@@ -5611,23 +5611,31 @@ class EpistemicGraphIndex:
             # repair incrementally, and indexing a handful of pages into a fresh
             # database would publish a graph that is missing every other page.
             return {**report, "requires_rebuild": 1}
+        # Cold resolver construction (or waiting for its single-flight builder)
+        # can walk the whole corpus. Keep it outside the interactive write lock.
+        # The returned fork is private to this pass; the guarded checkpoint
+        # comparison below refuses it if a writer changed its source projection.
+        external_epoch = freshness.external_pending_epoch(self.vault_root)
+        checkpoint = freshness.recall_checkpoint(self.vault_root, "vault")
+        if not freshness.recall_is_live(self.vault_root, "vault"):
+            return {**report, "requires_rebuild": 1}
+        resolver = find_module.recall_resolver_snapshot(
+            self.vault_root, expected_checkpoint=checkpoint
+        )
+        if resolver is None:
+            return {**report, "requires_rebuild": 1}
         with self._mutation_coordinator.hold(
             operation="epistemic_graph_drain_paths", holder_kind="graph"
         ):
-            if not freshness.recall_is_live(self.vault_root, "vault"):
-                return {**report, "requires_rebuild": 1}
-            checkpoint = freshness.recall_checkpoint(self.vault_root, "vault")
+            # Cache-only admission avoids a policy reprojection under the lock.
+            # Preserve the drain's existing external-pending semantics: queued
+            # paths can repair their own fence before the watcher dispatches it.
+            if (
+                freshness.live_recall_checkpoint(self.vault_root, "vault") != checkpoint
+                or freshness.external_pending_epoch(self.vault_root) != external_epoch
+            ):
+                return {**report, "moved": 1}
             before = _incremental_projection_identity(self.vault_root)
-            # Not `recall_resolver_snapshot_at_checkpoint`: that variant refuses
-            # a cache miss on purpose, because the *incremental refresh* path
-            # needs the pre-delta topology to prove bounded edge repair. A drain
-            # proves nothing about edges it did not touch -- it re-derives each
-            # queued page against the current corpus, which is what a resolver
-            # built from the current projection is. The identity check inside
-            # keeps a stale cached resolver from being reused.
-            resolver = find_module.recall_resolver_snapshot(self.vault_root)
-            if resolver is None:
-                return {**report, "requires_rebuild": 1}
             queued_rels = {
                 rel
                 for path in paths
@@ -5665,6 +5673,7 @@ class EpistemicGraphIndex:
                 if not (
                     _incremental_projection_identity(self.vault_root) == before
                     and freshness.recall_checkpoint(self.vault_root, "vault") == checkpoint
+                    and freshness.external_pending_epoch(self.vault_root) == external_epoch
                 ):
                     # The vault moved elsewhere under the pass. Every row it
                     # wrote is proven against its own bytes, so the rows land

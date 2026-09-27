@@ -148,6 +148,7 @@ def _write(
                 today=when.replace(microsecond=0),
                 extra_frontmatter=recap.frontmatter,
                 supersede=tuple((item.path, item.hash) for item in live),
+                defer_fanout_to_terminal=True,
             )
         except add_module.AddError as error:
             raise ValueError(f"{error.code}: {error.reason} (missing: {error.missing})") from error
@@ -208,20 +209,6 @@ def record(
             )
 
     source, idempotent = _write(vault_root, source_schema, recap, when, audience)
-    if not idempotent:
-        # A recorded conversation is heat (step 5, design section 5): the
-        # recap is a contact for the recent-context block and each page it is
-        # about a deliberate act, under the recorder's own episode key, which
-        # is the session key the hooks pass. A retry wrote nothing and
-        # records nothing.
-        working_set_heat.note_episode(
-            vault_root,
-            source["path"],
-            [about_paths[ref] for ref in recap.about if ref in about_paths],
-            attribution=working_set_heat.attribution_for(
-                vault_root, client=client, session=recap.key
-            ),
-        )
     revision: int | None
     try:
         bound = owner.bind_committed_input(
@@ -241,8 +228,28 @@ def record(
         ledger, recovery, revision = "unbound", "unavailable", None
     else:
         ledger, recovery, revision = bound["ledger"], bound["recovery"], bound["input_revision"]
-    # A recorded episode is what the `episode_due` advisory asks for.
-    episode_nudge.note_record(vault_root)
+    from .writer_lease import defer_housekeeping_until_terminal_persisted
+
+    about_heat_paths = [about_paths[ref] for ref in recap.about if ref in about_paths]
+
+    def record_housekeeping() -> None:
+        if not idempotent:
+            # A retry wrote nothing and records no new heat.
+            try:
+                working_set_heat.note_episode(
+                    vault_root,
+                    source["path"],
+                    about_heat_paths,
+                    attribution=working_set_heat.attribution_for(
+                        vault_root, client=client, session=recap.key
+                    ),
+                )
+            except Exception as error:  # noqa: BLE001 - the recap already committed
+                log.debug("episode heat failed after commit: %s", type(error).__name__)
+        episode_nudge.note_record(vault_root)
+
+    if not defer_housekeeping_until_terminal_persisted(record_housekeeping):
+        record_housekeeping()
     return {
         "operation": "episode_memory",
         "episode": recap.key,
