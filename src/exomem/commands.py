@@ -7745,6 +7745,7 @@ def op_episode_memory(
     | None = None,
     reason: str | None = None,
     input_revision: int | None = None,
+    journal_digest: str | None = None,
     order: list[str] | None = None,
     max_leaves: int | None = None,
     postcommit: bool | None = None,
@@ -7802,6 +7803,9 @@ def op_episode_memory(
         reason: For `disposition`: why, in one or two sentences.
         input_revision: For `resume`: the input revision your coverage
             review covered, the current one.
+        journal_digest: For `resume`: the `journal_digest` your last
+            candidates, prepare or disposition result returned. A resume
+            after any later change is refused with EPISODE_REVISION_CONFLICT.
         order: For `resume`: leaf ids to run, in this order.
         max_leaves: For `resume`: at most this many leaves this pass, 1 to
             16 (default 8); the rest stay pending.
@@ -7834,6 +7838,7 @@ def op_episode_memory(
         "disposition": disposition,
         "reason": reason,
         "input_revision": input_revision,
+        "journal_digest": journal_digest,
         "order": order,
         "max_leaves": max_leaves,
         "postcommit": postcommit,
@@ -7847,7 +7852,10 @@ def op_episode_memory(
             {"candidate", "disposition", "reason"},
             {"candidate", "disposition", "reason"},
         ),
-        "resume": ({"input_revision", "order", "max_leaves", "postcommit"}, {"input_revision"}),
+        "resume": (
+            {"input_revision", "journal_digest", "order", "max_leaves", "postcommit"},
+            {"input_revision", "journal_digest"},
+        ),
     }.get(action, (None, None))
     if allowed is None:
         raise ValueError(
@@ -7897,6 +7905,7 @@ def op_episode_memory(
         resumed = episode_workflow_module.resume(
             vault_root,
             episode=episode,
+            journal_digest=journal_digest,
             input_revision=input_revision,
             order=order,
             max_leaves=max_leaves,

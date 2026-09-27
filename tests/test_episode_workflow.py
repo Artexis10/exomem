@@ -115,6 +115,11 @@ def disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(episode_workflow.ENABLE_ENV, raising=False)
 
 
+def _reviewed(vault: Path) -> str:
+    """The journal digest a caller holds after re-reading its candidates."""
+    return _workflow(vault, action="candidates")["journal_digest"]
+
+
 def _candidate(result: dict, key: str) -> dict:
     return next(item for item in result["candidates"] if item["candidate_key"] == key)
 
@@ -257,7 +262,7 @@ def test_resume_is_refused_while_disabled_and_writes_nothing(vault: Path, owner,
     )
     files, journal = _canonical_files(vault), _journal(vault)
 
-    refused = _workflow(vault, action="resume", input_revision=1)
+    refused = _workflow(vault, action="resume", input_revision=1, journal_digest=_reviewed(vault))
 
     assert refused["status"] == "refused"
     assert refused["code"] == "episode_workflow_disabled"
@@ -272,7 +277,7 @@ def test_workflow_needs_a_recorded_episode_of_this_audience(vault: Path, enabled
     with request_scope(RequestPrincipal(audience_id="client-b", surface="mcp")):
         for action, extra in (
             ("candidates", {}),
-            ("resume", {"input_revision": 1}),
+            ("resume", {"input_revision": 1, "journal_digest": "0" * 64}),
             ("disposition", {"candidate": "c", "disposition": "no_capture", "reason": "r"}),
         ):
             with pytest.raises(ValueError, match="EPISODE_NOT_FOUND"):
@@ -285,7 +290,7 @@ def test_an_unresolved_principal_fails_before_anything_is_written(vault: Path, e
     journal = _journal(vault)
     with request_scope(RequestPrincipal(audience_id=None, surface="mcp")):
         with pytest.raises(ValueError, match="EPISODE_OWNER_UNRESOLVED"):
-            _workflow(vault, action="resume", input_revision=1)
+            _workflow(vault, action="resume", input_revision=1, journal_digest="0" * 64)
     assert _journal(vault) == journal
 
 
@@ -328,7 +333,7 @@ def test_three_doors_reach_one_leaf_and_refuse_untyped_fields(
     client = _rest_client(monkeypatch)
     rest = client.post(
         "/api/episode_memory",
-        json={"action": "resume", "episode": KEY, "input_revision": 1},
+        json={"action": "resume", "episode": KEY, "input_revision": 1, "journal_digest": "0" * 64},
         headers={"Authorization": "Bearer sekret"},
     )
     assert rest.status_code == 200, rest.text
@@ -380,10 +385,17 @@ def test_an_enabled_resume_reports_its_receipts_through_the_rest_door(
     with request_scope(owner_principal(surface="mcp")):
         _record(vault)
         _three_notes(vault)
+        digest = _reviewed(vault)
     client = _rest_client(monkeypatch)
     response = client.post(
         "/api/episode_memory",
-        json={"action": "resume", "episode": KEY, "input_revision": 1, "max_leaves": 1},
+        json={
+            "action": "resume",
+            "episode": KEY,
+            "input_revision": 1,
+            "journal_digest": digest,
+            "max_leaves": 1,
+        },
         headers={"Authorization": "Bearer sekret"},
     )
     assert response.status_code == 200, response.text
@@ -545,14 +557,16 @@ def _link_supplier(vault: Path) -> dict:
             target=ENTITY,
         ),
     )
-    _workflow(
+    disposed = _workflow(
         vault,
         action="disposition",
         candidate="supplier-link",
         disposition="routed",
         reason="A truthful typed relation to the existing supplier.",
     )
-    return _workflow(vault, action="resume", input_revision=1)
+    return _workflow(
+        vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"]
+    )
 
 
 def test_synthetic_slice_runs_through_existing_writers_with_nothing_unexpressed(
@@ -592,7 +606,7 @@ def test_synthetic_slice_runs_through_existing_writers_with_nothing_unexpressed(
     _prepare_slice(vault, recap_ref)
     before = _canonical_files(vault)
 
-    resumed = _workflow(vault, action="resume", input_revision=1)
+    resumed = _workflow(vault, action="resume", input_revision=1, journal_digest=_reviewed(vault))
 
     assert resumed["status"] == "ok", resumed["blocked"]
     assert len(resumed["executed"]) == 2 and resumed["blocked"] == []
@@ -626,7 +640,13 @@ def test_synthetic_slice_runs_through_existing_writers_with_nothing_unexpressed(
 
     # The final pass: an active-agent postcommit attestation that reverifies
     # every committed proof, while the deferred candidate stays pending.
-    attested = _workflow(vault, action="resume", input_revision=1, postcommit=True)
+    attested = _workflow(
+        vault,
+        action="resume",
+        input_revision=1,
+        postcommit=True,
+        journal_digest=resumed["journal_digest"],
+    )
     assert attested["executed"] == []
     assert attested["reviewed_through_input_revision"] == 1
     assert attested["complete"] is False
@@ -678,7 +698,7 @@ def test_a_fresh_session_activates_bounded_provenance_bearing_context(vault: Pat
         _seed_entity(vault)
         recap = _record(vault)
         _prepare_slice(vault, recap["source"]["ref"])
-        _workflow(vault, action="resume", input_revision=1)
+        _workflow(vault, action="resume", input_revision=1, journal_digest=_reviewed(vault))
     _fresh_session_index(vault)
 
     with request_scope(owner_principal(surface="mcp")):
@@ -726,7 +746,9 @@ def test_a_shared_name_with_two_owners_is_not_resolved_to_either(vault: Path, en
         _workflow(
             vault, action="disposition", candidate="harbor-site", disposition="routed", reason="r"
         )
-        resumed = _workflow(vault, action="resume", input_revision=1)
+        resumed = _workflow(
+            vault, action="resume", input_revision=1, journal_digest=_reviewed(vault)
+        )
         # The keeper shares the supplier's name as an alias: two owners.
         keeper = vault / resumed["executed"][0]["path"]
         text = keeper.read_text(encoding="utf-8")
@@ -754,7 +776,9 @@ def test_an_unready_index_says_warming_instead_of_claiming_currentness(
         _seed_entity(vault)
         recap = _record(vault)
         _prepare_slice(vault, recap["source"]["ref"])
-        resumed = _workflow(vault, action="resume", input_revision=1)
+        resumed = _workflow(
+            vault, action="resume", input_revision=1, journal_digest=_reviewed(vault)
+        )
     assert resumed["publication"] == "pending"
 
     working_set_runtime.reset_caches_for_tests()
@@ -808,7 +832,13 @@ def test_interrupt_reorder_and_resume_reuses_the_original_receipt(
 
     monkeypatch.setattr(EpisodeStore, "transition", crash_on_reconcile)
     with pytest.raises(KeyboardInterrupt):
-        _workflow(vault, action="resume", input_revision=1, order=[alpha, beta, gamma])
+        _workflow(
+            vault,
+            action="resume",
+            input_revision=1,
+            order=[alpha, beta, gamma],
+            journal_digest=_reviewed(vault),
+        )
     monkeypatch.setattr(EpisodeStore, "transition", real)
 
     interrupted = _workflow(vault, action="candidates")
@@ -879,8 +909,19 @@ def test_interrupt_reorder_and_resume_reuses_the_original_receipt(
             ),
         )
 
+    # The revision withdrew gamma's disposition; the agent routes it afresh.
+    disposed = _workflow(
+        vault, action="disposition", candidate="gamma", disposition="routed", reason="Corrected."
+    )
+
     # Resume with the remainder reordered.
-    resumed = _workflow(vault, action="resume", input_revision=1, order=[gamma, beta])
+    resumed = _workflow(
+        vault,
+        action="resume",
+        input_revision=1,
+        order=[gamma, beta],
+        journal_digest=disposed["journal_digest"],
+    )
 
     assert [item["leaf_id"] for item in resumed["reconciled"]] == [alpha]
     assert [item["leaf_id"] for item in resumed["executed"]] == [gamma, beta]
@@ -896,7 +937,9 @@ def test_interrupt_reorder_and_resume_reuses_the_original_receipt(
     )
 
     # Nothing is left to run, and a repeat resume applies nothing again.
-    again = _workflow(vault, action="resume", input_revision=1)
+    again = _workflow(
+        vault, action="resume", input_revision=1, journal_digest=resumed["journal_digest"]
+    )
     assert again["executed"] == [] and again["reconciled"] == []
     assert alpha_path.read_bytes() == committed_bytes
 
@@ -913,7 +956,9 @@ def test_an_uncertain_leaf_is_never_retried_under_a_fresh_identity(
         raise curation.CurationError("CURATION_STEP_FAILED", "writer refused")
 
     monkeypatch.setattr(curation, "apply", writer_fails)
-    resumed = _workflow(vault, action="resume", input_revision=1, order=[alpha])
+    resumed = _workflow(
+        vault, action="resume", input_revision=1, order=[alpha], journal_digest=_reviewed(vault)
+    )
     monkeypatch.undo()
     monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
 
@@ -929,7 +974,13 @@ def test_an_uncertain_leaf_is_never_retried_under_a_fresh_identity(
                 "focused_note", [_note_leaf("alpha-dye-note", "Changed.", revision=2)], title="a"
             ),
         )
-    again = _workflow(vault, action="resume", input_revision=1, order=[alpha])
+    again = _workflow(
+        vault,
+        action="resume",
+        input_revision=1,
+        order=[alpha],
+        journal_digest=resumed["journal_digest"],
+    )
     assert again["executed"] == []
     assert [item["leaf_id"] for item in again["blocked"]] == [alpha]
 
@@ -941,10 +992,11 @@ def test_a_new_input_revision_requires_fresh_dispositions_before_execution(
     _three_notes(vault)
     _record(vault, open=["Maybe book the kiln next month", "Check the mordant"])
 
+    digest = _reviewed(vault)
     with pytest.raises(ValueError, match="EPISODE_INPUT_REVISION_STALE"):
-        _workflow(vault, action="resume", input_revision=1)
+        _workflow(vault, action="resume", input_revision=1, journal_digest=digest)
     with pytest.raises(ValueError, match="EPISODE_COVERAGE_INCOMPLETE"):
-        _workflow(vault, action="resume", input_revision=2)
+        _workflow(vault, action="resume", input_revision=2, journal_digest=digest)
     assert not (vault / "Knowledge Base/Notes/Insights/alpha-dye-note.md").exists()
 
 
@@ -1049,7 +1101,10 @@ def test_a_stale_unattempted_binding_is_resealed_by_the_same_proposal(
         curation, "registry_identities", lambda root: {**real(root), "schemas": "0" * 64}
     )
     stale = _workflow(
-        vault, action="resume", input_revision=1, journal_digest=routed["disposed"]["journal_digest"]
+        vault,
+        action="resume",
+        input_revision=1,
+        journal_digest=routed["disposed"]["journal_digest"],
     )
     assert [item["code"] for item in stale["stale"]] == ["CURATION_REGISTRY_CHANGED"]
 
@@ -1069,9 +1124,7 @@ def test_a_stale_unattempted_binding_is_resealed_by_the_same_proposal(
     assert [item["leaf_id"] for item in again["executed"]] == [first["leaf_id"]]
 
 
-def test_a_leaf_already_applied_elsewhere_is_reported_replayed(
-    vault: Path, owner, enabled
-) -> None:
+def test_a_leaf_already_applied_elsewhere_is_reported_replayed(vault: Path, owner, enabled) -> None:
     _record(vault)
     routed = _routed(vault, "alpha", "alpha-dye-note")
     leaf = _candidate(routed["prepared"], "alpha")["leaves"][0]
@@ -1088,7 +1141,10 @@ def test_a_leaf_already_applied_elsewhere_is_reported_replayed(
     )
 
     resumed = _workflow(
-        vault, action="resume", input_revision=1, journal_digest=routed["disposed"]["journal_digest"]
+        vault,
+        action="resume",
+        input_revision=1,
+        journal_digest=routed["disposed"]["journal_digest"],
     )
 
     assert resumed["status"] == "ok"

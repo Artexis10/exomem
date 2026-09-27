@@ -408,6 +408,8 @@ def revise_proposal(
         raise _fail("EPISODE_PROPOSAL_UNCHANGED", "proposal is byte-equivalent")
     candidate["proposal_revision"] += 1
     candidate["proposal"], candidate["leaves"] = normalized, leaves
+    # A disposition reviewed the earlier proposal; the revision needs its own.
+    candidate["disposition"] = None
     _invalidate(result)
     return _copy(result)
 

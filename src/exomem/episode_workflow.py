@@ -357,6 +357,7 @@ def resume(
     vault_root: Path,
     *,
     episode: Any,
+    journal_digest: Any,
     input_revision: Any,
     order: Sequence[str] | None = None,
     max_leaves: Any = None,
@@ -365,7 +366,9 @@ def resume(
     """Reconcile, attest and execute this episode's remaining routed leaves.
 
     Refused with `episode_workflow_disabled`, before anything is read or
-    written, unless the service enables execution.
+    written, unless the service enables execution. Otherwise it acts only on
+    the journal state the caller last reviewed: a `journal_digest` other than
+    the current one is refused before any reconcile or attestation.
     """
     key = _key(episode)
     if not enabled():
@@ -373,10 +376,16 @@ def resume(
         return _refused(key)
     if type(input_revision) is not int:
         raise _error("EPISODE_WORKFLOW_INVALID", "resume needs the reviewed input_revision")
+    if not isinstance(journal_digest, str):
+        raise _error("EPISODE_WORKFLOW_INVALID", "resume needs the reviewed journal_digest")
     limit = DEFAULT_MAX_LEAVES if max_leaves is None else max_leaves
     if type(limit) is not int or not 1 <= limit <= MAX_LEAVES:
         raise _error("EPISODE_WORKFLOW_INVALID", f"max_leaves must be 1 through {MAX_LEAVES}")
     session = _Session(vault_root, key)
+    if journal_digest != session.current["journal_digest"]:
+        raise _error(
+            "EPISODE_REVISION_CONFLICT", "the episode changed after the caller's last review"
+        )
     if input_revision != session.state["input_revisions"][-1]["revision"]:
         raise _error("EPISODE_INPUT_REVISION_STALE", "resume must review the current input")
 
