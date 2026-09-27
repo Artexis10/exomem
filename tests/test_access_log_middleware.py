@@ -166,3 +166,27 @@ def test_bumps_http_requests_total_by_status() -> None:
     counters = {(c["name"], tuple(sorted(c["labels"].items()))): c["value"] for c in snap["counters"]}
     assert counters[("exomem_http_requests_total", (("status", "200"),))] == 2
     assert counters[("exomem_http_requests_total", (("status", "500"),))] == 1
+
+
+def test_request_host_lands_in_content_normalised(caplog: pytest.LogCaptureFixture) -> None:
+    # Which public hostname a request arrived on is what proves an address is
+    # no longer in use before it is retired. The Host header is client text,
+    # so it is content-classified like the path: kept locally, dropped by the
+    # hosted privacy boundary.
+    caplog.set_level(logging.INFO, logger="exomem.access")
+    scope = _scope(headers={"host": "Memory.Example.TEST:443"})
+    _run(scope)
+
+    record = next(r for r in caplog.records if getattr(r, "event", None) == "http_request")
+    assert "host" not in record.fields
+    assert record.content["host"] == "memory.example.test"
+
+
+def test_malformed_request_host_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="exomem.access")
+    scope = _scope(headers={"host": "not a host/../x"})
+    _run(scope)
+
+    record = next(r for r in caplog.records if getattr(r, "event", None) == "http_request")
+    assert "host" not in record.content
+    assert "host" not in record.fields
