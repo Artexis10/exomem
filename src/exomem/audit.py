@@ -4678,7 +4678,7 @@ def _observation_page_signal(
 
 
 def _backfill_prefilter(
-    page: find_module.ParsedPage, targets: list[Any]
+    page: find_module.ParsedPage, targets: list[tuple[Any, frozenset[str]]]
 ) -> bool:
     """Whether a pre-lookback page could route anywhere, without parsing its body."""
     from . import collection_claims
@@ -4708,10 +4708,7 @@ def _backfill_prefilter(
             replace(target, match=knowable), facets
         ) is not None
 
-    return any(
-        cheap_terms & collection_claims.normalize_terms(target.claims) or declared(target)
-        for target in targets
-    )
+    return any(cheap_terms & claims or declared(target) for target, claims in targets)
 
 
 def _observation_moment(page: find_module.ParsedPage) -> dt.datetime | None:
@@ -4838,6 +4835,9 @@ def _check_unreflected_observations(
     # collection or changing its claims looks back at what it now covers.
     backfill: dict[str, list[tuple[str, str, str]]] = {}
     backfill_budget = BACKFILL_MAX_PAGES
+    prefilter_targets = [
+        (target, collection_claims.normalize_terms(target.claims)) for target in targets
+    ]
     for page in pages:
         if not (
             page.rel_path.startswith(f"{kb_prefix()}Notes/")
@@ -4866,7 +4866,7 @@ def _check_unreflected_observations(
             and observation_ref not in tracked
         )
         if historical:
-            if backfill_budget <= 0 or not _backfill_prefilter(page, targets):
+            if backfill_budget <= 0 or not _backfill_prefilter(page, prefilter_targets):
                 continue
             backfill_budget -= 1
         terms, facets = _observation_page_signal(page, language=language, relations=relations)
