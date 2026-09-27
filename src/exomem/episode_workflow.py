@@ -267,8 +267,15 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
         commands.append(("declare_candidate", {"key": key}))
     if revised:
         commands.append(("revise_proposal", {"candidate": identity, "proposal": proposal}))
-    if len(commands) + len(unsealed) > session.store.headroom(session.current):
-        raise _error("EPISODE_TOO_LARGE", "episode transition cap reached")
+    # A lower bound on what the journal takes: the commands plus each sealed
+    # plan's step. Too little room refuses before any plan is sealed.
+    transitions, room = session.store.room(session.identity)
+    needed = len(model._json(commands).encode()) + sum(  # noqa: SLF001
+        len(model._json(leaf["args"]).encode())  # noqa: SLF001
+        for leaf in unsealed
+    )
+    if len(commands) + len(unsealed) > transitions or needed > room:
+        raise _error("EPISODE_TOO_LARGE", "the episode journal has no room for this preparation")
     for leaf in unsealed:
         proposed = _seal(session.vault_root, leaf)
         commands.append(

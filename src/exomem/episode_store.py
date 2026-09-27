@@ -29,6 +29,8 @@ from .writer_lease import active_manager
 
 MAX_TRANSITIONS = 512
 MAX_JOURNAL_BYTES = curation.MAX_PLAN_BYTES * 4
+#: Journal and state bytes held back per uncertain leaf, so its reconcile fits.
+RECONCILE_RESERVE_BYTES = 4 * 1024
 _FIELDS = {
     "append_input_revision": {"input_evidence"},
     "declare_candidate": {"key"},
@@ -51,6 +53,25 @@ _FIELDS = {
 
 def _error(code: str, reason: str) -> model.EpisodeError:
     return model.EpisodeError(code, reason)
+
+
+def _uncertain(state: Mapping[str, Any]) -> int:
+    return sum(
+        leaf["outcome"] == "uncertain"
+        for candidate in state["candidates"]
+        for leaf in candidate["leaves"]
+    )
+
+
+def _byte_room(journal: Mapping[str, Any], state: Mapping[str, Any], reserved: int) -> int:
+    """Bytes the journal and the state can both still take beyond `reserved` reconciles."""
+    return (
+        min(
+            MAX_JOURNAL_BYTES - len(model._json(journal).encode()),
+            model.MAX_STATE_BYTES - len(model._json(state).encode()),
+        )
+        - RECONCILE_RESERVE_BYTES * reserved
+    )
 
 
 def _validate_args(action: Any, args: Any) -> None:
@@ -338,12 +359,15 @@ class EpisodeStore:
     @staticmethod
     def headroom(current: Mapping[str, Any]) -> int:
         """Transitions still available once every uncertain leaf keeps one to reconcile."""
-        uncertain = sum(
-            leaf["outcome"] == "uncertain"
-            for candidate in current["state"]["candidates"]
-            for leaf in candidate["leaves"]
+        return MAX_TRANSITIONS - (current["revision"] - 1) - _uncertain(current["state"])
+
+    def room(self, identity: str) -> tuple[int, int]:
+        """Transitions and bytes still free once every uncertain leaf keeps its reconcile."""
+        with self._guard():
+            journal, current = self._load(identity)
+        return self.headroom(current), _byte_room(
+            journal, current["state"], _uncertain(current["state"])
         )
-        return MAX_TRANSITIONS - (current["revision"] - 1) - uncertain
 
     def transition(
         self,
@@ -378,8 +402,9 @@ class EpisodeStore:
 
         Every event is validated before anything is written, so a refused
         command leaves none of its sequence behind. Every command but a
-        reconcile must leave one transition per uncertain leaf, so an attempt
-        mark can always be followed by its reconcile.
+        reconcile must leave one transition and `RECONCILE_RESERVE_BYTES` of
+        journal and state per uncertain leaf, so an attempt mark can always be
+        followed by its reconcile.
         """
         commands = [(action, model._copy(args)) for action, args in commands]
         for action, args in commands:
@@ -423,9 +448,14 @@ class EpisodeStore:
                     "journal_digest": event["hash"],
                     "state": state,
                 }
+                reserved = 0 if action == "reconcile_curation_leaf" else _uncertain(state)
                 if action != "reconcile_curation_leaf" and self.headroom(accepted) < 0:
                     raise _error(
                         "EPISODE_TOO_LARGE", "no transition would remain to reconcile an attempt"
+                    )
+                if _byte_room(journal, state, reserved) < 0:
+                    raise _error(
+                        "EPISODE_TOO_LARGE", "no room would remain to reconcile an attempt"
                     )
             if accepted is current:
                 return current
