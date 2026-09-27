@@ -20,6 +20,8 @@ import hashlib
 import json
 import logging
 import re
+import threading
+import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,12 @@ BATCH_PAGES = 64
 #: Groups listed per preview, most-used first.
 GROUP_LIMIT = 50
 _WHY_BYTES = 512
+#: Seconds a folded usage index serves writes. Which spelling is most used
+#: moves slowly, and re-folding every tag on every write cost ~60 ms at 5,000
+#: distinct tags, so write-time guidance reads a briefly cached index.
+INDEX_TTL_SECONDS = 120.0
+_INDEX_CACHE: dict[str, tuple[float, _Index]] = {}
+_INDEX_LOCK = threading.Lock()
 _PLAIN_TAG = re.compile(r"[a-z0-9][a-z0-9_./-]*", re.IGNORECASE)
 _SKIP_KB_SUBDIRS = frozenset(
     {"Sources", "Evidence", "_Schema", "_trash", "_archive", "_attachments", "_Governance"}
@@ -97,6 +105,22 @@ class _Index:
         return minority(tag, members)
 
 
+def _index_for(vault_root: Path) -> _Index | None:
+    key = str(Path(vault_root).resolve())
+    now = time.monotonic()
+    with _INDEX_LOCK:
+        cached = _INDEX_CACHE.get(key)
+    if cached is not None and now - cached[0] < INDEX_TTL_SECONDS:
+        return cached[1]
+    counts = usage_counts(vault_root)
+    if not counts:
+        return None
+    index = _Index(counts)
+    with _INDEX_LOCK:
+        _INDEX_CACHE[key] = (now, index)
+    return index
+
+
 def usage_counts(vault_root: Path) -> dict[str, int] | None:
     """Pages per tag from the lexical catalogue, or None when it cannot answer."""
     from . import lexstore
@@ -130,10 +154,9 @@ def reconcile_authored(
             return tags, []
     if level != "maximal":
         return tags, []
-    counts = usage_counts(vault_root)
-    if not counts:
+    index = _index_for(vault_root)
+    if index is None:
         return tags, []
-    index = _Index(counts)
     out: list[str] = []
     notes: list[str] = []
     for tag in tags:
@@ -180,10 +203,9 @@ def advisory_for_page(vault_root: Path, path: str) -> dict[str, Any] | None:
     tags = _page_tags(Path(vault_root) / path)
     if not tags:
         return None
-    counts = usage_counts(vault_root)
-    if not counts:
+    index = _index_for(vault_root)
+    if index is None:
         return None
-    index = _Index(counts)
     for tag in tags:
         found = index.minority(tag.casefold())
         if found and found[0] != tag:

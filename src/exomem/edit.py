@@ -45,6 +45,7 @@ from . import (
     reserved_paths,
     semantic_contract,
     semantic_writes,
+    tag_variants,
     temporal,
 )
 from . import find as find_module
@@ -254,8 +255,9 @@ def edit(
         fm_text = _set_or_append(fm_text, "updated", date_iso)
 
     # Patch tags: if provided.
+    tag_warnings: list[str] = []
     if tags is not None:
-        tags_clean = _clean_tags(tags)
+        tags_clean, tag_warnings = tag_variants.reconcile_authored(vault_root, _clean_tags(tags))
         fm_text = _remove_yaml_key(fm_text, "tags")
         if tags_clean:
             fm_text = fm_text.rstrip() + "\ntags: [" + ", ".join(tags_clean) + "]"
@@ -378,7 +380,7 @@ def edit(
         date_iso=date_iso,
         why=why,
         changed=changed,
-        extra_warnings=body_warnings,
+        extra_warnings=body_warnings + tag_warnings,
         expected_before_hash=editable.semantic_before_hash,
         semantic_transition_token=semantic_transition_token,
         relation_disposition=relation_disposition,

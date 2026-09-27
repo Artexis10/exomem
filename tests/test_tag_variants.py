@@ -6,6 +6,13 @@ import pytest
 from exomem import commands, lexstore, tag_variants, vault, writer_lease
 
 
+@pytest.fixture(autouse=True)
+def _fresh_index_cache():
+    tag_variants._INDEX_CACHE.clear()
+    yield
+    tag_variants._INDEX_CACHE.clear()
+
+
 def _page(root: Path, rel: str, tags_line: str, body: str = "Plain body text.\n") -> Path:
     path = root / "Knowledge Base" / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -227,3 +234,109 @@ def test_apply_requires_plan_and_reason(tmp_path):
     _variant_vault(tmp_path)
     with pytest.raises(Exception, match="INVALID_ARGUMENTS"):
         _maintain(tmp_path, "bad", mode="tag-variants", apply=True, why="No plan.")
+
+
+_UNIT = "## Observations\n- [operating constraint] Keep retries bounded #reliability\n"
+
+
+def _catalogued_vault(root: Path) -> None:
+    _log(root)
+    for index in range(3):
+        _page(root, f"Notes/Insights/seed-{index}.md", "tags: [dogfood]", _UNIT)
+    assert lexstore.get_store(root).rebuild_atomic()
+
+
+def _written_tags(root: Path, result: dict) -> list[str]:
+    return vault.parse_frontmatter((root / result["path"]).read_text(encoding="utf-8"))[0]["tags"]
+
+
+def test_maximal_write_records_the_canonical_tag(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    monkeypatch.setattr(tag_variants, "usage_counts", lambda _root: {"dogfood": 3})
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "remember")
+    from exomem import note as note_module
+
+    captured = {}
+    original = note_module._render_note
+
+    def spy(**kwargs):
+        captured["tags"] = kwargs["tags"]
+        return original(**kwargs)
+
+    monkeypatch.setattr(note_module, "_render_note", spy)
+    _catalogued_vault(tmp_path)
+    try:
+        writer_lease.invoke_command(
+            command, tmp_path, idempotency_key="max", content=_UNIT, title="Max",
+            slug="max", tags=["dogfooding", "fresh"],
+        )
+    except Exception:  # noqa: BLE001 - the semantic contract may still refuse; tags are what matter
+        pass
+    assert captured["tags"] == ["dogfood", "fresh"]
+
+
+def test_balanced_write_keeps_the_authored_tag_and_advises(tmp_path, monkeypatch):
+    from exomem import vocabulary_delivery
+    from exomem.governance.principal import library_scope
+
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "balanced")
+    monkeypatch.setattr(tag_variants, "usage_counts", lambda _root: {"dogfood": 3})
+    path = _page(tmp_path, "Notes/new.md", "tags: [dogfooding]", _UNIT)
+    rel = path.relative_to(tmp_path).as_posix()
+    from exomem import mutation_terminal
+
+    terminal = mutation_terminal.committed_terminal(
+        {"path": rel}, request_id="r", receipt_id="receipt-r", idempotency_key="k"
+    )
+    with library_scope():
+        result = vocabulary_delivery.after_commit(tmp_path, terminal)
+    notice = result["vocabulary_advisory"]
+    assert notice["family"] == "tag-variant/v1"
+    assert notice["canonical"] == "dogfood"
+    assert _written_tags(tmp_path, {"path": rel}) == ["dogfooding"]
+    public = vocabulary_delivery.public_projection(result)
+    assert public["vocabulary_advisory"] == notice
+
+
+def test_tag_advisory_respects_an_off_envelope(tmp_path, monkeypatch):
+    from exomem import vocabulary_delivery
+    from exomem.governance.principal import library_scope
+
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "off")
+    monkeypatch.setattr(tag_variants, "usage_counts", lambda _root: {"dogfood": 3})
+    path = _page(tmp_path, "Notes/quiet.md", "tags: [dogfooding]", _UNIT)
+    from exomem import mutation_terminal
+
+    terminal = mutation_terminal.committed_terminal(
+        {"path": path.relative_to(tmp_path).as_posix()},
+        request_id="r", receipt_id="receipt-r", idempotency_key="k",
+    )
+    with library_scope():
+        result = vocabulary_delivery.after_commit(tmp_path, terminal)
+    assert "vocabulary_advisory" not in result
+
+
+def test_relation_review_notice_keeps_the_single_advisory_slot():
+    from exomem import vocabulary_delivery
+
+    tag_notice = tag_variants.advisory("dogfooding", "dogfood", 3)
+    merged = vocabulary_delivery._with_tag_advisory(
+        {"vocabulary_advisory": {"ref": "exomem://review/vocabulary/x"}}, tag_notice
+    )
+    assert merged["vocabulary_advisory"]["ref"] == "exomem://review/vocabulary/x"
+
+
+def test_write_time_index_is_cached_briefly(tmp_path, monkeypatch):
+    calls = []
+
+    def counts(_root):
+        calls.append(1)
+        return {"dogfood": 7}
+
+    monkeypatch.setattr(tag_variants, "usage_counts", counts)
+    for _ in range(3):
+        tag_variants.reconcile_authored(tmp_path, ["dogfooding"], level="maximal")
+    assert len(calls) == 1
+    monkeypatch.setattr(tag_variants, "INDEX_TTL_SECONDS", 0.0)
+    tag_variants.reconcile_authored(tmp_path, ["dogfooding"], level="maximal")
+    assert len(calls) == 2

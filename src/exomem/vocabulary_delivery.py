@@ -17,6 +17,7 @@ from . import (
     deferred_index,
     envelope,
     mutation_terminal,
+    tag_variants,
     vocabulary_notifications,
     vocabulary_projection,
     vocabulary_recovery,
@@ -97,9 +98,41 @@ def _project(vault_root: Path, path: str, continuation: str | None = None) -> di
     }
 
 
+def _with_tag_advisory(result: dict[str, Any], notice: Mapping[str, Any] | None) -> Any:
+    """Fill the single advisory slot with a tag notice only when it is free.
+
+    A relation review notice is evidence-bound work, so it keeps the slot; the
+    tag variant stays discoverable through its maintenance route.
+    """
+    if notice is None or "vocabulary_advisory" in result:
+        return result
+    return {**result, "vocabulary_advisory": dict(notice)}
+
+
+def _tag_advisory(vault_root: Path, path: str) -> dict[str, Any] | None:
+    try:
+        if envelope.resolved()["classes"]["structural_suggestions"]["disposition"] == "off":
+            return None
+        return tag_variants.advisory_for_page(vault_root, path)
+    except Exception as exc:  # noqa: BLE001 - optional guidance cannot change a committed outcome
+        _log_unavailable("tag advisory", exc)
+        return None
+
+
 @call_spans.timed("delivery.vocabulary_after_commit")
 def after_commit(vault_root: Path, result: Any) -> Any:
     """Preserve the canonical terminal even if any optional-guidance step fails."""
+    guided = _after_commit(vault_root, result)
+    if guided is result:
+        # Early exits (not a committed write, no page path, or an off envelope)
+        # carry no tag guidance either.
+        return result
+    leaf = result.get("leaf_result")
+    path = deferred_index._safe_markdown_rel_path(leaf.get("path"))
+    return _with_tag_advisory(guided, _tag_advisory(vault_root, path))
+
+
+def _after_commit(vault_root: Path, result: Any) -> Any:
     if (
         not isinstance(result, Mapping)
         or result.get("_terminal") != mutation_terminal._TERMINAL_MARKER
@@ -215,6 +248,11 @@ def public_projection(result: Mapping[str, Any]) -> dict[str, Any]:
             sync["state"], reason if default and reason in PUBLIC_REASONS else default
         )
     notice = result.get("vocabulary_advisory")
+    if tag_variants.valid_advisory(notice):
+        # Derived from tag counts, not review state: the bounded shape is the
+        # whole disclosure, so it is re-emitted as validated.
+        public["vocabulary_advisory"] = dict(notice)
+        return public
     root = result.get("_vocabulary_vault")
     if not isinstance(notice, Mapping) or not isinstance(root, str):
         return public

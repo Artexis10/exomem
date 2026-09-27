@@ -49,6 +49,7 @@ from . import (
     semantic_units,
     semantic_writes,
     source_closure,
+    tag_variants,
     temporal,
     vocabulary_resolution,
 )
@@ -601,7 +602,7 @@ def _legacy_note(
     now = today or temporal.now()
     date_iso = temporal.render_date(now)
     stamp_iso = temporal.stamp(now)
-    tags_clean = _clean_tags(tags)
+    tags_clean, tag_warnings = tag_variants.reconcile_authored(vault_root, _clean_tags(tags))
     exomem_id = memory_refs.new_id()
 
     note_path = _resolve_path(
@@ -762,6 +763,7 @@ def _legacy_note(
         + list(source_warnings)
         + list(body_warnings)
         + list(advisory_warnings)
+        + tag_warnings
     )
     if not sources_norm:
         provenance_warning = _empty_sources_warning(note_type)
@@ -1761,7 +1763,7 @@ def note(
         resolver=resolver,
     )
     body_clean, body_warnings = normalize_body_wikilinks(content, root, resolver=resolver)
-    tags_clean = _clean_tags(tags)
+    tags_clean, tag_warnings = tag_variants.reconcile_authored(root, _clean_tags(tags))
     source = _render_note(
         note_type=note_type,
         title=title,
@@ -1822,7 +1824,7 @@ def note(
     preflight_ms = (time.perf_counter() - write_started) * 1000.0
     if draft_hash is not None and preflight.draft_hash != draft_hash:
         raise NoteError("DRAFT_HASH_MISMATCH", ["draft_hash"], "draft requires fresh validation")
-    warnings = list(slug_warnings) + list(source_warnings) + list(body_warnings)
+    warnings = list(slug_warnings) + list(source_warnings) + list(body_warnings) + tag_warnings
     if not sources_norm:
         provenance_warning = _empty_sources_warning(note_type)
         if provenance_warning is not None:
