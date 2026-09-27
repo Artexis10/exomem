@@ -111,11 +111,18 @@ def _in_episode_folder(rel: str) -> bool:
 
 def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
     try:
+        # `old_rel` is always a source this call's caller has already resolved
+        # to an existing on-disk spelling (including a macOS-origin NFD name
+        # on a byte-exact filesystem); `physical=True` opens exactly that
+        # spelling rather than re-normalizing it away. `new_rel` -- the
+        # destination -- is a name being written, so it always takes the
+        # ordinary NFKC spelling.
         reserved_paths.move_generic_path(
             vault_root,
             old_rel,
             new_rel,
             source_kind="file",
+            physical=True,
         )
     except reserved_paths.ReservedPathLeafError as error:
         if error.code == "CROSS_DEVICE":
@@ -216,9 +223,70 @@ def move_file(
             vault_root, old_path, must_exist=True, must_be_file=True, refuse_withheld=True
         )
     except VaultPathError as e:
-        raise MoveFileError(code=e.code, reason=e.reason) from e
+        if e.code != "NOT_FOUND":
+            raise MoveFileError(code=e.code, reason=e.reason) from e
+        # NOT_FOUND also hides existing withheld files. A spelling fallback
+        # is valid only when the canonical source really is absent.
+        canonical_source, logical_rel = resolve_under_vault(vault_root, old_path)
+        if canonical_source.exists():
+            raise MoveFileError(code=e.code, reason=e.reason) from e
+        # The literal (NFKC) spelling may simply be absent because the
+        # on-disk name is a different Unicode normalization -- a macOS-origin
+        # NFD name on a byte-exact filesystem (Linux ext4). Substitute the
+        # confirmed physical spelling and re-resolve, so every downstream
+        # read AND rename (which just open literal path strings, no further
+        # normalization) target the real file. Refuse outright, rather than
+        # guess, if two physical spellings collide.
+        try:
+            physical_rel = reserved_paths.resolve_physical_relative(vault_root, old_path)
+        except reserved_paths.ReservedPathLeafError as fallback_error:
+            if fallback_error.code == "AMBIGUOUS_PATH":
+                from .get_page import path_withheld
+
+                if path_withheld(vault_root, logical_rel):
+                    raise MoveFileError(code=e.code, reason=e.reason) from None
+                raise MoveFileError(
+                    code="AMBIGUOUS_PATH",
+                    reason=(
+                        f"{old_path} matches more than one on-disk spelling; "
+                        "refusing to guess which"
+                    ),
+                ) from None
+            raise MoveFileError(code=e.code, reason=e.reason) from e
+        try:
+            old_abs, old_rel = resolve_under_vault(
+                vault_root, physical_rel, must_exist=True, must_be_file=True,
+                refuse_withheld=True,
+            )
+        except VaultPathError as e2:
+            if e2.code == "NOT_FOUND":
+                # Keep the caller's logical spelling in the absent response.
+                raise MoveFileError(code=e.code, reason=e.reason) from None
+            raise MoveFileError(code=e2.code, reason=e2.reason) from e2
+    else:
+        # The NFKC spelling opened, but an NFD twin beside it would make the
+        # read door refuse this same path; refuse the move too rather than
+        # silently pick the NFKC file.
+        try:
+            reserved_paths.resolve_physical_relative(vault_root, old_rel)
+        except reserved_paths.ReservedPathLeafError as collision:
+            if collision.code == "AMBIGUOUS_PATH":
+                from .get_page import path_withheld
+
+                if path_withheld(vault_root, old_rel):
+                    # A withheld page answers exactly like a missing one.
+                    raise MoveFileError(
+                        code="NOT_FOUND", reason=f"path does not exist: {old_rel}"
+                    ) from None
+                raise MoveFileError(
+                    code="AMBIGUOUS_PATH",
+                    reason=(
+                        f"{old_path} matches more than one on-disk spelling; "
+                        "refusing to guess which"
+                    ),
+                ) from None
     try:
-        reserved_paths.inspect_generic_file(vault_root, old_rel)
+        reserved_paths.inspect_generic_file(vault_root, old_rel, physical=True)
     except reserved_paths.ReservedPathLeafError as error:
         if error.code in {
             "CAPABILITY_UNAVAILABLE",
@@ -817,7 +885,9 @@ def move_file(
         log_rel_no_ext, log_body, log_plan = plan_activity_log()
         if validate_only:
             try:
-                raw_source = reserved_paths.read_generic_bytes(vault_root, old_rel).data
+                raw_source = reserved_paths.read_generic_bytes(
+                    vault_root, old_rel, physical=True
+                ).data
             except reserved_paths.ReservedPathLeafError as error:
                 raise MoveFileError(
                     "MOVE_FAILED", "move source changed during canonical validation"

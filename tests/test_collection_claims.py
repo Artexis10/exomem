@@ -266,6 +266,71 @@ def test_route_stays_silent_on_a_tie_or_miss() -> None:
     assert route(["billing"], [left]) is None
 
 
+def _generic_overlap_corpus() -> tuple[RoutingTarget, RoutingTarget, RoutingTarget, RoutingTarget]:
+    metrics = _target(
+        "Knowledge Base/Records/Metrics/_collection.md",
+        {"capture", "release", "review", "dashboard"},
+    )
+    standups = _target(
+        "Knowledge Base/Records/Standups/_collection.md", {"capture", "release"}
+    )
+    retros = _target("Knowledge Base/Records/Retros/_collection.md", {"review", "capture"})
+    okrs = _target("Knowledge Base/Records/OKRs/_collection.md", {"release", "review"})
+    return metrics, standups, retros, okrs
+
+
+def test_route_stays_silent_on_generic_term_overlap_alone() -> None:
+    """"capture", "release" and "review" are each declared by most of these
+    invented collections, so their corpus-wide document frequency is high --
+    a strict raw-count winner on those terms alone still gets no suggestion."""
+    metrics, standups, retros, okrs = _generic_overlap_corpus()
+
+    assert route(["capture", "release", "review"], [metrics, standups, retros, okrs]) is None
+
+
+def test_route_still_fires_on_a_collection_distinctive_term() -> None:
+    """The same generic overlap, plus one term ("dashboard") only Metrics
+    declares, gives a real subject signal and still routes."""
+    metrics, standups, retros, okrs = _generic_overlap_corpus()
+
+    advisory = route(
+        ["capture", "release", "review", "dashboard"],
+        [metrics, standups, retros, okrs],
+    )
+
+    assert advisory == {
+        "collection": metrics.collection,
+        "title": "Metrics",
+        "matched_terms": ["capture", "dashboard", "release", "review"],
+        "natural_key": ["account", "effective_on"],
+        "strength": "moderate",
+    }
+
+
+@pytest.mark.parametrize("population", [3, 5])
+def test_route_rejects_majority_terms_in_an_odd_population(population: int) -> None:
+    winner = _target("Knowledge Base/Records/Ledger/_collection.md", {"cloud", "project"})
+    others = [
+        _target(f"Knowledge Base/Records/Other{index}/_collection.md", {term})
+        for index, term in enumerate(["cloud", "project"] * (population // 2))
+    ]
+
+    assert route(["cloud", "project"], [winner, *others]) is None
+
+
+@pytest.mark.parametrize("population", [1, 2, 4])
+def test_route_preserves_singleton_and_half_population_claims(population: int) -> None:
+    winner = _target("Knowledge Base/Records/Ledger/_collection.md", {"cloud", "project"})
+    others = [
+        _target(f"Knowledge Base/Records/Other{index}/_collection.md", claims)
+        for index, claims in enumerate(
+            [{"cloud"}, {"project"}, {"unrelated"}][: population - 1]
+        )
+    ]
+
+    assert route(["cloud", "project"], [winner, *others])["collection"] == winner.collection
+
+
 def test_claim_routing_normalizes_nfkc_for_authored_and_declared_terms(
     tmp_path: Path,
 ) -> None:

@@ -840,7 +840,7 @@ def test_the_working_set_rung_posts_to_the_activation_route(
         seen["body"] = json.loads(request.data.decode("utf-8"))
         return _Response()
 
-    monkeypatch.setattr(hook.urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr(hook, "_open_no_redirect", _urlopen)
 
     packet = hook._fetch_packet_via_rest(PROMPT, "sekret", "TOKEN-0", 1.0)
 
@@ -966,8 +966,8 @@ def test_no_continuity_key_is_sent_when_there_is_no_token(
             return False
 
     monkeypatch.setattr(
-        hook.urllib.request,
-        "urlopen",
+        hook,
+        "_open_no_redirect",
         lambda request, timeout=0.0: (
             seen.update(body=json.loads(request.data.decode("utf-8"))) or _Response()
         ),
@@ -2203,7 +2203,7 @@ def test_a_service_that_predates_the_workspace_key_still_gets_the_session(
         return _Response()
 
     monkeypatch.setattr(hook, "_rest_port", lambda: 1234)
-    monkeypatch.setattr(hook.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(hook, "_open_no_redirect", fake_urlopen)
     packet = hook._fetch_packet_via_rest("continue", "key", "", 1.0, hook.attribution(SESSION))
 
     assert packet == {"abstained": True}

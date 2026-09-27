@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import os
 import posixpath
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -1806,6 +1806,9 @@ def compile_packet(
                 rows, term_counts, decided_ids = working_set_resolve.audience_view(
                     analysis, rows, term_counts, visible
                 )
+            routing_targets = _routing_targets(
+                root, index_token[1], index_token=index_token, visible=visible
+            )
             def _candidates(rows: tuple[working_set_resolve.AnchorFacts, ...]) -> tuple:
                 nonlocal hot
                 # Computed once per request, like `used_paths`, and for the
@@ -1833,9 +1836,7 @@ def compile_packet(
                     rows,
                     bands=bands,
                     retrieval_paths=retrieval_paths,
-                    routing_targets=_routing_targets(
-                        root, index_token[1], index_token=index_token
-                    ),
+                    routing_targets=routing_targets,
                     used_paths=_used_paths(root, rows),
                     # Anchor members only, and none at all when the leading tier
                     # holds a page: a page is served below, never through the
@@ -2130,6 +2131,7 @@ def _routing_targets(
     index_generation: int,
     *,
     index_token: tuple[int, int, int] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[Any, ...]:
     """Records routing targets for `claims_match`, via the existing claims rule.
 
@@ -2153,12 +2155,15 @@ def _routing_targets(
         return ()
     targets: list[Any] = []
     for manifest in manifests:
+        path = str(getattr(manifest, "path", ""))
+        if visible is not None and (not path or not visible(path)):
+            continue
         claims = record_governance.effective_claims(manifest, None)
         if not claims:
             continue
         targets.append(
             collection_claims.RoutingTarget(
-                collection=str(getattr(manifest, "path", "")),
+                collection=path,
                 title=str(getattr(manifest, "title", "")),
                 claims=claims,
                 natural_key=tuple(getattr(getattr(manifest, "schema", None), "natural_key", ())),

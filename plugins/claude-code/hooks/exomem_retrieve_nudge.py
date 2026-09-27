@@ -545,6 +545,17 @@ def _parse_hits(payload) -> list[dict] | None:
     return None
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_no_redirect(req: urllib.request.Request, timeout: float):
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _NoRedirect()
+    ).open(req, timeout=timeout)
+
+
 def _fetch_via_rest(
     prompt: str, api_key: str, limit: int = 3, timeout: float = REST_TIMEOUT_SECONDS
 ) -> list[dict] | None:
@@ -569,7 +580,7 @@ def _fetch_via_rest(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _open_no_redirect(req, timeout=timeout) as resp:
             status = resp.getcode()
             raw = resp.read()
         if status != 200:
@@ -914,7 +925,7 @@ def _fetch_packet_via_rest(
         if remaining <= 0:
             return None
         try:
-            with urllib.request.urlopen(req, timeout=remaining) as resp:
+            with _open_no_redirect(req, timeout=remaining) as resp:
                 status = resp.getcode()
                 raw = resp.read()
             if status != 200:
