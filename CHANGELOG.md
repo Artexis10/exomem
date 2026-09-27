@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.95.1](https://github.com/Artexis10/exomem/compare/v0.95.0...v0.95.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **cloud:** expose only the Cloud MCP routes and unblock Traefik rollouts ([#1417](https://github.com/Artexis10/exomem/issues/1417)) ([d900c59](https://github.com/Artexis10/exomem/commit/d900c5967bc92506c12a65cf73a56886083f27ed))
+* **upgrade:** carry a standby-built lexical catalogue across a schema bump ([#1419](https://github.com/Artexis10/exomem/issues/1419)) ([c670656](https://github.com/Artexis10/exomem/commit/c6706566b0ae1dc50e8d3450730e5b0f2f440179))
+
 ## [0.95.0](https://github.com/Artexis10/exomem/compare/v0.94.0...v0.95.0) (2026-09-27)
 
 
