@@ -99,12 +99,18 @@ def test_turn_analysis_is_nfkc_casefolded_with_ngrams() -> None:
     assert analysis.text == analysis.text.casefold()
 
 
-def test_planning_cues_are_detected_deterministically() -> None:
+def test_analyze_turn_is_deterministic() -> None:
+    """`TurnAnalysis` carries no `cues` field (`make-activation-conventions-
+    vault-owned`, decision 1: the cue vocabulary now lives in the vault's
+    own `context_roles` registry, so this module stays registry-free) --
+    what must still hold, and does, is that the same turn always analyses
+    to the same tokens and n-grams."""
     first = resolve_module.analyze_turn("I'm planning to cook this")
     second = resolve_module.analyze_turn("I'm planning to cook this")
 
-    assert first.cues == second.cues
-    assert "planning" in first.cues
+    assert first.tokens == second.tokens
+    assert first.ngrams == second.ngrams
+    assert not hasattr(first, "cues")
 
 
 # --------------------------------------------------------------------------- #
@@ -274,7 +280,36 @@ def test_a_project_key_anchor_never_carries_retrieval() -> None:
     assert "retrieval" not in candidates[0].evidence
 
 
-def test_category_match_comes_from_turn_cues() -> None:
+def test_category_match_comes_from_the_callers_eligible_categories() -> None:
+    """`candidates_for` no longer derives categories from the turn itself
+    (`make-activation-conventions-vault-owned`, decision 1): the caller
+    (`working_set.compile_packet`, via `context_roles`'s registry) computes
+    which categories a turn's evidence cues make eligible and passes them
+    in through `eligible_categories`, the same pattern `stopwords` and
+    `rare_term_max_anchors` already follow."""
+    rows = (
+        resolve_module.AnchorFacts(
+            anchor_id="sled",
+            path="sled.md",
+            ref=None,
+            title="Cargo Sled",
+            kind="resource",
+            lifecycle="active",
+            aliases=(),
+            terms=("cargo", "sled"),
+            categories=("constraint",),
+            neighbourhood=frozenset(),
+        ),
+    )
+    analysis = resolve_module.analyze_turn("what are the constraints on the cargo sled")
+    candidates = resolve_module.candidates_for(
+        analysis, rows, eligible_categories=frozenset({"constraint"})
+    )
+
+    assert "category_match" in candidates[0].evidence
+
+
+def test_category_match_is_absent_without_an_eligible_category() -> None:
     rows = (
         resolve_module.AnchorFacts(
             anchor_id="sled",
@@ -292,7 +327,7 @@ def test_category_match_comes_from_turn_cues() -> None:
     analysis = resolve_module.analyze_turn("what are the constraints on the cargo sled")
     candidates = resolve_module.candidates_for(analysis, rows)
 
-    assert "category_match" in candidates[0].evidence
+    assert "category_match" not in candidates[0].evidence
 
 
 def test_vector_band_is_absent_without_vectors() -> None:
@@ -387,6 +422,16 @@ def test_retrieved_evidence_alone_never_resolves_however_many_kinds_stack() -> N
 # --------------------------------------------------------------------------- #
 # rare_term and folded lexical comparison (task 3)
 # --------------------------------------------------------------------------- #
+
+
+def _shipped_eligible(analysis: resolve_module.TurnAnalysis) -> frozenset[str]:
+    """The categories the shipped role registry makes eligible for a turn: what
+    the runtime passes in since the cue table moved into the registry."""
+    from exomem import context_roles
+
+    return resolve_module.eligible_categories(
+        analysis, context_roles.shipped_registry().roles.values()
+    )
 
 
 def _term_row(
@@ -487,7 +532,10 @@ def test_a_rare_single_name_term_with_broad_overlap_and_only_a_qualifier_stays_p
     row = _term_row("bench.md", "Workshop bench", terms=("workshop", "bench", "limit"))
     analysis = resolve_module.analyze_turn("is the bench past its limit")
     candidates = resolve_module.candidates_for(
-        analysis, (row,), term_anchor_counts={"bench": 1}
+        analysis,
+        (row,),
+        term_anchor_counts={"bench": 1},
+        eligible_categories=_shipped_eligible(analysis),
     )
 
     assert len(candidates) == 1
@@ -509,6 +557,7 @@ def test_a_rare_single_name_term_with_retrieval_resolves_via_rare_term() -> None
         (row,),
         term_anchor_counts={"bench": 1},
         retrieval_paths=frozenset({"bench.md"}),
+        eligible_categories=_shipped_eligible(analysis),
     )
 
     assert len(candidates) == 1
@@ -1609,7 +1658,7 @@ def test_c3_a_function_word_alone_does_not_earn_rare_term() -> None:
 def test_a_declared_referential_cue_makes_the_turn_referential(turn: str) -> None:
     analysis = resolve_module.analyze_turn(turn)
 
-    assert "referential" in analysis.cues
+    assert analysis.referential_cue is True
     assert analysis.referential is True
 
 
@@ -1627,7 +1676,7 @@ def test_a_short_turn_without_a_cue_is_not_referential(turn: str) -> None:
     must never answer one with whatever was edited last."""
     analysis = resolve_module.analyze_turn(turn)
 
-    assert "referential" not in analysis.cues
+    assert analysis.referential_cue is False
     assert analysis.referential is False
 
 
@@ -1647,7 +1696,7 @@ def test_a_cue_is_matched_on_whole_tokens_only(turn: str) -> None:
     a turn pointing back."""
     analysis = resolve_module.analyze_turn(turn)
 
-    assert "referential" not in analysis.cues
+    assert analysis.referential_cue is False
     assert analysis.referential is False
 
 
@@ -1723,15 +1772,15 @@ def test_a_cue_word_with_anything_else_said_is_not_referential(turn: str) -> Non
     is about, so recency is not asked to supply a referent for it."""
     analysis = resolve_module.analyze_turn(turn)
 
-    assert "referential" in analysis.cues
+    assert analysis.referential_cue is True
     assert analysis.referential is False
 
 
 def test_the_filler_set_is_closed_and_declared() -> None:
-    assert "work" in resolve_module.REFERENTIAL_FILLER
-    assert "resume" not in resolve_module.REFERENTIAL_FILLER
-    assert "report" not in resolve_module.REFERENTIAL_FILLER
-    assert len(resolve_module.REFERENTIAL_FILLER) == 33
+    assert "work" in resolve_module.shipped_vocabulary().filler
+    assert "resume" not in resolve_module.shipped_vocabulary().filler
+    assert "report" not in resolve_module.shipped_vocabulary().filler
+    assert len(resolve_module.shipped_vocabulary().filler) == 33
 
 
 # --------------------------------------------------------------------------- #
