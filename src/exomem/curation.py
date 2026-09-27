@@ -314,6 +314,23 @@ def _require_string(value: Any, field: str, *, max_chars: int = MAX_PLAN_BYTES) 
     return value
 
 
+#: Casefolded top-level Knowledge Base trees another typed owner governs.
+#: Curation cannot target them and tag maintenance never rewrites them.
+PROTECTED_TREES: Final = frozenset(
+    {
+        "planning",
+        "records",
+        "workflow-contract",
+        "workflow-contracts",
+        "_schema",
+        "_governance",
+        "_adoption",
+        "sources",
+        "evidence",
+    }
+)
+
+
 def normalize_target_path(path: Any, *, field: str = "path", allow_trash: bool = False) -> str:
     raw = _require_string(path, field).replace("\\", "/").strip().lstrip("/")
     if (
@@ -328,18 +345,7 @@ def normalize_target_path(path: Any, *, field: str = "path", allow_trash: bool =
     relative = raw[len(prefix) :]
     first = relative.split("/", 1)[0].casefold()
     compact = relative.casefold().replace("_", "-")
-    protected = {
-        "planning",
-        "records",
-        "workflow-contract",
-        "workflow-contracts",
-        "_schema",
-        "_governance",
-        "_adoption",
-        "sources",
-        "evidence",
-    }
-    if first in protected or compact.startswith("workflow-contract/"):
+    if first in PROTECTED_TREES or compact.startswith("workflow-contract/"):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} belongs to another typed owner")
     if first == "_trash" and not allow_trash:
         raise _error("CURATION_TARGET_PROTECTED", f"{field} targets trash internals")
