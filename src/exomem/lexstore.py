@@ -1903,9 +1903,10 @@ def select_query_units(
     and keeps its rarest `max_units`.
 
     A kept run is returned as its content bigrams alone. Units are taken
-    rarest first while their stems fit in `max_stems`; the first that does
-    not fit keeps only its rarest stems in the room left, and the rest are
-    dropped. A long unspaced turn is otherwise a few hundred bigrams.
+    rarest first, the one with fewer stems first between equally rare ones,
+    while their stems fit in `max_stems`; the first that does not fit keeps
+    only its rarest stems in the room left, and the rest are dropped. A long
+    unspaced turn is otherwise a few hundred bigrams.
     """
     from . import bm25 as bm25_module
 
@@ -1928,12 +1929,14 @@ def select_query_units(
         distinctive = [entry for entry in ranked if entry[0] <= ceiling]
         if len(distinctive) >= min_units:
             ranked = distinctive
-    # Rarest first, the turn's own order breaking ties; kept in turn order.
+    # Rarest first; between equally rare units the one with fewer stems, so
+    # a long run does not spend the stem budget a short name needs, then the
+    # turn's own order. Kept in turn order.
     kept: list[tuple[int, object]] = []
     room = max(0, budget.max_stems)
-    for _frequency, position, unit in sorted(ranked, key=lambda entry: entry[:2])[
-        : max(0, budget.max_units)
-    ]:
+    for _frequency, position, unit in sorted(
+        ranked, key=lambda entry: (entry[0], len(entry[2].stems), entry[1])
+    )[: max(0, budget.max_units)]:
         if room <= 0:
             break
         if len(unit.stems) > room:
