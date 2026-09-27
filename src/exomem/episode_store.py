@@ -10,7 +10,7 @@ The hash chain detects corruption; it is not authentication against a vault owne
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -335,6 +335,16 @@ class EpisodeStore:
                         raise _error("EPISODE_OUTCOME_UNCERTAIN", "current commit proof differs")
         return {}
 
+    @staticmethod
+    def headroom(current: Mapping[str, Any]) -> int:
+        """Transitions still available once every uncertain leaf keeps one to reconcile."""
+        uncertain = sum(
+            leaf["outcome"] == "uncertain"
+            for candidate in current["state"]["candidates"]
+            for leaf in candidate["leaves"]
+        )
+        return MAX_TRANSITIONS - (current["revision"] - 1) - uncertain
+
     def transition(
         self,
         identity: str,
@@ -349,8 +359,31 @@ class EpisodeStore:
         No command executes a curation effect. An owner must first durably record
         mark_attempt_started, then separately call the existing authorized writer.
         """
-        args = model._copy(args)
-        _validate_args(action, args)
+        return self.transitions(
+            identity,
+            expected_revision=expected_revision,
+            expected_digest=expected_digest,
+            commands=[(action, args)],
+        )
+
+    def transitions(
+        self,
+        identity: str,
+        *,
+        expected_revision: int,
+        expected_digest: str,
+        commands: Sequence[tuple[str, Mapping[str, Any]]],
+    ) -> dict[str, Any]:
+        """Accept finite commands under one CAS and persist them in one write.
+
+        Every event is validated before anything is written, so a refused
+        command leaves none of its sequence behind. Every command but a
+        reconcile must leave one transition per uncertain leaf, so an attempt
+        mark can always be followed by its reconcile.
+        """
+        commands = [(action, model._copy(args)) for action, args in commands]
+        for action, args in commands:
+            _validate_args(action, args)
         with self._guard():
             journal, current = self._load(identity)
             if (
@@ -359,29 +392,43 @@ class EpisodeStore:
                 or expected_digest != current["journal_digest"]
             ):
                 raise _error("EPISODE_REVISION_CONFLICT", "episode revision or digest changed")
-            if action == "reconcile_curation_leaf":
-                leaf = model._owned(current["state"], args["candidate"], args["leaf"])
-                if leaf["outcome"] == "committed":
-                    return current
-            if len(journal["transitions"]) >= MAX_TRANSITIONS:
-                raise _error("EPISODE_TOO_LARGE", "episode transition cap reached")
             prior = curation._digest(journal)
-            try:
-                evidence = self._accepted_evidence(current["state"], action, args)
-                event = {
-                    "revision": current["revision"] + 1,
-                    "previous_hash": current["journal_digest"],
-                    "action": action,
-                    "args": args,
-                    "evidence": evidence,
+            accepted = current
+            for action, args in commands:
+                if action == "reconcile_curation_leaf":
+                    leaf = model._owned(accepted["state"], args["candidate"], args["leaf"])
+                    if leaf["outcome"] == "committed":
+                        continue
+                if len(journal["transitions"]) >= MAX_TRANSITIONS:
+                    raise _error("EPISODE_TOO_LARGE", "episode transition cap reached")
+                try:
+                    evidence = self._accepted_evidence(accepted["state"], action, args)
+                    event = {
+                        "revision": accepted["revision"] + 1,
+                        "previous_hash": accepted["journal_digest"],
+                        "action": action,
+                        "args": args,
+                        "evidence": evidence,
+                    }
+                    state = _apply_event(accepted["state"], event)
+                except (KeyError, TypeError, IndexError) as error:
+                    raise _error(
+                        "EPISODE_TRANSITION_INVALID", "transition values are invalid"
+                    ) from error
+                event["hash"] = model._hash("exomem-episode-event-v1", event)
+                journal["transitions"].append(event)
+                accepted = {
+                    **accepted,
+                    "revision": event["revision"],
+                    "journal_digest": event["hash"],
+                    "state": state,
                 }
-                _apply_event(current["state"], event)
-            except (KeyError, TypeError, IndexError) as error:
-                raise _error(
-                    "EPISODE_TRANSITION_INVALID", "transition values are invalid"
-                ) from error
-            event["hash"] = model._hash("exomem-episode-event-v1", event)
-            journal["transitions"].append(event)
+                if action != "reconcile_curation_leaf" and self.headroom(accepted) < 0:
+                    raise _error(
+                        "EPISODE_TOO_LARGE", "no transition would remain to reconcile an attempt"
+                    )
+            if accepted is current:
+                return current
             result = self._reconstruct(identity, journal)
             self._write(identity, journal, prior)
             return result

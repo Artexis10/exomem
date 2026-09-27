@@ -94,6 +94,16 @@ class _Session:
         )
         return self.current
 
+    def transitions(self, commands: Sequence[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+        """Accept every command in one journal write, or none of them."""
+        self.current = self.store.transitions(
+            self.identity,
+            expected_revision=self.current["revision"],
+            expected_digest=self.current["journal_digest"],
+            commands=commands,
+        )
+        return self.current
+
 
 def _candidate_by_key(state: Mapping[str, Any], key: str) -> dict[str, Any] | None:
     return next((item for item in state["candidates"] if item["candidate_key"] == key), None)
@@ -186,7 +196,10 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
 
     The proposal is validated by the pure model, and every new or revised leaf
     passes current preparation, before the journal accepts anything: a refused
-    proposal or leaf leaves the episode unchanged.
+    proposal or leaf leaves the episode unchanged. The declaration, revision
+    and bindings land in one journal write, so a refused bind leaves no
+    half-bound candidate, and a journal without room for all of them refuses
+    before any plan is sealed.
     """
     session = _Session(vault_root, episode)
     key = model._string(candidate, "candidate_key", 160)  # noqa: SLF001
@@ -204,25 +217,35 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
         if error.code != "EPISODE_PROPOSAL_UNCHANGED":
             raise
         revised = False
-    sealed = [
-        (leaf["leaf_id"], _seal(session.vault_root, leaf))
+    unsealed = [
+        leaf
         for leaf in model._candidate(trial, identity)["leaves"]  # noqa: SLF001
         if leaf["binding"] is None and not leaf["attempts"]
     ]
+    commands: list[tuple[str, dict[str, Any]]] = []
     if existing is None:
-        session.transition("declare_candidate", key=key)
+        commands.append(("declare_candidate", {"key": key}))
     if revised:
-        session.transition("revise_proposal", candidate=identity, proposal=model._copy(proposal))  # noqa: SLF001
-    for leaf_id, proposed in sealed:
-        session.transition(
-            "bind_curation_leaf",
-            candidate=identity,
-            leaf=leaf_id,
-            run_id=proposed["run_id"],
-            plan_id=proposed["plan_id"],
-            plan_fingerprint=proposed["plan_fingerprint"],
-            ordinal=0,
+        commands.append(("revise_proposal", {"candidate": identity, "proposal": proposal}))
+    if len(commands) + len(unsealed) > session.store.headroom(session.current):
+        raise _error("EPISODE_TOO_LARGE", "episode transition cap reached")
+    for leaf in unsealed:
+        proposed = _seal(session.vault_root, leaf)
+        commands.append(
+            (
+                "bind_curation_leaf",
+                {
+                    "candidate": identity,
+                    "leaf": leaf["leaf_id"],
+                    "run_id": proposed["run_id"],
+                    "plan_id": proposed["plan_id"],
+                    "plan_fingerprint": proposed["plan_fingerprint"],
+                    "ordinal": 0,
+                },
+            )
         )
+    if commands:
+        session.transitions(commands)
     return _projection(session)
 
 
@@ -414,7 +437,8 @@ def resume(
             try:
                 executed.append(_execute(session, candidate_id, leaf_id))
             except (curation.CurationError, model.EpisodeError) as error:
-                # The leaf stays uncertain: a failure is not proof of non-commit.
+                # A leaf past its attempt mark stays uncertain: a failure is
+                # not proof of non-commit.
                 session.current = session.store.read(session.identity)
                 blocked.append({"leaf_id": leaf_id, "code": error.code})
                 break
