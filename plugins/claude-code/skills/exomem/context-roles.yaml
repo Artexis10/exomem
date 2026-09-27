@@ -31,12 +31,30 @@
 #       add_cues: ["i'd rather"]     # extend a shipped role
 #     people:
 #       anchor_defaults: []          # narrow a shipped default away
+#     active_plans:
+#       evidence_cues: ["ich plane"]       # a cue in your own language
+#       evidence_categories: [action]     # what it may qualify as evidence
 #
 # Lanes: units (semantic units by category), records (Records collection items),
 # planning (active Planning items), entity (entity/profile page facets),
 # graph (typed neighbourhood), evidence (pointers only, never bodies).
 #
 # Anchor kinds: entity, resource, hub, collection, plan, project.
+#
+# EVIDENCE: most cues only SELECT a role (a lens to run). A cue also listed
+# in `evidence_cues` may additionally make its role's `evidence_categories`
+# eligible for `category_match` — a qualifier that can promote an anchor
+# already reached by other evidence from `partial` to `resolved`, never a
+# way to reach an anchor on its own. `evidence_cues` extends by union like
+# `cues` does, and an entry there selects its role even if it is not also
+# listed in `cues`. Three bounds keep this narrow: a cue must be at least
+# three characters long, must tokenise to at least one term, and must occur
+# in the turn as whole terms in order — a cue failing any of these still
+# selects its role but is reported as a finding and never becomes evidence
+# (this is why a bare `?` selects `open_questions` but cannot qualify
+# `question`/`problem`). Each `evidence_categories` entry must be a category
+# the semantic-language registry (`semantic-language-registry.yaml`) knows,
+# core or your own; an unregistered one is dropped with a finding.
 
 schema_version: 1
 roles:
@@ -53,6 +71,8 @@ roles:
     categories: [preference]
     anchor_defaults: [entity, project]
     cues: ["prefer", "i like", "i hate", "usually", "i'd rather"]
+    evidence_cues: ["prefer", "i like", "i hate", "usually"]
+    evidence_categories: [preference]
 
   constraints:
     description: Limits, requirements and assumptions that bound what is allowed.
@@ -60,6 +80,8 @@ roles:
     categories: [constraint, requirement, assumption]
     anchor_defaults: [resource, project, plan]
     cues: ["constraint", "limit", "allowed to", "can i", "am i able", "budget"]
+    evidence_cues: ["constraint", "limit", "allowed to", "can i", "am i able"]
+    evidence_categories: [constraint, requirement]
 
   resources:
     description: The things themselves — products, systems, accounts, equipment.
@@ -74,6 +96,8 @@ roles:
     categories: [fact, config]
     anchor_defaults: [resource, collection]
     cues: ["right now", "currently", "at the moment", "how much", "how many", "left"]
+    evidence_cues: ["right now", "currently", "at the moment", "how much", "how many"]
+    evidence_categories: [fact]
 
   recent_change:
     description: What changed lately and the decision behind it.
@@ -81,6 +105,8 @@ roles:
     categories: [decision, finding]
     anchor_defaults: [project, hub]
     cues: ["again", "still", "changed", "since", "lately"]
+    evidence_cues: ["again", "still", "changed", "since"]
+    evidence_categories: [decision, finding]
 
   active_plans:
     description: Intents and work already committed for this anchor.
@@ -88,6 +114,8 @@ roles:
     categories: [action]
     anchor_defaults: [plan, project]
     cues: ["i'm planning", "im planning", "planning to", "next", "should i"]
+    evidence_cues: ["i'm planning", "im planning", "planning to", "how should i", "should i"]
+    evidence_categories: [action]
 
   methods:
     description: Reusable approaches and designs that apply here.
@@ -95,6 +123,8 @@ roles:
     categories: [technique, design]
     anchor_defaults: [hub]
     cues: ["how do i", "how to", "what is the best way", "approach"]
+    evidence_cues: ["how do i", "how to", "what is the best way", "approach"]
+    evidence_categories: [technique, design]
 
   precedents:
     description: What was decided or learned the last time this came up.
@@ -102,6 +132,8 @@ roles:
     categories: [decision, insight, finding]
     anchor_defaults: [hub, project]
     cues: ["last time", "before", "previously", "we already"]
+    evidence_cues: ["last time", "before", "previously"]
+    evidence_categories: [decision, insight]
 
   people:
     description: Who is involved and in what relationship.
@@ -137,3 +169,12 @@ roles:
     categories: [question, problem, risk]
     anchor_defaults: [hub, plan]
     cues: ["unsure", "open question", "still don't know", "why does", "?"]
+    # "?" is one character and tokenises to nothing, so it can select this
+    # role (as it always has) but can never be evidence — the one intended
+    # difference from the deleted cue table: a turn whose only question
+    # signal is a question mark no longer makes `question`/`problem`
+    # eligible for `category_match`. "what about" is new here too (an
+    # `evidence_cues` entry selects its role even when `cues` never listed
+    # it), which is why it does not also need to be added above.
+    evidence_cues: ["?", "what about", "why does"]
+    evidence_categories: [question, problem]
