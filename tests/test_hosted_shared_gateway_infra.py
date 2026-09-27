@@ -9,6 +9,9 @@ from test_hosted_helm_contract import PLATFORM, _find, _render, _render_process
 
 ROOT = Path(__file__).resolve().parents[1]
 GATEWAY_ARGS = (
+    # Exercise the legacy gateway on its own; Cloud deliberately pauses it.
+    "--set", "cellctl.enabled=false",
+    "--set", "cloudGateway.enabled=false",
     "--set", "gateway.enabled=true",
     "--set", "gateway.image=ghcr.io/substrate-systems/substrate-gateway@sha256:" + "a" * 64,
     "--set", "gateway.originHostname=mcp-origin.example.test",
