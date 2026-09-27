@@ -69,7 +69,8 @@ jobs:
         run: |
           uv run --frozen python -m pytest -q -p no:cacheprovider \
             --ignore=tests/test_k3s_integration.py \
-            --ignore=tests/test_platform_chart_headers.py
+            --ignore=tests/test_platform_chart_headers.py \
+            --ignore=tests/test_platform_legacy_pause.py
       - name: Pinned ruff
         working-directory: infra/cellctl
         run: uvx --from "ruff==${RUFF_VERSION}" ruff check src tests
@@ -91,7 +92,8 @@ jobs:
         working-directory: infra/cellctl
         shell: bash
         run: |
-          uv run --frozen python -m pytest -q -rs -p no:cacheprovider tests/test_platform_chart_headers.py \
+          uv run --frozen python -m pytest -q -rs -p no:cacheprovider \
+            tests/test_platform_chart_headers.py tests/test_platform_legacy_pause.py \
             | tee "${RUNNER_TEMP}/chart-tests.txt"
           if grep -q '^SKIPPED \[' "${RUNNER_TEMP}/chart-tests.txt"; then
             echo "::error::a platform chart test was skipped"
