@@ -163,6 +163,43 @@ def test_upgrade_stages_immutable_release_before_sending_target(tmp_path: Path) 
     assert str(tmp_path / "launcher") not in trace.read_text(encoding="utf-8").splitlines()[-1]
 
 
+def test_upgrade_result_carries_a_hook_refresh_report_without_failing(tmp_path: Path) -> None:
+    """The promotion step refreshes wired Claude Code hooks and reports the
+    outcome alongside the upgrade result; an empty home has nothing wired, so
+    this also proves a clean run never touches the exit code."""
+    requests, thread = _control(tmp_path)
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = venv ]; then\n"
+        "  mkdir -p \"$4/bin\"\n"
+        "  cat > \"$4/bin/python\" <<'STUB'\n"
+        "#!/bin/sh\n"
+        "echo '{\"version\": \"0.2.0\", \"state_descriptors\": []}'\n"
+        "STUB\n"
+        "  chmod +x \"$4/bin/python\"\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    empty_home = tmp_path / "empty-home"
+    empty_home.mkdir()
+    result = _operator(
+        tmp_path,
+        "--package-version", "0.2.0", "--profile", "lean",
+        env={"EXOMEM_UV": str(fake_uv), "HOME": str(empty_home)},
+    )
+    thread.join(3)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["hook_refresh"] == {
+        "skipped": False,
+        "reason": None,
+        "profiles": [],
+        "success": True,
+    }
+
+
 def test_unavailable_manager_fails_before_creating_release(tmp_path: Path) -> None:
     result = _operator(tmp_path, "--package-version", "0.2.0")
     assert result.returncode != 0

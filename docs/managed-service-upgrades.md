@@ -74,6 +74,17 @@ leaves it alone. Failed staging leaves the old worker serving and retains the
 candidate directory for inspection; no release environment is automatically
 deleted.
 
+Once the target is confirmed active, the operator also re-runs `install-hook`,
+from the newly promoted release, for every local Claude Code profile that
+already wires the retrieve nudge hook: the default `~/.claude` plus any
+sibling `~/.claude-*` profile whose `settings.json` (resolved through a
+symlink, if it is one) names `exomem-retrieve-nudge.sh`. A profile that never
+wired the hook is left untouched. This never fails or rolls back the upgrade
+itself -- a per-profile error, such as the installer's own refusal of a
+group-writable config, is reported under `hook_refresh` in the upgrade result
+and surfaced by `exomem doctor` (`upgrade.hook_refresh`), not raised. Set
+`EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH` to opt out.
+
 For status or recovery, read the runtime directory from the rendered unit's
 `--runtime-dir` argument and use the launcher's interpreter:
 
