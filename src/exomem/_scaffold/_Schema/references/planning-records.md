@@ -77,6 +77,36 @@ language, and create only after that inline confirmation. Backfill only exactly
 dated evidence units, citing each unit or artifact in `sources`; prose notes stay
 where they are.
 
+A Records collection says what belongs in it through its manifest's `claims`
+block: `tags` and `terms` name its vocabulary, and an optional `match` block
+declares membership outright from a page's frontmatter:
+
+```yaml
+claims:
+  tags: [example-product, incidents, regressions]
+  terms: [sync, login]
+  match:
+    type: [failure]
+    project: [example-product]
+```
+
+Every key under `match` must hold on the page (`type`, `category`, `project`
+or `tags`; `category` also reads the page's unit categories), and any value
+listed under a key may match. A page that satisfies every predicate routes to
+the collection as strong, even when its words share nothing with the claims.
+Predicates only widen routing; two collections declaring the same membership
+stay silent. Words are compared in a folded form, so `failure`/`failures` and
+`regression`/`regressions` meet, and function words such as "not" or "after"
+never count as shared vocabulary.
+
+A strong route of a failure-shaped note carries a `disposition`, set by the
+user's prominence: `file` (perform the ready `record_memory` payload without
+asking), `append_occurrence` (the note recurs an existing item: add it to that
+item's `sources`), `ask` (put the one precomposed question once and act only on
+yes), or `hold` (leave it for review). Creating a collection, or changing its
+claims, raises one grouped item naming the existing notes it now covers;
+handle it under the same disposition, once.
+
 For a Planning or Records collection stored as Markdown items, YAML frontmatter
 is the sole canonical value source and the UUID remains durable identity. A
 manifest may declare `item_filename` and `item_presentation` (or the compatible

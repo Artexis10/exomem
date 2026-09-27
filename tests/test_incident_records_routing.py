@@ -849,3 +849,18 @@ def test_a_failure_note_is_filed_through_the_returned_payload(
     recurred = _terminal_routing(again["creation"]["records_routing"])
     assert recurred is not None and recurred["disposition"] == "append_occurrence"
     assert recurred["record_memory"]["item_key"] == appended["item_key"]
+
+
+def test_bootstrap_teaches_dispositions_command_free(tmp_path: Path) -> None:
+    from exomem import commands
+
+    post_write = commands.op_bootstrap(tmp_path, profile="compact")["authoring_contract"][
+        "post_write"
+    ]
+    routing = post_write["records_routing"]
+
+    for disposition in ("file:", "append_occurrence:", "ask:", "hold:"):
+        assert disposition in routing
+    assert "claims.match" in routing and "without asking" in routing
+    assert "record_memory" not in routing
+    assert "grouped backfill" in post_write["records_routing_handling"]

@@ -1648,18 +1648,25 @@ def op_bootstrap(
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "records_routing": (
                     "a committed compiled note or Evidence write may name one existing "
-                    "Records collection whose claims match the observation; this is advisory "
-                    "and never appends from the advisory alone"
+                    "Records collection whose claims or declared claims.match predicates cover "
+                    "the observation; the runtime never appends from the advisory alone. A strong "
+                    "route of a failure-shaped observation carries a disposition set by capture "
+                    "prominence. file: perform the ready payload without asking. "
+                    "append_occurrence: add the note to the named existing item. ask: put the one "
+                    "precomposed question once and act only on yes. hold: leave it for review"
                 ),
                 "records_routing_handling": (
                     "read the observation, then route it into the named collection under the "
-                    "served capture disposition; resume a held candidate when one exists"
+                    "served capture disposition; resume a held candidate when one exists. A "
+                    "grouped backfill item names existing observations a new or changed "
+                    "collection covers: handle it under the same disposition, once"
                 ),
                 "collection_candidate": (
                     "a strong collection_candidate is a proposal: draft its schema through "
                     "record_memory describe and validate, ask one question in domain language, "
                     "and create only after that inline confirmation. Backfill only exactly dated "
-                    "evidence units, citing each unit or artifact in sources"
+                    "evidence units, citing each unit or artifact in sources. At most a few are "
+                    "served at once, distinctive terms only"
                 ),
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
                 # Deliberately command-free, exactly like the epistemic
