@@ -25,6 +25,7 @@ from exomem import (
     lexstore,
     request_budget,
     working_set,
+    working_set_heat,
     working_set_index,
     working_set_resolve,
     working_set_runtime,
@@ -1781,8 +1782,13 @@ def test_a_referential_turn_never_runs_the_carry(
         working_set, "_carry_by_retrieval", lambda *_a, **_k: asked.append("carry") or ()
     )
 
+    # A keyed caller, as a hook sends it: a caller with no key is never
+    # given the vault's referent (the keyless-connector ruling).
+    local = working_set_heat.Attribution(session="local-conversation")
     for turn in ("continue", "let's continue the work, what's pending?"):
-        packet = working_set.compile_packet(carry_vault, turn=turn, max_chars=4000)
+        packet = working_set.compile_packet(
+            carry_vault, turn=turn, max_chars=4000, attribution=local
+        )
         resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
         if hot:
             assert [item["path"] for item in resolved] == [

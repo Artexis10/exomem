@@ -825,7 +825,13 @@ def _measure_referential_working_set(vault: Path) -> tuple[float, dict]:
             ],
         )
         working_set_runtime.reset_caches_for_tests()
-        return commands.op_activate_context(vault, turn="continue", include_timings=True)
+        # A fresh keyed conversation each call, as a hook sends it: the worst
+        # case, ranked over the whole ring. A keyless caller never ranks the
+        # vault for its referent, and a session's own served thread would
+        # lead without ranking it.
+        return commands.op_activate_context(
+            vault, turn="continue", include_timings=True, session=f"latency-gate-{index}"
+        )
 
     packet = call(0)
     samples = [_compiler_ms(call(index)["timings"]) for index in range(1, 4)]

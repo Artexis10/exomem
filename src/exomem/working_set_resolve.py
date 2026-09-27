@@ -278,14 +278,15 @@ class TurnAnalysis:
 #: A follow-up is short: at most this many tokens. "what about the second
 #: one" is five; a turn long enough to say what it is about names it.
 FOLLOW_UP_MAX_TOKENS = 8
-#: Words that point back into the conversation instead of naming anything.
-#: A closed, English set, like the shipped referential seed; they are
-#: evidence of a follow-up only in a turn this short.
+#: Words that point back into the conversation instead of naming anything,
+#: beyond the vault's own referential filler ("it", "that", "this", ...), which
+#: `is_follow_up` reads as pointing words too: the filler is vault data, so it
+#: is never restated here. Evidence of a follow-up only in a turn this short.
 FOLLOW_UP_MARKERS: frozenset[str] = frozenset(
     {
-        "that", "this", "it", "those", "these", "they", "them", "same",
-        "one", "ones", "first", "second", "third", "last", "previous",
-        "former", "latter", "above", "earlier", "other", "another", "next",
+        "those", "these", "they", "them", "same", "one", "ones", "first",
+        "second", "third", "previous", "former", "latter", "above", "earlier",
+        "other", "another", "next",
     }
 )
 #: Openers that continue the previous answer: "and the results?",
@@ -315,8 +316,9 @@ def is_follow_up(
     Short (`FOLLOW_UP_MAX_TOKENS`), saying at most `FOLLOW_UP_MAX_CONTENT`
     words of its own, and it either speaks a referential cue, opens with a
     continuing word (`FOLLOW_UP_OPENERS`), or points with a deictic or
-    anaphoric word (`FOLLOW_UP_MARKERS`). "what about the quarterly budget?"
-    opens like one and is not: it names a subject. Whether the turn reached
+    anaphoric word (`FOLLOW_UP_MARKERS`, or the vault's referential filler).
+    "what about the quarterly budget?" opens like one and is not: it names a
+    subject. Whether the turn reached
     an anchor after all is the resolver's answer, not this function's: the
     carry it enables runs only for a turn that reached none."""
     if not tokens or len(tokens) > FOLLOW_UP_MAX_TOKENS:
@@ -333,7 +335,9 @@ def is_follow_up(
     if len(content) > FOLLOW_UP_MAX_CONTENT:
         return False
     return bool(
-        referential_cue or opener or any(token in FOLLOW_UP_MARKERS for token in words)
+        referential_cue
+        or opener
+        or any(token in FOLLOW_UP_MARKERS or token in filler for token in words)
     )
 
 

@@ -1439,6 +1439,18 @@ def serve(
             continuity_passed=continuity_passed,
             released_paths=released_paths,
         )
+        # A caller with no key of its own, or only a token's thread, is never
+        # given the vault tier's referent (`working_set_heat.leading`'s
+        # `for_referent`), so on a turn that points back its packet differs
+        # from a keyed caller's even where both have nothing of their own and
+        # share the vault's digest. Only on such a turn: on any other both are
+        # compiled alike and still share one entry.
+        who = attribution or working_set_heat.Attribution()
+        stranger = not (who.workspace or (who.session and not who.thread_only))
+        if stranger and working_set_resolve.analyze_turn(
+            turn, vocabulary=conventions_registry.conventions.referential
+        ).referential:
+            heat_digest = hashlib.sha256(f"{heat_digest}:stranger".encode()).hexdigest()[:16]
 
     key = cache_key(
         freshness_key=freshness_key,
