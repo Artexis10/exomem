@@ -167,12 +167,14 @@ def _target(
 def test_fold_term_folds_plurals_and_progressives_conservatively() -> None:
     fold = vocabulary_fold.fold_term
     assert fold("failures") == fold("failure") == "failure"
-    assert fold("dogfooding") == fold("dogfood") == "dogfood"
     assert fold("regressions") == "regression"
     assert fold("Matches") == "match"
-    assert fold("stopped") == "stop"
     assert fold("Context  Compiler") == "context-compiler"
     assert fold("snake_case term") == "snake-case-term"
+    # Progressive and past forms are different words often enough that the
+    # shared fold never removes -ing or -ed.
+    assert fold("dogfooding") != fold("dogfood")
+    assert fold("stopped") == "stopped"
     # Short words and declared exceptions are never folded.
     for word in ("bus", "gas", "news", "series", "status", "process", "analysis", "ring"):
         assert fold(word) == word
