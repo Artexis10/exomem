@@ -727,13 +727,55 @@ def _schedule_reembed(
     _schedule_build(root, freshness_stamp=freshness_stamp)
 
 
+#: The most query units (a spaced word, or an unspaced run) the lexical
+#: stage asks the catalogue about, rarest first. PROVISIONAL: a long turn's
+#: head of distinctive words is what names a page, and the whole turn made
+#: the stage cost 3.2-4.3 s on long live turns. Re-measure, don't hand-tune.
+ACTIVATION_LEXICAL_MAX_TERMS = 12
+#: A unit on more than this share of the catalogue's pages is a
+#: near-stopword for this corpus and is not asked about. PROVISIONAL.
+ACTIVATION_LEXICAL_COMMON_FRACTION = 0.1
+#: The smallest catalogue that share is believed on; below it every unit
+#: competes on rarity alone. PROVISIONAL, and the carry's own floor
+#: (`working_set.RETRIEVAL_CARRY_MIN_PAGES`) for the same reason.
+ACTIVATION_LEXICAL_COMMON_MIN_PAGES = 100
+#: The rows, ranked by bm25 inside SQL, that the corroboration test reads.
+#: PROVISIONAL; far wider than the packet's own retrieval limit.
+ACTIVATION_LEXICAL_CANDIDATE_CAP = 256
+
+
+def lexical_term_budget():
+    """The activation lexical stage's `lexstore.QueryTermBudget`."""
+    from . import lexstore
+
+    return lexstore.QueryTermBudget(
+        max_units=ACTIVATION_LEXICAL_MAX_TERMS,
+        common_fraction=ACTIVATION_LEXICAL_COMMON_FRACTION,
+        common_min_pages=ACTIVATION_LEXICAL_COMMON_MIN_PAGES,
+        candidate_cap=ACTIVATION_LEXICAL_CANDIDATE_CAP,
+    )
+
+
 def lexical_evidence(
-    vault_root: Path, turn: str, rows, *, limit: int, freshness=None, recall_checkpoint=None
+    vault_root: Path,
+    turn: str,
+    rows,
+    *,
+    limit: int,
+    freshness=None,
+    recall_checkpoint=None,
+    selection: dict | None = None,
 ):
     """Rank only anchor pages in the maintained full-page text index.
 
     This is own-page retrieval evidence, not a second vote for title overlap.
     Unavailable FTS never falls back to a corpus walk or foreground repair.
+
+    Bounded on any turn: at most `ACTIVATION_LEXICAL_MAX_TERMS` of the
+    turn's units reach the MATCH, the rarest in the catalogue, and the
+    corroboration test reads a capped candidate window (see
+    `lexical_term_budget`). `selection`, when given, receives how many units
+    were kept and dropped — counts only, never the turn's words.
     """
     from . import find_types, lexstore
 
@@ -744,13 +786,9 @@ def lexical_evidence(
         # A full-page match on the same single name word is not a second fact.
         # Require two distinct content units (words or unspaced runs); exact
         # aliases still resolve alone.
-        content_turn = " ".join(
-            token for token in working_set_index.tokens_of(working_set_index.normalize(turn))
-            if token not in working_set_index.STOPWORDS
-        )
         result = lexstore.search_bm25_result(
             vault_root,
-            content_turn,
+            content_words(turn),
             min(limit, len(by_path)),
             scope="kb",
             freshness=freshness,
@@ -758,6 +796,8 @@ def lexical_evidence(
             allow_delta=False,
             min_matched_terms=2,
             recall_checkpoint=recall_checkpoint,
+            term_budget=lexical_term_budget(),
+            term_selection=selection,
         )
         if not result.readiness.complete:
             return [], result.readiness.status

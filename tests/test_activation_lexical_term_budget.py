@@ -309,3 +309,62 @@ def test_corroboration_is_counted_on_the_capped_candidate_window(
     assert {path for path, _ in wide.value} == {ANCHOR_PATH, MODEL_PATH}
     assert len(capped.value) == 1
     assert capped.value[0][0] == wide.value[0][0]
+
+
+def test_activation_timings_report_the_selection_as_counts_only(vault: Path) -> None:
+    """The kept and dropped unit counts reach the activation diagnostics, and
+    nothing of the turn's own text does."""
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    from exomem import commands, working_set_index
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    turn = "I'm planning to tow the Cargo Sled north past the quorvint ridge"
+
+    packet = commands.op_activate_context(vault, turn=turn, include_timings=True)
+
+    reported = packet["timings"]["profile"]["working_set.lexical"]
+    assert set(reported) == {"terms_kept", "terms_dropped"}
+    assert all(isinstance(value, int) for value in reported.values())
+    assert reported["terms_kept"] + reported["terms_dropped"] > 0
+    assert "quorvint" not in repr(packet["timings"])
+
+
+def test_without_a_vocabulary_view_the_stage_is_still_bounded(
+    long_turn_vault: Path, statements: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An SQLite build that cannot create the `fts5vocab` view degrades to a
+    count-only bound; the lane never turns unavailable because of it."""
+    original = lexstore.LexicalStore._connect
+
+    class _NoVocabulary:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args):
+            if "fts5vocab" in sql:
+                raise lexstore.sqlite3.OperationalError("no such module: fts5vocab")
+            return self._conn.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    monkeypatch.setattr(
+        lexstore.LexicalStore,
+        "_connect",
+        lambda self, *a, **k: _NoVocabulary(original(self, *a, **k)),
+    )
+    monkeypatch.setattr(lexstore.get_store(long_turn_vault), "_term_frequency_cache", None)
+    rng = random.Random(14)
+    turn = _long_turn(rng, 400, "kelvane", "throughput")
+
+    hits, state = working_set_runtime.lexical_evidence(
+        long_turn_vault, turn, _rows(long_turn_vault), limit=8
+    )
+
+    assert state == "available"
+    assert isinstance(hits, list)
