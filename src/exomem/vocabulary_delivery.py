@@ -7,6 +7,7 @@ mutation, changes its identity, or treats unavailable evidence as an empty KB.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,24 @@ from . import (
 )
 from .vocabulary_state import VocabularyState
 from .vocabulary_workflow import _hash
+
+log = logging.getLogger(__name__)
+
+
+def _log_unavailable(stage: str, exc: BaseException) -> None:
+    """Name the swallowed failure by type and raising frame, never by content.
+
+    Exception messages can quote page text, so only the class and the
+    innermost code location travel into the operator log.
+    """
+    frame = exc.__traceback__
+    while frame is not None and frame.tb_next is not None:
+        frame = frame.tb_next
+    where = (
+        f"{frame.tb_frame.f_globals.get('__name__', '?')}:{frame.tb_lineno}"
+        if frame is not None else "?"
+    )
+    log.warning("vocabulary %s unavailable: %s at %s", stage, type(exc).__name__, where)
 
 
 def _sync(state: str, reason: str | None = None) -> dict[str, Any]:
@@ -107,7 +126,8 @@ def after_commit(vault_root: Path, result: Any) -> Any:
                 vault_root, job, continuation=projected["continuation"]
             )
         return {**result, **guidance}
-    except Exception:  # noqa: BLE001 - optional guidance cannot change a committed outcome
+    except Exception as exc:  # noqa: BLE001 - optional guidance cannot change a committed outcome
+        _log_unavailable("guidance", exc)
         return {**result, "vocabulary_sync": _sync("unavailable", "guidance_unavailable")}
 
 
@@ -144,6 +164,7 @@ def recover(vault_root: Path, *, limit: int = 4) -> dict[str, Any]:
             processed += 1
         except Exception as exc:  # noqa: BLE001 - recovery never repeats content mutation
             unavailable = True
+            _log_unavailable("recovery", exc)
             if isinstance(exc, ValueError) and str(exc).startswith("VOCABULARY_CONTINUATION_STALE"):
                 vocabulary_recovery.reset_cursor(vault_root, job)
     return {
