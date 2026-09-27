@@ -7,7 +7,9 @@ tags, collection claims and routing terms. The fold SHALL apply NFKC normalisati
 map runs of `_`, whitespace and `-` to one `-`, strip edge hyphens, and remove at most one
 plural `-s`/`-es` (`-ies` becoming `-y`) from the final hyphen segment. It SHALL NOT remove
 `-ing` or `-ed`. It SHALL never inflect a word under four letters, a non-alphabetic segment,
-or a member of its `EXCEPTIONS` set, and SHALL be idempotent on its own output.
+or a member of its `EXCEPTIONS` set, which SHALL include plurals whose singular is a different
+word such as `securities`, `futures`, `sales` and `operations`, and SHALL be idempotent on its
+own output.
 
 #### Scenario: Plural and separator variants share a key
 
@@ -17,7 +19,7 @@ or a member of its `EXCEPTIONS` set, and SHALL be idempotent on its own output.
 
 #### Scenario: Different words are kept apart
 
-- **WHEN** `training` and `trains`, `recording` and `records`, or `embedded` and `embeddings` are folded
+- **WHEN** `training` and `trains`, `recording` and `records`, `embedded` and `embeddings`, or `securities` and `security` are folded
 - **THEN** each pair yields two different keys
 
 #### Scenario: Meaning-bearing forms are kept apart
@@ -31,7 +33,8 @@ A write SHALL keep its authored tags at every prominence level. When an authored
 fold-variant of a tag whose canonical form has strictly more page uses, a write at `maximal`
 SHALL add one single-line warning naming the canonical tag, and `note`, `add`, `edit` and
 `link` SHALL surface it. Tag usage SHALL come from the one count source the maintenance mode
-uses; when the lexical catalogue cannot answer, the write SHALL proceed without advice. The
+uses; when the lexical catalogue cannot answer, the write SHALL proceed without advice. At
+`maximal` the committed response SHALL NOT repeat that advice as a `vocabulary_advisory`. The
 body SHALL never be changed by this step.
 
 #### Scenario: Maximal keeps the authored tag and advises
@@ -70,9 +73,11 @@ warnings and advisories SHALL read the same for a withheld page as for an absent
 `maintain_memory(mode="tag-variants")` without `apply` SHALL be read-only and SHALL list
 variant groups with each spelling's page count, the canonical form, whether the group is tied,
 the number of pages pending, one bounded batch, and a `plan_id`. With `apply=true`, the exact
-`plan_id` and a one-line `why`, it SHALL plan outside the mutation guard and, under it,
-re-verify each batch page's content hash and visibility and each touched group's decision,
-refusing as stale on any change. It SHALL rewrite a variant only when its canonical has
+`plan_id` and a one-line `why`, it SHALL plan without holding the vault mutation boundary,
+on the served path as in the library, and, under it, re-verify each batch page's content hash
+and visibility and each rewritten group's decision, refusing as stale on any change. An
+optional `exclude_groups` list SHALL keep the named fold groups out of preview and apply and
+SHALL be part of `plan_id`. It SHALL rewrite a variant only when its canonical has
 strictly more uses, SHALL change only the frontmatter `tags` key, SHALL leave the body and
 every other key unchanged, SHALL NOT drop a comment, and SHALL NOT rewrite a page in an owned
 tree. It SHALL record one log entry holding each page's before and after tags and the inverse
@@ -91,6 +96,12 @@ entry cannot be written. Repeating preview and apply SHALL converge to zero pend
 - **AND** their bodies are byte-identical to before
 - **AND** the log entry records each page's before and after tags
 - **AND** a later preview reports no pending pages
+
+#### Scenario: An excluded group is left alone
+
+- **WHEN** a preview and apply name one group in `exclude_groups`
+- **THEN** the other groups' variants are rewritten and the excluded group's are not
+- **AND** the same preview without the exclusion has a different `plan_id`
 
 #### Scenario: A tie is never rewritten
 

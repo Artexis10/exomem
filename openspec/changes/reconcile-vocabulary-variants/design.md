@@ -21,8 +21,11 @@ alphabetic word of four or more letters. It never removes `-ing` or `-ed`: `trai
 fold is shared by tags, collection claims and routing, so a wrong merge silently joins two
 concepts everywhere while a missed merge only leaves two spellings apart. Hyphens join the
 separator run so a writer's per-character mapping (`x  y` becomes `x--y`) folds with the
-original. A must-not-merge table and a must-merge table in `tests/test_vocabulary_fold.py` pin
-the boundary, together with idempotence.
+original. Plurals whose singular is a different word (`securities`, `futures`, `minutes`,
+`aids`, `pandas`, `sales`, `premises`, `odds`, `operations`) are exceptions. A must-not-merge
+table and a must-merge table in `tests/test_vocabulary_fold.py` pin the boundary, together
+with idempotence. Collection claims pay for this: `dogfooding` no longer meets a `dogfood`
+claim, so a collection that wants both declares both.
 
 **One count source.** Tag usage is the lexical catalogue's per-page `page.tags` members
 (`LexicalStore.tag_members_by_page`), read once and filtered before counting: pages the
@@ -32,6 +35,10 @@ contracts, `_Schema`, `_Governance`, `_Adoption` — plus trash, archive, attach
 directories, compared casefolded at any depth) never contribute. Write-time advice,
 post-commit advisories and maintenance all read this one `usage`, so a count, a group or a
 canonical choice reads for a restricted caller exactly as if withheld pages were absent. An
+unrestricted reader is counted by one SQL aggregate (`LexicalStore.tag_usage_aggregate`) that
+excludes owned trees in SQL and computes the written form in SQL; a restricted reader is
+counted from per-page rows its release filter decides, and a test pins that both paths count
+identically. An
 absent or stale catalogue gives no advice at write time and a typed
 `TAG_USAGE_UNAVAILABLE` refusal from maintenance.
 
@@ -45,10 +52,13 @@ rewritten; a variant is acted on only when its canonical has strictly more uses.
 **Write time advises, never rewrites.** No prominence level changes an authored tag. Hosted
 surfaces default to `maximal` (`prominence.default_for_surface`), so rewriting there would act
 on tags no owner chose to have rewritten. At `maximal` a write adds one warning line per
-minority variant; `note`, `add`, `edit` and `link` surface it. At any non-`off` level
-post-commit delivery can carry one `tag-variant/v1` advisory. The unrestricted reader's usage
-index is cached per vault for 120 seconds, including an empty one; a restricted reader's is
-computed per call and never cached.
+minority variant; `note`, `add`, `edit` and `link` surface it, and post-commit delivery adds no
+second tag notice. At other non-`off` levels post-commit delivery can carry one
+`tag-variant/v1` advisory. Either way a write builds its usage index at most once. The
+unrestricted reader's index holds counts only and is cached per vault for 120 seconds,
+including an empty one; a restricted reader's is computed per call and never cached. The
+dispatcher keeps the request principal bound through post-commit delivery, which a test
+pins, so a restricted caller's advisory never reads the unrestricted cache.
 
 **The advisory reuses the existing slot.** A tag notice has its own family
 (`tag-variant/v1`) and a closed shape validated before public projection. A relation review
@@ -57,11 +67,14 @@ discoverable through the maintenance route.
 
 **Maintenance is plan-gated and batched.** The preview reads the usage, reads only pages that
 carry a spelling a decided group rewrites, and plans at most 64 pages. The `plan_id` hashes
-every decided group's canonical and each planned page's content hash and tags. Apply plans
-outside the mutation guard, refuses as stale when the plan differs from the preview, and under
-the guard re-verifies only the batch: each page's content hash, each page's visibility to the
-caller (a withheld page answers exactly as a changed one), and the decision of every group the
-batch touches. The splice changes only the frontmatter `tags` key, quotes any tag YAML would
+every decided group's canonical and each planned page's content hash and tags. The owner can keep named
+groups out with `exclude_groups`; the exclusion is hashed into `plan_id`, so a bad group can be
+dropped without abandoning maintenance. Apply plans outside the mutation guard: the dispatcher
+narrows its own boundary for this mode to the writer-authority fence, and the leaf takes the
+mutation guard only around re-verification and commit. It refuses as stale when the plan
+differs from the preview, and under the guard re-verifies only the batch: each page's content
+hash, each page's visibility to the caller (a withheld page answers exactly as a changed one),
+and the decision of every group the batch rewrites, counting only those keys. The splice changes only the frontmatter `tags` key, quotes any tag YAML would
 read as a null, boolean, number or date, keeps a trailing comment on the `tags:` line, and
 refuses a page whose block list carries a comment, or whose body or any other frontmatter key
 would not come through unchanged. Such pages are reported as `unrewritable` and never planned,

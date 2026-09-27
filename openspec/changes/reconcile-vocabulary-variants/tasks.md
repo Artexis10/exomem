@@ -45,6 +45,12 @@
       the inverse mapping, and apply refuses when it cannot be written; the splice quotes
       YAML-ambiguous tags, keeps a `tags:` line comment, and refuses to drop a block comment or
       change another key.
+- [x] 4.5 Test first, through the dispatcher: tag-variants apply plans without the served
+      writer lock; `exclude_groups` is hashed into `plan_id` and leaves other groups applied;
+      unrestricted counts come from one SQL aggregate matching the row path, the cache holds
+      counts only, and the guard re-verifies only rewritten keys; maximal advice is emitted
+      once and a restricted write builds its index once; post-commit advice runs with the
+      request principal bound.
 
 ## 5. Delivery
 
