@@ -23,7 +23,7 @@ Collect these inputs without changing the named systems:
 | Personal service | Actual host, service manager/unit, interpreter, vault and external state root; current health and authenticated MCP read |
 | Personal tunnel | Connector host, local configuration path and ingress, credentials reference, service manager; a dashboard copy does not prove local configuration ownership |
 | Original DNS | Zone, record ID, complete type/content/proxy/TTL settings; preserve the original record for rollback |
-| Endpoint pair | Cloud and replacement personal HTTPS hostnames, both with `/mcp`; certificate coverage and connector reauthentication requirements |
+| Endpoint pair | Cloud and replacement personal HTTPS hostnames, both with `/mcp`; certificate coverage, canonical OAuth issuer/resource, discovery and token endpoints, and connector reauthentication requirements |
 | Personal clients | CLI profiles, desktop/web connectors and any other consumers; record which owner has verified each one |
 | Fleet and database | Node identity, private database address, direct PostgreSQL roles on 5432, cluster/pod/service CIDRs, current chart release and values |
 | Images | Released Cloud cell, cellctl and gateway repository digests, their source revisions, supported architecture and authenticated pull proof |
@@ -68,8 +68,16 @@ Any override must agree with the chart and destination matrix.
 | `exomem-cloudflare-dns-token` | `token` | DNS-01 authority for the chosen zone; namespaced Issuer limits the requested hostname |
 | `exomem-cloud-volume-encryption` | `encryption-passphrase` | Separately escrowed Cloud volume key, not an instruction to rotate an existing volume key |
 
-Add and review destinations in `infra/contracts/secret-destinations-v1.json`
-before sealing. First verify the complete-bundle handoff support from
+Prepare and review the new destinations in a private copy of
+`infra/contracts/secret-destinations-v1.json` before sealing. The active registry
+binds the complete matrix bytes and the exact active destination set. Publishing
+a changed matrix alone invalidates that binding, even if the old destination
+entries are untouched. Keep the committed matrix, selection and signed registry
+unchanged during draft preparation. Record the source revision and matrix hash
+beside the draft; reconcile newer changes before publication. Do not invent an
+inactive slot or weaken registry verification to stage the additions.
+
+First verify the complete-bundle handoff support from
 [PR #1398](https://github.com/Artexis10/exomem/pull/1398) has merged and is present
 in the checkout used to seal and apply. The earlier scalar-only tooling rejects
 these bundles; do not work around that by splitting fields into competing
@@ -79,11 +87,17 @@ The current single-key forms remain scalar destinations. Use named secret-manage
 bindings or stdin; validate the runtime-specific key encodings before sealing.
 Shape validation alone does not establish cryptographic key validity.
 
+`secret_handoff.py --dry-run` checks destination/source policy and version paths;
+it does not read a credential, validate its encoding, seal it or prove recovery.
+Use an explicit draft `--matrix` path when checking the preparation packet.
+
 Produce only immutable versioned ciphertext using `infra/scripts/secret_handoff.py`.
 Verify every leaf is encrypted, decrypt in memory for exact shape comparison, and
 prove the owner can recover the key material. Prepare the active selection and
 registry changes as reviewed artifacts; do not activate or apply them during
-preparation. After a future apply, verify exact key names without printing values.
+preparation. Publish the final matrix, complete selection, ciphertext and
+custodian-signed registry together after verification; a private draft is not
+an active binding. After a future apply, verify exact key names without printing values.
 Do not use forced server-side-apply ownership to hide retained foreign fields.
 
 ## Render and review
@@ -142,7 +156,16 @@ These are future execution gates, not commands to run during preparation.
 3. Add the personal replacement route against the same personal backend. Choose
    a method supported by the actual locally managed tunnel. Do not restart the
    personal runtime. Keep the old route and observe it while testing the new one.
-4. Verify each personal client on the replacement: authentication, tools listing,
+4. Verify the replacement's complete OAuth lifecycle before moving clients.
+   Read both hosts' protected-resource and authorization-server metadata and
+   challenges. A working alias with an existing token can still advertise the
+   old resource, issuer, authorization endpoint or token endpoint. In that case
+   it is an additional transport route, not a replacement ready for cutover.
+   Plan the canonical identity and existing registration/session transition in
+   an agreed personal-service window; do not silently rewrite token audiences
+   or weaken bearer validation. Prove fresh authorization for the replacement
+   resource and token refresh without depending on the hostname Cloud will take.
+   Then verify each personal client on the replacement: authentication, tools listing,
    cited recall, an agreed non-sensitive write and recall, and any required
    reauthentication. Preserve original client settings for rollback.
 5. Only after all personal clients pass, agree the DNS ownership transition and
