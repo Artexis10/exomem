@@ -6423,6 +6423,11 @@ class LexicalStore:
         if allowed_paths is not None:
             allowed_clause = " AND p.path IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
+        # The ranking step's own clause and parameters end here; the
+        # corroboration test's follow. A bounded query runs them as two steps.
+        ranking_clause = allowed_clause
+        corroboration_at = len(params)
+        corroborated = ""
         groups = [group for group in (corroboration_groups or []) if group]
         if min_matched_terms > 1 or groups:
             # Filter before LIMIT so one-unit hits cannot crowd out valid pages.
@@ -6473,13 +6478,37 @@ class LexicalStore:
             # Either alone, or both as alternatives: a caller that supplies
             # only groups gets the all-of test and no flat count, which is
             # how "this page qualifies on a phrase or not at all" is said.
-            allowed_clause += " AND (" + " OR ".join(clauses) + ")"
+            corroborated = "(" + " OR ".join(clauses) + ")"
+            allowed_clause += " AND " + corroborated
+        corroboration_end = len(params)
         # Excluded before LIMIT, for the same reason as corroboration.
         excluded_clause, excluded_params = _excluded_rows_clause(
             navigation=exclude_navigation, raw_material=exclude_raw_material
         )
         allowed_clause += excluded_clause
         params.extend(excluded_params)
+        if term_budget is not None and corroborated:
+            # Bounded: rank every row the kept units match that passes the
+            # scope, path and exclusion filters, then run the corroboration
+            # test on those rows alone. No row is left out, so the result is
+            # the one-statement query's for the same units; the test just
+            # never reads the stored text of a row the filters already refuse.
+            rows = conn.execute(
+                "SELECT c.path, -c.bm25 FROM ("
+                "SELECT p.path AS path, fts.rowid AS rid, bm25(fts) AS bm25 "
+                "FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                f"WHERE fts MATCH ? AND p.{col} = 1" + ranking_clause + excluded_clause
+                + ") AS c JOIN fts ON fts.rowid = c.rid "
+                "WHERE " + corroborated + " "
+                "ORDER BY c.bm25, c.path LIMIT ?",
+                [
+                    *params[:corroboration_at],
+                    *params[corroboration_end:],
+                    *params[corroboration_at:corroboration_end],
+                    k,
+                ],
+            ).fetchall()
+            return [(p, float(s)) for p, s in rows]
         params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "
