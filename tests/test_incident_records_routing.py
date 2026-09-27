@@ -1287,3 +1287,153 @@ def test_evidence_writes_route_by_their_facets(vault: Path) -> None:
     routing = preserved.get("records_routing")
     assert routing is not None and routing["collection"] == INCIDENTS
     assert routing["matched_predicates"] == ["tags:widget-app"]
+
+
+# --- Review fixes, round 2 ----------------------------------------------------
+
+
+def test_editing_a_dismissed_note_at_maximal_does_not_file(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import review_state
+
+    evidence = _incident_vault(vault, monkeypatch, "maximal")
+    written = _remember_failure(
+        vault, evidence, "The panel stopped responding after load", "widget-panel-froze"
+    )
+    assert _raw_routing(written)["disposition"] == "file"
+    path, _ref = _created(written)
+    bucket = due_state.load(vault)["categories"]["unreflected_observations"][path]
+    (entry,) = [*bucket["open"], *bucket["pending"]]
+    # The owner decided not to file it.
+    review_state.ReviewStateStore(vault).apply(
+        entry["item_id"], entry["fingerprint"], action="dismiss", why="not an incident"
+    )
+
+    edited = _edit_note(
+        vault,
+        path,
+        "The panel stopped responding after load",
+        "The panel stopped responding after the first load",
+    )
+
+    routing = _raw_routing(edited)
+    assert routing is None or "disposition" not in routing
+
+
+def _write_keyed_collection(
+    tmp_path: Path, relative: str, collection_id: str, title: str, key: str, symptom: str
+) -> None:
+    """A collection with the shared declared claims whose items derive its own words."""
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        _incident_manifest(
+            claims="claims:\n  tags: [incidents, regressions]\n  terms: [triage, postmortem]\n"
+        )
+        .replace("21111111-1111-4111-8111-111111111111", collection_id)
+        .replace("Widget incidents", title),
+        encoding="utf-8",
+    )
+    entries = path.parent / "Entries"
+    entries.mkdir(exist_ok=True)
+    for suffix in ("1", "2"):
+        (entries / f"{key}-{suffix}.md").write_text(
+            "---\n"
+            "type: record\n"
+            f"collection_id: {collection_id}\n"
+            f"record_id: {collection_id[:-1]}{suffix}\n"
+            "schema_version: 1\n"
+            f"incident: {key if suffix == '1' else f'{key}-{suffix}'}\n"
+            "observed_on: 2026-09-01\n"
+            f"symptom: {symptom}\n"
+            "sources: []\n"
+            "---\n",
+            encoding="utf-8",
+        )
+
+
+def test_backfill_cursors_belong_to_their_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(audit, "BACKFILL_MAX_PAGES", 4)
+    _write_keyed_collection(
+        tmp_path, INCIDENTS, "21111111-1111-4111-8111-111111111111",
+        "Widget incidents", "widget-app", "frozen panel",
+    )
+    _write_keyed_collection(
+        tmp_path, _GADGET, "41111111-1111-4111-8111-111111111111",
+        "Gadget incidents", "gadget-app", "sync outage",
+    )
+    for index in range(1, 4):
+        _write_failure_note(
+            tmp_path, index, title=f"Sync outage {index}", tags="[gadget-app]"
+        )
+    for index in range(101, 107):
+        _write_failure_note(
+            tmp_path, index, title=f"Frozen panel {index}", tags="[widget-app]"
+        )
+    manifests = [
+        collections.load_manifest(tmp_path, tmp_path / relative) for relative in (INCIDENTS, _GADGET)
+    ]
+    # Identical declared claims: one claims signal for both collections.
+    assert audit._claims_signal(manifests[0]) == audit._claims_signal(manifests[1])
+
+    def grouped(projection: dict, collection: str) -> dict:
+        (entry,) = projection["categories"]["unreflected_observations"][collection]["open"]
+        return entry["component"]
+
+    first = due_state.reconcile(tmp_path, now=NOW)
+    assert grouped(first, _GADGET)["count"] == 3
+    assert grouped(first, INCIDENTS)["truncated"] is True
+    # A new gadget note sorts before the widget collection's cursor.
+    _write_failure_note(tmp_path, 4, title="Sync outage 4", tags="[gadget-app]")
+
+    second = due_state.reconcile(tmp_path, now=NOW)
+
+    assert grouped(second, _GADGET)["count"] == 4
+    assert grouped(second, INCIDENTS)["count"] == 6
+
+
+def test_open_keys_never_contradict() -> None:
+    incidents = _target(
+        INCIDENTS, {"outage", "sync", "login"}, match={"tags": frozenset({"incident"})}
+    )
+
+    advisory = route(["Sync outage", "sync", "outage"], [incidents], facets={"tags": ["sync", "outage"]})
+
+    assert advisory is not None and advisory["collection"] == INCIDENTS
+    # Identity keys still contradict.
+    typed = _target(INCIDENTS, {"outage", "sync", "login"}, match={"type": frozenset({"failure"})})
+    assert route(["Sync outage"], [typed], facets={"type": ["decision"]}) is None
+
+
+def test_evidence_layer_type_is_silence_for_typed_collections(vault: Path) -> None:
+    from exomem import commands
+
+    commands.op_record_memory(
+        vault,
+        action="create",
+        manifest_path=INCIDENTS,
+        manifest_text=_incident_manifest(
+            claims=(
+                "claims:\n  terms: [panel crash, log rotation]\n"
+                "  match:\n    type: [failure]\n    project: [widget]\n"
+            )
+        ),
+        why="track widget incidents",
+    )
+    due_state.reconcile(vault)
+
+    preserved = commands.op_preserve_evidence(
+        vault,
+        scope="Widget app",
+        category="Crash logs",
+        filename="panel.log",
+        content="panel froze on load",
+        description="panel crash log",
+    )
+
+    routing = preserved.get("records_routing")
+    assert routing is not None and routing["collection"] == INCIDENTS
+    assert "matched_predicates" not in routing
