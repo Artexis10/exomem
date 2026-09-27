@@ -243,6 +243,27 @@ def test_refuses_to_write_secrets_at_the_vault_root(vault: Path) -> None:
     assert str(env_path) in out
 
 
+@pytest.mark.parametrize("interactive", [False, True])
+def test_refuses_secrets_in_a_new_vault_before_initialization(
+    tmp_path: Path, interactive: bool
+) -> None:
+    fresh_vault = tmp_path / "new-vault"
+    fresh_vault.mkdir()
+    env_path = fresh_vault / ".env"
+
+    code, out, doctor_calls = _run(
+        env_path,
+        vault=None if interactive else str(fresh_vault),
+        yes=not interactive,
+        input_fn=lambda _prompt: str(fresh_vault),
+    )
+
+    assert code == 2
+    assert not env_path.exists()
+    assert doctor_calls == []
+    assert "inside a vault" in out
+
+
 def test_refuses_to_write_secrets_in_a_vault_subdirectory(vault: Path) -> None:
     env_path = vault / "Knowledge Base" / ".env"
 

@@ -307,6 +307,30 @@ def test_route_still_fires_on_a_collection_distinctive_term() -> None:
     }
 
 
+@pytest.mark.parametrize("population", [3, 5])
+def test_route_rejects_majority_terms_in_an_odd_population(population: int) -> None:
+    winner = _target("Knowledge Base/Records/Ledger/_collection.md", {"cloud", "project"})
+    others = [
+        _target(f"Knowledge Base/Records/Other{index}/_collection.md", {term})
+        for index, term in enumerate(["cloud", "project"] * (population // 2))
+    ]
+
+    assert route(["cloud", "project"], [winner, *others]) is None
+
+
+@pytest.mark.parametrize("population", [1, 2, 4])
+def test_route_preserves_singleton_and_half_population_claims(population: int) -> None:
+    winner = _target("Knowledge Base/Records/Ledger/_collection.md", {"cloud", "project"})
+    others = [
+        _target(f"Knowledge Base/Records/Other{index}/_collection.md", claims)
+        for index, claims in enumerate(
+            [{"cloud"}, {"project"}, {"unrelated"}][: population - 1]
+        )
+    ]
+
+    assert route(["cloud", "project"], [winner, *others])["collection"] == winner.collection
+
+
 def test_claim_routing_normalizes_nfkc_for_authored_and_declared_terms(
     tmp_path: Path,
 ) -> None:

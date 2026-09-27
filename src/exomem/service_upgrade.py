@@ -496,13 +496,18 @@ def _refresh_hooks_after_promotion(target: dict[str, Any]) -> dict[str, Any]:
     try:
         return install_hook.refresh_wired_profiles(str(target["python"]))
     except Exception as error:  # noqa: BLE001 - must never fail a completed upgrade
-        return {
+        report = {
             "skipped": False,
             "reason": None,
             "profiles": [],
             "success": False,
-            "error": str(error),
+            "error": _uv_stderr_tail(str(error).encode("utf-8", errors="replace")),
         }
+        try:
+            install_hook._write_upgrade_refresh_report(Path.home(), report)
+        except Exception:  # noqa: BLE001 - even report failure cannot undo promotion
+            pass
+        return report
 
 
 def main(argv: list[str] | None = None) -> int:

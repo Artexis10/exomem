@@ -305,13 +305,20 @@ def run_remote_setup(
 
     from .dotenv_guard import dotenv_load_guard
 
-    if dotenv_load_guard(env_path) is None:
+    def refuse_vault_env(selected_vault: str | None) -> bool:
+        if dotenv_load_guard(
+            env_path, vault=Path(selected_vault) if selected_vault else None
+        ) is not None:
+            return False
         print_fn(
             f"setup --remote: refusing to write secrets to {env_path} -- it is "
             "inside a vault, whose files remote principals can write through sync. "
             "Re-run this command from a working directory outside the vault. "
             "No changes were written."
         )
+        return True
+
+    if refuse_vault_env(vault):
         return 2
 
     existing_text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
@@ -342,6 +349,8 @@ def run_remote_setup(
         print_fn("setup --remote: a vault path is required.")
         return 2
     vault_path = str(Path(vault).expanduser())
+    if refuse_vault_env(vault_path):
+        return 2
     report("vault", f"[done] {vault_path}")
 
     # 3. Public base URL — validated (no trailing slash, no /mcp).
@@ -538,6 +547,8 @@ def run_remote_setup(
                 "EXOMEM_OAUTH_STORAGE_TOKEN": storage_credential,
             }
         )
+    if refuse_vault_env(vault_path):
+        return 2
     env_path.write_text(patch_env(existing_text, updates), encoding="utf-8")
     try:
         env_path.chmod(0o600)  # secrets — owner-only on POSIX; near-no-op on Windows

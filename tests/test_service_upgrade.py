@@ -54,6 +54,10 @@ def _operator(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> 
     variables = os.environ.copy()
     variables["PYTHONPATH"] = str(ROOT / "src")
     variables["EXOMEM_STATE_ROOT"] = str(tmp_path / "state")
+    if not env or "HOME" not in env:
+        operator_home = tmp_path / "operator-home"
+        operator_home.mkdir(exist_ok=True)
+        variables["HOME"] = str(operator_home)
     if env:
         variables.update(env)
     return subprocess.run(
@@ -65,6 +69,29 @@ def _operator(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> 
         timeout=20,
         check=False,
     )
+
+
+def test_operator_uses_disposable_child_home_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_home = os.environ.get("HOME")
+    child_homes = []
+
+    def fake_run(argv, **kwargs):
+        child_homes.append(kwargs["env"]["HOME"])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _operator(tmp_path, "--status").returncode == 0
+    assert Path(child_homes[0]).parent == tmp_path
+    assert Path(child_homes[0]).is_dir()
+    assert os.environ.get("HOME") == parent_home
+
+    explicit_home = tmp_path / "explicit-home"
+    explicit_home.mkdir()
+    assert _operator(tmp_path, "--status", env={"HOME": str(explicit_home)}).returncode == 0
+    assert child_homes[1] == str(explicit_home)
+    assert os.environ.get("HOME") == parent_home
 
 
 def _control(
@@ -198,6 +225,24 @@ def test_upgrade_result_carries_a_hook_refresh_report_without_failing(tmp_path: 
         "profiles": [],
         "success": True,
     }
+
+
+def test_unexpected_hook_refresh_failure_is_scrubbed_and_persisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import install_hook, service_upgrade
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError("api-key:hunter2hunter2 failed")
+
+    monkeypatch.setattr(install_hook, "refresh_wired_profiles", fail_refresh)
+    report = service_upgrade._refresh_hooks_after_promotion({"python": sys.executable})
+    assert report["success"] is False
+    assert "hunter2hunter2" not in json.dumps(report)
+    assert install_hook.read_last_upgrade_refresh(home=home) == report
 
 
 def test_unavailable_manager_fails_before_creating_release(tmp_path: Path) -> None:

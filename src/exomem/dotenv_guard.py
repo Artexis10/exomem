@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 _VAULT_PATH_ENV = ("EXOMEM_VAULT_PATH", "KB_MCP_VAULT_PATH")
 
 
-def dotenv_load_guard(path: Path) -> Path | None:
+def dotenv_load_guard(path: Path, *, vault: Path | None = None) -> Path | None:
     """`path`, or None when reading/writing it would touch a vault.
 
     Both the directory holding `path` (a symlinked working directory, or a
@@ -33,7 +33,8 @@ def dotenv_load_guard(path: Path) -> Path | None:
     resolves into (a symlinked `.env` may point into a vault) are checked.
     "Inside a vault" is the configured vault (process environment, or the
     vault `path` would itself configure, when it already exists and is
-    readable) or any enclosing directory that is structurally a vault.
+    readable), an explicitly selected vault (even before initialization), or
+    any enclosing directory that is structurally a vault.
 
     A wrong refusal is not free: when the refused file held required settings
     (the vault path, OAuth or signing keys), the caller then fails on the
@@ -44,6 +45,8 @@ def dotenv_load_guard(path: Path) -> Path | None:
     directory = path.parent.resolve()
     candidate = directory / path.name
     configured = [os.environ.get(name, "") for name in _VAULT_PATH_ENV]
+    if vault is not None:
+        configured.append(str(vault))
     if candidate.is_file():
         try:
             from dotenv import dotenv_values

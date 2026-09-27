@@ -3472,6 +3472,14 @@ def _check_managed_hook_refresh() -> DoctorCheck:
             "Re-run `exomem install-hook` for the listed profile(s).",
             details=report,
         )
+    if report.get("success") is False:
+        return _check(
+            "upgrade.hook_refresh",
+            "warn",
+            "the last managed upgrade could not complete the Claude Code hook refresh",
+            "Re-run `exomem install-hook` for affected profiles.",
+            details=report,
+        )
     if profiles:
         return _check(
             "upgrade.hook_refresh",

@@ -202,6 +202,18 @@ def test_managed_hook_refresh_check_passes_when_never_run(monkeypatch: pytest.Mo
     assert check.status == "pass"
 
 
+def test_managed_hook_refresh_check_warns_on_aggregate_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import install_hook as hook_module
+
+    report = {"skipped": False, "success": False, "profiles": [], "error": "refresh failed"}
+    monkeypatch.setattr(hook_module, "read_last_upgrade_refresh", lambda home=None: report)
+    check = doctor_module._check_managed_hook_refresh()
+    assert check.status == "warn"
+    assert check.details == report
+
+
 def test_managed_hook_refresh_check_warns_on_a_failed_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -97,7 +97,9 @@ def _distinctive_matched_terms(
     matched: frozenset[str], frequency: Counter[str], total_targets: int
 ) -> frozenset[str]:
     """Matched terms not shared by a majority of this call's routing targets."""
-    ceiling = (total_targets + 1) // 2
+    # A singleton has no comparative population. With multiple targets, a
+    # term shared by more than half cannot distinguish the collection.
+    ceiling = max(1, total_targets // 2)
     return frozenset(term for term in matched if frequency[term] <= ceiling)
 
 
