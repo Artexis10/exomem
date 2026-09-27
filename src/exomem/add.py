@@ -508,10 +508,10 @@ def add(
             )
         )
 
-    publication_intents: list[object] = []
-    created_paths = [write.path for write in writes if not os.path.lexists(write.path)]
     try:
         if defer_fanout_to_terminal:
+            publication_intents: list[object] = []
+            created_paths = [write.path for write in writes if not os.path.lexists(write.path)]
             committed = batch_atomic_write(
                 writes,
                 vault_root=vault_root,
