@@ -191,15 +191,27 @@ def _seal(vault_root: Path, leaf: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
+def _blockers(vault_root: Path, run_id: str) -> list[str]:
+    """Codes that would refuse this sealed plan now, as `curation.preview` reports them.
+
+    A plan whose step already committed has none: it replays rather than runs,
+    so its guards on the preimage no longer apply.
+    """
+    if curation.CurationStore(vault_root).reconstruct(run_id)["committed_steps"]:
+        return []
+    return [item["code"] for item in curation.preview(vault_root, run_id=run_id)["blockers"]]
+
+
 def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) -> dict[str, Any]:
     """Declare or revise one candidate's typed proposal and bind its leaves.
 
     The proposal is validated by the pure model, and every new or revised leaf
     passes current preparation, before the journal accepts anything: a refused
-    proposal or leaf leaves the episode unchanged. The declaration, revision
-    and bindings land in one journal write, so a refused bind leaves no
-    half-bound candidate, and a journal without room for all of them refuses
-    before any plan is sealed.
+    proposal or leaf leaves the episode unchanged. An unattempted leaf whose
+    sealed plan has gone stale is sealed again against the current vault. The
+    declaration, revision and bindings land in one journal write, so a refused
+    bind leaves no half-bound candidate, and a journal without room for all of
+    them refuses before any plan is sealed.
     """
     session = _Session(vault_root, episode)
     key = model._string(candidate, "candidate_key", 160)  # noqa: SLF001
@@ -220,7 +232,8 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
     unsealed = [
         leaf
         for leaf in model._candidate(trial, identity)["leaves"]  # noqa: SLF001
-        if leaf["binding"] is None and not leaf["attempts"]
+        if not leaf["attempts"]
+        and (leaf["binding"] is None or _blockers(session.vault_root, leaf["binding"]["run_id"]))
     ]
     commands: list[tuple[str, dict[str, Any]]] = []
     if existing is None:
@@ -278,6 +291,7 @@ def _refused(key: str) -> dict[str, Any]:
             f"it with {ENABLE_ENV}. Inspect, prepare and disposition remain available."
         ),
         "executed": [],
+        "stale": [],
         "reconciled": [],
         "blocked": [],
     }
@@ -344,9 +358,14 @@ def _reconcile_uncertain(session: _Session) -> tuple[list[dict], list[dict]]:
     return reconciled, blocked
 
 
-def _execute(session: _Session, candidate_id: str, leaf_id: str) -> dict[str, Any]:
+def _execute(session: _Session, candidate_id: str, leaf_id: str) -> tuple[str, dict[str, Any]]:
     leaf = model._owned(session.state, candidate_id, leaf_id)  # noqa: SLF001
     binding = leaf["binding"]
+    # A plan the vault has moved past is reported, never attempted: with no
+    # attempt recorded, the agent can still re-prepare or re-disposition it.
+    blockers = _blockers(session.vault_root, binding["run_id"])
+    if blockers:
+        return "stale", {"leaf_id": leaf_id, "code": blockers[0]}
     snapshot = session.state["current_precommit"]["snapshot"]
     # Durably uncertain before the writer runs: a crash from here on can only
     # be reconciled from receipts, never retried under a fresh identity.
@@ -369,7 +388,7 @@ def _execute(session: _Session, candidate_id: str, leaf_id: str) -> dict[str, An
         )
     session.transition("reconcile_curation_leaf", candidate=candidate_id, leaf=leaf_id)
     step = result.get("step") if isinstance(result, Mapping) else None
-    return {
+    return "executed", {
         "leaf_id": leaf_id,
         "operation_id": binding["operation_id"],
         "outcome": "committed",
@@ -414,7 +433,7 @@ def resume(
         raise _error("EPISODE_INPUT_REVISION_STALE", "resume must review the current input")
 
     reconciled, blocked = _reconcile_uncertain(session)
-    executed: list[dict[str, Any]] = []
+    reported: dict[str, list[dict[str, Any]]] = {"executed": [], "stale": []}
     if postcommit:
         committed = [
             leaf["leaf_id"] for _c, leaf in _leaves(session.state) if leaf["outcome"] == "committed"
@@ -429,29 +448,35 @@ def resume(
             if (session.state["current_precommit"] or {}).get("input_revision") != input_revision:
                 session.transition("attest_precommit", input_revision=input_revision)
         frozen = {item["leaf_id"] for item in blocked}
+        held: set[str] = set()
         deferred = max(0, len(planned) - limit)
         for candidate_id, leaf_id in planned[:limit]:
             owner = model._candidate(session.state, candidate_id)  # noqa: SLF001
-            if any(leaf["leaf_id"] in frozen for leaf in owner["leaves"]):
+            if candidate_id in held or any(leaf["leaf_id"] in frozen for leaf in owner["leaves"]):
                 continue
             try:
-                executed.append(_execute(session, candidate_id, leaf_id))
+                kind, item = _execute(session, candidate_id, leaf_id)
             except (curation.CurationError, model.EpisodeError) as error:
                 # A leaf past its attempt mark stays uncertain: a failure is
                 # not proof of non-commit.
                 session.current = session.store.read(session.identity)
                 blocked.append({"leaf_id": leaf_id, "code": error.code})
                 break
+            reported[kind].append(item)
+            if kind == "stale":
+                # The rest of its candidate waits for the same re-preparation.
+                held.add(candidate_id)
     projection = _projection(session)
+    status = "blocked" if blocked else "stale" if reported["stale"] else "ok"
     return {
         **projection,
         "action": "resume",
-        "status": "ok" if not blocked else "blocked",
-        "executed": executed,
+        "status": status,
+        **reported,
         "reconciled": reconciled,
         "blocked": blocked,
         "deferred": deferred,
         # Writers schedule their own projections; this call never claims a
         # published graph or index is current.
-        "publication": "pending" if executed else "unchanged",
+        "publication": "pending" if reported["executed"] else "unchanged",
     }
