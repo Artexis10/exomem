@@ -26,7 +26,10 @@ role-registry hash, the index generation, the served anchor refs and the roles.
 The server trusts nothing in it beyond matching its own identity and roles hash,
 re-validates every ref against the current index, and only ever QUALIFIES an
 anchor the current turn already reached. It is minted from the packet as served —
-after the egress guard — so it can never carry a ref that guard removed.
+after the egress guard — so it can never carry a ref that guard removed. It also
+names the caller's thread (`CONTINUITY_THREAD_BYTES`), a random value echoed
+back by a caller that supplies no session key, whose salted derivation is that
+caller's session tier; the thread itself is never stored.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -84,6 +88,21 @@ CONTINUITY_ABSENT = "absent"
 CONTINUITY_MAX_CHARS = 8192
 CONTINUITY_MAX_REFS = 32
 CONTINUITY_MAX_ROLES = 32
+
+#: The token's THREAD: an opaque random value naming one keyless caller's
+#: conversation, echoed back on every turn so a caller that supplies no
+#: session key (a remote connector over stateless HTTP) still has a session
+#: tier. It is never stored: the heat projection keeps only its salted,
+#: audience-scoped derivation (`working_set_heat.derive_key`), exactly as it
+#: keeps a supplied session key. Its lifetime is bounded twice: it lapses
+#: after `CONTINUITY_THREAD_IDLE_NS` without a served packet (the heat
+#: projection's own session gap), and `CONTINUITY_THREAD_MAX_NS` after it
+#: began whatever happened since. A lapsed thread is reported `stale` and the
+#: caller is answered as a keyless one, with a fresh thread in the new token.
+CONTINUITY_THREAD_BYTES = 16
+CONTINUITY_THREAD_MAX_CHARS = 64
+CONTINUITY_THREAD_IDLE_NS = working_set_heat.SESSION_GAP_NS
+CONTINUITY_THREAD_MAX_NS = 7 * 24 * 3600 * 1_000_000_000
 
 READY = "ready"
 #: The abstention reason a managed runtime returns while the derived index is
@@ -278,6 +297,8 @@ def encode_continuity(
     refs: Iterable[str],
     roles: Iterable[str],
     minted_ns: int | None = None,
+    thread: str = "",
+    thread_ns: int | None = None,
 ) -> str:
     """Base64 of the compact JSON payload. No secret, and no signature.
 
@@ -291,6 +312,13 @@ def encode_continuity(
     happened from one the user has since moved on from (`working_set.
     hot_profile`). Omitted, the token reads as it did before the field
     existed, and its refs lead the profile unconditionally.
+
+    `thread` and `thread_ns` are the caller's conversation and when it began
+    (`CONTINUITY_THREAD_BYTES`). Unsigned for the same reason: the server
+    derives the session key from the thread with its own salt and the
+    caller's audience, so a forged thread names at most a session of the
+    forger's own, and guessing another caller's is guessing a random value
+    only that caller was ever sent.
     """
     payload = {
         "v": CONTINUITY_VERSION,
@@ -309,6 +337,10 @@ def encode_continuity(
     }
     if minted_ns is not None:
         payload["minted_ns"] = int(minted_ns)
+    if thread:
+        payload["thread"] = str(thread)
+        if thread_ns is not None:
+            payload["thread_ns"] = int(thread_ns)
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     # `surrogatepass`, symmetrically with `decode_continuity`. A vault path reaches
     # Python through filesystem decoding, so a filename with invalid UTF-8 arrives
@@ -375,6 +407,15 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
     # older token's behaviour rather than a stale token's.
     minted = payload.get("minted_ns")
     minted_ns = minted if isinstance(minted, int) and not isinstance(minted, bool) and minted > 0 else None
+    # The thread is optional in the same way: a token minted before it existed,
+    # or carrying one of the wrong shape, simply names no thread.
+    thread = payload.get("thread")
+    if not isinstance(thread, str) or len(thread) > CONTINUITY_THREAD_MAX_CHARS:
+        thread = ""
+    started = payload.get("thread_ns")
+    thread_ns = (
+        started if isinstance(started, int) and not isinstance(started, bool) and started > 0 else None
+    )
     return {
         "identity": identity,
         "roles_hash": roles_hash,
@@ -383,6 +424,8 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
         "refs": [ref for ref in refs if isinstance(ref, str) and ref],
         "roles": [role for role in roles if isinstance(role, str) and role],
         "minted_ns": minted_ns,
+        "thread": thread,
+        "thread_ns": thread_ns if thread else None,
     }
 
 
@@ -432,7 +475,53 @@ def read_continuity(
         return frozenset(), CONTINUITY_STALE
     if payload["conventions_hash"] != str(conventions_hash):
         return frozenset(), CONTINUITY_STALE
+    if not payload["refs"]:
+        # A token that carries only its thread: the packet behind it resolved
+        # nothing, so for the anchor refs it is exactly no token. Before the
+        # thread existed such a packet minted no token at all.
+        return frozenset(), CONTINUITY_ABSENT
     return frozenset(payload["refs"]), CONTINUITY_APPLIED
+
+
+def new_thread() -> tuple[str, int]:
+    """A fresh thread and when it began."""
+    return secrets.token_urlsafe(CONTINUITY_THREAD_BYTES), time.time_ns()
+
+
+def read_continuity_thread(
+    token: str | None, *, identity: str, now_ns: int | None = None
+) -> tuple[str, int | None, str]:
+    """`(thread, thread_ns, state)` for one inbound token's conversation.
+
+    `applied` for a thread this vault's index minted that has not lapsed;
+    `stale` for a token that cannot be read, was minted by another index, or
+    whose thread has lapsed (`CONTINUITY_THREAD_IDLE_NS` since the packet
+    that carried it, `CONTINUITY_THREAD_MAX_NS` since it began); `absent`
+    for no token, or one minted before threads existed. Only the identity is
+    checked, not the registry hashes: a conventions edit changes how turns
+    are read, not who is asking, so it strands no conversation. Never raises,
+    and never refuses: every other answer is served as a keyless caller.
+    """
+    if not str(token or "").strip():
+        return "", None, CONTINUITY_ABSENT
+    try:
+        payload = decode_continuity(token)
+    except Exception:  # noqa: BLE001 - a caller's string must not fail the request
+        log.debug("continuity thread could not be read; ignoring", exc_info=True)
+        return "", None, CONTINUITY_STALE
+    if payload is None or not identity or payload["identity"] != identity:
+        return "", None, CONTINUITY_STALE
+    thread = payload["thread"]
+    if not thread:
+        return "", None, CONTINUITY_ABSENT
+    now = time.time_ns() if now_ns is None else int(now_ns)
+    served = payload["minted_ns"]
+    started = payload["thread_ns"] or served
+    if served is None or now - served > CONTINUITY_THREAD_IDLE_NS:
+        return "", None, CONTINUITY_STALE
+    if started is None or now - started > CONTINUITY_THREAD_MAX_NS:
+        return "", None, CONTINUITY_STALE
+    return thread, started, CONTINUITY_APPLIED
 
 
 #: The anchor statuses a token carries forward: what the packet served.
@@ -440,8 +529,19 @@ MINTED_STATUSES = frozenset({"resolved", working_set_resolve.RETRIEVAL_CARRIED_S
 _MINTED_STATUSES = MINTED_STATUSES
 
 
-def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
+def mint_continuity(
+    packet: Mapping[str, Any],
+    *,
+    identity: str,
+    thread: str = "",
+    thread_ns: int | None = None,
+) -> str:
     """The token for a packet AS SERVED, or `""` when there is nothing to carry.
+
+    With a `thread`, every packet carries one — an abstention too, with no
+    refs — so a caller that supplies no session key keeps its conversation
+    across a turn that resolved nothing. The refs follow the rules below
+    whatever the thread: an abstained packet names none.
 
     The caller passes the packet the guard returned, which is the whole point:
     an anchor the guard removed is not in `anchors[]`, so it cannot reach the
@@ -461,16 +561,16 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     the hot profile resumes as a page referent; a later turn's `continuity` still
     only qualifies an anchor that turn reached.
     """
-    if not identity or packet.get("abstained"):
+    if not identity:
         return ""
     anchors = [
         item
-        for item in packet.get("anchors") or ()
+        for item in (() if packet.get("abstained") else packet.get("anchors") or ())
         if isinstance(item, Mapping) and item.get("status") in _MINTED_STATUSES
     ]
     refs = [str(item.get("ref") or "") for item in anchors]
     refs = [ref for ref in refs if ref]
-    if not refs:
+    if not refs and not thread:
         return ""
     generation = packet.get("generation")
     generation = generation if isinstance(generation, Mapping) else {}
@@ -488,8 +588,10 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
             conventions_hash=str(generation.get("conventions_hash") or ""),
             generation=int(generation.get("index_generation") or 0),
             refs=refs,
-            roles=[role for role in roles if role],
+            roles=[role for role in roles if role] if refs else [],
             minted_ns=time.time_ns(),
+            thread=thread,
+            thread_ns=thread_ns,
         )
     except Exception:  # noqa: BLE001 - a token is an optimisation, never a promise
         log.debug("continuity token could not be minted; serving without", exc_info=True)

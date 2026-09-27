@@ -267,6 +267,74 @@ class TurnAnalysis:
     #: the rare-term length floor needs it (`RARE_TERM_MIN_CHARS`). Empty for
     #: a turn with no lower-case letter, where capitals carry no signal.
     acronyms: frozenset[str] = frozenset()
+    #: Is this a short follow-up that points into the conversation's own
+    #: recent answer ("what about the second one?", "and the results?")?
+    #: Broader than `referential` and deliberately weaker: it never lets a
+    #: prior RESOLVE anything, and is read only to carry the caller's own
+    #: thread as a `partial` anchor (`is_follow_up`).
+    follow_up: bool = False
+
+
+#: A follow-up is short: at most this many tokens. "what about the second
+#: one" is five; a turn long enough to say what it is about names it.
+FOLLOW_UP_MAX_TOKENS = 8
+#: Words that point back into the conversation instead of naming anything.
+#: A closed, English set, like the shipped referential seed; they are
+#: evidence of a follow-up only in a turn this short.
+FOLLOW_UP_MARKERS: frozenset[str] = frozenset(
+    {
+        "that", "this", "it", "those", "these", "they", "them", "same",
+        "one", "ones", "first", "second", "third", "last", "previous",
+        "former", "latter", "above", "earlier", "other", "another", "next",
+    }
+)
+#: Openers that continue the previous answer: "and the results?",
+#: "what about ...", "how about ...".
+FOLLOW_UP_OPENERS: tuple[tuple[str, ...], ...] = (
+    ("and",),
+    ("also",),
+    ("then",),
+    ("what", "about"),
+    ("how", "about"),
+)
+
+
+#: The most words a follow-up may say besides function words, markers and
+#: filler: "and the results?" says one. A turn saying more is about something.
+FOLLOW_UP_MAX_CONTENT = 1
+
+
+def is_follow_up(
+    tokens: Sequence[str],
+    *,
+    referential_cue: bool = False,
+    filler: frozenset[str] = frozenset(),
+) -> bool:
+    """A short turn that continues the conversation's own last answer.
+
+    Short (`FOLLOW_UP_MAX_TOKENS`), saying at most `FOLLOW_UP_MAX_CONTENT`
+    words of its own, and it either speaks a referential cue, opens with a
+    continuing word (`FOLLOW_UP_OPENERS`), or points with a deictic or
+    anaphoric word (`FOLLOW_UP_MARKERS`). "what about the quarterly budget?"
+    opens like one and is not: it names a subject. Whether the turn reached
+    an anchor after all is the resolver's answer, not this function's: the
+    carry it enables runs only for a turn that reached none."""
+    if not tokens or len(tokens) > FOLLOW_UP_MAX_TOKENS:
+        return False
+    words = tuple(tokens)
+    opener = next(
+        (opener for opener in FOLLOW_UP_OPENERS if words[: len(opener)] == opener), ()
+    )
+    content = [
+        token
+        for token in words[len(opener) :]
+        if token not in _STOPWORDS and token not in FOLLOW_UP_MARKERS and token not in filler
+    ]
+    if len(content) > FOLLOW_UP_MAX_CONTENT:
+        return False
+    return bool(
+        referential_cue or opener or any(token in FOLLOW_UP_MARKERS for token in words)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -662,6 +730,9 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         referential=referential,
         referential_cue=referential_cue,
         acronyms=_acronyms_of(turn, vocabulary.filler),
+        follow_up=is_follow_up(
+            tokens, referential_cue=referential_cue, filler=vocabulary.filler
+        ),
     )
 
 

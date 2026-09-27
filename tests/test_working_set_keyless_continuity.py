@@ -21,22 +21,44 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
 from test_governance_egress import _external, _reset_caches, write_rule, write_scope
-from test_working_set_carry import CARRY_PAGE
-from test_working_set_hot_projection import (  # noqa: F401 - `heat_vault` is a fixture
+from test_working_set_carry import CARRY_PAGE, _seed_carry_pages
+from test_working_set_hot_projection import (
     MARIT,
     MARIT_TURN,
     NONSENSE_TURN,
     SLED,
     _edit,
+    _live,
+    _one_old_tick,
     _resolved,
-    heat_vault,
 )
+from test_working_set_index import _seed_planning, _seed_structure
 
-from exomem import commands, working_set_heat, working_set_runtime
+from exomem import commands, lexstore, working_set_heat, working_set_index, working_set_runtime
 from exomem.governance.principal import request_scope
 
 FOLLOW_UP = "what about the second one?"
+
+
+@pytest.fixture
+def heat_vault(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`test_working_set_hot_projection.heat_vault`, copied rather than
+    imported: a cross-file fixture import used as a parameter reads to ruff
+    as a redefinition (F811)."""
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _seed_carry_pages(vault)
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    _reset_caches()
+    _one_old_tick(vault)
+    _live(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_heat.reset_for_tests()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    return vault
 
 
 def _activate(vault: Path, turn: str, **kwargs) -> dict:
