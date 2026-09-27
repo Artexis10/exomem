@@ -216,7 +216,7 @@ def _request_full_rebuild(
         return False
     log.info(
         "graph drain: %s; queued a whole-vault rebuild at generation %d",
-        _FULL_REBUILD_CAUSES[cause],
+        _FULL_REBUILD_CAUSES.get(cause, cause),
         generation,
     )
     return True
