@@ -236,3 +236,33 @@ for the full checklist:
    family, plus interleaving tests.
 5. `chore` — `tasks.md` checkbox cleanup and doc touch-up; Linux CI remains
    the authoritative full-suite gate.
+
+## Episode and graph contention follow-up
+
+Keep `episode_memory` outside `_NARROW_BOUNDARY_COMMANDS`. Visibility checks,
+revision selection, shared Source index/log planning, supersession writes and
+input-ledger binding remain inside its existing command guard. The episode
+caller opts into `add.add`'s deferred fanout path: commit canonical files without
+inline fanout, persist full-refresh demand for the exact caller paths, and queue
+`post_commit_batch_fanout` through `defer_until_terminal_persisted`. Receipt-owned
+fast-ack batches retain custody without duplicate fanout. Direct leaf calls
+without a terminal queue run the work inline rather than dropping it. Heat and
+nudge use the separate post-terminal housekeeping queue. Failed fanout leaves
+durable demand and must not relabel a committed recap as a retryable failure.
+
+Graph `drain_paths` prepares an immutable recall resolver before acquiring the
+mutation boundary. Sample its live recall checkpoint before preparation, then
+recheck the complete checkpoint, live state and sampled external-pending epoch
+inside the boundary. Existing pending marks remain admissible so the drain can
+repair its own fenced paths; a newly observed external event invalidates preparation
+and prevents availability publication. A mismatch
+returns a no-progress report with no queue retirement. The topology repair,
+source-version checks and transactional availability publication remain guarded
+and unchanged. This does not revive a graph-contract or debounce experiment.
+
+Use deterministic barriers to prove that unrelated writers can commit while
+post-terminal episode fanout or cold graph resolver preparation is blocked;
+prove same-key recap writers still serialize, identical retries do not duplicate,
+and concurrent resolver invalidation cannot publish or clear repair debt.
+Release-event timings are the acceptance evidence for the actual outer hold;
+a later reserved-state hold is not evidence that the earlier command was short.

@@ -96,3 +96,42 @@ achieves its latency goal in production.
 - **AND** a commit that instead falls back to in-boundary revalidation
   increments `exomem_prevalidated_commit_total{outcome="revalidated"}`
   instead
+
+### Requirement: Episode Derived Work Does Not Hold the Canonical Boundary
+
+Episode recording SHALL serialize visibility admission, revision selection,
+canonical Source and auxiliary writes, supersession and ledger binding. Derived
+index fanout and episode housekeeping SHALL execute after that command guard
+exits. Durable repair demand MUST exist before releasing custody, including
+when fanout fails or the process exits after its canonical commit. Existing
+receipt-owned fast acknowledgement MUST NOT receive duplicate fanout.
+
+#### Scenario: Slow recap indexing does not exclude an unrelated writer
+
+- **WHEN** an episode has committed and its post-terminal fanout is blocked
+- **THEN** an unrelated writer can acquire the canonical mutation boundary
+- **AND** a failed fanout leaves durable repair demand without a retryable recap failure
+
+#### Scenario: Concurrent recaps preserve revision ordering
+
+- **WHEN** two writers record the same episode key concurrently
+- **THEN** revision selection and supersession remain serialized
+- **AND** an identical retry creates no extra revision
+
+### Requirement: Graph Resolver Preparation Does Not Hold the Canonical Boundary
+
+An incremental graph drain SHALL build or wait for its recall resolver before
+acquiring the canonical mutation boundary. It MUST verify the complete sampled
+recall checkpoint is still current and live inside that boundary before deriving
+rows, reject newly observed external events during preparation or publication, and retain the existing source-version and transactional publication proofs.
+
+#### Scenario: Cold resolver preparation permits an interactive write
+
+- **WHEN** a graph drain waits for cold resolver preparation
+- **THEN** an interactive writer can acquire the canonical mutation boundary
+
+#### Scenario: A writer invalidates the prepared resolver
+
+- **WHEN** recall checkpoint state changes during resolver preparation
+- **THEN** the drain does not use that resolver to publish graph rows or availability
+- **AND** repair demand remains queued for a later attempt
