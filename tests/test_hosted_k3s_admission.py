@@ -187,6 +187,29 @@ def _wait_for_policy_typecheck(k3s: str, policy_name: str) -> None:
     raise AssertionError(f"K3s did not type-check {policy_name}")
 
 
+def _wait_for_admission_refusal(k3s: str, documents: list[dict[str, Any]], message: str) -> None:
+    """Wait until the API server enforces a freshly applied policy binding.
+
+    A type-checked policy is not yet an enforced one: the binding reaches the
+    admission plugin through an informer, so for a moment after `apply` a
+    request the policy forbids is still admitted. A server-side dry run goes
+    through the same admission chain without persisting anything.
+    """
+    last: subprocess.CompletedProcess[str] | None = None
+    for _ in range(30):
+        last = _kubectl(
+            k3s,
+            ["apply", "--dry-run=server", "--filename=-"],
+            documents=documents,
+            check=False,
+        )
+        if last.returncode != 0 and message in last.stderr:
+            return
+        time.sleep(1)
+    assert last is not None
+    raise AssertionError(f"K3s never enforced the policy: {last.stdout}{last.stderr}")
+
+
 def _pod(workload: dict[str, Any], *, name: str, namespace: str) -> dict[str, Any]:
     template = workload["spec"]["template"]
     return {
@@ -731,6 +754,9 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
             },
         },
     }
+    _wait_for_admission_refusal(
+        k3s, [insecure_namespace], "restricted-v1.35 tenant namespace contract"
+    )
     insecure_create = _kubectl(
         k3s,
         ["apply", "--filename=-"],
