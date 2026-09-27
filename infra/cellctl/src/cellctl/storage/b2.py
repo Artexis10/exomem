@@ -8,10 +8,9 @@ from dataclasses import dataclass
 
 import httpx
 
-from .interface import ObjectStorageKey, ObjectVersion
+from .interface import CELL_KEY_CAPABILITIES, ObjectStorageKey, ObjectVersion
 
 _AUTHORIZE_URL = "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"
-_KEY_CAPABILITIES = ["listFiles", "readFiles", "writeFiles", "deleteFiles"]
 
 
 @dataclass(frozen=True)
@@ -68,7 +67,7 @@ class B2ObjectStorage:
             "b2_create_key",
             {
                 "accountId": self._config.account_id,
-                "capabilities": _KEY_CAPABILITIES,
+                "capabilities": list(CELL_KEY_CAPABILITIES),
                 "keyName": f"cell-{cell_id}",
                 "bucketId": self._config.bucket_id,
                 "namePrefix": prefix,
@@ -83,13 +82,20 @@ class B2ObjectStorage:
     def delete_key(self, key_id: str) -> None:
         self._post("b2_delete_key", {"applicationKeyId": key_id})
 
-    def key_absent(self, key_id: str) -> bool:
+    def _listed_key(self, key_id: str) -> dict | None:
         payload = self._post(
             "b2_list_keys",
             {"accountId": self._config.account_id, "startApplicationKeyId": key_id, "maxKeyCount": 1},
         )
         keys = payload.get("keys", [])
-        return not any(entry["applicationKeyId"] == key_id for entry in keys)
+        return next((entry for entry in keys if entry["applicationKeyId"] == key_id), None)
+
+    def key_absent(self, key_id: str) -> bool:
+        return self._listed_key(key_id) is None
+
+    def key_capabilities(self, key_id: str) -> frozenset[str] | None:
+        entry = self._listed_key(key_id)
+        return None if entry is None else frozenset(entry.get("capabilities", []))
 
     def list_object_versions(self, prefix: str) -> list[ObjectVersion]:
         request = {

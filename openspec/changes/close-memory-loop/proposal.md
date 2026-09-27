@@ -29,6 +29,8 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 
 ### Modified Capabilities
 
+- `managed-service-upgrades`: a release that changes the lexical catalogue schema cuts over through a catalogue its standby built instead of a cold start.
+
 The existing `activate-agent-led-vocabulary-evolution` change continues to own scoped additive authority; its artifacts are revised with this programme rather than introducing a competing authority delta. The existing `add-context-activation-benchmark` change retains its fixture/scoring ownership. The integration contract adds no second mutation executor or canonical storage engine.
 
 ## Impact
