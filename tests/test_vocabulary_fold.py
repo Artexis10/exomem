@@ -71,3 +71,23 @@ def test_fold_is_idempotent_on_its_own_output():
 def test_empty_and_separator_only_input():
     assert fold_term("") == ""
     assert fold_term("  _ ") == ""
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "always", "perhaps", "statuses", "focuses", "caches", "sizes", "meetings",
+        "building", "planning", "summaries", "overviews", "drafts", "stopped",
+        "regressions", "dogfooding", "Context  Compiler", "snake_case term",
+        "machine-learning-models", "https", "a", "", "  ",
+    ],
+)
+def test_the_fold_is_idempotent(word: str) -> None:
+    """A stored key folds to itself, so comparing it again never drifts."""
+    once = fold_term(word)
+    assert fold_term(once) == once
+
+
+def test_adverbs_ending_in_s_are_not_plurals() -> None:
+    assert fold_term("always") == "always"
+    assert fold_term("perhaps") == "perhaps"

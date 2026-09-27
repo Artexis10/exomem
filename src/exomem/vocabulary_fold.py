@@ -24,10 +24,10 @@ __all__ = ["EXCEPTIONS", "fold_term"]
 EXCEPTIONS = frozenset(
     {
         # -s forms that are not plurals of the stem
-        "access", "address", "alias", "analysis", "arms", "atlas", "basis",
+        "access", "address", "alias", "always", "analysis", "arms", "atlas", "basis",
         "bias", "business", "bus", "campus", "canvas", "chaos", "corpus",
         "crisis", "customs", "diagnosis", "earnings", "gas", "glasses",
-        "goods", "https", "kudos", "lens", "means", "news", "process",
+        "goods", "https", "kudos", "lens", "means", "news", "perhaps", "process",
         "proceedings", "rails", "savings", "series", "species", "status",
         "surroundings", "synopsis", "thesis", "windows",
         # -ics fields of study, not plurals of an adjective
