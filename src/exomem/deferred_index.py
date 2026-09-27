@@ -50,6 +50,7 @@ _ROTATION_EPSILON_SECONDS = 1e-6
 
 def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
     """Add the exact derived-batch custody tables without touching old queues."""
+    caller_transaction = conn.in_transaction
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS derived_batches (
@@ -69,7 +70,8 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
             updated_at REAL NOT NULL,
             failure_code TEXT CHECK(
                 failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 64
-            )
+            ),
+            proven_at REAL
         )
         """
     )
@@ -83,6 +85,7 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
             stable_memory_ref TEXT CHECK(
                 stable_memory_ref IS NULL OR length(stable_memory_ref) BETWEEN 1 AND 256
             ),
+            batch_seq INTEGER,
             PRIMARY KEY(batch_id, rel_path),
             FOREIGN KEY(batch_id) REFERENCES derived_batches(batch_id)
         )
@@ -209,6 +212,59 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS advisory_result_retention "
         "ON write_advisory_results(retention_deadline, terminal_replay_until)"
     )
+    # Coverage asks "which later batch carries this path?". The batch's store
+    # sequence on each path row lets that seek by path and sequence instead of
+    # walking every later receipt, which are never pruned. A trigger fills it,
+    # so every writer -- an older build after a rollback included -- keeps it.
+    batch_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(derived_batches)")
+    }
+    if "proven_at" not in batch_columns:
+        conn.execute("ALTER TABLE derived_batches ADD COLUMN proven_at REAL")
+    conn.execute("SAVEPOINT derived_paths_sequence_migration")
+    try:
+        path_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(derived_batch_paths)")
+        }
+        if "batch_seq" not in path_columns:
+            conn.execute("ALTER TABLE derived_batch_paths ADD COLUMN batch_seq INTEGER")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS derived_paths_missing_sequence "
+            "ON derived_batch_paths(batch_id) WHERE batch_seq IS NULL"
+        )
+        if conn.execute(
+            "SELECT 1 FROM derived_batch_paths "
+            "INDEXED BY derived_paths_missing_sequence "
+            "WHERE batch_seq IS NULL LIMIT 1"
+        ).fetchone():
+            conn.execute(
+                "UPDATE derived_batch_paths SET batch_seq = (SELECT b.rowid "
+                "FROM derived_batches AS b WHERE b.batch_id = derived_batch_paths.batch_id) "
+                "WHERE batch_seq IS NULL"
+            )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS derived_paths_sequence_fill "
+            "AFTER INSERT ON derived_batch_paths WHEN NEW.batch_seq IS NULL BEGIN "
+            "UPDATE derived_batch_paths SET batch_seq = (SELECT b.rowid "
+            "FROM derived_batches AS b WHERE b.batch_id = NEW.batch_id) "
+            "WHERE batch_id = NEW.batch_id AND rel_path = NEW.rel_path; END"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS derived_paths_sequence "
+            "ON derived_batch_paths(rel_path, batch_seq)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS derived_paths_after_sequence "
+            "ON derived_batch_paths(rel_path, after_hash, batch_seq)"
+        )
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT derived_paths_sequence_migration")
+        conn.execute("RELEASE SAVEPOINT derived_paths_sequence_migration")
+        raise
+    conn.execute("RELEASE SAVEPOINT derived_paths_sequence_migration")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS derived_batches_state ON derived_batches(state)"
+    )
     advisory_columns = {
         str(row[1]) for row in conn.execute("PRAGMA table_info(write_advisory_results)")
     }
@@ -255,10 +311,10 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         )
         conn.execute("UPDATE pending_recall_rows SET component_revision = 1")
         conn.execute("UPDATE write_advisory_results SET component_revision = 1")
-    # DDL itself is durable without a caller transaction, but the additive
-    # generation initialization and any repair DML are not. Commit schema
-    # migration before returning a handle whose caller may begin immediately.
-    conn.commit()
+    # A newly opened handle must be ready for the caller's BEGIN; a caller's
+    # existing transaction still owns its commit or rollback.
+    if not caller_transaction:
+        conn.commit()
 
 
 def _ensure_vocabulary_provenance_schema(conn: sqlite3.Connection) -> None:
@@ -743,8 +799,15 @@ class EmbeddingFreshness(StrEnum):
     UNVERIFIABLE = "unverifiable"
 
 
-def _safe_markdown_rel_path(value: object) -> str | None:
-    """Normalize one persisted Markdown identity without permitting traversal."""
+def _safe_markdown_rel_path(
+    value: object, *, knowledge_base_only: bool = True
+) -> str | None:
+    """Normalize one persisted Markdown identity without permitting traversal.
+
+    ``knowledge_base_only=False`` keeps every traversal refusal but admits a
+    vault-relative page outside the knowledge base -- what a vault-scope
+    advisory can name as its counterpart.
+    """
     if not isinstance(value, str):
         return None
     if "\\" in value:
@@ -759,7 +822,7 @@ def _safe_markdown_rel_path(value: object) -> str | None:
         or any(part in {"", ".", ".."} for part in path.parts)
         or not normalized.lower().endswith(".md")
         or not path.parts
-        or path.parts[0] != kb_dirname()
+        or (knowledge_base_only and path.parts[0] != kb_dirname())
     ):
         return None
     return path.as_posix()

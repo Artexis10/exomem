@@ -101,6 +101,12 @@ drainers continue until empty; new fast writers create only batch/component
 rows. This avoids rewriting thousands of legacy entries and allows a safe
 mixed-version rollout.
 
+Receipt sequence migration commits the added column, existing-row backfill,
+indexes and compatibility trigger atomically, without committing a caller's
+outer transaction. Reopening also repairs missing sequence values left by an
+interrupted older migration. Once current, ordinary receipt access must retain
+bounded lookup cost rather than scanning the full receipt history.
+
 **Alternative rejected — add semantic/graph rows only after commit.** That is
 cheap, but a process death between canonical replacement and SQLite insertion
 loses the exact work demand and recreates the defect this change is meant to
@@ -128,6 +134,38 @@ original request evaluates a prepared batch from source of truth:
   stranded every page but the last of a multi-page burst in
   `reconcile_required` (integration finding, 2026-09-02). Exact after-state is
   proven by content hashes plus the observation recheck alone;
+- every path equals its intended after hash/tombstone, or has moved on past it
+  and a newer exact batch covers that path (higher store sequence; `ready`,
+  `completed` or `superseded`; a live or retired pending row for that path) →
+  `ready`, retiring this batch's pending rows for the handed-on paths; with no
+  path left in after-state → `superseded`. A shared page -- the knowledge
+  base's log and index, a cited source's back-reference -- moves on under
+  every later write, so whole-batch proof held every batch but the last of a
+  burst in `reconcile_required` for good, and its unprovable live rows turned
+  every managed recall into a warming answer (owner ruling, option A,
+  2026-09-25). A moved path whose newer batch is committed but not yet proven
+  leaves the batch `reconcile_required` until recovery re-proves it. A shared
+  page can also move on and land back on bytes an older batch saw before its
+  own write (an index re-rendered as it was): a path back at its before-bytes
+  is handed on only when a newer proven batch recorded exactly those bytes as
+  its after-state, since otherwise it may be the older batch's own torn write
+  (found by the 3-writer burst, 2026-09-25). One before-state cannot be a torn
+  write: a page the batch created, absent again after the batch was proven
+  committed, was deleted since. Successful proof records a durable fact in the
+  same transaction as activation; changing the batch to `reconcile_required`
+  cannot erase it, even if pending publication has not happened. That absence
+  is handed on through the same
+  lanes test as a moved path, once both recall lanes hold it, so a page
+  deleted by hand before its batch converges leaves managed recall ready with
+  no operator step; its advisory result is superseded, since it describes a
+  page that no longer exists. A first proof or a crash-cut batch is not
+  proven committed and keeps the stricter rule. A moved
+  path that no batch covers -- a hand edit in the editor, which is ordinary in
+  a personal vault -- is handed on once both recall lanes hold its current
+  bytes (ruling R2): that is the overlay's lane test (lexical catalogue and
+  reference sidecar; the overlay's full retirement also waits for the batch's
+  resolver, semantic-purge and freshness components), and until it
+  holds the batch stays `reconcile_required` rather than publishing anything;
 - every path equals the before state and the canonical attempt is known not to
   have committed → retire as `aborted`, retiring the batch's own pending
   rows in the same transition;
@@ -160,7 +198,10 @@ derived work, while the existing idempotency/GraphCommitReceipt protocol decides
 canonical retry semantics independently.
 
 Publication is at-least-once with exact generation checks and idempotent sidecar
-upserts. Component completion CAS-clears only the claimed revision. Claim expiry
+upserts. Pending visibility is published for the paths a batch owns; a path
+handed on to newer custody is retired instead. Component completion CAS-clears
+only the claimed revision, and applies the same per-path predicate as the proof:
+every path is in its after-state or moved on under newer custody. Claim expiry
 allows another process to resume after worker death.
 
 **Alternative rejected — infer commitment from filesystem similarity for the
@@ -299,6 +340,20 @@ while custody declined for a real compiled page silently loses the
 duplicate/overlap signal. The worker publishes `not_required` when it later
 proves the page inapplicable.
 
+A route that sweeps inline declares its exact sweep inputs around its commit
+(owner ruling on task 5.12). `remember` declares the draft title, normalized
+body and note type; `edit` declares the new body when it changed, and declares
+no sweep when it did not, so that edit takes no advisory custody. The committed
+batch hands the declared inputs to its component in process memory -- the draft
+is content and never enters the receipt -- and the component runs the route's
+own sweep (`corpus_aware.write_advisory_for`) over them, so the deferred result
+is the inline result and the route skips its inline sweep. A component that
+runs where the inputs are unavailable (a restart between acknowledgement and
+execution) falls back to the generic sweep over the page's published vectors,
+converging the job instead of stranding it. `capture` keeps its inline sweep.
+A candidate's counterpart may be any safe vault-relative Markdown page, because a
+vault-scope sweep names pages outside the knowledge base.
+
 Advisory output remains noncanonical and fail-open with respect to the committed
 write. The compact terminal returns a stable opaque
 `exomem://write-advisory-result/<id>` reference. Exact
@@ -320,6 +375,20 @@ stale replay is refused. A crash after result publication can therefore reuse
 the stored result and complete the component without recomputation. Old rows
 without the additive target identity remain resolvable by their stable ref but
 fail closed with a fixed compatibility code and no candidate payload.
+
+An earned one-time family quiet offer belongs to an accepted result candidate.
+After publication and successful review surfacing, the existing review-state
+lock records the winning result reference, review reference and fingerprint
+alongside the offer marker. Refused publication consumes neither surfacing nor
+the offer. SQLite candidate strings remain immutable: exact lookup decorates
+only the winning candidate after current authority and fingerprint checks,
+using the shared bounded warning renderer and a read-only review-state snapshot.
+Unavailable optional review state leaves the stored warning usable. Quiet/off
+decisions preserve the internal ownership marker without returning it through
+triage; an explicit normal reset clears it. Published-result replay neither
+recomputes candidates nor rearms an offer. This retains the existing best-effort
+gap between publication and review surfacing and the existing in-process lock;
+it adds no cross-store transaction or cross-process exactly-once guarantee.
 
 `suggestions=true` remains synchronous because it is an explicit request for
 the enriched related-link result in the current response. It is not silently
@@ -528,6 +597,18 @@ not eligible for review.
    declares the fast-ack capability/SLO inactive; it is not a configurable
    extension of the enabled path's fixed 2.0-second budget. Additive tables remain
    inert and are not deleted by rollback.
+
+A stranded batch is not rollback-able state: the kill switch stops new
+fast-acknowledged writes, but the pending overlay keeps reading durable custody,
+so a batch already held in `reconcile_required` stays until it is repaired.
+`doctor` reports it (`fast_ack_custody`, failing while any batch is stranded)
+and `maintain --reconcile` repairs it by converging its pages from current bytes
+and retiring it once both recall lanes hold them. Reconcile retires receipt
+custody only: a batch stranded by a shared page can still own a page exactly as
+its advisory result describes it, so a `ready` or `failed` result stays as
+published; a result that never ran fails as `advisory_unavailable` over an
+unchanged target and is superseded over a moved one. The runbook entry is
+therefore "set the flag to 0, then reconcile".
 
 Rollback is mandatory on any stale post-write read, any acknowledged write with
 missing required custody, any cross-tenant/result authorization leak, two or

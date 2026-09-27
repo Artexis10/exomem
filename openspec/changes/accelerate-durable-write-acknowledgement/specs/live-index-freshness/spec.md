@@ -17,6 +17,18 @@ demand.
 - **THEN** each unfinished component retains exact custody for the batch generation
 - **AND** the server drains the components without requiring an operator command or another foreground write
 
+#### Scenario: A promoted component does not wait for the next tick
+
+- **WHEN** a drain pass completes a component and the store promotes that component's dependants
+- **THEN** the same pass claims the promoted dependants within its remaining allowance, so a batch converges through its embedding component in one normal-mode pass
+- **AND** no dependant is claimed before every component it depends on has completed, and quiet mode's single-slot allowance still bounds the pass
+
+#### Scenario: A registered graph rebuild does not hold the batch's other components
+
+- **WHEN** the receipt-owned fan-out of a batch registers a whole-vault graph rebuild
+- **THEN** it starts that rebuild and continues to the embedding component without waiting for the rebuild to finish
+- **AND** the graph pipeline, not the fan-out, owns that rebuild's convergence and the `graph_sync` state
+
 #### Scenario: Old worker completes after a newer write
 
 - **WHEN** a worker finishes an older receipt revision after the same path has a newer revision
