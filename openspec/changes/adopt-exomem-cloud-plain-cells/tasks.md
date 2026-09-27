@@ -99,6 +99,7 @@
 - [ ] 3.9 Add platform chart entries:
   - cellctl, single replica, `Recreate`, with the RBAC in D4 and the `ValidatingAdmissionPolicy` on its ServiceAccount (cell namespaces only, restricted labels, digest-pinned images from the cell repository);
   - the gateway Deployment and Service consuming the Substrate gateway image digest, rendering exactly the gateway's environment contract (C3), with a chart test pinning that set;
+  - optional paired `cloudDatabase.hostname` / `privateIp` values resolving the certificate hostname privately in only the gateway and cellctl pods, with matching database egress `/32`s; reject partial or invalid mappings, preserve default resolution and tenant admission, and verify both image clients' TLS hostname and trust checks before sealing role DSNs;
   - the cellctl image, built from `infra/cellctl/Dockerfile` (digest-pinned base, non-root, read-only root filesystem) and published to GHCR by digest on the same release trigger as the `cloud` image, which the chart consumes by digest;
   - the `exomem-cloud-encrypted` StorageClass;
   - Traefik `websecure` on hostPort 443 only, with no `trustedIPs`;
