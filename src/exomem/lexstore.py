@@ -1402,11 +1402,17 @@ def live_catalog_compatible(vault_root: Path) -> bool:
     return get_store(vault_root).live_catalog_compatible()
 
 
-def build_detached_catalog(vault_root: Path) -> DetachedCatalog | None:
-    """Build this release's catalogue beside the live one, publishing nothing."""
+def build_detached_catalog(
+    vault_root: Path, cancel: threading.Event | None = None
+) -> DetachedCatalog | None:
+    """Build this release's catalogue beside the live one, publishing nothing.
+
+    A ``cancel`` event, when given, is the build's own: setting it stops the
+    build at its next walked file or parsed page, as a discard does.
+    """
     if not maintained_content_index_enabled():
         return None
-    return get_store(vault_root).build_detached_catalog()
+    return get_store(vault_root).build_detached_catalog(cancel=cancel)
 
 
 def adopt_detached_catalog(vault_root: Path, detached: DetachedCatalog) -> bool:
@@ -5871,7 +5877,9 @@ class LexicalStore:
             if conn is not None:
                 conn.close()
 
-    def build_detached_catalog(self) -> DetachedCatalog | None:
+    def build_detached_catalog(
+        self, cancel: threading.Event | None = None
+    ) -> DetachedCatalog | None:
         """Build this release's complete catalogue beside the live one.
 
         For a standby whose serving worker keeps an incompatible catalogue: it
@@ -5898,6 +5906,8 @@ class LexicalStore:
         detached = DetachedCatalog(
             self.vault_root, temp_path, temp_lock, builder=threading.current_thread()
         )
+        if cancel is not None:
+            detached.cancelled = cancel
         with _DETACHED_LOCK:
             _DETACHED[temp_path] = detached
         built = False
@@ -5980,7 +5990,10 @@ class LexicalStore:
         except (sqlite3.Error, OSError) as e:
             log.warning("lexical detached catalogue adoption failed (%s)", e)
         finally:
-            self.discard_detached_catalog(detached)
+            try:
+                self.discard_detached_catalog(detached)
+            except Exception:  # noqa: BLE001 - an orphan temp is reaped by the next sweep
+                log.warning("lexical detached catalogue cleanup failed", exc_info=True)
         if published:
             with self._lock:
                 # A published current catalog clears the disposable-failure flag

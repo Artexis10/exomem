@@ -278,13 +278,59 @@ def test_no_build_starts_once_the_standby_is_discarded(
     root = older_catalogue
     builds: list[Path] = []
     monkeypatch.setattr(
-        lexstore, "build_detached_catalog", lambda vault_root: builds.append(vault_root)
+        lexstore, "build_detached_catalog", lambda vault_root, cancel=None: builds.append(vault_root)
     )
     service_standby.enter_standby()
     service_standby.discard()
 
     assert service_standby.prepare_detached_catalog(root) is False
     assert builds == []
+
+
+def test_a_discard_landing_as_the_build_starts_still_stops_it(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-check passed, then the stop arrived before the build registered."""
+    root = older_catalogue
+    real_build = lexstore.build_detached_catalog
+    walked: list[Path] = []
+    real_walk = vault_module.walk_vault_md
+
+    def counting_walk(vault_root):
+        for path in real_walk(vault_root):
+            walked.append(path)
+            yield path
+
+    def discard_then_build(vault_root, cancel=None):
+        service_standby.discard()
+        return real_build(vault_root, cancel=cancel)
+
+    monkeypatch.setattr(vault_module, "walk_vault_md", counting_walk)
+    monkeypatch.setattr(lexstore, "build_detached_catalog", discard_then_build)
+    service_standby.enter_standby()
+
+    assert service_standby.prepare_detached_catalog(root) is False
+    assert walked == []
+    assert _temps(root) == []
+
+
+def test_a_cleanup_that_raises_after_adoption_keeps_the_adoption(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = older_catalogue
+    detached = lexstore.build_detached_catalog(root)
+    assert detached is not None
+
+    real_discard = lexstore.LexicalStore.discard_detached_catalog
+
+    def failing_discard(self, _detached):
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(lexstore.LexicalStore, "discard_detached_catalog", failing_discard)
+
+    assert lexstore.adopt_detached_catalog(root, detached) is True
+    real_discard(lexstore.get_store(root), detached)
+    assert lexstore.live_catalog_compatible(root) is True
 
 
 def test_a_removal_that_raises_still_releases_the_build(
@@ -699,12 +745,14 @@ def test_a_targeted_retry_in_flight_does_not_skip_the_heal(
     key = root.resolve()
     lexstore._REPAIRS_IN_FLIGHT.add(key)
     lexstore._DEFERRED_UPSERTS[key] = {root / next(iter(NOTES))}
+    lexstore._REPAIR_PROGRESS[key] = {"phase": "targeted", "started_at": time.monotonic()}
     try:
         assert lexstore.full_rebuild_in_flight(root) is False
         _promoted_warm(root)
     finally:
         lexstore._REPAIRS_IN_FLIGHT.discard(key)
         lexstore._DEFERRED_UPSERTS.pop(key, None)
+        lexstore._REPAIR_PROGRESS.pop(key, None)
     assert heals
 
 
@@ -775,7 +823,7 @@ def test_the_registry_is_reseeded_after_the_build_before_the_graph_proof(
     monkeypatch.setattr(
         lexstore,
         "build_detached_catalog",
-        lambda vault_root: (order.append("build"), real_build(vault_root))[1],
+        lambda vault_root, cancel=None: (order.append("build"), real_build(vault_root, cancel))[1],
     )
     real_prove = service_standby.prove_graph_snapshot
     monkeypatch.setattr(

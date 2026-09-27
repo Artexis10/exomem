@@ -66,6 +66,9 @@ _detached_built = False
 #: Set once an unpromoted standby is being stopped; a build that finishes
 #: afterwards discards what it built instead of holding it.
 _discarded = False
+#: The same stop as an event the detached build polls from its first walked
+#: file, so a discard that lands while the build is starting still stops it.
+_discard_requested = threading.Event()
 
 
 def standby_requested() -> bool:
@@ -331,7 +334,7 @@ def prepare_detached_catalog(vault_root: Path) -> bool:
             if _discarded or _promoted:
                 return False
         started = time.monotonic()
-        detached = lexstore.build_detached_catalog(vault_root)
+        detached = lexstore.build_detached_catalog(vault_root, cancel=_discard_requested)
     except Exception:  # noqa: BLE001 - an unbuilt catalogue is a waiting component
         log.warning("standby detached catalogue build failed", exc_info=True)
         return False
@@ -397,6 +400,7 @@ def discard() -> None:
         _discarded = True
         _detached_catalog = None
         _detached_built = False
+    _discard_requested.set()
     try:
         lexstore.discard_detached_catalogs()
     except Exception:  # noqa: BLE001 - an orphan temp is reaped by the next sweep
@@ -747,11 +751,12 @@ def reset_for_tests() -> None:
     """Clear process-local standby state; intentionally public for tests."""
     global _standby, _promoted, _proved_token, _adoption, _activation
     global _carried, _corpus_built, _corpus_attempted
-    global _detached_catalog, _detached_built, _discarded
+    global _detached_catalog, _detached_built, _discarded, _discard_requested
     with _lock:
         _detached_catalog = None
         _detached_built = False
         _discarded = False
+        _discard_requested = threading.Event()
         _standby = False
         _promoted = False
         _proved_token = None
