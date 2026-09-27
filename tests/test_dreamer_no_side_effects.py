@@ -156,7 +156,11 @@ def test_each_spy_bites_on_a_leaky_family(
     vault = fx.build(tmp_path)
     spies = _install_all(monkeypatch)
     monkeypatch.setattr(dreamer_families, "REGISTRY", [_leaky(_LEAKS[group])])
-    result = dreamer.run_once(vault)
+    # This proves each spy observes its forbidden call. Budget behavior is
+    # covered separately; setup CPU must not end the tick before the callback.
+    result = dreamer.run_once(
+        vault, clock=dreamer.Clock(monotonic=lambda: 0.0, thread_time=lambda: 0.0)
+    )
     assert result.stop_reason == "error"
     assert spies.calls.get(group), f"the {group} spy did not see the leak"
 

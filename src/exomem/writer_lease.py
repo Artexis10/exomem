@@ -283,6 +283,9 @@ class _FastAcknowledgementBatch:
     receipt: Any
     canonical_commit_monotonic: float
     advisory_target: str | None = None
+    #: The route's own sweep inputs, when the leaf declared them for this
+    #: batch's advisory target (`declare_write_advisory`).
+    advisory_inputs: Any | None = None
 
 
 @dataclass(slots=True)
@@ -300,6 +303,7 @@ class _FastAcknowledgementSession:
     #: prepared batch that rolls back must leave the claim for its successor.
     advisory_claimed: bool = False
     advisory_prepared_target: str | None = None
+    advisory_prepared_inputs: Any | None = None
     batches: list[_FastAcknowledgementBatch] = field(default_factory=list)
 
 
@@ -513,6 +517,54 @@ def active_derived_batch_custody(vault_root: Path) -> bool:
     )
 
 
+#: What the running leaf declared about its default duplicate/overlap sweep:
+#: unset (the leaf declared nothing), ``None`` (the leaf's write has no sweep),
+#: or the route's exact `corpus_aware.WriteAdvisoryInputs`.
+_UNDECLARED: Any = object()
+_DECLARED_WRITE_ADVISORY: ContextVar[Any] = ContextVar(
+    "exomem_declared_write_advisory", default=_UNDECLARED
+)
+
+
+@contextmanager
+def declare_write_advisory(inputs: Any | None) -> Iterator[None]:
+    """Declare, around a leaf's canonical commit, what its default sweep reads.
+
+    A route that sweeps inline passes its exact inputs; under fast
+    acknowledgement the committed batch then hands them to its `write_advisory`
+    component, which runs the same sweep over them, and the leaf skips its own.
+    ``None`` declares that this write has no default sweep, so the batch takes
+    no advisory custody at all. A leaf that declares nothing keeps the
+    component's generic behaviour.
+    """
+    token = _DECLARED_WRITE_ADVISORY.set(inputs)
+    try:
+        yield
+    finally:
+        _DECLARED_WRITE_ADVISORY.reset(token)
+
+
+def write_advisory_deferred(vault_root: Path, inputs: Any) -> bool:
+    """Whether a committed batch of this session carries exactly these inputs.
+
+    True only under fast acknowledgement, for this exact vault, when a batch
+    this mutation committed holds the session's advisory custody together with
+    the very inputs the leaf declared. The leaf then skips its inline sweep:
+    the component runs it and the terminal carries its result reference.
+    Anything else -- no session, a claim released to a later batch, other
+    inputs -- keeps the inline sweep.
+    """
+    session = _ACTIVE_FAST_ACK_SESSION.get()
+    if session is None or not session.advisory_claimed:
+        return False
+    if _fast_ack_root_key(vault_root) != _fast_ack_root_key(session.vault_root):
+        return False
+    return any(
+        batch.advisory_target is not None and batch.advisory_inputs is inputs
+        for batch in session.batches
+    )
+
+
 def current_canonical_generation(vault_root: Path) -> str | None:
     """Public reader for the vault's current canonical generation.
 
@@ -622,6 +674,17 @@ def prepare_active_derived_batch(
         _release_superseded_advisory_claim(session, paths)
     advisory_target: str | None = None
     advisory_fingerprint: str | None = None
+    declared = _DECLARED_WRITE_ADVISORY.get()
+    advisory_inputs = None
+    if declared is None:
+        # The leaf's write has no default sweep: nothing to defer.
+        advisory_target_rel_path = None
+    elif declared is not _UNDECLARED:
+        if getattr(declared, "target_rel_path", None) == advisory_target_rel_path:
+            advisory_inputs = declared
+        else:
+            # The batch is not about the page the leaf's sweep reads.
+            advisory_target_rel_path = None
     if (
         session.advisory_required
         and not session.advisory_claimed
@@ -639,6 +702,9 @@ def prepare_active_derived_batch(
             advisory_target = advisory_target_rel_path
             advisory_fingerprint = after_hash
     session.advisory_prepared_target = advisory_target
+    session.advisory_prepared_inputs = (
+        advisory_inputs if advisory_target is not None else None
+    )
     required_components = set(derived_receipts.DerivedComponent)
     if advisory_target is None:
         required_components.remove(derived_receipts.DerivedComponent.WRITE_ADVISORY)
@@ -673,18 +739,27 @@ def complete_active_derived_batch(
     if session is None:
         raise RuntimeError("derived receipt committed outside its acknowledgement session")
     advisory_target = session.advisory_prepared_target
+    advisory_inputs = session.advisory_prepared_inputs
     session.advisory_prepared_target = None
+    session.advisory_prepared_inputs = None
     if advisory_target is not None:
         # The canonical batch is known committed, so this is the point the
         # session's one advisory job becomes real. A batch that prepared a
         # target and then rolled back never reaches here and leaves the claim
         # available to the next governed batch in the same mutation.
         session.advisory_claimed = True
+        if advisory_inputs is not None:
+            from . import advisory_handoff
+
+            advisory_handoff.register_route_inputs(
+                session.vault_root, receipt.batch_id, advisory_inputs
+            )
     session.batches.append(
         _FastAcknowledgementBatch(
             receipt,
             float(canonical_commit_monotonic),
             advisory_target=advisory_target,
+            advisory_inputs=advisory_inputs if advisory_target is not None else None,
         )
     )
 
@@ -734,6 +809,27 @@ def _acknowledge_derived_batches(
         )
 
 
+_CLOSED_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_CLOSED_TOKEN = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _content_free_cause(error: BaseException, **fields: str | None) -> str:
+    """One log fragment naming a failure without any vault content.
+
+    The exception class and, when it carries one, a closed upper-case code; then
+    each named field, kept only when it is a closed lower-case token. Messages,
+    paths and argument values never appear.
+    """
+    code = getattr(error, "code", None)
+    parts = [f"class={type(error).__name__}"]
+    if isinstance(code, str) and _CLOSED_CODE.fullmatch(code):
+        parts.append(f"code={code}")
+    for name, value in fields.items():
+        if isinstance(value, str) and _CLOSED_TOKEN.fullmatch(value):
+            parts.append(f"{name}={value}")
+    return " ".join(parts)
+
+
 def _acknowledgement_component_names() -> tuple[str, ...]:
     """The derived components one acknowledgement is answerable for.
 
@@ -763,6 +859,9 @@ def _acknowledge_derived_batches_timed(
     # a multi-batch mutation. A failure before any status is read owes the whole
     # set, which is the honest answer -- nothing about them was proven.
     owed: dict[str, set[str]] = {}
+    # Where the acknowledgement was when it failed, for a content-free log:
+    # closed stage names, a component name and a proof outcome, never a path.
+    where: dict[str, str | None] = {"stage": "setup", "component": None, "outcome": None}
 
     def still_owed() -> tuple[str, ...] | None:
         """What is owed, or None when no batch was examined at all.
@@ -802,12 +901,14 @@ def _acknowledge_derived_batches_timed(
                 _current_canonical_generation(session.vault_root)
                 or receipt.canonical_generation
             )
+            where.update(stage="receipt_proof", component=None, outcome=None)
             with call_spans.span("derived.receipt_proof"):
                 proof = derived_receipts.prove_committed(
                     session.vault_root,
                     receipt,
                     current_generation=observed_generation,
                 )
+            where["outcome"] = proof.outcome
             if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
                 raise RuntimeError("derived receipt proof does not match this batch")
             if proof.outcome == "superseded":
@@ -821,6 +922,7 @@ def _acknowledge_derived_batches_timed(
                 raise RuntimeError(
                     "derived receipt did not prove the committed generation"
                 )
+            where["stage"] = "pending_visibility"
             with call_spans.span("derived.pending_visibility"):
                 published = derived_receipts.publish_pending_visibility(
                     session.vault_root,
@@ -829,6 +931,7 @@ def _acknowledge_derived_batches_timed(
                 )
             if not published:
                 raise RuntimeError("pending visibility publication was not proven")
+            where["stage"] = "signal"
             derived_receipts.signal_components(session.vault_root, receipt)
 
         for batch in session.batches:
@@ -840,6 +943,7 @@ def _acknowledge_derived_batches_timed(
             owed[receipt.batch_id] = batch_owed
             statuses = []
             for component in derived_receipts.DerivedComponent:
+                where.update(stage="component_status", component=component.value)
                 status = derived_receipts.component_status(
                     session.vault_root, receipt, component
                 )
@@ -851,6 +955,7 @@ def _acknowledge_derived_batches_timed(
                     statuses.append(status)
                     continue
                 if status.state == "claimed":
+                    where["stage"] = "component_wait"
                     status = _wait_for_derived_component(
                         session.vault_root,
                         receipt,
@@ -925,13 +1030,14 @@ def _acknowledge_derived_batches_timed(
     except _PostCommitOutcomeUncertain:
         raise
     except Exception as error:
-        # Name the class only in the log -- never the message, which can carry
-        # a path. The caller's terminal names the derived components instead:
-        # an exception class tells a reader nothing about what is behind.
+        # Content-free cause (owner ruling R4): the exception class, a closed
+        # code, the stage, the component and the proof outcome -- never the
+        # message, which can carry a path. The caller's terminal names the
+        # derived components owed.
         logger.warning(
             "fast acknowledgement failed; the persisted terminal degrades to "
             "derived_sync=pending (%s)",
-            type(error).__name__,
+            _content_free_cause(error, **where),
         )
         uncertain = _PostCommitOutcomeUncertain()
         uncertain.derived_components = still_owed()
@@ -4307,6 +4413,11 @@ class LeaseManager:
                     _ACTIVE_MUTATION_COMMITTED.get()
                     and getattr(error, "committed", None) is not True
                 ):
+                    logger.warning(
+                        "committed mutation raised after its canonical commit; the "
+                        "terminal is committed-uncertain (%s)",
+                        _content_free_cause(error, stage="post_commit_leaf"),
+                    )
                     raise _PostCommitOutcomeUncertain() from error
                 raise
             finally:
@@ -4612,6 +4723,11 @@ class LeaseManager:
                     }
                 return result
             except Exception as error:
+                logger.warning(
+                    "graph commit evidence could not be persisted; the terminal is "
+                    "committed-uncertain (%s)",
+                    _content_free_cause(error, stage="graph_commit_evidence"),
+                )
                 raise _PostCommitOutcomeUncertain() from error
 
         def exact_commit_evidence(

@@ -23,13 +23,14 @@ addressed afterwards.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import call_spans, corpus_aware, derived_receipts
+from . import advisory_handoff, call_spans, corpus_aware, derived_receipts, review_state
 from .derived_receipts import (
     DerivedAdvisoryCandidate,
     DerivedBatchReceipt,
@@ -55,6 +56,9 @@ MAX_RESULT_CANDIDATES = 8
 DUPLICATE_TOP_N = 3
 OVERLAP_TOP_N = 3
 CLAIM_LEASE_SECONDS = 60.0
+#: The observation published for a deleted target. It is not a content digest,
+#: so it can never equal a stored fingerprint and always supersedes.
+_ABSENT_TARGET = "absent"
 
 #: One outcome for malformed, unknown, unauthorized and expired references, so
 #: a caller cannot separate "there is no such result" from "not for you". It
@@ -222,7 +226,31 @@ def _candidates_for(
             # reached nobody. The stamp is committed after publication succeeds.
             record_surfacing=False,
         )
+    return _candidates_from_emitted(vault_root, emitted, result_ref=result_ref), emitted
 
+
+def _candidates_for_route(
+    vault_root: Path,
+    inputs: corpus_aware.WriteAdvisoryInputs,
+    *,
+    result_ref: str,
+) -> tuple[tuple[DerivedAdvisoryCandidate, ...], list[Any]]:
+    """The route's own sweep over its exact inputs: what it returns inline.
+
+    The surfacing stamp waits for publication, as on the generic path; it
+    changes no warning of this result.
+    """
+    emitted = corpus_aware.write_advisory_for(vault_root, inputs, record_surfacing=False)
+    return _candidates_from_emitted(vault_root, emitted, result_ref=result_ref), emitted
+
+
+def _candidates_from_emitted(
+    vault_root: Path,
+    emitted: list[Any],
+    *,
+    result_ref: str,
+) -> tuple[DerivedAdvisoryCandidate, ...]:
+    """Bind each emitted advisory to its counterpart's current fingerprint."""
     candidates: dict[tuple[str, str], DerivedAdvisoryCandidate] = {}
     for item in emitted:
         if item.identity is None or item.counterpart_rel_path is None:
@@ -246,7 +274,28 @@ def _candidates_for(
         )
         if len(candidates) >= MAX_RESULT_CANDIDATES:
             break
-    return tuple(candidates.values()), emitted
+    return tuple(candidates.values())
+
+
+def _arm_published_quiet_offer(
+    vault_root: Path,
+    result_ref: str,
+    candidates: Sequence[DerivedAdvisoryCandidate],
+    emitted: list[Any],
+) -> None:
+    accepted = {(item.review_ref, item.triage_fingerprint) for item in candidates}
+    store = review_state.ReviewStateStore(vault_root)
+    for item in emitted:
+        identity = item.identity
+        if identity is None or (identity.ref, identity.fingerprint) not in accepted:
+            continue
+        try:
+            store.arm_quiet_offer(
+                item.kind,
+                carrier=(result_ref, identity.ref, identity.fingerprint),
+            )
+        except Exception as error:  # noqa: BLE001 - optional offer fails open
+            log.debug("deferred quiet offer failed open: %s", type(error).__name__)
 
 
 def _publish(
@@ -342,6 +391,20 @@ def execute_write_advisory(
         )
 
     observed = _observe_fingerprint(vault_root, stored.target_rel_path)
+    if observed is None and not os.path.lexists(
+        Path(vault_root).joinpath(*str(stored.target_rel_path).split("/"))
+    ):
+        # Deleted since the write, which a proven batch can hand on once both
+        # recall lanes hold the absence. The result describes nothing current:
+        # publishing the absence supersedes it, as a moved target's does.
+        return _publish(
+            vault_root,
+            claimed_status,
+            state="failed",
+            failure_code="target_unreadable",
+            observed=_ABSENT_TARGET,
+            now=now,
+        )
     if observed is None:
         # Nothing current to observe, so nothing may be published against it.
         # Proof and retirement own what happens to the batch from here.
@@ -358,6 +421,49 @@ def execute_write_advisory(
             observed=observed,
             now=now,
         )
+
+    route_inputs = advisory_handoff.route_inputs(vault_root, batch_id)
+    if route_inputs is not None and route_inputs.target_rel_path == stored.target_rel_path:
+        # The leaf declared its sweep and skipped it inline: run exactly that
+        # sweep here, over exactly those inputs.
+        try:
+            candidates, emitted = _candidates_for_route(
+                vault_root, route_inputs, result_ref=ref
+            )
+        except Exception as error:  # noqa: BLE001 - optional advisory fails closed and soft
+            if not isinstance(error, _UnaddressableAdvisory):
+                # The sweep runs over the draft's own title and body, which an
+                # exception message or traceback could carry into the log.
+                from .writer_lease import _content_free_cause
+
+                log.warning(
+                    "advisory computation failed batch=%s (%s)",
+                    batch_id,
+                    _content_free_cause(error, stage="route_advisory"),
+                )
+            return _publish(
+                vault_root,
+                claimed_status,
+                state="failed",
+                failure_code="advisory_failed",
+                observed=observed,
+                now=now,
+            )
+        execution = _publish(
+            vault_root,
+            claimed_status,
+            state="ready",
+            candidates=candidates,
+            observed=observed,
+            now=now,
+        )
+        if execution.outcome == "published" and corpus_aware.record_write_advisory_surfacing(
+            vault_root, emitted
+        ):
+            _arm_published_quiet_offer(vault_root, ref, candidates, emitted)
+        if execution.outcome in {"published", "already_published", "superseded"}:
+            advisory_handoff.forget_route_inputs(vault_root, batch_id)
+        return execution
 
     from . import embeddings  # numpy-backed; loaded only when a claim is executed
 
@@ -411,7 +517,8 @@ def execute_write_advisory(
     if execution.outcome == "published":
         # Durable now, so the signal has genuinely reached its result. A refused
         # publication deliberately leaves the once-only ledger untouched.
-        corpus_aware.record_write_advisory_surfacing(vault_root, emitted)
+        if corpus_aware.record_write_advisory_surfacing(vault_root, emitted):
+            _arm_published_quiet_offer(vault_root, ref, candidates, emitted)
     return execution
 
 
@@ -673,8 +780,34 @@ def resolve_result(
         return _projected(stored.ref, stored.state)
     if stored.state == "failed":
         return _projected(stored.ref, "failed", code=stored.failure_code)
+    advisories = _released_candidates(vault_root, stored.candidates)
+    if advisories:
+        try:
+            dispositions = review_state.ReviewStateStore(vault_root).load()["dispositions"]
+        except Exception:  # noqa: BLE001 - optional offer state fails open
+            dispositions = {}
+        for family in corpus_aware._WRITE_ADVISORY_KINDS:
+            row = dispositions.get(family)
+            carrier = (
+                row.get("_quiet_offer_carrier")
+                if isinstance(row, dict) and row.get("quiet_offered_at")
+                else None
+            )
+            if not isinstance(carrier, dict) or carrier.get("result_ref") != stored.ref:
+                continue
+            for advisory in advisories:
+                if (
+                    carrier.get("review_ref") == advisory["ref"]
+                    and carrier.get("fingerprint") == advisory["fingerprint"]
+                ):
+                    advisory["warning"] = corpus_aware.render_write_advisory_quiet_offer(
+                        advisory["warning"],
+                        advisory["ref"],
+                        advisory["fingerprint"],
+                        {"ref": review_state.family_ref(family)},
+                    )
     return _projected(
         stored.ref,
         "ready",
-        advisories=_released_candidates(vault_root, stored.candidates),
+        advisories=advisories,
     )

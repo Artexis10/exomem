@@ -12,7 +12,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
@@ -61,6 +61,7 @@ _RETRYABLE_FAILURE_CODES = frozenset(
 _ADVISORY_FAILURE_CODES = frozenset(
     {
         "advisory_failed",
+        "advisory_unavailable",
         "embedding_unavailable",
         "generation_changed",
         "handler_unavailable",
@@ -401,7 +402,19 @@ class DerivedAdvisoryCandidate:
     triage_fingerprint: str
 
     def __post_init__(self) -> None:
-        _safe_rel_path(self.counterpart_rel_path, label="counterpart_rel_path")
+        # A vault-scope sweep names counterparts outside the knowledge base, and
+        # the result must carry exactly the warnings the write returns inline.
+        counterpart = deferred_index._safe_markdown_rel_path(
+            self.counterpart_rel_path, knowledge_base_only=False
+        )
+        if (
+            counterpart is None
+            or counterpart != self.counterpart_rel_path
+            or len(counterpart) > _MAX_REL_PATH
+        ):
+            raise ValueError(
+                "counterpart_rel_path must be a bounded safe vault Markdown rel_path"
+            )
         _bounded(
             self.counterpart_fingerprint,
             label="counterpart_fingerprint",
@@ -597,6 +610,13 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
         str(row[1])
         for row in connection.execute("PRAGMA table_info(write_advisory_results)")
     }
+    paths = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(derived_batch_paths)")
+    }
+    batches = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(derived_batches)")
+    }
     present = {
         str(row[0])
         for row in connection.execute(
@@ -604,13 +624,23 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
             "('write_advisory_result_candidates', "
             "'pending_visibility_generation_insert', "
             "'pending_visibility_generation_update', "
-            "'pending_visibility_generation_delete')"
+            "'pending_visibility_generation_delete', "
+            "'derived_paths_sequence_fill', 'derived_paths_sequence', "
+            "'derived_paths_after_sequence', 'derived_paths_missing_sequence', "
+            "'derived_batches_state')"
         )
     }
     return (
         "lease_revision" in components
         and "target_rel_path" in advisory
-        and len(present) == 4
+        and "batch_seq" in paths
+        and "proven_at" in batches
+        and len(present) == 9
+        and connection.execute(
+            "SELECT 1 FROM derived_batch_paths "
+            "INDEXED BY derived_paths_missing_sequence "
+            "WHERE batch_seq IS NULL LIMIT 1"
+        ).fetchone() is None
     )
 
 
@@ -1077,6 +1107,304 @@ def _newer_visibility_covers(
     return True
 
 
+def _newer_custody_covers_path(
+    connection: sqlite3.Connection,
+    batch_sequence: int,
+    rel_path: str,
+) -> bool:
+    """Whether a newer exact batch holds visibility custody for this one path.
+
+    The coverer must sit later in the store's sequence, be proven (`ready`,
+    `completed`, or itself `superseded`, which is transitive exactly as in
+    whole-batch supersession), carry the path, and hold a live or retired
+    pending row for it -- so the path's newer bytes are visible or already
+    published, never in a gap.
+    """
+    # A seek on (path, store sequence): only the later batches that carry this
+    # path are visited, never the whole later history, which is never pruned.
+    # A shared page's first later proven carrier is ordinarily a hit.
+    return (
+        connection.execute(
+            "SELECT 1 FROM derived_batch_paths AS p "
+            "JOIN derived_batches AS b ON b.batch_id = p.batch_id "
+            "WHERE p.rel_path = ? AND p.batch_seq > ? "
+            "AND b.state IN ('ready', 'completed', 'superseded') "
+            "AND EXISTS (SELECT 1 FROM pending_recall_rows AS r "
+            "WHERE r.batch_id = p.batch_id AND r.rel_path = p.rel_path "
+            "AND r.state IN ('live', 'retired')) "
+            "ORDER BY p.batch_seq LIMIT 1",
+            (rel_path, batch_sequence),
+        ).fetchone()
+        is not None
+    )
+
+
+def _recall_lanes_hold_current(vault_root: Path, rel_path: str) -> bool:
+    """Whether both persistent recall lanes already hold this path's current bytes.
+
+    Owner ruling R2 (2026-09-25): a path moved by a write no receipt covers --
+    a hand edit in an editor is the ordinary case -- is visible once the lanes
+    hold what is on disk now, and that is the right test for handing it on.
+    Absence is held as proven absence. An unreadable path never is.
+
+    This is the overlay's lane test (lexical catalogue plus reference sidecar),
+    not its whole retirement test, which also waits for the batch's resolver,
+    semantic-purge and freshness components. A handed-on row therefore stops
+    shadowing vector and graph evidence before this batch's own components have
+    run; they still run over the path later, from its current bytes.
+    """
+    target = vault_root.joinpath(*rel_path.split("/"))
+    try:
+        if not os.path.lexists(target):
+            identity: str | None = None
+        elif target.is_symlink() or not target.is_file():
+            return False
+        else:
+            identity = _hash_file(target)
+    except OSError:
+        return False
+    from . import pending_recall
+
+    return pending_recall.recall_lanes_hold(vault_root, {rel_path: identity})
+
+
+def _newer_custody_wrote_bytes(
+    connection: sqlite3.Connection,
+    batch_sequence: int,
+    rel_path: str,
+    identity: str | None,
+) -> bool:
+    """Whether a newer proven batch's recorded after-state is exactly these bytes.
+
+    A shared page can move on and land back on bytes an older batch saw before
+    its own write (an index re-rendered as it was). Those bytes are then a
+    newer write's proven after-state under that batch's custody, not a torn
+    write of the older batch.
+    """
+    # A seek on (path, after-bytes, store sequence): the ordinary answer is a
+    # miss, and a miss visits no row at all.
+    return (
+        connection.execute(
+            "SELECT 1 FROM derived_batch_paths AS p "
+            "JOIN derived_batches AS b ON b.batch_id = p.batch_id "
+            "WHERE p.rel_path = ? AND p.after_hash IS ? AND p.batch_seq > ? "
+            "AND b.state IN ('ready', 'completed', 'superseded') "
+            "AND EXISTS (SELECT 1 FROM pending_recall_rows AS r "
+            "WHERE r.batch_id = p.batch_id AND r.rel_path = p.rel_path "
+            "AND r.state IN ('live', 'retired')) "
+            "ORDER BY p.batch_seq LIMIT 1",
+            (rel_path, identity, batch_sequence),
+        ).fetchone()
+        is not None
+    )
+
+
+def _handed_on(
+    vault_root: Path,
+    connection: sqlite3.Connection,
+    batch_id: str,
+    moved: Sequence[str],
+    returned: Sequence[tuple[str, str | None]] = (),
+) -> frozenset[str]:
+    """The paths whose current bytes are someone else's to make visible.
+
+    A moved path (`other`) is handed on when newer exact custody covers it
+    (option A) or, failing that, when both recall lanes already hold its
+    current bytes (R2). A path back at this batch's before-bytes is handed on
+    when a newer proven batch recorded exactly those bytes as its own
+    after-state; otherwise it may be this batch's torn write, and stays owed.
+    One before-state cannot be a torn write: a page this batch created is
+    absent again after the batch was proven committed, so someone deleted it
+    since. That absence goes through the same lanes test as a moved path.
+    """
+    if not moved and not returned:
+        return frozenset()
+    row = connection.execute(
+        "SELECT rowid, state, EXISTS (SELECT 1 FROM pending_recall_rows AS r "
+        "WHERE r.batch_id = b.batch_id AND r.state IN ('live', 'retired')), "
+        "proven_at "
+        "FROM derived_batches AS b WHERE batch_id = ?",
+        (batch_id,),
+    ).fetchone()
+    if row is None:
+        return frozenset()
+    sequence = int(row[0])
+    # The durable proof marker survives a stranded state and unpublished rows.
+    # Ready/completed state or published custody also proves legacy batches.
+    proven = row[3] is not None or str(row[1]) in {"ready", "completed"} or bool(row[2])
+    handed = {
+        rel
+        for rel in moved
+        if _newer_custody_covers_path(connection, sequence, rel)
+        or _recall_lanes_hold_current(vault_root, rel)
+    }
+    handed.update(
+        rel
+        for rel, identity in returned
+        if _newer_custody_wrote_bytes(connection, sequence, rel, identity)
+        or (identity is None and proven and _recall_lanes_hold_current(vault_root, rel))
+    )
+    return frozenset(handed)
+
+
+def _delegated_paths(
+    vault_root: Path,
+    connection: sqlite3.Connection,
+    receipt: DerivedBatchReceipt,
+    path_states: Sequence[str],
+) -> frozenset[str] | None:
+    """The paths this batch hands on, or None if it cannot prove.
+
+    Owner ruling on stranded batches (option A, 2026-09-25): proof is per path.
+    A path in its intended after-state is this batch's own. A path whose bytes
+    moved on past it (`other`) is proven when newer exact custody covers it, or
+    when both recall lanes already hold its current bytes (R2). A path back at
+    this batch's before-bytes is proven only when a newer proven batch wrote
+    exactly those bytes, or -- for a page this batch created, once the batch
+    was proven committed -- when both lanes hold its absence. A handed-on
+    path's visibility is no longer this
+    batch's; its remaining paths still converge here. Any other path --
+    unreadable, or not explained by newer custody or the lanes -- makes the
+    whole batch unprovable, exactly as before.
+    """
+    if any(state not in {"after", "other", "before"} for state in path_states):
+        return None
+    moved = [
+        path.rel_path
+        for path, state in zip(receipt.paths, path_states, strict=True)
+        if state == "other"
+    ]
+    returned = [
+        (path.rel_path, path.before_hash)
+        for path, state in zip(receipt.paths, path_states, strict=True)
+        if state == "before"
+    ]
+    if not moved and not returned:
+        return frozenset()
+    handed_on = _handed_on(vault_root, connection, receipt.batch_id, moved, returned)
+    return handed_on if len(handed_on) == len(moved) + len(returned) else None
+
+
+def _retire_delegated_rows(
+    connection: sqlite3.Connection,
+    batch_id: str,
+    delegated: Collection[str],
+    *,
+    now: float,
+) -> None:
+    """Stop shadowing paths whose visibility newer custody now owns.
+
+    A delegated row's recorded after-state is gone from disk, so it can never
+    prove again; left live it would only make the overlay unprovable once its
+    coverer retires.
+    """
+    for rel_path in sorted(delegated):
+        connection.execute(
+            "UPDATE pending_recall_rows SET state = 'retired', updated_at = ? "
+            "WHERE batch_id = ? AND rel_path = ? AND state != 'retired'",
+            (now, batch_id, rel_path),
+        )
+
+
+def _activate_proven_batch(
+    connection: sqlite3.Connection, batch_id: str, *, now: float
+) -> None:
+    """Open a proven batch's components; a completed batch stays completed."""
+    connection.execute(
+        "UPDATE derived_batch_components SET state = 'prepared', "
+        "claim_owner = NULL, claim_expires_at = NULL, failure_code = NULL, "
+        "next_attempt_at = MIN(next_attempt_at, ?), updated_at = ? "
+        "WHERE batch_id = ? AND state IN ('prepared', 'reconcile_required')",
+        (now, now, batch_id),
+    )
+    _promote_ready_components(connection, batch_id, now=now)
+    connection.execute(
+        "UPDATE derived_batches SET state = CASE "
+        "WHEN state = 'completed' THEN state ELSE 'ready' END, updated_at = ?, "
+        "proven_at = COALESCE(proven_at, ?), failure_code = NULL WHERE batch_id = ?",
+        (now, now, batch_id),
+    )
+
+
+def _supersede_batch(
+    connection: sqlite3.Connection,
+    batch_id: str,
+    *,
+    now: float,
+    advisory: bool = True,
+) -> None:
+    """Retire a batch whose every path newer custody now owns.
+
+    ``advisory=False`` retires receipt custody only and leaves the batch's
+    advisory result to the caller, which is reconcile's route: there the
+    target page may be exactly what the advisory describes.
+    """
+    connection.execute(
+        "UPDATE derived_batch_components SET state = 'superseded', "
+        "claim_owner = NULL, claim_expires_at = NULL, updated_at = ? "
+        "WHERE batch_id = ? AND state != 'not_required'",
+        (now, batch_id),
+    )
+    # Newer exact custody already shadows these paths, so the dead batch must
+    # stop consuming the bounded snapshot limit.
+    connection.execute(
+        "UPDATE pending_recall_rows SET state = 'retired', "
+        "updated_at = ? WHERE batch_id = ? AND state != 'retired'",
+        (now, batch_id),
+    )
+    connection.execute(
+        "UPDATE derived_batches SET state = 'superseded', updated_at = ? "
+        "WHERE batch_id = ?",
+        (now, batch_id),
+    )
+    if advisory:
+        connection.execute(
+            "UPDATE write_advisory_results SET state = 'superseded', "
+            "updated_at = ? WHERE batch_id = ?",
+            (now, batch_id),
+        )
+
+
+def _settle_owed_advisory(
+    vault_root: Path,
+    connection: sqlite3.Connection,
+    batch_id: str,
+    *,
+    now: float,
+) -> None:
+    """Answer a stranded batch's advisory that never ran; leave a finished one.
+
+    A `ready` or `failed` result stays as published. A `pending` result over an
+    unchanged target is owed an answer the retired batch can no longer give,
+    so it fails as `advisory_unavailable`; one whose target moved describes
+    nothing current and is superseded.
+    """
+    from .deferred_write_advisory import _observe_fingerprint
+
+    for result_id, target_rel_path, target_fingerprint in connection.execute(
+        "SELECT result_id, target_rel_path, target_fingerprint "
+        "FROM write_advisory_results WHERE batch_id = ? AND state = 'pending'",
+        (batch_id,),
+    ).fetchall():
+        unchanged = target_rel_path is not None and (
+            _observe_fingerprint(vault_root, str(target_rel_path))
+            == str(target_fingerprint)
+        )
+        if unchanged:
+            connection.execute(
+                "UPDATE write_advisory_results SET state = 'failed', "
+                "failure_code = 'advisory_unavailable', updated_at = ? "
+                "WHERE result_id = ? AND state = 'pending'",
+                (now, result_id),
+            )
+        else:
+            connection.execute(
+                "UPDATE write_advisory_results SET state = 'superseded', "
+                "updated_at = ? WHERE result_id = ? AND state = 'pending'",
+                (now, result_id),
+            )
+
+
 def _prove_committed_guarded(
     vault_root: Path,
     batch_id: str,
@@ -1103,6 +1431,17 @@ def _prove_committed_guarded(
             all_after = all(state == "after" for state in path_states)
             all_before = all(state == "before" for state in path_states)
             current = _receipt_from_connection(connection, batch_id)
+            # Preserve a pre-upgrade batch's proof before re-proof can strand
+            # it and erase the only surviving evidence of its old ready state.
+            connection.execute(
+                "UPDATE derived_batches AS b SET proven_at = ? "
+                "WHERE batch_id = ? AND proven_at IS NULL AND "
+                "state NOT IN ('aborted', 'superseded') AND "
+                "(state IN ('ready', 'completed') OR EXISTS ("
+                "SELECT 1 FROM pending_recall_rows AS r WHERE r.batch_id = b.batch_id "
+                "AND r.state IN ('live', 'retired')))",
+                (observed_at, current.batch_id),
+            )
             if current.state == "aborted":
                 outcome = "aborted"
             elif current.state == "superseded":
@@ -1123,24 +1462,7 @@ def _prove_committed_guarded(
                 # write that was entirely sound. The generation stays recorded
                 # for lineage and is still what completion binds against.
                 outcome = "ready"
-                connection.execute(
-                    "UPDATE derived_batch_components SET state = 'prepared', "
-                    "claim_owner = NULL, claim_expires_at = NULL, failure_code = NULL, "
-                    "next_attempt_at = MIN(next_attempt_at, ?), updated_at = ? "
-                    "WHERE batch_id = ? AND state IN ('prepared', 'reconcile_required')",
-                    (observed_at, observed_at, current.batch_id),
-                )
-                _promote_ready_components(
-                    connection,
-                    current.batch_id,
-                    now=observed_at,
-                )
-                connection.execute(
-                    "UPDATE derived_batches SET state = CASE "
-                    "WHEN state = 'completed' THEN state ELSE 'ready' END, updated_at = ?, "
-                    "failure_code = NULL WHERE batch_id = ?",
-                    (observed_at, current.batch_id),
-                )
+                _activate_proven_batch(connection, current.batch_id, now=observed_at)
             elif all_before and known_uncommitted:
                 outcome = "aborted"
                 connection.execute(
@@ -1174,29 +1496,23 @@ def _prove_committed_guarded(
                 )
             elif _newer_visibility_covers(connection, current):
                 outcome = "superseded"
-                connection.execute(
-                    "UPDATE derived_batch_components SET state = 'superseded', "
-                    "claim_owner = NULL, claim_expires_at = NULL, updated_at = ? "
-                    "WHERE batch_id = ? AND state != 'not_required'",
-                    (observed_at, current.batch_id),
-                )
-                # Newer exact custody already shadows these paths, so the dead
-                # batch must stop consuming the bounded snapshot limit.
-                connection.execute(
-                    "UPDATE pending_recall_rows SET state = 'retired', "
-                    "updated_at = ? WHERE batch_id = ? AND state != 'retired'",
-                    (observed_at, current.batch_id),
-                )
-                connection.execute(
-                    "UPDATE derived_batches SET state = 'superseded', updated_at = ? "
-                    "WHERE batch_id = ?",
-                    (observed_at, current.batch_id),
-                )
-                connection.execute(
-                    "UPDATE write_advisory_results SET state = 'superseded', "
-                    "updated_at = ? WHERE batch_id = ?",
-                    (observed_at, current.batch_id),
-                )
+                _supersede_batch(connection, current.batch_id, now=observed_at)
+            elif (
+                delegated := _delegated_paths(vault_root, connection, current, path_states)
+            ) is not None:
+                # Per-path proof (owner ruling, option A): every path is either
+                # this batch's exact after-state or has moved on under newer
+                # custody. The batch keeps what it owns and hands the rest over;
+                # with nothing left to own it is superseded as a whole.
+                if len(delegated) == len(current.paths):
+                    outcome = "superseded"
+                    _supersede_batch(connection, current.batch_id, now=observed_at)
+                else:
+                    outcome = "ready"
+                    _retire_delegated_rows(
+                        connection, current.batch_id, delegated, now=observed_at
+                    )
+                    _activate_proven_batch(connection, current.batch_id, now=observed_at)
             else:
                 outcome = "reconcile_required"
                 connection.execute(
@@ -1262,6 +1578,47 @@ def prove_committed(
         )
 
 
+def _publication_split(
+    vault_root: Path,
+    receipt: DerivedBatchReceipt,
+) -> tuple[tuple[DerivedBatchPath, ...], frozenset[str]]:
+    """Split a proven batch into the paths it publishes and the paths it hands on.
+
+    A path whose row the proof already retired belongs to newer custody. A path
+    that moved on since the proof is handed on only if newer custody covers it
+    now or the recall lanes already hold its current bytes; otherwise it stays
+    owned, and the publisher's own exact proof refuses it, exactly as before
+    per-path proof existed.
+    """
+    connection = _connect_receipt_read(vault_root)
+    try:
+        retired = {
+            str(rel)
+            for (rel,) in connection.execute(
+                "SELECT rel_path FROM pending_recall_rows "
+                "WHERE batch_id = ? AND state = 'retired'",
+                (receipt.batch_id,),
+            )
+        }
+        open_paths = tuple(p for p in receipt.paths if p.rel_path not in retired)
+        states = tuple(_canonical_path_state(vault_root, p) for p in open_paths)
+        moved = [
+            p.rel_path
+            for p, state in zip(open_paths, states, strict=True)
+            if state == "other"
+        ]
+        returned = [
+            (p.rel_path, p.before_hash)
+            for p, state in zip(open_paths, states, strict=True)
+            if state == "before"
+        ]
+        handed_on = _handed_on(vault_root, connection, receipt.batch_id, moved, returned)
+    finally:
+        connection.close()
+    owned = tuple(p for p in open_paths if p.rel_path not in handed_on)
+    return owned, frozenset(retired | handed_on)
+
+
 def publish_pending_visibility(
     vault_root: Path,
     receipt: DerivedBatchReceipt,
@@ -1283,11 +1640,15 @@ def publish_pending_visibility(
         current = _load_receipt(vault_root, receipt.batch_id)
         if current.state not in {"ready", "completed"}:
             raise RuntimeError("pending visibility requires exact committed proof")
-        if not publisher(vault_root, current):
+        owned, delegated = _publication_split(vault_root, current)
+        if not publisher(vault_root, replace(current, paths=owned)):
             raise RuntimeError("pending visibility publisher did not prove publication")
         connection = deferred_index._connect(vault_root, create=True)
         try:
             with connection:
+                _retire_delegated_rows(
+                    connection, current.batch_id, delegated, now=published_at
+                )
                 connection.execute(
                     "UPDATE pending_recall_rows SET state = 'live', updated_at = ? "
                     "WHERE batch_id = ? AND canonical_generation = ? "
@@ -1491,15 +1852,25 @@ def retire_pending_visibility(
             (row.rel_path, row.component_revision, row.canonical_generation)
             for row in batch.rows
         )
+        all_identity = tuple(
+            (str(row[0]), int(row[1]), str(row[2])) for row in current
+        )
+        if all(str(row[3]) == "retired" for row in current):
+            if set(expected_identity) <= set(all_identity):
+                connection.commit()
+                return PendingVisibilityRetirement(outcome="retired")
+            connection.rollback()
+            return PendingVisibilityRetirement(outcome="stale")
+        # A row per-path proof handed to newer custody was retired on its own
+        # and is not part of what a snapshot still shows; the exact identity
+        # compared is the batch's open custody.
+        current = [row for row in current if str(row[3]) != "retired"]
         current_identity = tuple(
             (str(row[0]), int(row[1]), str(row[2])) for row in current
         )
         if current_identity != expected_identity:
             connection.rollback()
             return PendingVisibilityRetirement(outcome="stale")
-        if all(str(row[3]) == "retired" for row in current):
-            connection.commit()
-            return PendingVisibilityRetirement(outcome="retired")
         # A never-published row still gates its batch's components. Retiring it
         # would strand them behind a publication that can no longer complete.
         if any(str(row[3]) == "prepared" for row in current):
@@ -2008,22 +2379,218 @@ def recover_prepared_batches(
     return recovered
 
 
+_RECOVERING_BATCHES_SQL: Final = (
+    "SELECT count(*) FROM derived_batches AS b WHERE "
+    "b.state = 'prepared' OR ("
+    "b.state = 'ready' AND EXISTS ("
+    "SELECT 1 FROM pending_recall_rows AS p "
+    "WHERE p.batch_id = b.batch_id AND p.state = 'prepared'))"
+)
+_STRANDED_BATCHES_SQL: Final = (
+    "SELECT count(*) FROM derived_batches WHERE state = 'reconcile_required'"
+)
+
+#: How many stranded batches one operator reconcile converges.
+STRANDED_RECONCILE_LIMIT: Final = 256
+
+
 def recoverable_batch_count(vault_root: Path) -> int:
+    """Crash-cut custody a drain pass will prove and publish on its own.
+
+    A committed batch whose writer never proved it, or whose pending rows were
+    never published. A stranded (`reconcile_required`) batch is not counted:
+    no pass finishes it until newer custody or the recall lanes cover what
+    moved, so it is reported apart by :func:`stranded_batch_count`.
+    """
     if not deferred_index.store_path(vault_root).exists():
         return 0
-    connection = deferred_index._connect(vault_root, create=False)
+    connection = _connect_receipt_read(vault_root)
     try:
-        return int(
-            connection.execute(
-                "SELECT count(*) FROM derived_batches AS b WHERE "
-                "b.state IN ('prepared', 'reconcile_required') OR ("
-                "b.state = 'ready' AND EXISTS ("
-                "SELECT 1 FROM pending_recall_rows AS p "
-                "WHERE p.batch_id = b.batch_id AND p.state = 'prepared'))"
-            ).fetchone()[0]
+        return int(connection.execute(_RECOVERING_BATCHES_SQL).fetchone()[0])
+    finally:
+        connection.close()
+
+
+def stranded_batch_count(vault_root: Path) -> int:
+    """Batches held in `reconcile_required`: proven neither way, owed a repair."""
+    if not deferred_index.store_path(vault_root).exists():
+        return 0
+    connection = _connect_receipt_read(vault_root)
+    try:
+        return int(connection.execute(_STRANDED_BATCHES_SQL).fetchone()[0])
+    finally:
+        connection.close()
+
+
+def custody_census(vault_root: Path, *, now: float | None = None) -> dict[str, Any]:
+    """Content-free counts and one age for operators: never a path or an id."""
+    census: dict[str, Any] = {
+        "due_components": 0,
+        "oldest_due_age_seconds": None,
+        "recovering_batches": 0,
+        "stranded_batches": 0,
+    }
+    if not deferred_index.store_path(vault_root).exists():
+        return census
+    current = _timestamp(now)
+    connection = _connect_receipt_read(vault_root)
+    try:
+        due, oldest = connection.execute(
+            "SELECT count(*), MIN(b.created_at) FROM derived_batch_components AS c "
+            "JOIN derived_batches AS b ON b.batch_id = c.batch_id "
+            "WHERE b.state = 'ready' AND (c.state = 'ready' OR "
+            "(c.state = 'retryable' AND c.next_attempt_at <= ?) OR "
+            "(c.state = 'claimed' AND c.claim_expires_at <= ?)) "
+            "AND NOT EXISTS (SELECT 1 FROM pending_recall_rows AS p "
+            "WHERE p.batch_id = c.batch_id AND p.state = 'prepared')",
+            (current, current),
+        ).fetchone()
+        census["due_components"] = int(due or 0)
+        if oldest is not None:
+            census["oldest_due_age_seconds"] = round(max(0.0, current - float(oldest)), 1)
+        census["recovering_batches"] = int(
+            connection.execute(_RECOVERING_BATCHES_SQL).fetchone()[0]
+        )
+        census["stranded_batches"] = int(
+            connection.execute(_STRANDED_BATCHES_SQL).fetchone()[0]
         )
     finally:
         connection.close()
+    return census
+
+
+def _probe_stranded_count(vault_root: Path) -> int:
+    """Count stranded batches without migrating or failing on the store.
+
+    Reconcile runs this before it knows there is anything to repair, and a dry
+    run must leave the store byte-identical. A legacy store with no receipt
+    tables holds no stranded batch; an unreadable one is reported by the
+    sidecar checks, not here.
+    """
+    if not deferred_index.store_path(vault_root).exists():
+        return 0
+    try:
+        connection = deferred_index._connect(vault_root, create=False)
+    except (OSError, RuntimeError, ValueError, sqlite3.Error):
+        return 0
+    try:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'derived_batches'"
+        ).fetchone() is None:
+            return 0
+        return int(connection.execute(_STRANDED_BATCHES_SQL).fetchone()[0])
+    except sqlite3.Error:
+        return 0
+    finally:
+        connection.close()
+
+
+def reconcile_stranded_batches(
+    vault_root: Path,
+    *,
+    converge: Callable[[Path, Sequence[str], Sequence[str]], bool],
+    dry_run: bool = False,
+    limit: int = STRANDED_RECONCILE_LIMIT,
+    now: float | None = None,
+) -> dict[str, int]:
+    """Operator repair (owner ruling R3): converge stranded batches from current bytes.
+
+    For each batch in `reconcile_required`, ``converge`` runs the ordinary
+    writer fan-out over what every one of its paths holds now. The batch is
+    then retired as `superseded` -- its pending rows with it -- once both recall
+    lanes hold every path's current bytes, which is the overlay's lane test and
+    full reconciliation of the path and component demand. Only receipt custody
+    is retired: a finished advisory result stays as published, and one that
+    never ran is settled by :func:`_settle_owed_advisory`. A batch the lanes
+    still lack stays stranded and is counted in ``remaining``. The report is
+    counts only.
+    """
+    stranded = _probe_stranded_count(vault_root)
+    if dry_run or not stranded or limit <= 0:
+        return {"stranded": stranded, "retired": 0, "remaining": stranded}
+    connection = _connect_receipt_read(vault_root)
+    try:
+        batch_ids = tuple(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT batch_id FROM derived_batches WHERE state = 'reconcile_required' "
+                "ORDER BY rowid LIMIT ?",
+                (int(limit),),
+            )
+        )
+    finally:
+        connection.close()
+    retired = 0
+    from . import pending_recall
+    from .writer_lease import active_manager
+
+    for batch_id in batch_ids:
+        receipt = _load_receipt(vault_root, batch_id)
+        present = [
+            path.rel_path
+            for path in receipt.paths
+            if vault_root.joinpath(*path.rel_path.split("/")).is_file()
+        ]
+        created = [
+            path.rel_path
+            for path in receipt.paths
+            if path.before_hash is None and path.rel_path in present
+        ]
+        try:
+            if not converge(vault_root, present, created):
+                continue
+        except Exception:  # noqa: BLE001 - one batch's fan-out cannot stop the rest
+            continue
+        retired_at = _timestamp(now)
+        with active_manager().consistency_guard(
+            vault_root,
+            operation="derived_receipt_reconcile",
+            holder_kind="derived-worker",
+        ):
+            expected: dict[str, str | None] = {}
+            readable = True
+            for path in receipt.paths:
+                target = vault_root.joinpath(*path.rel_path.split("/"))
+                try:
+                    if not os.path.lexists(target):
+                        expected[path.rel_path] = None
+                    elif target.is_symlink() or not target.is_file():
+                        readable = False
+                        break
+                    else:
+                        expected[path.rel_path] = _hash_file(target)
+                except OSError:
+                    readable = False
+                    break
+            if not readable or not pending_recall.recall_lanes_hold(vault_root, expected):
+                continue
+            write = deferred_index._connect(vault_root, create=True)
+            try:
+                write.execute("BEGIN IMMEDIATE")
+                try:
+                    still = write.execute(
+                        "SELECT 1 FROM derived_batches WHERE batch_id = ? "
+                        "AND state = 'reconcile_required'",
+                        (batch_id,),
+                    ).fetchone()
+                    if still is not None:
+                        _supersede_batch(write, batch_id, now=retired_at, advisory=False)
+                        _settle_owed_advisory(
+                            vault_root, write, batch_id, now=retired_at
+                        )
+                        retired += 1
+                except Exception:
+                    write.rollback()
+                    raise
+                write.commit()
+            finally:
+                write.close()
+    return {
+        "stranded": stranded,
+        "retired": retired,
+        "remaining": stranded_batch_count(vault_root),
+    }
 
 
 def claim_ready_components(
@@ -2203,9 +2770,10 @@ def complete_component(
         )
         # No generation-equality refusal here either (ruling R1). Completion is
         # bound by the exact claim CAS below and by every path still being in
-        # its intended after-state under the observation guards; the vault's
-        # global checkpoint having moved because some other page was written
-        # says nothing about whether THIS batch's bytes are still current.
+        # its intended after-state under the observation guards, or moved on
+        # under newer custody (per-path proof); the vault's global checkpoint
+        # having moved because some other page was written says nothing about
+        # whether THIS batch's bytes are still current.
         connection = deferred_index._connect(vault_root, create=True)
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -2215,7 +2783,9 @@ def complete_component(
                     path_states,
                     observation_guards,
                 )
-                if any(state != "after" for state in path_states):
+                # The same per-path predicate as the proof: every path is this
+                # batch's exact after-state or has moved on under newer custody.
+                if _delegated_paths(vault_root, connection, receipt, path_states) is None:
                     connection.rollback()
                     return False
                 changed = connection.execute(
