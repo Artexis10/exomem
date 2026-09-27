@@ -353,19 +353,21 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
 
 ## 8. Handoff convergence — the 2026-09-27 cold fallback
 
-- [ ] 8.1 Red tests: a page created after the last publication does not strand the
+- [x] 8.1 Red tests: a page created after the last publication does not strand the
   standby; a standby re-proves after the serving worker republishes; a removed page is
   adopted as residue and its rows are deleted by the drain; promotion retires a full
   marker its proof covered and retains one raised after; rebuild outcome lines carry a
   reason and report a refused claim as coalesced.
-- [ ] 8.2 Rebuild outcome logging: `_rebuild_outcome` names the reason and reports
+- [x] 8.2 Rebuild outcome logging: `_rebuild_outcome` names the reason and reports
   `GraphRebuildInProgress` as `coalesced`; start-up validation and the reconcile
   rebuild log their outcome; the drain's whole-vault request names its branch.
-- [ ] 8.3 Adoption residue for created and removed pages, bounded by one drain pass,
+- [x] 8.3 Adoption residue for created and removed pages, bounded by one drain pass,
   with topology accepted only when the residue explains it.
-- [ ] 8.4 A waiting standby re-proves on a changed generation or snapshot, at most every
+- [x] 8.4 A waiting standby re-proves on a changed generation or snapshot, at most every
   30 s, and never after promotion or discard has begun.
-- [ ] 8.5 Promotion retires the full marker its proof covered, recorded in the handoff
+- [x] 8.5 Promotion retires the full marker its proof covered, recorded in the handoff
   record.
 - [ ] 8.6 Scoped suites green (`tests/test_standby_*`, `tests/test_graph_*`, index_sync);
   ruff and the public-artifact gate green; author-independent review.
+  Evidence for 8.1-8.5: `tests/test_graph_handoff_convergence.py` (15 tests) was red
+  on the base (14 failed, 1 guard passed) and is green with the fix.
