@@ -1653,8 +1653,8 @@ def op_bootstrap(
                     "disposition carries its own instruction"
                 ),
                 "records_routing_handling": (
-                    "read the observation, then route it under the served capture disposition, "
-                    "a grouped backfill once; resume a held candidate when one exists"
+                    "route the observation under the served capture disposition, resuming a "
+                    "held candidate; ask about a grouped backfill once at any prominence"
                 ),
                 "collection_candidate": (
                     "a strong collection_candidate is a proposal: draft its schema through "
@@ -4764,14 +4764,22 @@ def op_preserve(
     _note_committed_artifact_targets(payload)
     from . import semantic_writes
 
-    routing_terms = [
-        f"Evidence: {Path(result.path).name}",
+    routing_tags = [
         "evidence",
         scope.lower().replace(" ", "-"),
         category.lower().replace(" ", "-"),
+    ]
+    routing_terms = [
+        f"Evidence: {Path(result.path).name}",
+        *routing_tags,
         description.strip() if description and description.strip() else "",
     ]
-    routing = semantic_writes._records_routing_from_terms(vault_root, routing_terms)
+    # The facets the sidecar's own frontmatter carries, so `claims.match`
+    # decides an Evidence write exactly as the recompute will.
+    routing_facets = {"type": ["source"], "tags": routing_tags}
+    routing = semantic_writes._records_routing_from_terms(
+        vault_root, routing_terms, routing_facets
+    )
     try:
         from . import due_state
 
@@ -4782,6 +4790,7 @@ def op_preserve(
             terms=routing_terms,
             routing=routing,
             observation_aliases=(str(result.path or ""),),
+            facets=routing_facets,
         )
     except Exception:  # noqa: BLE001 -- due-state advice never breaks Evidence custody
         log.debug("Evidence observation due-state delta failed (non-fatal)", exc_info=True)

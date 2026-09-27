@@ -942,6 +942,9 @@ def recompute(
         "bindings": audit_module.outcome_binding_index(Path(vault_root)),
         "claims": _recompute_claims(Path(vault_root)),
         "role_state": role_marker,
+        # Where each collection's bounded backfill scan resumes, keyed by its
+        # collection id and claims signal. Carried by deltas, rebuilt only here.
+        "backfill_cursors": dict(report.backfill_cursors or {}),
     }
 
 
@@ -1475,6 +1478,7 @@ def apply_write_delta(
             ),
             "claims": dict(current.get("claims") or {}),
             "role_state": role_index,
+            **_carried_backfill_cursors(current),
         }
         save(vault_root, updated)
     return updated
@@ -1886,9 +1890,16 @@ def _persist_delta(
         ),
         "claims": claims if claims is not None else dict(current.get("claims") or {}),
         "role_state": current.get("role_state"),
+        **_carried_backfill_cursors(current),
     }
     save(vault_root, updated)
     return updated
+
+
+def _carried_backfill_cursors(current: Mapping[str, Any]) -> dict[str, Any]:
+    """A write learns nothing about backfill progress; keep what recompute left."""
+    cursors = current.get("backfill_cursors")
+    return {"backfill_cursors": dict(cursors)} if isinstance(cursors, dict) else {}
 
 
 def _prune_missing_joined(
