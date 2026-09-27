@@ -3,25 +3,30 @@
 The active agent decides every candidate, destination and disposition; this
 module validates, records and (only when enabled) executes them. A candidate
 names a typed destination for an existing writer -- one closed curation step
-(`curation.STEP_KINDS`, fields checked by `curation.validate_forward_plan`) --
-never a free-form effect.
+of a kind its route owns (fields checked by `curation.validate_forward_plan`)
+-- never a free-form effect.
 
-Authority boundary, kept small for review (close-memory-loop task 5.5):
+What each action writes (close-memory-loop task 5.5):
 
 * `inspect` reads the caller's own episode ledger. It writes nothing.
 * `prepare` and `disposition` write only the caller's audience-bound episode
   journal and inert sealed single-step curation plans. Preparation runs the
   same read-only leaf preparation `maintain_memory mode=curation` propose runs;
-  no canonical page is written.
-* `resume` is the only path to a writer. Unless the service environment sets
-  `EXOMEM_EPISODE_WORKFLOW`, it refuses with `episode_workflow_disabled` before
-  reading or writing anything. When enabled it runs only a leaf that is routed,
-  bound to its own sealed plan, covered by a current precommit attestation and
-  not already attempted, through `curation.apply` -- the existing executor,
-  under the command's writer lease and each writer's own validation. It grants
-  nothing `maintain_memory mode=curation apply` does not already grant the same
-  caller, mints no vocabulary or edge authority, and never retries an
+  no canonical page is written. Revising a proposal withdraws its disposition.
+* `resume` is the episode's executor. It acts only on the journal digest its
+  caller last reviewed, and runs only a leaf that is routed, bound to a current
+  sealed plan, covered by a current precommit attestation and not already
+  attempted, through `curation.apply` -- the existing executor, under the
+  command's writer lease and each writer's own validation. It never retries an
   uncertain attempt: reconciliation reads existing receipts only.
+
+`EXOMEM_EPISODE_WORKFLOW` is a feature switch for that executor, not an
+authority boundary. Unless the service environment sets it, `resume` refuses
+with `episode_workflow_disabled` before reading or writing anything. A sealed
+leaf plan is an ordinary curation run, which the same caller can apply through
+`maintain_memory mode=curation apply` whatever the switch says; the episode
+operations grant nothing that apply does not already grant that caller and
+mint no vocabulary or edge authority.
 """
 
 from __future__ import annotations
@@ -291,6 +296,7 @@ def _refused(key: str) -> dict[str, Any]:
             f"it with {ENABLE_ENV}. Inspect, prepare and disposition remain available."
         ),
         "executed": [],
+        "replayed": [],
         "stale": [],
         "reconciled": [],
         "blocked": [],
@@ -388,7 +394,10 @@ def _execute(session: _Session, candidate_id: str, leaf_id: str) -> tuple[str, d
         )
     session.transition("reconcile_curation_leaf", candidate=candidate_id, leaf=leaf_id)
     step = result.get("step") if isinstance(result, Mapping) else None
-    return "executed", {
+    # A plan already applied elsewhere (through `maintain_memory` curation
+    # apply, say) is reconciled from its receipt; this pass wrote nothing.
+    kind = "replayed" if curation.valid_replay_result(result) else "executed"
+    return kind, {
         "leaf_id": leaf_id,
         "operation_id": binding["operation_id"],
         "outcome": "committed",
@@ -433,7 +442,7 @@ def resume(
         raise _error("EPISODE_INPUT_REVISION_STALE", "resume must review the current input")
 
     reconciled, blocked = _reconcile_uncertain(session)
-    reported: dict[str, list[dict[str, Any]]] = {"executed": [], "stale": []}
+    reported: dict[str, list[dict[str, Any]]] = {"executed": [], "replayed": [], "stale": []}
     if postcommit:
         committed = [
             leaf["leaf_id"] for _c, leaf in _leaves(session.state) if leaf["outcome"] == "committed"

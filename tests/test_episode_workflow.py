@@ -2,9 +2,10 @@
 
 Contract: openspec/changes/close-memory-loop tasks 3.3, 3.5, 3.6 and 3.7, with
 the live-enablement gate of task 5.5. A candidate names a typed destination for
-an existing writer (a closed curation step), never a free-form effect. Only
-`resume` can reach a writer, and it refuses with `episode_workflow_disabled`
-unless the service sets `EXOMEM_EPISODE_WORKFLOW`.
+an existing writer (a closed curation step its route owns), never a free-form
+effect. `resume` is the episode's executor and refuses with
+`episode_workflow_disabled` unless the service sets `EXOMEM_EPISODE_WORKFLOW`,
+a feature switch rather than an authority boundary.
 """
 
 from __future__ import annotations

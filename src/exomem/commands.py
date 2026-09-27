@@ -7816,8 +7816,8 @@ def op_episode_memory(
         coverage_current}; candidates/prepare/disposition -> {episode,
         input_revision, candidates: [{candidate_key, route, disposition,
         pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete,
-        execution}; resume adds {status, executed, reconciled, blocked,
-        deferred, publication}. Newlines, credential-shaped text and anything
+        execution}; resume adds {status, executed, replayed, stale,
+        reconciled, blocked, deferred, publication}. Newlines, credential-shaped text and anything
         over a cap are refused with nothing written.
     """
     recap = {
