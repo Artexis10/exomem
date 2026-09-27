@@ -646,12 +646,16 @@ standby_calls = dict(calls)
 # The worker still serving keeps writing between the detached build and the
 # promotion: an edit, a new note and a delete, none of which this process sees.
 edited = generated / "generated-note-0001.md"
+newline = chr(10)
 edited.write_text(
-    edited.read_text(encoding="utf-8") + "\\nquokkaeditedafterbuild\\n", encoding="utf-8"
+    edited.read_text(encoding="utf-8") + newline + "quokkaeditedafterbuild" + newline,
+    encoding="utf-8",
 )
 created = generated / "generated-note-9999.md"
 created.write_text(
-    "---\\ntype: note\\n---\\n\\n# Created after the build\\n\\nquokkacreatedafterbuild\\n",
+    newline.join(
+        ["---", "type: note", "---", "", "# Created after the build", "", "quokkacreatedafterbuild", ""]
+    ),
     encoding="utf-8",
 )
 (generated / "generated-note-0002.md").unlink()

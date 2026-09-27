@@ -565,6 +565,10 @@ _PUBLICATION_TIMEOUT_BACKGROUND = 30.0
 # bound. Requests and writers retain their 50ms fail-fast path.
 _PUBLICATION_TIMEOUT_PUBLISH = 120.0
 _PUBLICATION_TIMEOUT_FOREGROUND = 0.05
+# A promoted standby adopts its detached catalogue inside the promotion request,
+# which the supervisor caps at ten seconds; a busier barrier leaves the live
+# catalogue to the ordinary repair instead of timing that request out.
+_PUBLICATION_TIMEOUT_ADOPT = 5.0
 
 
 @contextlib.contextmanager
@@ -5888,7 +5892,7 @@ class LexicalStore:
 
         published = False
         try:
-            with self._publication_lock():
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_ADOPT):
                 if self._detached_catalog_current(detached.path):
                     published = self._replace_live_catalog(detached.path)
                 else:

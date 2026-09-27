@@ -586,7 +586,7 @@ class Supervisor:
                     return {
                         "ok": False,
                         "error": "the standby did not reach cutover readiness; current "
-                        "worker is still serving (allow_cold_replacement replaces it cold)",
+                        "worker is still serving (--allow-cold-replacement replaces it cold)",
                         "handoff": handoff,
                     }
                 handoff["cold_replacement"] = "allowed"

@@ -152,6 +152,39 @@ def test_adoption_refuses_a_catalogue_whose_identity_moved_after_the_build(
     assert not detached.lock.held()
 
 
+def test_adoption_under_a_busy_barrier_declines_inside_the_promotion_budget(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supervisor caps the promotion request; adoption must not outwait it."""
+    import threading
+
+    root = older_catalogue
+    live = lexstore.lexical_path(root)
+    before = live.read_bytes()
+    detached = lexstore.build_detached_catalog(root)
+    assert detached is not None
+    monkeypatch.setattr(lexstore, "_PUBLICATION_TIMEOUT_ADOPT", 0.2)
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with lexstore.get_store(root)._publication_lock():
+            held.set()
+            release.wait(30)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert held.wait(10)
+        started = time.monotonic()
+        assert lexstore.adopt_detached_catalog(root, detached) is False
+        assert time.monotonic() - started < 5
+    finally:
+        release.set()
+        holder.join(30)
+    assert live.read_bytes() == before
+    assert _temps(root) == []
+
+
 def test_the_held_temp_outlives_both_temp_reapers_for_the_warm(
     older_catalogue: Path,
 ) -> None:

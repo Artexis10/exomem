@@ -540,11 +540,9 @@ def warm(vault_root: Path) -> None:
             except Exception:  # noqa: BLE001 - caches are rebuildable on demand
                 log.warning("standby cache warm-up failed", exc_info=True)
             readiness.mark_ready("lexical")
-        elif prepare_detached_catalog(vault_root):
-            # The live catalogue is an earlier release's. Nothing is warmed
-            # over it: its caches would be of rows promotion replaces.
-            pass
-        else:
+        elif not prepare_detached_catalog(vault_root):
+            # Not an earlier release's catalogue either (a detached one would
+            # warm no caches here: their rows are the ones promotion replaces).
             log.info(
                 "standby retrieval catalog is not current; the serving worker's "
                 "repair owner has to publish one before this candidate can cut over"

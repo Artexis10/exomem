@@ -14,6 +14,7 @@
 #   bash scripts/upgrade.sh --cli-sync always          # install CLI if absent
 #   bash scripts/upgrade.sh --resume-stopped-transition # roll forward after failure
 #   bash scripts/upgrade.sh --unit-file ~/Library/LaunchAgents/com.exomem.http.plist
+#   bash scripts/upgrade.sh --allow-cold-replacement   # managed: cold-start if no standby
 
 set -euo pipefail
 
@@ -28,6 +29,7 @@ PROFILE="standard"
 PACKAGE_VERSION=""
 VAULT=""
 RESUME_STOPPED_TRANSITION=0
+ALLOW_COLD_REPLACEMENT=0
 CLI_SYNC="auto"
 UNIT_FILE=""
 
@@ -41,8 +43,9 @@ while [[ $# -gt 0 ]]; do
         --cli-sync)        CLI_SYNC="${2:?}"; shift 2 ;;
         --unit-file)       UNIT_FILE="${2:?}"; shift 2 ;;
         --resume-stopped-transition) RESUME_STOPPED_TRANSITION=1; shift ;;
+        --allow-cold-replacement) ALLOW_COLD_REPLACEMENT=1; shift ;;
         --skip-restart)    die "--skip-restart is unavailable during state-root migration; a target install must complete offline migration and restart or remain stopped on failure" ;;
-        -h|--help)         sed -n '2,15p' "$0"; exit 0 ;;
+        -h|--help)         sed -n '2,16p' "$0"; exit 0 ;;
         *)                 die "unknown option: $1" ;;
     esac
 done
@@ -111,6 +114,7 @@ if exomem_service_is_managed "$UNIT_FILE"; then
     [[ -n "$RUNTIME_DIR" ]] || die "could not resolve the managed runtime directory from $UNIT_FILE"
     MANAGED_ARGS=(--runtime-dir "$RUNTIME_DIR" --profile "$PROFILE")
     [[ -z "$PACKAGE_VERSION" ]] || MANAGED_ARGS+=(--package-version "$PACKAGE_VERSION")
+    [[ "$ALLOW_COLD_REPLACEMENT" == 0 ]] || MANAGED_ARGS+=(--allow-cold-replacement)
     echo "Staging a managed release while $SERVICE_ID serves..."
     RESULT="$(cd "$REPO_ROOT" && "$VENV_PYTHON" -m exomem.service_upgrade "${MANAGED_ARGS[@]}")" \
         || die "managed worker upgrade failed; inspect --status and use --resume for recorded recovery"
@@ -134,6 +138,7 @@ if exomem_service_is_managed "$UNIT_FILE"; then
     echo "Managed serving version: $SERVED"
     exit 0
 fi
+[[ "$ALLOW_COLD_REPLACEMENT" == 0 ]] || die "--allow-cold-replacement applies only to managed upgrades"
 [[ "$PROFILE" != "onnx" ]] || die "onnx profile is available only for managed Linux upgrades"
 
 # --- Locate the venv the service ACTUALLY runs ----------------------------------
