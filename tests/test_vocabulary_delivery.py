@@ -530,3 +530,36 @@ def test_recovery_failure_is_logged_by_type_without_content(tmp_path, monkeypatc
     ]
     assert any("TypeError" in message for message in messages)
     assert all("private page sentence" not in message for message in messages)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["graph_projection_unavailable", "target_projection_unavailable", "target_projection_changed"],
+)
+def test_public_sync_names_the_closed_projection_reason(tmp_path, monkeypatch, reason):
+    from exomem import vocabulary_delivery
+
+    path = "Knowledge Base/Notes/reasoned.md"
+    monkeypatch.setattr(
+        vocabulary_projection,
+        "for_write",
+        lambda *args, **kwargs: {"status": "unavailable", "reason": reason, "items": []},
+    )
+    with library_scope():
+        result = vocabulary_delivery.after_commit(tmp_path, terminal(path))
+    assert result["vocabulary_sync"]["reason"] == reason
+    public = vocabulary_delivery.public_projection(result)
+    assert public["vocabulary_sync"]["reason"] == reason
+    assert public["vocabulary_sync"]["recovery"]["tool"] == "review_memory"
+
+
+def test_public_sync_never_releases_an_unknown_reason(tmp_path):
+    from exomem import vocabulary_delivery
+
+    public = vocabulary_delivery.public_projection(
+        {
+            "state": "committed",
+            "vocabulary_sync": {"state": "unavailable", "reason": "private page sentence"},
+        }
+    )
+    assert public["vocabulary_sync"]["reason"] == "guidance_unavailable"

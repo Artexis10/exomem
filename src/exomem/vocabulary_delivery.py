@@ -27,6 +27,24 @@ from .vocabulary_workflow import _hash
 
 log = logging.getLogger(__name__)
 
+#: Closed projection reasons the public sync may name. Collapsing them all to
+#: ``guidance_unavailable`` hid that an unpublished or lagging graph snapshot,
+#: not a raised failure, is the ordinary cause of an unavailable sync.
+PROJECTION_REASONS = frozenset(
+    {
+        "graph_projection_unavailable",
+        "target_projection_unavailable",
+        "target_projection_changed",
+        "ambiguous_entity_identity",
+    }
+)
+PUBLIC_REASONS = PROJECTION_REASONS | {
+    "guidance_unavailable",
+    "projection_unavailable",
+    "origin_independence_unavailable",
+    "source_discovery_pending",
+}
+
 
 def _log_unavailable(stage: str, exc: BaseException) -> None:
     """Name the swallowed failure by type and raising frame, never by content.
@@ -62,7 +80,14 @@ def _project(vault_root: Path, path: str, continuation: str | None = None) -> di
             "continuation": projected["continuation"],
         }
     if projected["status"] != "current":
-        return {"sync": _sync("unavailable", "projection_unavailable"), "items": []}
+        reason = projected.get("reason")
+        return {
+            "sync": _sync(
+                "unavailable",
+                reason if reason in PROJECTION_REASONS else "projection_unavailable",
+            ),
+            "items": [],
+        }
     if any(signal.get("eligibility") == "unavailable" for signal in projected.get("signals", [])):
         return {"sync": _sync("unavailable", "origin_independence_unavailable"), "items": []}
     return {
@@ -181,11 +206,13 @@ def public_projection(result: Mapping[str, Any]) -> dict[str, Any]:
     public = {}
     sync = result.get("vocabulary_sync")
     if isinstance(sync, Mapping) and sync.get("state") in {"current", "warming", "unavailable"}:
+        default = {
+            "unavailable": "guidance_unavailable",
+            "warming": "source_discovery_pending",
+        }.get(sync["state"])
+        reason = sync.get("reason")
         public["vocabulary_sync"] = _sync(
-            sync["state"],
-            {"unavailable": "guidance_unavailable", "warming": "source_discovery_pending"}.get(
-                sync["state"]
-            ),
+            sync["state"], reason if default and reason in PUBLIC_REASONS else default
         )
     notice = result.get("vocabulary_advisory")
     root = result.get("_vocabulary_vault")
