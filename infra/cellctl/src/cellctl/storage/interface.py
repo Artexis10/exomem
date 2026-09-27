@@ -10,6 +10,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+# What a per-cell key must allow for restic to work through B2's S3 API.
+# listBuckets matters even on a bucket- and prefix-restricted key: without
+# it, B2 answers a HEAD on a missing object with 403 instead of 404, and
+# restic's first step (a HEAD on the repository's `config`) is exactly that.
+# The key still sees only its own bucket and prefix.
+CELL_KEY_CAPABILITIES: tuple[str, ...] = (
+    "listBuckets",
+    "listFiles",
+    "readFiles",
+    "writeFiles",
+    "deleteFiles",
+)
+
 
 @dataclass(frozen=True)
 class ObjectStorageKey:
@@ -40,6 +53,11 @@ class ObjectStorage(Protocol):
         """Proof of absence for D10: checked via the key-management
         credential's own key listing, not via the (possibly already
         deleted) per-cell key's own auth."""
+        ...
+
+    def key_capabilities(self, key_id: str) -> frozenset[str] | None:
+        """The capabilities the key-management listing reports for
+        `key_id`, or None when no such key exists."""
         ...
 
     def list_object_versions(self, prefix: str) -> list[ObjectVersion]:

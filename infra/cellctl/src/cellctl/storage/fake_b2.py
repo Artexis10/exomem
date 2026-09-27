@@ -14,12 +14,13 @@ from __future__ import annotations
 import os
 import uuid
 
-from .interface import ObjectStorageKey, ObjectVersion
+from .interface import CELL_KEY_CAPABILITIES, ObjectStorageKey, ObjectVersion
 
 
 class FakeB2:
     def __init__(self, *, fixed_credentials: tuple[str, str] | None = None) -> None:
         self._keys: dict[str, str] = {}  # key_id -> name_prefix
+        self._capabilities: dict[str, frozenset[str]] = {}  # key_id -> capabilities
         self._objects: dict[str, list[str]] = {}  # object key -> [version_id, ...]
         # Key management (create/delete/list/prefix-restriction) stays fully
         # faked; when a live S3-compatible test double (e.g. MinIO) is
@@ -29,6 +30,10 @@ class FakeB2:
         self._fixed_credentials = fixed_credentials
 
     # -- test setup helpers, not part of the real ObjectStorage surface --
+
+    def set_key_capabilities(self, key_id: str, capabilities: set[str] | frozenset[str]) -> None:
+        """Stand in for a key an older cellctl minted with fewer capabilities."""
+        self._capabilities[key_id] = frozenset(capabilities)
 
     def seed_object(self, key: str, *, version_id: str | None = None) -> str:
         version_id = version_id or uuid.uuid4().hex
@@ -49,16 +54,21 @@ class FakeB2:
             key_id = f"fake-b2-key-{uuid.uuid4().hex[:12]}"
             secret = os.urandom(20).hex()
         self._keys[key_id] = prefix
+        self._capabilities[key_id] = frozenset(CELL_KEY_CAPABILITIES)
         return ObjectStorageKey(key_id=key_id, key_secret=secret, name_prefix=prefix)
 
     def delete_key(self, key_id: str) -> None:
         self._keys.pop(key_id, None)
+        self._capabilities.pop(key_id, None)
 
     def key_exists(self, key_id: str) -> bool:
         return key_id in self._keys
 
     def key_absent(self, key_id: str) -> bool:
         return key_id not in self._keys
+
+    def key_capabilities(self, key_id: str) -> frozenset[str] | None:
+        return self._capabilities.get(key_id) if key_id in self._keys else None
 
     def _require_prefix(self, key_id: str, prefix: str) -> None:
         if key_id not in self._keys:

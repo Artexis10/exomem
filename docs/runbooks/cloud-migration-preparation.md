@@ -38,7 +38,9 @@ flags set to false is an input worksheet, not an apply-ready platform release.
 Use the existing business B2 account and a dedicated Cloud bucket. Give cellctl
 a separately named key-management credential; keep the provider/master
 credential in the operator's secret store. Tenant credentials are restricted to
-the Cloud bucket and `cells/<cell_id>/` and carry file operations only.
+the Cloud bucket and `cells/<cell_id>/` and carry `listBuckets` plus file
+operations. `listBuckets` shows only that bucket; without it, B2's S3 API
+reports a missing object as 403 and restic cannot open a repository.
 
 The controller is still an account-level trusted operator: B2 `writeKeys` can
 create unrestricted keys, and `deleteKeys` can delete other account keys. A

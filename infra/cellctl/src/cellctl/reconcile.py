@@ -49,6 +49,7 @@ from .state import (
     CellRow,
     ClusterObservation,
 )
+from .storage.interface import CELL_KEY_CAPABILITIES
 
 logger = logging.getLogger("cellctl")
 
@@ -146,6 +147,7 @@ _ROW_SESSION_ERRORS = (asyncpg.InterfaceError, asyncpg.PostgresConnectionError, 
 # API is asked about a deleting row's volume at most this often.
 ORPHAN_SCAN_INTERVAL = timedelta(minutes=10)
 VOLUME_CHECK_INTERVAL = timedelta(minutes=1)
+OBJECT_STORAGE_KEY_CHECK_INTERVAL = timedelta(minutes=10)
 # D4: a refused row is retried on a backoff doubling from this floor to this
 # ceiling, so a transient cause (a deploy-skew 403) clears by itself.
 REFUSAL_BACKOFF_INITIAL = timedelta(minutes=2)
@@ -182,6 +184,10 @@ class LoopMemory:
     # A volume confirmed absent stays absent: its id is never reused.
     volumes_absent: set[str] = field(default_factory=set)
     refusals: dict[str, RefusalPark] = field(default_factory=dict)
+    # B2 keys cannot change after creation, so a key listed with every
+    # capability the backup needs is never listed again by this process.
+    object_storage_keys_verified: set[str] = field(default_factory=set)
+    object_storage_key_checked_at: dict[str, datetime] = field(default_factory=dict)
 
 
 def _record_refusal(
@@ -441,11 +447,23 @@ async def _resolve_object_storage_key(
     row: CellRow,
     secrets_config: SecretsConfig,
     object_storage,
+    *,
+    memory: LoopMemory | None = None,
+    now: datetime | None = None,
+    replace_allowed: bool = True,
 ) -> tuple[str, str, int]:
     """D7: create the per-cell B2 key once, deleting the loser on a race.
-    Returns the key id, its secret and the wrapping key version."""
+    Outside a hold, a stored key that B2 lists without a capability the
+    backup needs is replaced. Returns the key id, its secret and the
+    wrapping key version."""
 
     if row.b2_key_id is not None and row.b2_key_wrapped is not None:
+        memory = memory if memory is not None else LoopMemory()
+        now = now or datetime.now(UTC)
+        if replace_allowed and _object_storage_key_lacks_capability(row, object_storage, memory, now):
+            replaced = await _replace_object_storage_key(connection, row, secrets_config, object_storage)
+            if replaced is not None:
+                return replaced
         secret = unwrap_secret(
             secrets_config.backup_master_keys[row.b2_key_version],
             row.b2_key_wrapped,
@@ -485,6 +503,107 @@ async def _resolve_object_storage_key(
         return current.b2_key_id, secret, current.b2_key_version
 
     return created.key_id, created.key_secret, version
+
+
+def _object_storage_key_lacks_capability(row: CellRow, object_storage, memory: LoopMemory, now: datetime) -> bool:
+    """True only when B2's key listing shows the stored key without a
+    capability in CELL_KEY_CAPABILITIES. A key that is not listed, or a
+    listing that fails, keeps the stored key: B2 is an external API that
+    may lag, and a key that really is wrong still fails its backup
+    visibly as BACKUP_FAILED. A verified key is not listed again; any
+    other outcome is re-checked at most every OBJECT_STORAGE_KEY_CHECK_INTERVAL."""
+
+    key_id = row.b2_key_id
+    if key_id in memory.object_storage_keys_verified:
+        return False
+    checked_at = memory.object_storage_key_checked_at.get(key_id)
+    if checked_at is not None and now - checked_at < OBJECT_STORAGE_KEY_CHECK_INTERVAL:
+        return False
+    memory.object_storage_key_checked_at[key_id] = now
+    try:
+        capabilities = object_storage.key_capabilities(key_id)
+    except Exception as error:  # noqa: BLE001 -- any listing failure keeps the stored key
+        logger.warning(
+            "cellctl could not list object-storage key %s for cell %s; keeping it: %s",
+            key_id,
+            row.cell_id,
+            _describe_error(error),
+        )
+        return False
+    if capabilities is None:
+        logger.warning("cellctl: object-storage key %s for cell %s is not in B2's key listing; keeping it", key_id, row.cell_id)
+        return False
+    if capabilities >= set(CELL_KEY_CAPABILITIES):
+        memory.object_storage_keys_verified.add(key_id)
+        return False
+    return True
+
+
+async def _replace_object_storage_key(
+    connection: asyncpg.Connection,
+    row: CellRow,
+    secrets_config: SecretsConfig,
+    object_storage,
+) -> tuple[str, str, int] | None:
+    """Swap a fresh key in place of the stored one, then delete the old one.
+    On a lost swap the fresh key is deleted and the stored one used. If B2
+    cannot create the fresh key, returns None and the caller keeps the
+    stored one, so a B2 outage never blocks an apply.
+
+    Residual: a crash between the swap and deleting the old key, or a
+    failed delete, leaves the old key in B2. Its secret is no longer stored
+    anywhere once the cell's Secret is re-rendered."""
+
+    try:
+        created = object_storage.create_prefix_key(row.cell_id)
+    except Exception as error:  # noqa: BLE001 -- keep the stored key; retried after the check interval
+        logger.error(
+            "cellctl could not create a replacement object-storage key for cell %s; keeping %s: %s",
+            row.cell_id,
+            row.b2_key_id,
+            _describe_error(error),
+        )
+        return None
+    version = secrets_config.backup_master_key_current_version
+    wrapped = wrap_secret(
+        secrets_config.backup_master_keys[version],
+        created.key_secret.encode("utf-8"),
+        cell_id=row.cell_id,
+        column="b2_key_wrapped",
+        key_version=version,
+    )
+    won = await db.try_replace_group(
+        connection,
+        row.cell_id,
+        {"b2_key_id": created.key_id, "b2_key_wrapped": wrapped, "b2_key_version": version},
+        match_column="b2_key_id",
+        expected=row.b2_key_id,
+    )
+    if not won:
+        refreshed = await db.select_all_rows(connection)
+        current = next(r for r in refreshed if r.cell_id == row.cell_id)
+        if created.key_id != current.b2_key_id:
+            _delete_object_storage_key(object_storage, created.key_id, row.cell_id)
+        secret = unwrap_secret(
+            secrets_config.backup_master_keys[current.b2_key_version],
+            current.b2_key_wrapped,
+            cell_id=row.cell_id,
+            column="b2_key_wrapped",
+            key_version=current.b2_key_version,
+        ).decode("utf-8")
+        return current.b2_key_id, secret, current.b2_key_version
+
+    logger.warning("cellctl replaced object-storage key %s for cell %s with %s", row.b2_key_id, row.cell_id, created.key_id)
+    if created.key_id != row.b2_key_id:
+        _delete_object_storage_key(object_storage, row.b2_key_id, row.cell_id)
+    return created.key_id, created.key_secret, version
+
+
+def _delete_object_storage_key(object_storage, key_id: str, cell_id: str) -> None:
+    try:
+        object_storage.delete_key(key_id)
+    except Exception as error:  # noqa: BLE001 -- the row no longer names this key; report it
+        logger.error("cellctl could not delete object-storage key %s for cell %s: %s", key_id, cell_id, _describe_error(error))
 
 
 def _compute_render_digest(row: CellRow, cluster_config: ClusterConfig, secrets_config: SecretsConfig) -> str:
@@ -900,8 +1019,16 @@ async def _reconcile_row(
     applied_cleanly = False
     if decision.apply_manifests and decision.image:
         secret_material, backup_key_version = await _resolve_secret_material(connection, row, secrets_config)
+        # A hold's Jobs read the key from the Secret, so it is only checked
+        # and replaced outside a hold, including the pass that starts one.
         key_id, key_secret, b2_key_version = await _resolve_object_storage_key(
-            connection, row, secrets_config, object_storage
+            connection,
+            row,
+            secrets_config,
+            object_storage,
+            memory=memory,
+            now=now,
+            replace_allowed=_active_hold(row, observation) is None,
         )
         # D4: the digest covers the row's key versions. A new cell's first
         # pass creates them, so the applied digest is computed from the
