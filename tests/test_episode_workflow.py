@@ -1117,7 +1117,8 @@ def test_a_stale_unattempted_binding_is_resealed_by_the_same_proposal(
     )
     leaf = _candidate(resealed, "alpha")["leaves"][0]
     assert leaf["bound"] and leaf["run_id"] != first["run_id"]
-    # The effect the disposition reviewed is unchanged, so it still stands.
+    # A registry-only change keeps the effect and its preimage, so the
+    # disposition that reviewed them still stands.
     assert _candidate(resealed, "alpha")["disposition"] == "routed"
     again = _workflow(
         vault, action="resume", input_revision=1, journal_digest=resealed["journal_digest"]
@@ -1235,3 +1236,146 @@ def test_an_attempt_starts_only_with_room_for_its_reconcile(
     )
     assert [item["leaf_id"] for item in again["executed"]] == [leaf["leaf_id"]]
     assert _candidate(again, "alpha")["leaves"][0]["outcome"] == "committed"
+
+
+def _seed_note(vault: Path, slug: str) -> str:
+    """An existing insight page, written through the curation executor."""
+    args = _note_leaf(slug, "The seeded observation holds.")["args"]
+    proposed = curation.propose(
+        vault,
+        {
+            "version": 1,
+            "title": "Seed a note",
+            "steps": [{"step_id": "seed", "kind": "create-note", "args": args}],
+        },
+    )
+    curation.apply(
+        vault,
+        run_id=proposed["run_id"],
+        plan_id=proposed["plan_id"],
+        expected_plan_fingerprint=proposed["plan_fingerprint"],
+        why="Seed the synthetic fixture.",
+    )
+    return f"{INSIGHTS}/{slug}.md"
+
+
+def test_a_reseal_onto_changed_content_withdraws_the_disposition(
+    vault: Path, owner, enabled
+) -> None:
+    _record(vault)
+    old = _seed_note(vault, "seed-dye-note")
+    proposal = _proposal(
+        "existing_page",
+        [
+            {
+                "leaf_key": "replace",
+                "effect_revision": 1,
+                "kind": "supersede",
+                "args": {
+                    "old_path": old,
+                    "title": "Seed dye note revised",
+                    "content": (
+                        "## Observations\n\n- [finding] The revised seed observation holds."
+                        " ^seed-revised\n"
+                    ),
+                },
+            }
+        ],
+        target=old,
+    )
+    prepared = _workflow(vault, action="prepare", candidate="seed", proposal=proposal)
+    disposed = _workflow(
+        vault, action="disposition", candidate="seed", disposition="routed", reason="Reviewed."
+    )
+    # The page changes out of band after its supersession was reviewed.
+    page = vault / old
+    page.write_text(
+        page.read_text(encoding="utf-8") + "\nAn out-of-band addition.\n", encoding="utf-8"
+    )
+    stale = _workflow(
+        vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"]
+    )
+    assert [item["code"] for item in stale["stale"]] == ["CURATION_BINDING_STALE"]
+
+    resealed = _workflow(vault, action="prepare", candidate="seed", proposal=proposal)
+
+    leaf = _candidate(resealed, "seed")["leaves"][0]
+    assert leaf["bound"]
+    assert leaf["run_id"] != _candidate(prepared, "seed")["leaves"][0]["run_id"]
+    # The reviewed preimage is gone, so the owner reviews the new one.
+    assert _candidate(resealed, "seed")["disposition"] is None
+    edited = page.read_bytes()
+    with pytest.raises(ValueError, match="EPISODE_COVERAGE_INCOMPLETE"):
+        _workflow(
+            vault, action="resume", input_revision=1, journal_digest=resealed["journal_digest"]
+        )
+    assert page.read_bytes() == edited
+
+
+def test_a_leaf_committed_elsewhere_then_edited_is_reported_diverged(
+    vault: Path, owner, enabled
+) -> None:
+    _record(vault)
+    routed = _routed(vault, "alpha", "alpha-dye-note")
+    leaf = _candidate(routed["prepared"], "alpha")["leaves"][0]
+    store = curation.CurationStore(vault)
+    plan_id, fingerprint = store.identities(leaf["run_id"])
+    curation.apply(
+        vault,
+        run_id=leaf["run_id"],
+        plan_id=plan_id,
+        expected_plan_fingerprint=fingerprint,
+        why="Applied outside the episode.",
+    )
+    note = vault / INSIGHTS / "alpha-dye-note.md"
+    note.write_text(
+        note.read_text(encoding="utf-8") + "\nEdited after it was written.\n", encoding="utf-8"
+    )
+
+    resumed = _workflow(
+        vault,
+        action="resume",
+        input_revision=1,
+        journal_digest=routed["disposed"]["journal_digest"],
+    )
+
+    assert resumed["status"] == "diverged"
+    assert resumed["diverged"] == [
+        {"leaf_id": leaf["leaf_id"], "code": "EPISODE_OUTCOME_UNCERTAIN"}
+    ]
+    assert resumed["executed"] == resumed["replayed"] == resumed["blocked"] == []
+    current = _candidate(resumed, "alpha")["leaves"][0]
+    assert (current["outcome"], current["attempts"]) == ("pending", 0)
+
+    # No attempt froze the candidate: the owner settles it and the episode goes on.
+    disposed = _workflow(
+        vault,
+        action="disposition",
+        candidate="alpha",
+        disposition="rejected",
+        reason="The page moved on after it was written.",
+    )
+    again = _workflow(
+        vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"]
+    )
+    assert again["status"] == "ok"
+
+
+def test_prepare_without_journal_bytes_seals_no_plan(
+    vault: Path, owner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record(vault)
+    before, runs = _journal(vault), _runs(vault)
+    # Room for a few hundred bytes: not for a proposal and its sealed plan.
+    monkeypatch.setattr(episode_store, "MAX_JOURNAL_BYTES", len(before) + 256)
+
+    with pytest.raises(ValueError, match="EPISODE_TOO_LARGE"):
+        _workflow(
+            vault,
+            action="prepare",
+            candidate="alpha",
+            proposal=_note_proposal("alpha-dye-note", "The alpha observation holds."),
+        )
+
+    assert _journal(vault) == before
+    assert _runs(vault) == runs
