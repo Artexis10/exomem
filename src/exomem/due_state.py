@@ -1103,6 +1103,7 @@ def routing_targets(
                     manifest.schema.fields[name].type for name in manifest.schema.natural_key
                 ),
                 natural_key_values=frozenset(natural_values),
+                match=collection_claims.normalize_match(manifest.claim_match),
             )
         )
     return targets

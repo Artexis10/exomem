@@ -64,6 +64,10 @@ _MAX_ITEM_FILENAME_FIELDS = 8
 _MAX_ITEM_PRESENTATION_FIELDS = 16
 _MAX_CLAIMS_PER_LIST = 24
 _CLAIM_LISTS = ("tags", "terms", "entity_types", "evidence_kinds")
+#: Page frontmatter a `claims.match` predicate may test. Closed: a predicate over
+#: an arbitrary key would make membership depend on fields no router reads.
+_CLAIM_MATCH_KEYS = ("type", "category", "project", "tags")
+_MAX_CLAIM_MATCH_VALUES = 24
 _MUTABLE_FILENAME_FIELDS = frozenset(
     {
         "status",
@@ -308,6 +312,14 @@ def manifest_authoring_contract() -> dict[str, Any]:
             "lists": list(_CLAIM_LISTS),
             "maximum_items_per_list": _MAX_CLAIMS_PER_LIST,
             "purpose": "declared domain vocabulary used for deterministic Records routing",
+            "match_keys": list(_CLAIM_MATCH_KEYS),
+            "match": (
+                "optional frontmatter predicates, e.g. match: {type: [failure], project: [key]}; "
+                "every listed key must hold on the page and any listed value may match. A page "
+                "satisfying every predicate routes here as strong regardless of word overlap; "
+                "predicates only widen routing and two collections declaring the same membership "
+                "stay silent"
+            ),
         },
         "item_representation": {
             "available_when": "storage.strategy=markdown-items",
@@ -644,9 +656,23 @@ def _claims_json_schema() -> dict[str, Any]:
         "maxItems": _MAX_CLAIMS_PER_LIST,
         "items": {"type": "string"},
     }
+    match_values = {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": _MAX_CLAIM_MATCH_VALUES,
+        "items": {"type": "string", "minLength": 1},
+    }
     return {
         "type": "object",
-        "properties": {name: dict(claim_list) for name in _CLAIM_LISTS},
+        "properties": {
+            **{name: dict(claim_list) for name in _CLAIM_LISTS},
+            "match": {
+                "type": "object",
+                "minProperties": 1,
+                "properties": {key: dict(match_values) for key in _CLAIM_MATCH_KEYS},
+                "additionalProperties": False,
+            },
+        },
         "additionalProperties": False,
     }
 
@@ -908,6 +934,8 @@ class CollectionManifest:
     item_filename: ItemFilename | None = None
     item_presentation: ItemPresentation | None = None
     claims: Mapping[str, tuple[str, ...]] | None = None
+    #: `claims.match`: frontmatter predicates that declare membership outright.
+    claim_match: Mapping[str, tuple[str, ...]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1622,6 +1650,7 @@ def _manifest_from_frontmatter(
     )
     links = _parse_links(frontmatter.get("links", {}), schema)
     claims = _parse_claims(frontmatter.get("claims"))
+    claim_match = _parse_claim_match(frontmatter.get("claims"))
     return CollectionManifest(
         collection_id=collection_id,
         title=title,
@@ -1644,6 +1673,7 @@ def _manifest_from_frontmatter(
         item_filename=item_filename,
         item_presentation=item_presentation,
         claims=claims,
+        claim_match=claim_match,
     )
 
 
@@ -2603,7 +2633,7 @@ def _parse_claims(value: object) -> Mapping[str, tuple[str, ...]] | None:
     if value is None:
         return None
     raw = _mapping(value, "claims")
-    unknown = sorted(set(raw) - set(_CLAIM_LISTS))
+    unknown = sorted(set(raw) - set(_CLAIM_LISTS) - {"match"})
     if unknown:
         raise CollectionError(
             "INVALID_COLLECTION_CLAIMS", f"claims has unknown list: {unknown[0]}"
@@ -2630,6 +2660,42 @@ def _parse_claims(value: object) -> Mapping[str, tuple[str, ...]] | None:
                 )
         claims[name] = tuple(entries)
     return MappingProxyType(claims)
+
+
+def _parse_claim_match(value: object) -> Mapping[str, tuple[str, ...]] | None:
+    """Parse `claims.match`: every key must hold, any listed value may match."""
+    if not isinstance(value, Mapping) or "match" not in value:
+        return None
+    raw = value["match"]
+    if not isinstance(raw, Mapping) or not raw:
+        raise CollectionError(
+            "INVALID_COLLECTION_CLAIMS",
+            f"claims.match must be a mapping of {', '.join(_CLAIM_MATCH_KEYS)}; offending entry: {raw!r}",
+        )
+    unknown = sorted(str(key) for key in raw if key not in _CLAIM_MATCH_KEYS)
+    if unknown:
+        raise CollectionError(
+            "INVALID_COLLECTION_CLAIMS", f"claims.match has unknown key: {unknown[0]}"
+        )
+    match: dict[str, tuple[str, ...]] = {}
+    for key in _CLAIM_MATCH_KEYS:
+        if key not in raw:
+            continue
+        entries = raw[key]
+        if not isinstance(entries, list) or not entries or len(entries) > _MAX_CLAIM_MATCH_VALUES:
+            raise CollectionError(
+                "INVALID_COLLECTION_CLAIMS",
+                f"claims.match.{key} must be a list of 1 to {_MAX_CLAIM_MATCH_VALUES} strings; "
+                f"offending entry: {entries!r}",
+            )
+        for entry in entries:
+            if type(entry) is not str or not entry.strip():
+                raise CollectionError(
+                    "INVALID_COLLECTION_CLAIMS",
+                    f"claims.match.{key} requires strings; offending entry: {entry!r}",
+                )
+        match[key] = tuple(entries)
+    return MappingProxyType(match)
 
 
 def _parse_templates(root: Path, manifest_rel: str, value: object) -> tuple[TemplateSpec, ...]:

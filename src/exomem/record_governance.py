@@ -263,7 +263,10 @@ def effective_claims(
 def is_routing_target(
     manifest: collections.CollectionManifest, claims: Iterable[str]
 ) -> bool:
-    return manifest.lifecycle == "active" and len(frozenset(claims)) >= MIN_CLAIM_TERMS
+    """Active, and claiming enough vocabulary or declaring `claims.match` membership."""
+    return manifest.lifecycle == "active" and (
+        len(frozenset(claims)) >= MIN_CLAIM_TERMS or bool(manifest.claim_match)
+    )
 
 
 def _inspection_legacy_identifier(value: Any) -> str | None:
