@@ -14,7 +14,9 @@ fingerprint; any other topology difference SHALL still decline. An unreadable or
 unparseable source, a recall policy that moved, and a projection that moved during the
 proof SHALL still decline. The adopted residue SHALL be queued as incremental repair
 with the availability marker withdrawn, and the repair SHALL add the rows of a created
-page and delete the rows of a removed one.
+page and delete the rows of a removed one. Once the residue has drained, the file rows
+and the edges of every page, not only the residue's, SHALL equal those a whole-vault
+rebuild derives from the same disk.
 
 #### Scenario: A page created after the last publication is adopted as residue
 
@@ -23,6 +25,8 @@ page and delete the rows of a removed one.
 - **THEN** the snapshot is adopted with the created page in its residue, reads that
   require a current projection refuse until the repair lands, and one drain adds the
   page's rows and republishes the marker with no whole-vault rebuild
+- **AND** links elsewhere that now resolve to the created page carry the same edges a
+  whole-vault rebuild derives
 
 #### Scenario: A page removed after the last publication is adopted as residue
 
@@ -33,6 +37,7 @@ page and delete the rows of a removed one.
 #### Scenario: An unexplained topology change still declines
 
 - **WHEN** the resolver topology differs from the snapshot's in a way that reverting the
-  residue paths does not reproduce
+  residue paths does not reproduce, such as a retitled page outside the indexed corpus
+  that the resolver sees
 - **THEN** adoption declines with the topology reason and the caller pays the
   whole-vault pass as before

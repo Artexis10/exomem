@@ -346,6 +346,32 @@ This addendum removes the handoff's dependence on that republish:
   callers that run the pass directly logged nothing. The line now carries the error code
   and says `coalesced` for a refused claim.
 
+Review of the first cut tightened four things. A proof now holds only the snapshot it
+read: if the serving worker publishes during the proof, the attempt proves nothing and
+the moved token earns a re-proof. Promotion retires the marker only while the durable
+generation is still the one the proof sampled, because a full-scope batch raises its
+marker before its bytes land. To keep that guard from stranding the handoff, the standby
+keeps re-proving after a success while the graph moves, and a newer proof replaces the
+held one only when it succeeds. The re-proof interval runs from the end of the last
+attempt, and the once-a-second poll only stats the checkpoint and the sidecar until one
+moves.
+
+The residue tests compare every edge after the drain with a fresh whole-vault rebuild.
+That covers a created page gaining incoming links, a stem made ambiguous, a rename, a
+removal and a retitle, with a negative control that disables the drain's widening.
+
+**A drain that withholds publication records its resolver topology.** A per-path drain
+under a moving vault lands its rows and withholds the marker, lineage and
+acknowledgement. It used to withhold the stored resolver topology fingerprint as well,
+so a page it created had rows the fingerprint did not know. The next adoption proof
+then declined a snapshot that matched the disk, and a topology-changing refresh fell
+back to a whole-vault rebuild (`stored_topology_fingerprint_mismatch`). The drain now
+writes the same fingerprint the published branch writes, the topology of the resolver it
+derived under, in the transaction that lands the rows. Nothing in the publication or
+availability contract moves. The published branch's existing limit applies to both: a
+page the registry names but this batch did not drain puts the fingerprint ahead of that
+page's rows until its own receipt drains.
+
 Steady-state convergence under writes, meaning catch-up publication of a pass whose
 movement was all recorded, is 7.2. It is not reopened here. It was built and measured on
 `fix/graph-convergence-contract` and parked by ruling on availability and latency

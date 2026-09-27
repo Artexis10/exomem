@@ -371,3 +371,17 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   ruff and the public-artifact gate green; author-independent review.
   Evidence for 8.1-8.5: `tests/test_graph_handoff_convergence.py` (15 tests) was red
   on the base (14 failed, 1 guard passed) and is green with the fix.
+- [ ] 8.7 Review follow-ups: a proof holds only the snapshot it read; promotion retires
+  the marker only at the proof's durable generation, and the standby keeps re-proving
+  after a success, replacing the held proof only with a newer success; the interval
+  runs from the end of the last attempt and the poll stats before it reads; a promotion
+  that raises leaves the standby proving; an unknown drain cause is logged as given;
+  a drain that withholds publication records its resolver topology with its rows; the
+  residue tests compare every edge with a fresh rebuild.
+- [ ] 8.8 **Open, not built.** Evaluate a cheaper route to steady-state convergence than
+  7.2: when a whole-vault pass exhausts its stabilization attempts with every movement
+  recorded, run the adoption proof against the live sidecar (O(vault) hashing, no build
+  or publication) and, when it adopts, queue the residue and retire the full marker
+  observed before it. Measure it on the same paired bar that parked 7.2 (longest
+  unreadable stretch, write p50 and CPU at one and five writers on the 3,000-page tree)
+  before any decision to ship it.
