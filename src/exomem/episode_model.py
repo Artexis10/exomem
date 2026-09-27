@@ -32,6 +32,15 @@ _ROUTES = {
 }
 _ADAPTER_PENDING_ROUTES = {"source", "evidence", "records", "planning", "experiment"}
 _NO_EFFECT_ROUTES = _ADAPTER_PENDING_ROUTES | {"no_capture"}
+#: The curation step kinds each effect route owns. No route owns a move,
+#: delete or recover step.
+_ROUTE_KINDS = {
+    "focused_note": {"create-note"},
+    "entity": {"create-entity"},
+    "relation_only": {"accept-relation"},
+    "existing_page": {"edit", "supersede"},
+    "semantic_unit": {"edit", "supersede"},
+}
 MAX_STATE_BYTES = 256 * 1024
 MAX_INPUT_REVISIONS = 64
 #: Refs of existing pages an input concerns, retained with it. Opaque here;
@@ -297,6 +306,8 @@ def _proposal(raw: Any, candidate: str) -> tuple[dict[str, Any], list[dict[str, 
     if raw["route"] not in _NO_EFFECT_ROUTES and not leaves:
         raise _fail("EPISODE_PROPOSAL_INVALID", "route needs at least one curation leaf")
     leaves = sorted((_leaf(item, candidate) for item in leaves), key=lambda item: item["leaf_id"])
+    if any(item["kind"] not in _ROUTE_KINDS.get(raw["route"], ()) for item in leaves):
+        raise _fail("EPISODE_PROPOSAL_INVALID", "route does not admit this leaf kind")
     if len({item["leaf_id"] for item in leaves}) != len(leaves):
         raise _fail("EPISODE_PROPOSAL_INVALID", "leaf keys are duplicated")
     if len({item["effect_digest"] for item in leaves}) != len(leaves):

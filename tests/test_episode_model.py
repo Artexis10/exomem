@@ -429,7 +429,9 @@ def test_binding_preserves_entity_candidate_from_real_curation_plan(vault) -> No
     state = episode_model.start_episode("turn-entity", _input())
     state = episode_model.declare_candidate(state, "amber-guild")
     candidate_id = state["candidates"][0]["candidate_id"]
-    state = episode_model.revise_proposal(state, candidate_id, _proposal(leaf))
+    state = episode_model.revise_proposal(
+        state, candidate_id, {**_proposal(leaf), "route": "entity"}
+    )
     state = episode_model.set_disposition(state, candidate_id, "routed", "Promote it.")
     leaf_id = state["candidates"][0]["leaves"][0]["leaf_id"]
     binding = {

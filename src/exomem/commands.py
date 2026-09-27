@@ -7705,9 +7705,6 @@ _EpisodeProposalArgument = Annotated[
                                             "accept-relation",
                                             "edit",
                                             "supersede",
-                                            "move",
-                                            "delete",
-                                            "recover",
                                         ]
                                     },
                                     "args": {"type": "object"},
@@ -7764,8 +7761,9 @@ def op_episode_memory(
     changes: `prepare` one candidate's destination, set its `disposition`
     (including honest no_capture, deferred or rejected ones), and `resume`
     to execute the routed ones. A leaf is one typed step for an existing
-    writer (the curation step kinds of `maintain_memory`), never a free-form
-    effect. `resume` refuses with `episode_workflow_disabled` unless this
+    writer, of a kind its route owns: focused_note creates a note, entity an
+    entity, relation_only accepts a relation, existing_page and semantic_unit
+    edit or supersede. It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
     service enables episode execution.
 
     Args:
