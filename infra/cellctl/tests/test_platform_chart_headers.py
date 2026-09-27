@@ -126,6 +126,92 @@ def _helm_template_result(*extra: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+PRIVATE_DB_ARGS = (
+    "--set-string", "cloudDatabase.hostname=db.example.test",
+    "--set-string", "cloudDatabase.privateIp=10.0.1.5",
+)
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cloud_database_alias_is_absent_by_default() -> None:
+    documents = _helm_template()
+    for name in ("cellctl", "exomem-cloud-gateway"):
+        deployment = _find(documents, "Deployment", name)
+        assert "hostAliases" not in deployment["spec"]["template"]["spec"]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cloud_database_alias_is_only_on_the_two_cloud_control_deployments() -> None:
+    result = _helm_template_result(
+        *PRIVATE_DB_ARGS,
+        "--set", "gateway.enabled=true",
+        "--set-string", "gateway.image=ghcr.io/substrate-systems/substrate-gateway@sha256:" + "a" * 64,
+        "--set-string", "gateway.originHostname=legacy.example.test",
+        "--set-string", "gateway.databaseEgressCidrs[0]=10.0.1.5/32",
+    )
+    assert result.returncode == 0, result.stderr
+    documents = [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
+    aliases = {
+        doc["metadata"]["name"]: doc["spec"]["template"]["spec"]["hostAliases"]
+        for doc in documents
+        if doc.get("kind") == "Deployment" and "hostAliases" in doc["spec"]["template"]["spec"]
+    }
+    assert aliases == {
+        "cellctl": [{"ip": "10.0.1.5", "hostnames": ["db.example.test"]}],
+        "exomem-cloud-gateway": [{"ip": "10.0.1.5", "hostnames": ["db.example.test"]}],
+    }
+    assert "hostAliases" not in _find(documents, "Deployment", "exomem-gateway")["spec"]["template"]["spec"]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cloud_database_requires_both_hostname_and_private_ip() -> None:
+    for setting in PRIVATE_DB_ARGS[1::2]:
+        result = _helm_template_result("--set-string", setting)
+        assert result.returncode != 0, setting
+        assert "cloudDatabase" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cloud_database_rejects_malformed_hostname_and_private_ip() -> None:
+    for setting in (
+        "cloudDatabase.hostname=bad host",
+        "cloudDatabase.hostname=db..example.test",
+        "cloudDatabase.privateIp=999.0.0.1",
+        "cloudDatabase.privateIp=10.0.1.5/32",
+    ):
+        result = _helm_template_result(*PRIVATE_DB_ARGS, "--set-string", setting)
+        assert result.returncode != 0, setting
+        assert "cloudDatabase" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_private_database_ip_must_match_each_enabled_workloads_egress_policy() -> None:
+    for missing, allowed in (("cellctl", "cloudGateway"), ("cloudGateway", "cellctl")):
+        result = _helm_template_result(
+            "--set-string", "cloudDatabase.hostname=db.example.test",
+            "--set-string", "cloudDatabase.privateIp=10.0.1.6",
+            "--set-string", f"{allowed}.databaseEgressCidrs[0]=10.0.1.6/32",
+        )
+        assert result.returncode != 0, missing
+        assert f"{missing}.databaseEgressCidrs" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_private_database_egress_check_skips_a_disabled_workload() -> None:
+    result = _helm_template_result(
+        *PRIVATE_DB_ARGS,
+        "--set", "cellctl.enabled=false",
+        "--set-string", "cellctl.databaseEgressCidrs[0]=10.0.1.6/32",
+    )
+    assert result.returncode == 0, result.stderr
+    documents = [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
+    assert not any(doc.get("kind") == "Deployment" and doc["metadata"]["name"] == "cellctl" for doc in documents)
+    gateway = _find(documents, "Deployment", "exomem-cloud-gateway")
+    assert gateway["spec"]["template"]["spec"]["hostAliases"] == [
+        {"ip": "10.0.1.5", "hostnames": ["db.example.test"]}
+    ]
+
+
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_backup_window_schema_accepts_a_midnight_crossing_and_rejects_an_empty_window() -> None:
     # D8: a window may cross midnight, and the schema rejects an empty one.

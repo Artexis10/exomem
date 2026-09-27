@@ -192,6 +192,11 @@ traefik:
 # cellctl and its gateway run in their own namespace (exomem-cloud) with
 # their own StorageClass, so neither block collides with the hosted one.
 
+cloudDatabase:
+  # Keep the certificate hostname in both DSNs while routing it privately.
+  hostname: ""
+  privateIp: ""
+
 cellctl:
   enabled: false
   # ghcr.io/artexis10/exomem-cellctl@sha256:<digest>, built from
