@@ -2462,9 +2462,12 @@ class EpistemicGraphIndex:
         path does not need it (`require_current_projection=False`), which is
         what makes this worth doing at all.
 
-        An unbounded residue, a membership or topology difference, or a
-        structurally unusable sidecar still fails, and the caller pays the
-        whole-vault pass as before.
+        Pages created or removed since the publication are residue too, and a
+        topology difference is accepted when reverting the residue explains it.
+        An unbounded residue, a page still on disk that the snapshot indexes but
+        no longer admits, any other topology difference, or a structurally
+        unusable sidecar still fails, and the caller pays the whole-vault pass as
+        before.
 
         Needs the recall registry seeded for the vault scope, which the warm-up
         does before any of this; it does not need a running watcher, so a
@@ -2617,28 +2620,42 @@ class EpistemicGraphIndex:
                     "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file'"
                 ).fetchall()
             }
+            residue: set[str] = set()
             if stored_hashes != current_hashes:
-                if residue_out is None or set(stored_hashes) != set(current_hashes):
-                    # A membership difference is not a residue: a page the
-                    # snapshot never indexed, or indexed and no longer admits,
-                    # is a different corpus, not a bounded repair.
-                    return declined(
-                        "indexed_membership_differs"
-                        if residue_out is not None
-                        else "indexed_sources_differ"
-                    )
-                residue_out.update(
+                if residue_out is None:
+                    return declined("indexed_sources_differ")
+                # A page created or removed since the publication is a residue
+                # like a page whose bytes moved: this proof enumerated it, and
+                # the drain adds an appeared page's rows and deletes a vanished
+                # one's, widening to the pages whose links it re-targets. Before
+                # the 2026-09-27 upgrade both were "a different corpus", so one
+                # agent write after the serving worker's last publication held
+                # a standby to its warm budget and cost a cold start.
+                created = set(current_hashes) - set(stored_hashes)
+                removed = set(stored_hashes) - set(current_hashes)
+                if any(os.path.lexists(self.vault_root / rel) for rel in removed):
+                    # Still on disk but no longer admitted: nothing on the
+                    # residue path is proven to remove its rows.
+                    return declined("indexed_membership_differs")
+                residue.update(created | removed)
+                residue.update(
                     rel
                     for rel, source_hash in current_hashes.items()
-                    if stored_hashes[rel] != source_hash
+                    if rel in stored_hashes and stored_hashes[rel] != source_hash
                 )
+                residue_out.update(residue)
             resolver = vault_module.WikilinkResolver.from_entries(
                 self.vault_root,
                 resolver_entries,
             )
-            topology_matches = (
-                resolver_fingerprint is not None
-                and _resolver_topology_fingerprint(resolver) == resolver_fingerprint
+            topology_matches = resolver_fingerprint is not None and (
+                _resolver_topology_fingerprint(resolver) == resolver_fingerprint
+                or bool(
+                    residue
+                    and self._residue_explains_topology(
+                        conn, resolver, residue, resolver_fingerprint
+                    )
+                )
             )
             if not topology_matches:
                 return declined("resolver_topology_mismatch")
@@ -2661,6 +2678,39 @@ class EpistemicGraphIndex:
         except Exception:  # noqa: BLE001 - an incomplete cold proof fails closed
             log.debug("cold snapshot proof raised", exc_info=True)
             return declined("proof_raised")
+
+    def _residue_explains_topology(
+        self,
+        conn: sqlite3.Connection,
+        resolver: vault_module.WikilinkResolver,
+        residue: set[str],
+        stored_fingerprint: str,
+    ) -> bool:
+        """Whether reverting the residue's resolver entries reproduces the stored topology.
+
+        The reconstruction the incremental refresh uses for a topology change
+        (`stored_topology_fingerprint_mismatch`): put back each residue page's
+        stored title, drop each page the snapshot never indexed, and compare
+        fingerprints. Equal means every topology difference is a residue path,
+        which the drain widens to the pages whose links it re-targets. A page
+        outside the indexed corpus has no stored title to put back, so any
+        change to one still declines.
+        """
+        present: list[tuple[str, str | None]] = []
+        absent: list[str] = []
+        for rel in sorted(residue):
+            row = conn.execute(
+                "SELECT title FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
+                (_file_key(rel),),
+            ).fetchone()
+            if row is None:
+                absent.append(rel)
+                continue
+            title = str(row[0]).strip().lower() if row[0] is not None else ""
+            present.append((rel, title or None))
+        before = resolver.fork()
+        before.on_entries_changed(present, absent)
+        return _resolver_topology_fingerprint(before) == stored_fingerprint
 
     def _read_publication_epoch(self) -> tuple[Any, Any, Any]:
         epoch = graph_sync.publication_epoch(self.vault_root)
