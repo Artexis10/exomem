@@ -229,14 +229,89 @@ def test_a_discard_during_the_build_leaves_no_temp_behind(
     store = lexstore.get_store(root)
     real_walk = type(store)._walk_entries
 
-    def walk_then_discard(self):
-        walked = real_walk(self)
+    def walk_then_discard(self, cancel=None):
+        walked = real_walk(self, cancel=cancel)
         lexstore.discard_detached_catalogs()
         return walked
 
     monkeypatch.setattr(type(store), "_walk_entries", walk_then_discard)
     assert lexstore.build_detached_catalog(root) is None
     assert _temps(root) == []
+
+
+def test_a_discard_stops_the_build_inside_its_walk(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A discarded standby does not first walk the whole vault, then stop."""
+    root = older_catalogue
+    real_walk = vault_module.walk_vault_md
+
+    walked: list[Path] = []
+
+    def walk_then_discard(vault_root):
+        for index, path in enumerate(real_walk(vault_root)):
+            if index == 1:
+                lexstore.discard_detached_catalogs()
+            walked.append(path)
+            yield path
+
+    materialized: list[Path] = []
+    real_materialize = lexstore.LexicalStore._materialize_catalog
+
+    def spy(self, temp_path, *args, **kwargs):
+        materialized.append(temp_path)
+        return real_materialize(self, temp_path, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module, "walk_vault_md", walk_then_discard)
+    monkeypatch.setattr(lexstore.LexicalStore, "_materialize_catalog", spy)
+
+    assert len(list(real_walk(root))) > 2
+    assert lexstore.build_detached_catalog(root) is None
+    assert len(walked) == 2, "the walk ran on past the discard"
+    assert materialized == []
+    assert _temps(root) == []
+
+
+def test_no_build_starts_once_the_standby_is_discarded(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = older_catalogue
+    builds: list[Path] = []
+    monkeypatch.setattr(
+        lexstore, "build_detached_catalog", lambda vault_root: builds.append(vault_root)
+    )
+    service_standby.enter_standby()
+    service_standby.discard()
+
+    assert service_standby.prepare_detached_catalog(root) is False
+    assert builds == []
+
+
+def test_a_removal_that_raises_still_releases_the_build(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stranded temp lock would hide the orphan from every later sweep."""
+    root = older_catalogue
+    store = lexstore.get_store(root)
+    captured: list = []
+
+    def cancelled(self, temp_path, *args, **kwargs):
+        with lexstore._DETACHED_LOCK:
+            captured.append(lexstore._DETACHED[temp_path])
+        raise lexstore._DetachedBuildCancelled
+
+    def failing_cleanup(self, base):
+        raise RuntimeError("removal failed")
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_materialize_catalog", cancelled)
+    monkeypatch.setattr(lexstore.LexicalStore, "_cleanup_sidecar_files", failing_cleanup)
+
+    with pytest.raises(RuntimeError, match="removal failed"):
+        store.build_detached_catalog()
+
+    (detached,) = captured
+    assert detached.finished.is_set(), "a discard would wait out its whole bound"
+    assert not detached.lock.held()
 
 
 def _stub_graph_and_models(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -620,13 +695,16 @@ def test_a_targeted_retry_in_flight_does_not_skip_the_heal(
     root = older_catalogue
     _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
     heals = _heal_spy(monkeypatch)
-    monkeypatch.setattr(
-        lexstore,
-        "repair_progress",
-        lambda _root: {"phase": "targeted", "age_seconds": 0.1},
-    )
-
-    assert _promoted_warm(root) is True
+    monkeypatch.setattr(lexstore, "request_repair", lambda _root: None)
+    key = root.resolve()
+    lexstore._REPAIRS_IN_FLIGHT.add(key)
+    lexstore._DEFERRED_UPSERTS[key] = {root / next(iter(NOTES))}
+    try:
+        assert lexstore.full_rebuild_in_flight(root) is False
+        _promoted_warm(root)
+    finally:
+        lexstore._REPAIRS_IN_FLIGHT.discard(key)
+        lexstore._DEFERRED_UPSERTS.pop(key, None)
     assert heals
 
 

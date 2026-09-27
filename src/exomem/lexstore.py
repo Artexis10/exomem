@@ -4394,8 +4394,13 @@ class LexicalStore:
         self._synced[scope] = _checkpoint_state(delta.to)
         return True
 
-    def _walk_entries(self):
-        """One pass over both walks: membership flags + file signatures."""
+    def _walk_entries(self, cancel: threading.Event | None = None):
+        """One pass over both walks: membership flags + file signatures.
+
+        A set ``cancel`` stops the walk between files with
+        `_DetachedBuildCancelled`, so a discarded standby's build does not first
+        finish walking the whole vault.
+        """
         from . import find as find_module
         from . import freshness as freshness_module
         from . import recall_policy
@@ -4403,17 +4408,24 @@ class LexicalStore:
 
         kb = self.vault_root / kb_dirname()
         members: dict[Path, list[bool]] = {}  # abs path -> [in_kb, in_vault]
+        def check() -> None:
+            if cancel is not None and cancel.is_set():
+                raise _DetachedBuildCancelled
+
         if kb.is_dir():
             for p in find_module._walk_md(kb):
+                check()
                 if not recall_policy.is_recall_candidate(self.vault_root, p):
                     continue
                 members.setdefault(p, [False, False])[0] = True
         for p in walk_vault_md(self.vault_root):
+            check()
             if not recall_policy.is_recall_candidate(self.vault_root, p):
                 continue
             members.setdefault(p, [False, False])[1] = True
         signatures: dict[Path, freshness_module.FileSignature] = {}
         for p in list(members):
+            check()
             try:
                 signatures[p] = freshness_module.stat_signature(p)
             except OSError:
@@ -5892,9 +5904,7 @@ class LexicalStore:
         try:
             identity = catalog_semantic_identity(self.vault_root)
             policy = recall_policy.recall_policy_identity(self.vault_root)
-            members, signatures = self._walk_entries()
-            if detached.cancelled.is_set():
-                raise _DetachedBuildCancelled
+            members, signatures = self._walk_entries(cancel=detached.cancelled)
             lineage = uuid.uuid4().hex
             scope_targets: dict[str, tuple] = {}
             for scope, idx in (("kb", 0), ("vault", 1)):
@@ -5939,11 +5949,13 @@ class LexicalStore:
             log.warning("lexical detached build failed (%s); live catalogue untouched", e)
             return None
         finally:
-            if not built:
-                with _DETACHED_LOCK:
-                    _DETACHED.pop(temp_path, None)
-                self._remove_detached_files(detached)
-            detached.finished.set()
+            try:
+                if not built:
+                    with _DETACHED_LOCK:
+                        _DETACHED.pop(temp_path, None)
+                    self._remove_detached_files(detached)
+            finally:
+                detached.finished.set()
 
     def adopt_detached_catalog(self, detached: DetachedCatalog) -> bool:
         """Publish a catalogue this process built detached, replacing the live one.
@@ -6105,15 +6117,22 @@ class LexicalStore:
         self._remove_detached_files(detached)
 
     def _remove_detached_files(self, detached: DetachedCatalog) -> None:
-        """Remove a finished detached temp family, then release its lock."""
-        self._cleanup_sidecar_files(detached.path)
-        with contextlib.suppress(OSError):
-            _remove_lexical_rebuild_artifact(
-                self.vault_root,
-                detached.path.with_name(f"{detached.path.name}-journal"),
-                missing_ok=True,
-            )
-        detached.lock.release()
+        """Remove a finished detached temp family, then release its lock.
+
+        The lock is released even when removal fails: a leftover temp is an
+        orphan the next sweep reaps, while a stranded lock would hide it from
+        that sweep for the life of the process.
+        """
+        try:
+            self._cleanup_sidecar_files(detached.path)
+            with contextlib.suppress(OSError):
+                _remove_lexical_rebuild_artifact(
+                    self.vault_root,
+                    detached.path.with_name(f"{detached.path.name}-journal"),
+                    missing_ok=True,
+                )
+        finally:
+            detached.lock.release()
 
     def _rebase_detached_catalog(
         self,

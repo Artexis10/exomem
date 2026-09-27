@@ -327,6 +327,9 @@ def prepare_detached_catalog(vault_root: Path) -> bool:
             return False
         if lexstore.live_catalog_compatible(vault_root):
             return False
+        with _lock:
+            if _discarded or _promoted:
+                return False
         started = time.monotonic()
         detached = lexstore.build_detached_catalog(vault_root)
     except Exception:  # noqa: BLE001 - an unbuilt catalogue is a waiting component

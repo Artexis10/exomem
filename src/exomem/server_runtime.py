@@ -438,10 +438,12 @@ class LocalRuntimeActivation:
                     await anyio.to_thread.run_sync(thread.join)
                 # A discarded standby must not leave the catalogue it built
                 # behind; a no-op for any worker that is not an unpromoted one.
-                # Off the loop: it may wait, bounded, for a build to stop.
+                # Off the loop: it may wait, bounded, for a build to stop, and
+                # shielded so a cancelled shutdown still finishes the removal.
                 from . import service_standby
 
-                await anyio.to_thread.run_sync(service_standby.discard)
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(service_standby.discard)
 
         return _lifespan
 
