@@ -609,6 +609,20 @@ the old personal route until every named client has passed acceptance on the
 replacement. Moving the original DNS record into Terraform ownership is itself
 a state mutation and belongs to the agreed cutover, not preparation.
 
+An alias serving existing credentials is not proof of an independent personal
+endpoint. Record its advertised OAuth issuer, resource, discovery and token
+endpoints. Before releasing the original hostname to Cloud, fresh authorization
+and token refresh for the replacement must work without depending on that
+hostname. Prepare the canonical identity and client registration/session
+transition for an agreed personal-service window; preserve audience validation.
+
+The active secret registry authenticates the entire destination matrix and its
+exact active destination set. Stage Cloud destinations in a private draft copied
+from a recorded revision, leaving the committed matrix and active registry
+unchanged. Publish a reconciled matrix, complete selection, ciphertext and signed
+registry together after verification. Draft policy checks do not establish
+credential validity, ciphertext availability or recovery custody.
+
 The operational packet is [Cloud migration preparation](../../../docs/runbooks/cloud-migration-preparation.md).
 
 ### Rollback boundaries
