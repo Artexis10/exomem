@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
@@ -723,6 +724,25 @@ _MAX_ROUTING_TITLE_CHARS = 160
 _MAX_ROUTING_COLLECTION_CHARS = 512
 _MAX_ROUTING_KEY_FIELDS = 16
 _ROUTING_STRENGTHS = frozenset({"strong", "moderate"})
+_ROUTING_REQUIRED_KEYS = frozenset(
+    {"collection", "title", "matched_terms", "natural_key", "strength"}
+)
+_ROUTING_OPTIONAL_KEYS = frozenset(
+    {
+        "matched_predicates",
+        "disposition",
+        "signal_version",
+        "instruction",
+        "question",
+        "record_memory",
+        "missing_fields",
+    }
+)
+_ROUTING_DISPOSITIONS = frozenset({"file", "ask", "hold", "append_occurrence"})
+_ROUTING_CALL_ACTIONS = frozenset({"append", "update"})
+_MAX_ROUTING_PROSE_CHARS = 480
+_MAX_ROUTING_CALL_BYTES = 4096
+_MAX_ROUTING_PREDICATES = 4
 #: Advisory kind emitted by the capture path. Its payload names the domain the
 #: fallback captures share, not the off-scope units a compiled write reports.
 _SOURCE_CLASSIFICATION_KIND = "source_classification_debt"
@@ -787,13 +807,11 @@ def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
         if not isinstance(container, Mapping):
             continue
         value = container.get("records_routing")
-        if not isinstance(value, Mapping) or set(value) != {
-            "collection",
-            "title",
-            "matched_terms",
-            "natural_key",
-            "strength",
-        }:
+        if (
+            not isinstance(value, Mapping)
+            or not _ROUTING_REQUIRED_KEYS <= set(value)
+            or set(value) - _ROUTING_REQUIRED_KEYS - _ROUTING_OPTIONAL_KEYS
+        ):
             continue
         collection = value.get("collection")
         title = value.get("title")
@@ -810,20 +828,89 @@ def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
             continue
         if not isinstance(title, str) or not 0 < len(title) <= _MAX_ROUTING_TITLE_CHARS:
             continue
-        if not _bounded_tokens(matched_terms, _MAX_STRUCTURE_TERMS):
+        predicates = value.get("matched_predicates")
+        if predicates is not None and not _bounded_tokens(predicates, _MAX_ROUTING_PREDICATES):
+            continue
+        # A declared-membership route may share no word at all with the claims.
+        if not (
+            _bounded_tokens(matched_terms, _MAX_STRUCTURE_TERMS)
+            or (predicates is not None and matched_terms == [])
+        ):
             continue
         if not _bounded_tokens(natural_key, _MAX_ROUTING_KEY_FIELDS):
             continue
         if not isinstance(strength, str) or strength not in _ROUTING_STRENGTHS:
             continue
+        disposition = _routing_disposition_projection(value, collection)
+        if disposition is None:
+            continue
         return {
             "collection": collection,
             "title": title,
             "matched_terms": list(matched_terms),
+            **({"matched_predicates": list(predicates)} if predicates is not None else {}),
             "natural_key": list(natural_key),
             "strength": strength,
+            **disposition,
         }
     return None
+
+
+def _routing_disposition_projection(
+    value: Mapping[str, Any], collection: str
+) -> dict[str, Any] | None:
+    """The bounded disposition half of a routing advisory; None when malformed.
+
+    An advisory without a disposition projects as `{}`. One with a malformed
+    disposition is dropped whole, like any other malformed advisory: a partial
+    instruction to act is worse than none.
+    """
+    if "disposition" not in value:
+        return (
+            {}
+            if not set(value) & {"signal_version", "instruction", "question", "record_memory", "missing_fields"}
+            else None
+        )
+    disposition = value.get("disposition")
+    if disposition not in _ROUTING_DISPOSITIONS:
+        return None
+    out: dict[str, Any] = {"disposition": disposition}
+    signal = value.get("signal_version")
+    if signal is not None:
+        if not isinstance(signal, str) or not 0 < len(signal) <= 64:
+            return None
+        out["signal_version"] = signal
+    for key in ("instruction", "question"):
+        text = value.get(key)
+        if text is None:
+            continue
+        if not isinstance(text, str) or not 0 < len(text) <= _MAX_ROUTING_PROSE_CHARS:
+            return None
+        out[key] = text
+    if "question" in out and disposition != "ask":
+        return None
+    call = value.get("record_memory")
+    if call is not None:
+        if (
+            disposition not in {"file", "append_occurrence"}
+            or not isinstance(call, Mapping)
+            or call.get("action") not in _ROUTING_CALL_ACTIONS
+            or call.get("collection") != collection
+        ):
+            return None
+        try:
+            encoded = json.dumps(call, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return None
+        if len(encoded.encode("utf-8")) > _MAX_ROUTING_CALL_BYTES:
+            return None
+        out["record_memory"] = json.loads(encoded)
+    missing = value.get("missing_fields")
+    if missing is not None:
+        if not _bounded_tokens(missing, _MAX_ROUTING_KEY_FIELDS):
+            return None
+        out["missing_fields"] = list(missing)
+    return out
 
 
 #: Wire bounds on the advisory due-state block. Deliberately this module's own

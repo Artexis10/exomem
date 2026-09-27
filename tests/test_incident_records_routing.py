@@ -715,3 +715,137 @@ def test_served_candidates_are_capped_per_response(tmp_path: Path) -> None:
     ]
 
     assert 0 < len(served) <= collection_candidate.MAX_SERVED_CANDIDATES
+
+
+# --- The compact write terminal carries the disposition --------------------
+
+
+def _terminal_routing(routing: dict) -> dict | None:
+    from exomem import mutation_terminal
+
+    raw = {
+        "path": "Knowledge Base/Notes/Failures/widget-failure-007.md",
+        "warnings": [],
+        "records_routing": routing,
+    }
+    terminal = mutation_terminal.committed_terminal(
+        raw,
+        request_id="33333333-3333-4333-8333-333333333334",
+        receipt_id="receipt-incidents",
+        idempotency_key="incidents-key",
+    )
+    return mutation_terminal.project_terminal(terminal).get("records_routing")
+
+
+_FILED = {
+    "collection": INCIDENTS,
+    "title": "Widget incidents",
+    "matched_terms": [],
+    "matched_predicates": ["project:widget-app", "type:failure"],
+    "natural_key": ["incident"],
+    "strength": "strong",
+    "disposition": "file",
+    "signal_version": "0123456789abcdef",
+    "instruction": "Perform this record_memory call now, without asking.",
+    "record_memory": {
+        "action": "append",
+        "collection": INCIDENTS,
+        "item": {"incident": "Widget panel froze", "observed_on": "2026-09-27"},
+        "why": "Recurring incident observed",
+    },
+    "missing_fields": ["symptom"],
+}
+
+
+def test_compact_terminal_projects_a_disposition_and_a_predicate_route() -> None:
+    assert _terminal_routing(dict(_FILED)) == _FILED
+    asked = {
+        key: value
+        for key, value in _FILED.items()
+        if key not in {"record_memory", "missing_fields"}
+    } | {"disposition": "ask", "question": "Log “Widget panel froze” as a new entry?"}
+    assert _terminal_routing(asked) == asked
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"disposition": "delete"},
+        {"record_memory": {**_FILED["record_memory"], "action": "discard"}},
+        {"record_memory": {**_FILED["record_memory"], "collection": LEDGER}},
+        {"record_memory": {**_FILED["record_memory"], "why": "x" * 5000}},
+        {"question": "q" * 1000},
+        {"matched_predicates": []},
+        {"unexpected": True},
+    ],
+)
+def test_compact_terminal_drops_a_malformed_disposition(change: dict) -> None:
+    assert _terminal_routing({**_FILED, **change}) is None
+
+
+# --- End to end: a real write, then the returned payload through governance --
+
+
+def test_a_failure_note_is_filed_through_the_returned_payload(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands
+
+    monkeypatch.setattr(prominence, "effective_capture_level", lambda *_a, **_k: "maximal")
+    commands.op_record_memory(
+        vault,
+        action="create",
+        manifest_path=INCIDENTS,
+        manifest_text=_incident_manifest(),
+        why="track widget incidents",
+    )
+    due_state.reconcile(vault)
+    evidence = commands.op_preserve_evidence(
+        vault,
+        scope="Widget app",
+        category="Logs",
+        filename="panel.log",
+        content="panel froze on load",
+        description="panel log",
+    )
+
+    def remember(body: str, slug: str) -> dict:
+        arguments = {
+            "content": f"## Observations\n\n- [failure] {body} #widget-app ^{slug}\n",
+            "title": "Widget panel froze on load",
+            "slug": slug,
+            "note_type": "failure",
+            "projects": ["widget-app"],
+            "tags": ["widget-app", "failure"],
+            "sources": [evidence["path"]],
+        }
+        validation = commands.op_remember(vault, validate_only=True, **arguments)
+        return commands.op_remember(
+            vault,
+            **arguments,
+            draft_id=validation["draft_id"],
+            draft_hash=validation["draft_hash"],
+            draft_token=validation["draft_token"],
+            relation_disposition="reviewed_none",
+            relation_review_hash=validation["draft_hash"],
+            relation_review_reason="No honest relation exists for this fixture.",
+        )
+
+    written = remember("The panel stopped responding after load", "widget-panel-froze")
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None
+    assert routing["disposition"] == "file"
+    call = routing["record_memory"]
+    appended = commands.op_record_memory(
+        vault,
+        action=call["action"],
+        collection=call["collection"],
+        item=call["item"],
+        why=call["why"],
+    )
+    assert appended["operation"] == "append"
+
+    again = remember("It froze again after a reload", "widget-panel-froze-again")
+    recurred = _terminal_routing(again["creation"]["records_routing"])
+    assert recurred is not None and recurred["disposition"] == "append_occurrence"
+    assert recurred["record_memory"]["item_key"] == appended["item_key"]
