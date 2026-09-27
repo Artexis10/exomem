@@ -208,6 +208,7 @@ def add(
     adoption_seed: Mapping[str, object] | None = None,
     extra_frontmatter: Mapping[str, object] | None = None,
     supersede: Sequence[tuple[str, str]] = (),
+    defer_fanout_to_terminal: bool = False,
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -226,6 +227,10 @@ def add(
     all and a Source body is never rewritten. A revision whose text no longer
     matches the caller's hash fails the whole call with
     `ContentHashMismatchError`; one that is already superseded is left alone.
+
+    `defer_fanout_to_terminal` is the episode recorder's opt-in: its caller
+    keeps planning and canonical writes under the wide guard, while derived
+    refresh waits for the committed mutation's terminal.
 
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
@@ -504,7 +509,17 @@ def add(
         )
 
     try:
-        batch_atomic_write(writes, vault_root=vault_root)
+        if defer_fanout_to_terminal:
+            publication_intents: list[object] = []
+            created_paths = [write.path for write in writes if not os.path.lexists(write.path)]
+            committed = batch_atomic_write(
+                writes,
+                vault_root=vault_root,
+                post_commit_fanout=False,
+                publication_intents_out=publication_intents,
+            )
+        else:
+            batch_atomic_write(writes, vault_root=vault_root)
     except Exception as e:
         log.exception("partial write during add(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")
@@ -512,6 +527,71 @@ def add(
     finally:
         if artifact_stream is not None:
             artifact_stream.close()
+
+    if defer_fanout_to_terminal:
+        from . import deferred_index, file_watcher, writer_lease
+        from . import vault as vault_module
+
+        assert isinstance(committed, list)
+        replaced = list(dict.fromkeys(committed))
+
+        def abort_intents() -> None:
+            try:
+                file_watcher.abort_publication_intents(
+                    publication_intents, force_paths=replaced
+                )
+            except Exception as error:  # noqa: BLE001 - the Source already committed
+                log.warning("episode publication cleanup failed: %s", type(error).__name__)
+
+        if writer_lease.active_derived_batch_custody(vault_root):
+            # The fast-ack receipt already carries this batch's derived work.
+            abort_intents()
+        else:
+            fanout_succeeded = [False]
+
+            def run_fanout() -> list[object]:
+                from . import index_sync
+
+                reports: list[object] = []
+                try:
+                    completed = vault_module.post_commit_batch_fanout(
+                        vault_root,
+                        replaced,
+                        reports,
+                        None,
+                        created_paths=created_paths,
+                        publication_intents=publication_intents,
+                    )
+                    fanout_succeeded[0] = completed is True
+                    if completed is not True:
+                        abort_intents()
+                except Exception as error:  # noqa: BLE001 - the Source already committed
+                    abort_intents()
+                    log.warning("episode derived fanout failed after commit: %s", type(error).__name__)
+                if not reports:
+                    reports.append(
+                        index_sync.unverified_upsert_report(vault_root, replaced)
+                        if fanout_succeeded[0]
+                        else index_sync.failed_upsert_report(vault_root, replaced)
+                    )
+                return reports
+
+            try:
+                # Keep this receipt after a successful inline drain too: a
+                # same-path ABA write may have replaced its queued revision.
+                # The background drain owns exact-revision retirement.
+                deferred_index.add_full(
+                    vault_root,
+                    [path.relative_to(vault_root).as_posix() for path in replaced],
+                )
+            except Exception as error:  # noqa: BLE001 - a committed Source cannot be retried safely
+                log.warning("episode durable derived demand failed after commit: %s", type(error).__name__)
+                run_fanout()
+                if not fanout_succeeded[0]:
+                    raise writer_lease._PostCommitOutcomeUncertain() from None
+            else:
+                if not writer_lease.defer_until_terminal_persisted(run_fanout):
+                    run_fanout()
 
     try:
         self_path = source_path.relative_to(vault_root).as_posix()

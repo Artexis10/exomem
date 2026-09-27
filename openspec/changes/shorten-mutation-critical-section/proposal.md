@@ -43,6 +43,13 @@ loading before the boundary; the boundary covers only the commit.
   fields (from `eliminate-mutation-busy-failure-modes` R1) are the acceptance
   measurement for the narrowed hold.
 
+- **Episode follow-up work**: preserve the existing serialized recap revision and
+  ledger commit, but persist derived demand and execute indexing, heat and nudge
+  work after the mutation boundary is released.
+- **Graph drain preparation**: prepare the recall resolver outside the mutation
+  boundary, then require the same live checkpoint before the guarded graph pass.
+  A concurrent write leaves repair queued rather than publishing stale topology.
+
 ## Capabilities
 
 ### Modified Capabilities
@@ -82,3 +89,12 @@ loading before the boundary; the boundary covers only the commit.
   `tasks.md`. Turn 1 covers only the docs and the pure refactor — the guard
   narrowing itself (and therefore any observable boundary-hold change) lands
   in a later commit.
+
+## Availability repair delivery
+
+The episode and graph repair is an urgent availability follow-up with an
+independent rollout from the unrelated learning and hook-maintenance batches.
+It changes `add.py`, `episode_memory.py`, and `epistemic_graph.py` with focused
+concurrency coverage. It does not enable fast acknowledgement or alter graph
+rebuild scheduling. Existing committed-write uncertainty remains an explicit
+receipt outcome; this repair must not encourage blind retries.

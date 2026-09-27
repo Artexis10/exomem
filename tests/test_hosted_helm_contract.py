@@ -966,7 +966,12 @@ def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -
 
 
 def test_platform_rotation_quiescence_surfaces_every_database_consumer() -> None:
-    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--set", "cellctl.enabled=false,cloudGateway.enabled=false"),
+    )
     expected_deployments = {
         "exomem-provisioner-api",
         "exomem-provisioner-worker",

@@ -276,13 +276,16 @@ def _configured_mcp_url(
     if force_stdio:
         return None
     configured = mcp_url
-    env_path = cwd / ".env"
-    if configured is None and env_path.is_file():
-        from .remote_setup_wizard import parse_env
+    if configured is None:
+        from .dotenv_guard import dotenv_load_guard
 
-        parsed = parse_env(env_path.read_text(encoding="utf-8"))
-        if "EXOMEM_BASE_URL" in parsed:
-            configured = parsed["EXOMEM_BASE_URL"]
+        env_path = dotenv_load_guard(cwd / ".env")
+        if env_path is not None and env_path.is_file():
+            from .remote_setup_wizard import parse_env
+
+            parsed = parse_env(env_path.read_text(encoding="utf-8"))
+            if "EXOMEM_BASE_URL" in parsed:
+                configured = parsed["EXOMEM_BASE_URL"]
     if configured is None and "EXOMEM_BASE_URL" in environ:
         configured = environ["EXOMEM_BASE_URL"]
     return client_config.normalize_mcp_url(configured) if configured is not None else None

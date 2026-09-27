@@ -335,6 +335,28 @@ def test_new_unclassified_root_format_fails_closed(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize("suffix", [".public.pem", ".json.complete"])
+@pytest.mark.parametrize("content_kind", ["clean", "private", "invalid_utf8"])
+def test_registry_publication_artifacts_are_scanned_as_text(
+    tmp_path: Path, suffix: str, content_kind: str
+) -> None:
+    artifact = tmp_path / f"registry{suffix}"
+    if content_kind == "invalid_utf8":
+        artifact.write_bytes(b"generic\n\xff")
+        expected_rule = "invalid_utf8"
+    elif content_kind == "private":
+        private_path = "C:" + "\\Users\\" + "SyntheticOperator\\private-vault"
+        artifact.write_text(private_path + "\n", encoding="utf-8")
+        expected_rule = "absolute_local_path"
+    else:
+        artifact.write_text("generic\n", encoding="utf-8")
+        expected_rule = None
+
+    findings = scan_artifact(artifact, label=artifact.name)
+
+    assert [item.rule for item in findings] == ([expected_rule] if expected_rule else [])
+
+
 def test_patch_artifacts_are_scanned_as_text(tmp_path: Path) -> None:
     artifact = tmp_path / "registration.patch"
     private_path = "C:" + "\\Users\\" + "SyntheticOperator\\private-vault"

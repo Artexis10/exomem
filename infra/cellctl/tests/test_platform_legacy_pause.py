@@ -57,6 +57,7 @@ def _render(*overrides: str) -> tuple[subprocess.CompletedProcess[str], list[dic
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("upgrade", [False, True])
 @pytest.mark.parametrize(
     ("paused", "cellctl", "cloud_gateway"),
     [
@@ -69,7 +70,7 @@ def _render(*overrides: str) -> tuple[subprocess.CompletedProcess[str], list[dic
     ],
 )
 def test_legacy_actors_follow_explicit_or_cloud_pause(
-    paused: bool, cellctl: bool, cloud_gateway: bool,
+    paused: bool, cellctl: bool, cloud_gateway: bool, upgrade: bool,
 ) -> None:
     overrides = [
         "--set", f"cellctl.enabled={str(cellctl).lower()}",
@@ -77,6 +78,8 @@ def test_legacy_actors_follow_explicit_or_cloud_pause(
     ]
     if paused:
         overrides.extend(("--set", "legacyHosted.paused=true"))
+    if upgrade:
+        overrides.append("--is-upgrade")
     result, documents = _render(*overrides)
     assert result.returncode == 0, result.stderr
 
@@ -89,6 +92,16 @@ def test_legacy_actors_follow_explicit_or_cloud_pause(
         for doc in documents if doc.get("kind") == "CronJob"
     }
     effective_pause = paused or cellctl or cloud_gateway
+    migration_jobs = [
+        doc for doc in documents
+        if doc.get("kind") == "Job"
+        and doc["metadata"]["name"] == "exomem-provisioner-database-migration"
+    ]
+    assert len(migration_jobs) == (0 if effective_pause else 1)
+    if migration_jobs:
+        assert migration_jobs[0]["spec"]["template"]["spec"]["containers"][0]["command"] == [
+            "exomem-provisioner-database-validate" if upgrade else "exomem-provisioner-database-migrate"
+        ]
     for name, configured_replicas in LEGACY_DEPLOYMENTS.items():
         assert deployments[name]["spec"]["replicas"] == (0 if effective_pause else configured_replicas), name
     assert set(cronjobs) == LEGACY_CRONJOBS

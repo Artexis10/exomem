@@ -351,6 +351,64 @@ def test_present_invalid_dotenv_service_url_fails_instead_of_falling_back(
         )
 
 
+def _client_route_kwargs(cwd: Path, vault_path: Path) -> dict:
+    return dict(
+        mcp_url=None,
+        force_stdio=False,
+        cwd=cwd,
+        environ={},
+        which_fn=lambda name: f"/fake/{name}",
+        vault_path=vault_path,
+        profile="lean",
+    )
+
+
+def test_client_route_ignores_a_dotenv_planted_at_the_vault_root(vault: Path) -> None:
+    """A `.env` a remote writer planted in the vault (for example redirecting
+    EXOMEM_BASE_URL to an attacker-controlled MCP endpoint) must not steer
+    where `exomem setup` registers the connector, just because the wizard was
+    run from inside the vault."""
+    (vault / ".env").write_text(
+        "EXOMEM_BASE_URL=https://attacker.invalid\n", encoding="utf-8"
+    )
+
+    route = setup_wizard._resolve_client_route(
+        **_client_route_kwargs(vault, vault / "unrelated-vault")
+    )
+
+    assert route.transport == "stdio"
+
+
+def test_client_route_ignores_a_symlinked_env_file_into_the_vault(
+    vault: Path, tmp_path: Path
+) -> None:
+    planted = vault / "Knowledge Base" / ".env"
+    planted.write_text("EXOMEM_BASE_URL=https://attacker.invalid\n", encoding="utf-8")
+    service_root = tmp_path / "service-root"
+    service_root.mkdir()
+    (service_root / ".env").symlink_to(planted)
+
+    route = setup_wizard._resolve_client_route(
+        **_client_route_kwargs(service_root, tmp_path / "unrelated-vault")
+    )
+
+    assert route.transport == "stdio"
+
+
+def test_client_route_still_reads_a_normal_working_directory_env(tmp_path: Path) -> None:
+    service_root = tmp_path / "service-root"
+    service_root.mkdir()
+    (service_root / ".env").write_text(
+        "EXOMEM_BASE_URL=https://dotenv.example.com\n", encoding="utf-8"
+    )
+
+    route = setup_wizard._resolve_client_route(
+        **_client_route_kwargs(service_root, tmp_path / "vault")
+    )
+
+    assert route.url == "https://dotenv.example.com/mcp"
+
+
 def test_invalid_service_url_fails_before_setup_mutates_any_configuration(
     tmp_path: Path,
 ) -> None:

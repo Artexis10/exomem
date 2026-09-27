@@ -184,3 +184,34 @@ def test_hosted_uvicorn_access_record_formats_through_the_real_access_formatter(
     assert "sensitive-bearer-value" not in formatted
     assert "GET" in formatted
     assert "200" in formatted
+
+
+def test_hosted_access_record_never_carries_the_request_host(hosted_logger, caplog) -> None:
+    """The access log keeps the request's hostname as content; in a hosted
+    cell a tenant's hostname must not survive into the rendered line."""
+    import asyncio
+
+    from exomem import access_log
+
+    async def app(scope, receive, send) -> None:  # noqa: ANN001
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    async def receive() -> dict:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict) -> None:
+        return None
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/health",
+        "headers": [(b"host", b"tenant-name.example.test")],
+        "client": ("203.0.113.7", 5555),
+    }
+    asyncio.run(access_log.AccessLogMiddleware(app)(scope, receive, send))
+
+    record = next(r for r in caplog.records if getattr(r, "event", None) == "http_request")
+    assert not getattr(record, "content", None)
+    assert "tenant-name" not in JsonLinesFormatter().format(record)
