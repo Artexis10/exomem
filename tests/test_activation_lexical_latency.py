@@ -82,3 +82,22 @@ def test_the_harness_reports_its_harder_cases(
     assert 0 < bounded["mean_units_kept"] <= working_set_runtime.ACTIVATION_LEXICAL_MAX_TERMS
     if script == "japanese":
         assert bounded["named_page_first"] == 1.0
+
+
+def test_the_harness_times_a_short_common_turn_warm_and_cold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Twelve head words and no name: the turn the budget keeps whole. Both
+    shapes run, nothing is named, and the bounded shape also reports a p95
+    with its term-frequency cache emptied before every turn."""
+    for key in ("EXOMEM_STATE_ROOT", "EXOMEM_WRITER_LEASE_STATE_DIR", "EXOMEM_DISABLE_EMBEDDINGS"):
+        monkeypatch.setenv(key, "")
+    report = harness.run(pages=160, turns=3, repeat=1, turn_words=12, seed=4, common=True)
+
+    assert report["common_turn"] is True
+    bounded = report["bounded"]
+    assert bounded["samples"] == 3
+    assert bounded["named_page_first"] is None
+    assert bounded["cold_p95_ms"] is not None and bounded["cold_p95_ms"] > 0
+    assert bounded["mean_units_kept"] == working_set_runtime.ACTIVATION_LEXICAL_MAX_TERMS
+    assert report["unbounded"]["cold_p95_ms"] is None

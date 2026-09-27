@@ -16,6 +16,7 @@ never reads a real vault. Do not point this at a live cell.
     uv run python scripts/activation_lexical_latency.py --pages 5000 --json
     uv run python scripts/activation_lexical_latency.py --shared 3
     uv run python scripts/activation_lexical_latency.py --script japanese
+    uv run python scripts/activation_lexical_latency.py --common-turn --turn-words 12
 
 The corpus is Zipf-distributed invented words (so the head of the vocabulary
 is on most pages, as ordinary English is) with rare model-number tokens, and
@@ -25,9 +26,13 @@ anchors, never both of one anchor's words on the same page, so the named page
 is the only one holding both. `--script japanese` writes the corpus and the
 turns as unspaced runs: invented kanji words joined by particles into
 sentences, and each anchor named by two rare kanji words, each its own
-sentence. Reported per shape: p50/p95 of the stage's wall time,
-how often the page the turn names comes first, and the mean kept/dropped unit
-counts. Run it more than once; one run is not a measurement.
+sentence. `--common-turn` makes each turn `--turn-words` distinct words from
+the head of the vocabulary and nothing else: at twelve words it is a short
+turn the budget keeps whole, whose every word is on most pages. Reported per
+shape: p50/p95 of the stage's wall time, for the bounded shape also p95 with
+its term-frequency cache emptied before every turn (`cold_p95_ms`), how often
+the page the turn names comes first (None for common turns), and the mean
+kept/dropped unit counts. Run it more than once; one run is not a measurement.
 """
 
 from __future__ import annotations
@@ -62,6 +67,9 @@ VOCABULARY = 6000
 PAGE_WORDS = 220
 #: One page in this many is an anchor, the catalogue activation ranks.
 ANCHOR_EVERY = 8
+#: The head of the vocabulary a `--common-turn` draws from: every word in it
+#: sits on most pages.
+COMMON_HEAD = 60
 _SYLLABLES = ("ka", "lo", "mi", "ren", "tas", "vu", "dor", "pel", "sin", "qua", "bre", "zon")
 #: The Japanese corpus: its vocabulary is written in `_KANJI`, joined by the
 #: particles in `_PARTICLES` into sentences of `_SENTENCE_WORDS` words, and an
@@ -177,16 +185,27 @@ def build_vault(
 
 
 def build_turns(
-    named: dict[str, list[str]], count: int, turn_words: int, seed: int, *, script: str = "latin"
-) -> list[tuple[str, str]]:
-    """`(turn text, the anchor it names)`: everyday words and one page's name."""
+    named: dict[str, list[str]],
+    count: int,
+    turn_words: int,
+    seed: int,
+    *,
+    script: str = "latin",
+    common: bool = False,
+) -> list[tuple[str, str | None]]:
+    """`(turn text, the anchor it names)`: everyday words and one page's name,
+    or with `common` only distinct head words, naming nothing."""
     rng = random.Random(seed + 1)
     japanese = script == "japanese"
     words = [(_kanji_word if japanese else _word)(index) for index in range(VOCABULARY)]
     weights = _zipf_weights(VOCABULARY)
     targets = rng.sample(sorted(named), min(count, len(named)))
-    turns = []
+    turns: list[tuple[str, str | None]] = []
     for target in targets:
+        if common:
+            head = rng.sample(words[:COMMON_HEAD], min(turn_words, COMMON_HEAD))
+            turns.append(("".join(head) if japanese else " ".join(head), None))
+            continue
         filler = rng.choices(words, weights=weights, k=turn_words)
         middle = len(filler) // 2
         if japanese:
@@ -198,19 +217,24 @@ def build_turns(
 
 
 def _time_shape(vault, turns, rows, repeat, checkpoint, *, bounded: bool):
-    from exomem import working_set_runtime
+    from exomem import lexstore, working_set_runtime
 
     original = working_set_runtime.lexical_term_budget
     if not bounded:
         working_set_runtime.lexical_term_budget = lambda: None
     samples: list[float] = []
+    cold: list[float] = []
     first = 0
     kept: list[int] = []
     dropped: list[int] = []
     try:
-        for _ in range(repeat):
+        # One extra pass for the bounded shape with the term-frequency cache
+        # emptied before every turn: the cost right after a publish.
+        for attempt in range(repeat + (1 if bounded else 0)):
             for turn, target in turns:
                 selection: dict = {}
+                if attempt == repeat:
+                    lexstore.get_store(vault)._term_frequency_cache = None
                 started = time.perf_counter()
                 hits, state = working_set_runtime.lexical_evidence(
                     vault,
@@ -220,9 +244,13 @@ def _time_shape(vault, turns, rows, repeat, checkpoint, *, bounded: bool):
                     recall_checkpoint=checkpoint,
                     selection=selection,
                 )
-                samples.append((time.perf_counter() - started) * 1000.0)
+                elapsed = (time.perf_counter() - started) * 1000.0
                 if state != "available":
                     raise RuntimeError(f"lexical stage answered {state!r}")
+                if attempt == repeat:
+                    cold.append(elapsed)
+                    continue
+                samples.append(elapsed)
                 first += bool(hits) and hits[0].path == target
                 if selection:
                     kept.append(selection["terms_kept"])
@@ -233,8 +261,11 @@ def _time_shape(vault, turns, rows, repeat, checkpoint, *, bounded: bool):
         "p50_ms": round(percentile(samples, 0.50), 1),
         "p95_ms": round(percentile(samples, 0.95), 1),
         "max_ms": round(max(samples), 1),
+        "cold_p95_ms": round(percentile(cold, 0.95), 1) if cold else None,
         "samples": len(samples),
-        "named_page_first": round(first / len(samples), 3),
+        "named_page_first": (
+            round(first / len(samples), 3) if any(target for _turn, target in turns) else None
+        ),
         "mean_units_kept": round(statistics.mean(kept), 1) if kept else None,
         "mean_units_dropped": round(statistics.mean(dropped), 1) if dropped else None,
     }
@@ -249,6 +280,7 @@ def run(
     *,
     script: str = "latin",
     shared: int = 0,
+    common: bool = False,
 ) -> dict:
     with scratch_root.scratch_root("exomem-activation-lexical-") as base:
         os.environ["EXOMEM_STATE_ROOT"] = str(base / "state")
@@ -281,7 +313,7 @@ def run(
         checkpoint = freshness.recall_checkpoint(vault, "kb")
         build_seconds = time.perf_counter() - started
         rows = [SimpleNamespace(path=path, title=Path(path).stem) for path in named]
-        cases = build_turns(named, turns, turn_words, seed, script=script)
+        cases = build_turns(named, turns, turn_words, seed, script=script, common=common)
         # Warm both shapes once so neither pays the first connection.
         _time_shape(vault, cases[:1], rows, 1, checkpoint, bounded=False)
         _time_shape(vault, cases[:1], rows, 1, checkpoint, bounded=True)
@@ -292,6 +324,7 @@ def run(
             "turn_words": turn_words,
             "script": script,
             "shared": shared,
+            "common_turn": common,
             "build_seconds": round(build_seconds, 1),
             "unbounded": _time_shape(vault, cases, rows, repeat, checkpoint, bounded=False),
             "bounded": _time_shape(vault, cases, rows, repeat, checkpoint, bounded=True),
@@ -308,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=4)
     parser.add_argument("--script", choices=("latin", "japanese"), default="latin")
     parser.add_argument("--shared", type=int, default=0)
+    parser.add_argument("--common-turn", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     report = run(
@@ -318,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         args.seed,
         script=args.script,
         shared=args.shared,
+        common=args.common_turn,
     )
     if args.json:
         print(json.dumps(report, indent=2))
@@ -325,9 +360,13 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"{report['pages']} pages, {report['anchors']} anchors, {report['turns']} turns "
         f"of ~{report['turn_words']} {report['script']} words, rare words on "
-        f"{report['shared']} other anchors (built in {report['build_seconds']}s)\n"
+        f"{report['shared']} other anchors{', common words only' if report['common_turn'] else ''}"
+        f" (built in {report['build_seconds']}s)\n"
     )
-    print(f"{'shape':>10}  {'p50 ms':>8}  {'p95 ms':>8}  {'max ms':>8}  {'named first':>11}  kept/dropped")
+    print(
+        f"{'shape':>10}  {'p50 ms':>8}  {'p95 ms':>8}  {'max ms':>8}  {'cold p95':>8}  "
+        f"{'named first':>11}  kept/dropped"
+    )
     for shape in ("unbounded", "bounded"):
         row = report[shape]
         units = (
@@ -335,9 +374,11 @@ def main(argv: list[str] | None = None) -> int:
             if row["mean_units_kept"] is not None
             else "-"
         )
+        cold = row["cold_p95_ms"] if row["cold_p95_ms"] is not None else "-"
+        first = row["named_page_first"] if row["named_page_first"] is not None else "-"
         print(
             f"{shape:>10}  {row['p50_ms']:>8}  {row['p95_ms']:>8}  {row['max_ms']:>8}  "
-            f"{row['named_page_first']:>11}  {units}"
+            f"{cold:>8}  {first:>11}  {units}"
         )
     return 0
 
