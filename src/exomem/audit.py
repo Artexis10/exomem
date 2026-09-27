@@ -304,6 +304,10 @@ class AuditReport:
     summary: dict[str, int]  # category → count
     metadata: dict | None = None
     role_state: dict | None = None  # Internal dependency descriptors; never serialized.
+    #: Internal: where each collection's backfill scan resumes, keyed by
+    #: collection id and claims signal, for the recompute to persist. Never
+    #: serialized.
+    backfill_cursors: dict | None = None
 
     def as_dict(self) -> dict:
         value = {
@@ -495,6 +499,7 @@ def audit(
     findings: list[AuditFinding] = []
     metadata: dict = {}
     role_state = None
+    backfill_cursors: dict[str, str] = {}
     role_families = selected & {"artifact_role_promotion", "transient_state_review"}
     if role_families:
         from . import artifact_role_state
@@ -557,6 +562,7 @@ def audit(
                 pages,
                 now=now,
                 retain_reflected=retain_reflected_observations,
+                cursors_out=backfill_cursors,
             )
         )
     if "supersession_integrity" in selected:
@@ -610,6 +616,7 @@ def audit(
         summary=summary,
         metadata=metadata or None,
         role_state=role_state,
+        backfill_cursors=backfill_cursors,
     )
 
 
@@ -4537,19 +4544,27 @@ def unreflected_observation_component(
 
 #: PROVISIONAL: how many observation references a grouped backfill item names.
 BACKFILL_SAMPLE_REFS = 8
-#: PROVISIONAL: the most pre-lookback pages one recompute routes for backfill,
-#: across every collection. The bound is on parsed candidates, not on the walk:
-#: a page sharing no claim word and no declared predicate is never parsed.
+#: PROVISIONAL: the most pre-lookback pages one recompute parses for backfill,
+#: per collection. The bound is on parsed candidates, not on the walk: a page
+#: sharing fewer than two cheap claim words and no declared predicate is never
+#: parsed. A collection that runs out resumes after its cursor next time.
 BACKFILL_MAX_PAGES = 500
 
 
-def _claims_signal(target: Any) -> str:
-    """Identity of a routing target's effective claims and declared predicates."""
+def _claims_signal(manifest: Any) -> str:
+    """Identity of a collection's DECLARED claims and predicates.
+
+    Declared only: derived claims move with every ordinary append, and a
+    dismissed backfill must hold until the author changes what the collection
+    claims.
+    """
     return hashlib.sha256(
         json.dumps(
             [
-                sorted(str(term) for term in target.claims),
-                {key: sorted(values) for key, values in sorted(target.match.items())},
+                {key: sorted(str(term) for term in values)
+                 for key, values in sorted((manifest.claims or {}).items())},
+                {key: sorted(str(value) for value in values)
+                 for key, values in sorted((manifest.claim_match or {}).items())},
             ],
             ensure_ascii=False,
             separators=(",", ":"),
@@ -4591,6 +4606,8 @@ def backfill_component(
     ).hexdigest()[:16]
     title = str(component.get("collection_title") or collection)
     refs = [row["ref"] for row in rows[:BACKFILL_SAMPLE_REFS]]
+    # The scan has not reached every page yet: the count is a lower bound.
+    truncated = component.get("truncated") is True
     meta = {
         "signal_version": signal_version,
         "review_partition": "backfill",
@@ -4598,6 +4615,7 @@ def backfill_component(
         "collection": collection,
         "collection_id": collection_id,
         "count": len(rows),
+        "truncated": truncated,
         "refs": refs,
     }
     return AuditFinding(
@@ -4605,13 +4623,13 @@ def backfill_component(
         severity="info",
         path=collection,
         detail=(
-            f"{len(rows)} existing observation(s) match the claims of {title!r} and no "
-            "record reflects them."
+            f"{'At least ' if truncated else ''}{len(rows)} existing observation(s) "
+            f"match the claims of {title!r} and no record reflects them."
         ),
         proposed_fix=(
-            "Review the named observations and file each one as a record in this "
-            "collection, citing it in sources, under the served capture disposition. "
-            "Nothing is auto-written."
+            "Ask the user once, in their own terms, whether to file the named "
+            "observations in this collection, at every prominence; file each one, "
+            "citing it in sources, only on a yes. Nothing is auto-written."
         ),
         paths=[],
         meta=meta,
@@ -4621,6 +4639,7 @@ def backfill_component(
             "kind": "backfill",
             "pages": rows,
             "count": len(rows),
+            "truncated": truncated,
             "refs": refs,
             "signal_version": signal_version,
         },
@@ -4673,42 +4692,56 @@ def _observation_page_signal(
         terms.extend(tag for unit in document.units for tag in unit.tags)
         facets["category"].extend(unit.category for unit in document.units if unit.category)
     facets = {key: list(dict.fromkeys(values)) for key, values in facets.items() if values}
-    terms.extend(value for key in ("type", "category", "project") for value in facets.get(key, ()))
     return terms, facets
 
 
 def _backfill_prefilter(
     page: find_module.ParsedPage, targets: list[tuple[Any, frozenset[str]]]
-) -> bool:
-    """Whether a pre-lookback page could route anywhere, without parsing its body."""
+) -> list[Any]:
+    """The collections a pre-lookback page could route to, without parsing its body.
+
+    A target qualifies when the page's title and tags share at least two of its
+    claim words and the page's frontmatter does not contradict its predicates,
+    or when its declared predicates hold.
+    """
     from . import collection_claims
 
     frontmatter = page.frontmatter or {}
-    cheap_terms = collection_claims.normalize_terms(
-        [page.title, *page.tags, *(str(frontmatter.get(name) or "") for name in ("type", "category", "project"))]
-    )
+    cheap_terms = collection_claims.normalize_terms([page.title, *page.tags])
+    projects = frontmatter.get("projects")
     facets = collection_claims.normalize_match(
         {
             "type": frontmatter.get("type"),
             "category": frontmatter.get("category"),
-            "project": [frontmatter.get("project"), *(frontmatter.get("projects") or [])]
-            if isinstance(frontmatter.get("projects"), list)
+            "project": [frontmatter.get("project"), *projects]
+            if isinstance(projects, list)
             else frontmatter.get("project"),
             "tags": list(page.tags),
         }
     )
 
-    def declared(target: Any) -> bool:
+    def knowable(target: Any) -> Any:
         # Unit categories are unknowable without the parse this avoids, so a
         # `category` predicate is assumed to hold here and decided after it.
-        knowable = {key: values for key, values in target.match.items() if key != "category"}
+        return replace(
+            target, match={key: values for key, values in target.match.items() if key != "category"}
+        )
+
+    def declared(target: Any) -> bool:
         if not target.match:
             return False
-        return not knowable or collection_claims.matched_predicates(
-            replace(target, match=knowable), facets
-        ) is not None
+        cheap = knowable(target)
+        return not cheap.match or collection_claims.matched_predicates(cheap, facets) is not None
 
-    return any(cheap_terms & claims or declared(target) for target, claims in targets)
+    return [
+        target
+        for target, claims in targets
+        if declared(target)
+        or (
+            len(cheap_terms & claims) >= collection_claims.MIN_CLAIM_COVERAGE
+            and not collection_claims.contradicts(knowable(target), facets)
+        )
+    ]
 
 
 def _observation_moment(page: find_module.ParsedPage) -> dt.datetime | None:
@@ -4799,8 +4832,14 @@ def _check_unreflected_observations(
     *,
     now: dt.datetime | None = None,
     retain_reflected: bool = False,
+    cursors_out: dict[str, str] | None = None,
 ) -> list[AuditFinding]:
-    """Claimed compiled/Evidence observations with no reflecting record."""
+    """Claimed compiled/Evidence observations with no reflecting record.
+
+    `cursors_out`, when given, receives where each collection's backfill scan
+    resumes, keyed by its collection id and claims signal, for the recompute to
+    persist.
+    """
     from . import collection_claims, due_state, memory_refs, record_formats
 
     root = Path(vault_root)
@@ -4817,28 +4856,68 @@ def _check_unreflected_observations(
         return []
     language = semantic_language_registry.load_registry(root)
     relations = relation_registry.load_registry(root)
-    tracked = {
-        str(component.get("observation_ref") or "")
+    projection = due_state.load(root) or {}
+    stored_components = [
+        component
         for bucket in (
-            ((due_state.load(root) or {}).get("categories") or {})
-            .get("unreflected_observations", {})
-            .values()
+            (projection.get("categories") or {}).get("unreflected_observations", {}).values()
         )
         for entry in due_state._unbucket(bucket)
         if isinstance((component := entry.get("component")), Mapping)
-    }
+    ]
+    tracked = {str(component.get("observation_ref") or "") for component in stored_components}
     collection_cache: dict[str, tuple[Any, Any]] = {}
+
+    def collection_state(collection: str) -> tuple[Any, Any] | None:
+        cached = collection_cache.get(collection)
+        if cached is None:
+            manifest = due_state._load_manifest(root, collection)
+            if manifest is None:
+                return None
+            try:
+                snapshot = record_formats.load_adapter(
+                    root,
+                    manifest,
+                    authorize_path=None if retain_reflected else authorize,
+                ).read()
+            except Exception:  # noqa: BLE001 -- incomplete collection cannot settle the signal
+                snapshot = None
+            cached = collection_cache[collection] = (manifest, snapshot)
+        return cached
+
     findings: list[AuditFinding] = []
     # Existing pages older than the discovery lookback that a collection's
     # claims cover. They are not individual entries -- that is what the
     # lookback bounds -- but one grouped item per collection, so creating a
     # collection or changing its claims looks back at what it now covers.
-    backfill: dict[str, list[tuple[str, str, str]]] = {}
-    backfill_budget = BACKFILL_MAX_PAGES
+    # Each collection parses at most BACKFILL_MAX_PAGES candidates per
+    # recompute, in path order, resuming after the cursor it left last time
+    # under its identity and claims signal (two collections may declare the
+    # same claims, or none); what earlier windows found is carried forward.
+    stored_cursors = projection.get("backfill_cursors")
+    stored_cursors = stored_cursors if isinstance(stored_cursors, Mapping) else {}
+    scans: dict[str, dict[str, Any]] = {}
+    for target in targets:
+        manifest = due_state._load_manifest(root, str(target.collection))
+        if manifest is None:
+            continue
+        signal = _claims_signal(manifest)
+        cursor_key = f"{manifest.collection_id}:{signal}"
+        cursor = stored_cursors.get(cursor_key)
+        scans[str(target.collection)] = {
+            "signal": signal,
+            "cursor_key": cursor_key,
+            "start": cursor if type(cursor) is str else "",
+            "budget": BACKFILL_MAX_PAGES,
+            "last": "",
+            "exhausted": False,
+            "found": [],
+        }
+    historical_pages: dict[str, tuple[str, str, Any]] = {}
     prefilter_targets = [
         (target, collection_claims.normalize_terms(target.claims)) for target in targets
     ]
-    for page in pages:
+    for page in sorted(pages, key=lambda page: page.rel_path):
         if not (
             page.rel_path.startswith(f"{kb_prefix()}Notes/")
             or page.rel_path.startswith(f"{kb_prefix()}Evidence/")
@@ -4865,29 +4944,38 @@ def _check_unreflected_observations(
             age > dt.timedelta(days=due_state.OBSERVATION_LOOKBACK_DAYS)
             and observation_ref not in tracked
         )
+        charged: set[str] = set()
         if historical:
-            if backfill_budget <= 0 or not _backfill_prefilter(page, prefilter_targets):
+            historical_pages[page.rel_path] = (
+                observation_ref, observed_at.isoformat(), artifact_path
+            )
+            for target in _backfill_prefilter(page, prefilter_targets):
+                scan = scans.get(str(target.collection))
+                if scan is None or page.rel_path <= scan["start"]:
+                    continue
+                if scan["budget"] <= 0:
+                    scan["exhausted"] = True
+                    continue
+                scan["budget"] -= 1
+                scan["last"] = page.rel_path
+                charged.add(str(target.collection))
+            if not charged:
                 continue
-            backfill_budget -= 1
         terms, facets = _observation_page_signal(page, language=language, relations=relations)
         routing = collection_claims.route(terms, targets, facets=facets)
         if routing is None:
             continue
         collection = str(routing["collection"])
-        cached = collection_cache.get(collection)
+        if historical and (
+            collection not in charged
+            # Only a confident route joins the group: a moderate word overlap
+            # is not worth one question about many notes.
+            or (routing.get("strength") != "strong" and not routing.get("matched_predicates"))
+        ):
+            continue
+        cached = collection_state(collection)
         if cached is None:
-            manifest = due_state._load_manifest(root, collection)
-            if manifest is None:
-                continue
-            try:
-                snapshot = record_formats.load_adapter(
-                    root,
-                    manifest,
-                    authorize_path=None if retain_reflected else authorize,
-                ).read()
-            except Exception:  # noqa: BLE001 -- incomplete collection cannot settle the signal
-                snapshot = None
-            cached = collection_cache[collection] = (manifest, snapshot)
+            continue
         manifest, snapshot = cached
         matched = list(routing.get("matched_terms") or ())
         reflectors = []
@@ -4912,7 +5000,7 @@ def _check_unreflected_observations(
                 )
         if historical:
             if not reflectors:
-                backfill.setdefault(collection, []).append(
+                scans[collection]["found"].append(
                     (observed_at.isoformat(), page.rel_path, observation_ref)
                 )
             continue
@@ -4943,22 +5031,67 @@ def _check_unreflected_observations(
         )
         if finding is not None:
             findings.append(finding)
-    by_collection = {str(target.collection): target for target in targets}
-    for collection, rows in sorted(backfill.items()):
-        manifest, _snapshot = collection_cache[collection]
-        target = by_collection.get(collection)
-        if target is None:
+    previous = {
+        str(component.get("collection") or ""): component
+        for component in stored_components
+        if component.get("kind") == due_state.BACKFILL_KIND
+    }
+    for collection, scan in sorted(scans.items()):
+        # The window this recompute scanned: after the start cursor, up to the
+        # last charged page when the budget ran out, else to the end.
+        end = scan["last"] if scan["exhausted"] else None
+        next_cursor = end or ""
+        if cursors_out is not None and next_cursor:
+            cursors_out[scan["cursor_key"]] = next_cursor
+        rows = {path: (moment, ref) for moment, path, ref in scan["found"]}
+        prior = previous.get(collection)
+        if prior is not None and prior.get("claims_signal") == scan["signal"]:
+            for row in prior.get("pages") or ():
+                path = row.get("path") if isinstance(row, Mapping) else None
+                if type(path) is not str or path in rows:
+                    continue
+                if scan["start"] < path and (end is None or path <= end):
+                    continue  # re-scanned this time; the fresh answer stands
+                known = historical_pages.get(path)
+                if known is None or known[0] != row.get("ref"):
+                    continue
+                cached = collection_state(collection)
+                if cached is None:
+                    continue
+                manifest, snapshot = cached
+                if any(
+                    not record.ambiguous
+                    and _record_observation_support(
+                        manifest,
+                        record.values,
+                        page_path=path,
+                        observation_ref=known[0],
+                        matched_terms=(),
+                        observation_aliases=(known[2],),
+                    )
+                    for record in (snapshot.records if snapshot is not None else ())
+                ):
+                    continue
+                rows[path] = (known[1], known[0])
+        if not rows:
             continue
+        cached = collection_state(collection)
+        if cached is None:
+            continue
+        manifest, _snapshot = cached
         finding = backfill_component(
             {
                 "collection": collection,
                 "collection_id": str(manifest.collection_id),
                 "collection_title": str(manifest.title),
-                "claims_signal": _claims_signal(target),
+                "claims_signal": scan["signal"],
                 "pages": [
-                    {"path": path, "ref": ref} for _moment, path, ref in sorted(rows)
+                    {"path": path, "ref": ref}
+                    for path, (_moment, ref) in sorted(
+                        rows.items(), key=lambda item: (item[1][0], item[0])
+                    )
                 ],
-                "truncated": backfill_budget <= 0,
+                "truncated": bool(next_cursor),
             }
         )
         if finding is not None:

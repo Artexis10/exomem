@@ -183,6 +183,9 @@ _STRUCTURAL_FIELDS = frozenset(
         "path",
         "mtime",
         "id",
+        # `activate_context`'s token: base64 the caller echoes on its next
+        # turn, so replacing it cuts every surface's conversation in two.
+        "continuity",
     }
 )
 

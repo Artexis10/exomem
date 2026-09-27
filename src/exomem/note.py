@@ -602,7 +602,8 @@ def _legacy_note(
     now = today or temporal.now()
     date_iso = temporal.render_date(now)
     stamp_iso = temporal.stamp(now)
-    tags_clean, tag_warnings = tag_variants.reconcile_authored(vault_root, _clean_tags(tags))
+    tags_clean = _clean_tags(tags)
+    tag_warnings = tag_variants.advise_authored(vault_root, tags_clean)
     exomem_id = memory_refs.new_id()
 
     note_path = _resolve_path(
@@ -1763,7 +1764,8 @@ def note(
         resolver=resolver,
     )
     body_clean, body_warnings = normalize_body_wikilinks(content, root, resolver=resolver)
-    tags_clean, tag_warnings = tag_variants.reconcile_authored(root, _clean_tags(tags))
+    tags_clean = _clean_tags(tags)
+    tag_warnings = tag_variants.advise_authored(root, tags_clean)
     source = _render_note(
         note_type=note_type,
         title=title,

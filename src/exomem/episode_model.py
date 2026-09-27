@@ -32,6 +32,15 @@ _ROUTES = {
 }
 _ADAPTER_PENDING_ROUTES = {"source", "evidence", "records", "planning", "experiment"}
 _NO_EFFECT_ROUTES = _ADAPTER_PENDING_ROUTES | {"no_capture"}
+#: The curation step kinds each effect route owns. No route owns a move,
+#: delete or recover step.
+_ROUTE_KINDS = {
+    "focused_note": {"create-note"},
+    "entity": {"create-entity"},
+    "relation_only": {"accept-relation"},
+    "existing_page": {"edit", "supersede"},
+    "semantic_unit": {"edit", "supersede"},
+}
 MAX_STATE_BYTES = 256 * 1024
 MAX_INPUT_REVISIONS = 64
 #: Refs of existing pages an input concerns, retained with it. Opaque here;
@@ -297,6 +306,8 @@ def _proposal(raw: Any, candidate: str) -> tuple[dict[str, Any], list[dict[str, 
     if raw["route"] not in _NO_EFFECT_ROUTES and not leaves:
         raise _fail("EPISODE_PROPOSAL_INVALID", "route needs at least one curation leaf")
     leaves = sorted((_leaf(item, candidate) for item in leaves), key=lambda item: item["leaf_id"])
+    if any(item["kind"] not in _ROUTE_KINDS.get(raw["route"], ()) for item in leaves):
+        raise _fail("EPISODE_PROPOSAL_INVALID", "route does not admit this leaf kind")
     if len({item["leaf_id"] for item in leaves}) != len(leaves):
         raise _fail("EPISODE_PROPOSAL_INVALID", "leaf keys are duplicated")
     if len({item["effect_digest"] for item in leaves}) != len(leaves):
@@ -408,6 +419,8 @@ def revise_proposal(
         raise _fail("EPISODE_PROPOSAL_UNCHANGED", "proposal is byte-equivalent")
     candidate["proposal_revision"] += 1
     candidate["proposal"], candidate["leaves"] = normalized, leaves
+    # A disposition reviewed the earlier proposal; the revision needs its own.
+    candidate["disposition"] = None
     _invalidate(result)
     return _copy(result)
 
@@ -443,6 +456,19 @@ def _owned(state: dict[str, Any], candidate: str, leaf: str) -> dict[str, Any]:
     raise _fail("EPISODE_LEAF_UNKNOWN", "leaf does not belong to candidate")
 
 
+def _preimage(manifest: Sequence[Any]) -> str:
+    """The vault state a sealed plan was prepared against, registries aside."""
+    if not all(isinstance(item, Mapping) for item in manifest):
+        raise _fail("EPISODE_BINDING_INVALID", "sealed plan evidence is incomplete")
+    return _hash(
+        "exomem-episode-preimage-v1",
+        [
+            [item.get("path"), item.get("before_hash"), item.get("effect_before")]
+            for item in manifest
+        ],
+    )
+
+
 def _binding(raw: Any, leaf: Mapping[str, Any]) -> dict[str, Any]:
     fields = {
         "sealed_plan",
@@ -455,7 +481,7 @@ def _binding(raw: Any, leaf: Mapping[str, Any]) -> dict[str, Any]:
     }
     if (
         not isinstance(raw, Mapping)
-        or set(raw) != fields
+        or set(raw) - {"preimage_digest"} != fields
         or not isinstance(raw["sealed_plan"], Mapping)
     ):
         raise _fail("EPISODE_BINDING_INVALID", "binding is invalid")
@@ -492,7 +518,13 @@ def _binding(raw: Any, leaf: Mapping[str, Any]) -> dict[str, Any]:
         )
     if step["kind"] != leaf["kind"] or _effect(step["kind"], step["args"]) != leaf["effect_digest"]:
         raise _fail("EPISODE_EFFECT_MISMATCH", "step does not match leaf effect")
-    return {key: raw[key] for key in fields if key != "sealed_plan"}
+    preimage = _preimage(manifest)
+    if raw.get("preimage_digest", preimage) != preimage:
+        raise _fail("EPISODE_BINDING_INVALID", "sealed plan preimage does not match the binding")
+    return {
+        **{key: raw[key] for key in fields if key != "sealed_plan"},
+        "preimage_digest": preimage,
+    }
 
 
 def bind_curation_leaf(
@@ -502,7 +534,15 @@ def bind_curation_leaf(
     item = _owned(result, candidate, leaf)
     if item["attempts"]:
         raise _fail("EPISODE_ATTEMPTED_LEAF", "attempted leaf cannot be rebound")
-    item["binding"] = _binding(binding, item)
+    previous, item["binding"] = item["binding"], _binding(binding, item)
+    if (
+        previous is not None
+        and previous.get("preimage_digest") != item["binding"]["preimage_digest"]
+    ):
+        # Re-sealed against other content: the disposition reviewed the old
+        # preimage, so the owner reviews the new one. A registry-only re-seal
+        # keeps both.
+        _candidate(result, candidate)["disposition"] = None
     _invalidate(result)
     return _copy(result)
 

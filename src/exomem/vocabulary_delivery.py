@@ -113,6 +113,12 @@ def _tag_advisory(vault_root: Path, path: str) -> dict[str, Any] | None:
     try:
         if envelope.resolved()["classes"]["structural_suggestions"]["disposition"] == "off":
             return None
+        from . import prominence
+
+        if prominence.resolve() == "maximal":
+            # At maximal the tag writers already warned about every variant
+            # (`tag_variants.advise_authored`); one channel carries the advice.
+            return None
         return tag_variants.advisory_for_page(vault_root, path)
     except Exception as exc:  # noqa: BLE001 - optional guidance cannot change a committed outcome
         _log_unavailable("tag advisory", exc)

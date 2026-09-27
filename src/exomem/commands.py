@@ -1653,8 +1653,8 @@ def op_bootstrap(
                     "disposition carries its own instruction"
                 ),
                 "records_routing_handling": (
-                    "read the observation, then route it under the served capture disposition, "
-                    "a grouped backfill once; resume a held candidate when one exists"
+                    "route the observation under the served capture disposition, resuming a "
+                    "held candidate; ask about a grouped backfill once at any prominence"
                 ),
                 "collection_candidate": (
                     "a strong collection_candidate is a proposal: draft its schema through "
@@ -4764,14 +4764,22 @@ def op_preserve(
     _note_committed_artifact_targets(payload)
     from . import semantic_writes
 
-    routing_terms = [
-        f"Evidence: {Path(result.path).name}",
+    routing_tags = [
         "evidence",
         scope.lower().replace(" ", "-"),
         category.lower().replace(" ", "-"),
+    ]
+    routing_terms = [
+        f"Evidence: {Path(result.path).name}",
+        *routing_tags,
         description.strip() if description and description.strip() else "",
     ]
-    routing = semantic_writes._records_routing_from_terms(vault_root, routing_terms)
+    # The facets the sidecar's own frontmatter carries, so `claims.match`
+    # decides an Evidence write exactly as the recompute will.
+    routing_facets = {"type": ["source"], "tags": routing_tags}
+    routing = semantic_writes._records_routing_from_terms(
+        vault_root, routing_terms, routing_facets
+    )
     try:
         from . import due_state
 
@@ -4782,6 +4790,7 @@ def op_preserve(
             terms=routing_terms,
             routing=routing,
             observation_aliases=(str(result.path or ""),),
+            facets=routing_facets,
         )
     except Exception:  # noqa: BLE001 -- due-state advice never breaks Evidence custody
         log.debug("Evidence observation due-state delta failed (non-fatal)", exc_info=True)
@@ -6401,15 +6410,16 @@ def _op_activate_context_body(
         "roles_hash": "",
         "continuity": working_set_runtime_module.unevaluated_continuity(continuity),
     }
-    # `(identity, thread, thread_ns, state)` once the caller's thread has been
-    # read below: an abstention after that point still carries it forward.
-    thread_carry: tuple[str, str, int | None, str] | None = None
+    # `(identity, thread, thread_ns, state, salt)` once the caller's thread has
+    # been read below: an abstention after that point still carries it forward.
+    thread_carry: tuple[str, str, int | None, str, str] | None = None
 
     def _abstain(
         reason: str,
         *,
         generation: Mapping[str, Any] | None = None,
         budget_caused: bool = False,
+        carry_thread: bool = True,
     ) -> dict:
         """One abstained packet, always carrying timings when they were asked
         for. Every early exit below must keep `serve`'s own promise — abstain,
@@ -6425,6 +6435,12 @@ def _op_activate_context_body(
         caused, never for an unrelated failure that also resolves to
         `unavailable` (release-plane/guard exceptions), so a caller reading
         `request_budget` can trust it names the real cause.
+
+        Once the caller's thread is read, the packet carries it forward in a
+        token, minted after the vault generation is withheld from this
+        audience, exactly as a served packet's is: `generation` here is the
+        compiled packet's, which no guard has seen. `carry_thread=False` mints
+        nothing, for a packet the guard withheld whole.
         """
         packet = working_set_module.abstained_packet(
             reason=reason,
@@ -6439,9 +6455,18 @@ def _op_activate_context_body(
             if block is not None:
                 packet["request_budget"] = block
         if thread_carry is not None:
-            identity_now, thread_now, started, state = thread_carry
-            token_now = working_set_runtime_module.mint_continuity(
-                packet, identity=identity_now, thread=thread_now, thread_ns=started
+            identity_now, thread_now, started, state, salt_now = thread_carry
+            _withhold_vault_generation(vault_root, packet, purpose=purpose)
+            token_now = (
+                working_set_runtime_module.mint_continuity(
+                    packet,
+                    identity=identity_now,
+                    thread=thread_now,
+                    thread_ns=started,
+                    salt=salt_now,
+                )
+                if carry_thread
+                else ""
             )
             if token_now:
                 packet["continuity"] = token_now
@@ -6700,15 +6725,18 @@ def _op_activate_context_body(
     # invalid or lapsed one is reported and served as keyless, never refused,
     # and every packet below carries a thread forward, a fresh one if need be.
     identity = working_set_runtime_module.identity_for(vault_root)
+    # The key the thread's times are signed with: they are the caller's
+    # claim until the server's MAC over them verifies.
+    salt = working_set_heat_module.load(vault_root).salt
     thread, thread_ns, thread_state = working_set_runtime_module.read_continuity_thread(
-        continuity, identity=identity
+        continuity, identity=identity, salt=salt
     )
     if thread_state != working_set_runtime_module.CONTINUITY_APPLIED:
         thread, thread_ns = working_set_runtime_module.new_thread()
         caller_thread = None
     else:
         caller_thread = thread
-    thread_carry = (identity, thread, thread_ns, thread_state)
+    thread_carry = (identity, thread, thread_ns, thread_state, salt)
     # The caller's derived keys, once: ruling S5-1's tiers, the pick's own
     # attribution and the session's last served thread all use the same one.
     attribution = (
@@ -6717,6 +6745,7 @@ def _op_activate_context_body(
             client=client,
             session=session,
             workspace=workspace,
+            salt=salt or None,
             thread=caller_thread,
         )
         if client or session or workspace or caller_thread
@@ -6789,12 +6818,16 @@ def _op_activate_context_body(
     ):
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     if guarded is None:
-        return _abstain("withheld", generation=packet.get("generation") or generation_stub)
+        return _abstain(
+            "withheld",
+            generation=packet.get("generation") or generation_stub,
+            carry_thread=False,
+        )
     packet = guarded
     # Before the token is minted: it carries the index generation too.
     _withhold_vault_generation(vault_root, packet, purpose=purpose)
     token = working_set_runtime_module.mint_continuity(
-        packet, identity=identity, thread=thread, thread_ns=thread_ns
+        packet, identity=identity, thread=thread, thread_ns=thread_ns, salt=salt
     )
     if token:
         packet["continuity"] = token
@@ -7705,9 +7738,6 @@ _EpisodeProposalArgument = Annotated[
                                             "accept-relation",
                                             "edit",
                                             "supersede",
-                                            "move",
-                                            "delete",
-                                            "recover",
                                         ]
                                     },
                                     "args": {"type": "object"},
@@ -7745,6 +7775,7 @@ def op_episode_memory(
     | None = None,
     reason: str | None = None,
     input_revision: int | None = None,
+    journal_digest: str | None = None,
     order: list[str] | None = None,
     max_leaves: int | None = None,
     postcommit: bool | None = None,
@@ -7763,8 +7794,9 @@ def op_episode_memory(
     changes: `prepare` one candidate's destination, set its `disposition`
     (including honest no_capture, deferred or rejected ones), and `resume`
     to execute the routed ones. A leaf is one typed step for an existing
-    writer (the curation step kinds of `maintain_memory`), never a free-form
-    effect. `resume` refuses with `episode_workflow_disabled` unless this
+    writer, of a kind its route owns: focused_note creates a note, entity an
+    entity, relation_only accepts a relation, existing_page and semantic_unit
+    edit or supersede. It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
     service enables episode execution.
 
     Args:
@@ -7802,6 +7834,9 @@ def op_episode_memory(
         reason: For `disposition`: why, in one or two sentences.
         input_revision: For `resume`: the input revision your coverage
             review covered, the current one.
+        journal_digest: For `resume`: the `journal_digest` your last
+            candidates, prepare or disposition result returned. A resume
+            after any later change is refused with EPISODE_REVISION_CONFLICT.
         order: For `resume`: leaf ids to run, in this order.
         max_leaves: For `resume`: at most this many leaves this pass, 1 to
             16 (default 8); the rest stay pending.
@@ -7814,8 +7849,8 @@ def op_episode_memory(
         coverage_current}; candidates/prepare/disposition -> {episode,
         input_revision, candidates: [{candidate_key, route, disposition,
         pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete,
-        execution}; resume adds {status, executed, reconciled, blocked,
-        deferred, publication}. Newlines, credential-shaped text and anything
+        execution}; resume adds {status, executed, replayed, stale,
+        diverged, reconciled, blocked, deferred, publication}. Newlines, credential-shaped text and anything
         over a cap are refused with nothing written.
     """
     recap = {
@@ -7834,6 +7869,7 @@ def op_episode_memory(
         "disposition": disposition,
         "reason": reason,
         "input_revision": input_revision,
+        "journal_digest": journal_digest,
         "order": order,
         "max_leaves": max_leaves,
         "postcommit": postcommit,
@@ -7847,7 +7883,10 @@ def op_episode_memory(
             {"candidate", "disposition", "reason"},
             {"candidate", "disposition", "reason"},
         ),
-        "resume": ({"input_revision", "order", "max_leaves", "postcommit"}, {"input_revision"}),
+        "resume": (
+            {"input_revision", "journal_digest", "order", "max_leaves", "postcommit"},
+            {"input_revision", "journal_digest"},
+        ),
     }.get(action, (None, None))
     if allowed is None:
         raise ValueError(
@@ -7897,6 +7936,7 @@ def op_episode_memory(
         resumed = episode_workflow_module.resume(
             vault_root,
             episode=episode,
+            journal_digest=journal_digest,
             input_revision=input_revision,
             order=order,
             max_leaves=max_leaves,
@@ -9951,6 +9991,7 @@ def op_maintain_memory(
     expected_plan_fingerprint: str | None = None,
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
+    exclude_groups: list[str] | None = None,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
@@ -9981,11 +10022,13 @@ def op_maintain_memory(
     Planning, Records, workflow contracts, schema/admin state, or trash internals.
 
     `mode="tag-variants"` lists tags that differ only by case, separator, or
-    inflection, grouped with their page counts and the most-used spelling as
-    canonical. Preview is read-only; `apply=true` with the preview's `plan_id`
-    and a one-line `why` rewrites one bounded batch of minority variants to the
-    canonical tag. Only the `tags` key changes, never the body; Sources and
-    Evidence are untouched. Preview again to continue with the next batch.
+    plural, grouped with the page counts you may see and the most-used written
+    form as canonical; a tie is listed, never rewritten. Preview is read-only;
+    `apply=true` with the preview's `plan_id` and a one-line `why` rewrites one
+    bounded batch of minority variants to the canonical tag and logs a rollback
+    record. Only the `tags` key changes; Sources, Evidence, Records, Planning
+    and other owned trees are untouched. Preview again for the next batch.
+    `exclude_groups` keeps named groups out of preview and apply alike.
 
     `mode="fix"` also collapses media sidecars that accumulated nested copies of
     themselves (audit category `duplicated_sidecar`, reportable on its own via
@@ -10024,6 +10067,7 @@ def op_maintain_memory(
         expected_plan_fingerprint: Exact reviewed plan fingerprint for approval.
         vocabulary_ref: Optional vocabulary decision correlated with curation apply or resume.
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
+        exclude_groups: Tag-variant group keys to leave out; part of the plan_id.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -10031,6 +10075,8 @@ def op_maintain_memory(
     )
     if rebuild_graph and mode != "reconcile":
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
+    if exclude_groups is not None and mode != "tag-variants":
+        raise ValueError("INVALID_ARGUMENTS: exclude_groups applies only to tag-variants")
     if mode == "curation":
         from . import curation as curation_module
         from . import due_state as due_state_module
@@ -10203,14 +10249,15 @@ def op_maintain_memory(
             or source_snapshot is not None
         ):
             raise ValueError(
-                "INVALID_ARGUMENTS: tag-variants accepts only apply, plan_id, and why"
+                "INVALID_ARGUMENTS: tag-variants accepts only apply, plan_id, why, "
+                "and exclude_groups"
             )
         if apply is None:
             if plan_id is not None or why is not None:
                 raise ValueError(
                     "INVALID_ARGUMENTS: tag-variants preview does not accept apply guards"
                 )
-            return tag_variants_module.preview(vault_root)
+            return tag_variants_module.preview(vault_root, exclude=exclude_groups)
         if apply is not True or plan_id is None or why is None:
             raise ValueError(
                 "INVALID_ARGUMENTS: tag-variants apply requires true, plan_id, and why"
@@ -10218,7 +10265,9 @@ def op_maintain_memory(
         from . import due_state as due_state_module
 
         with due_state_module.batch_scope(vault_root):
-            reconciled = tag_variants_module.apply(vault_root, plan_id=plan_id, why=why)
+            reconciled = tag_variants_module.apply(
+                vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
+            )
         return _carrying_batch_advisories(vault_root, reconciled)
     if mode == "audit":
         return op_audit(

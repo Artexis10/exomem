@@ -53,14 +53,20 @@ None of it is served back or part of a packet, so a session that lost its token 
 continues its own thread (memory-loop: "A turn that names nothing MAY resolve to the
 hottest recent anchor").
 
-Every packet, an abstention included, SHALL carry a token, and the token SHALL name
+Every packet, an abstention included, SHALL carry a token, except a `withheld`
+abstention, for which the egress guard served no packet at all, and the token SHALL name
 the caller's thread: an opaque random value the server chose, which the caller passes
 back unchanged on its next call in the same conversation. The server instructions and
-the tool description SHALL ask the caller to do so. A token that carries a thread and
+the tool description SHALL ask the caller to do so. A token that names no ref SHALL
+carry generation 0, whoever the audience. A token that carries a thread and
 no refs SHALL be reported `generation.continuity = "absent"`; the refs' semantics above
 are otherwise unchanged, and a packet's thread never adds a ref to its token. A valid
-thread is one minted by this vault's index, carried by a packet served no longer ago
-than a declared idle bound, and begun no longer ago than a declared lifetime bound.
+thread is one minted by this vault's index for the caller's audience, carried by a
+packet served no longer ago than a declared idle bound, and begun no longer ago than a
+declared lifetime bound. The token SHALL authenticate the thread and both times with a
+key that never leaves the server, so a caller can neither extend a thread's life nor
+name another thread; a thread whose authentication is missing or does not verify SHALL
+be treated as lapsed.
 Where the caller supplies no session key of its own, a valid thread SHALL be its session
 key for the heat projection: its admitted picks and its last served thread are recorded
 under it, and its session tier ranks by it. It SHALL be stored only as a salted
@@ -155,6 +161,12 @@ index or a spent request budget.
 - **WHEN** a caller passes a token whose thread lapsed, or a string that is not a token
 - **THEN** the call is served as a keyless caller, reports
   `generation.continuity_thread = "stale"`, and returns a token naming a fresh thread
+
+#### Scenario: A rewritten thread is served as keyless
+- **WHEN** a caller passes a token whose thread, or the time it began or was served, it
+  rewrote, or a token minted before threads were authenticated
+- **THEN** the call is served as a keyless caller, the packet reports
+  `generation.continuity_thread = "stale"`, and its token names a fresh thread
 
 #### Scenario: A withheld page in a thread answers as an absent one
 - **WHEN** a caller other than the owner, under a governed policy, passes a thread whose
