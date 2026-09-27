@@ -2730,7 +2730,8 @@ class EpistemicGraphIndex:
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
-        return self._rebuild_all_off_boundary()
+        with _logged_whole_vault_rebuild(_durable_generation(self.vault_root)):
+            return self._rebuild_all_off_boundary()
 
     def _rebuild_all_off_boundary(
         self, *, accept_stabilized_build: bool = False
@@ -5002,7 +5003,12 @@ class EpistemicGraphIndex:
                     )
                 return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
             try:
-                return self._rebuild_all_off_boundary(accept_stabilized_build=True)
+                with _logged_whole_vault_rebuild(
+                    graph_checkpoint.generation
+                    if graph_checkpoint is not None
+                    else _durable_generation(self.vault_root)
+                ):
+                    return self._rebuild_all_off_boundary(accept_stabilized_build=True)
             except graph_sync.GraphRebuildInProgress:
                 # A defer-disposition fallback has already persisted these exact
                 # paths. A rebuild-disposition fallback knows only that the
@@ -8753,29 +8759,59 @@ def upsert_after_write(
         return GraphDispatchResult("failed", "graph_dispatch_failed")
 
 
-def _rebuild_outcome(
-    index: EpistemicGraphIndex, checkpoint: graph_sync.GraphSyncCheckpoint
-) -> graph_sync.GraphBuildOutcome:
-    # #576 F3. Elapsed wall time around the whole registered rebuild, on both
-    # the publishing and the failing path. Read alongside the publication- and
-    # stabilization-attempt counts the two loops inside it log, this is what
-    # separates "one slow pass" from "several retried passes" -- the
-    # distinction the incident needed and could not make.
+def _rebuild_failure_reason(error: BaseException) -> str:
+    """The code a failed whole-vault rebuild carries, else its exception type."""
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code and code.isascii() and len(code) <= 64:
+        return code
+    return type(error).__name__
+
+
+@contextmanager
+def _logged_whole_vault_rebuild(generation: int | None) -> Iterator[None]:
+    """Log one outcome line for a whole-vault rebuild, naming why it did not publish.
+
+    #576 F3 added the elapsed time, which separates "one slow pass" from
+    "several retried passes". The 2026-09-27 cold fallback showed what it still
+    lacked: a refused rebuild claim (0.2 s, no pass run, the work waits for the
+    owner) and a pass defeated after eight minutes printed the same
+    `outcome=failed` line with no reason, and the callers that run the pass
+    directly -- start-up validation, the reconcile rebuild -- printed nothing.
+    A refused claim is `coalesced`, never `failed`: it did not fail at anything.
+    """
     started = time.monotonic()
     try:
-        index._rebuild_all_off_boundary()
-    except BaseException:
+        yield
+    except BaseException as error:
         log.info(
-            "graph rebuild finished outcome=failed elapsed_ms=%.1f generation=%s",
+            "graph rebuild finished outcome=%s reason=%s elapsed_ms=%.1f generation=%s",
+            "coalesced" if isinstance(error, graph_sync.GraphRebuildInProgress) else "failed",
+            _rebuild_failure_reason(error),
             (time.monotonic() - started) * 1000.0,
-            checkpoint.generation,
+            generation,
         )
         raise
     log.info(
         "graph rebuild finished outcome=published elapsed_ms=%.1f generation=%s",
         (time.monotonic() - started) * 1000.0,
-        checkpoint.generation,
+        generation,
     )
+
+
+def _durable_generation(vault_root: Path) -> int | None:
+    """The committed graph generation, for a rebuild that was handed none."""
+    try:
+        checkpoint = graph_sync.read_checkpoint(vault_root)
+    except Exception:  # noqa: BLE001 - a log field never fails the rebuild
+        return None
+    return None if checkpoint is None else int(checkpoint.generation)
+
+
+def _rebuild_outcome(
+    index: EpistemicGraphIndex, checkpoint: graph_sync.GraphSyncCheckpoint
+) -> graph_sync.GraphBuildOutcome:
+    with _logged_whole_vault_rebuild(checkpoint.generation):
+        index._rebuild_all_off_boundary()
     return graph_sync.GraphBuildOutcome.covering(checkpoint)
 
 

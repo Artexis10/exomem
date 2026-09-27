@@ -179,7 +179,19 @@ def _availability_pending(vault_root: Path) -> bool:
         return False
 
 
-def _request_full_rebuild(vault_root: Path) -> bool:
+#: Why the drain queued whole-vault debt, as its log line says it. Two branches
+#: reach `_request_full_rebuild`, and the 2026-09-27 cold fallback was diagnosed
+#: from a line that named the other one: it said "unreadable with no barrier"
+#: for a barrier holding an unpublished external epoch.
+_FULL_REBUILD_CAUSES = {
+    "unreadable_without_barrier": "graph unreadable with no barrier",
+    "barrier_external_epoch": "barrier holds an unpublished external epoch",
+}
+
+
+def _request_full_rebuild(
+    vault_root: Path, *, cause: str = "unreadable_without_barrier"
+) -> bool:
     """Queue a whole-vault rebuild for an unreadable graph. True when queued.
 
     Routed through the durable marker rather than by calling the rebuild here,
@@ -203,8 +215,8 @@ def _request_full_rebuild(vault_root: Path) -> bool:
         log.warning("graph drain: could not queue a rebuild for an unreadable graph")
         return False
     log.info(
-        "graph drain: graph unreadable with no barrier; queued a whole-vault "
-        "rebuild at generation %d",
+        "graph drain: %s; queued a whole-vault rebuild at generation %d",
+        _FULL_REBUILD_CAUSES[cause],
         generation,
     )
     return True
@@ -391,7 +403,7 @@ def _work_once(vault_root: Path) -> int:
             if (
                 freshness.external_pending(vault_root)
                 and not epistemic_graph.publication_refusal_active(vault_root)
-                and _request_full_rebuild(vault_root)
+                and _request_full_rebuild(vault_root, cause="barrier_external_epoch")
             ):
                 processed += 1
     elif _availability_pending(vault_root):
