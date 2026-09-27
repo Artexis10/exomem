@@ -96,9 +96,9 @@ def first_ask(vault_root: Path, signal_version: str) -> bool:
     A separate ledger rather than a key of the due-state projection: every
     projection write replaces that payload with a fixed shape, and a question
     must not be asked again just because a reconcile ran. The read-modify-write
-    holds the same file lock `prominence_preferences` uses for its record, so
-    two concurrent writes cannot both ask; a lock that cannot be taken asks
-    nothing, and the observation stays in review.
+    holds a `filelock` lock beside the ledger, the pattern `prominence_preferences`
+    uses for its record, so two concurrent writes cannot both ask; a lock that
+    cannot be taken asks nothing, and the observation stays in review.
     """
     from . import state_paths
 
