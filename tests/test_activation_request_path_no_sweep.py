@@ -1358,6 +1358,41 @@ def test_an_agent_picked_page_holds_the_same_ceilings(
     assert calls.unattributable == 0, calls.report()
 
 
+
+def test_an_agent_pick_that_fires_the_learning_sensor_holds_the_same_ceilings(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """Step 5's pick seam at work: a pick whose turn never named the anchor
+    counts a miss and builds the advisory. It adds at most the page read for
+    the writer's hash and the review-state read, and enumerates nothing."""
+    from exomem import capture_sweep
+
+    monkeypatch.setattr(capture_sweep, "_proactive_capture_permitted", lambda: True)
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    _warm_activation(vault, warm_managed_cell)
+    _drain_background_walks()
+
+    scheduled = _no_background_walks(monkeypatch)
+    calls = _FilesystemCalls(vault)
+    calls.install(monkeypatch)
+
+    packet = commands.op_activate_context(
+        vault,
+        turn="wie geht es dem Schlitten",
+        anchor="Knowledge Base/Products/Cargo Sled.md",
+    )
+
+    assert scheduled == [], scheduled
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["learning"]["observed"]["class"] == "naming", "the sensor must fire"
+    assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+    assert calls.unattributable == 0, calls.report()
+
+
+
 def test_a_referential_turn_with_a_full_heat_ring_holds_the_same_ceilings(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
@@ -1442,6 +1477,7 @@ def test_a_referential_turn_with_a_full_heat_ring_holds_the_same_ceilings(
     assert len(folded) == working_set_heat.MAX_FOLD_PATHS, "and it folded every page it was given"
 
 
+
 def test_the_semantic_lane_holds_the_same_ceilings(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
@@ -1498,6 +1534,7 @@ def test_the_semantic_lane_holds_the_same_ceilings(
     assert WARM_REQUEST_FILESYSTEM_CALL_CEILING == 1200
 
 
+
 def _write_episodes(vault: Path, count: int, *, start: int = 0) -> list[Path]:
     """`count` recaps of distinct conversations, oldest first, a second apart."""
     from exomem import episode_capture
@@ -1521,6 +1558,7 @@ def _write_episodes(vault: Path, count: int, *, start: int = 0) -> list[Path]:
         )
         written.append(page)
     return written
+
 
 
 def _governance_enumerations(calls: _FilesystemCalls) -> int:
@@ -1607,6 +1645,7 @@ def test_a_keyed_turn_on_a_governed_vault_pays_nothing_for_its_threads(
     assert keyed.enumerations - _governance_enumerations(keyed) == 0, keyed.report()
     assert keyed.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, keyed.report()
     assert keyed.unattributable == 0, keyed.report()
+
 
 
 def _fresh_projection(vault: Path) -> None:
