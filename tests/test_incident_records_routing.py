@@ -859,8 +859,9 @@ def test_bootstrap_teaches_dispositions_command_free(tmp_path: Path) -> None:
     ]
     routing = post_write["records_routing"]
 
-    for disposition in ("file:", "append_occurrence:", "ask:", "hold:"):
-        assert disposition in routing
-    assert "claims.match" in routing and "without asking" in routing
+    # The disposition's instruction travels with the write response itself, so
+    # bootstrap only has to point at it and stays within its byte ceiling.
+    assert "claims.match" in routing and "disposition carries its own instruction" in routing
+    assert "advisory alone" in routing
     assert "record_memory" not in routing
     assert "grouped backfill" in post_write["records_routing_handling"]
