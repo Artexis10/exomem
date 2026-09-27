@@ -480,3 +480,53 @@ def test_non_committed_result_does_not_create_review_state(tmp_path, state):
     result = terminal("Knowledge Base/Notes/example.md") | {"state": state}
     assert vocabulary_delivery.after_commit(tmp_path, result) == result
     assert not VocabularyState(tmp_path).store.path.exists()
+
+
+def test_swallowed_guidance_failure_is_logged_by_type_without_content(
+    tmp_path, monkeypatch, caplog
+):
+    from exomem import vocabulary_delivery
+
+    path = "Knowledge Base/Notes/logged.md"
+
+    def unavailable(*args, **kwargs):
+        raise KeyError("private page sentence")
+
+    monkeypatch.setattr(vocabulary_projection, "for_write", unavailable)
+    with caplog.at_level("WARNING", logger="exomem.vocabulary_delivery"):
+        with library_scope():
+            result = vocabulary_delivery.after_commit(tmp_path, terminal(path))
+    assert result["vocabulary_sync"]["reason"] == "guidance_unavailable"
+    records = [r for r in caplog.records if r.name == "exomem.vocabulary_delivery"]
+    assert len(records) == 1
+    assert records[0].levelname == "WARNING"
+    message = records[0].getMessage()
+    assert "KeyError" in message
+    assert "private page sentence" not in message
+    assert records[0].exc_info is None
+
+
+def test_recovery_failure_is_logged_by_type_without_content(tmp_path, monkeypatch, caplog):
+    from exomem import vocabulary_delivery
+
+    path = "Knowledge Base/Notes/recover-logged.md"
+    page = tmp_path / path
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: insight\n---\nRecovery under review.\n")
+
+    def unavailable(*args, **kwargs):
+        raise TypeError("private page sentence")
+
+    monkeypatch.setattr(vocabulary_projection, "for_write", unavailable)
+    with library_scope():
+        vocabulary_delivery.after_commit(tmp_path, terminal(path))
+    with caplog.at_level("WARNING", logger="exomem.vocabulary_delivery"):
+        caplog.clear()
+        with library_scope():
+            recovered = vocabulary_delivery.recover(tmp_path)
+    assert recovered["state"] == "unavailable"
+    messages = [
+        r.getMessage() for r in caplog.records if r.name == "exomem.vocabulary_delivery"
+    ]
+    assert any("TypeError" in message for message in messages)
+    assert all("private page sentence" not in message for message in messages)
