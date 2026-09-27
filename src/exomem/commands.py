@@ -6565,6 +6565,9 @@ def _op_activate_context_body(
         # second one will, and the gate asks the budget for room in
         # proportion to it.
         lexical_started = time.monotonic()
+        # How many of the turn's units the bounded stage kept and dropped;
+        # counts only, so the diagnostic never carries the turn's words.
+        lexical_selection: dict[str, int] = {}
         with find_types.timing_span(timings, "working_set.lexical"):
             if anchor:
                 hits, lexical_state = [], "agent_choice"
@@ -6580,8 +6583,11 @@ def _op_activate_context_body(
                     ),
                     freshness=lexical_freshness,
                     recall_checkpoint=(snapshot.recall_checkpoint("kb") if snapshot else None),
+                    selection=lexical_selection,
                 )
         lexical_seconds = max(0.0, time.monotonic() - lexical_started)
+        if timings is not None and lexical_selection:
+            timings.profile["working_set.lexical"] = dict(lexical_selection)
         if working_set_module.budget_exhausted("working_set.release"):
             return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
         with find_types.timing_span(timings, "working_set.release"):

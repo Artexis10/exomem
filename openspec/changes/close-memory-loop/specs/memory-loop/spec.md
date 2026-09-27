@@ -377,7 +377,13 @@ catalogue proof or current-parent validation. Unit role queries SHALL restrict
 parent paths to the resolved anchor neighbourhood before applying their row
 limit. Missing or stale publication SHALL remain explicit and SHALL NOT trigger
 foreground repair. Managed-service warm latency and offline cold filesystem
-proof SHALL be reported separately.
+proof SHALL be reported separately. The lexical evidence query SHALL stay
+bounded on any turn: it SHALL ask the catalogue about a bounded number of the
+turn's units, chosen rarest first by the catalogue's own document frequencies
+on the tokens the index stores, and SHALL run its corroboration test over a
+capped candidate window ranked inside the catalogue query. Selection SHALL NOT
+drop a unit for containing digits, SHALL count an unspaced run as one unit, and
+SHALL be reported in activation diagnostics as kept and dropped counts only.
 
 Packet generation metadata SHALL identify semantic evidence as ready, disabled,
 absent, uncalibrated, audience_restricted, warming, busy, unavailable or
@@ -417,6 +423,15 @@ fast abstention or compiler-only timing.
   English-authored anchor and is about that anchor
 - **THEN** the anchor earns `rare_term` and `vector_band` and resolves
 - **AND** with semantic evidence off the same turn leaves it partial
+
+#### Scenario: A long turn's lexical stage stays bounded
+
+- **WHEN** a turn of several hundred everyday words also names one anchor by
+  its rare words or a rare model number
+- **THEN** the lexical MATCH holds at most the bounded number of units, the
+  rare words are among them, and the anchor is still reached
+- **AND** a turn left with no content word, or with only words the catalogue
+  never holds, issues no MATCH and abstains without error
 
 #### Scenario: A turn similar to many anchors earns no band
 

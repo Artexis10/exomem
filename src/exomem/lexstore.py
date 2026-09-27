@@ -1855,6 +1855,74 @@ def _term_units(units) -> list[list[object]]:
     return rows
 
 
+#: Stems one catalogue generation's frequency cache may hold before it
+#: starts again; a vault's working vocabulary sits far below it.
+_TERM_FREQUENCY_CACHE_MAX = 50_000
+
+
+@dataclass(frozen=True, slots=True)
+class QueryTermBudget:
+    """How much of a long query a bounded BM25 caller lets reach the MATCH.
+
+    `max_units` query units (a spaced word, or an unspaced run with all its
+    bigrams) are kept, rarest in the catalogue first. A unit on more than
+    `common_fraction` of the catalogue's pages is a near-stopword for this
+    corpus and is dropped, once the catalogue holds at least
+    `common_min_pages` pages and enough rarer units remain to corroborate.
+    `candidate_cap` bounds the rows, ranked by bm25 inside SQL, that the
+    corroboration test reads. The numbers are the caller's policy.
+    """
+
+    max_units: int
+    common_fraction: float
+    common_min_pages: int
+    candidate_cap: int
+
+
+def select_query_units(
+    units,
+    frequencies: Mapping[str, int],
+    pages: int,
+    budget: QueryTermBudget,
+    *,
+    min_units: int = 1,
+) -> tuple[list, int]:
+    """`(kept units in query order, distinct units dropped)`.
+
+    Units are deduplicated first: a word said thirty times is one unit. A
+    unit's frequency is its rarest measured stem present in the catalogue
+    (for a run, `bm25.run_content_stems`, the bigrams corroboration counts),
+    and a unit none of whose stems the catalogue holds is dropped: it can
+    neither rank nor corroborate a page. Digits play no part; a rare model
+    number is kept because it is rare.
+
+    The common-term ceiling only applies when at least `min_units` units
+    survive it. Otherwise the turn is all everyday words, and it keeps its
+    rarest `max_units` exactly as an unbounded query would have ranked them.
+    """
+    from . import bm25 as bm25_module
+
+    distinct: dict[tuple[str, ...], tuple[int, object]] = {}
+    for position, unit in enumerate(units):
+        distinct.setdefault(tuple(unit.stems), (position, unit))
+    ranked: list[tuple[int, int, object]] = []
+    for position, unit in distinct.values():
+        measured = bm25_module.run_content_stems(unit.stems) if unit.run else unit.stems
+        present = [int(frequencies.get(stem, 0)) for stem in measured]
+        present = [frequency for frequency in present if frequency > 0]
+        if present:
+            ranked.append((min(present), position, unit))
+    if pages >= budget.common_min_pages:
+        ceiling = budget.common_fraction * pages
+        distinctive = [entry for entry in ranked if entry[0] <= ceiling]
+        if len(distinctive) >= min_units:
+            ranked = distinctive
+    # Rarest first, the turn's own order breaking ties; kept in turn order.
+    rarest = sorted(ranked, key=lambda entry: entry[:2])[: max(0, budget.max_units)]
+    kept = sorted(rarest, key=lambda entry: entry[1])
+    return [unit for _frequency, _position, unit in kept], len(distinct) - len(kept)
+
+
 def search_bm25(
     vault_root: Path,
     query: str,
@@ -1900,6 +1968,8 @@ def search_bm25_result(
     recall_checkpoint: Any | None = None,
     exclude_navigation: bool = False,
     exclude_raw_material: bool = False,
+    term_budget: QueryTermBudget | None = None,
+    term_selection: dict[str, int] | None = None,
 ) -> CatalogQueryResult[list[tuple[str, float]]]:
     """Non-walking maintained-catalog BM25 query with explicit readiness.
 
@@ -1916,6 +1986,12 @@ def search_bm25_result(
     inside the query (see `_excluded_rows_clause`), so `k` counts only rows a
     caller could keep: filtered after the LIMIT, a run of them at the head
     empties the window.
+
+    `term_budget` bounds a long query (see `QueryTermBudget` and
+    `select_query_units`): the units are chosen on the served snapshot, from
+    the catalogue's own document frequencies, before the MATCH is built.
+    `term_selection`, when given, receives `terms_kept` and `terms_dropped`
+    — counts only, never a term.
     """
     if not _usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
@@ -1945,6 +2021,9 @@ def search_bm25_result(
         term_units=_term_units(units),
         exclude_navigation=exclude_navigation,
         exclude_raw_material=exclude_raw_material,
+        term_budget=term_budget,
+        query_units=units if term_budget is not None else None,
+        term_selection=term_selection,
     )
 
 
@@ -2988,6 +3067,9 @@ class LexicalStore:
         self._failed = False  # runtime-retired for this process
         self._last_rebuild_result: str | None = None
         self._lock = threading.Lock()
+        # (catalogue generation, {stem: document frequency}, pages) for
+        # bounded queries; see `_catalogue_term_frequencies`.
+        self._term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
 
     def _decline_rebuild(self, reason: str) -> bool:
         """Record one stable, content-free repair result and decline."""
@@ -6125,6 +6207,9 @@ class LexicalStore:
         term_units: list[list[object]] | None = None,
         exclude_navigation: bool = False,
         exclude_raw_material: bool = False,
+        term_budget: QueryTermBudget | None = None,
+        query_units: list | None = None,
+        term_selection: dict[str, int] | None = None,
     ) -> CatalogQueryResult[list[tuple[str, float]]]:
         return self._serve_from_ready_catalog_result(
             scope,
@@ -6137,6 +6222,9 @@ class LexicalStore:
                 corroboration_groups=corroboration_groups,
                 exclude_navigation=exclude_navigation,
                 exclude_raw_material=exclude_raw_material,
+                term_budget=term_budget,
+                query_units=query_units,
+                term_selection=term_selection,
             ),
             "lexical sidecar BM25 query failed (%s)",
             allow_delta=allow_delta,
@@ -6205,6 +6293,64 @@ class LexicalStore:
             frequencies[token] = int(row[0]) if row else 0
         return frequencies, int(total[0]) if total else 0
 
+    def _catalogue_term_frequencies(
+        self, conn: sqlite3.Connection, tokens: list[str]
+    ) -> tuple[dict[str, int], int]:
+        """`({stem: rows of the fts table holding it}, pages in the catalogue)`.
+
+        The informativeness a bounded query ranks its terms by, read from
+        the index itself through a connection-local `fts5vocab` view: no new
+        persistent table, and one indexed lookup for every stem this
+        generation has not been asked about yet, in a single statement.
+        Counted over the whole `fts` table, which is what a MATCH term reads,
+        not per scope; `term_document_frequencies` is the scoped measure.
+
+        Cached per catalogue generation, keyed by the stored checkpoints and
+        catalogue identity read on `conn`'s own snapshot. A frequency only
+        steers which terms are asked for, never whether a page matches, so a
+        count from a superseded snapshot could at worst pick a different
+        rare term; the key makes even that fall away at the next publish.
+        """
+        generation = tuple(
+            conn.execute(
+                "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' "
+                "OR key = 'catalog_identity' ORDER BY key"
+            ).fetchall()
+        )
+        cached = self._term_frequency_cache
+        if cached is None or cached[0] != generation:
+            total = conn.execute("SELECT COUNT(*) FROM pages").fetchone()
+            cached = (generation, MappingProxyType({}), int(total[0]) if total else 0)
+        _generation, known, pages = cached
+        missing = [token for token in dict.fromkeys(tokens) if token not in known]
+        if missing:
+            try:
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS temp.fts_terms "
+                    "USING fts5vocab(main, fts, row)"
+                )
+                found = dict(
+                    conn.execute(
+                        "SELECT term, doc FROM temp.fts_terms "
+                        "WHERE term IN (SELECT value FROM json_each(?))",
+                        (json.dumps(missing, ensure_ascii=False),),
+                    ).fetchall()
+                )
+            except sqlite3.OperationalError as e:
+                # A build without the vocabulary view still answers, bounded
+                # by count alone: every term reads as present, in turn order,
+                # and with no page total the common-term ceiling stays off.
+                log.debug("fts5vocab unavailable (%s); bounding by count alone", e)
+                return {token: 1 for token in tokens}, 0
+            merged = {} if len(known) + len(missing) > _TERM_FREQUENCY_CACHE_MAX else dict(known)
+            merged.update((token, int(found.get(token, 0))) for token in missing)
+            # Replaced whole, never mutated: a concurrent reader keeps the
+            # mapping it already holds.
+            cached = (generation, MappingProxyType(merged), pages)
+        self._term_frequency_cache = cached
+        known = cached[1]
+        return {token: int(known.get(token, 0)) for token in tokens}, pages
+
     def _bm25_query(
         self,
         conn: sqlite3.Connection,
@@ -6219,7 +6365,35 @@ class LexicalStore:
         corroboration_groups: list[list[str]] | None = None,
         exclude_navigation: bool = False,
         exclude_raw_material: bool = False,
+        term_budget: QueryTermBudget | None = None,
+        query_units: list | None = None,
+        term_selection: dict[str, int] | None = None,
     ) -> list[tuple[str, float]]:
+        if term_budget is not None and query_units is not None:
+            from . import bm25 as bm25_module
+
+            measured = [
+                stem
+                for unit in query_units
+                for stem in (
+                    bm25_module.run_content_stems(unit.stems) if unit.run else unit.stems
+                )
+            ]
+            frequencies, pages = self._catalogue_term_frequencies(conn, measured)
+            kept, dropped = select_query_units(
+                query_units,
+                frequencies,
+                pages,
+                term_budget,
+                min_units=max(1, min_matched_terms),
+            )
+            if term_selection is not None:
+                term_selection.update(terms_kept=len(kept), terms_dropped=dropped)
+            if not kept:
+                # Nothing the catalogue holds: no page can rank, so no MATCH.
+                return []
+            tokens = list(dict.fromkeys(stem for unit in kept for stem in unit.stems))
+            term_units = _term_units(kept)
         # Tokens are runs of letters, numbers and marks: no quote or other FTS5
         # syntax can hide in them, but quote anyway; OR mirrors get_scores()
         # membership (any-term match).
@@ -6230,6 +6404,11 @@ class LexicalStore:
         if allowed_paths is not None:
             allowed_clause = " AND p.path IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
+        # The ranking window's own clause and parameters end here; the
+        # corroboration test's follow. A bounded query splits them apart.
+        window_clause = allowed_clause
+        filter_at = len(params)
+        corroborated = ""
         groups = [group for group in (corroboration_groups or []) if group]
         if min_matched_terms > 1 or groups:
             # Filter before LIMIT so one-unit hits cannot crowd out valid pages.
@@ -6280,13 +6459,39 @@ class LexicalStore:
             # Either alone, or both as alternatives: a caller that supplies
             # only groups gets the all-of test and no flat count, which is
             # how "this page qualifies on a phrase or not at all" is said.
-            allowed_clause += " AND (" + " OR ".join(clauses) + ")"
+            corroborated = "(" + " OR ".join(clauses) + ")"
+            allowed_clause += " AND " + corroborated
+        corroboration_end = len(params)
         # Excluded before LIMIT, for the same reason as corroboration.
         excluded_clause, excluded_params = _excluded_rows_clause(
             navigation=exclude_navigation, raw_material=exclude_raw_material
         )
         allowed_clause += excluded_clause
         params.extend(excluded_params)
+        if term_budget is not None and corroborated:
+            # Bounded: rank the MATCH inside SQL and read at most
+            # `candidate_cap` rows, then run the corroboration test on that
+            # window only. Unbounded, the test read the stored text of every
+            # row any term of the turn touched.
+            window_params = params[:filter_at] + params[corroboration_end:]
+            corroboration_params = params[filter_at:corroboration_end]
+            rows = conn.execute(
+                "SELECT c.path, -c.bm25 FROM ("
+                "SELECT p.path AS path, fts.rowid AS rid, bm25(fts) AS bm25 "
+                "FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                f"WHERE fts MATCH ? AND p.{col} = 1" + window_clause + excluded_clause + " "
+                "ORDER BY bm25(fts), p.path LIMIT ?"
+                ") AS c JOIN fts ON fts.rowid = c.rid "
+                "WHERE " + corroborated + " "
+                "ORDER BY c.bm25, c.path LIMIT ?",
+                [
+                    *window_params,
+                    int(term_budget.candidate_cap),
+                    *corroboration_params,
+                    k,
+                ],
+            ).fetchall()
+            return [(p, float(s)) for p, s in rows]
         params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "
