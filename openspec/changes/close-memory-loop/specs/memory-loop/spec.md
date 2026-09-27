@@ -384,7 +384,9 @@ document frequencies measured over the scope it queries on the tokens the
 index stores, and SHALL rank and run its corroboration test over every row
 those units match, so that for the same units it returns what the unbounded
 query returns. A turn whose units the scope holds fit within the unit bound
-SHALL NOT lose a unit for being common. Selection SHALL NOT drop a unit for
+SHALL NOT lose a unit for being common; on a longer turn a unit dropped for
+being common SHALL leave the MATCH but SHALL still count toward
+corroboration. Selection SHALL NOT drop a unit for
 containing digits, SHALL count an unspaced run as one unit carrying only its
 content bigrams, and SHALL be reported in activation diagnostics as kept and
 dropped counts only.
@@ -443,6 +445,8 @@ fast abstention or compiler-only timing.
   common in the catalogue that each of those pages also holds
 - **THEN** the common word is still asked about and both pages are returned
   in the order the unbounded query returns them
+- **AND** padded with everyday words past the unit bound, the everyday words
+  leave the MATCH but still corroborate, and both pages are still returned
 
 #### Scenario: A turn similar to many anchors earns no band
 
