@@ -171,16 +171,16 @@ def test_effective_claims_unions_declared_and_recurring_derived_values(tmp_path:
         "tags": {"subscriptions": 2, "other": 4, "snapshot": 3},
     }
 
-    # Compared in folded form: "billing" and "bill", "subscriptions" and
-    # "subscription" are one term (see vocabulary_fold).
+    # Compared in folded form: "subscriptions" and "subscription" are one
+    # term; "billing" and "cancelled" keep their -ing/-ed (see vocabulary_fold).
     assert record_governance.effective_claims(manifest, observed) == frozenset(
         {
             "account",
             "state",
-            "bill",
+            "billing",
             "receipt",
             "active",
-            "cancell",
+            "cancelled",
             "provider",
             "alpha",
             "subscription",
@@ -262,7 +262,7 @@ def test_route_returns_only_a_strict_winner_with_bounded_sorted_terms() -> None:
     assert advisory == {
         "collection": winner.collection,
         "title": "Accounts",
-        "matched_terms": ["account", "active", "bill", "monthly", "provider", "renewal"],
+        "matched_terms": ["account", "active", "billing", "monthly", "provider", "renewal"],
         "natural_key": ["account", "effective_on"],
         "strength": "moderate",
     }
@@ -508,7 +508,7 @@ def test_claims_projection_reconcile_equals_bounded_record_folds(
             "tags": ["licences"],
         },
     )
-    assert "cancell" not in due_state.routing_targets(tmp_path)[0].claims
+    assert "cancelled" not in due_state.routing_targets(tmp_path)[0].claims
     due_state.apply_record_write_delta(
         tmp_path,
         manifest,
@@ -523,7 +523,7 @@ def test_claims_projection_reconcile_equals_bounded_record_folds(
         },
     )
     folded = due_state.routing_targets(tmp_path)[0]
-    assert {"cancell", "provider", "beta", "licence"} <= folded.claims
+    assert {"cancelled", "provider", "beta", "licence"} <= folded.claims
 
     monkeypatch.undo()
     reconciled = due_state.reconcile(tmp_path)

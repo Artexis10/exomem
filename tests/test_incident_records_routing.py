@@ -167,12 +167,14 @@ def _target(
 def test_fold_term_folds_plurals_and_progressives_conservatively() -> None:
     fold = vocabulary_fold.fold_term
     assert fold("failures") == fold("failure") == "failure"
-    assert fold("dogfooding") == fold("dogfood") == "dogfood"
     assert fold("regressions") == "regression"
     assert fold("Matches") == "match"
-    assert fold("stopped") == "stop"
     assert fold("Context  Compiler") == "context-compiler"
     assert fold("snake_case term") == "snake-case-term"
+    # Progressive and past forms are different words often enough that the
+    # shared fold never removes -ing or -ed.
+    assert fold("dogfooding") != fold("dogfood")
+    assert fold("stopped") == "stopped"
     # Short words and declared exceptions are never folded.
     for word in ("bus", "gas", "news", "series", "status", "process", "analysis", "ring"):
         assert fold(word) == word
@@ -194,11 +196,18 @@ def test_prose_claims_no_longer_capture_a_page_sharing_only_function_words() -> 
 def test_inflected_tags_meet_their_claims() -> None:
     incidents = _target(INCIDENTS, {"dogfood", "failures", "widget-app"})
 
-    advisory = route(["Panel froze", "failure", "dogfooding"], [incidents])
+    # The plural meets its claim; `dogfooding` does not meet `dogfood`. That is
+    # the deliberate cost of dropping -ing/-ed folding, which merged different
+    # words (training/trains, recording/records): a collection that wants both
+    # spellings declares both.
+    assert route(["Panel froze", "failure", "dogfooding"], [incidents]) is None
+    both = _target(INCIDENTS, {"dogfood", "dogfooding", "failures", "widget-app"})
+
+    advisory = route(["Panel froze", "failure", "dogfooding"], [both])
 
     assert advisory is not None
     assert advisory["collection"] == INCIDENTS
-    assert advisory["matched_terms"] == ["dogfood", "failure"]
+    assert advisory["matched_terms"] == ["dogfooding", "failure"]
 
 
 # --- Part 2: structured claims ---------------------------------------------

@@ -257,7 +257,8 @@ def edit(
     # Patch tags: if provided.
     tag_warnings: list[str] = []
     if tags is not None:
-        tags_clean, tag_warnings = tag_variants.reconcile_authored(vault_root, _clean_tags(tags))
+        tags_clean = _clean_tags(tags)
+        tag_warnings = tag_variants.advise_authored(vault_root, tags_clean)
         fm_text = _remove_yaml_key(fm_text, "tags")
         if tags_clean:
             fm_text = fm_text.rstrip() + "\ntags: [" + ", ".join(tags_clean) + "]"

@@ -6748,12 +6748,13 @@ class LexicalStore:
         finally:
             conn.close()
 
-    def tag_usage_counts(self) -> dict[str, int] | None:
-        """Pages per stored `page.tags` member across the Knowledge Base.
+    def tag_members_by_page(self) -> list[tuple[str, list[str]]] | None:
+        """Each Knowledge Base page's stored `page.tags` members, by path.
 
-        One aggregate over the members column the filters already maintain;
-        None when the catalogue is absent or stale, so a caller fails open
-        instead of treating an unbuilt sidecar as an empty vocabulary.
+        Per page rather than aggregated so a caller can drop pages its reader
+        may not see, or that another subsystem owns, before it counts. None
+        when the catalogue is absent or stale, so a caller fails open instead
+        of treating an unbuilt sidecar as an empty vocabulary.
         """
         if self._failed or not self.path.exists():
             return None
@@ -6766,17 +6767,70 @@ class LexicalStore:
             if not self._schema_is_current(conn):
                 return None
             rows = conn.execute(
-                "SELECT member.value, COUNT(DISTINCT pages.path) "
-                "FROM pages, json_each(pages.tags_json) AS member "
-                "WHERE pages.in_kb = 1 AND pages.tags_json IS NOT NULL "
-                "AND member.type = 'text' GROUP BY member.value"
+                "SELECT path, tags_json FROM pages "
+                "WHERE in_kb = 1 AND tags_json IS NOT NULL AND tags_json != '[]'"
             ).fetchall()
-            return {str(tag): int(count) for tag, count in rows}
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical tag-usage probe declined (%s)")
             return None
         finally:
             conn.close()
+        out: list[tuple[str, list[str]]] = []
+        for path, members in rows:
+            try:
+                decoded = json.loads(members)
+            except ValueError:
+                continue
+            if isinstance(decoded, list):
+                out.append((str(path), [item for item in decoded if isinstance(item, str)]))
+        return out
+
+    def tag_usage_aggregate(
+        self, excluded_dirs: Iterable[str], whitespace: str
+    ) -> tuple[dict[str, int], dict[str, int]] | None:
+        """Pages per stored `page.tags` member and per written form, in SQL.
+
+        A Knowledge Base page under a directory whose lowercased name is in
+        `excluded_dirs`, or under any dot directory, is not counted. The
+        written form trims `whitespace` from both ends and writes ` ` and `_`
+        as `-`, as the tag writers do. None when the catalogue is absent or
+        stale, so a caller fails open.
+        """
+        if self._failed or not self.path.exists():
+            return None
+        names = sorted({f"/{name.lower()}/" for name in excluded_dirs})
+        owned = " OR ".join("instr(lower('/' || path), ?) > 0" for _ in names) or "0"
+        sql = (
+            "WITH kept AS (SELECT path, tags_json FROM pages "
+            "WHERE in_kb = 1 AND tags_json IS NOT NULL AND tags_json != '[]' "
+            f"AND NOT ({owned}) AND NOT (('/' || path) GLOB '*/.*/*')), "
+            "members AS (SELECT DISTINCT kept.path AS path, member.value AS value "
+            "FROM kept, json_each(kept.tags_json) AS member "
+            "WHERE member.type = 'text' AND trim(member.value, ?) != '') "
+            "SELECT 0, value, COUNT(*) FROM members GROUP BY value "
+            "UNION ALL SELECT 1, form, COUNT(*) FROM (SELECT DISTINCT path, "
+            "replace(replace(trim(value, ?), ' ', '-'), '_', '-') AS form FROM members) "
+            "GROUP BY form"
+        )
+        try:
+            conn = self._connect()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical tag-usage probe declined (%s)")
+            return None
+        try:
+            if not self._schema_is_current(conn):
+                return None
+            rows = conn.execute(sql, [*names, whitespace, whitespace]).fetchall()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical tag-usage probe declined (%s)")
+            return None
+        finally:
+            conn.close()
+        spellings: dict[str, int] = {}
+        forms: dict[str, int] = {}
+        for kind, value, count in rows:
+            (forms if kind else spellings)[str(value)] = int(count)
+        return spellings, forms
 
     def recall_resolver_entries(
         self, scope: str, checkpoint: Any | None
