@@ -196,7 +196,7 @@ def test_prose_claims_no_longer_capture_a_page_sharing_only_function_words() -> 
 def test_inflected_tags_meet_their_claims() -> None:
     incidents = _target(INCIDENTS, {"dogfood", "failures", "widget-app"})
 
-    advisory = route(["Panel froze", "failure", "dogfooding"], [incidents])
+    advisory = route(["Panel froze", "failure", "dogfoods"], [incidents])
 
     assert advisory is not None
     assert advisory["collection"] == INCIDENTS
