@@ -94,18 +94,23 @@ Every key under `match` must hold on the page (`type`, `category`, `project`
 or `tags`; `category` also reads the page's unit categories), and any value
 listed under a key may match. A page that satisfies every predicate routes to
 the collection as strong, even when its words share nothing with the claims.
-Predicates only widen routing; two collections declaring the same membership
-stay silent. Words are compared in a folded form, so `failure`/`failures` and
+A page silent about a key can still route by shared words, but a page whose
+value contradicts a key (another project, say) never routes there. When several
+collections' predicates all hold, the one holding the most predicates wins,
+then the one sharing more words; a full tie stays silent. Words come from the
+title and tags only, compared in a folded form, so `failure`/`failures` and
 `regression`/`regressions` meet, and function words such as "not" or "after"
 never count as shared vocabulary.
 
 A strong route of a failure-shaped note carries a `disposition`, set by the
 user's prominence: `file` (perform the ready `record_memory` payload without
-asking), `append_occurrence` (the note recurs an existing item: add it to that
-item's `sources`), `ask` (put the one precomposed question once and act only on
-yes), or `hold` (leave it for review). Creating a collection, or changing its
-claims, raises one grouped item naming the existing notes it now covers;
-handle it under the same disposition, once.
+asking), `append_occurrence` (perform the ready update payload, which adds the
+note to the existing item it recurs), `ask` (put the one precomposed question
+once and act only on yes), or `hold` (leave it for review). Editing a note that
+is already filed raises none of these again. Creating a collection, or changing
+its claims, raises one grouped item naming the existing notes it now covers:
+ask the user about it once, at any prominence, and file nothing from it without
+a yes.
 
 For a Planning or Records collection stored as Markdown items, YAML frontmatter
 is the sole canonical value source and the UUID remains durable identity. A
