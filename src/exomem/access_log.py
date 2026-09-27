@@ -35,10 +35,25 @@ logger = logging.getLogger("exomem.access")
 _REQUEST_ID_HEADER = b"x-exomem-request-id"
 _SESSION_ID_HEADER = b"mcp-session-id"
 _CF_RAY_HEADER = b"cf-ray"
+_HOST_HEADER = b"host"
 #: Cloudflare's own ray shape. Under content-private logging a `cf-ray` of any
 #: other shape is caller-chosen text, so it is dropped rather than logged. A
 #: cloud cell has no Cloudflare in front of it at all, so it never logs one.
 _CF_RAY_SHAPE = re.compile(r"[0-9a-f]{16}(-[A-Z]{3})?")
+_HOST_SHAPE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
+
+
+def _request_host(value: str | None) -> str | None:
+    """The hostname a request named, lowercased and without its port, or None
+    when the header is absent or is not shaped like a hostname."""
+    if not value:
+        return None
+    host = value.strip().lower()
+    if host.count(":") == 1:
+        host, _, port = host.partition(":")
+        if not port.isdigit():
+            return None
+    return host if _HOST_SHAPE.fullmatch(host) else None
 
 
 def access_log_disabled(env: dict[str, str] | None = None) -> bool:
@@ -80,6 +95,7 @@ class AccessLogMiddleware:
         path = str(scope.get("path") or "")
         session_id = _header_value(headers, _SESSION_ID_HEADER)
         cf_ray = _header_value(headers, _CF_RAY_HEADER)
+        host = _request_host(_header_value(headers, _HOST_HEADER))
         client = scope.get("client")
         client_ip = client[0] if client else None
 
@@ -120,6 +136,11 @@ class AccessLogMiddleware:
             content: dict[str, Any] = {"path": path[:512]}
             if client_ip:
                 content["client_ip"] = client_ip
+            # Which public address a request arrived on is what shows an old
+            # hostname has gone quiet before it is retired; the header is client
+            # text, so it is content-classified with the path.
+            if host:
+                content["host"] = host
             log_event(
                 logger,
                 logging.INFO,

@@ -47,7 +47,7 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "hosted_call": EventSpec(),
     "log_write_error": EventSpec(content_fields=frozenset({"message"})),
     "observability_internal_error": EventSpec(content_fields=frozenset({"message"})),
-    "http_request": EventSpec(content_fields=frozenset({"client_ip", "path"})),
+    "http_request": EventSpec(content_fields=frozenset({"client_ip", "host", "path"})),
     "mutation_lock_acquired": EventSpec(),
     "mutation_lock_released": EventSpec(),
     "mutation_lock_long_hold": EventSpec(),
