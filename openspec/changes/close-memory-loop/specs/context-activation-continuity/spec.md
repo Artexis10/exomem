@@ -53,10 +53,12 @@ None of it is served back or part of a packet, so a session that lost its token 
 continues its own thread (memory-loop: "A turn that names nothing MAY resolve to the
 hottest recent anchor").
 
-Every packet, an abstention included, SHALL carry a token, and the token SHALL name
+Every packet, an abstention included, SHALL carry a token, except a `withheld`
+abstention, for which the egress guard served no packet at all, and the token SHALL name
 the caller's thread: an opaque random value the server chose, which the caller passes
 back unchanged on its next call in the same conversation. The server instructions and
-the tool description SHALL ask the caller to do so. A token that carries a thread and
+the tool description SHALL ask the caller to do so. A token that names no ref SHALL
+carry generation 0, whoever the audience. A token that carries a thread and
 no refs SHALL be reported `generation.continuity = "absent"`; the refs' semantics above
 are otherwise unchanged, and a packet's thread never adds a ref to its token. A valid
 thread is one minted by this vault's index, carried by a packet served no longer ago

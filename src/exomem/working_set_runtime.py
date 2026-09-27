@@ -586,7 +586,10 @@ def mint_continuity(
             identity=identity,
             roles_hash=str(generation.get("roles_hash") or ""),
             conventions_hash=str(generation.get("conventions_hash") or ""),
-            generation=int(generation.get("index_generation") or 0),
+            # A token naming no ref names no generation either: nothing is
+            # re-validated against it, and an abstention's packet is not one
+            # the guard decided.
+            generation=int(generation.get("index_generation") or 0) if refs else 0,
             refs=refs,
             roles=[role for role in roles if role] if refs else [],
             minted_ns=time.time_ns(),

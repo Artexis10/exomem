@@ -6406,6 +6406,7 @@ def _op_activate_context_body(
         *,
         generation: Mapping[str, Any] | None = None,
         budget_caused: bool = False,
+        carry_thread: bool = True,
     ) -> dict:
         """One abstained packet, always carrying timings when they were asked
         for. Every early exit below must keep `serve`'s own promise — abstain,
@@ -6421,6 +6422,12 @@ def _op_activate_context_body(
         caused, never for an unrelated failure that also resolves to
         `unavailable` (release-plane/guard exceptions), so a caller reading
         `request_budget` can trust it names the real cause.
+
+        Once the caller's thread is read, the packet carries it forward in a
+        token, minted after the vault generation is withheld from this
+        audience, exactly as a served packet's is: `generation` here is the
+        compiled packet's, which no guard has seen. `carry_thread=False` mints
+        nothing, for a packet the guard withheld whole.
         """
         packet = working_set_module.abstained_packet(
             reason=reason,
@@ -6436,8 +6443,13 @@ def _op_activate_context_body(
                 packet["request_budget"] = block
         if thread_carry is not None:
             identity_now, thread_now, started, state = thread_carry
-            token_now = working_set_runtime_module.mint_continuity(
-                packet, identity=identity_now, thread=thread_now, thread_ns=started
+            _withhold_vault_generation(vault_root, packet, purpose=purpose)
+            token_now = (
+                working_set_runtime_module.mint_continuity(
+                    packet, identity=identity_now, thread=thread_now, thread_ns=started
+                )
+                if carry_thread
+                else ""
             )
             if token_now:
                 packet["continuity"] = token_now
@@ -6779,7 +6791,11 @@ def _op_activate_context_body(
     ):
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     if guarded is None:
-        return _abstain("withheld", generation=packet.get("generation") or generation_stub)
+        return _abstain(
+            "withheld",
+            generation=packet.get("generation") or generation_stub,
+            carry_thread=False,
+        )
     packet = guarded
     # Before the token is minted: it carries the index generation too.
     _withhold_vault_generation(vault_root, packet, purpose=purpose)
