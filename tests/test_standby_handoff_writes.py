@@ -591,7 +591,8 @@ root = Path(sys.argv[1])
 generated = root / GENERATED
 
 calls = {{"rebuild_atomic": 0, "in_place_rebuild": 0, "heal_delta": 0}}
-ensure_fresh_ms = []
+heal_results = []
+heal_ms = []
 
 real_atomic = lexstore.LexicalStore.rebuild_atomic
 
@@ -617,21 +618,21 @@ def counted_heal(self, conn):
     return real_heal(self, conn)
 
 
-real_ensure_fresh = lexstore.ensure_fresh
+real_heal_adopted = lexstore.heal_adopted_catalog
 
 
-def timed_ensure_fresh(vault_root):
+def timed_heal_adopted(vault_root):
     started = time.monotonic()
-    try:
-        return real_ensure_fresh(vault_root)
-    finally:
-        ensure_fresh_ms.append(round((time.monotonic() - started) * 1000.0, 1))
+    healed = real_heal_adopted(vault_root)
+    heal_ms.append(round((time.monotonic() - started) * 1000.0, 1))
+    heal_results.append(healed)
+    return healed
 
 
 lexstore.LexicalStore.rebuild_atomic = counted_atomic
 lexstore.LexicalStore._rebuild = counted_rebuild
 lexstore.LexicalStore._heal_delta = counted_heal
-lexstore.ensure_fresh = timed_ensure_fresh
+lexstore.heal_adopted_catalog = timed_heal_adopted
 
 live = lexstore.lexical_path(root)
 
@@ -696,7 +697,8 @@ print(
             "standby_calls": standby_calls,
             "promotion": promotion,
             "calls": calls,
-            "ensure_fresh_ms": ensure_fresh_ms,
+            "heal_results": heal_results,
+            "heal_ms": heal_ms,
             "admitted": readiness.is_ready("retrieval_catalog"),
             "compatible": getattr(lexstore, "live_catalog_compatible", lambda _r: None)(root),
             "edited_found": bool(
@@ -766,8 +768,8 @@ def test_writes_between_the_detached_build_and_promotion_heal_without_a_rebuild(
 
     The serving worker's catalogue carries an earlier release's schema, so the
     standby builds this release's catalogue detached and promotion adopts it.
-    Writes the serving worker made after that build are healed by one bounded
-    delta pass in the promoted worker's warm: no `rebuild_atomic`, no in-place
+    Writes the serving worker made after that build are healed by one heal that
+    re-parses only changed pages in the promoted worker's warm: no `rebuild_atomic`, no in-place
     rebuild, and every one of them is searchable once retrieval is admitted.
     """
     _run_child(handoff_vault, tmp_path, ["outgoing"])
@@ -787,8 +789,8 @@ def test_writes_between_the_detached_build_and_promotion_heal_without_a_rebuild(
     assert "catalogue_handoff" in report["promotion"]["carried_from_standby"]
     assert report["calls"]["rebuild_atomic"] == 0, report["calls"]
     assert report["calls"]["in_place_rebuild"] == 0, report["calls"]
-    assert report["calls"]["heal_delta"] >= 1, report["calls"]
-    assert len(report["ensure_fresh_ms"]) == 1, report["ensure_fresh_ms"]
+    assert report["heal_results"] == [True], report["heal_results"]
+    assert len(report["heal_ms"]) == 1, report["heal_ms"]
     assert report["admitted"] is True
     assert report["compatible"] is True
     assert report["edited_found"] is True

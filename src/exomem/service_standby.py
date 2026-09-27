@@ -356,20 +356,25 @@ def _adopt_detached_catalog(vault_root: Path) -> str | None:
     catalogue that cannot be adopted leaves the live one to the promoted
     worker's ordinary repair, which rebuilds it: the cold path, recorded.
     """
-    global _detached_catalog
+    global _detached_catalog, _detached_built
     from . import lexstore
 
     with _lock:
         detached = _detached_catalog
         _detached_catalog = None
+        # Adopted or not, there is no detached catalogue any more.
+        _detached_built = False
     if detached is None:
         return None
     try:
         adopted = lexstore.adopt_detached_catalog(vault_root, detached)
     except Exception:  # noqa: BLE001 - the coalesced repair owns an unadopted catalogue
         log.warning("promoted worker could not adopt its detached catalogue", exc_info=True)
-        lexstore.discard_detached_catalog(vault_root, detached)
         adopted = False
+        try:
+            lexstore.discard_detached_catalog(vault_root, detached)
+        except Exception:  # noqa: BLE001 - an orphan temp is reaped by the next sweep
+            log.warning("promoted worker could not discard its detached catalogue", exc_info=True)
     return "adopted" if adopted else "rebuild-after-promotion"
 
 
@@ -377,10 +382,10 @@ def discard() -> None:
     """Remove what an unpromoted standby built. Called when the process stops.
 
     A discarded candidate must not leave a whole catalogue behind in the state
-    directory. A build still running is discarded too: it notices when it
-    finishes, and its temp is removed now regardless.
+    directory. A build still running is cancelled and waited for, bounded, so
+    no temp outlives the discard without its builder's lock.
     """
-    global _detached_catalog, _discarded
+    global _detached_catalog, _detached_built, _discarded
     from . import lexstore
 
     with _lock:
@@ -388,6 +393,7 @@ def discard() -> None:
             return
         _discarded = True
         _detached_catalog = None
+        _detached_built = False
     try:
         lexstore.discard_detached_catalogs()
     except Exception:  # noqa: BLE001 - an orphan temp is reaped by the next sweep
@@ -540,9 +546,15 @@ def warm(vault_root: Path) -> None:
             except Exception:  # noqa: BLE001 - caches are rebuildable on demand
                 log.warning("standby cache warm-up failed", exc_info=True)
             readiness.mark_ready("lexical")
-        elif not prepare_detached_catalog(vault_root):
-            # Not an earlier release's catalogue either (a detached one would
-            # warm no caches here: their rows are the ones promotion replaces).
+        elif prepare_detached_catalog(vault_root):
+            # No caches are warmed over rows promotion replaces. The build took
+            # up to a minute, during which this unwatched registry went stale;
+            # reseed it so the graph proof below starts from the disk as it is.
+            try:
+                freshness.rebaseline(vault_root)
+            except Exception:  # noqa: BLE001 - an unseeded scope only costs adoption
+                log.warning("standby recall registry reseed failed", exc_info=True)
+        else:
             log.info(
                 "standby retrieval catalog is not current; the serving worker's "
                 "repair owner has to publish one before this candidate can cut over"

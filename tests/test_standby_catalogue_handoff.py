@@ -370,11 +370,7 @@ def test_the_promoted_warm_heals_the_adopted_catalogue_without_a_rebuild(
         return real_rebuild(self, conn)
 
     monkeypatch.setattr(lexstore.LexicalStore, "_rebuild", counted_rebuild)
-    heals: list[str] = []
-    real_fresh = lexstore.ensure_fresh
-    monkeypatch.setattr(
-        lexstore, "ensure_fresh", lambda vault_root: (heals.append("ensure_fresh"), real_fresh(vault_root))
-    )
+    heals = _heal_spy(monkeypatch)
     readiness.manage_runtime()
     readiness.begin_warm()
     try:
@@ -382,7 +378,7 @@ def test_the_promoted_warm_heals_the_adopted_catalogue_without_a_rebuild(
     finally:
         readiness.finish_warm()
 
-    assert heals == ["ensure_fresh"]
+    assert heals == ["heal_adopted_catalog"]
     assert rebuilds == [], rebuilds
     assert readiness.retrieval_admission(root)["admitted"] is True
     assert lexstore.search_bm25(root, "quokkaafterbuild", k=3, scope="kb")
@@ -410,8 +406,7 @@ def test_a_cold_start_upgrades_an_older_schema_catalogue_in_place_and_admits(
     admits retrieval. The handoff heal must not run on this path.
     """
     root = older_catalogue
-    heals: list[str] = []
-    monkeypatch.setattr(lexstore, "ensure_fresh", lambda vault_root: heals.append("heal"))
+    heals = _heal_spy(monkeypatch)
     rebuilds: list[bool] = []
     real_atomic = lexstore.LexicalStore.rebuild_atomic
 
@@ -436,3 +431,281 @@ def test_a_cold_start_upgrades_an_older_schema_catalogue_in_place_and_admits(
     assert lexstore.live_catalog_compatible(root) is True
     assert readiness.retrieval_admission(root)["admitted"] is True
     assert lexstore.search_bm25(root, f"{MARKER}1", k=3, scope="kb")
+
+
+# -- correction round: exact handoff heal, cancellation and edge handling --
+
+
+def _replace_preserving_mtime(path: Path, text: str) -> None:
+    """What a sync client does: new bytes under the old modification time."""
+    before = path.stat()
+    path.write_text(text, encoding="utf-8")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert path.stat().st_mtime_ns == before.st_mtime_ns
+
+
+def _rebuild_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    rebuilds: list[str] = []
+    monkeypatch.setattr(
+        lexstore.LexicalStore, "rebuild_atomic", lambda self: rebuilds.append("atomic")
+    )
+    real_rebuild = lexstore.LexicalStore._rebuild
+
+    def counted_rebuild(self, conn):
+        rebuilds.append("in-place")
+        return real_rebuild(self, conn)
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_rebuild", counted_rebuild)
+    return rebuilds
+
+
+def _heal_spy(monkeypatch: pytest.MonkeyPatch, *, fail: bool = False) -> list[str]:
+    """Record the handoff heal under whichever seam carries it."""
+    calls: list[str] = []
+    for name in ("ensure_fresh", "heal_adopted_catalog"):
+        real = getattr(lexstore, name, None)
+        if real is None:
+            continue
+
+        def recorded(vault_root, _real=real, _name=name):
+            calls.append(_name)
+            if fail:
+                raise RuntimeError("heal failed")
+            return _real(vault_root)
+
+        monkeypatch.setattr(lexstore, name, recorded)
+    return calls
+
+
+def _promoted_warm(root: Path) -> bool:
+    _seed_live_scopes(root)
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    try:
+        return warmup.warm_retrieval_catalog(root)
+    finally:
+        readiness.finish_warm()
+
+
+def test_a_page_replaced_under_its_old_mtime_is_healed_beside_another_write(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-path signatures, not modification times, decide what the heal re-parses.
+
+    A sync client can replace a page's bytes and keep its mtime. With any
+    other write beside it the count/mtime rung routes to the mtime-only heal,
+    which kept the replaced page's old rows and then blessed them as current.
+    """
+    root = older_catalogue
+    replaced = root / "Knowledge Base/Notes/Insights/handoff-2.md"
+
+    def writes(vault_root: Path) -> None:
+        _replace_preserving_mtime(
+            replaced,
+            NOTES["Knowledge Base/Notes/Insights/handoff-2.md"].replace(
+                f"{MARKER}2", "quokkapreservedmtimes"
+            ),
+        )
+        _serving_writes(vault_root)
+
+    record = _promote_over_older_catalogue(root, monkeypatch, between=writes)
+    assert record["lexical_catalogue"] == "adopted"
+    rebuilds = _rebuild_spy(monkeypatch)
+
+    assert _promoted_warm(root) is True
+
+    assert rebuilds == [], rebuilds
+    assert lexstore.search_bm25(root, "quokkapreservedmtimes", k=3, scope="kb")
+    assert not lexstore.search_bm25(root, f"{MARKER}2", k=3, scope="kb")
+    assert lexstore.search_bm25(root, "quokkaafterbuild", k=3, scope="kb")
+    assert readiness.retrieval_admission(root)["admitted"] is True
+
+
+def test_a_permission_change_alone_reparses_one_page_not_the_catalogue(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chmod moves only ctime; it must not cost a whole in-place rebuild."""
+    root = older_catalogue
+    touched = root / "Knowledge Base/Notes/Insights/handoff-1.md"
+
+    record = _promote_over_older_catalogue(
+        root, monkeypatch, between=lambda _root: os.chmod(touched, 0o600)
+    )
+    assert record["lexical_catalogue"] == "adopted"
+    rebuilds = _rebuild_spy(monkeypatch)
+
+    assert _promoted_warm(root) is True
+
+    assert rebuilds == [], rebuilds
+    assert readiness.retrieval_admission(root)["admitted"] is True
+    assert lexstore.search_bm25(root, f"{MARKER}1", k=3, scope="kb")
+
+
+def test_a_discard_cancels_a_running_build_and_waits_for_it(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No temp may outlive a discard unlocked, so the discard stops the builder."""
+    import threading
+
+    root = older_catalogue
+    inside = threading.Event()
+    real_insert = lexstore.LexicalStore._insert_page
+
+    def slow_first_insert(self, conn, *args, **kwargs):
+        if not inside.is_set():
+            inside.set()
+            time.sleep(0.5)
+        return real_insert(self, conn, *args, **kwargs)
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_insert_page", slow_first_insert)
+    outcome: dict = {}
+    builder = threading.Thread(
+        target=lambda: outcome.setdefault("built", lexstore.build_detached_catalog(root))
+    )
+    builder.start()
+    assert inside.wait(30), "the build never reached materialization"
+
+    lexstore.discard_detached_catalogs()
+
+    alive_after_discard = builder.is_alive()
+    builder.join(30)
+    assert alive_after_discard is False, "the discard returned while its builder still ran"
+    assert outcome["built"] is None
+    assert _temps(root) == []
+
+
+def test_a_failed_discard_after_a_failed_adoption_still_promotes(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = older_catalogue
+    _stub_graph_and_models(monkeypatch)
+    service_standby.enter_standby()
+    service_standby.warm(root)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("state volume unavailable")
+
+    real_discard = lexstore.discard_detached_catalog
+    monkeypatch.setattr(lexstore, "adopt_detached_catalog", boom)
+    monkeypatch.setattr(lexstore, "discard_detached_catalog", boom)
+
+    record = service_standby.promote(root, migrated=False)
+
+    assert record["lexical_catalogue"] == "rebuild-after-promotion"
+    assert service_standby.promoted() is True
+    monkeypatch.setattr(lexstore, "discard_detached_catalog", real_discard)
+    lexstore.discard_detached_catalogs()
+    assert _temps(root) == []
+
+
+def test_a_heal_that_raises_falls_back_to_the_proof_and_the_repair(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = older_catalogue
+    _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
+    heals = _heal_spy(monkeypatch, fail=True)
+    repairs: list[Path] = []
+    monkeypatch.setattr(lexstore, "request_repair", lambda vault_root: repairs.append(vault_root))
+
+    assert _promoted_warm(root) is False
+
+    assert heals, "the handoff heal was not attempted"
+    assert repairs == [root]
+
+
+def test_a_targeted_retry_in_flight_does_not_skip_the_heal(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a full rebuild owns the catalogue; a deferred-upsert retry does not."""
+    root = older_catalogue
+    _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
+    heals = _heal_spy(monkeypatch)
+    monkeypatch.setattr(
+        lexstore,
+        "repair_progress",
+        lambda _root: {"phase": "targeted", "age_seconds": 0.1},
+    )
+
+    assert _promoted_warm(root) is True
+    assert heals
+
+
+def test_a_full_rebuild_in_flight_skips_the_heal(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = older_catalogue
+    _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
+    heals = _heal_spy(monkeypatch)
+    monkeypatch.setattr(lexstore, "request_repair", lambda _root: None)
+    key = root.resolve()
+    lexstore._FULL_REBUILDS_IN_FLIGHT.add(key)
+    try:
+        _promoted_warm(root)
+    finally:
+        lexstore._FULL_REBUILDS_IN_FLIGHT.discard(key)
+    assert heals == []
+
+
+def test_a_busy_live_catalogue_is_not_mistaken_for_an_incompatible_one(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient lock says wait; only a readable older schema says rebuild."""
+    root = older_catalogue
+    store = lexstore.get_store(root)
+
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(type(store), "_connect", locked)
+    assert lexstore.live_catalog_compatible(root) is True
+
+    def corrupt(*_args, **_kwargs):
+        raise sqlite3.DatabaseError("file is not a database")
+
+    monkeypatch.setattr(type(store), "_connect", corrupt)
+    assert lexstore.live_catalog_compatible(root) is False
+
+
+def test_lexical_is_not_ready_once_the_detached_catalogue_is_gone(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = older_catalogue
+    _stub_graph_and_models(monkeypatch)
+    service_standby.enter_standby()
+    service_standby.warm(root)
+    assert service_standby.cutover_components()["lexical"] == "ready"
+
+    service_standby.discard()
+
+    assert service_standby.cutover_components()["lexical"] == "waiting"
+
+
+def test_the_registry_is_reseeded_after_the_build_before_the_graph_proof(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A minute-long build must not widen the staleness the graph proof sees."""
+    root = older_catalogue
+    _stub_graph_and_models(monkeypatch)
+    order: list[str] = []
+    real_rebaseline = freshness.rebaseline
+    monkeypatch.setattr(
+        freshness,
+        "rebaseline",
+        lambda vault_root: (order.append("rebaseline"), real_rebaseline(vault_root))[1],
+    )
+    real_build = lexstore.build_detached_catalog
+    monkeypatch.setattr(
+        lexstore,
+        "build_detached_catalog",
+        lambda vault_root: (order.append("build"), real_build(vault_root))[1],
+    )
+    real_prove = service_standby.prove_graph_snapshot
+    monkeypatch.setattr(
+        service_standby,
+        "prove_graph_snapshot",
+        lambda vault_root: (order.append("graph_proof"), real_prove(vault_root))[1],
+    )
+    service_standby.enter_standby()
+    service_standby.warm(root)
+
+    assert order == ["rebaseline", "build", "rebaseline", "graph_proof"], order

@@ -68,7 +68,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -975,24 +975,43 @@ class _RebuildTempLock:
             self.path.unlink()
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(eq=False)
 class DetachedCatalog:
     """A complete catalogue built beside the live one and not yet published.
 
     ``lock`` is the temp's `_RebuildTempLock`, held from before the temp exists
     until the catalogue is adopted or discarded (or the process dies), so no
     orphan sweep takes it while its builder still intends to publish it.
+    ``rows`` records, per catalogue path, the exact file signature and scope
+    membership the build parsed, so the process that adopts it can re-parse
+    precisely the pages that changed since, whatever their mtime says.
     """
 
     vault_root: Path
     path: Path
     lock: _RebuildTempLock
+    rows: dict[str, tuple] = field(default_factory=dict)
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    finished: threading.Event = field(default_factory=threading.Event)
+    builder: threading.Thread | None = None
+
+
+class _DetachedBuildCancelled(Exception):
+    """A discard asked a detached build to stop."""
 
 
 #: Detached catalogues this process holds, by temp path. A standby that is
 #: stopped discards every one, including a build still in progress.
 _DETACHED: dict[Path, DetachedCatalog] = {}
 _DETACHED_LOCK = threading.Lock()
+#: How long a discard waits for a running build to notice its cancellation. The
+#: build checks between pages, so this is a bound, not an expected wait; it stays
+#: well inside the supervisor's ten-second stop proof for the standby.
+_DETACHED_DISCARD_WAIT = 5.0
+
+
+def _signature_key(signature) -> tuple[int, ...]:
+    return tuple(int(part) for part in signature)
 
 
 def _remove_lexical_rebuild_artifact(
@@ -1405,7 +1424,21 @@ def discard_detached_catalogs() -> None:
     with _DETACHED_LOCK:
         held = list(_DETACHED.values())
     for detached in held:
-        discard_detached_catalog(detached.vault_root, detached)
+        try:
+            get_store(detached.vault_root).discard_detached_catalog(detached)
+        except Exception:  # noqa: BLE001 - an orphan temp is reaped by the next sweep
+            log.warning("lexical detached catalogue discard failed", exc_info=True)
+
+
+def heal_adopted_catalog(vault_root: Path) -> bool:
+    """Re-parse exactly the pages that changed since an adopted catalogue's build."""
+    return get_store(vault_root).heal_adopted_catalog()
+
+
+def full_rebuild_in_flight(vault_root: Path) -> bool:
+    """Whether the repair worker is running a whole-catalogue pass for this vault."""
+    with _REPAIRS_LOCK:
+        return vault_root.resolve() in _FULL_REBUILDS_IN_FLIGHT
 
 
 def rebase_inherited_catalog_lineage(vault_root: Path) -> tuple[str, ...]:
@@ -3041,6 +3074,9 @@ class LexicalStore:
         self._stranded_scopes: set[str] = set()
         self._failed = False  # runtime-retired for this process
         self._last_rebuild_result: str | None = None
+        # Per-path build signatures of a detached catalogue this process
+        # adopted, awaiting the one heal that reconciles it (single use).
+        self._adopted_rows: dict[str, tuple] | None = None
         self._lock = threading.Lock()
 
     def _decline_rebuild(self, reason: str) -> bool:
@@ -5711,13 +5747,16 @@ class LexicalStore:
         members: dict[Path, list[bool]],
         signatures: dict,
         scope_targets: dict[str, tuple],
+        *,
+        cancel: threading.Event | None = None,
     ) -> bool:
         """Write one walked corpus and its target checkpoints into a temp catalogue.
 
         Shared by the background repair's `rebuild_atomic` and a standby's
         `build_detached_catalog`. Touches only the temp family: no live file, no
         publication barrier. True only when the temp is a single self-contained
-        main file that may later replace the live one.
+        main file that may later replace the live one. A set ``cancel`` stops the
+        build between pages with `_DetachedBuildCancelled`.
         """
         conn = self._connect_setup(temp_path)
         folded = False
@@ -5725,6 +5764,8 @@ class LexicalStore:
             self._ensure_schema(conn)
             with conn:
                 for path, (in_kb, in_vault) in members.items():
+                    if cancel is not None and cancel.is_set():
+                        raise _DetachedBuildCancelled
                     self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
                 conn.execute(
                     "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
@@ -5809,8 +5850,11 @@ class LexicalStore:
             return self._schema_is_current(conn) and self._meta_catalog_identity(
                 conn
             ) == catalog_semantic_identity(self.vault_root)
-        except sqlite3.Error:
-            return False
+        except sqlite3.Error as error:
+            # A passing lock says nothing about the schema: report compatible,
+            # so a standby waits on the serving worker rather than building a
+            # whole catalogue beside one it merely found busy.
+            return classify_sqlite_error(error) == "transient"
         finally:
             if conn is not None:
                 conn.close()
@@ -5839,7 +5883,9 @@ class LexicalStore:
         except VaultLockError as e:
             log.warning("lexical detached build could not lock its temp (%s)", e)
             return None
-        detached = DetachedCatalog(self.vault_root, temp_path, temp_lock)
+        detached = DetachedCatalog(
+            self.vault_root, temp_path, temp_lock, builder=threading.current_thread()
+        )
         with _DETACHED_LOCK:
             _DETACHED[temp_path] = detached
         built = False
@@ -5847,6 +5893,8 @@ class LexicalStore:
             identity = catalog_semantic_identity(self.vault_root)
             policy = recall_policy.recall_policy_identity(self.vault_root)
             members, signatures = self._walk_entries()
+            if detached.cancelled.is_set():
+                raise _DetachedBuildCancelled
             lineage = uuid.uuid4().hex
             scope_targets: dict[str, tuple] = {}
             for scope, idx in (("kb", 0), ("vault", 1)):
@@ -5859,7 +5907,9 @@ class LexicalStore:
                     lineage, 0, triple, *policy
                 )
                 scope_targets[scope] = ("walk", None, checkpoint, triple)
-            if not self._materialize_catalog(temp_path, members, signatures, scope_targets):
+            if not self._materialize_catalog(
+                temp_path, members, signatures, scope_targets, cancel=detached.cancelled
+            ):
                 return None
             if (
                 catalog_semantic_identity(self.vault_root) != identity
@@ -5867,17 +5917,33 @@ class LexicalStore:
             ):
                 log.info("lexical detached build discarded: projection identity moved")
                 return None
+            for path, (in_kb, in_vault) in members.items():
+                rel = self._rel(path)
+                if rel is not None:
+                    detached.rows[rel] = (
+                        _signature_key(signatures[path]),
+                        bool(in_kb),
+                        bool(in_vault),
+                    )
             with _DETACHED_LOCK:
-                built = _DETACHED.get(temp_path) is detached
+                built = (
+                    _DETACHED.get(temp_path) is detached and not detached.cancelled.is_set()
+                )
             if not built:
-                log.info("lexical detached build discarded while it ran")
-            return detached if built else None
+                raise _DetachedBuildCancelled
+            return detached
+        except _DetachedBuildCancelled:
+            log.info("lexical detached build discarded while it ran")
+            return None
         except (sqlite3.Error, OSError, RuntimeError) as e:
             log.warning("lexical detached build failed (%s); live catalogue untouched", e)
             return None
         finally:
             if not built:
-                self.discard_detached_catalog(detached)
+                with _DETACHED_LOCK:
+                    _DETACHED.pop(temp_path, None)
+                self._remove_detached_files(detached)
+            detached.finished.set()
 
     def adopt_detached_catalog(self, detached: DetachedCatalog) -> bool:
         """Publish a catalogue this process built detached, replacing the live one.
@@ -5910,7 +5976,97 @@ class LexicalStore:
                 self._failed = False
                 self._synced.clear()
                 self._witnessed.clear()
+                self._adopted_rows = dict(detached.rows)
         return published
+
+    def heal_adopted_catalog(self) -> bool:
+        """Reconcile an adopted detached catalogue with what changed since its build.
+
+        The rows were parsed from the build's walk; the live projection (the
+        watcher's seed in the promoted process) names every page now. A page is
+        re-parsed exactly when its full file signature -- mtime, ctime and size
+        -- or its scope membership differs from what the build parsed, a page
+        that is gone loses its rows, and a new one is inserted; both scopes are
+        then blessed at the live checkpoints. So a replacement that kept its
+        mtime is re-parsed, and a permission change costs one page, never the
+        whole catalogue. Single use; False leaves the catalogue to the ordinary
+        proof and repair.
+        """
+        from .vault import VaultLockError
+
+        with self._lock:
+            reference = self._adopted_rows
+            self._adopted_rows = None
+        if reference is None or self._failed:
+            return False
+        try:
+            with self._publication_lock():
+                with self._lock:
+                    conn = self._connect_setup()
+                    try:
+                        return self._heal_adopted_locked(conn, reference)
+                    finally:
+                        conn.close()
+        except VaultLockError as e:
+            log.info("adopted lexical catalogue heal deferred (%s)", e)
+            return False
+
+    def _heal_adopted_locked(
+        self, conn: sqlite3.Connection, reference: dict[str, tuple]
+    ) -> bool:
+        from . import freshness as freshness_module
+
+        if (
+            not self._schema_is_current(conn)
+            or self._meta_catalog_identity(conn) != catalog_semantic_identity(self.vault_root)
+        ):
+            return False
+        for _attempt in range(3):
+            targets = {
+                scope: freshness_module.recall_checkpoint(self.vault_root, scope)
+                for scope in ("kb", "vault")
+            }
+            members, signatures = self._delta_source()
+            current: dict[str, tuple] = {}
+            for path, (in_kb, in_vault) in members.items():
+                rel = self._rel(path)
+                if rel is not None:
+                    current[rel] = (
+                        path,
+                        (_signature_key(signatures[path]), bool(in_kb), bool(in_vault)),
+                    )
+            stored = {
+                str(row[0]): int(row[1])
+                for row in conn.execute("SELECT path, rowid FROM pages")
+            }
+            reparsed = 0
+            with conn:
+                self._delete_orphan_rows(conn)
+                for rel, rowid in stored.items():
+                    now = current.get(rel)
+                    if now is None or reference.get(rel) != now[1]:
+                        self._delete_rowid(conn, rowid)
+                for rel, (path, state) in current.items():
+                    if rel not in stored or reference.get(rel) != state:
+                        self._insert_page(conn, path, state[0][0], state[1], state[2])
+                        reparsed += 1
+            self._witnessed.clear()
+            if all(
+                freshness_module.recall_checkpoint(self.vault_root, scope) == target
+                for scope, target in targets.items()
+            ):
+                for scope, target in targets.items():
+                    self._bless(conn, scope, target)
+                log.info(
+                    "adopted lexical catalogue healed: %d page(s) re-parsed, %d removed",
+                    reparsed,
+                    len(set(stored) - set(current)),
+                )
+                return True
+            # The projection moved while rows were applied; what is stored now
+            # is exactly the snapshot just read, so diff the next one from it.
+            reference = {rel: state for rel, (_path, state) in current.items()}
+        return False
 
     def _detached_catalog_current(self, temp_path: Path) -> bool:
         """Whether a detached temp is self-contained, current-schema and current-identity."""
@@ -5926,9 +6082,30 @@ class LexicalStore:
             conn.close()
 
     def discard_detached_catalog(self, detached: DetachedCatalog) -> None:
-        """Remove one detached temp family and release its lock. Idempotent."""
+        """Cancel, then remove one detached temp family and release its lock.
+
+        A build still running is asked to stop and waited for (bounded), so its
+        temp is never unlocked while the builder can still write it. If it does
+        not stop in time it keeps its lock and removes the temp itself when it
+        does. Idempotent.
+        """
+        detached.cancelled.set()
         with _DETACHED_LOCK:
             _DETACHED.pop(detached.path, None)
+        if not detached.finished.is_set():
+            if detached.builder is threading.current_thread():
+                return  # the build notices the cancel and removes its own temp
+            if not detached.finished.wait(_DETACHED_DISCARD_WAIT):
+                log.warning(
+                    "lexical detached build still running after %.0f s; it removes "
+                    "its temp when it stops",
+                    _DETACHED_DISCARD_WAIT,
+                )
+                return
+        self._remove_detached_files(detached)
+
+    def _remove_detached_files(self, detached: DetachedCatalog) -> None:
+        """Remove a finished detached temp family, then release its lock."""
         self._cleanup_sidecar_files(detached.path)
         with contextlib.suppress(OSError):
             _remove_lexical_rebuild_artifact(

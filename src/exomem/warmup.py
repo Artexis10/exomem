@@ -120,14 +120,20 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
 
         if _catalogue_handoff_pending(vault_root):
             # Promotion adopted a catalogue this process built as a standby,
-            # before the serving worker's last writes. One paranoid reconcile
-            # heals exactly the pages that changed since (O(changed), against
-            # the watcher's fresh seed) and stamps this process's checkpoints,
-            # where the repair below would rebuild the whole catalogue.
+            # before the serving worker's last writes. One heal re-parses
+            # exactly the pages whose file signature changed since the build
+            # (against the watcher's fresh seed) and stamps this process's
+            # checkpoints, where the repair below would rebuild the whole
+            # catalogue. A heal that fails leaves exactly that repair.
             started = time.perf_counter()
-            lexstore.ensure_fresh(vault_root)
+            try:
+                healed = lexstore.heal_adopted_catalog(vault_root)
+            except Exception:  # noqa: BLE001 - the proof and repair below still run
+                log.warning("adopted retrieval catalog heal failed", exc_info=True)
+                healed = False
             log.info(
-                "adopted retrieval catalog reconciled in %.1f ms",
+                "adopted retrieval catalog healed=%s in %.1f ms",
+                healed,
                 (time.perf_counter() - started) * 1000.0,
             )
         if _prove_and_admit():
@@ -168,16 +174,15 @@ def _catalogue_handoff_pending(vault_root: Path) -> bool:
     """Whether this warm owes the adopted catalogue its one bounded heal.
 
     Only a promoted standby that adopted its detached catalogue carries the
-    handoff; a cold start never does, so its warm is unchanged. A repair
-    already in flight owns the catalogue, and a reconcile beside it would
-    contend with its publication.
+    handoff; a cold start never does, so its warm is unchanged. A whole-catalogue
+    rebuild already in flight replaces what the heal would patch; a targeted
+    retry of deferred upserts does not, so it does not skip the heal.
     """
     from . import lexstore, service_standby
 
     if "catalogue_handoff" not in service_standby.carried_warm_components():
         return False
-    progress = lexstore.repair_progress(vault_root)
-    return progress is None or progress.get("phase") == "idle"
+    return not lexstore.full_rebuild_in_flight(vault_root)
 
 
 def _adopt_graph_snapshot(vault_root: Path, durations: dict[str, float]) -> bool:

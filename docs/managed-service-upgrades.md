@@ -185,6 +185,28 @@ single repair owner. A catalog that is not current leaves `lexical` waiting unti
 that owner publishes one — which the warm budget covers and its expiry records.
 The old worker serves throughout.
 
+The exception is a catalog the candidate can never prove: one whose schema or
+semantic identity is an earlier release's (a release that bumps the lexical
+catalog schema, for instance). The serving worker keeps that catalog current for
+its own code, so waiting would only burn the warm budget. The standby instead
+builds its own release's catalog into a lexical rebuild temp beside the live one,
+holding the temp's advisory lock for its whole life. The build takes no
+publication barrier and changes no byte the serving worker owns; `lexical` is
+ready once it exists, and a stopped standby cancels and removes it. At promotion,
+once it owns the vault, the standby adopts that temp in place of the live catalog
+and records `lexical_catalogue: adopted` (or `rebuild-after-promotion` when it
+could not, leaving the ordinary repair to rebuild). The promoted worker's warm
+then re-parses exactly the pages whose file signature changed since the build and
+admits retrieval, without a whole-catalog rebuild. Adoption replaces a private
+state file, so promotion also rebuilds the private-identity inventory once, in
+the background, off the request thread. A catalog at the current schema that
+merely lags is still the serving worker's to repair, as above.
+
+The standby warm budget (300 s unless the unit sets it) is the ceiling on how
+large a vault this handoff covers: the detached build measured 54-60 s at
+4.6k pages, so a vault several times larger needs a longer
+`EXOMEM_STANDBY_WARM_SECONDS` before a schema-bumping upgrade.
+
 Only when the standby reports cutover readiness does the supervisor pause
 ingress, drain, stop the old worker and prove its descendants exited, run the
 offline migrator if the target declares a state migration, promote the standby
