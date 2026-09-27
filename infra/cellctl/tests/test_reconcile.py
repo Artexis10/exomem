@@ -5,6 +5,7 @@ to a disposable Postgres and fakes standing in for Kubernetes and B2/Hetzner.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import dataclasses
 import time
@@ -19,7 +20,7 @@ from cellctl.reconcile import _augment_deletion_observation
 from cellctl.state import CellRow, ClusterObservation, RolloutRow
 from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
-from cellctl.storage.interface import VolumeInfo
+from cellctl.storage.interface import CELL_KEY_CAPABILITIES, VolumeInfo
 
 from .conftest import CellDatabase, insert_tenant, tenant_uuid
 
@@ -190,6 +191,160 @@ async def test_reused_object_storage_key_is_stable_across_passes(cell_db: CellDa
         assert b2.key_exists(first_key_id)
     finally:
         await connection.close()
+
+
+async def _converged_cell(connection, cluster: FakeClusterGateway, b2: FakeB2, now: datetime) -> str:
+    hetzner = FakeHetznerVolumeProvider()
+    await reconcile.reconcile_once(connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now)
+    cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(cluster, "aaaaaaaaaaaaaaaa")
+    await reconcile.reconcile_once(connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now)
+    return (await db.select_all_rows(connection))[0].b2_key_id
+
+
+def _rendered_b2_key_id(cluster: FakeClusterGateway) -> str:
+    secret = cluster.applied[(namespace_name("aaaaaaaaaaaaaaaa"), "Secret", "cell-credentials")]
+    return base64.b64decode(secret["data"]["b2-key-id"]).decode("utf-8")
+
+
+async def test_a_key_lacking_a_backup_capability_is_replaced_on_re_render(cell_db: CellDatabase) -> None:
+    """A key minted before listBuckets was required cannot back up: B2's S3
+    API refuses restic's first HEAD with 403. The next re-render replaces
+    it, points the cell's Secret at the new key and deletes the old one."""
+
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    b2 = FakeB2()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    try:
+        old_key_id = await _converged_cell(connection, cluster, b2, now)
+        b2.set_key_capabilities(old_key_id, {"listFiles", "readFiles", "writeFiles", "deleteFiles"})
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
+            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
+        )
+
+        await reconcile.reconcile_once(
+            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+        )
+
+        new_key_id = (await db.select_all_rows(connection))[0].b2_key_id
+        assert new_key_id != old_key_id
+        assert b2.key_absent(old_key_id)
+        assert b2.key_capabilities(new_key_id) >= set(CELL_KEY_CAPABILITIES)
+        assert _rendered_b2_key_id(cluster) == new_key_id
+    finally:
+        await connection.close()
+
+
+async def test_a_key_with_every_backup_capability_survives_a_re_render(cell_db: CellDatabase) -> None:
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    b2 = FakeB2()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    try:
+        key_id = await _converged_cell(connection, cluster, b2, now)
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
+            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
+        )
+
+        await reconcile.reconcile_once(
+            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+        )
+
+        assert (await db.select_all_rows(connection))[0].b2_key_id == key_id
+        assert b2.key_exists(key_id)
+        assert _rendered_b2_key_id(cluster) == key_id
+    finally:
+        await connection.close()
+
+
+async def test_a_lost_key_replacement_deletes_the_fresh_key_and_uses_the_stored_one(
+    cell_db: CellDatabase, monkeypatch
+) -> None:
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    b2 = FakeB2()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    try:
+        old_key_id = await _converged_cell(connection, cluster, b2, now)
+        b2.set_key_capabilities(old_key_id, {"listFiles"})
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
+            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
+        )
+        created: list[str] = []
+        real_create = b2.create_prefix_key
+
+        def recording_create(cell_id: str):
+            key = real_create(cell_id)
+            created.append(key.key_id)
+            return key
+
+        async def another_pass_won(conn, cell_id, columns, *, match_column, expected):
+            # Another pass already swapped in its own key; this one loses.
+            winner = real_create(cell_id)
+            await db.write_observed(conn, cell_id, {"b2_key_id": winner.key_id})
+            return False
+
+        monkeypatch.setattr(b2, "create_prefix_key", recording_create)
+        monkeypatch.setattr(db, "try_replace_group", another_pass_won)
+
+        await reconcile.reconcile_once(
+            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+        )
+
+        stored = (await db.select_all_rows(connection))[0].b2_key_id
+        assert created and stored not in created
+        assert all(b2.key_absent(key_id) for key_id in created)
+        assert _rendered_b2_key_id(cluster) == stored
+    finally:
+        await connection.close()
+
+
+async def test_a_failed_key_listing_keeps_the_stored_key(cell_db: CellDatabase, monkeypatch) -> None:
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    b2 = FakeB2()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    try:
+        key_id = await _converged_cell(connection, cluster, b2, now)
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
+            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
+        )
+
+        def unavailable(_key_id: str):
+            raise RuntimeError("b2 unavailable")
+
+        monkeypatch.setattr(b2, "key_capabilities", unavailable)
+        applies_before = sum(1 for event in cluster.events if event[0] == "apply_statefulset")
+
+        await reconcile.reconcile_once(
+            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+        )
+
+        # The re-render still happened; the listing failure did not stop it.
+        assert sum(1 for event in cluster.events if event[0] == "apply_statefulset") > applies_before
+        assert (await db.select_all_rows(connection))[0].b2_key_id == key_id
+        assert _rendered_b2_key_id(cluster) == key_id
+    finally:
+        await connection.close()
+
+
+def test_the_render_digest_covers_the_capabilities_a_cell_key_needs(monkeypatch) -> None:
+    """Requiring a new capability must re-render every cell once, because
+    the re-render is where a stored key is checked and replaced."""
+
+    row = _row(volume_id="vol-1", b2_key_id="key-1")
+    before = reconcile._compute_render_digest(row, _cluster_config(), _secrets_config())
+    monkeypatch.setattr(reconcile, "CELL_KEY_CAPABILITIES", (*CELL_KEY_CAPABILITIES, "readBucketEncryption"))
+    after = reconcile._compute_render_digest(row, _cluster_config(), _secrets_config())
+    assert before != after
 
 
 async def test_deletion_runs_to_completion_across_passes(cell_db: CellDatabase) -> None:

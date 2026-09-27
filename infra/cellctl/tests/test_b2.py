@@ -8,6 +8,7 @@ import json
 import httpx
 
 from cellctl.storage.b2 import B2Config, B2ObjectStorage
+from cellctl.storage.interface import CELL_KEY_CAPABILITIES
 
 CONFIG = B2Config(
     key_management_key_id="km-key-id",
@@ -40,6 +41,49 @@ def test_create_prefix_key_requests_the_exact_bucket_and_cell_prefix() -> None:
     assert requests[0]["bucketId"] == CONFIG.bucket_id
     assert requests[0]["namePrefix"] == "cells/aaaaaaaaaaaaaaaa/"
     assert key.name_prefix == requests[0]["namePrefix"]
+
+
+def test_create_prefix_key_requests_list_buckets_for_the_s3_api() -> None:
+    """Without listBuckets, B2's S3 API answers a HEAD on a missing object
+    with 403, not 404. restic's first step is exactly that HEAD (on the
+    repository's `config`), so every backup failed before writing a byte."""
+
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("b2_authorize_account"):
+            return httpx.Response(
+                200,
+                json={"apiInfo": {"storageApi": {"apiUrl": "https://api.example"}}, "authorizationToken": "tok"},
+            )
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"applicationKeyId": "cell-key", "applicationKey": "secret"})
+
+    B2ObjectStorage(CONFIG, client=_client(handler)).create_prefix_key("aaaaaaaaaaaaaaaa")
+
+    assert set(requests[0]["capabilities"]) == set(CELL_KEY_CAPABILITIES)
+    assert "listBuckets" in requests[0]["capabilities"]
+
+
+def test_key_capabilities_reads_the_listed_key_and_none_when_absent() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("b2_authorize_account"):
+            return httpx.Response(
+                200,
+                json={"apiInfo": {"storageApi": {"apiUrl": "https://api.example"}}, "authorizationToken": "tok"},
+            )
+        body = json.loads(request.content)
+        assert request.url.path.endswith("b2_list_keys")
+        if body["startApplicationKeyId"] == "key-1":
+            listed = {"applicationKeyId": "key-1", "capabilities": ["listFiles", "readFiles"]}
+        else:
+            # B2 lists from the start id onwards, so a missing key yields the next one.
+            listed = {"applicationKeyId": "key-9", "capabilities": ["listBuckets"]}
+        return httpx.Response(200, json={"keys": [listed]})
+
+    storage = B2ObjectStorage(CONFIG, client=_client(handler))
+    assert storage.key_capabilities("key-1") == frozenset({"listFiles", "readFiles"})
+    assert storage.key_capabilities("key-2") is None
 
 
 def test_authorize_is_cached_across_calls() -> None:

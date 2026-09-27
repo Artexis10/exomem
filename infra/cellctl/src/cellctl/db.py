@@ -220,6 +220,34 @@ async def try_write_once_group(
     return result == "UPDATE 1"
 
 
+async def try_replace_group(
+    connection: asyncpg.Connection,
+    cell_id: str,
+    columns: dict[str, object],
+    *,
+    match_column: str,
+    expected: object,
+) -> bool:
+    """Compare-and-swap for a write-once group that must be replaced: writes
+    every column in `columns` together, only while `match_column` still holds
+    `expected`. A loss means another pass already replaced it; the caller
+    re-reads the row and uses what is stored."""
+
+    if match_column not in columns:
+        raise ValueError(f"match_column {match_column!r} must be one of {sorted(columns)}")
+    unknown = set(columns) - set(OBSERVED_COLUMNS)
+    if unknown:
+        raise ValueError(f"not an observed column: {sorted(unknown)}")
+    assignments, values = _assignments(columns, start=3)
+    result = await connection.execute(
+        f"UPDATE exomem_cloud_cells SET {assignments} WHERE cell_id = $1 AND {match_column} = $2",
+        cell_id,
+        expected,
+        *values,
+    )
+    return result == "UPDATE 1"
+
+
 # D4: single-writer guard for the direct LISTEN session. `Recreate` alone
 # does not stop two pods overlapping during an eviction; the lock does.
 # Fixed, arbitrary 63-bit key: there is exactly one lock cellctl ever takes.

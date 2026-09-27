@@ -302,12 +302,14 @@ Nothing else pins a release: no candidates, locks, fixtures or adoption PRs. A C
 - **Write-once columns are written in one statement.** Each group is written together, in a single `UPDATE ... WHERE cell_id = $1 AND <first column> IS NULL`, and cellctl checks the affected row count:
   - `backup_key_wrapped` with `backup_key_version`;
   - `b2_key_id` with `b2_key_wrapped` and `b2_key_version`.
-  A crash can therefore never leave half a group, which would wedge every later pass.
+  A crash can therefore never leave half a group, which would wedge every later pass. The B2 group has one sanctioned replacement, below: it swaps the whole group in one statement gated on the stored `b2_key_id`.
 - **Backup data key.** Each cell has a random 32-byte key, envelope-encrypted with `backup_master_key` (AES-GCM, versioned).
   - cellctl writes `backup_key_wrapped` once, with `WHERE backup_key_wrapped IS NULL`, and only then applies the Secret. It re-reads on conflict, and renders the Secret from the unwrapped row on every pass.
   - The plaintext lives only in the cell's Secret. The runtime container does not mount it.
   - K3s encrypts Secrets at rest, but etcd snapshots can retain the encrypted Secret until snapshot retention expires. D10 states this residual.
-- **Per-cell object-storage key.** cellctl creates a B2 application key restricted to the name prefix `cells/<cell_id>/`, using a key-management credential that only cellctl holds.
+- **Per-cell object-storage key.** cellctl creates a B2 application key restricted to the Cloud bucket and the name prefix `cells/<cell_id>/`, using a key-management credential that only cellctl holds.
+  - **Capabilities:** `listBuckets`, `listFiles`, `readFiles`, `writeFiles` and `deleteFiles`. `listBuckets` is required even on a restricted key: without it, B2's S3-compatible API answers a HEAD on a missing object with 403 instead of 404, and restic opens a repository by exactly that HEAD on `config`. Every backup then fails before writing anything. The key still sees only its own bucket and prefix. The local rehearsal's S3 double does not reproduce this, which is why the first real backup found it (2026-09-27).
+  - **A stored key that lacks a required capability is replaced.** When cellctl renders a cell and B2's key listing shows the stored key without one of the capabilities above, or no longer lists it, cellctl creates a fresh key and swaps `b2_key_id`, `b2_key_wrapped` and `b2_key_version` in one statement gated on the stored `b2_key_id`. The winner deletes the old key; a lost swap deletes the fresh key and uses the stored one. The required capability set is part of the D4 render digest, so changing it re-renders every cell once, one at a time, and each stored key is checked on the way through. A failed key listing keeps the stored key: B2 is an external API, and a key that really is wrong still fails its backup visibly as `BACKUP_FAILED`.
   - B2 returns the secret only at creation. cellctl therefore writes `b2_key_id`, `b2_key_wrapped` (the secret, envelope-encrypted with `backup_master_key`) and `b2_key_version` once, with `WHERE b2_key_id IS NULL`, before it renders the Secret.
   - If that write loses a race, cellctl deletes the key it just created and uses the stored one.
   - A backup Job can never touch another tenant's prefix.

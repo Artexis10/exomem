@@ -49,6 +49,7 @@ from .state import (
     CellRow,
     ClusterObservation,
 )
+from .storage.interface import CELL_KEY_CAPABILITIES
 
 logger = logging.getLogger("cellctl")
 
@@ -443,9 +444,12 @@ async def _resolve_object_storage_key(
     object_storage,
 ) -> tuple[str, str, int]:
     """D7: create the per-cell B2 key once, deleting the loser on a race.
+    A stored key that lacks a capability the backup needs is replaced.
     Returns the key id, its secret and the wrapping key version."""
 
     if row.b2_key_id is not None and row.b2_key_wrapped is not None:
+        if _object_storage_key_needs_replacing(row, object_storage):
+            return await _replace_object_storage_key(connection, row, secrets_config, object_storage)
         secret = unwrap_secret(
             secrets_config.backup_master_keys[row.b2_key_version],
             row.b2_key_wrapped,
@@ -487,6 +491,78 @@ async def _resolve_object_storage_key(
     return created.key_id, created.key_secret, version
 
 
+def _object_storage_key_needs_replacing(row: CellRow, object_storage) -> bool:
+    """A key B2 lists without every capability in CELL_KEY_CAPABILITIES, or no
+    longer lists at all, cannot back up. When the listing itself fails, the
+    stored key is kept: B2 is an external API, and a key that really is
+    wrong still fails its backup loudly as BACKUP_FAILED."""
+
+    try:
+        capabilities = object_storage.key_capabilities(row.b2_key_id)
+    except Exception as error:  # noqa: BLE001 -- any listing failure keeps the stored key
+        logger.warning(
+            "cellctl could not list object-storage key %s for cell %s; keeping it: %s",
+            row.b2_key_id,
+            row.cell_id,
+            _describe_error(error),
+        )
+        return False
+    return capabilities is None or not capabilities >= set(CELL_KEY_CAPABILITIES)
+
+
+async def _replace_object_storage_key(
+    connection: asyncpg.Connection,
+    row: CellRow,
+    secrets_config: SecretsConfig,
+    object_storage,
+) -> tuple[str, str, int]:
+    """Swap a fresh key in place of the stored one, then delete the old one.
+    On a lost swap the fresh key is deleted and the stored one used."""
+
+    created = object_storage.create_prefix_key(row.cell_id)
+    version = secrets_config.backup_master_key_current_version
+    wrapped = wrap_secret(
+        secrets_config.backup_master_keys[version],
+        created.key_secret.encode("utf-8"),
+        cell_id=row.cell_id,
+        column="b2_key_wrapped",
+        key_version=version,
+    )
+    won = await db.try_replace_group(
+        connection,
+        row.cell_id,
+        {"b2_key_id": created.key_id, "b2_key_wrapped": wrapped, "b2_key_version": version},
+        match_column="b2_key_id",
+        expected=row.b2_key_id,
+    )
+    if not won:
+        refreshed = await db.select_all_rows(connection)
+        current = next(r for r in refreshed if r.cell_id == row.cell_id)
+        if created.key_id != current.b2_key_id:
+            object_storage.delete_key(created.key_id)
+        secret = unwrap_secret(
+            secrets_config.backup_master_keys[current.b2_key_version],
+            current.b2_key_wrapped,
+            cell_id=row.cell_id,
+            column="b2_key_wrapped",
+            key_version=current.b2_key_version,
+        ).decode("utf-8")
+        return current.b2_key_id, secret, current.b2_key_version
+
+    logger.warning("cellctl replaced object-storage key %s for cell %s with %s", row.b2_key_id, row.cell_id, created.key_id)
+    if created.key_id != row.b2_key_id:
+        try:
+            object_storage.delete_key(row.b2_key_id)
+        except Exception as error:  # noqa: BLE001 -- the swap is committed; report the leftover key
+            logger.error(
+                "cellctl replaced object-storage key %s for cell %s but could not delete it: %s",
+                row.b2_key_id,
+                row.cell_id,
+                _describe_error(error),
+            )
+    return created.key_id, created.key_secret, version
+
+
 def _compute_render_digest(row: CellRow, cluster_config: ClusterConfig, secrets_config: SecretsConfig) -> str:
     """D4: a SHA-256 over the non-secret render inputs -- the renderer
     version, chart-level cell settings, the set of cell_token_key versions
@@ -504,6 +580,9 @@ def _compute_render_digest(row: CellRow, cluster_config: ClusterConfig, secrets_
         "storage_gib": row.storage_gib,
         "backup_key_version": row.backup_key_version,
         "b2_key_version": row.b2_key_version,
+        # Requiring a new capability re-renders every cell once, and the
+        # re-render is where a stored key is checked and replaced.
+        "b2_key_capabilities": sorted(CELL_KEY_CAPABILITIES),
     }
     blob = json.dumps(material, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
