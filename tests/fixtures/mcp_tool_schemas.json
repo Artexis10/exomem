@@ -2484,7 +2484,7 @@
     }
   },
   "episode_memory": {
-    "description": "Record what a conversation worked on, decided and left open, for the next session on any client.\n\nCall `record` once when a conversation reaches a decision or a stopping\npoint, and skip it when nothing durable happened. You write the recap:\nshort one-line items, never a transcript. It is kept as a bounded Source\nunder `Sources/Episodes/`, and the newest recap of each conversation leads\nthe `recent_context` block `activate_context` serves on every client.\nRecording again under the same `episode` with changed content adds a\nrevision and retires the previous one; an identical retry writes nothing.\n\nA recorded episode can also carry typed candidates for its durable\nchanges: `prepare` one candidate's destination, set its `disposition`\n(including honest no_capture, deferred or rejected ones), and `resume`\nto execute the routed ones. A leaf is one typed step for an existing\nwriter (the curation step kinds of `maintain_memory`), never a free-form\neffect. `resume` refuses with `episode_workflow_disabled` unless this\nservice enables episode execution.",
+    "description": "Record what a conversation worked on, decided and left open, for the next session on any client.\n\nCall `record` once when a conversation reaches a decision or a stopping\npoint, and skip it when nothing durable happened. You write the recap:\nshort one-line items, never a transcript. It is kept as a bounded Source\nunder `Sources/Episodes/`, and the newest recap of each conversation leads\nthe `recent_context` block `activate_context` serves on every client.\nRecording again under the same `episode` with changed content adds a\nrevision and retires the previous one; an identical retry writes nothing.\n\nA recorded episode can also carry typed candidates for its durable\nchanges: `prepare` one candidate's destination, set its `disposition`\n(including honest no_capture, deferred or rejected ones), and `resume`\nto execute the routed ones. A leaf is one typed step for an existing\nwriter, of a kind its route owns: focused_note creates a note, entity an\nentity, relation_only accepts a relation, existing_page and semantic_unit\nedit or supersede. It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this\nservice enables episode execution.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2712,10 +2712,7 @@
                           "create-entity",
                           "accept-relation",
                           "edit",
-                          "supersede",
-                          "move",
-                          "delete",
-                          "recover"
+                          "supersede"
                         ]
                       },
                       "args": {
@@ -2793,6 +2790,18 @@
           ],
           "default": null,
           "description": "For `resume`: the input revision your coverage review covered, the current one."
+        },
+        "journal_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `resume`: the `journal_digest` your last candidates, prepare or disposition result returned. A resume after any later change is refused with EPISODE_REVISION_CONFLICT."
         },
         "order": {
           "anyOf": [
