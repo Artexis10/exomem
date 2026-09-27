@@ -35,6 +35,9 @@ EXCEPTIONS = frozenset(
         "goods", "https", "kudos", "lens", "means", "news", "perhaps", "process",
         "proceedings", "rails", "savings", "series", "species", "status",
         "surroundings", "synopsis", "thesis", "windows",
+        # plurals whose singular is a different word
+        "aids", "futures", "minutes", "odds", "operations", "pandas", "premises",
+        "sales", "securities",
         # -ics fields of study, not plurals of an adjective
         "analytics", "diagnostics", "dynamics", "economics", "electronics",
         "ethics", "genetics", "graphics", "heuristics", "linguistics",
