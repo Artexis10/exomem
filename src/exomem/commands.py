@@ -9981,11 +9981,12 @@ def op_maintain_memory(
     Planning, Records, workflow contracts, schema/admin state, or trash internals.
 
     `mode="tag-variants"` lists tags that differ only by case, separator, or
-    inflection, grouped with their page counts and the most-used spelling as
-    canonical. Preview is read-only; `apply=true` with the preview's `plan_id`
-    and a one-line `why` rewrites one bounded batch of minority variants to the
-    canonical tag. Only the `tags` key changes, never the body; Sources and
-    Evidence are untouched. Preview again to continue with the next batch.
+    plural, grouped with the page counts you may see and the most-used written
+    form as canonical; a tie is listed, never rewritten. Preview is read-only;
+    `apply=true` with the preview's `plan_id` and a one-line `why` rewrites one
+    bounded batch of minority variants to the canonical tag and logs a rollback
+    record. Only the `tags` key changes; Sources, Evidence, Records, Planning
+    and other owned trees are untouched. Preview again for the next batch.
 
     `mode="fix"` also collapses media sidecars that accumulated nested copies of
     themselves (audit category `duplicated_sidecar`, reportable on its own via
