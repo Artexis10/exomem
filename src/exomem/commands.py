@@ -6745,6 +6745,7 @@ def _op_activate_context_body(
             client=client,
             session=session,
             workspace=workspace,
+            salt=salt or None,
             thread=caller_thread,
         )
         if client or session or workspace or caller_thread

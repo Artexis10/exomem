@@ -6083,6 +6083,7 @@ class LexicalStore:
                 self._failed = False
                 self._synced.clear()
                 self._witnessed.clear()
+                self._term_frequency_cache = None
                 self._adopted_rows = dict(detached.rows)
         return published
 
