@@ -48,7 +48,23 @@ def _rows(*pages: list[str]):
 
 
 def _usage(*pages: list[str]) -> "tag_variants.Usage":
-    return tag_variants.Usage(_rows(*pages)(None))
+    return tag_variants.Usage.from_rows(_rows(*pages)(None))
+
+
+def _fake_catalogue(monkeypatch, rows_fn) -> None:
+    """Serve both catalogue reads, per-page rows and the aggregate, from one fake."""
+
+    def aggregate(root):
+        found = rows_fn(root)
+        if found is None:
+            return None
+        usage = tag_variants.Usage.from_rows(
+            (path, members) for path, members in found if not tag_variants._owned_elsewhere(path)
+        )
+        return usage.spellings, usage.forms
+
+    monkeypatch.setattr(tag_variants, "_catalogue_rows", rows_fn)
+    monkeypatch.setattr(tag_variants, "_catalogue_aggregate", aggregate)
 
 
 # ---------------- counting and canonical choice ----------------
@@ -104,7 +120,7 @@ def test_catalogue_counts_tags_per_page(tmp_path):
 
 
 def test_maximal_advises_and_never_rewrites(tmp_path, monkeypatch):
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", _rows(*[["failures"]] * 3, ["policy"]))
+    _fake_catalogue(monkeypatch, _rows(*[["failures"]] * 3, ["policy"]))
     notes = tag_variants.advise_authored(
         tmp_path, ["failure", "policy", "fresh"], level="maximal"
     )
@@ -116,18 +132,18 @@ def test_maximal_advises_and_never_rewrites(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("level", ["off", "light", "balanced"])
 def test_other_levels_leave_advice_to_the_committed_response(tmp_path, monkeypatch, level):
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", _rows(*[["failures"]] * 3))
+    _fake_catalogue(monkeypatch, _rows(*[["failures"]] * 3))
     assert tag_variants.advise_authored(tmp_path, ["failure"], level=level) == []
 
 
 def test_unavailable_catalogue_fails_open(tmp_path, monkeypatch):
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", lambda _root: None)
+    _fake_catalogue(monkeypatch, lambda _root: None)
     assert tag_variants.advise_authored(tmp_path, ["failure"], level="maximal") == []
 
 
 def test_advisory_names_the_canonical_tag_on_one_line(tmp_path, monkeypatch):
     path = _page(tmp_path, "Notes/a.md", "tags: [failure, other]")
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", _rows(*[["failures"]] * 5, ["failure"]))
+    _fake_catalogue(monkeypatch, _rows(*[["failures"]] * 5, ["failure"]))
     notice = tag_variants.advisory_for_page(tmp_path, path.relative_to(tmp_path).as_posix())
     assert notice["canonical"] == "failures" and notice["tag"] == "failure"
     assert "\n" not in notice["message"]
@@ -141,7 +157,7 @@ def test_write_time_index_is_cached_briefly(tmp_path, monkeypatch):
         calls.append(1)
         return [("Knowledge Base/Notes/a.md", ["failures"])]
 
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", rows)
+    _fake_catalogue(monkeypatch, rows)
     for _ in range(3):
         tag_variants.advise_authored(tmp_path, ["failure"], level="maximal")
     assert len(calls) == 1
@@ -152,7 +168,7 @@ def test_write_time_index_is_cached_briefly(tmp_path, monkeypatch):
 
 def test_an_empty_index_is_cached_too(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", lambda _root: calls.append(1) or [])
+    _fake_catalogue(monkeypatch, lambda _root: calls.append(1) or [])
     for _ in range(3):
         assert tag_variants.advise_authored(tmp_path, ["failure"], level="maximal") == []
     assert len(calls) == 1
@@ -163,7 +179,7 @@ _UNIT = "## Observations\n- [operating constraint] Keep retries bounded #reliabi
 
 def test_maximal_write_keeps_the_authored_tags(tmp_path, monkeypatch):
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", _rows(*[["failures"]] * 3))
+    _fake_catalogue(monkeypatch, _rows(*[["failures"]] * 3))
     command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "remember")
     from exomem import note as note_module
 
@@ -190,7 +206,7 @@ def test_add_surfaces_tag_advice(vault, source_schema, monkeypatch):
     from exomem import add as add_module
 
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", _rows(*[["failures"]] * 3))
+    _fake_catalogue(monkeypatch, _rows(*[["failures"]] * 3))
     result = add_module.add(
         vault,
         source_schema,
@@ -214,7 +230,7 @@ def test_edit_never_rewrites_authored_tags(vault, monkeypatch):
     from exomem import vault as vault_module
 
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", _rows(*[["failures"]] * 3))
+    _fake_catalogue(monkeypatch, _rows(*[["failures"]] * 3))
     target = _page(vault, "Notes/Insights/tagged.md", "tags: [keep]")
     rel = target.relative_to(vault).as_posix()
     result = edit_module.edit(vault, path=rel, tags=["failure", "keep"], why="retag")
@@ -228,7 +244,7 @@ def test_link_surfaces_tag_advice(vault, monkeypatch):
     from exomem import vault as vault_module
 
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", _rows(*[["failures"]] * 3))
+    _fake_catalogue(monkeypatch, _rows(*[["failures"]] * 3))
     result = link_module.link(
         vault,
         entity_type="concept",
@@ -246,7 +262,7 @@ def test_balanced_write_keeps_the_authored_tag_and_advises(tmp_path, monkeypatch
     from exomem.governance.principal import library_scope
 
     monkeypatch.setenv("EXOMEM_PROMINENCE", "balanced")
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", _rows(*[["failures"]] * 3))
+    _fake_catalogue(monkeypatch, _rows(*[["failures"]] * 3))
     path = _page(tmp_path, "Notes/new.md", "tags: [failure]", _UNIT)
     rel = path.relative_to(tmp_path).as_posix()
     terminal = mutation_terminal.committed_terminal(
@@ -267,7 +283,7 @@ def test_tag_advisory_respects_an_off_envelope(tmp_path, monkeypatch):
     from exomem.governance.principal import library_scope
 
     monkeypatch.setenv("EXOMEM_PROMINENCE", "off")
-    monkeypatch.setattr(tag_variants, "_catalogue_rows", _rows(*[["failures"]] * 3))
+    _fake_catalogue(monkeypatch, _rows(*[["failures"]] * 3))
     path = _page(tmp_path, "Notes/quiet.md", "tags: [failure]", _UNIT)
     terminal = mutation_terminal.committed_terminal(
         {"path": path.relative_to(tmp_path).as_posix()},
@@ -556,9 +572,7 @@ def test_apply_refuses_when_a_batch_group_changes_before_the_guard(tmp_path, mon
     original_rows = tag_variants._catalogue_rows
 
     def flip():
-        monkeypatch.setattr(
-            tag_variants, "_catalogue_rows", lambda root: original_rows(root) + flipped
-        )
+        _fake_catalogue(monkeypatch, lambda root: original_rows(root) + flipped)
 
     _guard_hook(manager, monkeypatch, flip)
     with pytest.raises(ValueError, match="STALE_TAG_VARIANT_PLAN"):
@@ -596,18 +610,35 @@ def test_separator_spellings_are_rewritten_to_the_writers_normal_form(tmp_path):
     assert result["pages_pending"] == 3
 
 
-def test_write_time_and_maintenance_read_one_count(tmp_path, monkeypatch):
+def test_write_time_and_maintenance_read_one_count(tmp_path):
     _variant_vault(tmp_path)
-    reads = []
-    original = tag_variants._catalogue_rows
-    monkeypatch.setattr(
-        tag_variants, "_catalogue_rows", lambda root: reads.append(1) or original(root)
-    )
     preview = tag_variants.preview(tmp_path)
     advice = tag_variants.advise_authored(tmp_path, ["failure"], level="maximal")
-    assert len(reads) == 2
     uses = {group["canonical"]: group["variants"][0]["uses"] for group in preview["groups"]}
     assert f"{uses['failures']} pages" in advice[0]
+
+
+def test_the_sql_aggregate_counts_exactly_like_visible_rows(tmp_path):
+    _log(tmp_path)
+    for rel, tags in [
+        ("Notes/a.md", "[Machine_Learning, failures]"),
+        ("Notes/b.md", "[machine-learning, machine_learning, failure]"),
+        ("Notes/c.md", '[" spaced tag ", failures]'),
+        ("Notes/Deep/Records/d.md", "[failure]"),
+        ("records/e.md", "[failure]"),
+        ("Workflow_Contracts/f.md", "[failure]"),
+        ("workflow-contract/g.md", "[failure]"),
+        ("Notes/.hidden/h.md", "[failure]"),
+        ("Planning/i.md", "[failure]"),
+        ("_ARCHIVE/j.md", "[failure]"),
+    ]:
+        _page(tmp_path, rel, f"tags: {tags}")
+    _catalogue(tmp_path)
+    spellings, forms = tag_variants._catalogue_aggregate(tmp_path)
+    rows = tag_variants.Usage.from_rows(tag_variants._visible_rows(tmp_path, None))
+    assert (spellings, forms) == (rows.spellings, rows.forms)
+    assert spellings["failure"] == 1 and forms["machine-learning"] == 2
+
 
 
 def test_preview_refuses_when_the_catalogue_cannot_answer(tmp_path):
@@ -771,3 +802,201 @@ def test_apply_refuses_a_batch_page_withheld_inside_the_guard(tmp_path, monkeypa
     with pytest.raises(ValueError, match="STALE_TAG_VARIANT_PLAN"):
         tag_variants.apply(tmp_path, plan_id=plan_id, why="Withheld.")
     assert {p: p.read_bytes() for p in tmp_path.rglob("*.md")} == before
+
+
+# ---------------- served path, exclusions and index cost ----------------
+
+
+def _track_guards(monkeypatch) -> list[str]:
+    """Record every mutation guard operation, and the depth `_plan` runs at."""
+    from contextlib import contextmanager as _cm
+
+    events: list[str] = []
+    depth = {"now": 0}
+    real_guard = writer_lease.LeaseManager.mutation_guard
+
+    @_cm
+    def tracking(self, vault_root, **kwargs):
+        with real_guard(self, vault_root, **kwargs) as coordinator:
+            events.append(f"enter:{kwargs.get('operation')}")
+            depth["now"] += 1
+            try:
+                yield coordinator
+            finally:
+                depth["now"] -= 1
+
+    monkeypatch.setattr(writer_lease.LeaseManager, "mutation_guard", tracking)
+    original_plan = tag_variants._plan
+    monkeypatch.setattr(
+        tag_variants,
+        "_plan",
+        lambda root, **kwargs: events.append(f"plan@{depth['now']}")
+        or original_plan(root, **kwargs),
+    )
+    return events
+
+
+def test_served_apply_plans_outside_the_writer_lock(tmp_path, monkeypatch):
+    _variant_vault(tmp_path)
+    preview = _maintain(tmp_path, "preview", mode="tag-variants")
+    events = _track_guards(monkeypatch)
+    applied = _maintain(
+        tmp_path, "apply", mode="tag-variants", apply=True,
+        plan_id=preview["plan_id"], why="Served.",
+    )
+    assert applied["state"] == "committed"
+    plans = [event for event in events if event.startswith("plan@")]
+    assert plans == ["plan@0"]
+    assert "enter:maintain_memory" not in events
+    assert events.count("enter:tag_variants_commit") == 1
+
+
+def test_excluding_a_group_applies_the_rest(tmp_path):
+    _variant_vault(tmp_path)
+    full = _maintain(tmp_path, "preview-all", mode="tag-variants")
+    partial = _maintain(tmp_path, "preview-some", mode="tag-variants", exclude_groups=["failure"])
+    assert partial["plan_id"] != full["plan_id"]
+    excluded = {group["key"]: group["excluded"] for group in partial["groups"]}
+    assert excluded == {"failure": True, "policy": False}
+    assert partial["apply"]["args"]["exclude_groups"] == ["failure"]
+    assert {tuple(entry["to"]) for entry in partial["batch"]} == {("failure", "policies", "Kept")}
+    with pytest.raises(Exception, match="STALE_TAG_VARIANT_PLAN"):
+        _maintain(
+            tmp_path, "apply-mismatch", mode="tag-variants", apply=True,
+            plan_id=full["plan_id"], why="Mismatch.", exclude_groups=["failure"],
+        )
+    applied = _maintain(
+        tmp_path, "apply-some", mode="tag-variants", apply=True,
+        plan_id=partial["plan_id"], why="Keep failure apart.", exclude_groups=["failures"],
+    )
+    assert applied["state"] == "committed"
+    for index in range(2):
+        path = tmp_path / f"Knowledge Base/Notes/variant-{index}.md"
+        assert vault.parse_frontmatter(path.read_text(encoding="utf-8"))[0]["tags"] == [
+            "failure", "policies", "Kept",
+        ]
+
+
+@pytest.mark.parametrize("bad", [[""], ["---"], ["x\ny"], ["a" * 300], ["k"] * 300, "failure"])
+def test_exclusions_are_bounded(tmp_path, bad):
+    _variant_vault(tmp_path)
+    with pytest.raises(Exception, match="INVALID_ARGUMENTS"):
+        _maintain(tmp_path, "bad-exclude", mode="tag-variants", exclude_groups=bad)
+
+
+def test_other_modes_refuse_exclusions(tmp_path):
+    _variant_vault(tmp_path)
+    with pytest.raises(Exception, match="INVALID_ARGUMENTS"):
+        _maintain(tmp_path, "audit-exclude", mode="audit", exclude_groups=["failure"])
+
+
+def test_the_cached_index_holds_counts_not_rows(tmp_path):
+    _variant_vault(tmp_path)
+    assert tag_variants.advise_authored(tmp_path, ["failure"], level="maximal")
+    [(_, cached)] = tag_variants._INDEX_CACHE.values()
+    assert not hasattr(cached, "rows")
+
+
+def test_an_unrestricted_reader_counts_through_the_sql_aggregate(tmp_path, monkeypatch):
+    _variant_vault(tmp_path)
+    calls = []
+    real_rows = lexstore.LexicalStore.tag_members_by_page
+    monkeypatch.setattr(
+        lexstore.LexicalStore,
+        "tag_members_by_page",
+        lambda self: calls.append("rows") or real_rows(self),
+    )
+    advice = tag_variants.advise_authored(tmp_path, ["failure"], level="maximal")
+    assert "4 pages" in advice[0]
+    assert calls == []
+
+
+def test_the_guard_reverifies_only_the_touched_keys(tmp_path, monkeypatch):
+    _log(tmp_path)
+    for index in range(3):
+        _page(tmp_path, f"Notes/c{index}.md", "tags: [failures, policies, other-tags]")
+    _page(tmp_path, "Notes/v.md", "tags: [failure]")
+    _page(tmp_path, "Notes/w.md", "tags: [other-tag]")
+    _catalogue(tmp_path)
+    monkeypatch.setattr(tag_variants, "BATCH_PAGES", 1)
+    plan_id = tag_variants.preview(tmp_path)["plan_id"]
+    manager = _leaf_manager(tmp_path, monkeypatch)
+    held = _guard_hook(manager, monkeypatch, lambda: None)
+    seen = []
+    original = tag_variants.usage
+    monkeypatch.setattr(
+        tag_variants,
+        "usage",
+        lambda root, **kwargs: seen.append((held["now"], kwargs.get("keys"))) or original(root, **kwargs),
+    )
+    tag_variants.apply(tmp_path, plan_id=plan_id, why="Touched only.")
+    assert [keys for now, keys in seen if now] == [frozenset({"failure"})]
+
+
+def _edit_tags(root: Path, key: str, tags: list[str]) -> dict:
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "edit_memory")
+    return writer_lease.invoke_command(
+        command, root, idempotency_key=key, path="Knowledge Base/Notes/target.md",
+        why="retag", operation={"kind": "replace_tags", "tags": tags},
+    )
+
+
+def _served_vault(root: Path) -> None:
+    _log(root)
+    for index in range(3):
+        _page(root, f"Notes/c{index}.md", "tags: [failures]")
+    _page(root, "Notes/target.md", "tags: [keep]")
+    _catalogue(root)
+
+
+@pytest.mark.parametrize("level", ["maximal", "balanced"])
+def test_a_served_write_gives_the_tag_advice_once(tmp_path, monkeypatch, level):
+    monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    _served_vault(tmp_path)
+    result = _edit_tags(tmp_path, f"edit-{level}", ["failure", "keep"])
+    warned = [warning for warning in result.get("warnings", []) if "'failures'" in warning]
+    notice = result.get("vocabulary_advisory") or {}
+    advised = notice.get("family") == "tag-variant/v1"
+    assert (len(warned), advised) == ((1, False) if level == "maximal" else (0, True))
+
+
+@pytest.mark.parametrize("level", ["maximal", "balanced"])
+def test_a_restricted_write_builds_its_tag_index_once(tmp_path, monkeypatch, level):
+    from test_governance_egress import _external
+
+    from exomem.governance.principal import request_scope
+
+    monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    _served_vault(tmp_path)
+    _govern(tmp_path, "Notes/Patterns/**")
+    builds = []
+    real_rows = tag_variants._catalogue_rows
+    monkeypatch.setattr(
+        tag_variants, "_catalogue_rows", lambda root: builds.append(1) or real_rows(root)
+    )
+    with request_scope(_external()):
+        result = _edit_tags(tmp_path, f"restricted-{level}", ["failure", "keep"])
+    assert result["state"] == "committed"
+    assert len(builds) == 1
+
+
+def test_post_commit_advice_runs_with_the_request_principal_bound(tmp_path, monkeypatch):
+    from test_governance_egress import _external
+
+    from exomem.governance import principal as principal_module
+    from exomem.governance.principal import request_scope
+
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "balanced")
+    _served_vault(tmp_path)
+    seen = []
+    original = tag_variants.advisory_for_page
+    monkeypatch.setattr(
+        tag_variants,
+        "advisory_for_page",
+        lambda root, path: seen.append(principal_module.current_principal())
+        or original(root, path),
+    )
+    caller = _external()
+    with request_scope(caller):
+        _edit_tags(tmp_path, "bound", ["failure", "keep"])
+    assert seen == [caller]

@@ -23,6 +23,16 @@ MUST_NOT_MERGE = [
     ("dogfooding", "dogfood"),
     ("planned", "plan"),
     ("news", "new"),
+    # Plurals whose singular is a different word.
+    ("securities", "security"),
+    ("futures", "future"),
+    ("minutes", "minute"),
+    ("aids", "aid"),
+    ("pandas", "panda"),
+    ("sales", "sale"),
+    ("premises", "premise"),
+    ("odds", "odd"),
+    ("operations", "operation"),
 ]
 
 #: Spellings of one term that must share a key.

@@ -196,11 +196,18 @@ def test_prose_claims_no_longer_capture_a_page_sharing_only_function_words() -> 
 def test_inflected_tags_meet_their_claims() -> None:
     incidents = _target(INCIDENTS, {"dogfood", "failures", "widget-app"})
 
-    advisory = route(["Panel froze", "failure", "dogfoods"], [incidents])
+    # The plural meets its claim; `dogfooding` does not meet `dogfood`. That is
+    # the deliberate cost of dropping -ing/-ed folding, which merged different
+    # words (training/trains, recording/records): a collection that wants both
+    # spellings declares both.
+    assert route(["Panel froze", "failure", "dogfooding"], [incidents]) is None
+    both = _target(INCIDENTS, {"dogfood", "dogfooding", "failures", "widget-app"})
+
+    advisory = route(["Panel froze", "failure", "dogfooding"], [both])
 
     assert advisory is not None
     assert advisory["collection"] == INCIDENTS
-    assert advisory["matched_terms"] == ["dogfood", "failure"]
+    assert advisory["matched_terms"] == ["dogfooding", "failure"]
 
 
 # --- Part 2: structured claims ---------------------------------------------
