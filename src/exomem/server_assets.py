@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import functools
 import json
 import logging
+import threading
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import mcp.types
@@ -89,6 +94,88 @@ def server_icons() -> list[mcp.types.Icon]:
     ]
 
 
+# How long a liveness snapshot is served before a worker thread re-reads it.
+HEALTH_SNAPSHOT_TTL_SECONDS = 5.0
+# A refresh in flight longer than this means a read is wedged (a hung
+# filesystem): /health then answers 503 instead of serving a stale 200.
+HEALTH_REFRESH_WEDGED_SECONDS = 120.0
+
+# Readiness measurements get their own workers. anyio's default limiter is
+# shared with every synchronous tool call, so slow calls would queue readiness
+# behind them and make a busy cell look NotReady.
+_READINESS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="exomem-readiness")
+
+
+def _read_liveness_facts() -> dict[str, object]:
+    """Blocking reads behind `/health`: install provenance and state placement."""
+    facts: dict[str, object] = {}
+    try:
+        from . import deploy_provenance
+
+        facts.update(deploy_provenance.provenance(include_local=False))
+    except Exception:  # noqa: BLE001 — provenance must never fail the probe
+        facts["version"] = "unknown"
+    # Content-free machine-local state placement.  This route is public:
+    # absolute roots belong only in the local doctor surface.
+    try:
+        from . import state_migration
+        from . import vault as vault_module
+
+        vault_root = vault_module.resolve_vault()
+        facts["state"] = {
+            "placement": "external-state",
+            "migration": state_migration.migration_status(vault_root),
+        }
+    except Exception:  # noqa: BLE001 — placement must never fail the probe
+        facts["state"] = {
+            "placement": "external-state",
+            "migration": "unavailable",
+        }
+    return facts
+
+
+class _LivenessSnapshot:
+    """Serve `/health` facts from memory; refresh them off the event loop.
+
+    Read once at construction (route registration, before any load), then at
+    most once per `HEALTH_SNAPSHOT_TTL_SECONDS` on an executor thread. A refresh
+    that blocks leaves the previous snapshot in service instead of the probe.
+    """
+
+    def __init__(self) -> None:
+        self._facts = _read_liveness_facts()
+        self._read_at = time.monotonic()
+        self._lock = threading.Lock()
+        self._refreshing = False
+        self._refresh_started = 0.0
+
+    def current(self) -> tuple[dict[str, object], bool, bool]:
+        """The served facts, whether to start a refresh, and whether one is wedged."""
+        with self._lock:
+            now = time.monotonic()
+            stale = now - self._read_at >= HEALTH_SNAPSHOT_TTL_SECONDS
+            start = stale and not self._refreshing
+            if start:
+                self._refreshing = True
+                self._refresh_started = now
+            wedged = (
+                self._refreshing and now - self._refresh_started >= HEALTH_REFRESH_WEDGED_SECONDS
+            )
+            return dict(self._facts), start, wedged
+
+    def refresh(self) -> None:
+        try:
+            facts = _read_liveness_facts()
+        except BaseException:
+            with self._lock:
+                self._refreshing = False
+            raise
+        with self._lock:
+            self._facts = facts
+            self._read_at = time.monotonic()
+            self._refreshing = False
+
+
 def register_health_routes(
     mcp_app: FastMCP,
     *,
@@ -111,6 +198,8 @@ def register_health_routes(
             log.debug("silent traffic health tracking failed", exc_info=True)
             return {}
 
+    liveness = _LivenessSnapshot()
+
     @mcp_app.custom_route("/health", methods=["GET"])
     async def _health(request: Request) -> JSONResponse:  # noqa: ARG001
         """Unauthenticated liveness probe for tunnels/orchestrators. Reports that
@@ -121,33 +210,27 @@ def register_health_routes(
         service from one running a local checkout without inspecting the service
         manager. Host-identifying detail (interpreter path, checkout location) is
         deliberately withheld here because this route is publicly reachable; use
-        the local `provenance` command for that."""
+        the local `provenance` command for that.
+
+        The handler itself does no I/O: the provenance and state-placement reads
+        come from a snapshot refreshed on a worker thread. A liveness probe that
+        reads files on the event loop waits behind every busy thread in the
+        process (the GIL is handed back per syscall), and a probe that times out
+        gets the pod killed mid index build."""
         _record_health_probe()
         payload: dict[str, object] = {"status": "ok", "service": "exomem"}
-        try:
-            from . import deploy_provenance
-
-            payload.update(deploy_provenance.provenance(include_local=False))
-        except Exception:  # noqa: BLE001 — provenance must never fail the probe
-            payload["version"] = "unknown"
-        # Content-free machine-local state placement.  This route is public:
-        # absolute roots belong only in the local doctor surface.
-        try:
-            from . import state_migration
-            from . import vault as vault_module
-
-            vault_root = vault_module.resolve_vault()
-            payload["state"] = {
-                "placement": "external-state",
-                "migration": state_migration.migration_status(vault_root),
-            }
-        except Exception:  # noqa: BLE001 — placement must never fail the probe
-            payload["state"] = {
-                "placement": "external-state",
-                "migration": "unavailable",
-            }
+        facts, refresh, wedged = liveness.current()
+        payload.update(facts)
+        if refresh:
+            # Queue the read without waiting for it. Only the executor's first
+            # use spawns a worker thread; the handler never joins one, and a
+            # thread start would block the loop until it wins the GIL.
+            asyncio.get_running_loop().run_in_executor(None, liveness.refresh)
+        if wedged:
+            payload["status"] = "degraded"
         return JSONResponse(
             payload,
+            status_code=503 if wedged else 200,
             headers={"Cache-Control": "no-store"},
             background=(BackgroundTask(on_liveness) if on_liveness is not None else None),
         )
@@ -164,9 +247,15 @@ def register_health_routes(
                 mcp_app._exomem_tool_surface_sha256 = digest
             except Exception:  # noqa: BLE001 - readiness must stay structured
                 digest = None
-        snapshot = runtime_readiness_module.runtime_readiness(
-            mcp_tool_surface_sha256=digest,
-            traffic=traffic,
+        # The measurement reads the filesystem and sqlite catalog and can wait
+        # on the coordination probe; it must not run on the event loop.
+        snapshot = await asyncio.get_running_loop().run_in_executor(
+            _READINESS_EXECUTOR,
+            functools.partial(
+                runtime_readiness_module.runtime_readiness,
+                mcp_tool_surface_sha256=digest,
+                traffic=traffic,
+            ),
         )
         status_code = 200 if snapshot["status"] == "ready" else 503
         return JSONResponse(
@@ -299,9 +388,7 @@ def register_asset_routes(
         )
 
 
-def register_oauth_metadata_route(
-    mcp_app: FastMCP, *, base_url: str, auth_enabled: bool
-) -> None:
+def register_oauth_metadata_route(mcp_app: FastMCP, *, base_url: str, auth_enabled: bool) -> None:
     """Expose compatibility aliases for OAuth/OIDC discovery."""
     if not auth_enabled:
         return
