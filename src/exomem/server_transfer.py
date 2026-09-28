@@ -309,6 +309,32 @@ def register_transfer_routes(
         filename = str(form.get("filename") or "").strip() or (
             getattr(upload, "filename", "") or ""
         )
+        if str(form.get("hold") or "").strip():
+            # `preserve-attachment-originals`: hold the bytes for a file-handle
+            # command instead of preserving them. Only a verified local grant
+            # can hold; nothing reaches the vault here.
+            from . import held_uploads
+
+            if str(form.get("hold")).strip() not in ("1", "true"):
+                return JSONResponse(
+                    {"code": "INVALID_UPLOAD", "reason": "`hold` must be 1"}, status_code=400
+                )
+            try:
+                held = await run_in_threadpool(
+                    held_uploads.hold,
+                    vault_root,
+                    upload.file,
+                    lane=str(form.get("lane") or "evidence").strip(),
+                    filename=filename,
+                    content_type=getattr(upload, "content_type", None),
+                    max_bytes=config.upload_max_bytes,
+                )
+            except held_uploads.HeldUploadError as exc:
+                return JSONResponse(
+                    {"code": exc.code, "reason": exc.reason},
+                    status_code=413 if exc.code == "TOO_LARGE" else 400,
+                )
+            return JSONResponse(held, status_code=201)
         preserve_module = _preserve_module()
         lane = _upload_lane(request)
         try:

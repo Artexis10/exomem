@@ -343,10 +343,50 @@ def _yaml_page_path_safe(value: str) -> bool:
     )
 
 
-def stage_artifact(
-    file: Mapping[str, object], budget: FetchBudget, *, batch_deadline: float | None = None
+def _redeem_held(
+    file: Mapping[str, object], budget: FetchBudget, *, vault_root: Path | None, lane: str | None
 ) -> StagedArtifact:
-    """Download one handle to a private temporary file before vault mutation."""
+    """Claim a local client's held upload instead of fetching anything."""
+    from . import held_uploads
+
+    file_id = _file_id(file)
+    if vault_root is None:
+        raise SafeFetchError("HELD_UPLOAD_UNAVAILABLE", "held uploads are not redeemable here")
+    try:
+        held = held_uploads.redeem(vault_root, str(file.get("download_url")), lane=lane)
+    except held_uploads.HeldUploadError as error:
+        raise SafeFetchError(error.code, error.reason) from None
+    try:
+        budget.consume(held.size)
+    except SafeFetchError:
+        held.path.unlink(missing_ok=True)
+        raise
+    content_type = held.content_type or _content_type(file.get("mime_type"))
+    filename = (
+        str(file.get("file_name") or "").strip()
+        or held.filename
+        or fallback_filename(held.sha256, content_type)
+    )
+    return StagedArtifact(file_id, held.path, held.size, held.sha256, content_type, filename)
+
+
+def stage_artifact(
+    file: Mapping[str, object],
+    budget: FetchBudget,
+    *,
+    batch_deadline: float | None = None,
+    vault_root: Path | None = None,
+    lane: str | None = None,
+) -> StagedArtifact:
+    """Download one handle to a private temporary file before vault mutation.
+
+    A local client's held upload (`exomem-held:`) is claimed from machine-local
+    state instead; it never reaches the network code below.
+    """
+    from .held_uploads import is_held_reference
+
+    if is_held_reference(file.get("download_url")):
+        return _redeem_held(file, budget, vault_root=vault_root, lane=lane)
     file_id = _file_id(file)
     current_url = str(file.get("download_url") or "")
     redirects = 0
@@ -1297,7 +1337,9 @@ def capture_source_artifacts(
             if not isinstance(file.get("download_url"), str) or not file["download_url"].strip():
                 raise SafeFetchError("INVALID_FILE", "download_url is required")
             _content_type(file.get("mime_type"))
-            staged[index] = stage_artifact(file, budget, batch_deadline=batch_deadline)
+            staged[index] = stage_artifact(
+                file, budget, batch_deadline=batch_deadline, vault_root=vault_root, lane="source"
+            )
         except SafeFetchError as error:
             file_id = str(file.get("file_id") or "") if isinstance(file, Mapping) else ""
             outcomes[index] = _failed(file_id, error)
@@ -1387,9 +1429,17 @@ def preserve_artifacts(
     category: str,
     files: list[Mapping[str, object]],
     adoption: Mapping[str, object] | None = None,
+    transcriptions: list[Mapping[str, object]] | tuple = (),
 ) -> dict:
-    """Stage remote files first, then preserve each append-only artifact under a narrow guard."""
+    """Stage remote files first, then preserve each append-only artifact under a narrow guard.
+
+    A transcription is written only with its original: as the extracted text
+    of the original's own page, in the same write that stores the bytes. An
+    original that is already stored or that fails records no transcription.
+    """
     if adoption is not None:
+        if transcriptions:
+            _refuse_transcriptions("transcriptions are not accepted with an adoption")
         return _preserve_evidence_adoption(
             vault_root,
             scope=scope,
@@ -1401,6 +1451,7 @@ def preserve_artifacts(
     # the call, so `files=[]` with `scope="a/b"` must refuse rather than report
     # a successful batch of nothing.
     _validate_destination(scope, category)
+    transcribed = _transcriptions_by_file(transcriptions, files)
     if not isinstance(files, list) or not files:
         return _batch_result([])
     if len(files) > MAX_FILES:
@@ -1424,7 +1475,9 @@ def preserve_artifacts(
             if not isinstance(file.get("download_url"), str) or not file["download_url"].strip():
                 raise SafeFetchError("INVALID_FILE", "download_url is required")
             _content_type(file.get("mime_type"))
-            staged[index] = stage_artifact(file, budget, batch_deadline=batch_deadline)
+            staged[index] = stage_artifact(
+                file, budget, batch_deadline=batch_deadline, vault_root=vault_root, lane="evidence"
+            )
         except SafeFetchError as error:
             file_id = str(file.get("file_id") or "") if isinstance(file, Mapping) else ""
             outcomes[index] = _failed(file_id, error)
@@ -1471,7 +1524,13 @@ def preserve_artifacts(
                         "content_type": artifact.content_type,
                         "warnings": [],
                     }
+                    if artifact.file_id in transcribed:
+                        outcomes[index]["transcription"] = {
+                            "state": "not_recorded",
+                            "reason": "the original was already preserved; its page is unchanged",
+                        }
                     continue
+                transcription = transcribed.get(artifact.file_id)
                 with manager.mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
@@ -1487,6 +1546,11 @@ def preserve_artifacts(
                             stream=stream,
                             content_type=artifact.content_type,
                             max_bytes=MAX_FILE_BYTES,
+                            **(
+                                {"text": transcription, "text_origin": "client"}
+                                if transcription
+                                else {}
+                            ),
                         )
                 mark_active_mutation_committed()
                 payload = result.as_dict()
@@ -1539,9 +1603,65 @@ def preserve_artifacts(
                     "content_type": payload.get("content_type"),
                     "warnings": warnings,
                 }
+                if transcription:
+                    outcomes[index]["transcription"] = {
+                        "state": "recorded",
+                        "page": payload.get("sidecar_path"),
+                    }
             except (PreserveError, SafeFetchError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
     finally:
         for artifact in staged.values():
             artifact.path.unlink(missing_ok=True)
     return _batch_result(outcomes)
+
+
+#: A transcription is a page of text, not a document dump.
+MAX_TRANSCRIPTION_CHARS = 100_000
+
+
+def _refuse_transcriptions(reason: str) -> None:
+    raise OpError(
+        "INVALID_PRESERVE",
+        reason,
+        "Name each transcription by the `file_id` of one supplied file.",
+        details={"field": "transcriptions", "reason": reason},
+    )
+
+
+def _transcriptions_by_file(
+    transcriptions: object, files: object
+) -> dict[str, str]:
+    """Validate transcriptions against the supplied files, before anything is staged."""
+    if not transcriptions:
+        return {}
+    if not isinstance(transcriptions, (list, tuple)) or len(transcriptions) > MAX_FILES:
+        _refuse_transcriptions(f"transcriptions must be a list of at most {MAX_FILES} objects")
+    supplied = {
+        file.get("file_id").strip()
+        for file in (files if isinstance(files, (list, tuple)) else ())
+        if isinstance(file, Mapping) and isinstance(file.get("file_id"), str)
+    }
+    by_file: dict[str, str] = {}
+    for item in transcriptions:
+        file_id = item.get("file_id") if isinstance(item, Mapping) else None
+        text = item.get("text") if isinstance(item, Mapping) else None
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != {"file_id", "text"}
+            or not isinstance(file_id, str)
+            or not isinstance(text, str)
+            or not text.strip()
+            or len(text) > MAX_TRANSCRIPTION_CHARS
+        ):
+            _refuse_transcriptions(
+                "each transcription is {file_id, text} with non-empty text of at most "
+                f"{MAX_TRANSCRIPTION_CHARS:,} characters"
+            )
+        file_id = file_id.strip()
+        if file_id not in supplied:
+            _refuse_transcriptions("a transcription names no supplied file")
+        if file_id in by_file:
+            _refuse_transcriptions("a file has more than one transcription")
+        by_file[file_id] = text
+    return by_file

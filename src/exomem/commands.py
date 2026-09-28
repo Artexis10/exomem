@@ -548,6 +548,28 @@ _OptionalClientArtifactFiles = Annotated[
 ]
 
 
+class ClientTranscription(TypedDict):
+    """A transcription an AI client derived from one supplied original."""
+
+    file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+    text: Annotated[str, StringConstraints(min_length=1, max_length=100_000)]
+
+
+#: Optional like `_OptionalClientArtifactFiles`, and for the same reason not
+#: `| None`: an empty list already means "no transcriptions supplied".
+_OptionalClientTranscriptions = Annotated[
+    list[ClientTranscription],
+    Field(
+        max_length=8,
+        description=(
+            "Optional transcriptions of supplied originals, each {file_id, text}. "
+            "Each is saved on its original's Evidence page, bound to the "
+            "original's bytes, and only when that original is stored."
+        ),
+    ),
+]
+
+
 class SearchResponse(TypedDict):
     results: list[SearchResult]
 
@@ -1883,8 +1905,14 @@ def op_bootstrap(
             },
             "binary_upload": {
                 "tool": "preserve_artifacts",
-                "fields": ["files", "scope", "category"],
+                # The tool schema already lists these, so compact leaves them to it.
+                **(
+                    {"fields": ["files", "scope", "category", "transcriptions"]}
+                    if profile != "compact"
+                    else {}
+                ),
                 "when": "the client can supply temporary file handles",
+                "custody": "original first; transcription beside, never instead",
                 "fallback": {
                     "tool": "transfer_artifact",
                     "args": {"operation": "upload"},
@@ -1991,6 +2019,20 @@ def op_bootstrap(
                     "preserve_artifacts(scope='...', category='...', files=["
                     "{'download_url': 'https://...', 'file_id': '...', "
                     "'mime_type': 'image/png', 'file_name': 'receipt.png'}])"
+                ),
+            },
+            {
+                "goal": "preserve an attached original with its transcription",
+                "call": (
+                    "preserve_artifacts(scope='...', category='...', files=[<handle>], "
+                    "transcriptions=[{'file_id': '<handle file_id>', 'text': '...'}])"
+                ),
+            },
+            {
+                "goal": "preserve a local client's file",
+                "call": (
+                    "run `exomem attach <file>`, then pass its printed `file` handle in "
+                    "preserve_artifacts(files=[...]); `--lane source` for capture_source"
                 ),
             },
             {
@@ -7591,7 +7633,8 @@ def op_capture_source(
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
 
-    Takes `content` for text or `files` for attached file handles, stored
+    Takes `content` for text or `files` for attached file handles (a local
+    client passes the handle `exomem attach --lane source` prints), stored
     losslessly under `Sources/`. This command is for raw material; proof-bearing
     artifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the
     artifact is for, not by what the client can carry.
@@ -8007,12 +8050,16 @@ def op_preserve_artifacts(
     category: str,
     files: _ClientArtifactFiles,
     adoption: _OptionalArtifactAdoption = None,
+    transcriptions: _OptionalClientTranscriptions = (),  # noqa: B006 - read-only
 ) -> dict:
     """Preserve client-provided binary file handles as append-only Evidence.
 
     Use this canonical binary-preservation command when the client can supply
-    temporary HTTPS file handles. Exomem retrieves each handle server-side and
-    returns one terminal state per file — `stored`, `already_stored`, or
+    file handles: a chat client's attachments, or the handle `exomem attach`
+    prints on a local client. When a shared file is evidence, preserve the
+    original first and put any transcription in `transcriptions`, never
+    instead. Exomem retrieves each handle server-side and returns one terminal
+    state per file — `stored`, `already_stored`, or
     `failed`. `already_stored` means those exact bytes are already under that
     destination, so nothing was written and the outcome names the existing path
     and ref; retrying a lost response with the same identity replays the batch
@@ -8030,6 +8077,8 @@ def op_preserve_artifacts(
         adoption: Optional explicit adoption identity selecting exactly one
             supplied handle. This establishes eligibility, not write consent;
             agent-initiated use obeys proactive_capture.
+        transcriptions: Optional {file_id, text} transcriptions of supplied
+            files, recorded on each stored original's page.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -8038,7 +8087,12 @@ def op_preserve_artifacts(
     # one counters block rather than N: see `due_state.batch_scope`.
     with due_state_module.batch_scope(vault_root):
         result = client_artifacts.preserve_artifacts(
-            vault_root, scope=scope, category=category, files=files, adoption=adoption
+            vault_root,
+            scope=scope,
+            category=category,
+            files=files,
+            adoption=adoption,
+            transcriptions=transcriptions,
         )
     _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,
@@ -12577,7 +12631,12 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("add", "propose_compilation"),
-        {"surface": "primary", "actions": ("save",), "first_run_safe": False},
+        {
+            "surface": "primary",
+            "actions": ("save",),
+            "first_run_safe": False,
+            "mcp_meta": {"openai/fileParams": ("files",)},
+        },
     ),
     (
         "episode_memory",

@@ -597,6 +597,16 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             return None
         return {"path": value["path"], "ref": value["ref"]}
 
+    def transcription(value: Any) -> dict[str, Any] | None:
+        """Whether a client transcription was recorded with its original."""
+        if not isinstance(value, Mapping):
+            return None
+        if value.get("state") == "recorded" and set(value) == {"state", "page"}:
+            return dict(value) if string(value.get("page"), limit=2048) else None
+        if value.get("state") == "not_recorded" and set(value) == {"state", "reason"}:
+            return dict(value) if string(value.get("reason"), limit=300) else None
+        return None
+
     projected: list[dict[str, Any]] = []
     for index, item in enumerate(files):
         if not isinstance(item, Mapping) or not string(item.get("file_id"), limit=256):
@@ -648,6 +658,12 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                     projected.append(invalid_row(item, index))
                     continue
                 row["duplicate_of"] = duplicate
+            if "transcription" in item:
+                recorded = transcription(item["transcription"])
+                if recorded is None:
+                    projected.append(invalid_row(item, index))
+                    continue
+                row["transcription"] = recorded
             if "adoption" in item:
                 receipt = adoption_receipt(item["adoption"], item)
                 if receipt is None:
