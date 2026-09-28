@@ -133,7 +133,7 @@ def test_the_served_contract_routes_additive_entity_creation_to_proactive_captur
     envelope = commands.op_bootstrap(root, profile="compact")["engagement"]["envelope"]
     clause = " ".join(envelope["confirm_required"].lower().split())
 
-    assert "additive entity creation follows proactive_capture" in clause
+    assert "on a personal vault, additive entity creation follows proactive_capture" in clause
     assert "entity creation and deletion" not in clause
     assert "entity creation have no" not in clause
     assert envelope["classes"]["restructure_execution"]["ceiling"] == "confirm-required"
