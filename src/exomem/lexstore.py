@@ -2190,6 +2190,7 @@ def term_document_frequencies(
     recall_checkpoint: Any | None = None,
     exclude_navigation: bool = False,
     exclude_raw_material: bool = False,
+    exclude_statuses: Iterable[str] = (),
 ) -> CatalogQueryResult[tuple[dict[str, int], int]]:
     """How many indexed pages each stem occurs on, and how many there are.
 
@@ -2217,6 +2218,12 @@ def term_document_frequencies(
     each stem's count AND out of the page total. Every captured session that
     discussed a page repeats its words; they are what a conclusion was drawn
     from, not pages of the corpus a caller measures rarity against.
+
+    `exclude_statuses` leaves pages whose own `status` is one of these out of
+    each stem's count; the page total is unchanged. A page revised three times
+    is one subject written four times, and its retired revisions repeat its
+    name words without making them any less distinctive of the page that is
+    current.
     """
     if not _usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
@@ -2231,11 +2238,12 @@ def term_document_frequencies(
         recall_checkpoint=recall_checkpoint,
         exclude_navigation=exclude_navigation,
         exclude_raw_material=exclude_raw_material,
+        exclude_statuses=tuple(sorted({str(status) for status in exclude_statuses})),
     )
 
 
 def _excluded_rows_clause(
-    *, navigation: bool, raw_material: bool
+    *, navigation: bool, raw_material: bool, statuses: tuple[str, ...] = ()
 ) -> tuple[str, list[object]]:
     """A `WHERE` fragment over the `pages p` alias that leaves navigation
     pages and/or raw material out, with its parameters in placeholder order.
@@ -2270,6 +2278,13 @@ def _excluded_rows_clause(
         ) + ")"
         for prefix in prefixes:
             params.extend((len(prefix), prefix))
+    if statuses:
+        clause += (
+            " AND (p.status IS NULL OR p.status NOT IN ("
+            + ", ".join("?" for _status in statuses)
+            + "))"
+        )
+        params.extend(statuses)
     return clause, params
 
 
@@ -6733,6 +6748,7 @@ class LexicalStore:
         recall_checkpoint: Any | None = None,
         exclude_navigation: bool = False,
         exclude_raw_material: bool = False,
+        exclude_statuses: tuple[str, ...] = (),
     ) -> CatalogQueryResult[tuple[dict[str, int], int]]:
         return self._serve_from_ready_catalog_result(
             scope,
@@ -6743,6 +6759,7 @@ class LexicalStore:
                 scope,
                 exclude_navigation=exclude_navigation,
                 exclude_raw_material=exclude_raw_material,
+                exclude_statuses=exclude_statuses,
             ),
             "lexical sidecar document-frequency query failed (%s)",
             allow_delta=allow_delta,
@@ -6757,6 +6774,7 @@ class LexicalStore:
         *,
         exclude_navigation: bool = False,
         exclude_raw_material: bool = False,
+        exclude_statuses: tuple[str, ...] = (),
     ) -> tuple[dict[str, int], int]:
         """`({stem: pages carrying it}, pages in scope)` — one indexed lookup
         per DISTINCT stem, over the same join `_bm25_query` ranks with."""
@@ -6771,7 +6789,9 @@ class LexicalStore:
             raw_params,
         ).fetchone()
         excluded_clause, excluded_params = _excluded_rows_clause(
-            navigation=exclude_navigation, raw_material=exclude_raw_material
+            navigation=exclude_navigation,
+            raw_material=exclude_raw_material,
+            statuses=exclude_statuses,
         )
         frequencies: dict[str, int] = {}
         for token in dict.fromkeys(tokens):

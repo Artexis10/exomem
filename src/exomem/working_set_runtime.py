@@ -1177,6 +1177,8 @@ def rare_turn_terms(
     # word past the cap and the page named by its title was never carried.
     # Raw material is not counted either, nor counted as a page: four
     # captured sessions that discussed a page did the same to its title.
+    # Nor retired revisions: the carry never serves one, and a page revised
+    # three times repeated its own name words past the cap.
     result = lexstore.term_document_frequencies(
         vault_root,
         stems,
@@ -1186,6 +1188,7 @@ def rare_turn_terms(
         recall_checkpoint=recall_checkpoint,
         exclude_navigation=True,
         exclude_raw_material=True,
+        exclude_statuses=working_set.RETIRED_PAGE_STATUSES,
     )
     if not result.readiness.complete:
         return (), 0, result.readiness.status
