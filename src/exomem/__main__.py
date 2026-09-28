@@ -38,6 +38,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import replace
@@ -102,6 +103,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "doctor",
         "install-info",
         "auth",
+        "attach",
         "status",
         "warm",
         "mode",
@@ -254,6 +256,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _install_info_main(raw[1:])
     if raw and raw[0] == "auth":
         return _auth_main(raw[1:])
+    if raw and raw[0] == "attach":
+        return _attach_main(raw[1:])
     if raw and raw[0] == "status":
         return _status_main(raw[1:])
     if raw and raw[0] == "warm":
@@ -370,6 +374,10 @@ def _session_metadata(
         and record.github_user_id == getattr(binding, "user_id", None)
         and record.issuer == getattr(binding, "issuer", None)
     )
+    from .local_ingress import LOCAL_AUDIENCE
+
+    # A local-ingress session always acts as the owner (`owner-local`).
+    local = record.audience == LOCAL_AUDIENCE
     return {
         "session_id": record.session_id,
         "client_id": record.client_id,
@@ -378,8 +386,118 @@ def _session_metadata(
         "github_user_id": record.github_user_id,
         "issued_at": record.issued_at,
         "status": effective_status,
-        "owner_equivalent": owner_equivalent,
+        "owner_equivalent": owner_equivalent or local,
+        "ingress": "local" if local else "public",
     }
+
+
+#: A local client's label: it lands in access logs, so it is kept to a short,
+#: plain identifier the operator chose.
+_LOCAL_CLIENT_LABEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}", re.ASCII)
+
+
+def _local_owner_identity():
+    """The owner identity a local session is issued for.
+
+    The configured sign-in account, so the allowed-account recheck applies to
+    local sessions exactly as it does to remote ones.
+    """
+    from .auth_sessions import SessionIdentity
+
+    raw_id = os.environ.get("EXOMEM_GITHUB_USER_ID", "").strip()
+    login = os.environ.get("EXOMEM_GITHUB_USERNAME", "").strip()
+    if not raw_id.isascii() or not raw_id.isdigit() or not login:
+        raise ValueError(
+            "issue-local needs EXOMEM_GITHUB_USER_ID and EXOMEM_GITHUB_USERNAME "
+            "(the owner identity)"
+        )
+    return SessionIdentity(github_user_id=int(raw_id), github_login=login)
+
+
+def _write_private_token(path: Path, bearer: str) -> None:
+    """Create `path` exclusively, owner-only, and write the bearer to it."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        os.write(descriptor, f"{bearer}\n".encode("ascii"))
+    finally:
+        os.close(descriptor)
+
+
+def _issue_local_main(args: argparse.Namespace) -> int:
+    """`exomem auth issue-local`: mint a local client session into a 0600 file.
+
+    The token is never printed or logged. A file that cannot be written leaves
+    no usable session behind: the new session is revoked before returning.
+    """
+    from .auth_sessions import SessionStoreUnavailable
+    from .local_ingress import LOCAL_SCOPES
+
+    output = Path(args.output).expanduser()
+    if output.exists() or output.is_symlink():
+        print(f"issue-local: {output} already exists; choose a new path", file=sys.stderr)
+        return 2
+    _load_cwd_dotenv()
+    from . import env_compat
+
+    env_compat.promote_legacy()
+    try:
+        from .server_auth import build_local_session_authority
+
+        identity = _local_owner_identity()
+        authority = build_local_session_authority()
+    except (SessionStoreUnavailable, OSError):
+        print(
+            "session authority unavailable; check storage configuration and connectivity",
+            file=sys.stderr,
+        )
+        return 1
+    except (ValueError, RuntimeError) as error:
+        print(f"auth configuration error: {error}", file=sys.stderr)
+        return 2
+
+    async def run():
+        bearer, record = await authority.issue(
+            client_id=args.client, scopes=LOCAL_SCOPES, identity=identity
+        )
+        try:
+            _write_private_token(output, bearer)
+        except OSError:
+            await authority.tombstone(record.session_id, reason="issue-local-write-failed")
+            raise
+        return record
+
+    try:
+        record = asyncio.run(run())
+    except SessionStoreUnavailable:
+        print(
+            "session authority unavailable; check storage configuration and connectivity",
+            file=sys.stderr,
+        )
+        return 1
+    except OSError as error:
+        print(
+            f"issue-local: could not write {output}: {error.strerror or error}; "
+            "the new session was revoked",
+            file=sys.stderr,
+        )
+        return 1
+    result = {
+        "session_id": record.session_id,
+        "client_id": record.client_id,
+        "ingress": "local",
+        "output": str(output),
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(
+            f"Issued local session {record.session_id} for client {record.client_id}; "
+            f"token written to {output}."
+        )
+    return 0
 
 
 def _auth_main(argv: list[str]) -> int:
@@ -396,7 +514,24 @@ def _auth_main(argv: list[str]) -> int:
     revoke.add_argument("--all", action="store_true", dest="revoke_all")
     revoke.add_argument("--reason", default=None, help="operator audit reason")
     revoke.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    issue_local = subcommands.add_parser(
+        "issue-local",
+        help="mint a revocable token for a same-machine client of the local listener",
+    )
+    issue_local.add_argument(
+        "--client", required=True, help="short label naming the client, such as home"
+    )
+    issue_local.add_argument(
+        "--output", required=True, help="new file to hold the token, created with mode 0600"
+    )
+    issue_local.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
+
+    if args.command == "issue-local":
+        if _LOCAL_CLIENT_LABEL.fullmatch(args.client) is None:
+            parser.error("--client must be 1-64 of a-z, 0-9, '.', '_' or '-', starting alphanumeric")
+        return _issue_local_main(args)
 
     if args.command == "revoke":
         if bool(args.session_id) == bool(args.revoke_all):
@@ -461,7 +596,13 @@ def _auth_main(argv: list[str]) -> int:
             print("No durable MCP sessions.")
         else:
             for row in rows:
-                owner = "owner" if row["owner_equivalent"] else "-"
+                owner = (
+                    "owner-local"
+                    if row["ingress"] == "local"
+                    else "owner"
+                    if row["owner_equivalent"]
+                    else "-"
+                )
                 print(
                     f"{row['session_id']}  {row['status']}  {owner}  {row['client_id']}  "
                     f"{row['github_login']}  {row['issued_at']}"
@@ -472,6 +613,105 @@ def _auth_main(argv: list[str]) -> int:
         print(f"Revoked session {result['session_id']}.")
     else:
         print(f"Session {result['session_id']} was not found.")
+    return 0
+
+
+def _attach_main(argv: list[str], *, transport=None) -> int:
+    """`exomem attach <file>`: send a file's bytes to the local `/upload`.
+
+    Bytes, never a path: the service never reads the caller's filesystem.
+    The request goes only to literal loopback, with a local client token, and
+    the command prints the handle the service returns.
+    """
+    import mimetypes
+
+    parser = argparse.ArgumentParser(
+        prog="exomem attach",
+        description=(
+            "Upload a file to the managed service's local listener with a local "
+            "client token and print the returned handle."
+        ),
+    )
+    parser.add_argument("file", help="file whose bytes to send")
+    parser.add_argument("--scope", default="", help="evidence scope, e.g. a project")
+    parser.add_argument("--category", default="", help="evidence category within the scope")
+    parser.add_argument("--description", default="", help="optional description")
+    parser.add_argument("--filename", default="", help="name to store it under")
+    parser.add_argument(
+        "--token-file", default="", help="local client token file (default $EXOMEM_LOCAL_TOKEN_FILE)"
+    )
+    parser.add_argument(
+        "--port", default="", help="local listener port (default $EXOMEM_LOCAL_PORT)"
+    )
+    args = parser.parse_args(argv)
+
+    token_file = args.token_file or os.environ.get("EXOMEM_LOCAL_TOKEN_FILE", "").strip()
+    raw_port = str(args.port or os.environ.get("EXOMEM_LOCAL_PORT", "")).strip()
+    if not token_file:
+        parser.error("a local client token file is required (--token-file or EXOMEM_LOCAL_TOKEN_FILE)")
+    if not raw_port.isascii() or not raw_port.isdigit() or not 0 < int(raw_port) < 65536:
+        parser.error("a valid local port is required (--port or EXOMEM_LOCAL_PORT)")
+    try:
+        token = Path(token_file).expanduser().read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        print("attach: the local client token file could not be read", file=sys.stderr)
+        return 2
+    if not token:
+        print("attach: the local client token file is empty", file=sys.stderr)
+        return 2
+    source = Path(args.file).expanduser()
+    if not source.is_file():
+        print(f"attach: {source} is not a file", file=sys.stderr)
+        return 2
+    name = args.filename or source.name
+    fields = {
+        key: value
+        for key, value in {
+            "scope": args.scope,
+            "category": args.category,
+            "description": args.description,
+            "filename": args.filename,
+        }.items()
+        if value
+    }
+
+    import httpx
+
+    url = f"http://127.0.0.1:{int(raw_port)}/upload"
+    try:
+        with httpx.Client(
+            transport=transport,
+            trust_env=False,
+            follow_redirects=False,
+            timeout=httpx.Timeout(30.0, read=300.0, write=300.0),
+        ) as client, source.open("rb") as handle:
+            response = client.post(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                files={
+                    "file": (
+                        name,
+                        handle,
+                        mimetypes.guess_type(name)[0] or "application/octet-stream",
+                    )
+                },
+                data=fields,
+            )
+    except httpx.HTTPError:
+        print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
+        return 1
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if response.status_code != 201 or not isinstance(payload, dict):
+        code = payload.get("code") or payload.get("error") if isinstance(payload, dict) else None
+        print(
+            f"attach: upload refused (HTTP {response.status_code}{f', {code}' if code else ''})",
+            file=sys.stderr,
+        )
+        return 1
+    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 
