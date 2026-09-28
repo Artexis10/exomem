@@ -194,6 +194,10 @@ class EntitySeed:
     name: str
     summary: str
     aliases: tuple[str, ...] = ()
+    #: The fixture's own answer when the writer prepares a shared-name
+    #: decision: ``"distinct"`` commits beside the named candidates, bound to
+    #: the fingerprint the preparation returned. ``None`` never guesses.
+    identity_decision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -391,6 +395,23 @@ def build_world_in_process(root: Path, spec: PreCapture) -> dict[str, str]:
             summary=seed.summary,
             today=dt.date.fromisoformat(_CORPUS_DATE),
         )
+        if isinstance(created, link.IdentityPreparation):
+            if seed.identity_decision is None:
+                raise FixtureError(
+                    f"IDENTITY_DECISION_REQUIRED: {seed.key!r} shares its name with "
+                    f"{[item['path'] for item in created.evidence['candidates']]}"
+                )
+            created = link.link(
+                root,
+                entity_type=seed.entity_type,
+                name=seed.name,
+                summary=seed.summary,
+                identity_decision={
+                    "outcome": seed.identity_decision,
+                    "candidate_fingerprint": created.evidence["candidate_fingerprint"],
+                },
+                today=dt.date.fromisoformat(_CORPUS_DATE),
+            )
         key_to_path[seed.key] = created.path
         if seed.aliases:
             _edit_frontmatter(root, created.path, "aliases", list(seed.aliases), "record the name it is also called by")

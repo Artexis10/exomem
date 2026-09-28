@@ -30,7 +30,8 @@ A small, stable API for consumers:
 * :func:`build_pre_capture` -- the episode's world through product writers;
 * :func:`check_capture` -- model-free verdicts over before/after readback;
 * :data:`SAME_NAME_WORLD` -- a world whose successful build is the writer
-  acceptance for a justified same-name distinct identity (red today).
+  acceptance for a justified same-name distinct identity, committed on the
+  seed's explicit ``distinct`` decision.
 """
 
 from __future__ import annotations
@@ -246,6 +247,7 @@ SAME_NAME_WORLD = PreCapture(
             entity_type="site",
             name="Merrow Farm",
             summary="Orchard on the north slope of Tarrow valley.",
+            identity_decision="distinct",
         ),
     ),
 )

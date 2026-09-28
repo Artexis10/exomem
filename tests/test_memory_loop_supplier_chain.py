@@ -242,14 +242,36 @@ def test_current_runtime_an_untouched_world_fails_every_capture_episode(worlds) 
     assert "brand/brand-identity" in red["brand"]
 
 
-def test_current_runtime_refuses_a_same_name_site_beside_its_organization(tmp_path: Path) -> None:
-    """Expected red. A justified distinct identity must stay expressible
-    through the public writer despite an overlapping surface name; today the
-    entity writer refuses it as ``ENTITY_EXISTS``. When the identity work
-    lands, this build succeeds and this test flips to assert it."""
+def test_current_runtime_builds_a_same_name_site_beside_its_organization(tmp_path: Path) -> None:
+    """A justified distinct identity stays expressible through the public
+    writer despite an overlapping surface name: the entity writer prepares a
+    shared-name decision, and the fixture's explicit ``distinct`` decision,
+    bound to the returned fingerprint, commits the site beside the company."""
 
-    with pytest.raises(FixtureError, match="ENTITY_EXISTS"):
-        contract.build_world(tmp_path / "vault", sc.SAME_NAME_WORLD, world_id="same-name")
+    root = tmp_path / "vault"
+    world = contract.build_world(root, sc.SAME_NAME_WORLD, world_id="same-name")
+
+    organization = world.key_to_path["org_merrow"]
+    site = world.key_to_path["site_same_name"]
+    assert organization != site
+    state = read_state(root)
+    assert (state.pages[organization].title, state.pages[organization].entity_type) == (
+        "Merrow Farm",
+        "organization",
+    )
+    assert (state.pages[site].title, state.pages[site].entity_type) == ("Merrow Farm", "site")
+
+
+def test_a_same_name_seed_without_a_decision_fails_the_build(tmp_path: Path) -> None:
+    """The writer never guesses: without the fixture's explicit decision the
+    shared name stops the build instead of committing or reusing either page."""
+
+    undecided = replace(
+        sc.SAME_NAME_WORLD,
+        entities=tuple(replace(seed, identity_decision=None) for seed in sc.SAME_NAME_WORLD.entities),
+    )
+    with pytest.raises(FixtureError, match="IDENTITY_DECISION_REQUIRED"):
+        contract.build_world(tmp_path / "vault", undecided, world_id="same-name-undecided")
 
 
 def test_current_runtime_reports_the_bare_shared_name_as_ambiguous(
