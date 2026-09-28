@@ -9,7 +9,6 @@ boundary for 14-50 s and starved every other writer.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -19,7 +18,6 @@ from exomem import (
     commands,
     mutation_lock,
     record_formats,
-    records,
     reserved_paths,
     writer_lease,
 )

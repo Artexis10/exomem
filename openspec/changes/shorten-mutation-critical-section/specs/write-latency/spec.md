@@ -162,3 +162,59 @@ reach the command's response.
 - **THEN** the batch fans out as the namespace is released
 - **AND** the body's own error is the one the writer receives
 
+
+### Requirement: The Whole-Vault Identity Inventory Is Built Before The Boundary
+
+A command that mutates the vault SHALL build a cold private-identity inventory
+before it acquires the vault mutation boundary, single-flighted with any
+build already running, so the whole-vault walk never runs while the boundary
+is held. A failed pre-boundary build MUST NOT refuse the write; the write
+proceeds and pays for the walk where it would have before. Index count
+refreshes that run inside a commit SHALL NOT cost a filesystem `stat` per page.
+
+#### Scenario: A cold inventory is not built by a write inside its boundary
+
+- **WHEN** `episode_memory` or a `record_memory` update runs against a vault
+  whose identity inventory has not been built in this process
+- **THEN** the inventory is built while the mutation boundary is free
+- **AND** the write commits without building it under the boundary
+
+### Requirement: Idempotent Capture Writes Absorb Ordinary Boundary Contention
+
+An idempotent capture write (`observe_memory`, `remember`, `episode_memory`,
+and `record_memory` with `action="append"`) that finds the mutation boundary
+busy SHALL be waited out on the server rather than refused, for a bounded
+time (default 40 s, `EXOMEM_CAPTURE_WAIT_SECONDS`, and never past the caller's
+own request budget). Waiting writes SHALL attempt in arrival order, and a
+write arriving while others wait SHALL join behind them. The retry MUST run
+under the same idempotency identity, so the write commits exactly once, and
+MUST NOT re-run any attempt that observed a commit. A client MUST NOT receive
+`MUTATION_BUSY` for a capture write whose holder is still inside its allowance
+and whose wait has not run out.
+
+A refusal remains only for a holder already past its allowance, or a wait that
+ran out. It SHALL keep `MUTATION_BUSY` with `committed: false` and add a
+`cause` (`holder_overdue` or `capture_wait_exhausted`), the time waited, and a
+remediation that says the write did not commit and may be retried with the same
+idempotency key. `EXOMEM_CAPTURE_CONTENTION_ABSORB=0` restores the previous
+immediate refusal.
+
+#### Scenario: Concurrent captures during a held boundary all commit once
+
+- **WHEN** several `remember` or `episode_memory` writes meet a boundary held by
+  another write
+- **AND** the holder releases within its allowance
+- **THEN** every write commits exactly once
+- **AND** no `MUTATION_BUSY` reaches any caller
+
+#### Scenario: An overdue holder is refused at once with a cause
+
+- **WHEN** a capture write finds a holder already past its allowance
+- **THEN** it is refused without waiting further, with `cause: holder_overdue`
+- **AND** nothing was committed
+
+#### Scenario: An exhausted wait names its cause
+
+- **WHEN** the boundary stays busy for the whole bounded wait
+- **THEN** the write is refused with `cause: capture_wait_exhausted`
+- **AND** nothing was committed

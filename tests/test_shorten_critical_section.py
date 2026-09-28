@@ -167,6 +167,11 @@ def test_embedding_prewarm_observes_a_free_boundary(
 def test_mutation_busy_shape_is_unchanged_under_a_narrow_hold(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A capture write now waits out ordinary contention on the server
+    # (`test_capture_contention_absorbed.py`); the refusal it still raises for an
+    # overdue holder or an exhausted wait keeps this shape, so pin the shape
+    # with the wait switched off.
+    monkeypatch.setenv("EXOMEM_CAPTURE_CONTENTION_ABSORB", "0")
     kwargs = _validated_kwargs(vault)
     state_dir = vault.parent / "state"
     manager = _standalone_manager(state_dir, mutation_timeout_seconds=0.2)
