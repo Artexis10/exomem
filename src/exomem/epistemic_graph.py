@@ -5234,6 +5234,20 @@ class EpistemicGraphIndex:
             # served reads as current past outstanding whole-vault debt. A parent
             # handoff keeps its registration, so it takes the queued deferral.
             scope = set(drain_scope)
+            marker_stands = deferred_index.graph_full_rebuild_pending(self.vault_root) is not None
+            if _caller_can_carry_pending(self.vault_root, self._mutation_coordinator) and (
+                marker_stands or not self.epoch_admits_incremental_repair()
+            ):
+                # Either way the drain would pay a whole-vault pass -- the
+                # marker's convergence, or the fallback after an epoch refuses
+                # per-path repair -- and on this caller's thread. A caller that
+                # can report pending leaves it to the drain daemon: the receipts
+                # are already durable, and availability is already withdrawn.
+                log.info(
+                    "graph replay left its repair to the drain marker_stands=%s",
+                    marker_stands,
+                )
+                return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
             if not _parent_receipted_graph_handoff_active(
                 self.vault_root, self._mutation_coordinator.state_root
             ):
@@ -5241,7 +5255,11 @@ class EpistemicGraphIndex:
 
                 index_sync.drain_graph_work(self.vault_root, paths=scope)
                 if not deferred_index.snapshot_graph(self.vault_root, limit=1, paths=scope):
-                    return {"indexed_files": 0, "nodes": 0, "edges": 0}
+                    # A standing marker drained through its whole-vault pass.
+                    report = {"indexed_files": 0, "nodes": 0, "edges": 0}
+                    if marker_stands:
+                        report["whole_vault"] = 1
+                    return report
                 log.info("graph replay drain left its repair queued; rebuilding")
             report["_rebuild_after_release"] = 1
             report["_durable_before_rebuild"] = 1
@@ -5262,7 +5280,8 @@ class EpistemicGraphIndex:
                     if graph_checkpoint is not None
                     else _durable_generation(self.vault_root)
                 ):
-                    return self._rebuild_all_off_boundary(accept_stabilized_build=True)
+                    rebuilt = self._rebuild_all_off_boundary(accept_stabilized_build=True)
+                return {**rebuilt, "whole_vault": 1}
             except graph_sync.GraphRebuildInProgress:
                 # A defer-disposition fallback has already persisted these exact
                 # paths. A rebuild-disposition fallback knows only that the
@@ -9169,6 +9188,13 @@ def upsert_after_write(
                 _registered_or_failure(vault_root, required, index, mutation_coordinator),
                 mutation_coordinator,
             )
+        if report.get("whole_vault"):
+            # Said as what ran: a whole-vault pass is not an incremental one.
+            return GraphDispatchResult("completed", "graph_rebuild_completed", required)
+        if report.get("deferred") and report.get("queued"):
+            # No checkpoint to report pending against; the code names the
+            # durable queue that owns the repair instead of claiming it done.
+            return GraphDispatchResult("completed", "graph_repair_queued_for_drain", required)
         return GraphDispatchResult("completed", "incremental_completed", required)
     except OpError as error:
         _handle_graph_dispatch_failure(
