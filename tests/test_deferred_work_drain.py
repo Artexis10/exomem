@@ -254,7 +254,7 @@ def test_full_drain_preserves_work_requeued_during_dispatch(
     target.write_text("# requeued\n", encoding="utf-8")
     deferred_index.add_full(vault, [rel])
 
-    def dispatch(root: Path, paths: list[Path]):
+    def dispatch(root: Path, paths: list[Path], **_kwargs):
         assert paths == [target]
         deferred_index.add_full(root, [rel])
         return _completed_full_upsert_report(paths)
@@ -289,7 +289,9 @@ def test_targeted_full_drain_reads_only_the_bounded_requested_receipts(
     monkeypatch.setattr(
         index_sync,
         "upsert_after_write",
-        lambda _root, paths: dispatched.append(paths) or _completed_full_upsert_report(paths),
+        lambda _root, paths, **_kwargs: (
+            dispatched.append(paths) or _completed_full_upsert_report(paths)
+        ),
     )
 
     assert index_sync.drain_deferred_work(
@@ -334,7 +336,7 @@ def test_unbounded_manual_drain_reconciles_semantic_work_created_by_full_refresh
     target.write_text("# full then semantic\n", encoding="utf-8")
     deferred_index.add_full(vault, [rel])
 
-    def dispatch(root: Path, paths: list[Path]):
+    def dispatch(root: Path, paths: list[Path], **_kwargs):
         assert paths == [target]
         deferred_index.add(root, [rel])
         return _completed_full_upsert_report(paths)
@@ -365,7 +367,7 @@ def test_full_drain_isolates_a_failed_receipt_from_later_work(
     deferred_index.add_full(vault, [bad_rel, good_rel])
     dispatched: list[str] = []
 
-    def dispatch(_root: Path, paths: list[Path]):
+    def dispatch(_root: Path, paths: list[Path], **_kwargs):
         assert len(paths) == 1
         rel = paths[0].relative_to(vault).as_posix()
         dispatched.append(rel)
@@ -400,7 +402,7 @@ def test_failed_full_prefix_rotates_so_later_work_is_not_starved(
         target.write_text(f"# {rel}\n", encoding="utf-8")
     deferred_index.add_full(vault, [*failed, good_rel])
 
-    def dispatch(_root: Path, paths: list[Path]):
+    def dispatch(_root: Path, paths: list[Path], **_kwargs):
         rels = [path.relative_to(vault).as_posix() for path in paths]
         if len(rels) > 1 or any(rel in failed for rel in rels):
             return index_sync.IndexSyncReport(
@@ -739,7 +741,7 @@ def test_bounded_full_drain_limits_incomplete_batch_isolation(
     )
     attempts: list[list[str]] = []
 
-    def incomplete(_root: Path, paths: list[Path]):
+    def incomplete(_root: Path, paths: list[Path], **_kwargs):
         attempts.append([path.relative_to(vault).as_posix() for path in paths])
         return index_sync.IndexSyncReport(
             "upsert",
@@ -802,7 +804,7 @@ def test_single_slot_bounded_drain_alternates_between_full_and_semantic_queues(
     )
     full_attempts: list[list[str]] = []
 
-    def incomplete_full(_root: Path, paths: list[Path]):
+    def incomplete_full(_root: Path, paths: list[Path], **_kwargs):
         rels = [path.relative_to(vault).as_posix() for path in paths]
         full_attempts.append(rels)
         return index_sync.IndexSyncReport(
@@ -862,7 +864,7 @@ def test_single_slot_startup_drains_both_queues_across_restarts(
         index_sync, "recover_full_receipt_graph_epoch", lambda _root: True
     )
 
-    def incomplete_full(_root: Path, paths: list[Path]):
+    def incomplete_full(_root: Path, paths: list[Path], **_kwargs):
         rels = tuple(path.relative_to(vault).as_posix() for path in paths)
         return index_sync.IndexSyncReport(
             "upsert",
@@ -960,7 +962,7 @@ def test_unbounded_full_drain_isolates_every_incomplete_receipt(
     )
     attempts: list[list[str]] = []
 
-    def incomplete(_root: Path, paths: list[Path]):
+    def incomplete(_root: Path, paths: list[Path], **_kwargs):
         rel_paths = [path.relative_to(vault).as_posix() for path in paths]
         attempts.append(rel_paths)
         return index_sync.IndexSyncReport(

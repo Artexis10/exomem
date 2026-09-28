@@ -1231,7 +1231,9 @@ def _republish_graph_availability(index) -> None:
         log.warning("graph availability republication failed", exc_info=True)
 
 
-def drain_graph_work(vault_root: Path, *, limit: int | None = None) -> int:
+def drain_graph_work(
+    vault_root: Path, *, limit: int | None = None, paths: Iterable[str] | None = None
+) -> int:
     """Drain queued epistemic-graph repair without touching the other queues.
 
     `drain_deferred_work` runs all three queues because its callers -- the
@@ -1239,8 +1241,13 @@ def drain_graph_work(vault_root: Path, *, limit: int | None = None) -> int:
     daemon wants only this one: it fires within a second of the write that
     queued the debt, and replaying embeddings that often is a different cost
     decision from repairing the graph.
+
+    `paths` (vault-relative) narrows it to receipts a caller just queued, so a
+    refresh that proved its own repair incremental drains it under these rules.
     """
-    return _drain_graph_work(vault_root, limit=limit, requested=None)
+    return _drain_graph_work(
+        vault_root, limit=limit, requested=None if paths is None else set(paths)
+    )
 
 
 def drain_deferred_work(
@@ -1297,7 +1304,7 @@ def drain_deferred_work(
         full_batch_completed = False
         if recover_full_receipt_graph_epoch(vault_root):
             try:
-                dispatched = upsert_after_write(vault_root, full_paths)
+                dispatched = upsert_after_write(vault_root, full_paths, replayed=True)
             except Exception:  # noqa: BLE001 - isolate failures below
                 log.warning("deferred full-index batch failed; isolating receipts", exc_info=True)
             else:
@@ -1318,7 +1325,7 @@ def drain_deferred_work(
             for receipt in isolation_receipts:
                 try:
                     dispatched = upsert_after_write(
-                        vault_root, [vault_root / receipt.rel_path]
+                        vault_root, [vault_root / receipt.rel_path], replayed=True
                     )
                 except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
                     log.warning(
@@ -1434,6 +1441,7 @@ def _dispatch_upsert_components(
     watcher_deleted_rels: list[str] | None = None,
     watcher_lexical_paths: list[Path] | None = None,
     watcher_lexical_suppressed_rels: list[str] | None = None,
+    replayed: bool = False,
 ) -> list[IndexComponentOutcome]:
     from . import epistemic_graph, find, lexstore, memory_refs, mode
 
@@ -1494,13 +1502,15 @@ def _dispatch_upsert_components(
     )
 
     def graph_upsert():
+        replay: dict[str, bool] = {"replayed": True} if replayed else {}
         if created_semantic_paths:
             return epistemic_graph.upsert_after_write(
                 vault_root,
                 semantic_paths,
                 created_paths=created_semantic_paths,
+                **replay,
             )
-        return epistemic_graph.upsert_after_write(vault_root, semantic_paths)
+        return epistemic_graph.upsert_after_write(vault_root, semantic_paths, **replay)
 
     components.append(
         _graph_component(graph_upsert, items=len(semantic_paths))
@@ -1611,8 +1621,13 @@ def upsert_after_write(
     publish_corpus_change: bool = True,
     created_paths: Iterable[Path] = (),
     watcher_deleted_rel_paths: Iterable[str] | None = None,
+    replayed: bool = False,
 ) -> IndexSyncReport:
     """Fan a writer's markdown change out to every index sidecar.
+
+    ``replayed`` is set only by the deferred full-index receipt replay: its
+    graph dispatch may prove a page outside the recall delta current instead
+    of rebuilding the vault. Every other caller keeps that fallback.
 
     Paths under excluded scan dirs (`_trash/`, `_archive/`, `_Schema/`, ...) are
     dropped first: every index's FULL rebuild skips them, so the incremental
@@ -1813,6 +1828,7 @@ def upsert_after_write(
             watcher_deleted_rels=watcher_deleted_rels,
             watcher_lexical_paths=watcher_lexical_paths,
             watcher_lexical_suppressed_rels=watcher_lexical_suppressed_rels,
+            replayed=replayed,
         )
     finally:
         semantic_index.reset_parent_states(token)
