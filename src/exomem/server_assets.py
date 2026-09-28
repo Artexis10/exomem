@@ -5,12 +5,15 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 import mcp.types
 from fastmcp import FastMCP
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
@@ -89,6 +92,76 @@ def server_icons() -> list[mcp.types.Icon]:
     ]
 
 
+# How long a liveness snapshot is served before a worker thread re-reads it.
+HEALTH_SNAPSHOT_TTL_SECONDS = 5.0
+
+
+def _read_liveness_facts() -> dict[str, object]:
+    """Blocking reads behind `/health`: install provenance and state placement."""
+    facts: dict[str, object] = {}
+    try:
+        from . import deploy_provenance
+
+        facts.update(deploy_provenance.provenance(include_local=False))
+    except Exception:  # noqa: BLE001 — provenance must never fail the probe
+        facts["version"] = "unknown"
+    # Content-free machine-local state placement.  This route is public:
+    # absolute roots belong only in the local doctor surface.
+    try:
+        from . import state_migration
+        from . import vault as vault_module
+
+        vault_root = vault_module.resolve_vault()
+        facts["state"] = {
+            "placement": "external-state",
+            "migration": state_migration.migration_status(vault_root),
+        }
+    except Exception:  # noqa: BLE001 — placement must never fail the probe
+        facts["state"] = {
+            "placement": "external-state",
+            "migration": "unavailable",
+        }
+    return facts
+
+
+class _LivenessSnapshot:
+    """Serve `/health` facts from memory; refresh them off the event loop.
+
+    Read once at construction (route registration, before any load), then at
+    most once per `HEALTH_SNAPSHOT_TTL_SECONDS` on a daemon thread. A refresh
+    that blocks leaves the previous snapshot in service instead of the probe.
+    """
+
+    def __init__(self) -> None:
+        self._facts = _read_liveness_facts()
+        self._read_at = time.monotonic()
+        self._lock = threading.Lock()
+        self._refreshing = False
+
+    def current(self) -> dict[str, object]:
+        with self._lock:
+            stale = time.monotonic() - self._read_at >= HEALTH_SNAPSHOT_TTL_SECONDS
+            start = stale and not self._refreshing
+            if start:
+                self._refreshing = True
+            facts = self._facts
+        if start:
+            threading.Thread(
+                target=self._refresh, name="exomem-health-snapshot", daemon=True
+            ).start()
+        return dict(facts)
+
+    def _refresh(self) -> None:
+        try:
+            facts = _read_liveness_facts()
+        finally:
+            with self._lock:
+                self._refreshing = False
+        with self._lock:
+            self._facts = facts
+            self._read_at = time.monotonic()
+
+
 def register_health_routes(
     mcp_app: FastMCP,
     *,
@@ -111,6 +184,8 @@ def register_health_routes(
             log.debug("silent traffic health tracking failed", exc_info=True)
             return {}
 
+    liveness = _LivenessSnapshot()
+
     @mcp_app.custom_route("/health", methods=["GET"])
     async def _health(request: Request) -> JSONResponse:  # noqa: ARG001
         """Unauthenticated liveness probe for tunnels/orchestrators. Reports that
@@ -121,31 +196,16 @@ def register_health_routes(
         service from one running a local checkout without inspecting the service
         manager. Host-identifying detail (interpreter path, checkout location) is
         deliberately withheld here because this route is publicly reachable; use
-        the local `provenance` command for that."""
+        the local `provenance` command for that.
+
+        The handler itself does no I/O: the provenance and state-placement reads
+        come from a snapshot refreshed on a worker thread. A liveness probe that
+        reads files on the event loop waits behind every busy thread in the
+        process (the GIL is handed back per syscall), and a probe that times out
+        gets the pod killed mid index build."""
         _record_health_probe()
         payload: dict[str, object] = {"status": "ok", "service": "exomem"}
-        try:
-            from . import deploy_provenance
-
-            payload.update(deploy_provenance.provenance(include_local=False))
-        except Exception:  # noqa: BLE001 — provenance must never fail the probe
-            payload["version"] = "unknown"
-        # Content-free machine-local state placement.  This route is public:
-        # absolute roots belong only in the local doctor surface.
-        try:
-            from . import state_migration
-            from . import vault as vault_module
-
-            vault_root = vault_module.resolve_vault()
-            payload["state"] = {
-                "placement": "external-state",
-                "migration": state_migration.migration_status(vault_root),
-            }
-        except Exception:  # noqa: BLE001 — placement must never fail the probe
-            payload["state"] = {
-                "placement": "external-state",
-                "migration": "unavailable",
-            }
+        payload.update(liveness.current())
         return JSONResponse(
             payload,
             headers={"Cache-Control": "no-store"},
@@ -164,7 +224,10 @@ def register_health_routes(
                 mcp_app._exomem_tool_surface_sha256 = digest
             except Exception:  # noqa: BLE001 - readiness must stay structured
                 digest = None
-        snapshot = runtime_readiness_module.runtime_readiness(
+        # The measurement reads the filesystem and sqlite catalog and can wait
+        # on the coordination probe; it must not run on the event loop.
+        snapshot = await run_in_threadpool(
+            runtime_readiness_module.runtime_readiness,
             mcp_tool_surface_sha256=digest,
             traffic=traffic,
         )
@@ -299,9 +362,7 @@ def register_asset_routes(
         )
 
 
-def register_oauth_metadata_route(
-    mcp_app: FastMCP, *, base_url: str, auth_enabled: bool
-) -> None:
+def register_oauth_metadata_route(mcp_app: FastMCP, *, base_url: str, auth_enabled: bool) -> None:
     """Expose compatibility aliases for OAuth/OIDC discovery."""
     if not auth_enabled:
         return
