@@ -1963,7 +1963,8 @@ class QueryTermBudget:
     `max_units` are held, a unit on more than `common_fraction` of the
     scope's pages is a near-stopword for this corpus and is dropped from the
     MATCH, once the scope holds at least `common_min_pages` pages and enough
-    rarer units remain to corroborate; it still counts toward corroboration.
+    rarer units remain to corroborate; it still counts toward corroboration
+    while the stems of all counted units fit in `max_stems`.
     The numbers are the caller's policy.
     """
 
@@ -1985,9 +1986,10 @@ def select_query_units(
     query order.
 
     Kept units are the ones the MATCH asks for. Counted units are the kept
-    ones plus every unit dropped for being common: they leave the MATCH, so
-    they never widen the rows read, but a page the MATCH reaches still
-    corroborates on them exactly as the unbounded query would let it.
+    ones plus the units dropped for being common, rarest first, while their
+    stems fit in what `max_stems` has left: they leave the MATCH, so they
+    never widen the rows read, but a page the MATCH reaches still
+    corroborates on them as the unbounded query would let it.
 
     Units are deduplicated first: a word said thirty times is one unit. A
     unit's frequency is its rarest measured stem present in the scope (for a
@@ -2056,10 +2058,17 @@ def select_query_units(
         room -= len(unit.stems)
         kept.append((position, unit))
     kept.sort(key=lambda entry: entry[0])
-    counted = sorted(
-        kept + [(position, unit) for _frequency, position, unit in common],
-        key=lambda entry: entry[0],
-    )
+    # The common units count toward corroboration in the stems the kept ones
+    # left over, rarest first, so the test stays bounded on any turn.
+    counted = list(kept)
+    for _frequency, position, unit in sorted(
+        common, key=lambda entry: (entry[0], len(entry[2].stems), entry[1])
+    ):
+        if len(unit.stems) > room:
+            break
+        room -= len(unit.stems)
+        counted.append((position, unit))
+    counted.sort(key=lambda entry: entry[0])
     return (
         [unit for _position, unit in kept],
         [unit for _position, unit in counted],

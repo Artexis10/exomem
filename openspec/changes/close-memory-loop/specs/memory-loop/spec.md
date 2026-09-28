@@ -386,7 +386,9 @@ those units match, so that for the same units it returns what the unbounded
 query returns. A turn whose units the scope holds fit within the unit bound
 SHALL NOT lose a unit for being common; on a longer turn a unit dropped for
 being common SHALL leave the MATCH but SHALL still count toward
-corroboration. Selection SHALL NOT drop a unit for
+corroboration, rarest first, while the stems counted toward corroboration
+stay within the same bounded number of stems as the MATCH. Selection SHALL
+NOT drop a unit for
 containing digits, SHALL count an unspaced run as one unit carrying only its
 content bigrams, and SHALL be reported in activation diagnostics as kept and
 dropped counts only.
