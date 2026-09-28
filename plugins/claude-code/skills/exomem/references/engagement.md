@@ -175,6 +175,22 @@ returned; an identical retry writes nothing. A Stop hook's episode check or an
 durable happened. At `off`, record only when the user asks; at `light`, also
 when a hook's episode check asks.
 
+**Episode candidates, where the service runs them.** When
+`episode_memory(action="candidates")` reports `execution: enabled`, the same
+decomposition can run as typed candidates against the recorded recap. `prepare`
+each durable change with its route, its home (an existing page's `target`, or a
+new page's `title`), the pages you inspected as other homes with their scope in
+a line and the `content_hash` you read, and your reason; then give every
+candidate a `disposition`, including honest `no_capture`, `deferred` or
+`rejected`. Review that plan against the recap before `resume`: every
+identified candidate is decided, and no independently useful synthesis is
+appended to a narrower page because it ranked highly. After `resume`, make the
+final pass once: `action="coverage"` puts the input ref beside each receipt and
+its readback; read the input, compare, prepare anything omitted or misrouted,
+then attest with `resume` and `postcommit=true`. A committed note or a Saved
+marker is not coverage, and the server never claims your candidates exhaust
+the input.
+
 ## Activation conventions and learning from corrections
 
 Every activation packet's `generation` says which registries shaped it:

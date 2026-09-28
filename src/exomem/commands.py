@@ -7827,7 +7827,12 @@ def op_episode_memory(
             one durable change, reused when you revise it.
         proposal: For `prepare`: {route, target?, title?, alternatives,
             evidence, reason, leaves: [{leaf_key, effect_revision, kind,
-            args}]}. A changed leaf needs the next `effect_revision`; a
+            args}]}. The destination is your call: `alternatives` lists up to
+            8 pages you inspected as possible homes, each {target: its
+            `exomem://` ref, scope: its declared scope in a line, version: the
+            `content_hash` you read}; an open page has no priority among them.
+            existing_page and semantic_unit name the `target` every leaf
+            writes. A changed leaf needs the next `effect_revision`; a
             committed one cannot change.
         disposition: For `disposition`: routed, no_capture, uncertain,
             rejected, deferred or awaiting_authority.

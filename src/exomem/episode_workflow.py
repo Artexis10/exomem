@@ -13,12 +13,18 @@ What each action writes (close-memory-loop task 5.5):
   journal and inert sealed single-step curation plans. Preparation runs the
   same read-only leaf preparation `maintain_memory mode=curation` propose runs;
   no canonical page is written. Revising a proposal withdraws its disposition.
+  A proposal's destination decision -- route, home, the alternatives the agent
+  inspected with the version it read of each, and its reason -- is checked for
+  structure only (task 3.8): each alternative is a page this caller can read at
+  that version, and an existing-page home is the one page its leaves write.
 * `resume` is the episode's executor. It acts only on the journal digest its
   caller last reviewed, and runs only a leaf that is routed, bound to a current
   sealed plan, covered by a current precommit attestation and not already
   attempted, through `curation.apply` -- the existing executor, under the
   command's writer lease and each writer's own validation. It never retries an
-  uncertain attempt: reconciliation reads existing receipts only.
+  uncertain attempt: reconciliation reads existing receipts only. A candidate
+  whose inspected pages changed after its decision is reported stale, with no
+  attempt, until the agent reconsiders it (task 3.9).
 
 `EXOMEM_EPISODE_WORKFLOW` is a feature switch for that executor, not an
 authority boundary. Unless the service environment sets it, `resume` refuses
@@ -32,21 +38,43 @@ mint no vocabulary or edge authority.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import curation, episode_capture
+from . import curation, episode_capture, memory_refs
 from . import episode_model as model
 from .episode_reconciliation import reconcile_curation_leaf
 from .episode_recovery import EpisodeInputOwner
 from .episode_store import EpisodeStore
+from .governance import egress
+from .governance.principal import effective_principal
+from .vault import content_hash
 
 ENABLE_ENV = "EXOMEM_EPISODE_WORKFLOW"
 DISABLED_CODE = "episode_workflow_disabled"
 DEFAULT_MAX_LEAVES = 8
 MAX_LEAVES = 16
 _EXECUTABLE = frozenset({"pending", "proven_uncommitted"})
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+#: Routes whose home is one existing page, and the arg each owned leaf kind
+#: names that page by.
+_BOUND_ROUTES = frozenset({"existing_page", "semantic_unit"})
+_LEAF_TARGET = {"edit": "path", "supersede": "old_path"}
+DESTINATION_STALE = "EPISODE_DESTINATION_STALE"
+_UNAVAILABLE = (
+    "EPISODE_DESTINATION_UNAVAILABLE",
+    "a destination or inspected alternative is not a page this caller can read",
+)
+_STALE = (
+    DESTINATION_STALE,
+    "a page this decision inspected changed after it was read; read it again and revise",
+)
+_MISMATCH = (
+    "EPISODE_DESTINATION_MISMATCH",
+    "an existing-page destination's leaves must write the page it names",
+)
 
 
 def _error(code: str, reason: str) -> model.EpisodeError:
@@ -207,6 +235,117 @@ def _blockers(vault_root: Path, run_id: str) -> list[str]:
     return [item["code"] for item in curation.preview(vault_root, run_id=run_id)["blockers"]]
 
 
+# --- destination decisions (close-memory-loop 3.8) ---------------------------
+#
+# The home, the alternatives weighed and the reason are the active agent's
+# judgment. These checks are structural only: every inspected alternative is a
+# page this caller can read at the version the agent read, and an existing-page
+# home is the one page its leaves write, so the leaf's own expected-hash guard
+# protects the declared home. Nothing here scores, ranks or prefers a page, and
+# a page the caller may not read is answered exactly as one that does not exist.
+
+
+def _page_ref(value: Any) -> str | None:
+    """The canonical page ref `value` spells, any unit fragment dropped, or None."""
+    if not isinstance(value, str):
+        return None
+    parent = value.partition("#")[0]
+    memory_id = memory_refs.parse_memory_ref(parent)
+    if memory_id is None or memory_refs.memory_ref(memory_id) != parent:
+        return None
+    return parent
+
+
+def _check_decision_shape(proposal: Mapping[str, Any]) -> None:
+    """What a new decision must carry beyond what the pure model already checks."""
+    for item in proposal["alternatives"]:
+        if _page_ref(item["target"]) != item["target"] or not _HEX64.fullmatch(item["version"]):
+            raise _error(
+                "EPISODE_PROPOSAL_INVALID",
+                "an alternative names a page by its memory ref and the content_hash read",
+            )
+    if proposal["route"] in _BOUND_ROUTES and "target" not in proposal:
+        # Never inferred from the page the conversation has open.
+        raise _error("EPISODE_PROPOSAL_INVALID", "an existing-page destination names its target")
+
+
+def _destination_refs(proposal: Mapping[str, Any]) -> list[str]:
+    refs = [item["target"] for item in proposal.get("alternatives", ())]
+    if proposal["route"] in _BOUND_ROUTES and (ref := _page_ref(proposal.get("target"))):
+        refs.append(ref)
+    return refs
+
+
+def _visible(vault_root: Path, refs: Sequence[str]) -> dict[str, str]:
+    """One release-filtered lookup for every ref: `{ref: path}` for visible ones."""
+    if not refs:
+        return {}
+    return egress.visible_memory_ref_paths(vault_root, refs, principal=effective_principal())
+
+
+def _version(vault_root: Path, path: str) -> str | None:
+    """The page's current content_hash, the one `read_memory` returns."""
+    try:
+        return content_hash((Path(vault_root) / path).read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _home(vault_root: Path, target: Any, visible: Mapping[str, str]) -> str | None:
+    """The one readable page an existing-page destination names, else None."""
+    ref = _page_ref(target)
+    if ref is not None:
+        return visible.get(ref)
+    if not isinstance(target, str) or target.lower().startswith(memory_refs.REF_PREFIX):
+        return None
+    try:
+        path = curation.normalize_target_path(target, field="target")
+        exists = (Path(vault_root) / path).is_file()
+    except (curation.CurationError, OSError):
+        return None
+    if not exists or egress.write_target_withheld(
+        vault_root, path, principal=effective_principal()
+    ):
+        return None
+    return path
+
+
+def _destination_blocker(
+    vault_root: Path,
+    proposal: Mapping[str, Any],
+    leaves: Sequence[Mapping[str, Any]],
+    visible: Mapping[str, str],
+) -> tuple[str, str] | None:
+    """Why a recorded destination decision does not hold now, or None."""
+    for item in proposal.get("alternatives", ()):
+        path = visible.get(item["target"])
+        if path is None:
+            return _UNAVAILABLE
+        if _version(vault_root, path) != item["version"]:
+            return _STALE
+    if proposal["route"] in _BOUND_ROUTES:
+        home = _home(vault_root, proposal.get("target"), visible)
+        if home is None:
+            return _UNAVAILABLE
+        if any(leaf["args"].get(_LEAF_TARGET.get(leaf["kind"], "")) != home for leaf in leaves):
+            return _MISMATCH
+    return None
+
+
+def _stale_destinations(session: _Session, candidate_ids: set[str]) -> set[str]:
+    """Candidates whose destination evidence changed since their decision."""
+    owners = [model._candidate(session.state, item) for item in sorted(candidate_ids)]  # noqa: SLF001
+    visible = _visible(
+        session.vault_root,
+        [ref for owner in owners for ref in _destination_refs(owner["proposal"])],
+    )
+    return {
+        owner["candidate_id"]
+        for owner in owners
+        if _destination_blocker(session.vault_root, owner["proposal"], owner["leaves"], visible)
+    }
+
+
 def _unverifiable(session: _Session, candidate_id: str, leaf_id: str) -> str | None:
     """Why reconciling this leaf would fail now, from a read-only trial on a copy.
 
@@ -237,6 +376,8 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
     session = _Session(vault_root, episode)
     key = model._string(candidate, "candidate_key", 160)  # noqa: SLF001
     existing = _candidate_by_key(session.state, key)
+    # Revision checks, then the decision's destination evidence, then sealing:
+    # a refusal at any step leaves the journal unchanged.
     identity = (
         existing["candidate_id"]
         if existing
@@ -250,9 +391,19 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
         if error.code != "EPISODE_PROPOSAL_UNCHANGED":
             raise
         revised = False
+    decided = model._candidate(trial, identity)  # noqa: SLF001
+    _check_decision_shape(decided["proposal"])
+    blocker = _destination_blocker(
+        session.vault_root,
+        decided["proposal"],
+        decided["leaves"],
+        _visible(session.vault_root, _destination_refs(decided["proposal"])),
+    )
+    if blocker is not None:
+        raise _error(*blocker)
     unsealed = [
         leaf
-        for leaf in model._candidate(trial, identity)["leaves"]  # noqa: SLF001
+        for leaf in decided["leaves"]
         if not leaf["attempts"]
         and (
             leaf["binding"] is None
@@ -501,9 +652,16 @@ def resume(
         frozen = {item["leaf_id"] for item in blocked}
         held: set[str] = set()
         deferred = max(0, len(planned) - limit)
+        # The precommit destination review: a decision whose inspected pages
+        # changed since it was made waits for the agent's fresh consideration.
+        reconsider = _stale_destinations(session, {candidate for candidate, _ in planned[:limit]})
         for candidate_id, leaf_id in planned[:limit]:
             owner = model._candidate(session.state, candidate_id)  # noqa: SLF001
             if candidate_id in held or any(leaf["leaf_id"] in frozen for leaf in owner["leaves"]):
+                continue
+            if candidate_id in reconsider:
+                reported["stale"].append({"leaf_id": leaf_id, "code": DESTINATION_STALE})
+                held.add(candidate_id)
                 continue
             try:
                 kind, item = _execute(session, candidate_id, leaf_id)
