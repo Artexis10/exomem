@@ -68,12 +68,14 @@
   - `capture_source` text and file lanes carry the same `vocabulary_resolution` record as Notes.
   - A malformed or ambiguous registry refuses only domain-bearing captures, and says a capture without `domain` still succeeds.
   - A census guard over `Sources/<Kind>/` is deliberately absent: it would refuse past its entry bound, and on every sync write, inside a boundary that already serializes writers.
-  - Open: Sources keep the post-write `DOMAIN_NEAR_MISS` warning instead of the pre-destination decision. Gating capture on it conflicts with command-surface "A previously unseen meaningful domain is accepted" and needs a ruling.
+  - Ruled: Sources keep the post-write `DOMAIN_NEAR_MISS` warning, with no pre-destination decision. Command-surface accepts an unseen meaningful domain, and capture runs from hooks and automation, where a decision stop loses material.
+  - Ruled: a malformed or ambiguous registry refusal is correct fail-closed, because it is a registry fault. The refusal names `_Schema/source-taxonomy.yaml` and says a capture without `domain` still succeeds (tested on the text and adoption lanes).
 - [ ] 5.11 Integrate category/entity/type/relation family adapters under their existing contracts, preserving open categories and current authority; define Evidence scope/category handling separately so incident identifiers cannot inherit domain aliases or slug collapsing.
   Branch `feat/resolver-families`.
   - `valid_public_resolution` admits the additive `entity_type` family. Entity creation reports the requested type, canonical id, folder and registry fingerprint; an unregistered type is still refused.
   - Evidence scope and category are excluded by name (`PUBLIC_FAMILIES`) and pinned by a test.
-  - Open: category and relation labels resolve many times per write and project no destination, so the single receipt record cannot carry them without a list-valued contract. They stay on their existing write diagnostics pending a ruling.
+  - Ruled: category and relation labels resolve many times per write and project no destination, so they stay on their existing write diagnostics. A list-valued receipt is a later contract change if a client needs one.
+  - Moved: semantic neighbour evidence for non-exact terms goes to `add-sensed-epistemic-model` as a future question family: deterministic candidate pairs, instrument-labelled readings recorded in the ledger. No vector-centroid review item here. Templated bodies dominate stored page vectors (0.88 between unrelated person pages), embeddings may not serve as the only reading, and the sensed model already owns the governed reconciliation path.
 
 ## 6. Demonstrate client coverage and excellent activation
 
