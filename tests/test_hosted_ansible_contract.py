@@ -417,6 +417,15 @@ def test_postgres_role_archives_wal_and_verifies_restores_weekly() -> None:
         "path: /etc/pgbackrest\n    state: directory\n    owner: postgres\n"
         "    group: postgres\n    mode: \"0750\""
     ) in tasks
+    # A quiet control database fills a 16 MB WAL segment only every few days,
+    # and archive-push ships only whole segments, so without a timeout the
+    # recovery point in B2 is the last nightly backup: up to a day of lost
+    # writes, including write-once wrapped cell keys. archive_timeout forces a
+    # segment switch, bounding the loss to that many seconds.
+    pg_conf = _read("roles/postgres/templates/exomem-postgres.conf.j2")
+    archive_timeout = re.search(r"^archive_timeout = (\d+)$", pg_conf, re.MULTILINE)
+    assert archive_timeout is not None
+    assert 0 < int(archive_timeout.group(1)) <= 300
     assert "OnCalendar=*-*-* 03:00:00" in full_timer
     assert "OnCalendar=Sun *-*-* 04:00:00" in verify_timer
     assert "exomem-pgbackrest-restore-verify.sh" in verify_service
