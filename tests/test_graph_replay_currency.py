@@ -439,3 +439,80 @@ def test_a_standalone_replay_that_rebuilds_does_not_report_incremental_completio
     assert whole_vault_passes, "a standalone caller must still converge"
     assert result.code != "incremental_completed", result
     assert result.whole_vault_attempted, result
+
+
+def _terminal_graph_state(
+    monkeypatch: pytest.MonkeyPatch, result: epistemic_graph.GraphDispatchResult
+) -> str:
+    """What the request terminal says about derived custody for this dispatch."""
+    from exomem import writer_lease
+
+    captured: dict[str, object] = {}
+
+    def capture(terminal, **kwargs):
+        captured.update(kwargs)
+        return terminal
+
+    monkeypatch.setattr(writer_lease, "with_fast_acknowledgement", capture, raising=True)
+    report = index_sync.IndexSyncReport(
+        "upsert",
+        (RETITLED,),
+        (RETITLED,),
+        (index_sync._graph_component(lambda: result),),
+    )
+    writer_lease._with_post_terminal_fanout_acknowledgement(
+        {"state": "committed"}, [report], drain_failed=False
+    )
+    return str(captured["derived_sync"])
+
+
+@pytest.mark.parametrize("marker", [False, True], ids=["epoch", "marker"])
+def test_a_request_replay_deferral_under_an_acknowledged_checkpoint_reports_pending(
+    vault: Path,
+    whole_vault_passes: list[str],
+    caller_whole_vault_calls: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    marker: bool,
+) -> None:
+    """The live state: a durable checkpoint the acknowledgement covers, graph available.
+
+    A request replay that leaves its repair to the drain is pending work with a
+    queued receipt, whatever the acknowledgement covers -- not a completed rebuild.
+    """
+    from exomem import graph_sync
+
+    root = _built(vault, whole_vault_passes)
+    graph_sync._write_floor(root, graph_sync.GraphSyncGenerationFloor.create(1))
+    graph_sync._write_checkpoint(
+        root,
+        graph_sync.GraphSyncCheckpoint.create(
+            generation=1, mutation_id="1" * 24, paths=(), created_paths=(), scope="full"
+        ),
+    )
+    EpistemicGraphIndex(root).rebuild_all()
+    _publish_past_a_stale_row(root)
+    required = graph_sync.read_checkpoint(root)
+    acknowledged = graph_sync.acknowledged_checkpoint(root)
+    assert required is not None and acknowledged is not None and acknowledged.covers(required)
+    assert EpistemicGraphIndex(root).available() is True
+    whole_vault_passes.clear()
+
+    with monkeypatch.context() as live:
+        if marker:
+            deferred_index.advance_graph_full_rebuild(root)
+        else:
+            live.setattr(
+                EpistemicGraphIndex,
+                "epoch_admits_incremental_repair",
+                lambda self: False,
+                raising=True,
+            )
+        result = _replay_under_a_mutation_request(root)
+
+    assert caller_whole_vault_calls == [], "a whole-vault pass ran on the request's thread"
+    assert (result.outcome, result.code) == ("deferred", "graph_repair_queued"), result
+    assert result.code in index_sync._GRAPH_COVERAGE_CODES
+    assert not result.whole_vault_attempted
+    assert _terminal_graph_state(monkeypatch, result) == "pending"
+    assert EpistemicGraphIndex(root).available() is False
+    _assert_the_daemon_drains_it_once(root)
