@@ -1,10 +1,10 @@
 """The keyed continuity group of the context-activation benchmark (design
 amendment A6): pre-registration and scorer.
 
-Group v2's digest below, which covers the cases, their gold, the checks and a
-sha256 of the scorer module's source, was pinned in a commit before v2's first
-run. A change to any of them is a new digest and a visible edit here. v1's
-recorded result is kept as history.
+Group v3's digest below, which covers the cases, their gold, the checks and a
+sha256 of the scorer module's source, was pinned in a commit before v3's first
+run. A change to any of them is a new digest and a visible edit here. The
+recorded results of v1 and v2 are kept as history.
 """
 
 from __future__ import annotations
@@ -20,26 +20,30 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 pytestmark = pytest.mark.timeout(1800)
 
-CONTINUITY_SHA256 = "b208a986e509ffd4076243dc4b899e2ffe3aad2cdfa708a838143207eb99502a"
+CONTINUITY_SHA256 = "8c6eb8140e5929f59ed2ff7bd701f85b7dded2fc0c24e0e8c277a406b0a7624a"
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 #: v1 (digest ``de5e7900…``, scorer too lenient per the integrity review),
 #: kept as history.
 V1_GROUP = REPOSITORY / "docs" / "benchmarks" / "context-activation-continuity-2026-09.json"
 V1_SHA256 = "de5e79004e85487bd2b5c56cc4082d763c97c077f80bce7d88e087935ccbadc7"
-RECORDED_GROUP = REPOSITORY / "docs" / "benchmarks" / "context-activation-continuity-2026-09-v2.json"
+#: v2 (digest ``b208a986…``; its extra-page check ignored units, pointers and
+#: current state, per the integrity recheck), kept as history.
+V2_GROUP = REPOSITORY / "docs" / "benchmarks" / "context-activation-continuity-2026-09-v2.json"
+V2_SHA256 = "b208a986e509ffd4076243dc4b899e2ffe3aad2cdfa708a838143207eb99502a"
+RECORDED_GROUP = REPOSITORY / "docs" / "benchmarks" / "context-activation-continuity-2026-09-v3.json"
 RECORD_ENV = "CONTEXT_ACTIVATION_RECORD_CONTINUITY"
 
-#: v2's first run on the real compiler, recorded after the digest above was
+#: v3's first run on the real compiler, recorded after the digest above was
 #: pinned. Re-record after a deliberate change::
 #:
-#:     CONTEXT_ACTIVATION_RECORD_CONTINUITY=docs/benchmarks/context-activation-continuity-2026-09-v2.json \\
+#:     CONTEXT_ACTIVATION_RECORD_CONTINUITY=docs/benchmarks/context-activation-continuity-2026-09-v3.json \\
 #:         uv run pytest tests/test_context_activation_continuity.py -k recorded
 PASSING_TODAY = frozenset({"K1", "K2", "K3", "K4"})
 
 
 def test_the_group_is_the_pre_registered_one() -> None:
-    assert continuity.GROUP_ID == "context-activation-continuity-v2"
+    assert continuity.GROUP_ID == "context-activation-continuity-v3"
     assert continuity.continuity_digest() == CONTINUITY_SHA256
     assert [case.case_id for case in continuity.CASES] == ["K1", "K2", "K3", "K4"]
     assert "continue" in {case.turn for case in continuity.CASES}
@@ -57,6 +61,13 @@ def test_the_v1_result_is_kept_as_history() -> None:
     history = json.loads(V1_GROUP.read_text(encoding="utf-8"))
     assert history["group_id"] == "context-activation-continuity-v1"
     assert history["continuity_digest"] == V1_SHA256
+    assert (history["passed"], history["total"]) == (4, 4)
+
+
+def test_the_v2_result_is_kept_as_history() -> None:
+    history = json.loads(V2_GROUP.read_text(encoding="utf-8"))
+    assert history["group_id"] == "context-activation-continuity-v2"
+    assert history["continuity_digest"] == V2_SHA256
     assert (history["passed"], history["total"]) == (4, 4)
 
 
@@ -87,6 +98,19 @@ IDENTITIES = continuity.Identities(
         continuity.ORDINARY_NOTE: continuity.ORDINARY_NOTE,
         continuity.RECAP: "Knowledge Base/Sources/Episodes/recap.md",
     },
+    canonical={
+        "Knowledge Base/Systems/Workshop bench.md": "Knowledge Base/Systems/Workshop bench.md",
+        "Knowledge Base/Systems/Scanner cart.md": "Knowledge Base/Systems/Scanner cart.md",
+        "Knowledge Base/Entities/People/colleague.md": "Knowledge Base/Entities/People/colleague.md",
+        "exomem://memory/00000000-0000-4000-8000-00000000000a": (
+            "Knowledge Base/Entities/People/colleague.md"
+        ),
+        "Knowledge Base/Records/Workshop Bench/_collection.md": (
+            "Knowledge Base/Records/Workshop Bench/_collection.md"
+        ),
+        continuity.ORDINARY_NOTE: continuity.ORDINARY_NOTE,
+        "Knowledge Base/Sources/Episodes/recap.md": "Knowledge Base/Sources/Episodes/recap.md",
+    },
 )
 
 
@@ -107,7 +131,7 @@ def _packets() -> dict[str, dict]:
         "K1": {
             "abstained": False,
             "anchors": [_anchor("c5_resource_profile")],
-            "units": [{"ref": "x#unit-1"}],
+            "units": [{"ref": "Knowledge Base/Systems/Workshop bench.md#unit-1"}],
             "generation": {},
             "recent_context": _recent(
                 ("c5_resource_profile", "activated"), ("t5_available_resource", "activated")
@@ -219,6 +243,74 @@ def test_v2_an_extra_ambiguity_candidate_fails_k4() -> None:
     assert "served page(s) outside the referents: ['<memory ref>']" in scored.failure_reasons
 
 
+def _unit(page: str, fragment: str = "#unit-1", **extra) -> dict:
+    return {"ref": IDENTITIES.refs[page] + fragment, **extra}
+
+
+def test_v3_a_unit_of_the_must_not_resolve_page_fails_k1() -> None:
+    """Integrity recheck F3: v2 passed K1 serving a unit of the other
+    workspace's page."""
+    packet = dict(_packets()["K1"])
+    packet["units"] = [_unit("c5_resource_profile"), _unit("t5_available_resource")]
+    checks = dict(continuity.score(packet, _case("K1"), IDENTITIES).checks)
+    assert not checks["must_not_resolve"] and not checks["served_subset"]
+
+
+@pytest.mark.parametrize("channel", ["units", "pointers", "current_state"])
+def test_v3_material_of_a_wrong_page_fails_each_case(channel: str) -> None:
+    wrong = "exomem://memory/00000000-0000-4000-8000-00000000000a"  # the colleague
+    item = {"anchor": IDENTITIES.refs["t5_available_resource"]}
+    if channel != "current_state":
+        item = {"ref": IDENTITIES.refs["t5_available_resource"] + "#unit-9"}
+    for case_id in ("K1", "K2", "K4"):
+        packet = dict(_packets()[case_id])
+        packet[channel] = [item]
+        scored = continuity.score(packet, _case(case_id), IDENTITIES)
+        assert dict(scored.checks)["served_subset"] is False, (case_id, channel)
+    packet = dict(_packets()["K4"])
+    packet[channel] = [{"anchor": wrong} if channel == "current_state" else {"ref": wrong + "#u"}]
+    scored = continuity.score(packet, _case("K4"), IDENTITIES)
+    assert "served page(s) outside the referents: ['c4_entity_profile']" in scored.failure_reasons
+
+
+def test_v3_material_of_the_referent_page_is_fine() -> None:
+    """A unit, pointer or state entry of the referent page, however spelled."""
+    packet = dict(_packets()["K2"])
+    entity = IDENTITIES.refs["c4_entity_profile"]
+    packet["units"] = [{"ref": entity + "#unit-1"}, {"ref": "Entities/People/colleague.md#unit-2"}]
+    packet["pointers"] = [{"ref": "Knowledge Base/Entities/People/colleague.md#unit-3"}]
+    packet["current_state"] = [{"anchor": entity}]
+    scored = continuity.score(packet, _case("K2"), IDENTITIES)
+    assert scored.passed, scored.failure_reasons
+
+
+def test_v3_a_unit_is_placed_by_its_provenance_when_its_ref_names_no_page() -> None:
+    packet = dict(_packets()["K1"])
+    packet["units"] = [
+        {"ref": "fragment-only#unit-1", "provenance": {"path": "Knowledge Base/Records/Workshop Bench/_collection.md"}}
+    ]
+    scored = continuity.score(packet, _case("K1"), IDENTITIES)
+    assert "served page(s) outside the referents: ['Knowledge Base/Records/Workshop Bench/_collection.md']" in (
+        scored.failure_reasons
+    )
+
+
+def test_v3_matches_on_canonical_identity_not_one_spelling() -> None:
+    """A hot-page ambiguity names a non-row page by path; the resolved
+    anchor carries its memory ref. Both are the same page."""
+    assert IDENTITIES.page("exomem://memory/00000000-0000-4000-8000-00000000000a#unit-4") == (
+        "Knowledge Base/Entities/People/colleague.md"
+    )
+    assert IDENTITIES.page("Entities/People/colleague.md") == "Knowledge Base/Entities/People/colleague.md"
+    packet = dict(_packets()["K2"])
+    packet["anchors"] = [
+        {"ref": "Knowledge Base/Entities/People/colleague.md", "status": "resolved", "evidence": ["recency"]}
+    ]
+    packet["ambiguity"] = [{"ref": "Knowledge Base/Entities/People/colleague.md", "kind": "page"}]
+    checks = dict(continuity.score(packet, _case("K2"), IDENTITIES).checks)
+    assert checks["referents"] and checks["served_subset"]
+
+
 # --------------------------------------------------------------------------- #
 # The group on the real compiler
 # --------------------------------------------------------------------------- #
@@ -266,5 +358,5 @@ def test_the_recorded_continuity_report_is_the_current_run(
 
 def test_the_continuity_modules_pass_the_privacy_gate() -> None:
     assert_public_artifacts_clean(
-        [Path(continuity.__file__), Path(__file__), V1_GROUP, RECORDED_GROUP]
+        [Path(continuity.__file__), Path(__file__), V1_GROUP, V2_GROUP, RECORDED_GROUP]
     )

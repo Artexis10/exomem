@@ -327,6 +327,692 @@
       }
     ]
   },
+  "amended_a7": {
+    "amendments": [
+      "ambiguity_precision"
+    ],
+    "audit_passed": false,
+    "c9_padding_robustness": {
+      "base_case_id": "C2",
+      "padded_case_id": "C9",
+      "passed": false,
+      "precision_delta": null,
+      "precision_padded": null,
+      "reasons": [
+        "padded-tree precision below the 0.8 floor"
+      ],
+      "recall_base": 0.5,
+      "recall_padded": 0.5
+    },
+    "hedged_twins": {
+      "count": 0,
+      "total": 4
+    },
+    "per_case": [
+      {
+        "case_id": "C1",
+        "failure_reasons": [
+          "gold recall 0.33 below the 0.9 floor",
+          "missing required fact(s): ['weekly limit', 'capacity ceiling']"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 3
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 1.0
+      },
+      {
+        "case_id": "T1",
+        "failure_reasons": [
+          "twin surfaced a ref outside its own gold",
+          "precision 0.00 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 3
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "C2",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.50 below the 0.9 floor",
+          "missing required fact(s): ['grill', 'cooking method']"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T2",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      },
+      {
+        "case_id": "C3",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.00 below the 0.9 floor",
+          "missing required fact(s): ['extending the reporting module']"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T3",
+        "failure_reasons": [
+          "twin surfaced a ref outside its own gold",
+          "gold recall 0.00 below the 0.9 floor",
+          "precision 0.00 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "C4",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.50 below the 0.9 floor",
+          "precision 0.00 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "T4",
+        "failure_reasons": [
+          "expected status 'ambiguous', observed 'unresolved'",
+          "1 poison anchor(s) surfaced",
+          "twin surfaced a ref outside its own gold",
+          "gold recall 0.00 below the 0.9 floor",
+          "precision 0.00 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 1,
+          "total": 2
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "C5",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 2,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 0.8
+      },
+      {
+        "case_id": "T5",
+        "failure_reasons": [
+          "twin surfaced a ref outside its own gold",
+          "precision 0.67 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 0.6666666666666666
+      },
+      {
+        "case_id": "C6",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 0
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T6",
+        "failure_reasons": [
+          "twin surfaced a ref outside its own gold",
+          "precision 0.00 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "C7",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 3,
+          "total": 3
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 0
+        },
+        "precision": 1.0
+      },
+      {
+        "case_id": "T7",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'ambiguous'",
+          "2 poison anchor(s) surfaced",
+          "twin surfaced a ref outside its own gold",
+          "precision 0.50 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 2,
+          "total": 2
+        },
+        "precision": 0.5
+      },
+      {
+        "case_id": "C8",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.00 below the 0.9 floor",
+          "missing required fact(s): ['version 3']"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T8",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.00 below the 0.9 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      },
+      {
+        "case_id": "C9",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.50 below the 0.9 floor",
+          "missing required fact(s): ['grill', 'cooking method']"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T9",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      }
+    ]
+  },
+  "amended_a8": {
+    "amendments": [
+      "carried_gold"
+    ],
+    "audit_passed": false,
+    "c9_padding_robustness": {
+      "base_case_id": "C2",
+      "padded_case_id": "C9",
+      "passed": false,
+      "precision_delta": null,
+      "precision_padded": null,
+      "reasons": [
+        "padded-tree precision below the 0.8 floor"
+      ],
+      "recall_base": 0.5,
+      "recall_padded": 0.5
+    },
+    "hedged_twins": {
+      "count": 0,
+      "total": 4
+    },
+    "per_case": [
+      {
+        "case_id": "C1",
+        "failure_reasons": [
+          "gold recall 0.33 below the 0.9 floor",
+          "missing required fact(s): ['weekly limit', 'capacity ceiling']"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 3
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 1.0
+      },
+      {
+        "case_id": "T1",
+        "failure_reasons": [
+          "twin surfaced a ref outside its own gold",
+          "precision 0.00 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 3
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "C2",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.50 below the 0.9 floor",
+          "missing required fact(s): ['grill', 'cooking method']"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T2",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      },
+      {
+        "case_id": "C3",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.00 below the 0.9 floor",
+          "missing required fact(s): ['extending the reporting module']"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T3",
+        "failure_reasons": [
+          "twin surfaced a ref outside its own gold",
+          "gold recall 0.00 below the 0.9 floor",
+          "precision 0.00 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "C4",
+        "failure_reasons": [
+          "gold recall 0.50 below the 0.9 floor"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": 1.0
+      },
+      {
+        "case_id": "T4",
+        "failure_reasons": [
+          "expected status 'ambiguous', observed 'unresolved'",
+          "1 poison anchor(s) surfaced",
+          "twin surfaced a ref outside its own gold",
+          "gold recall 0.00 below the 0.9 floor",
+          "precision 0.00 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 1,
+          "total": 2
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "C5",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 2,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 0.8
+      },
+      {
+        "case_id": "T5",
+        "failure_reasons": [
+          "twin surfaced a ref outside its own gold",
+          "precision 0.67 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 0.6666666666666666
+      },
+      {
+        "case_id": "C6",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 0
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T6",
+        "failure_reasons": [
+          "twin surfaced a ref outside its own gold",
+          "precision 0.00 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "C7",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 3,
+          "total": 3
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 0
+        },
+        "precision": 1.0
+      },
+      {
+        "case_id": "T7",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'ambiguous'",
+          "2 poison anchor(s) surfaced",
+          "twin surfaced a ref outside its own gold",
+          "precision 0.50 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 2,
+          "total": 2
+        },
+        "precision": 0.5
+      },
+      {
+        "case_id": "C8",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.00 below the 0.9 floor",
+          "missing required fact(s): ['version 3']"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T8",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.00 below the 0.9 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      },
+      {
+        "case_id": "C9",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.50 below the 0.9 floor",
+          "missing required fact(s): ['grill', 'cooking method']"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T9",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      }
+    ]
+  },
   "audit_passed": false,
   "blocked": {
     "count": 0,
