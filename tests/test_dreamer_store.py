@@ -433,3 +433,35 @@ def test_a_schema_failure_wipes_instead_of_failing_every_tick(vault: Path) -> No
         assert "spelling" in columns
     finally:
         store.close(conn)
+
+
+@pytest.mark.parametrize("code", [10, 13, 8])  # SQLITE_IOERR, SQLITE_FULL, SQLITE_READONLY
+def test_a_transient_error_during_schema_setup_keeps_the_sidecar(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """Only damage or an incompatible file is a reason to wipe; a passing fault raises."""
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        store.set_meta(conn, "probe", "kept")
+    finally:
+        store.close(conn)
+    real = dreamer_store.DreamerStore._ensure_schema
+    fired: list[int] = []
+
+    def flaky(self: dreamer_store.DreamerStore, conn: sqlite3.Connection) -> None:
+        if not fired:
+            fired.append(code)
+            exc = sqlite3.OperationalError("transient fault")
+            exc.sqlite_errorcode = code
+            raise exc
+        real(self, conn)
+
+    monkeypatch.setattr(dreamer_store.DreamerStore, "_ensure_schema", flaky)
+    with pytest.raises(sqlite3.OperationalError):
+        store.connect()
+    conn = store.connect()
+    try:
+        assert store.get_meta(conn, "probe") == "kept"
+    finally:
+        store.close(conn)

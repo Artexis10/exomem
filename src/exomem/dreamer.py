@@ -514,6 +514,14 @@ def run_once(
             if store.is_damaged():
                 log.warning("dreamer: sidecar damaged; wiping it for a reseed")
                 store.wipe()
+    if conn is not None:
+        try:
+            # Pruned rows and replaced contributions leave free pages: hand
+            # them back so the file can fall under the size cap again. It
+            # runs before the tick is measured, so the hourly budget pays it.
+            store.reclaim(conn)
+        except sqlite3.Error:
+            log.debug("dreamer: reclaim skipped", exc_info=True)
     wall = clock.monotonic() - started_wall
     cpu = max(0.0, clock.thread_time() - started_cpu)
     _record_tick(
@@ -527,12 +535,6 @@ def run_once(
         waiting=waiting,
     )
     if conn is not None:
-        try:
-            # Pruned rows and replaced contributions leave free pages: hand
-            # them back so the file can fall under the size cap again.
-            store.reclaim(conn)
-        except sqlite3.Error:
-            log.debug("dreamer: reclaim skipped", exc_info=True)
         store.close(conn)
     return TickResult(
         ran=True,

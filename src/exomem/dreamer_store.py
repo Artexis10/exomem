@@ -278,8 +278,9 @@ class DreamerStore:
         process, or a file changed by anything else) is checked whole before
         use: damage in a page no tick happens to read would otherwise stay
         until a later write met it. A file that cannot be brought to this
-        schema is wiped and rebuilt too, rather than failing every tick. A
-        lock is never a reason to wipe.
+        schema is wiped and rebuilt too, rather than failing every tick. Only
+        damage or an incompatible file is a reason to wipe: a lock, a full
+        disk or a passing I/O fault raises and the next tick tries again.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn: sqlite3.Connection | None = None
@@ -297,7 +298,7 @@ class DreamerStore:
         except sqlite3.DatabaseError as exc:
             if conn is not None:
                 conn.close()
-            if _busy(exc):
+            if not _incompatible(exc):
                 raise
             self.wipe()
             conn = self._open()
@@ -1037,13 +1038,18 @@ class DreamerStore:
         return None if low is None or high is None else (str(low), str(high))
 
 
-def _busy(exc: sqlite3.DatabaseError) -> bool:
-    """A lock or a busy file: never damage, never a reason to wipe."""
+def _incompatible(exc: sqlite3.DatabaseError) -> bool:
+    """Damage or a file this schema cannot use: the only reasons to wipe.
+
+    SQLITE_ERROR is what a table shape this code does not expect raises
+    ("no such column"); CORRUPT and NOTADB are damage. Busy, locked, I/O,
+    full, read-only and out-of-memory are passing faults, never wiped.
+    """
     code = getattr(exc, "sqlite_errorcode", None)
     if code is not None:
-        return int(code) & 0xFF in {5, 6}  # SQLITE_BUSY, SQLITE_LOCKED
+        return int(code) & 0xFF in {1, 11, 26}  # SQLITE_ERROR, _CORRUPT, _NOTADB
     text = str(exc).casefold()
-    return "locked" in text or "busy" in text
+    return any(cue in text for cue in ("no such", "malformed", "not a database"))
 
 
 def _check_table(table: str) -> None:
