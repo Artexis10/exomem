@@ -232,19 +232,78 @@ product_activate_context`) and binding, then the eighteen scores are read as
 one report. The scorer and its thresholds are unchanged.
 
 The reproducible part of that run is recorded in
-`docs/benchmarks/context-activation-product-2026-09.json`: fixture-set digest
+`docs/benchmarks/context-activation-product-2026-09-v4.json` (corpus v4; the
+v3 report `context-activation-product-2026-09.json` is kept as history):
+fixture-set digest
 `a49d85f4…`, threshold digest `7b2785cf…`, the logical corpus digest of each
-tree, per-case duals, the mechanism-removal outcomes and the topology findings.
+tree, per-case duals, the mechanism-removal outcomes, the topology findings,
+and the amended column (A2 and A4) beside the raw one.
 Exact corpus bytes carry writer-minted identities, so each run's manifest
 carries its own exact digest and binding, and the recorded report binds the
 logical ones. The test fails when the recorded report no longer matches a
 fresh run. After a deliberate product or corpus change, re-record it:
 
 ```
-CONTEXT_ACTIVATION_RECORD_REPORT=docs/benchmarks/context-activation-product-2026-09.json uv run pytest tests/test_context_activation_real_compiler.py -k recorded_report
+CONTEXT_ACTIVATION_RECORD_REPORT=docs/benchmarks/context-activation-product-2026-09-v4.json uv run pytest tests/test_context_activation_real_compiler.py -k recorded_report
 ```
 
-### Result on 2026-09-28: red
+### Round 2 on corpus v4 (2026-09-28): red
+
+Corpus v4 (design amendment A1) registers the corpus vault's own observation
+categories and routes them to roles through the schema writers, and adds 110
+ordinary Notes pages; both trees index 147 pages, above the retrieval carry's
+floor of 100. The fixtures and thresholds are unchanged. Every amended score
+(A2 unit-to-parent recall, A4 hedged poison) is reported beside the raw one.
+
+| Case | Raw | Amended | Why it fails today |
+|------|-----|---------|--------------------|
+| C1 | red | red | Resolves the subscriptions collection; the two gold notes never arrive (recall 1/3) |
+| T1 | red | red | The carry reaches T1's own fitness-goal note, outside its empty gold |
+| C2, C9 | red | red | The grill stays `partial`; the turn abstains (recall 1/2) |
+| T2 | pass | pass | |
+| C3 | red | red | Product red (A3, close-memory-loop 6.12): the plan anchor is the collection, not the item |
+| T3 | red | red | Product red (A3): resolves the other workstream's collection |
+| C4 | red | red | The carry brings the failure note; nothing reaches the colleague's entity |
+| T4 | red | red | Product red (A5): a bare first name stays `partial`; the carry also reaches C4's failure note |
+| C5 | pass | pass | |
+| T5 | red | red | The scanner cart's own resource unit is served; D9 counts the fragment as foreign, and A2 amends recall only |
+| C6 | pass | pass | |
+| T6 | red | red | The carry reaches an ordinary note on oven temperature conversions |
+| C7 | pass | pass | |
+| T7 | red | red | Product red (A5): the scoped turn also resolves the market hub |
+| C8, T8 | red | red | The gold notes are not anchors, and no word of the turn carries them |
+| T9 | pass | pass | |
+
+Raw 5/18, amended 5/18. Neither amendment changes a verdict on v4: no gold
+note reaches a packet only as a unit, and no poison is served as a hedge.
+
+Mechanism removal on v4. The kill switch fails every positive case. C5 fails
+without governed current state and C7 without competing-sense abstention.
+The negative controls C6, T1, T2 and T9 are now load-bearing: each fails with
+the naming gate removed, where on v3 each passed under every removal. Under
+the kill switch they pass, as a negative control must, because a disabled
+compiler abstains.
+
+### The keyed continuity group (amendment A6)
+
+`membench.utility.context_activation_continuity` pre-registers four keyed
+fresh-session cases, each from a `memory-loop` spec scenario, with gold for the
+referent and for the `recent_context` block. Its digest (`de5e7900…`) was
+pinned in a commit before the first run. The earlier session's acts go through
+supported doors (an `anchor` pick, an `episode_memory` record, an
+`edit_memory` commit), then one fresh `activate_context` call is made. The
+result is recorded in `docs/benchmarks/context-activation-continuity-2026-09.json`.
+
+| Case | Scenario | Result |
+|------|----------|--------|
+| K1 | "continue" from a fresh session in the earlier session's workspace, after newer work in another workspace | pass |
+| K2 | "where were we" after a recorded episode | pass |
+| K3 | a keyless bare "continue" | pass: abstains, serves nothing, still lists the page |
+| K4 | "continue" after an edit of an ordinary, non-anchor note | pass: carried on recency |
+
+The group is not one of the eighteen and does not enter their verdict.
+
+### Round 1 on corpus v3 (2026-09-28, history): red
 
 Seven of eighteen fixtures pass: C5, T5, C6, C7, T1, T2 and T9. The audit is
 red, and C9's padding comparison fails because the padded packet surfaces no
@@ -262,7 +321,7 @@ resolved reference to measure precision on.
 | T7 | The scoped turn still resolves the market hub beside the feature hub |
 | C8, T8 | The gold notes are not anchors, and nothing carries them |
 
-### Mechanism removal
+### Mechanism removal on v3 (history)
 
 `FIXTURE_MECHANISMS` pre-registers the mechanism each fixture measures, and
 `removed()` takes it out of the running compiler. With
@@ -273,7 +332,7 @@ including the kill switch: nothing in this corpus serves their words, so on
 this corpus they cannot catch a false activation. The test names them rather
 than skipping them.
 
-### Read this before treating the report as compiler quality (task 1.8)
+### Read this before treating the v3 report as compiler quality (task 1.8)
 
 - **Gold notes have no anchor, and the carry refuses the corpus.** Insight,
   pattern, failure and design notes are not activation anchors. They reach a
