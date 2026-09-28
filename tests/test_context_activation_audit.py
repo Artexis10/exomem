@@ -1766,3 +1766,64 @@ def test_a9_never_changes_the_raw_metrics() -> None:
         raw.poison_hit,
         raw.status_match,
     )
+
+
+# -- Amendment A10: invalid twins (pre-registered list; digest pinned) ---------
+
+#: Pinned in the commit that introduced A10, before its first run.
+INVALID_TWINS_SHA256 = "7828bc8f4e39f90fac71a13c37e22e87c002bb4a98367ee0f8dc82be09757c61"
+
+
+def test_a10_is_the_pre_registered_list() -> None:
+    from membench.utility.context_activation import INVALID_TWINS, invalid_twins_digest
+
+    assert invalid_twins_digest() == INVALID_TWINS_SHA256
+    assert {case: page for case, (page, _why) in INVALID_TWINS.items()} == {
+        "T1": "t1_fitness_goal_note",
+        "T2": "t2_camera_gear_note",
+        "T9": "t2_camera_gear_note",
+    }
+
+
+def test_a10_lists_only_negative_twins_answered_by_a_pre_registered_fixture_page() -> None:
+    from epistemic.corpora.context_activation import KEY_KINDS
+    from membench.utility.context_activation import INVALID_TWINS
+
+    poison_pages = {key for fixture in FIXTURES for key in fixture.poison}
+    for case_id, (page, why) in INVALID_TWINS.items():
+        fixture = fixture_by_id(case_id)
+        assert fixture.case_id.startswith("T") and not fixture.gold, case_id
+        assert fixture.expected_status == "unresolved", case_id
+        assert page in KEY_KINDS and page in poison_pages, case_id
+        assert why.strip(), case_id
+
+
+def test_a10_excludes_a_listed_twin_and_leaves_raw_alone() -> None:
+    from membench.utility.context_activation import INVALID_TWIN, excluded_case_ids
+
+    packet = ActivationPacket(
+        anchors=(Anchor(ref="t1_fitness_goal_note", title="t", kind="page", status="retrieval_carried"),),
+        units=(Unit(ref="t1_fitness_goal_note#unit-1", role="preferences", text="step-count goal"),),
+        abstained=True,
+        abstention_reason="unresolved",
+    )
+    raw = score_case(packet, fixture_by_id("T1"))
+    amended = _amended(packet, "T1", amendments={INVALID_TWIN})
+    assert not raw.passed and "twin surfaced a ref outside its own gold" in raw.failure_reasons
+    assert amended.failure_reasons[0].startswith("A10: invalid twin, excluded: t1_fitness_goal_note")
+    assert excluded_case_ids([raw, amended]) == ("T1",)
+    assert (amended.precision, amended.twin_false_activation) == (raw.precision, raw.twin_false_activation)
+
+
+@pytest.mark.parametrize("case_id", ["T6", "T3", "C1"])
+def test_a10_leaves_every_other_case_unchanged(case_id: str) -> None:
+    from membench.utility.context_activation import INVALID_TWIN
+
+    packet = ActivationPacket(
+        anchors=(Anchor(ref="zz_page", title="z", kind="page", status="retrieval_carried"),),
+        abstained=True,
+        abstention_reason="unresolved",
+    )
+    raw = score_case(packet, fixture_by_id(case_id))
+    amended = _amended(packet, case_id, amendments={INVALID_TWIN})
+    assert (amended.passed, amended.failure_reasons) == (raw.passed, raw.failure_reasons)

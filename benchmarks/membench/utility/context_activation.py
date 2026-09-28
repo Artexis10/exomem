@@ -470,8 +470,38 @@ AMBIGUITY_PRECISION = "ambiguity_precision"
 CARRIED_GOLD = "carried_gold"
 #: A9: agent-choice scoring (see :data:`AGENT_CHOICE_RULE`).
 AGENT_CHOICE = "agent_choice"
+#: A10: invalid twins (see :data:`INVALID_TWINS`).
+INVALID_TWIN = "invalid_twin"
 AMENDMENTS: frozenset[str] = frozenset(
-    {UNIT_PARENT_RECALL, HEDGED_POISON, AMBIGUITY_PRECISION, CARRIED_GOLD, AGENT_CHOICE}
+    {UNIT_PARENT_RECALL, HEDGED_POISON, AMBIGUITY_PRECISION, CARRIED_GOLD, AGENT_CHOICE, INVALID_TWIN}
+)
+
+#: Amendment A10, as pre-registered: negative twins whose turn a
+#: pre-registered fixture page genuinely answers. The twin's premise (empty
+#: gold, nothing to activate) is a fixture-design defect for these, and
+#: serving that page is correct behaviour, so under A10 the twin is reported
+#: "invalid, excluded" rather than scored. Raw still scores it as-is, and the
+#: fixture page itself is frozen. twin -> (fixture page key, reason).
+INVALID_TWINS: dict[str, tuple[str, str]] = {
+    "T1": (
+        "t1_fitness_goal_note",
+        "the turn is about a step-count goal, and this pre-registered page (C1's poison) records one",
+    ),
+    "T2": (
+        "t2_camera_gear_note",
+        "latent: the turn is about photographing a dish, and this pre-registered page (C2's poison) "
+        "is the photography gear for it; the carry does not reach it today",
+    ),
+    "T9": (
+        "t2_camera_gear_note",
+        "latent: T2's turn on the padded tree, answered by the same page (C9's poison)",
+    ),
+}
+INVALID_TWIN_RULE = (
+    "A10 invalid twins. A negative twin (expected unresolved, empty gold) whose turn a "
+    "pre-registered fixture page genuinely answers is reported 'invalid, excluded' under "
+    "A10, never passed or failed. Raw scores it unchanged. The list is pre-registered with "
+    "the page and the reason; the fixture pages stay frozen."
 )
 
 #: Amendment A9, as pre-registered. Its digest (:func:`agent_choice_digest`)
@@ -540,6 +570,20 @@ def _agent_choice_failures(
     return failures
 
 
+def invalid_twins_digest() -> str:
+    """The pre-registered identity of A10: its rule and its list."""
+
+    payload = {"rule": INVALID_TWIN_RULE, "invalid_twins": {k: list(v) for k, v in INVALID_TWINS.items()}}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def invalid_twin_reason(case_id: str) -> str:
+    """The A10 exclusion reason every excluded twin's amended score carries."""
+
+    page, why = INVALID_TWINS[case_id]
+    return f"A10: invalid twin, excluded: {page} answers the turn ({why})"
+
+
 def agent_choice_digest() -> str:
     """The pre-registered identity of A9: its rule and the code applying it."""
 
@@ -553,6 +597,16 @@ def agent_choice_digest() -> str:
     ]
     blob = "\n".join(part.replace("\r\n", "\n") for part in parts).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
+
+def excluded_case_ids(scores: Iterable[CaseScore]) -> tuple[str, ...]:
+    """The cases an A10-amended report excludes from its verdict."""
+
+    return tuple(
+        score.case_id
+        for score in scores
+        if score.failure_reasons and score.failure_reasons[0].startswith("A10: invalid twin, excluded")
+    )
 
 
 def _resolved_refs(packet: ActivationPacket) -> set[str]:
@@ -914,6 +968,11 @@ def score_case(
             f"packet-contract violation: current_state statement exceeds {STATEMENT_MAX_CHARS} chars "
             f"for {list(overlong_statements)}"
         )
+
+    # A10: a listed invalid twin is excluded, never passed or failed. The
+    # reason names it; `excluded_case_ids` reads it back.
+    if INVALID_TWIN in applied and fixture.case_id in INVALID_TWINS:
+        failure_reasons = [invalid_twin_reason(fixture.case_id)]
 
     # A9 replaces the verdict of a positive case, never its raw metrics.
     if AGENT_CHOICE in applied and _agent_choice_applies(fixture):
@@ -1422,7 +1481,13 @@ __all__ = [
     "ReferenceBinding",
     "RunManifest",
     "Unit",
+    "INVALID_TWIN",
+    "INVALID_TWINS",
+    "INVALID_TWIN_RULE",
     "agent_choice_digest",
+    "excluded_case_ids",
+    "invalid_twin_reason",
+    "invalid_twins_digest",
     "audit_passed",
     "build_report",
     "end_to_end_latency_distribution",
