@@ -895,7 +895,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
 # the tests refuse the module until these are deliberately re-pinned.
 # --------------------------------------------------------------------------- #
 
-FIXTURE_SET_SHA256 = "725d9ce448c954f550d9d4c9849d8a3671369455b5508a8d50518f1482b8a60b"
+FIXTURE_SET_SHA256 = "efc762fc1f7706e28d4625ecf4ed208cedc1c655c4e38782058830eb31bebeba"
 ACTOR_SHA256: dict[str, str] = {
     "org-and-site": "135e9bf0556b3ef2d817d6f3477d96770c34352cb54b01b8477b554b5804235e",
     "multi-role": "2c03c998b675d80fd6e3ac1ddc92a75e7cd3b994f2461f0a5b87a2388331f42c",
@@ -905,12 +905,12 @@ ACTOR_SHA256: dict[str, str] = {
     "brand": "958f06142f148e58e923996de78a106ef3bbb00da56af85a6c4deffdba76c01c",
 }
 EVALUATOR_SHA256: dict[str, str] = {
-    "org-and-site": "390b47737ed62199ef14595a8287c386ff539717c1fb79f15798f4d123b88491",
-    "multi-role": "7f959b070be673bf1b1459b95cbcbf17e5ed80abc9353ff16d9260b380348054",
-    "shared-name": "28abd8f9b72fc8f833e04b6cd7c7bb657e71a2e22fa5be2879cba805f5ff96f2",
-    "mixed-purchase": "7d8aeee36622681fd70f6b16ad9a23dafe9c216afc7beaad513b67c8b16a26c5",
-    "operator-succession": "922918e2133131d97397c3976bbedfd6113906d1c7c2f4bc2cf4f9c329efb05b",
-    "brand": "f186700e4e49807805b0d89daa5295cc788dbc84d97f3d7c112f4f4a2cf7801c",
+    "org-and-site": "a9bfa21d0d7c43d1add17ea23203b4c55afa30eff48a04ff239977c7d9f43e51",
+    "multi-role": "3faa50e473f389f2c2afd91d53133a8769cb0d9dcc91b477c0d69934ce5c1e99",
+    "shared-name": "5230bb042c45b885b8441e91877f60daf329cabe740bb7fb144a745cb937b8fb",
+    "mixed-purchase": "c6337e95ef8fe9b70cb176d8a5260357c591f750e9dc9f8e1269ac41e45d0c0c",
+    "operator-succession": "6ce342f5eb011ab305b2c746292bb8665918baad5d6d82824ab3e8247e6f8cdf",
+    "brand": "7f25839d64d090db9210b247e4f33700284456868a22ed60c2056617e2583f41",
 }
 PRE_CAPTURE_SHA256: dict[str, str] = {
     "org-and-site": "47a43d1f62175c6696516cfe4c3e822ec2e424d1180dc42dcd81dc4137449f55",

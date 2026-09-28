@@ -354,14 +354,14 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
 # Frozen pins (re-pinned deliberately; the tests refuse drift)
 # --------------------------------------------------------------------------- #
 
-FIXTURE_SET_SHA256 = "01022a51888f1a43f7585ba67747cc2dd7a6aebdc0602003459d2aade0e59aef"
+FIXTURE_SET_SHA256 = "5e8a7b16caff8ec93b8bb8036d156b546a1711604b0316d788b8d6757a995938"
 ACTOR_SHA256: dict[str, str] = {
     "synthesis": "50c776148b7dfd7ca3a0a517ed190bd7bb54208cf0e5fdf8fafeb7ddd95fb007",
     "refinement": "5fbcfa6f5c51314b623643ea95ff53bae666eab07080c61c9114842883efb230",
 }
 EVALUATOR_SHA256: dict[str, str] = {
-    "synthesis": "b05f9060a9e4f8995612a06c412560087f59546e503b9a3b572892ac9b730bbb",
-    "refinement": "6d6c619fa83725d18b10eb3abc68828e270be97280b22763e2e459eeb7b7b478",
+    "synthesis": "79db112098366c7e16c89bbb1d94e1dbc53902fdd95efe7392bb44fa03bf495f",
+    "refinement": "2b8b69ba16604b388c4634532558322914419cd51a986312213883c8457b7944",
 }
 PRE_CAPTURE_SHA256 = "80e33a8646d7bd509563be44f442fbfe31aa61f05c14fc42c18cf01e6a3ba41d"
 

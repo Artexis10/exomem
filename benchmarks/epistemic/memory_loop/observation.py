@@ -744,21 +744,44 @@ def _exact_replay(record: NoNudgeObservation, frozen: Frozen) -> Verdict:
 
 
 #: The functions whose code decides the gate's verdicts, read at call time.
-_GATE_FUNCTIONS: tuple[str, ...] = ("_initiation", "_decision_trace", "_effects", "_uncovered")
+_GATE_FUNCTIONS: tuple[str, ...] = (
+    "void_reasons",
+    "_verdict",
+    "_initiation",
+    "_decision_trace",
+    "_effects",
+    "_uncovered",
+    "_publication",
+    "_later",
+    "_exact_replay",
+    "evaluate",
+    "accept",
+    "prompt_sha256",
+    "_template_pattern",
+    "shipped_prompts",
+    "_kind_texts",
+    "product_prompt_templates",
+    "hook_script_sha256",
+)
 
 
 def gate_semantics() -> dict[str, Any]:
-    """What the observation gate decides with: the source of each gate
-    function and the constants they read. Folded into the contract's
+    """What the observation gate decides with: the source of every function
+    that decides a verdict or what counts as shipped (including the
+    contract's marker matcher) and the constants they read. Folded into the contract's
     semantics fingerprint, so an edit to the gate moves every evaluator
     digest and voids runs bound to the old one."""
 
     import inspect
     import sys
 
+    from . import contract
+
     module = sys.modules[__name__]
     return {
         "functions": {name: inspect.getsource(getattr(module, name)) for name in _GATE_FUNCTIONS},
+        #: The contract's marker matcher decides abstention coverage.
+        "contract_functions": {"_has_marker": inspect.getsource(contract._has_marker)},
         "harness_intervention_kinds": list(HARNESS_INTERVENTION_KINDS),
         "product_prompt_kinds": list(PRODUCT_PROMPT_KINDS),
         "hook_prompts": sorted(_HOOK_PROMPTS),
