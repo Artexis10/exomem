@@ -16,6 +16,7 @@ fresh whole-vault rebuild.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -38,6 +39,13 @@ RETITLED = f"{GENERATED}/retitled.md"
 # that does not widen to the retitle's dependants leaves both visibly wrong.
 OLD_LINKER = f"{GENERATED}/old-linker.md"
 NEW_LINKER = f"{GENERATED}/new-linker.md"
+# A page with semantic units, whose graph rows carry a projection generation.
+UNITS = f"{GENERATED}/units.md"
+
+
+def _replay(root: Path, paths: list[Path], **kwargs) -> epistemic_graph.GraphDispatchResult:
+    """The graph dispatch as the deferred-receipt replay calls it."""
+    return epistemic_graph.upsert_after_write(root, paths, replayed=True, **kwargs)
 
 
 def _projection_rows(root: Path) -> dict[str, set[tuple[object, ...]]]:
@@ -91,6 +99,7 @@ def _built(vault: Path, whole_vault_passes: list[str]) -> Path:
             OLD_LINKER: _note(500, []) + "\nSee [[Old Title]].\n",
             NEW_LINKER: _note(501, []) + "\nSee [[New Title]].\n",
             RETITLED: _titled("Old Title", ""),
+            UNITS: _titled("Units", "- [config] first observation ^first\n- [rule] second one ^second"),
         },
     )
     whole_vault_passes.clear()
@@ -120,13 +129,76 @@ def test_a_replayed_path_the_graph_already_reflects_rebuilds_nothing(
     before = _graph_rows(root)
     caplog.set_level(logging.INFO, logger="exomem.epistemic_graph")
 
-    result = epistemic_graph.upsert_after_write(root, [root / REPLAYED])
+    result = _replay(root, [root / REPLAYED])
 
     assert whole_vault_passes == [], "a replay the graph already reflects rebuilt the vault"
     assert "caller_path_outside_delta" not in caplog.text
     assert result.outcome in {"completed", "not_required"}, result
     assert _graph_rows(root) == before
     assert EpistemicGraphIndex(root).available() is True
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_caller_that_is_not_a_replay_still_refreshes_an_unchanged_page(
+    vault: Path, whole_vault_passes: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reconcile and explicit repair refresh unchanged pages to reproject them.
+
+    The currency proof is for replayed deferred receipts only; any other caller
+    naming a page outside the delta keeps the whole-vault fallback.
+    """
+    root = _built(vault, whole_vault_passes)
+    caplog.set_level(logging.INFO, logger="exomem.epistemic_graph")
+
+    epistemic_graph.upsert_after_write(root, [root / REPLAYED])
+
+    assert "reason=caller_path_outside_delta" in caplog.text
+    assert len(whole_vault_passes) == 1
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def _unit_generations(root: Path, rel: str) -> set[str]:
+    connection = sqlite3.connect(epistemic_graph.sidecar_path(root))
+    try:
+        rows = connection.execute(
+            "SELECT metadata FROM graph_nodes WHERE path = ?", (rel,)
+        ).fetchall()
+    finally:
+        connection.close()
+    return {
+        str(metadata["parent_generation"])
+        for (raw,) in rows
+        if (metadata := json.loads(raw)).get("record_type") == "semantic_unit"
+    }
+
+
+def test_a_replayed_page_with_stale_generation_unit_rows_is_repaired(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """The file row's source hash is not the page's whole projection."""
+    root = _built(vault, whole_vault_passes)
+    current = _unit_generations(root, UNITS)
+    assert current and "stale-generation" not in current
+    connection = sqlite3.connect(epistemic_graph.sidecar_path(root))
+    try:
+        for node_key, raw in connection.execute(
+            "SELECT node_key, metadata FROM graph_nodes WHERE path = ?", (UNITS,)
+        ).fetchall():
+            metadata = json.loads(raw)
+            if metadata.get("record_type") == "semantic_unit":
+                metadata["parent_generation"] = "stale-generation"
+                connection.execute(
+                    "UPDATE graph_nodes SET metadata = ? WHERE node_key = ?",
+                    (json.dumps(metadata, sort_keys=True), node_key),
+                )
+        connection.commit()
+    finally:
+        connection.close()
+    deferred_index.add_full_receipts(root, [UNITS])
+
+    assert index_sync.drain_deferred_work(root, paths=[root / UNITS]) == 1
+
+    assert _unit_generations(root, UNITS) == current, "the stale unit rows were kept"
     _assert_matches_a_fresh_rebuild(root)
 
 
@@ -159,7 +231,7 @@ def test_a_current_replayed_path_does_not_hold_back_the_delta(
 
     find_module.recall_resolver_snapshot(root)
 
-    epistemic_graph.upsert_after_write(root, [root / REPLAYED, edited])
+    _replay(root, [root / REPLAYED, edited])
 
     assert whole_vault_passes == []
     assert EpistemicGraphIndex(root).available() is True
@@ -173,7 +245,7 @@ def test_a_replayed_stale_page_is_drained_incrementally(
     _publish_past_a_stale_row(root)
     caplog.set_level(logging.INFO, logger="exomem.epistemic_graph")
 
-    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+    _replay(root, [root / RETITLED])
 
     assert whole_vault_passes == [], "a stale page the registry vouches for rebuilt the vault"
     assert "caller_path_outside_delta" not in caplog.text
@@ -191,7 +263,7 @@ def test_a_replayed_page_the_registry_does_not_vouch_for_still_rebuilds(
     (root / RETITLED).write_text(_titled("Newer Title", "moved again"), encoding="utf-8")
     caplog.set_level(logging.INFO, logger="exomem.epistemic_graph")
 
-    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+    _replay(root, [root / RETITLED])
 
     assert "reason=caller_path_outside_delta" in caplog.text
     assert len(whole_vault_passes) == 1
@@ -213,7 +285,7 @@ def test_a_replayed_stale_page_does_not_publish_past_a_standing_full_marker(
     EpistemicGraphIndex(root)._mark_unavailable()
     whole_vault_passes.clear()
 
-    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+    _replay(root, [root / RETITLED])
 
     if EpistemicGraphIndex(root).available():
         assert deferred_index.graph_full_rebuild_pending(root) is None, (
@@ -244,7 +316,7 @@ def test_a_replayed_stale_page_is_not_repaired_against_an_unsettled_epoch(
         EpistemicGraphIndex, "epoch_admits_incremental_repair", lambda self: False, raising=True
     )
 
-    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+    _replay(root, [root / RETITLED])
 
     assert drained == [], "repaired paths against a lineage it could not classify"
     if EpistemicGraphIndex(root).available():
@@ -259,7 +331,7 @@ def test_a_replayed_stale_page_clears_its_own_receipts(
     root = _built(vault, whole_vault_passes)
     _publish_past_a_stale_row(root)
 
-    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+    _replay(root, [root / RETITLED])
 
     assert whole_vault_passes == []
     assert deferred_index.snapshot_graph(root) == [], "left receipts for a duplicate drain"
@@ -284,7 +356,7 @@ def test_the_oracle_sees_a_replay_drain_that_does_not_widen(
         raising=True,
     )
 
-    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+    _replay(root, [root / RETITLED])
 
     assert whole_vault_passes == [], "a rebuild healed what the control must expose"
     with pytest.raises(AssertionError):
@@ -310,7 +382,7 @@ def test_a_stale_page_named_through_a_vault_alias_is_not_judged_current(
     alias = tmp_path / "vault-alias"
     alias.symlink_to(root, target_is_directory=True)
 
-    epistemic_graph.upsert_after_write(root, [alias / GENERATED / "created-late.md"])
+    _replay(root, [alias / GENERATED / "created-late.md"])
 
     rel = f"{GENERATED}/created-late.md"
     assert any(path == rel for path, _ in _graph_rows(root)[1]), "the stale page was dropped"
@@ -330,7 +402,7 @@ def test_a_current_created_path_outside_the_delta_does_not_rebuild_the_vault(
     find_module.recall_resolver_snapshot(root)
     replayed_creation = root / NEW_LINKER
 
-    epistemic_graph.upsert_after_write(
+    _replay(
         root, [replayed_creation, edited], created_paths=[replayed_creation]
     )
 
@@ -367,7 +439,7 @@ def _replay_under_a_mutation_request(root: Path) -> epistemic_graph.GraphDispatc
 
     trace = writer_lease._ACTIVE_MUTATION_TRACE.set(("request", "command", "receipt"))
     try:
-        return epistemic_graph.upsert_after_write(root, [root / RETITLED])
+        return _replay(root, [root / RETITLED])
     finally:
         writer_lease._ACTIVE_MUTATION_TRACE.reset(trace)
 
@@ -434,7 +506,7 @@ def test_a_standalone_replay_that_rebuilds_does_not_report_incremental_completio
         EpistemicGraphIndex, "epoch_admits_incremental_repair", lambda self: False, raising=True
     )
 
-    result = epistemic_graph.upsert_after_write(root, [root / RETITLED])
+    result = _replay(root, [root / RETITLED])
 
     assert whole_vault_passes, "a standalone caller must still converge"
     assert result.code != "incremental_completed", result
