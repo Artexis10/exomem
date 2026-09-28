@@ -678,6 +678,37 @@ def test_edit_memory_keeps_a_page_s_own_names_when_it_rewrites_its_aliases(
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.parametrize(
+    ("turn", "path"),
+    [
+        ("ハヤブサ号はどう？", FALCON),
+        ("ハヤブサ号はもう車検に出した？", FALCON),
+        ("青木陽介はいつ来る？", AOKI),
+        ("ハヤブサ号をまた洗車した", FALCON),
+        ("ハヤブサ号がまだ故障中", FALCON),
+    ],
+)
+def test_a_name_followed_by_a_particle_glued_to_more_kana_resolves(
+    ja_vault: Path, turn: str, path: str
+) -> None:
+    """The most common phrasing: a particle ends the name even when the next
+    kana word is written straight after it (はどう, をまた, がまだ)."""
+    packet = _activate(ja_vault, turn)
+    assert _resolved(packet) == [path], (packet.get("abstention"), packet["anchors"])
+    assert "exact_alias" in packet["anchors"][0]["evidence"]
+
+
+@pytest.mark.parametrize(
+    "turn", ["ねこやなぎ銀行の口座を解約したい", "駅前のねこやなぎ銀行で口座を作った"]
+)
+def test_a_hiragana_name_after_a_particle_run_stays_one_name(turn: str) -> None:
+    """The control: ねこやなぎ does not start with a particle, and after の the
+    rest of the run joins the kanji that follows, so the bank stays one word."""
+    words = working_set_resolve.analyze_turn(turn).words
+    assert "ねこやなぎ銀行" in words
+    assert "銀行" not in words
+
+
 def test_a_name_that_starts_with_hiragana_is_not_handed_to_its_kanji_tail(
     ja_vault: Path,
 ) -> None:
