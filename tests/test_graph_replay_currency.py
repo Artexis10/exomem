@@ -17,12 +17,12 @@ fresh whole-vault rebuild.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 
 import pytest
 from test_graph_handoff_convergence import (
     GENERATED,
-    _assert_matches_a_fresh_rebuild,
     _build_small,
     _graph_rows,
     _note,
@@ -38,6 +38,36 @@ RETITLED = f"{GENERATED}/retitled.md"
 # that does not widen to the retitle's dependants leaves both visibly wrong.
 OLD_LINKER = f"{GENERATED}/old-linker.md"
 NEW_LINKER = f"{GENERATED}/new-linker.md"
+
+
+def _projection_rows(root: Path) -> dict[str, set[tuple[object, ...]]]:
+    """The rows a replay's repair can get wrong beyond edges: titles and dependencies."""
+    connection = sqlite3.connect(epistemic_graph.sidecar_path(root))
+    try:
+        nodes = connection.execute("SELECT kind, path, title FROM graph_nodes").fetchall()
+        dependencies = connection.execute(
+            "SELECT source_path, lookup_key, raw_target FROM graph_dependencies"
+        ).fetchall()
+    finally:
+        connection.close()
+    return {"nodes": set(nodes), "dependencies": set(dependencies)}
+
+
+def _assert_matches_a_fresh_rebuild(root: Path) -> None:
+    """Edges, file hashes, nodes and dependencies all equal a whole-vault rebuild."""
+    drained_edges, drained_files = _graph_rows(root)
+    drained = _projection_rows(root)
+    EpistemicGraphIndex(root).rebuild_all()
+    rebuilt_edges, rebuilt_files = _graph_rows(root)
+    rebuilt = _projection_rows(root)
+    assert drained_files == rebuilt_files
+    missing = sorted(map(str, rebuilt_edges - drained_edges))
+    extra = sorted(map(str, drained_edges - rebuilt_edges))
+    assert not missing and not extra, f"missing={missing[:5]} extra={extra[:5]}"
+    for table in ("nodes", "dependencies"):
+        missing = sorted(map(str, rebuilt[table] - drained[table]))
+        extra = sorted(map(str, drained[table] - rebuilt[table]))
+        assert not missing and not extra, f"{table}: missing={missing[:5]} extra={extra[:5]}"
 
 
 @pytest.fixture
@@ -259,3 +289,51 @@ def test_the_oracle_sees_a_replay_drain_that_does_not_widen(
     assert whole_vault_passes == [], "a rebuild healed what the control must expose"
     with pytest.raises(AssertionError):
         _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_stale_page_named_through_a_vault_alias_is_not_judged_current(
+    vault: Path, whole_vault_passes: list[str], tmp_path: Path
+) -> None:
+    """The proof reads the page under the vault's own spelling, not the caller's.
+
+    A page with no row yet, named through a symlinked alias of the vault, is not
+    a recall candidate under the alias spelling; judged by that spelling it
+    looks like a non-page with no row -- current -- and the replay drops it.
+    """
+    root = _built(vault, whole_vault_passes)
+    created = root / GENERATED / "created-late.md"
+    created.write_text(_note(502, []) + "\nSee [[Old Title]].\n", encoding="utf-8")
+    other = root / GENERATED / "generated-note-0007.md"
+    other.write_text(other.read_text(encoding="utf-8") + "\n- edit\n", encoding="utf-8")
+    freshness.rebaseline(root)
+    assert EpistemicGraphIndex(root).drain_paths([other])["published"] is True
+    alias = tmp_path / "vault-alias"
+    alias.symlink_to(root, target_is_directory=True)
+
+    epistemic_graph.upsert_after_write(root, [alias / GENERATED / "created-late.md"])
+
+    rel = f"{GENERATED}/created-late.md"
+    assert any(path == rel for path, _ in _graph_rows(root)[1]), "the stale page was dropped"
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_current_created_path_outside_the_delta_does_not_rebuild_the_vault(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """A fan-out replays its batch's created pages too; a current one owes nothing."""
+    root = _built(vault, whole_vault_passes)
+    edited = root / GENERATED / "generated-note-0010.md"
+    edited.write_text(edited.read_text(encoding="utf-8") + "\n- edited\n", encoding="utf-8")
+    freshness.on_files_changed(root, changed=[edited])
+    from exomem import find as find_module
+
+    find_module.recall_resolver_snapshot(root)
+    replayed_creation = root / NEW_LINKER
+
+    epistemic_graph.upsert_after_write(
+        root, [replayed_creation, edited], created_paths=[replayed_creation]
+    )
+
+    assert whole_vault_passes == [], "a current created page outside the delta rebuilt the vault"
+    assert EpistemicGraphIndex(root).available() is True
+    _assert_matches_a_fresh_rebuild(root)
