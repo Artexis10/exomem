@@ -461,7 +461,15 @@ HEDGED_POISON = "hedged_poison"
 #: case's gold counts against precision. The raw scorer leaves ambiguity out
 #: of precision, so a wrong candidate beside C7's gold still passes raw.
 AMBIGUITY_PRECISION = "ambiguity_precision"
-AMENDMENTS: frozenset[str] = frozenset({UNIT_PARENT_RECALL, HEDGED_POISON, AMBIGUITY_PRECISION})
+#: A8: on a positive (non-twin) case, a gold page served ``retrieval_carried``
+#: together with at least one of its own units satisfies the expected
+#: ``resolved`` status, and every unit whose ref is a ``#unit-`` fragment of a
+#: bound gold page is credited to that page in precision as well as recall
+#: (A2 amended recall only). Units of any other page stay distinct.
+CARRIED_GOLD = "carried_gold"
+AMENDMENTS: frozenset[str] = frozenset(
+    {UNIT_PARENT_RECALL, HEDGED_POISON, AMBIGUITY_PRECISION, CARRIED_GOLD}
+)
 
 
 def _resolved_refs(packet: ActivationPacket) -> set[str]:
@@ -596,8 +604,9 @@ def score_case(
     unknown_amendments = sorted(applied - AMENDMENTS)
     if unknown_amendments:
         raise ValueError(f"unknown amendment(s) {unknown_amendments}")
-    if UNIT_PARENT_RECALL in applied and unit_parents is None:
-        raise ValueError(f"{UNIT_PARENT_RECALL} needs a frozen unit_parents map")
+    for needs_parents in (UNIT_PARENT_RECALL, CARRIED_GOLD):
+        if needs_parents in applied and unit_parents is None:
+            raise ValueError(f"{needs_parents} needs a frozen unit_parents map")
 
     binding_map: dict[str, str] | None = None
     valid_projections: dict[str, str] = {}
@@ -643,6 +652,21 @@ def score_case(
                 recall_mentions.add(unit_parents[parent])
 
     own_gold = set(gold_refs)
+    # A8: each unit of a bound gold page, credited to that page; and the gold
+    # pages served `retrieval_carried` with at least one of their own units.
+    gold_unit_parent: dict[str, str] = {}
+    carried_gold: set[str] = set()
+    if CARRIED_GOLD in applied and unit_parents is not None and not fixture.case_id.startswith("T"):
+        for unit in packet.units:
+            parent, separator, fragment = unit.ref.partition("#")
+            if separator and fragment.startswith("unit-") and unit_parents.get(parent) in own_gold:
+                gold_unit_parent[unit.ref] = unit_parents[parent]
+        recall_mentions.update(gold_unit_parent.values())
+        carried_gold = {
+            unit_parents.get(anchor.ref, anchor.ref)
+            for anchor in packet.anchors
+            if anchor.status == "retrieval_carried"
+        } & set(gold_unit_parent.values())
     # A4: a twin's poison served only as a `partial` anchor, beside a
     # `partial` anchor from the twin's own gold, is a hedge. Served resolved,
     # through any other channel, or alone, it stays poison.
@@ -688,7 +712,9 @@ def score_case(
     )
 
     observed_status = turn_status(packet)
-    status_match = observed_status == fixture.expected_status
+    status_match = observed_status == fixture.expected_status or bool(
+        carried_gold and fixture.expected_status == "resolved"
+    )
 
     # Twin false activation (B1): a ref outside the twin's own gold, found via
     # a resolved anchor or any unit/pointer/current-state/ambiguity channel.
@@ -733,7 +759,11 @@ def score_case(
     # (task 2.3) is excluded from the denominator: deliberately,
     # transparently marking it is correct compiler behaviour, not irrelevant
     # padding, and must not be penalised as if it were.
-    precision_denominator_refs = resolved | {unit.ref for unit in packet.units} | {p.ref for p in packet.pointers}
+    precision_denominator_refs = (
+        resolved
+        | {gold_unit_parent.get(unit.ref, unit.ref) for unit in packet.units}
+        | {p.ref for p in packet.pointers}
+    )
     if AMBIGUITY_PRECISION in applied and not fixture.case_id.startswith("T"):
         precision_denominator_refs |= set(packet.ambiguity)
     precision_denominator_refs -= credited
@@ -1268,6 +1298,7 @@ def write_report(report: AuditReport, path: Path) -> Path:
 __all__ = [
     "AMBIGUITY_PRECISION",
     "AMENDMENTS",
+    "CARRIED_GOLD",
     "DISABLED_PACKET",
     "GOLD_RECALL_FLOOR",
     "HEDGED_POISON",
