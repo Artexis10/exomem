@@ -75,3 +75,53 @@ A window is emitted only on the next quiet hold, so the last window is lost when
 
 - Scratch probes (not committed): M1 fails at 6.00 s, and the warm probe and the crash probe both pass.
 - PR scoped suites: 325 passed, 11 skipped.
+
+## Recheck at `aa053fe`
+
+Round diff: `git diff f8e494a aa053fe`. It touches `foreground_priority`, `readiness`, `server_assets`, `vault`, `mutation_lock`, `metrics` and `working_set_heat`, plus five test files. The rest is a merge of `origin/main` (OpenSpec/docs only).
+
+### Findings
+
+- **M1 is resolved (`foreground_priority.py:42-129`).**
+  - The outermost `bulk()` gets a `_PassBudget`. A wait is capped at `2 s + 0.5 × elapsed − waited`, and a wait that hits its cap earns `ceil(wait / unit cost)` units that run without yielding.
+  - A direct `yield_to_foreground()` inside the pass, such as the graph `_rebuild_all_pass`, draws on the same budget.
+  - Free units are spent before the boundary check, which is harmless because a free unit never waits.
+  - Measured with my probe under two request streams that keep `_in_flight ≥ 1`:
+    - 3 units took 2.00 s (the single grace wait), down from 6.00 s.
+    - 1 s of work finished in 5.02 s; 4 s of work finished in 6.02 s (66 % bulk share).
+    - Both are within the bound `elapsed ≤ 2 × (work + 2 s)`, so over long passes bulk keeps at least half the wall time.
+  - The new tests (`test_foreground_priority.py:318, :352`) pin both the floor and the priority of a lone request.
+- **L1 is resolved (`readiness.py:263-308`).** Proofs are single-flight per (vault, generation, admitted), and a finished flight is never reused. Sharing cannot launder a stale proof: any invalidation bumps the generation, and the CAS at `:245` drops the result.
+  - *Residual, low:* a sharer that waits more than 30 s returns `False`. On an `admitted=True` key, that clears admission because a proof was slow, not because it failed. The owner's later `True` is then discarded by the CAS. This is a readiness flap, but it fails closed, so it stays honest. A possible follow-up: on a sharer timeout, return `admission` unchanged instead of `False`.
+- **L2 is resolved (`server_assets.py:123-147, 214`).** Probes coalesce onto one future per digest. `asyncio.shield` keeps a disconnect from cancelling the shared proof, and the done-callback forgets the flight, so there is no queue and no replay.
+  - *Nit:* sharers return the first probe's `traffic` snapshot.
+- **L3 is resolved.** `test_a_death_before_the_released_fanout_still_converges_on_restart` is the same shape as my probe. The PR reports that it fails when reconcile is stubbed.
+- **L4 is resolved.** `flush_hold_summary` is registered on the snapshotter tick and skips an empty window. The flush reads the module global, so the fork reset still applies.
+- **The nit is resolved (`working_set_heat.py:1078`).**
+- **New code: `vault._run_in_captured_context` (`:856-870`).**
+  - It copies back every var the deferred fan-out changed, last write wins.
+  - The only such var is `graph_sync._PENDING_WAITERS`, a copy-on-write dict. The only writers are the graph dispatch functions (`epistemic_graph.py:5418, 8590, 8870, 8879, 9134`), and these run in the fan-out, never in the locked body after commit.
+  - Where two fan-outs share one lock, both write the same (vault, state root) key, and the later one wins, as it would inline. This is equivalent today.
+  - *Nit:* copying back only when the releasing context still holds the captured value would make that ordering explicit.
+
+### CI-regression fixes: no assertion weakened
+
+- **`test_read_after_write_visibility.py`:** only the setup changed. `_publication_barrier_held_elsewhere` produces real contention on the publication barrier, and `deferred == [[page]]` plus the during-repair read are unchanged. The old route (`VAULT_LOCK_NESTED`) is the bug that item 7 removed.
+- **`test_membench_trackd` j3:** the test is untouched. The source fix above restores the graph rebuild registration, and two new red→green tests pin it end to end (`asserted_pairs` returns the pair).
+- **Windows timeout:** no test or source change. The PR cites main run 36413687175 failing the same way at a docs-only commit, and the job passed at `aa053fe`.
+- **Test lines:** the round's test diffs add 314 lines and delete none.
+
+### CI (PR #1435 check runs, head `aa053fe`)
+
+- 36 check runs: 26 success, 10 skipped, 0 failures.
+- "required CI gate" is green. It covers all 12 core shards, the 4 harness shards, Windows held filesystem (NTFS), product E2E, lint, OpenSpec and package build.
+- The skipped jobs are workflow-gated, including the templated matrix names.
+
+### Local verification
+
+- Scoped suites at `aa053fe`: foreground_priority, fanout_after_creation_lock, read_after_write_visibility, readiness_after_required_warm, readiness_honesty, mutation_lock, membench_trackd, working_set_heat, post_promotion_warm and index_sync. Result: **265 passed, 11 skipped**.
+- Floor probe results as above.
+
+### Verdict: APPROVE
+
+M1 and L1–L4 are fixed and tested, the CI fixes keep every assertion, and CI is green. The two residual items (the sharer-timeout flap and copy-back ordering) are low and fine as follow-ups.
