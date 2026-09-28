@@ -241,7 +241,7 @@ def test_a_japanese_name_inside_a_longer_compound_is_never_resolved(ja_vault: Pa
 
 def test_the_words_a_japanese_run_holds_are_read_between_its_particles() -> None:
     analysis = working_set_resolve.analyze_turn("ハヤブサ号の油圧センサーは旅行前に交換すべき？")
-    assert analysis.words == ("ハヤブサ号", "油圧センサー", "旅行前", "交換")
+    assert analysis.words == ("ハヤブサ号", "油圧センサー", "旅行前", "交換すべき")
     # One Han character is as often a verb stem as a word: never a word here.
     assert working_set_resolve.analyze_turn("隼を借りた").words == ()
     # Hiragana alone, Chinese without a Latin word, and Latin are untouched.
@@ -541,6 +541,153 @@ def test_a_japanese_alias_inside_a_longer_compound_is_never_resolved(ja_vault: P
     )
     packet = _activate(ja_vault, "コルヴェインスキーの小説を読んだ")
     assert CORVANE not in _resolved(packet), packet["anchors"]
+
+
+# --------------------------------------------------------------------------- #
+# The alias guard answers for every name the resolver matches (review round)
+# --------------------------------------------------------------------------- #
+
+
+def _refused(vault: Path, name: str, aliases: list[str]) -> str:
+    with pytest.raises(ValueError, match="ENTITY_EXISTS") as info:
+        commands.op_connect_memory(
+            vault,
+            operation="create-entity",
+            entity_type="organization",
+            name=name,
+            summary="Refused.",
+            aliases=aliases,
+        )
+    assert not (vault / KB / "Entities" / "Organizations" / f"{name}.md").exists()
+    return str(info.value)
+
+
+def test_an_alias_a_note_already_answers_to_is_refused(ja_vault: Path) -> None:
+    """ハヤブサ号 is a note, not an entity. As another page's alias it would
+    make the note's own name resolve both pages."""
+    _refused(ja_vault, "Corvane Motors", ["ハヤブサ号"])
+    working_set_index.WorkingSetIndex(ja_vault).update()
+    _fresh_session()
+    packet = _activate(ja_vault, "ハヤブサ号の油圧センサーは旅行前に交換すべき？")
+    assert _resolved(packet) == [FALCON], packet["anchors"]
+
+
+def test_an_alias_spelled_with_a_typographic_apostrophe_is_refused(ja_vault: Path) -> None:
+    """The index reads U+2019 as the plain apostrophe, so `Dana’s Garage` is
+    the existing entity's own name."""
+    _create_entity(ja_vault, "Dana's Garage", "The garage on the corner.")
+    _refused(ja_vault, "Corvane Motors", ["Dana\u2019s Garage"])
+
+
+def test_an_alias_with_a_soft_hyphen_is_refused(ja_vault: Path) -> None:
+    """A soft hyphen is dropped by the index: テッ\u00adサリー is テッサリー."""
+    _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["テッサリー"])
+    _refused(ja_vault, "Corvane Motors", ["テッ\u00adサリー"])
+
+
+def test_an_alias_only_a_withheld_page_answers_to_reads_as_absent(ja_vault: Path) -> None:
+    """The guard decides visibility first: a caller who may not see the page
+    gets the same answer as if it did not exist, and never its path."""
+    write_scope(ja_vault, paths=SECRET, name="Hidden")
+    write_rule(ja_vault, ceiling=0)
+    _reset_caches()
+    with request_scope(_external()):
+        result = commands.op_connect_memory(
+            ja_vault,
+            operation="create-entity",
+            entity_type="organization",
+            name="Corvane Motors",
+            summary="A carmaker.",
+            aliases=["月影プロジェクト"],
+        )
+    assert result["path"] == CORVANE
+    assert "月影" not in str(result.get("warnings"))
+
+
+def test_one_create_walks_the_entities_once_however_many_aliases(
+    ja_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import entity_candidates
+
+    reads: list[str] = []
+    original = entity_candidates.parse_frontmatter
+
+    def counting(source: str):
+        reads.append(source)
+        return original(source)
+
+    monkeypatch.setattr(entity_candidates, "parse_frontmatter", counting)
+    _create_entity(ja_vault, "Corvane Motors", "One alias.", aliases=["コルヴェイン"])
+    one = len(reads)
+    reads.clear()
+    _create_entity(
+        ja_vault, "Tessary Works", "Eight aliases.", aliases=[f"テッサリー{n}" for n in range(8)]
+    )
+    assert len(reads) == one, (one, len(reads))
+
+
+def test_edit_memory_refuses_an_alias_another_page_answers_to(ja_vault: Path) -> None:
+    """The second route the guidance names runs the same guard."""
+    _create_entity(ja_vault, "Tessary Works", "The tool shop by the station.")
+    text = (ja_vault / TESSARY).read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="ENTITY_EXISTS"):
+        writer_lease.invoke_command(
+            _command("edit_memory"),
+            ja_vault,
+            path=TESSARY,
+            why="a wrong alias",
+            operation={
+                "kind": "patch_frontmatter",
+                "field": "aliases",
+                "value": ["テッサリー", "青木陽介"],
+                "expected_hash": content_hash(text),
+            },
+        )
+    assert "青木陽介" not in (ja_vault / TESSARY).read_text(encoding="utf-8")
+    working_set_index.WorkingSetIndex(ja_vault).update()
+    _fresh_session()
+    assert _resolved(_activate(ja_vault, "青木陽介の仕事は何だっけ")) == [AOKI]
+
+
+def test_edit_memory_keeps_a_page_s_own_names_when_it_rewrites_its_aliases(
+    ja_vault: Path,
+) -> None:
+    """The page's own title and current aliases are not a collision."""
+    _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["テッサリー"])
+    text = (ja_vault / TESSARY).read_text(encoding="utf-8")
+    writer_lease.invoke_command(
+        _command("edit_memory"),
+        ja_vault,
+        path=TESSARY,
+        why="the user also writes it in hiragana",
+        operation={
+            "kind": "patch_frontmatter",
+            "field": "aliases",
+            "value": ["テッサリー", "Tessary Works", "てっさりー"],
+            "expected_hash": content_hash(text),
+        },
+    )
+    assert "てっさりー" in (ja_vault / TESSARY).read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# A name that begins in hiragana keeps its own edge (review round)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_name_that_starts_with_hiragana_is_not_handed_to_its_kanji_tail(
+    ja_vault: Path,
+) -> None:
+    """ねこやなぎ is part of the bank's name, not a particle: only a hiragana
+    run that is wholly a declared particle or filler word is a word edge."""
+    _write(ja_vault / KB / "Products" / "銀行.md", _page("銀行", "銀行の手続き全般のメモ。"))
+    _create_entity(ja_vault, "ねこやなぎ銀行", "The bank the family uses.")
+    turn = "ねこやなぎ銀行の口座を解約したい"
+    assert "銀行" not in working_set_resolve.analyze_turn(turn).words
+    packet = _activate(ja_vault, turn)
+    bank_note = f"{KB}/Products/銀行.md"
+    assert bank_note not in _resolved(packet), packet["anchors"]
+    assert _resolved(packet) == [f"{KB}/Entities/Organizations/ねこやなぎ銀行.md"], packet["anchors"]
 
 
 # --------------------------------------------------------------------------- #
