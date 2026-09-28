@@ -45,6 +45,7 @@ from unittest import mock
 
 from epistemic.corpora.context_activation import (
     BASE_DISTRACTOR_COUNT,
+    CORPUS_ID,
     DEFAULT_DISTRACTOR_COUNT,
     FIXTURES,
     KEY_KINDS,
@@ -257,6 +258,31 @@ def trusted_key_to_ref(
     return out
 
 
+def unit_parents(root: Path, corpus: CorpusManifest, binding: ReferenceBinding) -> dict[str, str]:
+    """Every spelling of each bound page, mapped to its bound ref (amendment A2).
+
+    A role lane spells a unit as a fragment of its page's memory ref or of
+    its path. Read from canonical frontmatter before any activation, for the
+    pages the binding names and no other, so a unit can recall only a page
+    the fixtures already bind.
+    """
+
+    from exomem import memory_refs, vault
+
+    out: dict[str, str] = {}
+    for key, ref in binding.key_to_ref:
+        path = corpus.key_to_path[key]
+        out[path] = ref
+        out[ref] = ref
+        frontmatter, _body, _marker = vault.parse_frontmatter(
+            (Path(root) / path).read_text(encoding="utf-8")
+        )
+        exomem_id = str((frontmatter or {}).get("exomem_id") or "").strip()
+        if exomem_id:
+            out[memory_refs.memory_ref(exomem_id)] = ref
+    return out
+
+
 # --------------------------------------------------------------------------
 # Topology audit (task 1.8).
 # --------------------------------------------------------------------------
@@ -464,6 +490,8 @@ class Tree:
     publication: Publication
     binding: ReferenceBinding
     manifest: audit.RunManifest
+    #: A page's ref spellings -> its bound ref, frozen before activation (A2).
+    unit_parents: Mapping[str, str]
 
     @property
     def fixtures(self) -> tuple[FixtureCase, ...]:
@@ -487,7 +515,8 @@ def prepare_tree(root: Path, *, distractor_count: int, seed: int = 20260916) -> 
             "mechanism": PRODUCT_MECHANISM,
         }
     )
-    return Tree(distractor_count, Path(root), corpus, publication, binding, manifest)
+    parents = unit_parents(root, corpus, binding)
+    return Tree(distractor_count, Path(root), corpus, publication, binding, manifest, parents)
 
 
 def activate_tree(tree: Tree, *, mechanism_removed: str | None = None) -> dict[str, dict[str, Any]]:
@@ -498,12 +527,24 @@ def activate_tree(tree: Tree, *, mechanism_removed: str | None = None) -> dict[s
         return {fixture.case_id: activate(tree.root, fixture) for fixture in tree.fixtures}
 
 
-def score_trees(trees: tuple[Tree, ...], raw: Mapping[str, Mapping[str, Any]]) -> audit.AuditReport:
+#: The scoring amendments a product run reports beside its raw score
+#: (design.md "Amendments": A2 and A4). Never applied to the raw score.
+REPORTED_AMENDMENTS: tuple[str, ...] = (audit.UNIT_PARENT_RECALL, audit.HEDGED_POISON)
+
+
+def score_trees(
+    trees: tuple[Tree, ...],
+    raw: Mapping[str, Mapping[str, Any]],
+    *,
+    amendments: tuple[str, ...] = (),
+) -> audit.AuditReport:
     """Score each tree under its own manifest and binding, then as one run.
 
     ``run_audit`` revalidates each tree's manifest against its binding. A
     fixture with no packet is blocked, and the combined report carries the
-    unpadded tree's manifest; :func:`report_dict` records both.
+    unpadded tree's manifest; :func:`report_dict` records both. With no
+    ``amendments`` this is the raw pre-registered score; an amended score is
+    reported beside it, never in its place.
     """
 
     if {tree.distractor_count for tree in trees} != set(TREES):
@@ -520,6 +561,8 @@ def score_trees(trees: tuple[Tree, ...], raw: Mapping[str, Mapping[str, Any]]) -
             manifest=tree.manifest,
             reference_binding=tree.binding,
             fixtures=tree.fixtures,
+            amendments=amendments,
+            unit_parents=tree.unit_parents,
         )
         scores.update({score.case_id: score for score in partial.per_case})
     base = next(tree for tree in trees if tree.distractor_count == BASE_DISTRACTOR_COUNT)
@@ -575,13 +618,29 @@ RECORDED_CASE_FIELDS: tuple[str, ...] = (
 )
 
 
+#: Per-case fields the amended column keeps: what an amendment can change.
+AMENDED_CASE_FIELDS: tuple[str, ...] = (
+    "case_id",
+    "gold",
+    "poison",
+    "hedged",
+    "precision",
+    "passed",
+    "failure_reasons",
+)
+
+
 def recorded_report(
     trees: tuple[Tree, ...],
     report: audit.AuditReport,
     *,
     removals: Mapping[str, audit.AuditReport],
+    amended: audit.AuditReport,
 ) -> dict[str, Any]:
     """The reproducible part of one product run (task 4.2).
+
+    ``report`` is the raw pre-registered score; ``amended`` is the same
+    packets scored under :data:`REPORTED_AMENDMENTS`, recorded beside it.
 
     Everything here is a function of the fixtures, the thresholds, the
     logical corpus and the compiler. Exact corpus bytes carry writer-minted
@@ -591,8 +650,10 @@ def recorded_report(
     """
 
     full = audit.report_to_dict(report)
+    amended_full = audit.report_to_dict(amended)
     return {
         "instrument": "context-activation deterministic audit, real compiler",
+        "corpus_id": CORPUS_ID,
         "mechanism": PRODUCT_MECHANISM,
         "fixture_set_digest": fixture_set_digest(),
         "threshold_digest": threshold_digest(),
@@ -621,6 +682,16 @@ def recorded_report(
         "per_case": [
             {name: row[name] for name in RECORDED_CASE_FIELDS} for row in full["per_case"]
         ],
+        "amended": {
+            "amendments": list(REPORTED_AMENDMENTS),
+            "audit_passed": audit.audit_passed(amended),
+            "hedged_twins": amended_full["hedged_twins"],
+            "c9_padding_robustness": amended_full["c9_padding_robustness"],
+            "per_case": [
+                {name: row[name] for name in AMENDED_CASE_FIELDS}
+                for row in amended_full["per_case"]
+            ],
+        },
         "fixture_mechanisms": dict(FIXTURE_MECHANISMS),
         "mechanism_removal": {
             mechanism: {
@@ -649,11 +720,13 @@ def run_product_audit(
 
 
 __all__ = [
+    "AMENDED_CASE_FIELDS",
     "FIXTURE_MECHANISMS",
     "MECHANISMS",
     "PRODUCT_MECHANISM",
     "PUBLISHED_ANCHOR_KINDS",
     "RECORDED_CASE_FIELDS",
+    "REPORTED_AMENDMENTS",
     "TREES",
     "PrerequisiteError",
     "Publication",
@@ -675,4 +748,5 @@ __all__ = [
     "threshold_digest",
     "thresholds",
     "trusted_key_to_ref",
+    "unit_parents",
 ]
