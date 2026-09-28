@@ -13,7 +13,7 @@ import json
 import os
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, NoReturn
@@ -1542,8 +1542,16 @@ def prepare_proposal(
 
 
 def _binding_blockers(
-    vault_root: Path, plan: Mapping[str, Any], current_registries: Mapping[str, str]
+    vault_root: Path,
+    plan: Mapping[str, Any],
+    current_registries: Mapping[str, str],
+    *,
+    keep: Callable[[str], bool] | None = None,
 ) -> list[dict[str, Any]]:
+    """Why a sealed plan's bindings no longer hold. `keep` is a caller's
+    release filter: a hash-bound path it withholds is read as unreadable, so
+    the list is exactly the one a deleted path gives. An expected absence is
+    still decided on disk; a withheld file there is never absent."""
     blockers: list[dict[str, Any]] = []
     for name, expected in plan["registry_ids"].items():
         if current_registries.get(name) != expected:
@@ -1571,12 +1579,7 @@ def _binding_blockers(
                     )
                     continue
                 expected = expected_item.get("content_hash")
-                try:
-                    _source, actual = _read_target(vault_root, path)
-                except CurationError as error:
-                    if error.code == "CURATION_PATH_UNSAFE":
-                        raise
-                    actual = None
+                actual = _bound_hash(vault_root, path, keep)
                 if actual != expected:
                     blockers.append(
                         {
@@ -1601,12 +1604,7 @@ def _binding_blockers(
         expected = item.get("before_hash")
         if expected is None:
             continue
-        try:
-            _source, actual = _read_target(vault_root, path)
-        except CurationError as error:
-            if error.code == "CURATION_PATH_UNSAFE":
-                raise
-            actual = None
+        actual = _bound_hash(vault_root, path, keep)
         if actual != expected:
             blockers.append(
                 {"code": "CURATION_BINDING_STALE", "path": path, "reason": "content hash changed"}
@@ -1614,12 +1612,31 @@ def _binding_blockers(
     return blockers
 
 
-def preview(vault_root: Path, *, run_id: str) -> dict[str, Any]:
+def _bound_hash(vault_root: Path, path: str, keep: Callable[[str], bool] | None) -> str | None:
+    """The live hash a binding compares, or None when the page is unreadable --
+    gone, or withheld from the caller `keep` filters for. A withheld page is
+    read like any other and the result discarded, so both take the same path."""
+    try:
+        _source, actual = _read_target(vault_root, path)
+    except CurationError as error:
+        if error.code == "CURATION_PATH_UNSAFE":
+            raise
+        return None
+    if keep is not None and not keep(path):
+        return None
+    return actual
+
+
+def preview(
+    vault_root: Path, *, run_id: str, keep: Callable[[str], bool] | None = None
+) -> dict[str, Any]:
+    """A sealed plan's current health. `keep` (the episode `resume` passes the
+    caller's release filter) reads a withheld bound page as a missing one."""
     root = Path(vault_root)
     store = CurationStore(root)
     plan = store.load_plan(run_id)
     identity, fingerprint = store.identities(run_id)
-    blockers = _binding_blockers(root, plan, registry_identities(root))
+    blockers = _binding_blockers(root, plan, registry_identities(root), keep=keep)
     if (
         isinstance(plan.get("entity_candidate"), Mapping)
         and not _committed_step_ids(store.reconstruct(run_id))

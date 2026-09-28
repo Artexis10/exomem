@@ -380,8 +380,13 @@ def _committed(vault_root: Path, run_id: str) -> bool:
 
 
 def _blockers(vault_root: Path, run_id: str) -> list[str]:
-    """Codes that would refuse an uncommitted sealed plan now, as `curation.preview` says."""
-    return [item["code"] for item in curation.preview(vault_root, run_id=run_id)["blockers"]]
+    """Codes that would refuse an uncommitted sealed plan now, as `curation.preview`
+    says for the current caller: a bound page it may not read is a missing one."""
+    keep = egress.restricted_release_filter(vault_root, principal=effective_principal())
+    return [
+        item["code"]
+        for item in curation.preview(vault_root, run_id=run_id, keep=keep)["blockers"]
+    ]
 
 
 # --- destination decisions (close-memory-loop 3.8) ---------------------------
@@ -760,20 +765,26 @@ def _execute(session: _Session, candidate_id: str, leaf_id: str) -> tuple[str, d
     # re-disposition the candidate. A plan committed elsewhere must still
     # reconcile, or its attempt would stay uncertain for good; any other plan
     # must still apply to the vault it would change. A target this caller may
-    # no longer write answers exactly as a missing one does in each case.
+    # no longer write answers exactly as a missing one does in each case: the
+    # same trial or preview runs either way, with the same ordered blockers,
+    # and the refusal only supplies the code a missing target would.
     refused = _refused_for_caller(session.vault_root, binding)
     if _committed(session.vault_root, binding["run_id"]):
-        code = "EPISODE_OUTCOME_UNCERTAIN" if refused else _unverifiable(
-            session, candidate_id, leaf_id
-        )
+        try:
+            code = _unverifiable(session, candidate_id, leaf_id)
+        except model.EpisodeError:
+            if not refused:
+                raise
+            code = None
+        if refused:
+            code = "EPISODE_OUTCOME_UNCERTAIN"
         if code:
             return "diverged", {"leaf_id": leaf_id, "code": code}
     else:
-        if refused:
-            return "stale", {"leaf_id": leaf_id, "code": "CURATION_BINDING_STALE"}
         blockers = _blockers(session.vault_root, binding["run_id"])
-        if blockers:
-            return "stale", {"leaf_id": leaf_id, "code": blockers[0]}
+        if refused or blockers:
+            code = (blockers or ["CURATION_BINDING_STALE"])[0]
+            return "stale", {"leaf_id": leaf_id, "code": code}
     snapshot = session.state["current_precommit"]["snapshot"]
     # Durably uncertain before the writer runs: a crash from here on can only
     # be reconciled from receipts, never retried under a fresh identity.

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, episode_workflow
+from exomem import commands, curation, episode_workflow
 from exomem import episode_model as model
 from exomem import schema as schema_module
 from exomem.episode_store import EpisodeStore
@@ -802,10 +802,17 @@ def _relation_leaf(vault: Path, page: str) -> dict:
     }
 
 
+@pytest.mark.parametrize("registry_changed", [False, True], ids=["as-sealed", "registry-changed"])
 def test_a_relation_source_withheld_before_its_attempt_resumes_like_a_deleted_one(
-    vault: Path, enabled
+    vault: Path, enabled, registry_changed: bool
 ) -> None:
-    """A page leaf with no bound home: only its own permission check answers."""
+    """A page leaf with no bound home: only its own permission check answers.
+
+    With a routine registry change after the page went away (recheck N1), the
+    deleted page's preview puts `CURATION_REGISTRY_CHANGED` first; the withheld
+    page must run the same preview and answer the same list, not a code of its
+    own.
+    """
     with request_scope(owner_principal(surface="mcp")):
         _seed_entity(vault)
     pages = {
@@ -833,8 +840,21 @@ def test_a_relation_source_withheld_before_its_attempt_resumes_like_a_deleted_on
             )
     _withhold_notes_from(vault, "client-a")
     (vault / pages["deleted"]).unlink()
+    if registry_changed:
+        contracts = vault / "Knowledge Base" / "_Schema" / "contracts"
+        contracts.mkdir(parents=True, exist_ok=True)
+        (contracts / "extra.yaml").write_text("x: 1\n", encoding="utf-8")
 
     with request_scope(client):
+        keep = egress.restricted_release_filter(vault, principal=client)
+        previews = {
+            case: curation.preview(
+                vault,
+                run_id=reviewed[case]["candidates"][0]["leaves"][0]["run_id"],
+                keep=keep,
+            )["blockers"]
+            for case in keys
+        }
         outcomes = {
             case: _client_episode(
                 vault,
@@ -845,10 +865,13 @@ def test_a_relation_source_withheld_before_its_attempt_resumes_like_a_deleted_on
             )
             for case, key in keys.items()
         }
+    # The same blockers, in the same order, for withheld and deleted alike.
+    assert _shape(previews["withheld"]) == _shape(previews["deleted"])
     assert json.dumps(_shape(outcomes["withheld"]), sort_keys=True) == json.dumps(
         _shape(outcomes["deleted"]), sort_keys=True
     )
-    assert [item["code"] for item in outcomes["withheld"]["stale"]] == ["CURATION_BINDING_STALE"]
+    first = "CURATION_REGISTRY_CHANGED" if registry_changed else "CURATION_BINDING_STALE"
+    assert [item["code"] for item in outcomes["withheld"]["stale"]] == [first]
     leaf = outcomes["withheld"]["candidates"][0]["leaves"][0]
     assert leaf["outcome"] == "pending" and leaf["attempts"] == 0
 
