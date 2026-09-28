@@ -1075,8 +1075,9 @@ def _connect(vault_root: Path, *, rebuilt: bool = False) -> sqlite3.Connection |
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         # Per connection, not stored in the file: set only where the schema is
         # created, every later connection committed at FULL and fsynced its WAL
-        # on each activation's session mark (~50 ms a turn on WSL). Derived,
-        # best-effort state: a power loss costs at most the last few rows.
+        # on each activation's session mark (~50 ms a turn on WSL). Recorded
+        # telemetry, best-effort: in WAL mode a power loss costs at most the
+        # last few committed rows and never corrupts the file.
         conn.execute("PRAGMA synchronous=NORMAL")
         _ensure_schema(conn)
     except sqlite3.OperationalError:
