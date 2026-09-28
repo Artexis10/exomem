@@ -405,6 +405,7 @@ def _video_frames_module():
 FindHit = retrieval_models.PageHit
 RetrievalHit = retrieval_models.RetrievalHit
 FindEnvelope = retrieval_models.FindEnvelope
+RecallResult = retrieval_models.RecallResult
 
 
 class SearchResult(TypedDict):
@@ -5881,7 +5882,7 @@ def op_ask_memory(
     include_timings: bool = False,
     explain: bool = False,
     purpose: str | None = None,
-) -> list[RetrievalHit] | FindEnvelope:
+) -> RecallResult:
     """Recall durable knowledge from Exomem with product defaults.
 
     This is the normal first read: search compiled knowledge, sources,
