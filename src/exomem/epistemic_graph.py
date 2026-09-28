@@ -5226,20 +5226,23 @@ class EpistemicGraphIndex:
             )
         drain_scope = report.pop("_drain_after_release", None)
         if drain_scope:
-            # Proved stale replayed pages, queued with the delta: repair them the
-            # way the drain does, O(changed), now that the hold is released.
-            drained = self.drain_paths([self.vault_root / rel for rel in drain_scope])
-            if not (drained.get("requires_rebuild") or drained.get("moved")):
-                return {
-                    "indexed_files": int(drained.get("indexed_files", 0)),
-                    "nodes": int(drained.get("nodes", 0)),
-                    "edges": int(drained.get("edges", 0)),
-                }
-            log.info(
-                "graph replay drain did not converge requires_rebuild=%s moved=%s",
-                bool(drained.get("requires_rebuild")),
-                bool(drained.get("moved")),
-            )
+            # Proved stale replayed pages, queued with the delta: repair them BY
+            # the drain, O(changed), now that the hold is released. Its rules
+            # then come from one place -- a standing full marker drains the queue
+            # with it, an unsettled epoch refuses per-path repair, and covered
+            # receipts clear by compare-and-swap -- instead of a copy here that
+            # served reads as current past outstanding whole-vault debt. A parent
+            # handoff keeps its registration, so it takes the queued deferral.
+            scope = set(drain_scope)
+            if not _parent_receipted_graph_handoff_active(
+                self.vault_root, self._mutation_coordinator.state_root
+            ):
+                from . import index_sync
+
+                index_sync.drain_graph_work(self.vault_root, paths=scope)
+                if not deferred_index.snapshot_graph(self.vault_root, limit=1, paths=scope):
+                    return {"indexed_files": 0, "nodes": 0, "edges": 0}
+                log.info("graph replay drain left its repair queued; rebuilding")
             report["_rebuild_after_release"] = 1
             report["_durable_before_rebuild"] = 1
         if report.pop("_rebuild_after_release", False):

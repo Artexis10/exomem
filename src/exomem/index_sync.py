@@ -1231,7 +1231,9 @@ def _republish_graph_availability(index) -> None:
         log.warning("graph availability republication failed", exc_info=True)
 
 
-def drain_graph_work(vault_root: Path, *, limit: int | None = None) -> int:
+def drain_graph_work(
+    vault_root: Path, *, limit: int | None = None, paths: Iterable[str] | None = None
+) -> int:
     """Drain queued epistemic-graph repair without touching the other queues.
 
     `drain_deferred_work` runs all three queues because its callers -- the
@@ -1239,8 +1241,13 @@ def drain_graph_work(vault_root: Path, *, limit: int | None = None) -> int:
     daemon wants only this one: it fires within a second of the write that
     queued the debt, and replaying embeddings that often is a different cost
     decision from repairing the graph.
+
+    `paths` (vault-relative) narrows it to receipts a caller just queued, so a
+    refresh that proved its own repair incremental drains it under these rules.
     """
-    return _drain_graph_work(vault_root, limit=limit, requested=None)
+    return _drain_graph_work(
+        vault_root, limit=limit, requested=None if paths is None else set(paths)
+    )
 
 
 def drain_deferred_work(
