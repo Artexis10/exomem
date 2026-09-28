@@ -93,7 +93,10 @@ The ledger is `<vault state dir>/sensing/readings.sqlite` (WAL). The dreamer's p
 - `readings(reading_id PRIMARY KEY, seq UNIQUE, question_type, instrument_id, input_key, inputs_json, output_json, verdict, label_map_version, fixture_set, sensed_at, placement)`;
 - `meta(schema_version)`.
 
-`BEFORE UPDATE` and `BEFORE DELETE` triggers abort every update and delete, so the ledger is append-only by construction. Re-sensing the same inputs with the same instrument has the same `reading_id` and is ignored.
+`BEFORE UPDATE` and `BEFORE DELETE` triggers abort every update and delete, so the ledger is append-only by construction. `BEFORE INSERT` triggers close the `INSERT OR REPLACE` path: a row whose `reading_id` (or `instrument_id`) already exists is ignored, and a new row that would take an existing `seq` aborts. Re-sensing the same inputs with the same instrument has the same `reading_id` and is ignored.
+
+- **Ledger identity.** A random genesis id is written once into `meta` when the ledger is created, and triggers refuse to replace, update or delete it. The projection records the genesis it follows: a ledger with another genesis (restored, replaced or recreated, even at the same length) makes it reproject every pair from scratch.
+- **Permissions.** `sensing/` is created through `ensure_vault_state_dir` and set to `0700`. The ledger, the projection and the worker's spend and admission files are created `0600`.
 
 - **Instrument identity.** The identity record holds model, revision, weights sha256 (or `unpinned_weights: true`), runtime and runtime version, template version, label-map version, fixture-set version and placement.
   - `instrument_id = sha256(model, revision, weights|"unpinned", runtime, runtime_version, template_version)`. These fields determine the stored vectors.
@@ -147,7 +150,9 @@ Inference runs only in a supervised, disposable child process: `python -m exomem
   - It reports its spend after every batch to a small spend file beside the ledger, and the supervisor charges that spend to its rolling window.
   - A child the supervisor terminates is charged its last report plus the wall time since, which bounds a one-thread child's CPU. A child that dies without reporting is charged its whole allotment.
 - **What the child reads.** Only the projection's sense queue (read-only, non-waiting) and the ledger. It never reads or writes the vault, takes no lease and schedules no index work.
-- **Soft failure.** A child that cannot admit its instrument exits with a named refusal, and the supervisor reports it without relaunching until the setting or the pin changes. Refusal causes: no pin, label map unknown, weights missing, digest mismatch, dependency missing, fixtures failed, and a ledger this build cannot use. A batch with non-finite output records no reading and the child carries on. Sensing off is byte-identical to a build without sensing.
+- **What the child inherits.** An allowlisted environment only: `PATH`, `HOME`, user and locale (`LANG`, `LC_*`, `TZ`), temp dirs, `PYTHONPATH` and `VIRTUAL_ENV`, the XDG dirs, the Hugging Face and torch cache locations, and the state-root and logging variables it needs to find the ledger. A variable whose name contains `TOKEN`, `SECRET`, `KEY`, `PASSWORD`, `CREDENTIAL`, `COOKIE` or `AUTH` never passes, whatever the allowlist says. The parent forces `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, an empty `CUDA_VISIBLE_DEVICES` and one thread for every math library.
+- **Soft failure.** A child that cannot admit its instrument exits with a named refusal, and the supervisor reports it without relaunching until the setting or the pin changes. Refusal causes: no pin, label map unknown, weights missing, digest mismatch, dependency missing, fixtures failed, and a ledger this build cannot use. A batch with non-finite output records no reading and the child carries on.
+- **Sensing off.** Byte-identical to a build without sensing. The setting reads `EXOMEM_SENSING` first; only when it is unset does a request consult the config file, through a five-second per-process memo, so an ordinary read with sensing off does no per-read file I/O.
 
 ### D5. Pair proposers
 
