@@ -281,6 +281,15 @@ categories and routes them to roles through the schema writers, and adds 110
 ordinary Notes pages; both trees index 147 pages, above the retrieval carry's
 floor of 100. The fixtures and thresholds are unchanged. Every amended score
 (A2 unit-to-parent recall, A4 hedged poison) is reported beside the raw one.
+A4 removes a hedged poison hit and nothing else: it never marks a case as
+hedging, so it cannot waive a status mismatch (integrity review F1).
+
+The ordinary notes are realistic, topic-diverse pages, and several share words
+with the fixture turns on purpose. One is a deliberately hard lexical
+distractor: "Oven temperature conversions" was written with T6's turn in view,
+and carries its distinctive words (temperature, Fahrenheit, Celsius). It makes
+T6 harder, not easier, and it is kept by ruling (F5): a vault in real use has
+distractors like it.
 
 | Case | Raw | Amended | Why it fails today |
 |------|-----|---------|--------------------|
@@ -315,18 +324,27 @@ compiler abstains.
 
 `membench.utility.context_activation_continuity` pre-registers four keyed
 fresh-session cases, each from a `memory-loop` spec scenario, with gold for the
-referent and for the `recent_context` block. Its digest (`de5e7900…`) was
-pinned in a commit before the first run. The earlier session's acts go through
-supported doors (an `anchor` pick, an `episode_memory` record, an
-`edit_memory` commit), then one fresh `activate_context` call is made. The
-result is recorded in `docs/benchmarks/context-activation-continuity-2026-09.json`.
+referent and for the `recent_context` block. The earlier session's acts go
+through supported doors (an `anchor` pick, an `episode_memory` record, an
+`edit_memory` commit), then one fresh `activate_context` call is made.
+
+The current group is v2 (digest `b208a986…`, pinned in a commit before its
+first run). It keeps v1's cases and gold and tightens the scorer after the
+integrity review. Every served anchor, whatever its status, and every
+ambiguity candidate must be one of the referents, so the right page plus a
+wrong one fails; the keyless K3 must serve nothing at all, partial anchors and
+ambiguity included. The digest also covers a sha256 of the scorer module's
+source. The result is in
+`docs/benchmarks/context-activation-continuity-2026-09-v2.json`. v1 (digest
+`de5e7900…`, 4/4, `context-activation-continuity-2026-09.json`) is kept as
+history; its scorer passed packets that v2 fails.
 
 | Case | Scenario | Result |
 |------|----------|--------|
-| K1 | "continue" from a fresh session in the earlier session's workspace, after newer work in another workspace | pass |
-| K2 | "where were we" after a recorded episode | pass |
-| K3 | a keyless bare "continue" | pass: abstains, serves nothing, still lists the page |
-| K4 | "continue" after an edit of an ordinary, non-anchor note | pass: carried on recency |
+| K1 | "continue" from a fresh session in the earlier session's workspace, after newer work in another workspace | v2 pass (v1 pass) |
+| K2 | "where were we" after a recorded episode | v2 pass (v1 pass) |
+| K3 | a keyless bare "continue" | v2 pass (v1 pass): abstains, names nothing, still lists the page |
+| K4 | "continue" after an edit of an ordinary, non-anchor note | v2 pass (v1 pass): carried on recency |
 
 The group is not one of the eighteen and does not enter their verdict.
 

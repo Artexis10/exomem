@@ -1406,7 +1406,44 @@ def test_a4_poison_partial_beside_a_partial_gold_candidate_is_a_hedge() -> None:
     amended = _amended(packet, "T7", amendments={HEDGED_POISON})
     assert raw.poison_hit == 1
     assert amended.poison_hit == 0
-    assert amended.hedged is True
+    # A4 removes the poison hit and nothing else: `hedged` stays B3's.
+    assert amended.hedged is raw.hedged is False
+
+
+def test_a4_never_waives_the_status_check() -> None:
+    """Review F1: T7 expects `resolved`. An abstained packet holding a partial
+    gold hub beside a partial poison hub is not resolved, under A4 or not."""
+    from membench.utility.context_activation import HEDGED_POISON
+
+    packet = ActivationPacket(anchors=_partial("c7_hub_feature", "c7_hub_market"), abstained=True)
+    amended = _amended(packet, "T7", amendments={HEDGED_POISON})
+    assert not amended.passed
+    assert any(
+        reason.startswith("expected status 'resolved', observed") for reason in amended.failure_reasons
+    ), amended.failure_reasons
+
+
+@pytest.mark.parametrize(
+    "case_id", [f.case_id for f in FIXTURES if f.case_id.startswith("T") and f.gold and f.poison]
+)
+@pytest.mark.parametrize("amended", [False, True])
+def test_adding_poison_never_removes_a_failure_reason(case_id: str, amended: bool) -> None:
+    """Review F1: a twin's partial own-gold candidate, then the same packet with
+    a partial poison beside it. The second packet keeps every failure reason
+    of the first, raw and under A4."""
+    from membench.utility.context_activation import HEDGED_POISON
+
+    fixture = fixture_by_id(case_id)
+    amendments = {HEDGED_POISON} if amended else set()
+    base = ActivationPacket(anchors=_partial(fixture.gold[0]), abstained=True)
+    poisoned = ActivationPacket(anchors=_partial(fixture.gold[0], fixture.poison[0]), abstained=True)
+    before = _amended(base, case_id, amendments=amendments)
+    after = _amended(poisoned, case_id, amendments=amendments)
+    assert set(before.failure_reasons) <= set(after.failure_reasons), (
+        before.failure_reasons,
+        after.failure_reasons,
+    )
+    assert after.passed <= before.passed
 
 
 def test_a4_a_lone_partial_poison_stays_poison() -> None:

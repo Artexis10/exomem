@@ -1,0 +1,148 @@
+{
+  "continuity_digest": "b208a986e509ffd4076243dc4b899e2ffe3aad2cdfa708a838143207eb99502a",
+  "corpus_id": "context-activation-corpus-v4",
+  "group_id": "context-activation-continuity-v2",
+  "passed": 4,
+  "per_case": [
+    {
+      "carried_by": null,
+      "case_id": "K1",
+      "checks": {
+        "carried_by": true,
+        "must_not_resolve": true,
+        "recent_includes": true,
+        "recent_lead": true,
+        "referents": true,
+        "served_subset": true,
+        "serves_nothing": true,
+        "status": true
+      },
+      "failure_reasons": [],
+      "observed_status": "resolved",
+      "passed": true,
+      "recent_head": [
+        [
+          "c5_resource_profile",
+          "activated"
+        ],
+        [
+          "t5_available_resource",
+          "activated"
+        ],
+        [
+          "Knowledge Base/Planning/Other Workstream/_collection.md",
+          "planning"
+        ]
+      ],
+      "resolved": [
+        "c5_resource_profile"
+      ],
+      "scenario": "A fresh session continues its workspace's thread"
+    },
+    {
+      "carried_by": null,
+      "case_id": "K2",
+      "checks": {
+        "carried_by": true,
+        "must_not_resolve": true,
+        "recent_includes": true,
+        "recent_lead": true,
+        "referents": true,
+        "served_subset": true,
+        "serves_nothing": true,
+        "status": true
+      },
+      "failure_reasons": [],
+      "observed_status": "resolved",
+      "passed": true,
+      "recent_head": [
+        [
+          "$recap",
+          "episode"
+        ],
+        [
+          "Knowledge Base/Planning/Other Workstream/_collection.md",
+          "planning"
+        ],
+        [
+          "Knowledge Base/Planning/Roadmap/_collection.md",
+          "planning"
+        ]
+      ],
+      "resolved": [
+        "c4_entity_profile"
+      ],
+      "scenario": "A recorded episode's page leads until newer work"
+    },
+    {
+      "carried_by": null,
+      "case_id": "K3",
+      "checks": {
+        "carried_by": true,
+        "must_not_resolve": true,
+        "recent_includes": true,
+        "recent_lead": true,
+        "referents": true,
+        "served_subset": true,
+        "serves_nothing": true,
+        "status": true
+      },
+      "failure_reasons": [],
+      "observed_status": "unresolved",
+      "passed": true,
+      "recent_head": [
+        [
+          "c5_resource_profile",
+          "activated"
+        ],
+        [
+          "Knowledge Base/Planning/Other Workstream/_collection.md",
+          "planning"
+        ],
+        [
+          "Knowledge Base/Planning/Roadmap/_collection.md",
+          "planning"
+        ]
+      ],
+      "resolved": [],
+      "scenario": "A keyless turn never resolves another conversation's topic"
+    },
+    {
+      "carried_by": "recency",
+      "case_id": "K4",
+      "checks": {
+        "carried_by": true,
+        "must_not_resolve": true,
+        "recent_includes": true,
+        "recent_lead": true,
+        "referents": true,
+        "served_subset": true,
+        "serves_nothing": true,
+        "status": true
+      },
+      "failure_reasons": [],
+      "observed_status": "resolved",
+      "passed": true,
+      "recent_head": [
+        [
+          "Knowledge Base/Notes/Kitchen/sourdough-starter-feeding.md",
+          "edited"
+        ],
+        [
+          "Knowledge Base/Planning/Other Workstream/_collection.md",
+          "planning"
+        ],
+        [
+          "Knowledge Base/Planning/Roadmap/_collection.md",
+          "planning"
+        ]
+      ],
+      "resolved": [
+        "Knowledge Base/Notes/Kitchen/sourdough-starter-feeding.md"
+      ],
+      "scenario": "A hot page that is not an anchor is carried on recency"
+    }
+  ],
+  "scorer_source_sha256": "660bfe9c62fcaeefb9a5cf0cdfedc5b5213df49065e6583d2cc05ed963b426d5",
+  "total": 4
+}

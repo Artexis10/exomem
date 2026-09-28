@@ -138,7 +138,8 @@ in its place, and the recorded report carries both columns.
   `partial` beside a `partial` anchor from the twin's own gold is a hedge,
   not poison. A poison anchor served `resolved`, through any other channel,
   or as a lone `partial` with no correct candidate beside it stays poison.
-  Reported beside the raw score.
+  Reported beside the raw score. A4 removes only the poison hit; it never
+  marks the case as hedging, so it cannot waive a status mismatch.
 - **A5 — Product reds kept (2026-09-28).** T4 (a bare first name stays
   `partial`, so the turn abstains `unresolved` rather than `ambiguous`) and
   T7 (the scoped turn also resolves the market hub) are product defects,
