@@ -819,6 +819,44 @@ def test_warm_covered_deferral_is_batch_success_and_mints_no_full_receipt(
         _clean_warm_deferred_note(tmp_path)
 
 
+@pytest.mark.parametrize("mode_name", ["normal", "quiet"])
+def test_covered_deferral_ignores_the_auxiliaries_embeddings_never_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode_name: str
+) -> None:
+    """A governed write replaces its page AND `log.md` (and often `index.md`).
+
+    Embeddings skip both auxiliaries by name, so no semantic receipt can ever
+    name them. Measured on the personal service 2026-09-28: every governed
+    write in quiet mode (85 of 85 over 14 hours) failed the coverage check on
+    `log.md` alone and minted a durable full-index receipt, and every replay of
+    that receipt failed the same check again.
+    """
+    target = _warm_deferred_note(tmp_path, monkeypatch)
+    monkeypatch.setenv("EXOMEM_MODE", mode_name)
+    log = tmp_path / "Knowledge Base" / "log.md"
+    log.write_text("# Log\n\n- wrote warm-accounting\n", encoding="utf-8")
+    index = tmp_path / "Knowledge Base" / "index.md"
+    index.write_text("# Index\n\n- [[warm-accounting]]\n", encoding="utf-8")
+    rel = "Knowledge Base/Notes/warm-accounting.md"
+    batch = [target, log, index]
+    try:
+        report = index_sync.upsert_after_write(tmp_path, batch)
+        outcome = _outcome(report, "embeddings")
+        assert outcome.outcome == "deferred"
+        # Only the page is embeddable, and only the page is queued.
+        assert deferred_index.status(tmp_path)["paths"] == [rel]
+        assert index_sync.full_upsert_succeeded(tmp_path, batch, report) is True
+        # The auxiliaries alone never bless a deferral: nothing embeddable was
+        # replaced, so there is nothing a receipt could cover.
+        assert index_sync.full_upsert_succeeded(tmp_path, [log, index], report) is False
+
+        completed = vault_module.post_commit_batch_fanout(tmp_path, batch, None, None)
+        assert completed is True
+        assert deferred_index.snapshot_full(tmp_path) == []
+    finally:
+        _clean_warm_deferred_note(tmp_path)
+
+
 def test_warm_deferral_accounting_telemetry_counts_both_outcomes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
