@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import functools
 import json
@@ -115,6 +116,35 @@ def register_health_routes(
             readiness_limiter.append(anyio.CapacityLimiter(2))
         return readiness_limiter[0]
 
+    # The proof in flight, by tool-surface digest. A probe that arrives while
+    # one runs answers from it: waiters queued without bound behind the
+    # limiter, and a client that gave up still left its proof queued, so a 30 s
+    # stall replayed 30 proofs back to back. A finished proof is never reused.
+    readiness_flights: dict[object, asyncio.Future] = {}
+
+    def _readiness_flight(digest: object, traffic: dict) -> asyncio.Future:
+        flight = readiness_flights.get(digest)
+        if flight is not None and not flight.done():
+            return flight
+        flight = asyncio.ensure_future(
+            anyio.to_thread.run_sync(
+                functools.partial(
+                    runtime_readiness_module.runtime_readiness,
+                    mcp_tool_surface_sha256=digest,
+                    traffic=traffic,
+                ),
+                limiter=_readiness_limiter(),
+            )
+        )
+        readiness_flights[digest] = flight
+
+        def _forget(done: asyncio.Future) -> None:
+            if readiness_flights.get(digest) is done:
+                del readiness_flights[digest]
+
+        flight.add_done_callback(_forget)
+        return flight
+
     def _record_health_probe() -> dict:
         try:
             return traffic_monitor.record_health_probe()
@@ -179,14 +209,9 @@ def register_health_routes(
         # reserved-state locks, and one probe held the loop 5.8 s on one at the
         # 0.96.0 promotion, timing out the liveness polls queued behind it. A
         # limiter of its own keeps probes from queueing behind request work.
-        snapshot = await anyio.to_thread.run_sync(
-            functools.partial(
-                runtime_readiness_module.runtime_readiness,
-                mcp_tool_surface_sha256=digest,
-                traffic=traffic,
-            ),
-            limiter=_readiness_limiter(),
-        )
+        # Shielded: one caller going away must not cancel the proof the others
+        # are waiting on.
+        snapshot = await asyncio.shield(_readiness_flight(digest, traffic))
         status_code = 200 if snapshot["status"] == "ready" else 503
         return JSONResponse(
             snapshot,

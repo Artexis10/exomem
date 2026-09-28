@@ -144,3 +144,80 @@ def test_the_readiness_probe_does_not_block_the_event_loop(
             return elapsed
 
     assert asyncio.run(scenario()) < 0.5
+
+
+def test_concurrent_unadmitted_requests_share_one_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review L1: once the required warm is done, every unadmitted request
+    re-proves the catalogue, and each proof takes reserved-state locks. Callers
+    that arrive while a proof for the same generation runs share its answer."""
+    proofs: list[str] = []
+    gate = threading.Event()
+
+    def slow_proof(_root, **_kwargs) -> bool:
+        proofs.append("proof")
+        gate.wait(5.0)
+        return False
+
+    _managed_warm_with_revoked_catalogue(monkeypatch, [False])
+    monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_current", slow_proof)
+    readiness.finish_required_warm()
+    answers: list[dict] = []
+    callers = [
+        threading.Thread(target=lambda: answers.append(readiness.retrieval_admission(tmp_path)))
+        for _ in range(8)
+    ]
+    for caller in callers:
+        caller.start()
+    deadline = time.monotonic() + 5.0
+    while not proofs and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.2)  # every caller is now inside admission
+    gate.set()
+    for caller in callers:
+        caller.join(5.0)
+    assert proofs == ["proof"]
+    assert len(answers) == 8 and all(answer["admitted"] is False for answer in answers)
+    # A later request is not served a finished flight: it proves again.
+    readiness.retrieval_admission(tmp_path)
+    assert proofs == ["proof", "proof"]
+
+
+def test_concurrent_readiness_probes_share_the_in_flight_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review L2: the limiter bounded running proofs at two, but waiters queued
+    without bound, and a client that gave up still left its proof queued: after
+    a 30 s stall, 30 polls replayed their proofs back to back. A probe that
+    arrives while a proof runs now answers from that proof."""
+    httpx = pytest.importorskip("httpx")
+    from fastmcp import FastMCP
+
+    from exomem import runtime_readiness, server_assets
+
+    calls: list[str] = []
+
+    def slow_readiness(**_kwargs):
+        calls.append("proof")
+        time.sleep(0.5)
+        return {"status": "ready"}
+
+    monkeypatch.setattr(runtime_readiness, "runtime_readiness", slow_readiness)
+    app = FastMCP("readiness-coalesce-probe")
+    server_assets.register_health_routes(app)
+    asgi = app.http_app(transport="streamable-http")
+
+    async def scenario() -> list[int]:
+        transport = httpx.ASGITransport(app=asgi)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = asyncio.create_task(client.get("/health/ready"))
+            await asyncio.sleep(0.1)
+            rest = [asyncio.create_task(client.get("/health/ready")) for _ in range(9)]
+            responses = [await first] + [await task for task in rest]
+            # A probe after the flight finished runs a proof of its own.
+            responses.append(await client.get("/health/ready"))
+            return [response.status_code for response in responses]
+
+    assert asyncio.run(scenario()) == [200] * 11
+    assert calls == ["proof", "proof"]
