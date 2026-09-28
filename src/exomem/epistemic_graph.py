@@ -29,6 +29,7 @@ from . import (
     access,
     call_spans,
     deferred_index,
+    foreground_priority,
     freshness,
     graph_sync,
     markdown_relations,
@@ -1563,9 +1564,16 @@ def _disk_vault_freshness(vault_root: Path) -> tuple[int, int, str]:
     Admission precedes the freshness stat, so this preserves the same no-read
     boundary as every other ordinary recall ingress while retaining the direct
     filesystem proof needed when watcher events are missed.
+
+    Inside the off-boundary whole-vault pass (`foreground_priority.bulk()`)
+    the walk yields to foreground requests; its two walks are a fifth of the
+    pass. Everywhere else, under a mutation boundary included, it never does.
     """
     return find_module._walk_freshness_key(
-        recall_policy.iter_recall_markdown(vault_root, vault_module.walk_vault_md(vault_root))
+        recall_policy.iter_recall_markdown(
+            vault_root,
+            foreground_priority.yielding_in_bulk(vault_module.walk_vault_md(vault_root)),
+        )
     )
 
 
@@ -2995,7 +3003,20 @@ class EpistemicGraphIndex:
     def _rebuild_all_off_boundary(
         self, *, accept_stabilized_build: bool = False
     ) -> dict[str, int]:
-        """Build and prove a private sidecar before its bounded replacement hold."""
+        """Build and prove a private sidecar before its bounded replacement hold.
+
+        A foreground bulk pass: its whole-vault walks and proofs pause while an
+        activation is in flight (`foreground_priority`), except under the
+        publication hold or any other boundary, where a yield returns at once.
+        """
+        with foreground_priority.bulk():
+            return self._rebuild_all_off_boundary_bulk(
+                accept_stabilized_build=accept_stabilized_build
+            )
+
+    def _rebuild_all_off_boundary_bulk(
+        self, *, accept_stabilized_build: bool = False
+    ) -> dict[str, int]:
         live = self.path
         attempts = 0
         superseded_retries = 0
@@ -4188,6 +4209,10 @@ class EpistemicGraphIndex:
             with conn:
                 if kb.is_dir():
                     for md in find_module._walk_md(kb):
+                        # The pass writes only its private sidecar, so a
+                        # pause here holds no reader; it holds only the
+                        # rebuild-owner claim a joining writer already waits on.
+                        foreground_priority.yield_to_foreground()
                         if self._index_path(
                             conn, md, resolver=resolver, commit=False
                         ):
@@ -4563,7 +4588,7 @@ class EpistemicGraphIndex:
         expected: dict[str, GraphSourceSignature],
     ) -> bool:
         """Rebind every incrementally published row to its exact source bytes."""
-        for rel, version in expected.items():
+        for rel, version in foreground_priority.yielding_in_bulk(expected.items()):
             path = self.vault_root / rel
             if not recall_policy.is_recall_candidate(self.vault_root, path):
                 return False
@@ -4582,7 +4607,10 @@ class EpistemicGraphIndex:
             return frozenset(
                 rel
                 for path in recall_policy.iter_recall_markdown(
-                    self.vault_root, vault_module.walk_vault_md(self.vault_root)
+                    self.vault_root,
+                    foreground_priority.yielding_in_bulk(
+                        vault_module.walk_vault_md(self.vault_root)
+                    ),
                 )
                 if (rel := _vault_rel(self.vault_root, path)) is not None
             )
@@ -4597,7 +4625,9 @@ class EpistemicGraphIndex:
                 rel
                 for path in recall_policy.iter_recall_markdown(
                     self.vault_root,
-                    find_module._walk_md(kb) if kb.is_dir() else (),
+                    foreground_priority.yielding_in_bulk(
+                        find_module._walk_md(kb) if kb.is_dir() else ()
+                    ),
                 )
                 if (rel := _vault_rel(self.vault_root, path)) is not None
             )
@@ -4651,7 +4681,7 @@ class EpistemicGraphIndex:
             if (set(indexed_hashes) - changed) != (set(expected_membership) - changed):
                 return None
         versions: dict[str, GraphSourceSignature] = {}
-        for rel in sorted(expected_membership):
+        for rel in foreground_priority.yielding_in_bulk(sorted(expected_membership)):
             path = self.vault_root / rel
             try:
                 raw_bytes = vault_module.read_bytes_without_pinning(path)

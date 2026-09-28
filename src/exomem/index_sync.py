@@ -773,7 +773,7 @@ def record_failed_refresh(vault_root: Path, paths: list[Path]) -> int:
 
 def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object) -> bool:
     """Whether a full-upsert report completed or retained exact durable work."""
-    from . import graph_sync
+    from . import graph_sync, index_paths
 
     if (
         not isinstance(report, IndexSyncReport)
@@ -872,16 +872,24 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
             # branch, `deferred_warmup` from the warm-up branch); anything
             # else — `deferred_warmup_volatile` included — carries no claim,
             # so a stale queue entry can never bless it.
+            # Coverage is judged over what embeddings index at all, as the
+            # graph clause above judges over graph inputs: `log.md` and
+            # `index.md` ride along with every governed write and no semantic
+            # receipt can ever name them, so requiring them minted a full
+            # receipt on every quiet-mode write and failed every replay of it.
+            embeddable_rels = {
+                rel for rel in replaced_rels if index_paths.is_embeddable_path(root / rel)
+            }
             if (
                 component.code in {"deferred_durable", "deferred_warmup"}
-                and replaced_rels
+                and embeddable_rels
             ):
                 if receipt_rels is None:
                     receipt_rels = {
                         receipt.rel_path
                         for receipt in deferred_index.snapshot(vault_root)
                     }
-                if replaced_rels <= receipt_rels:
+                if embeddable_rels <= receipt_rels:
                     _note_deferral("covered_deferral_accepted")
                     continue
             _note_deferral("uncovered_deferral_escalated")

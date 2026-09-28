@@ -2078,8 +2078,13 @@ def _commit_existing_locked(
     auxiliaries: tuple[vault.PlannedWrite, ...],
     derived_auxiliaries: tuple[tuple[str, vault.PlannedWrite], ...],
     result: semantic_contract.SemanticContractResult,
+    index_reports: list[Any] | None = None,
 ) -> ExistingCommit:
-    """Plan lifecycle state and commit while the semantic namespace is held."""
+    """Plan lifecycle state and commit while the semantic namespace is held.
+
+    The batch's index fan-out runs as the namespace is released, so its report
+    lands in `index_reports` after this returns; the caller attaches it.
+    """
     if preflight.committed_replay:
         if preflight.applicability != "full":
             return ExistingCommit(
@@ -2228,7 +2233,7 @@ def _commit_existing_locked(
             "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
             str(error),
         ) from error
-    reports: list[Any] = []
+    reports: list[Any] = [] if index_reports is None else index_reports
     from . import vocabulary_auxiliaries
 
     manifest = vocabulary_auxiliaries.seal(
@@ -2800,6 +2805,7 @@ def _commit_existing(
                 except Exception:  # noqa: BLE001 — rebuildable graph cache never blocks commit
                     pass
 
+        index_reports: list[Any] = []
         try:
             with _timed_acquire(
                 timings,
@@ -2808,13 +2814,18 @@ def _commit_existing(
             ):
                 log_active_mutation_phase("semantic_locked_commit_start")
                 with mutation_timing_span(timings, "commit.locked_commit"):
-                    return _commit_existing_locked(
+                    committed = _commit_existing_locked(
                         root,
                         preflight=preflight,
                         auxiliaries=auxiliaries,
                         derived_auxiliaries=derived_auxiliaries,
                         result=result,
+                        index_reports=index_reports,
                     )
+            # The fan-out ran as the creation lock was released.
+            if committed.index_report is None and index_reports:
+                committed = replace(committed, index_report=index_reports[0])
+            return committed
         except vault.PathGuardError as error:
             # A caller-captured auxiliary guard (log/index) lost a race the
             # wide boundary used to prevent. The batch aborted atomically —
