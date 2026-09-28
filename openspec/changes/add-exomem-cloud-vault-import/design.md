@@ -65,7 +65,9 @@ For each import, cellctl:
 2. presigns one PUT URL per part, valid for 24 hours;
 3. writes the part URLs to the import row.
 
-The client encrypts and uploads the parts directly, and reads each part's ETag. When it marks the import uploaded, it reports the part ETags and the ciphertext's SHA-256 and size through its authenticated Substrate session. cellctl then completes the multipart upload itself with those ETags. The import Job checks the SHA-256 before decrypting anything.
+The client encrypts and uploads the parts directly, and reads each part's ETag. When it marks the import uploaded, it reports the part ETags and the ciphertext's SHA-256 and size through its authenticated Substrate session. cellctl then completes the multipart upload itself with those ETags. The import Job checks the SHA-256 before decrypting anything (D5).
+
+Uploads resume within one page session. age ciphertext is randomised, and the browser's SHA-256 is not incremental across reloads, so a reload starts the upload again. `exomem cloud import` is the path for vaults too large for that.
 
 The web app and the gateway never carry the bytes. The Cloud bucket gains a CORS rule for the web app's origin that allows `PUT` and exposes `ETag`. A B2 lifecycle rule cancels unfinished large files after two days, as a backstop for uploads nobody completes.
 
@@ -102,7 +104,7 @@ The prepare, import and discard Jobs each run under an `import` hold, following 
 2. it runs the Job on the cell image;
 3. it releases the hold and starts the cell again, on success or failure.
 
-The import Job downloads the ciphertext through a presigned GET that cellctl gives it, checks its SHA-256, and streams it through `age -d` into the validating unpacker (D6). The identity comes from the volume.
+The import Job reads the ciphertext twice through a presigned GET that cellctl gives it. The first pass only computes its SHA-256, so no byte an attacker could have substituted reaches the decryptor or the tar parser before the digest matches. The second pass streams it through `age -d` into the validating unpacker (D6). Neither pass stores the ciphertext. The identity comes from the volume.
 
 This needs:
 
@@ -122,7 +124,9 @@ The unpacker reads the tar stream member by member. It checks every member befor
 - a second member at a path already written, or a member beneath a file;
 - going over the declared or maximum size or member count, or over the volume's free space less a reserve.
 
-It writes into `/data/.import-<import-id>`, a new directory on the same volume, never into the vault. On any refusal it removes that directory.
+It accepts a plain or compressed tar stream (gzip, bzip2 or xz). Sizes stay bounded by the member headers, the caps and free space, and the hold's deadline bounds the time decompression can take.
+
+It writes into `/data/.import-<import-id>`, a new directory on the same volume, never into the vault. On any refusal it removes that directory. On success it syncs the filesystem before reporting, because the tenant path deletes the ciphertext once the import is committed.
 
 The staging directory is committed only when all of these hold:
 
@@ -135,15 +139,15 @@ Where the committed result goes depends on the path:
 - **Tenant import.** One `rename` moves the staging directory to `/data/vault/_Imports/<date>-<import-id>/`. Nothing existing is touched.
 - **Restore.** The current vault and the vault's derived-state directory are moved into `/data/.restore-prior-<import-id>/`, and the staging directory is renamed to `/data/vault`. The runtime rebuilds derived state on start. The custody directory beside the derived state stays where it is.
 
-The two restore renames are not atomic together. While a `/data/.restore-prior-*` directory exists, `cell-init` refuses to create a vault, so a cell started in that window fails visibly instead of initialising an empty vault.
+The two restore renames are not atomic together. While a `/data/.restore-prior-*` directory exists, `cell-init` refuses to create a vault, so a cell started in that window fails visibly instead of initialising an empty vault. That guard ships with the cell commands (section 2). The owner restore runs on an image without it, and relies on cellctl staying paused until the swap is done (D9).
 
-The prior directory is kept until the restored cell has passed recall and a backup, then deleted. Rolling back is the same two renames in reverse.
+The prior directory is kept until the restored cell has passed recall, a governed write and a backup, then deleted. Rolling back removes the derived state the restored cell has written since it started, then moves the prior vault and derived state back.
 
 ### D7. Adoption: the `adopt_vault` exclusion is lifted
 
 `adopt_vault` becomes available on cloud cells, without a path restriction. Its own lifting condition is met. Everything it can read belongs to the tenant, and `adoption_studio` already runs on cells without one. The tenant's assistant scans an import folder, and Adoption Studio proposes how to file it. Filing uses governed writes, with provenance to the original path and hash.
 
-`transfer_artifact`, `process_media` and `read_media` stay excluded.
+`transfer_artifact`, `process_media` and `read_media` stay excluded. `transfer_artifact`'s lifting condition names an artifact-upload path to Cloud, and this change adds one, but the tool could not use it. The import path is a batch Job under a hold that ends in a staging folder, not a live bridge a running cell's tool can hand a file to. Task 2.3 rewords that exclusion's condition to say so.
 
 ### D8. Cleanup, discard and failure
 
@@ -182,13 +186,13 @@ The owner's vault comes in through `docs/runbooks/cloud-operator-import.md`. It 
 2. **Size the cell.** Grow `storage_gib` to hold the new vault, the prior vault, and derived state while both exist.
 3. **Mint the one-time key.** `age-keygen` on the node, into `/dev/shm`.
 4. **Stream.** On the source machine, tar the vault and pipe it through `age -r <recipient>`. The ciphertext streams through the operator's machine to a file on the node, and its SHA-256 is recorded at both ends. The operator's machine only ever sees ciphertext.
-5. **Stop the cell durably.** Pause cellctl by scaling its Deployment to zero, then scale the cell's StatefulSet to zero and wait until no cell pod exists. A `desired_state` write would be rewritten by Substrate's reconcile, and cellctl would then start the runtime mid-swap. Pausing cellctl also pauses backups and upgrades for every cell for the few minutes of the swap.
+5. **Stop the cell durably.** Pause cellctl by scaling its Deployment to zero, then scale the cell's StatefulSet to zero and wait until no cell pod exists. A `desired_state` write would be rewritten by Substrate's reconcile, and cellctl would then start the runtime mid-swap. Pausing cellctl also pauses backups and upgrades for every cell for the few minutes of the swap. Only a platform chart deploy would bring it back early, so none runs during the window.
 6. **Unpack and swap.** A helper pod on the cell image mounts the cell's volume. The unpacker is piped into it, because the running image predates it. The node decrypts, and break-glass exec streams the plaintext into the unpacker. The commit gate and the swap follow D6. The operator checks that no cell pod exists before each volume change.
-7. **Start.** Scale the StatefulSet back and resume cellctl. `cell-init` migrates state, and the runtime rebuilds its indexes.
-8. **Verify.** A known Knowledge Base note is found through the owner's own connector. The operator lists notes in the prior vault that the restored vault lacks, and shows the owner before anything is deleted.
+7. **Start.** Scale the StatefulSet back by hand, then resume cellctl. cellctl would not restore the replica count itself: the row still reads `running`, so it only checks readiness. `cell-init` migrates state, and the runtime rebuilds its indexes.
+8. **Verify.** Through the owner's own connector, a known Knowledge Base note is found, and one governed write is committed and read back. A vault the cell cannot serve can refuse every write while recall still works. Before the swap, the operator lists notes in the prior vault that the restored vault lacks, and shows the owner before anything is deleted.
 9. **Clean up.** The node key and the ciphertext are deleted as soon as step 8 passes: the prior vault is the rollback, not the ciphertext. The prior directory is deleted after the next scheduled backup succeeds. That backup's duration is checked against the backup Job's deadline, because the owner's cell is the rollout canary and a backup that cannot finish would stall every upgrade.
 
-*Rehearsal.* The swap is rehearsed on the cell image against a volume with existing runtime state: the literal steps 6 and 7, then recall of a known note, and a check that the prior vault's notes no longer answer. In production, the prior vault and its derived state are kept, so a restore that fails to start is reversed in minutes.
+*Rehearsal.* The swap is rehearsed on the cell image against a volume with existing runtime state: the literal steps 6 and 7, recall of a known note, a check that the prior vault's notes no longer answer, a governed write, and the rollback. In production, the prior vault and its derived state are kept, so a restore that fails to start is reversed in minutes. The rehearsal cannot show the owner's real vault against the cell's memory limit and start-up deadlines. A failure there is a failure to start, which the rollback reverses.
 
 *Rejected: a scratch-namespace rehearsal before the real swap.* It re-runs the same swap on a copy, which costs a rendered scratch cell, a port-forward and a probe. Its only extra coverage is a start failure, and the kept prior vault already reverses that.
 

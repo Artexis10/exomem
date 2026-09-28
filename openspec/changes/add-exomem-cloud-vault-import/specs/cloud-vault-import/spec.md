@@ -27,7 +27,7 @@ The archive SHALL be uploaded as ciphertext directly to object storage, into one
 - allow writing only;
 - expire within 24 hours.
 
-The tenant's client SHALL report the parts' ETags and the ciphertext's SHA-256 and size through its authenticated session. The controller SHALL complete the upload with exactly those ETags, and the import SHALL verify the SHA-256 before decrypting. Encryption to the import's recipient is not evidence of who uploaded an archive.
+The tenant's client SHALL report the parts' ETags and the ciphertext's SHA-256 and size through its authenticated session. The controller SHALL complete the upload with exactly those ETags. The import SHALL verify the SHA-256 over the whole ciphertext before any byte of it is decrypted. Encryption to the import's recipient is not evidence of who uploaded an archive.
 
 The web app, the gateway and the control database MUST NOT receive, proxy or store the archive's bytes.
 
@@ -114,12 +114,14 @@ A restore of the Cloud owner's existing Exomem vault into the owner's cell SHALL
 - set aside the vault's derived state, so that the cell rebuilds it;
 - keep the prior vault and its derived state until the restored cell has answered recall and a backup has completed.
 
-A restore SHALL be refused when the source vault's governance schema is one a standalone cell cannot serve. The cell SHALL be stopped by a means the control plane cannot undo mid-restore, and the operator SHALL confirm no runtime pod uses the volume before each change to it. The swap SHALL be rehearsed on the same cell image before production. A cell SHALL NOT initialise an empty vault while a restore's prior directory exists.
+A restore SHALL be refused when the source vault's governance schema is one a standalone cell cannot serve. The cell SHALL be stopped by a means the control plane cannot undo mid-restore, and the operator SHALL confirm no runtime pod uses the volume before each change to it. The swap and its rollback SHALL be rehearsed on the same cell image before production.
+
+While a restore's prior directory exists, a cell SHALL NOT start on an empty vault. A cell image that includes the import commands refuses to initialise one. On an image without them, the restore keeps the controller stopped until the swap is complete.
 
 #### Scenario: The restored cell serves recall
 
 - **WHEN** an operator restores the owner's vault into the owner's cell
-- **THEN** the cell keeps its identity and custody, starts on the restored vault, answers recall for a known note, and no longer answers for notes only the prior vault held
+- **THEN** the cell keeps its identity and custody, starts on the restored vault, answers recall for a known note, accepts a governed write, and no longer answers for notes only the prior vault held
 - **AND** its next backup succeeds before the prior vault is deleted
 
 #### Scenario: Incompatible governance schema
