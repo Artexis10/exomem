@@ -162,3 +162,71 @@ def test_a_replayed_page_the_registry_does_not_vouch_for_still_rebuilds(
     assert "reason=caller_path_outside_delta" in caplog.text
     assert len(whole_vault_passes) == 1
     _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_replayed_stale_page_does_not_publish_past_a_standing_full_marker(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """The drain's first rule: a standing full marker drains the queue with it.
+
+    The replay's repair is the drain's repair, so it must not serve reads as
+    current while whole-vault debt is outstanding: either the graph stays
+    unavailable or the marker's debt is paid.
+    """
+    root = _built(vault, whole_vault_passes)
+    _publish_past_a_stale_row(root)
+    deferred_index.advance_graph_full_rebuild(root)
+    EpistemicGraphIndex(root)._mark_unavailable()
+    whole_vault_passes.clear()
+
+    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+
+    if EpistemicGraphIndex(root).available():
+        assert deferred_index.graph_full_rebuild_pending(root) is None, (
+            "reads served as current while the whole-vault debt stands"
+        )
+        assert whole_vault_passes, "the full marker's debt was never paid"
+        assert deferred_index.snapshot_graph(root) == [], "left receipts for a duplicate drain"
+        _assert_matches_a_fresh_rebuild(root)
+    else:
+        assert deferred_index.graph_full_rebuild_pending(root) is not None
+
+
+def test_a_replayed_stale_page_is_not_repaired_against_an_unsettled_epoch(
+    vault: Path, whole_vault_passes: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drain's second rule: per-path repair needs a lineage it can classify."""
+    root = _built(vault, whole_vault_passes)
+    _publish_past_a_stale_row(root)
+    drained: list[list[Path]] = []
+    real_drain = EpistemicGraphIndex.drain_paths
+
+    def recorded(self, paths, *args, **kwargs):
+        drained.append(list(paths))
+        return real_drain(self, paths, *args, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "drain_paths", recorded, raising=True)
+    monkeypatch.setattr(
+        EpistemicGraphIndex, "epoch_admits_incremental_repair", lambda self: False, raising=True
+    )
+
+    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+
+    assert drained == [], "repaired paths against a lineage it could not classify"
+    if EpistemicGraphIndex(root).available():
+        assert whole_vault_passes, "published without repairing the stale row"
+        _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_replayed_stale_page_clears_its_own_receipts(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """The drain's third rule: receipts the repair covered clear by CAS."""
+    root = _built(vault, whole_vault_passes)
+    _publish_past_a_stale_row(root)
+
+    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+
+    assert whole_vault_passes == []
+    assert deferred_index.snapshot_graph(root) == [], "left receipts for a duplicate drain"
+    _assert_matches_a_fresh_rebuild(root)
