@@ -256,13 +256,16 @@ T3, T4, T5 and T7 now pass, raw and amended:
 | Case | Raw | What changed |
 |------|-----|--------------|
 | T3 | pass | A plan anchor reports its item's own page; the collection stays its home (task 6.12) |
-| T4 | pass | A bare first name two unlinked people share is `ambiguous`, and the carry is not asked |
+| T4 | pass | A bare first name two unlinked people share is `ambiguous`, and the carry is not asked; a shared word forms that question only for people, or when a cased turn capitalises it away from a sentence start |
 | T5 | pass | A unit the anchor's own lede already says is not served again as a fragment |
-| T7 | pass | The qualifier "feature implementation" narrows the two AI-search senses to one |
+| T7 | pass | The contiguous run "AI search feature" strictly contains the run naming the market hub, so the turn narrows to the feature hub; a word of the wider name said elsewhere narrows nothing |
 | C3 | red | The item ref is served, and the turn's words reach the other workstream's item (now a partial poison anchor) |
 
-The other red cases keep their round-2 reasons. C8's carry now names the
-current head alone (retired revisions no longer count toward a word's rarity),
+Under amendments A2+A4, A7 and A8 alone, the passing set is the raw one: A8
+credits C4's carried failure note, but the colleague's entity is still never
+reached (recall 0.50). The other red cases keep their round-2 reasons. C8's
+carry now names the current head alone (retired revisions, by status or by
+`superseded_by`, no longer count toward a word's rarity),
 but no units-lane role reads a `current state` observation off a carried page.
 A carried page is `retrieval_carried`, never `resolved` (design D3), and its
 units are fragments (D9), so no positive case whose gold is an ordinary note
