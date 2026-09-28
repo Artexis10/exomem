@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from datetime import date
 from typing import Any
 
 from .working_set_index import normalize, terms_of
@@ -96,6 +97,51 @@ def current_state_for(
         )
         if entry is not None:
             out.append(entry)
+    return temper_weak_entries(out, anchors)
+
+
+#: Evidence that names an anchor by shared WORDS alone. An anchor whose every
+#: evidence kind is in this set resolved on vocabulary, which two unrelated
+#: pages can share; its state is not vouched for by anything else.
+WEAK_EVIDENCE = frozenset({"lexical_overlap", "rare_term", "recency", "category_match", "usage_prior"})
+#: A state older than this, on a weakly-resolved anchor, is held back rather
+#: than served as current. Younger state is served labelled with its age.
+WEAK_STATE_MAX_AGE_DAYS = 30
+
+
+def temper_weak_entries(
+    entries: Sequence[Mapping[str, Any]],
+    anchors: Sequence[Any],
+    *,
+    today: "date | None" = None,
+) -> tuple[dict[str, Any], ...]:
+    """Hold back or age-label current state from weakly-resolved anchors.
+
+    Strongly-resolved anchors (an alias, a claim, a vector band, corroboration,
+    the agent's own pick) are untouched. A weak one's undated or old state is
+    dropped; recent state is kept and says how it was resolved and how old it is.
+    """
+    from datetime import date as _date
+
+    now = today or _date.today()
+    weak = {
+        _anchor_ref(anchor)
+        for anchor in anchors
+        if (evidence := frozenset(getattr(anchor, "evidence", ()) or ()))
+        and evidence <= WEAK_EVIDENCE
+    }
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        if entry.get("anchor") not in weak:
+            out.append(dict(entry))
+            continue
+        try:
+            age = (now - _date.fromisoformat(str(entry.get("as_of") or "")[:10])).days
+        except ValueError:
+            continue
+        if age > WEAK_STATE_MAX_AGE_DAYS:
+            continue
+        out.append({**entry, "resolved_by": "lexical", "age_days": max(age, 0)})
     return tuple(out)
 
 

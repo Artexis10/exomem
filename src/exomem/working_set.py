@@ -37,6 +37,7 @@ from . import (
     request_budget,
     source_taxonomy,
     working_set_heat,
+    working_set_currency,
     working_set_index,
     working_set_resolve,
     working_set_state,
@@ -420,8 +421,9 @@ def build_packet(
     def _sort_key(item: LaneItem) -> tuple:
         return (
             0 if item.level == "unit" else 1,
-            order.get(item.role, len(order)),
+            # History ranks below current material whatever role asked for it.
             _lifecycle_rank(item.lifecycle),
+            order.get(item.role, len(order)),
             -_date_rank(item.updated),
             item.ref,
         )
@@ -439,7 +441,9 @@ def build_packet(
     # the first role in registry priority order that reached it — the most
     # specific lens that asked. A `level`-less or ref-less item is left
     # alone: its identity is not its ref.
-    ordered = _without_lede_repeats(_deduplicated(sorted(items, key=_sort_key)))
+    ordered = _without_lede_repeats(
+        _deduplicated(sorted(working_set_currency.annotate(items), key=_sort_key))
+    )
     units: list[dict[str, Any]] = []
     deferred: list[tuple[LaneItem, str]] = []
     per_role: dict[str, int] = {}
@@ -467,22 +471,28 @@ def build_packet(
             continue
         text = bounded_text(item.text)
         role_count = per_role.get(item.role, 0)
-        if role_count >= MAX_ITEMS_PER_ROLE:
+        # An explicit supersession unit is what replaced the older claim; capped
+        # to a pointer it would leave the old claim standing unopposed.
+        if role_count >= MAX_ITEMS_PER_ROLE and not item.provenance.get("supersession"):
             deferred.append((item, "role_cap"))
             continue
         if used + len(text) > limit or not text:
             deferred.append((item, "budget"))
             continue
-        units.append(
-            {
-                "ref": item.ref,
-                "role": item.role,
-                "text": text,
-                "lifecycle": item.lifecycle,
-                "updated": item.updated,
-                "provenance": _provenance(item),
-            }
-        )
+        unit = {
+            "ref": item.ref,
+            "role": item.role,
+            "text": text,
+            "lifecycle": item.lifecycle,
+            "updated": item.updated,
+            "provenance": _provenance(item),
+        }
+        if item.lifecycle != "active":
+            unit["history"] = True
+        for key in ("newer_than", "superseded_by_outcome"):
+            if item.provenance.get(key):
+                unit[key] = item.provenance[key]
+        units.append(unit)
         used += len(text)
         per_role[item.role] = role_count + 1
 
@@ -841,6 +851,7 @@ def _units_lane(
         parent = str(getattr(hit, "parent_path", "") or "")
         superseded_by = list(getattr(hit, "parent_superseded_by", ()) or ())
         lifecycle = "superseded" if superseded_by else "active"
+        supersedes = working_set_currency.relation_targets(getattr(hit, "relations", None))
         out.append(
             LaneItem(
                 role=role.id,
@@ -850,12 +861,21 @@ def _units_lane(
                 title=str(getattr(hit, "parent_title", "") or parent),
                 text=str(getattr(hit, "content", "") or getattr(hit, "excerpt", "") or ""),
                 lifecycle=lifecycle,
-                updated=str(getattr(hit, "parent_updated", "") or ""),
+                # The unit's OWN authored time. A unit with none is served
+                # undated, with the page's time labelled apart as
+                # `page_updated`: the page changed when ANY unit on it did.
+                updated=working_set_currency.own_time(
+                    str(getattr(hit, "content", "") or ""),
+                    getattr(hit, "context", None),
+                ),
                 anchor=parent,
                 provenance={
                     "category": str(getattr(hit, "category", "") or ""),
                     "kind": str(getattr(hit, "kind", "") or ""),
                     "superseded_by": superseded_by,
+                    "page_updated": str(getattr(hit, "parent_updated", "") or ""),
+                    "supersedes_targets": list(supersedes),
+                    "supersession": bool(supersedes),
                 },
                 why=role.description or f"{role.id} lane",
             )
