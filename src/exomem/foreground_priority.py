@@ -65,12 +65,25 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     """Wait while a foreground request runs, at most `max_wait`; return the wait."""
     if not _in_flight:  # unlocked read: the common case costs one load
         return 0.0
-    if getattr(_local, "depth", 0):
+    if getattr(_local, "depth", 0) or _holds_a_boundary():
         return 0.0
     started = time.monotonic()
     with _condition:
         _condition.wait_for(lambda: _in_flight == 0, timeout=max(0.0, max_wait))
     return time.monotonic() - started
+
+
+def _holds_a_boundary() -> bool:
+    """A mutation boundary or vault creation lock held by this thread.
+
+    Pausing there would make every writer queued on it wait out the request
+    too, so a yield under one returns at once whatever called it.
+    """
+    from . import mutation_lock, vault
+
+    return bool(getattr(vault._HELD_LOCKS, "keys", None)) or (  # noqa: SLF001
+        mutation_lock.current_thread_holds_boundary()
+    )
 
 
 def yielding(items: Iterable[_T], *, max_wait: float = MAX_YIELD_SECONDS) -> Iterator[_T]:
@@ -94,8 +107,8 @@ def yielding_in_bulk(items: Iterable[_T]) -> Iterable[_T]:
     """`yielding(items)` inside `bulk()` on this thread; `items` untouched elsewhere.
 
     For helpers shared between a bulk pass and a caller holding a mutation
-    boundary: only the bulk pass may pause, since a pause under a boundary
-    would make every writer queued on it wait for the foreground request too.
+    boundary: only the bulk pass may pause, and even there never while this
+    thread holds a boundary (see `_holds_a_boundary`).
     """
     if getattr(_local, "bulk", 0):
         return yielding(items)

@@ -1885,6 +1885,18 @@ def _state_for(lock_path: Path) -> _LocalLockState:
         return state
 
 
+def current_thread_holds_boundary() -> bool:
+    """Whether this thread holds any mutation boundary in this process.
+
+    For schedulers that must never pause work while a boundary is held: every
+    writer queued on it would wait out the pause too.
+    """
+    ident = threading.get_ident()
+    with _LOCAL_STATES_GUARD:
+        states = tuple(_LOCAL_STATES.values())
+    return any(state.owner_thread == ident for state in states)
+
+
 def _reset_in_forked_child() -> None:
     """Drop inherited thread state and close inherited lock descriptors.
 

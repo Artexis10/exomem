@@ -195,3 +195,67 @@ def test_activation_runs_as_a_foreground_request(
     commands.op_activate_context(tmp_path, turn="where were we?")
     assert seen == [1]
     assert foreground_priority.in_flight() == 0
+
+
+def test_a_thread_holding_a_mutation_boundary_never_pauses(tmp_path: Path) -> None:
+    """A pause under a boundary would queue every writer behind the request too."""
+    from exomem import mutation_lock
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def request() -> None:
+        with foreground_priority.foreground():
+            entered.set()
+            release.wait(5.0)
+
+    worker = threading.Thread(target=request)
+    worker.start()
+    (tmp_path / "state").mkdir()
+    coordinator = mutation_lock.VaultMutationCoordinator(tmp_path / "state", tmp_path)
+    try:
+        assert entered.wait(5.0)
+        with coordinator.hold(request_id="bulk", operation="bulk_probe"):
+            with foreground_priority.bulk():
+                started = time.monotonic()
+                assert foreground_priority.yield_to_foreground(max_wait=1.0) == 0.0
+                assert list(foreground_priority.yielding_in_bulk(["a"])) == ["a"]
+                assert time.monotonic() - started < 0.2
+    finally:
+        release.set()
+        worker.join(5.0)
+
+
+def test_every_whole_vault_phase_yields_and_never_under_a_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measured on a 4.6k-page vault: after the pass and its disk walks yield,
+    ~10 s per rebuild still ran with no yield: three membership walks (6.4 s),
+    source-version proofs (2.3 s), the recall reconcile (1.4 s) and the
+    resolver's source versions (0.6 s)."""
+    import traceback
+
+    from exomem import mutation_lock
+
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    for index in range(4):
+        (notes / f"page-{index}.md").write_text(
+            f"---\ntype: note\n---\n\n# Page {index}\n\nSee [[page-{(index + 1) % 4}]].\n",
+            encoding="utf-8",
+        )
+    callers: set[str] = set()
+    held_while_yielding: list[str] = []
+    real_holds = mutation_lock.current_thread_holds_boundary
+
+    def spy(*, max_wait: float = foreground_priority.MAX_YIELD_SECONDS) -> float:
+        frames = [frame.name for frame in traceback.extract_stack(limit=12)]
+        callers.update(frames)
+        if real_holds():
+            held_while_yielding.append(frames[-2])
+        return 0.0
+
+    monkeypatch.setattr(foreground_priority, "yield_to_foreground", spy)
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    assert {"_recall_membership", "_source_versions_current", "_resolver_source_versions"} <= callers
+    assert held_while_yielding == []

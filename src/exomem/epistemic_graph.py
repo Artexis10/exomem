@@ -2983,7 +2983,20 @@ class EpistemicGraphIndex:
     def _rebuild_all_off_boundary(
         self, *, accept_stabilized_build: bool = False
     ) -> dict[str, int]:
-        """Build and prove a private sidecar before its bounded replacement hold."""
+        """Build and prove a private sidecar before its bounded replacement hold.
+
+        A foreground bulk pass: its whole-vault walks and proofs pause while an
+        activation is in flight (`foreground_priority`), except under the
+        publication hold or any other boundary, where a yield returns at once.
+        """
+        with foreground_priority.bulk():
+            return self._rebuild_all_off_boundary_bulk(
+                accept_stabilized_build=accept_stabilized_build
+            )
+
+    def _rebuild_all_off_boundary_bulk(
+        self, *, accept_stabilized_build: bool = False
+    ) -> dict[str, int]:
         live = self.path
         attempts = 0
         superseded_retries = 0
@@ -3798,8 +3811,7 @@ class EpistemicGraphIndex:
                 attempts += 1
                 retarget = False
                 attempt_started = time.monotonic()
-                with foreground_priority.bulk():
-                    before_disk = _disk_vault_freshness(self.vault_root)
+                before_disk = _disk_vault_freshness(self.vault_root)
                 before = _recall_projection_identity(self.vault_root, disk_freshness=before_disk)
                 resolver = find_module.recall_resolver_snapshot(
                     self.vault_root, freshness=before_disk
@@ -3833,8 +3845,7 @@ class EpistemicGraphIndex:
                     continue
                 pass_started = True
                 report = self._rebuild_all_pass(resolver)
-                with foreground_priority.bulk():
-                    after_disk = _disk_vault_freshness(self.vault_root)
+                after_disk = _disk_vault_freshness(self.vault_root)
                 _note_whole_vault_pass(self.vault_root, time.monotonic() - attempt_started)
                 # Bound to names so the `else` below can say *which* of the three
                 # conditions moved without re-running either O(vault) proof.  The
@@ -4557,7 +4568,7 @@ class EpistemicGraphIndex:
         expected: dict[str, GraphSourceSignature],
     ) -> bool:
         """Rebind every incrementally published row to its exact source bytes."""
-        for rel, version in expected.items():
+        for rel, version in foreground_priority.yielding_in_bulk(expected.items()):
             path = self.vault_root / rel
             if not recall_policy.is_recall_candidate(self.vault_root, path):
                 return False
@@ -4576,7 +4587,10 @@ class EpistemicGraphIndex:
             return frozenset(
                 rel
                 for path in recall_policy.iter_recall_markdown(
-                    self.vault_root, vault_module.walk_vault_md(self.vault_root)
+                    self.vault_root,
+                    foreground_priority.yielding_in_bulk(
+                        vault_module.walk_vault_md(self.vault_root)
+                    ),
                 )
                 if (rel := _vault_rel(self.vault_root, path)) is not None
             )
@@ -4591,7 +4605,9 @@ class EpistemicGraphIndex:
                 rel
                 for path in recall_policy.iter_recall_markdown(
                     self.vault_root,
-                    find_module._walk_md(kb) if kb.is_dir() else (),
+                    foreground_priority.yielding_in_bulk(
+                        find_module._walk_md(kb) if kb.is_dir() else ()
+                    ),
                 )
                 if (rel := _vault_rel(self.vault_root, path)) is not None
             )
@@ -4645,7 +4661,7 @@ class EpistemicGraphIndex:
             if (set(indexed_hashes) - changed) != (set(expected_membership) - changed):
                 return None
         versions: dict[str, GraphSourceSignature] = {}
-        for rel in sorted(expected_membership):
+        for rel in foreground_priority.yielding_in_bulk(sorted(expected_membership)):
             path = self.vault_root / rel
             try:
                 raw_bytes = vault_module.read_bytes_without_pinning(path)
