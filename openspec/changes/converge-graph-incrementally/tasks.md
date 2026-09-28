@@ -440,3 +440,11 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   standalone code test, red on 544662fa and green after the fix. Scoped graph, standby,
   index_sync, bounded join, drain, records-recall, trash-exclusion, media-worker and
   durable-closure suites: 1154 passed, 13 skipped.
+  Recheck 2: under a durable checkpoint the acknowledgement covers, that request
+  deferral entered the checkpoint-deferred block and was reported as a completed
+  whole-vault rebuild. A deferred and queued report from a caller that can carry
+  pending now dispatches as `deferred`/`graph_repair_queued`, a coverage code,
+  whatever the acknowledgement covers. With no checkpoint the dispatch cannot be
+  `deferred`, so it stays `completed`/`graph_repair_queued_for_drain`, which is not
+  treated as pending coverage. Evidence: the acknowledged-checkpoint request test
+  (marker and epoch), red on 99aae8b6 and green after the fix.
