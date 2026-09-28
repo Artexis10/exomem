@@ -2679,6 +2679,29 @@ class EpistemicGraphIndex:
             log.debug("cold snapshot proof raised", exc_info=True)
             return declined("proof_raised")
 
+    def _drain_owns_topology(
+        self,
+        conn: sqlite3.Connection,
+        resolver: vault_module.WikilinkResolver,
+        batch_rels: set[str],
+    ) -> bool:
+        """Whether a drain of `batch_rels` may record `resolver`'s topology.
+
+        True when the stored fingerprint already matches, or when reverting the
+        batch's resolver entries to their stored rows reproduces it: then every
+        topology change is one of this batch's pages, whose rows the pass
+        rewrites and whose link dependants it widened to.
+        """
+        row = conn.execute(
+            "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
+        ).fetchone()
+        if row is None or row[0] is None:
+            return False
+        stored = str(row[0])
+        return _resolver_topology_fingerprint(resolver) == stored or bool(
+            batch_rels and self._residue_explains_topology(conn, resolver, batch_rels, stored)
+        )
+
     def _residue_explains_topology(
         self,
         conn: sqlite3.Connection,
@@ -5702,6 +5725,12 @@ class EpistemicGraphIndex:
                 affected = self._topology_affected_sources(
                     probe, queued_rels, resolver=resolver
                 )
+                # Decided on the pre-pass rows, which still carry the stored
+                # titles; inside the publication hook the rows already hold the
+                # new ones, and reverting to them would prove nothing.
+                owns_topology = affected is not None and self._drain_owns_topology(
+                    probe, resolver, queued_rels | affected
+                )
             finally:
                 probe.close()
             if affected is None:
@@ -5744,11 +5773,14 @@ class EpistemicGraphIndex:
                     # behind, a page this drain created had rows the stored
                     # topology did not know, and the next adoption declined a
                     # snapshot that matched the disk. Same value the published
-                    # branch writes, in the same transaction as the rows.
-                    conn.execute(
-                        "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                        (_RESOLVER_TOPOLOGY_KEY, _resolver_topology_fingerprint(resolver)),
-                    )
+                    # branch writes, in the same transaction as the rows, and
+                    # under the same condition: only when this batch's rows
+                    # account for every topology change in the resolver.
+                    if owns_topology:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                            (_RESOLVER_TOPOLOGY_KEY, _resolver_topology_fingerprint(resolver)),
+                        )
                     return
                 self._publish_available_marker_in_transaction(
                     conn,
@@ -5759,12 +5791,18 @@ class EpistemicGraphIndex:
                     # now, not the one that was committed when the drain
                     # started.
                     graph_checkpoint=self._drained_graph_checkpoint(batch),
-                    # The resolver this drain derived under, which already
-                    # holds every page the registry names: a queued topology
-                    # change is repaired from its own receipt, and a stale
-                    # fingerprint only sends the next topology-changing write
-                    # to a whole-vault rebuild (stored_topology_fingerprint_mismatch).
-                    topology=_resolver_topology_fingerprint(resolver),
+                    # The resolver this drain derived under, but only when its
+                    # rows account for every topology change in it. A change
+                    # this batch did not widen -- a retitled page outside the
+                    # indexed corpus, or a queued page it did not dequeue --
+                    # would otherwise be stamped as derived, and the next
+                    # adoption would accept edges no pass ever re-targeted. Left
+                    # alone, the stale fingerprint fails closed: the next
+                    # topology-changing write takes the whole-vault rebuild
+                    # (stored_topology_fingerprint_mismatch).
+                    topology=(
+                        _resolver_topology_fingerprint(resolver) if owns_topology else None
+                    ),
                 )
                 published = True
 
