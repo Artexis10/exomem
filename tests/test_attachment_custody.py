@@ -455,6 +455,28 @@ def test_an_already_stored_original_keeps_its_page_and_says_so(vault: Path, leas
     assert not _vault_text_contains(vault, TRANSCRIPTION)
 
 
+def test_a_held_markdown_file_is_preserved_byte_for_byte(vault: Path, lease) -> None:
+    from exomem import held_uploads
+
+    original = "# Trip notes\n\nMeet at the north gate at nine.\n".encode("utf-8")
+    with _local_session("session-home"):
+        held = held_uploads.hold(
+            vault,
+            io.BytesIO(original),
+            lane="evidence",
+            filename="trip-notes.md",
+            content_type="text/markdown",
+            max_bytes=1024 * 1024,
+        )
+        result = _preserve(lease, vault, [held["file"]], "held-markdown")
+
+    assert result["status"] == "committed", result
+    row = result["files"][0]
+    assert row["state"] == "stored", row
+    assert (vault / row["stored_path"]).read_bytes() == original
+    assert row["hash"] == hashlib.sha256(original).hexdigest()
+
+
 # ---- End to end through the real local door ---------------------------------------
 
 
