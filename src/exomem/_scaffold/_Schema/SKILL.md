@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: f4caf860084955b65d2b800cc50a7a6c52fcb3e3be0df196a06d552633df6df8
+  skill_contract: b401f2c079740afbd360d11c9499fe7e3b1371e1cc214d5ba34cc582cea4ddab
   version: "0.32.0"
 ---
 
@@ -241,10 +241,10 @@ or explicitly overridden by the user.
 | Action class | Ceiling | What it covers |
 |---|---|---|
 | `hygiene_writes` | silent | index, log and back-reference upkeep riding a governed write |
-| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself |
+| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself, including a new entity after resolve-before-create |
 | `link_acceptance` | confirm | accepting a suggested relation |
 | `structural_suggestions` | advisory | structural advice on any channel — surface only |
-| `restructure_execution` | confirm-required | restructure application, supersession commit, entity creation, deletion |
+| `restructure_execution` | confirm-required | restructure application, supersession commit, entity merge, deletion |
 | `disclosure` | governed by the governance plane | no disposition; not envelope-configurable |
 
 **The decider protocol**, for every action you are about to take:
@@ -264,7 +264,7 @@ or explicitly overridden by the user.
 Confirm-required binds at three tiers: the served envelope marks the class, you
 obtain the confirmation in the conversation, and the server-side gates still
 apply — deletion needs its explicit confirm, and the adoption apply surface
-commits only a plan that was previewed. Supersession and entity creation have no
+commits only a plan that was previewed. Supersession has no
 server-side gate today; that is named future work, not an implied gate, so the
 confirmation is yours to obtain.
 

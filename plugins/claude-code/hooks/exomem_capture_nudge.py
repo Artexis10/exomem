@@ -107,8 +107,8 @@ REMINDER = (
     "in context. Uniquely resolved Entity: narrow additive entity facet, else concise compiled "
     "observation/proactive_capture; "
     "affiliation relation/link_acceptance; compatible Records only. Hydrate: edit_memory first; else "
-    'connect_memory(operation="create-entity") only for identity stable, and central or recurring. '
-    "Entity creation/substantial curation: confirmed "
+    'connect_memory(operation="create-entity") only for identity stable, and central or recurring: '
+    "proactive_capture. Merge/substantial curation: confirmed "
     "restructure_execution. Recheck on confirmed batch terminal receipt; closure-only eighth recheck. "
     "Distil; no transcripts. replace_memory supersedes contradicted "
     "conclusions, not corrections beside them. Stated intent -> "
