@@ -26,6 +26,7 @@ import re
 import secrets
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -42,7 +43,7 @@ STORE_DIRNAME = "held-uploads"
 
 _SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
 _CHUNK = 1024 * 1024
-_UNAVAILABLE_REASON = "no redeemable held upload for this handle"
+UNAVAILABLE_REASON = "no redeemable held upload for this handle"
 _now = time.time
 
 
@@ -91,7 +92,7 @@ def _key(secret: str) -> str:
 
 
 def _unavailable() -> HeldUploadError:
-    return HeldUploadError("HELD_UPLOAD_UNAVAILABLE", _UNAVAILABLE_REASON)
+    return HeldUploadError("HELD_UPLOAD_UNAVAILABLE", UNAVAILABLE_REASON)
 
 
 def _remove(*paths: Path) -> None:
@@ -196,8 +197,18 @@ def hold(
     }
 
 
-def redeem(vault_root: Path, reference: str, *, lane: str | None) -> Redeemed:
-    """Claim one hold for the live local session through a command of `lane`."""
+def redeem(
+    vault_root: Path,
+    reference: str,
+    *,
+    lane: str | None,
+    admit: Callable[[int], None] | None = None,
+) -> Redeemed:
+    """Claim one hold for the live local session through a command of `lane`.
+
+    `admit` sees the held size before the claim, so a caller's byte budget can
+    refuse a hold without spending it.
+    """
     secret = reference[len(HELD_SCHEME) :] if is_held_reference(reference) else ""
     binding = _binding()
     if binding is None or _SECRET.fullmatch(secret) is None or lane is None:
@@ -224,6 +235,8 @@ def redeem(vault_root: Path, reference: str, *, lane: str | None) -> Redeemed:
             "HELD_UPLOAD_LANE",
             f"this upload is held for {LANE_COMMANDS.get(str(record.get('lane')), 'another lane')}",
         )
+    if admit is not None:
+        admit(int(record.get("size") or 0))
     claimed = store / f"{key}.claimed-{secrets.token_hex(8)}"
     try:
         os.rename(payload, claimed)  # exactly one redemption wins

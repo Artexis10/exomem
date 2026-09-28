@@ -364,6 +364,22 @@ def test_held_bytes_that_changed_are_not_committed(vault: Path, lease) -> None:
     assert not _evidence(vault).exists()
 
 
+def test_a_byte_budget_refusal_does_not_spend_the_hold(vault: Path) -> None:
+    from exomem import held_uploads
+
+    def over_budget(size: int) -> None:
+        raise RuntimeError(f"{size} bytes is over this batch's budget")
+
+    with _local_session("session-home"):
+        handle = _hold(vault, _png())["file"]
+        with pytest.raises(RuntimeError):
+            held_uploads.redeem(vault, handle["download_url"], lane="evidence", admit=over_budget)
+        redeemed = held_uploads.redeem(vault, handle["download_url"], lane="evidence")
+
+    assert redeemed.path.read_bytes() == _png()
+    redeemed.path.unlink()
+
+
 def test_holding_needs_a_local_grant(vault: Path) -> None:
     from exomem import held_uploads
 
@@ -444,7 +460,8 @@ def test_an_already_stored_original_keeps_its_page_and_says_so(vault: Path, leas
 
 @pytest.mark.anyio
 async def test_attach_hold_then_preserve_over_the_local_listener(
-    real_worker: _RealWorker, vault: Path
+    real_worker: _RealWorker,  # noqa: F811 - the imported fixture, by name
+    vault: Path,
 ) -> None:
     from exomem import server_auth
 

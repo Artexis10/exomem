@@ -79,6 +79,7 @@ def test_preserve_artifacts_has_openai_file_parameter_contract(
         "category",
         "files",
         "adoption",
+        "transcriptions",
         "response_detail",
     }
     vault_root = tmp_path / "vault"

@@ -351,16 +351,17 @@ def _redeem_held(
 
     file_id = _file_id(file)
     if vault_root is None:
-        raise SafeFetchError("HELD_UPLOAD_UNAVAILABLE", "held uploads are not redeemable here")
+        raise SafeFetchError("HELD_UPLOAD_UNAVAILABLE", held_uploads.UNAVAILABLE_REASON)
     try:
-        held = held_uploads.redeem(vault_root, str(file.get("download_url")), lane=lane)
+        held = held_uploads.redeem(
+            vault_root,
+            str(file.get("download_url")),
+            lane=lane,
+            admit=budget.validate_content_length,
+        )
     except held_uploads.HeldUploadError as error:
         raise SafeFetchError(error.code, error.reason) from None
-    try:
-        budget.consume(held.size)
-    except SafeFetchError:
-        held.path.unlink(missing_ok=True)
-        raise
+    budget.consume(held.size)
     content_type = held.content_type or _content_type(file.get("mime_type"))
     filename = (
         str(file.get("file_name") or "").strip()
