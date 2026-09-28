@@ -8,6 +8,8 @@ visible edit here.
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -15,7 +17,20 @@ from membench.utility import context_activation_continuity as continuity
 
 from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
+pytestmark = pytest.mark.timeout(1800)
+
 CONTINUITY_SHA256 = "de5e79004e85487bd2b5c56cc4082d763c97c077f80bce7d88e087935ccbadc7"
+
+REPOSITORY = Path(__file__).resolve().parents[1]
+RECORDED_GROUP = REPOSITORY / "docs" / "benchmarks" / "context-activation-continuity-2026-09.json"
+RECORD_ENV = "CONTEXT_ACTIVATION_RECORD_CONTINUITY"
+
+#: The first run's outcome on the real compiler, recorded after the digest
+#: above was pinned. Re-record after a deliberate change::
+#:
+#:     CONTEXT_ACTIVATION_RECORD_CONTINUITY=docs/benchmarks/context-activation-continuity-2026-09.json \\
+#:         uv run pytest tests/test_context_activation_continuity.py -k recorded
+PASSING_TODAY = frozenset({"K1", "K2", "K3", "K4"})
 
 
 def test_the_group_is_the_pre_registered_one() -> None:
@@ -149,5 +164,52 @@ def test_a_page_served_without_the_recency_carry_fails_k4() -> None:
     assert "expected carried_by 'recency', observed 'retrieval'" in scored.failure_reasons
 
 
+# --------------------------------------------------------------------------- #
+# The group on the real compiler
+# --------------------------------------------------------------------------- #
+
+_RUNS: dict[str, tuple[continuity.CaseRun, ...]] = {}
+
+
+@pytest.fixture
+def runs(tmp_path_factory: pytest.TempPathFactory) -> tuple[continuity.CaseRun, ...]:
+    if "runs" not in _RUNS:
+        _RUNS["runs"] = continuity.run_group(tmp_path_factory.mktemp("continuity"))
+    return _RUNS["runs"]
+
+
+def test_current_runtime_continuity_outcomes_are_as_recorded(
+    runs: tuple[continuity.CaseRun, ...],
+) -> None:
+    assert [run.case.case_id for run in runs] == [case.case_id for case in continuity.CASES]
+    assert {run.case.case_id for run in runs if run.score.passed} == PASSING_TODAY, [
+        (run.case.case_id, run.score.failure_reasons) for run in runs
+    ]
+
+
+def test_every_fresh_session_packet_is_a_real_first_turn(
+    runs: tuple[continuity.CaseRun, ...],
+) -> None:
+    for run in runs:
+        generation = run.packet["generation"]
+        assert generation["continuity"] == "absent", run.case.case_id
+        assert generation["hot_profile"]["state"] != "empty", run.case.case_id
+        assert run.packet["recent_context"], run.case.case_id
+
+
+def test_the_recorded_continuity_report_is_the_current_run(
+    runs: tuple[continuity.CaseRun, ...],
+) -> None:
+    live = continuity.recorded_group(runs)
+    target = os.environ.get(RECORD_ENV)
+    if target:
+        Path(target).write_text(json.dumps(live, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    recorded = json.loads(RECORDED_GROUP.read_text(encoding="utf-8"))
+    assert recorded["continuity_digest"] == CONTINUITY_SHA256
+    assert recorded == live
+
+
 def test_the_continuity_modules_pass_the_privacy_gate() -> None:
-    assert_public_artifacts_clean([Path(continuity.__file__), Path(__file__)])
+    assert_public_artifacts_clean(
+        [Path(continuity.__file__), Path(__file__), RECORDED_GROUP]
+    )
