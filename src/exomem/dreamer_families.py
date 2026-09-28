@@ -1177,25 +1177,23 @@ def ambiguity(ctx: Context, key: str, keep) -> str | None:
     Two or more pages the caller may see carry the name, and a page the
     caller may see links it by a spelling that resolves to none of them
     (`forward_reference`) or to more than one (`broken_wikilink`). Reads the
-    released rows of that key only, so a withheld page never counts.
+    released rows of that key only, within the member bound items keep, and
+    takes titles from the name rows: no page is parsed and a withheld page
+    never counts.
     """
     from . import vault as vault_module
 
     conn = ctx.members_conn()
-    names = _pages_in(
-        dreamer_store.DreamerStore.members(conn, "name_keys", key, keep=keep, pages=None)
-    )
+    names = _pages_in(dreamer_store.DreamerStore.members(conn, "name_keys", key, keep=keep))
     if len(names) < 2:
         return None
-    refs = dreamer_store.DreamerStore.members(conn, "name_refs", key, keep=keep, pages=None)
-    if not refs:
+    refs = dreamer_store.DreamerStore.members(conn, "name_refs", key, keep=keep)
+    if not refs or len(set(names) | {row[0] for row in refs}) > dreamer_store.MEMBER_BOUND:
         return None
-    titles = []
-    for path in names:
-        page = ctx.page(path)
-        frontmatter = page.frontmatter if page is not None else {}
-        title = frontmatter.get("title") if isinstance(frontmatter, dict) else None
-        titles.append((path, str(title) if title else None))
+    titles = [
+        (path, next((spelling for source, spelling in rows if source == "title"), None))
+        for path, rows in names.items()
+    ]
     resolver = vault_module.WikilinkResolver.from_entries(ctx.vault_root, titles)
     category = None
     for raw in sorted({raw for _path, raw, _folded in refs}):
@@ -1273,6 +1271,10 @@ CATEGORY_KIND = "convention.category"
 
 #: The registry content hash the stored category rows were checked against.
 _REGISTRY_META = "category_registry"
+
+#: Set when a global family skipped a page at the size cap; cleared by the
+#: reseed that makes the skipped pages good again.
+CAPACITY_BEHIND_META = "capacity_behind"
 
 
 def _page_tags(page: Any) -> list[tuple[str, str]]:
@@ -1610,12 +1612,20 @@ CONVENTION = Family(
 
 
 def tick_start(ctx: Context) -> None:
-    """Once per tick: queue the category rows' pages again when the registry moved.
+    """Once per tick: resume after the size cap, and follow a registry change.
 
-    A category row's signal is anchored on the registry's content hash, which
-    no page change reports. Bounded by the open category rows. Writes only
-    when the hash changed.
+    A global family that skipped pages at the size cap reseeds once the file
+    is back under it: every indexed page is queued again and the families
+    report incomplete until that drains. A category row's signal is anchored
+    on the registry's content hash, which no page change reports, so its
+    pages are queued again when the hash moves. Writes only on either change.
     """
+    store, conn = ctx.store, ctx.conn
+    if store.get_meta(conn, CAPACITY_BEHIND_META) and not store.capacity_exceeded(conn):
+        with store.write(conn):
+            store.pending_add(conn, sorted(store.seen_map(conn)))
+            store.set_meta(conn, "reseeding", True)
+            store.set_meta(conn, CAPACITY_BEHIND_META, None)
     registry = ctx.registry()
     if ctx.store.get_meta(ctx.conn, _REGISTRY_META) == registry.content_hash:
         return
@@ -1677,9 +1687,12 @@ def process_page(ctx: Context, rel_path: str, *, exists: bool, changed: bool = T
     """
     cited_by = set(ctx.store.candidates_for_path(ctx.conn, rel_path)) if changed else set()
     for family in REGISTRY:
-        # Past the size cap a global family records nothing more; its items
-        # are then held back as incomplete (the one residual of its bound).
-        if family.global_counts and not ctx.store.family_enabled(ctx.conn, family.name):
+        # Past the size cap a global family records nothing more (a deletion
+        # only removes rows, so it still runs). The skipped page is owed: the
+        # family is marked behind, reports incomplete and delivers nothing,
+        # and reseeds once there is room again (`tick_start`).
+        if exists and family.global_counts and not ctx.store.family_enabled(ctx.conn, family.name):
+            ctx.store.set_meta(ctx.conn, CAPACITY_BEHIND_META, True)
             continue
         if exists:
             family.on_page(ctx, rel_path)

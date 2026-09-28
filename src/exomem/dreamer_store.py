@@ -35,15 +35,22 @@ from .state_paths import vault_state_dir
 
 log = logging.getLogger(__name__)
 
-#: 3 added the alias and convention families' page-contribution tables. A
-#: mismatch wipes the file and reseeds, which also resets the delivery ledger.
-SCHEMA_VERSION = 3
+#: 3 added the alias and convention families' page-contribution tables and 4
+#: their casefolded spelling columns. A mismatch wipes the file and reseeds,
+#: which also resets the delivery ledger.
+SCHEMA_VERSION = 4
 SIDECAR_NAME = "dreamer.sqlite"
 
-#: Past this size the global-count families disable themselves (`capacity`)
-#: and the page-local families continue. Prevents an unbounded state file.
-#: It is the global families' one bound: they are exempt from the row caps.
-SIZE_CAP_BYTES = 64 * 1024 * 1024
+#: The size cap (`size_cap_bytes`): past it the global-count families stop
+#: recording and the page-local families continue. Prevents an unbounded state
+#: file, and is the global families' one bound: they are exempt from the row
+#: caps. It is `max(floor, headroom x bytes per page x indexed pages)`.
+SIZE_CAP_FLOOR_BYTES = 64 * 1024 * 1024
+#: Sidecar bytes per indexed page with every per-page bound full (16 names,
+#: 16 link targets, 16 tags): measured at 13.3 KB marginal and 14.7 KB in all
+#: on a 200-page synthetic vault, 13.8 KB at 600 pages; rounded up.
+BYTES_PER_PAGE = 16 * 1024
+SIZE_CAP_HEADROOM = 3
 
 #: Open candidates per family, and rows in total including resolved history,
 #: for the page-local families. Prevents an ignored backlog accumulating in the
@@ -270,9 +277,12 @@ class DreamerStore:
         A file this process did not leave as it is now (the first open in a
         process, or a file changed by anything else) is checked whole before
         use: damage in a page no tick happens to read would otherwise stay
-        until a later write met it.
+        until a later write met it. A file that cannot be brought to this
+        schema is wiped and rebuilt too, rather than failing every tick. A
+        lock is never a reason to wipe.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        conn: sqlite3.Connection | None = None
         try:
             conn = self._open()
             if self._schema(conn) not in {None, str(SCHEMA_VERSION)}:
@@ -283,10 +293,15 @@ class DreamerStore:
                 conn.close()
                 self.wipe()
                 conn = self._open()
-        except sqlite3.DatabaseError:
+            self._ensure_schema(conn)
+        except sqlite3.DatabaseError as exc:
+            if conn is not None:
+                conn.close()
+            if _busy(exc):
+                raise
             self.wipe()
             conn = self._open()
-        self._ensure_schema(conn)
+            self._ensure_schema(conn)
         self._remember()
         return conn
 
@@ -321,6 +336,9 @@ class DreamerStore:
 
     def _open(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=5.0, isolation_level=None)
+        # Takes effect only on a fresh file, before its first table: freed
+        # pages can then be returned to the filesystem (`reclaim`).
+        conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute(f"PRAGMA cache_size=-{_CACHE_SIZE_KIB}")
@@ -495,12 +513,32 @@ class DreamerStore:
                 total += self.path.with_name(self.path.name + suffix).stat().st_size
         return total
 
-    def capacity_exceeded(self) -> bool:
-        return self.size_bytes() > SIZE_CAP_BYTES
+    @staticmethod
+    def size_cap_bytes(conn: sqlite3.Connection) -> int:
+        """The size cap for the pages indexed so far (see `SIZE_CAP_FLOOR_BYTES`)."""
+        pages = int(conn.execute("SELECT count(*) FROM seen").fetchone()[0])
+        return max(SIZE_CAP_FLOOR_BYTES, SIZE_CAP_HEADROOM * BYTES_PER_PAGE * pages)
+
+    def capacity_exceeded(self, conn: sqlite3.Connection) -> bool:
+        return self.size_bytes() > self.size_cap_bytes(conn)
 
     def family_enabled(self, conn: sqlite3.Connection, family: str) -> bool:
-        del conn
-        return family not in GLOBAL_FAMILIES or not self.capacity_exceeded()
+        return family not in GLOBAL_FAMILIES or not self.capacity_exceeded(conn)
+
+    @staticmethod
+    def reclaim(conn: sqlite3.Connection) -> None:
+        """Return freed pages to the filesystem. Call outside a transaction.
+
+        Pruning and replaced contributions leave free pages; without this the
+        file never shrinks, and a sidecar once past the size cap would stay
+        there until a wipe.
+        """
+        if not int(conn.execute("PRAGMA freelist_count").fetchone()[0]):
+            return
+        # The pragma frees one page per step, and a cursor steps a statement
+        # with no result columns once: `executescript` runs it to completion.
+        conn.executescript("PRAGMA incremental_vacuum;")
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
 
     # ------------------------------------------------------------------
     # candidates: the one write entry
@@ -997,6 +1035,15 @@ class DreamerStore:
             "SELECT max(raw) FROM term_uses WHERE fold_key=?", (fold_key,)
         ).fetchone()[0]
         return None if low is None or high is None else (str(low), str(high))
+
+
+def _busy(exc: sqlite3.DatabaseError) -> bool:
+    """A lock or a busy file: never damage, never a reason to wipe."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None:
+        return int(code) & 0xFF in {5, 6}  # SQLITE_BUSY, SQLITE_LOCKED
+    text = str(exc).casefold()
+    return "locked" in text or "busy" in text
 
 
 def _check_table(table: str) -> None:

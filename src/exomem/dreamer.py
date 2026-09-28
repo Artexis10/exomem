@@ -527,6 +527,12 @@ def run_once(
         waiting=waiting,
     )
     if conn is not None:
+        try:
+            # Pruned rows and replaced contributions leave free pages: hand
+            # them back so the file can fall under the size cap again.
+            store.reclaim(conn)
+        except sqlite3.Error:
+            log.debug("dreamer: reclaim skipped", exc_info=True)
         store.close(conn)
     return TickResult(
         ran=True,
@@ -652,7 +658,11 @@ def _record_tick(
         health["reseed_remaining"] = pending if reseeding else 0
         # A global family's membership is incomplete while a reseed drains and
         # once the size cap stops it recording; nothing of it is delivered then.
-        partial = reseeding or store.capacity_exceeded()
+        partial = (
+            reseeding
+            or store.capacity_exceeded(conn)
+            or bool(store.get_meta(conn, dreamer_families.CAPACITY_BEHIND_META))
+        )
         health["evidence_complete"] = {
             family.name: not (family.global_counts and partial)
             for family in dreamer_families.REGISTRY

@@ -269,10 +269,10 @@ def test_a_reseed_delivers_no_alias_item_until_it_drains(tmp_path: Path) -> None
         conn.close()
 
 
-def test_the_sidecar_holds_page_contributions_under_schema_three(tmp_path: Path) -> None:
+def test_the_sidecar_holds_page_contributions_under_schema_four(tmp_path: Path) -> None:
     vault = fx.build_vocabulary(tmp_path)
     _quiet(vault)
-    assert dreamer_store.SCHEMA_VERSION == 3
+    assert dreamer_store.SCHEMA_VERSION == 4
     conn = sqlite3.connect(dreamer_store.sidecar_path(vault))
     try:
         names = conn.execute(
@@ -295,7 +295,7 @@ def test_an_older_sidecar_is_wiped_and_reseeded(tmp_path: Path) -> None:
     _quiet(vault)
     conn = sqlite3.connect(dreamer_store.sidecar_path(vault))
     try:
-        conn.execute("UPDATE meta SET value='2' WHERE key='schema'")
+        conn.execute("UPDATE meta SET value='3' WHERE key='schema'")
         conn.commit()
     finally:
         conn.close()
