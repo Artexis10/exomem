@@ -8,6 +8,15 @@
 - [ ] 1.3 Identify the live `guidance_unavailable` cause from the warning logs and the
       closed reason now named in `vocabulary_sync`. Steps 1.1, 1.2 and 1.4 added logging and
       reason naming only; no committed test reproduces the live cause.
+      Observed 2026-09-28 on the live personal worker, read-only: in 0.93 the reason came only
+      from a raised exception, since projection states then reported `projection_unavailable`.
+      The retained log starts 2026-09-27 22:14Z, after that write. The 0.96.0 worker started
+      06:12Z; 30 committed writes followed, including `remember`, `edit_memory` and
+      `record_memory`. None logged `vocabulary guidance unavailable` or
+      `vocabulary tag advisory unavailable`. The recovery queue drained nine jobs at 06:22Z.
+      The cause is not reproduced and no defect is shown. Close this at the 5.2 live preview
+      if the worker log still names no exception class; a logged class reopens it as a
+      red-first fix.
 - [x] 1.4 Test first, then keep closed projection reasons in `vocabulary_sync`.
 
 ## 2. Shared fold
