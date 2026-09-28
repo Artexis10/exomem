@@ -955,8 +955,9 @@ def _promote_owned(
         # The offline migrator is the only writer between the two workers, and
         # it ran. Re-run the whole proof rather than compare a checkpoint pair
         # that describes state it may have rewritten.
-        covered_marker = _observe_full_marker(Path(vault_root))
+        # Generation before marker, the order the warm-time proof samples in.
         covered_generation = _durable_generation(Path(vault_root))
+        covered_marker = _observe_full_marker(Path(vault_root))
         adoption = _reprove(Path(vault_root))
         with _lock:
             # The re-proof supersedes the warm's: `adoption_record()` must
