@@ -557,11 +557,19 @@ def _assert_baseline_authority_mapping(name: str, block: str) -> None:
         name,
         "link_acceptance",
     )
+    # Ruling R1: a new Entity is additive capture; merge and curation stay confirmed.
+    assert re.search(r"(?:new entity|create-entity).{0,80}proactive_capture", normalized), (
+        name,
+        "new entity proactive_capture",
+    )
     assert re.search(
-        r"entity creation.{0,140}(?:substantial curation|structural change).{0,100}"
-        r"restructure_execution",
+        r"merge.{0,60}(?:substantial curation|structural change).{0,100}restructure_execution",
         normalized,
     ), (name, "restructure_execution")
+    assert not re.search(r"entity creation[^.;]{0,120}restructure_execution", normalized), (
+        name,
+        "entity creation is no longer confirmed restructure_execution",
+    )
 
 
 def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
@@ -606,7 +614,7 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
             assert marker in block, (name, marker)
         _assert_baseline_authority_mapping(name, block)
         for marker in _DELEGATION_MARKERS:
-            mutant = block.replace(marker, "", 1)
+            mutant = block.replace(marker, "")
             with pytest.raises(AssertionError):
                 _assert_baseline_authority_mapping(name, mutant)
     assert "when torn between saving and letting it pass, save" in blocks["maximal docs"]
@@ -666,7 +674,7 @@ def test_every_served_bootstrap_projection_respects_its_prominence_level(
     assert "one-off" in capture and "incidental" in capture
     _assert_baseline_authority_mapping(f"{level}/{profile} bootstrap", capture)
     for marker in _DELEGATION_MARKERS:
-        mutant = capture.replace(marker, "", 1)
+        mutant = capture.replace(marker, "")
         with pytest.raises(AssertionError):
             _assert_baseline_authority_mapping(f"{level}/{profile} bootstrap", mutant)
     assert "_memory" not in capture

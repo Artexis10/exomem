@@ -139,6 +139,8 @@ _CREATE_ENTITY_FIELDS = frozenset(
         "decided",
         "project",
         "decision_status",
+        "identity_decision",
+        "facets",
     }
 )
 _ACCEPT_RELATION_FIELDS = frozenset({"ref", "expected_hash", "why", "expected_fingerprint"})
@@ -1185,6 +1187,11 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
             ]
         elif kind == "create-entity":
             validation = link_module.link(vault_root, validate_only=True, **args)
+            if isinstance(validation, link_module.IdentityPreparation):
+                raise _error(
+                    "CURATION_IDENTITY_DECISION_REQUIRED",
+                    canonical_json(validation.as_dict()),
+                )
             path = normalize_target_path(validation.path, field="destination")
             if not _guarded_absent(vault_root, path):
                 raise _error("CURATION_BINDING_STALE", f"entity destination {path!r} exists")

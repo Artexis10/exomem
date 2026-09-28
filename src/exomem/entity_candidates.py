@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import unicodedata
+from collections.abc import Mapping
 from pathlib import Path
 
 from . import memory_refs
@@ -17,6 +20,35 @@ def identity_key(value: object) -> str:
 
 
 _identity_key = identity_key
+
+
+def candidate_fingerprint(
+    *, name: str, entity_type: str, resolution: Mapping[str, object]
+) -> str:
+    """Bind a shared-name decision to exactly the candidates it was made against.
+
+    Covers the requested name and type, each returned candidate's identity,
+    path, type and match kind, and the omitted count, so any change to what
+    the name resolves to makes an earlier decision stale.
+    """
+    candidates = resolution.get("candidates") or []
+    payload = {
+        "name": identity_key(name),
+        "entity_type": entity_type,
+        "candidates": sorted(
+            [
+                str(item.get("ref") or ""),
+                str(item.get("path") or ""),
+                str(item.get("entity_type") or ""),
+                str(item.get("matched_by") or ""),
+            ]
+            for item in candidates
+            if isinstance(item, Mapping)
+        ),
+        "omitted": int(resolution.get("omitted_candidate_count") or 0),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _aliases(value: object) -> tuple[str, ...]:

@@ -256,6 +256,55 @@ _DomainVocabularyDecisionArgument = Annotated[
         }
     ),
 ]
+#: create-entity's shared-name decision: `distinct` bound to the fingerprint a
+#: preparation or a same-name refusal returned. Nothing else is decidable here;
+#: reuse means not creating, and merging is governed restructuring.
+_IdentityDecisionArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["outcome", "candidate_fingerprint"],
+                    "properties": {
+                        "outcome": {"enum": ["distinct"]},
+                        "candidate_fingerprint": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$",
+                            "description": "candidate_fingerprint returned for this name.",
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+#: create-entity's vault-declared facets: declared names only, a string for a
+#: `single` facet and a list for a `multi` one (see `_Schema/entity-types.yaml`
+#: `facets`). The writer re-validates against the registry.
+_EntityFacetsArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "maxProperties": 16,
+                    "additionalProperties": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}, "maxItems": 16},
+                        ]
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
 _VocabularyDecisionArgument = Annotated[
     dict[str, Any] | None,
     WithJsonSchema(
@@ -1523,20 +1572,29 @@ def op_bootstrap(
         "source_taxonomy": source_taxonomy_projection,
         "entity_registry": {
             "types": [
-                ({
-                    "id": definition.id,
-                    "folder": definition.folder,
-                    "family": entity_type_registry.family_of(definition.id) or definition.id,
-                } if profile == "compact" else {
-                    "id": definition.id,
-                    "folder": definition.folder,
-                    "family": (
-                        entity_type_registry.family_of(definition.id) or definition.id
-                    ),
-                    "aliases": list(definition.aliases),
-                    "label": definition.label,
-                    "capture_guidance": definition.capture_guidance,
-                })
+                {
+                    **({
+                        "id": definition.id,
+                        "folder": definition.folder,
+                        "family": entity_type_registry.family_of(definition.id) or definition.id,
+                    } if profile == "compact" else {
+                        "id": definition.id,
+                        "folder": definition.folder,
+                        "family": (
+                            entity_type_registry.family_of(definition.id) or definition.id
+                        ),
+                        "aliases": list(definition.aliases),
+                        "label": definition.label,
+                        "capture_guidance": definition.capture_guidance,
+                    }),
+                    # Only a type with vault-declared facets carries this key.
+                    **({
+                        "facets": {
+                            facet.name: f"{facet.cardinality} {facet.value}"
+                            for facet in entity_type_registry.facets_for(definition.id)
+                        }
+                    } if entity_type_registry.facets_for(definition.id) else {}),
+                }
                 for definition in entity_type_registry.active_definitions
             ],
             "capture_rule": (
@@ -4553,6 +4611,8 @@ def op_link(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    identity_decision: _IdentityDecisionArgument = None,
+    facets: _EntityFacetsArgument = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -4584,15 +4644,26 @@ def op_link(
             `## Relations` as conservative `relates_to` edges. Same path
             conventions as `note.sources`.
         (per-type fields): see the bullet list above.
+        identity_decision: `{outcome: "distinct", candidate_fingerprint}` when
+            the name already denotes other active entities and this is a
+            different identity; the fingerprint comes from the preparation
+            or refusal for this exact name.
+        facets: Values for facets the registry declares for this type: a
+            string for a single facet, a list for a multi one. Undeclared
+            names are refused.
 
     Returns:
-        {path, warnings}.
+        {path, warnings}, or a non-mutating `identity_preparation` when the
+        name already denotes active entities of other types only.
 
     Errors:
         ENTITY_TYPE_UNKNOWN (entity_type not in the active registry);
         INVALID_LINK (bad decision_status, missing required);
         ENTITY_EXISTS (update/link the returned active entity instead);
-        ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first).
+        ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first);
+        STALE_IDENTITY_DECISION (the candidates changed; decide again);
+        ENTITY_FACET_UNDECLARED / INVALID_ENTITY_FACET (facets outside the
+        type's declaration).
     """
     try:
         result = link_module.link(
@@ -4614,11 +4685,15 @@ def op_link(
             decided=decided,
             project=project,
             decision_status=decision_status,
+            identity_decision=identity_decision,
+            facets=facets,
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
         if e.candidates:
             suffix += f" (candidates: {e.candidates})"
+        if e.candidate_fingerprint is not None:
+            suffix += f" (candidate_fingerprint: {e.candidate_fingerprint})"
         raise ValueError(f"{e.code}: {e.reason}{suffix}") from e
     return result.as_dict()
 
@@ -9434,6 +9509,9 @@ def op_connect_memory(
     expected_fingerprint: str | None = None,
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
+    identity_decision: _IdentityDecisionArgument = None,
+    facets: _EntityFacetsArgument = None,
+    entity_family: str | None = None,
 ) -> dict | list[dict]:
     """Connect memory through links, typed graph context, or entities.
 
@@ -9502,6 +9580,15 @@ def op_connect_memory(
             the queue read and this call also refuses.
         vocabulary_ref: Optional vocabulary decision correlated with this typed application.
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
+        identity_decision: create-entity only. When the name already denotes
+            other active entities, `{outcome: "distinct", candidate_fingerprint}`
+            from that preparation or refusal commits a separate identity;
+            omit it to reuse a candidate or abstain.
+        facets: create-entity only. Values for the facets the registry
+            declares for entity_type (string for single, list for multi).
+        entity_family: Parent family from the entity registry. On
+            resolve-entity it matches every leaf type in that family; on
+            context and graph-context it keeps only entity neighbours of it.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -9545,6 +9632,9 @@ def op_connect_memory(
             "expected_hash": None,
             "why": None,
             "expected_fingerprint": None,
+            "identity_decision": None,
+            "facets": None,
+            "entity_family": None,
         }
         invalid = sorted(
             name
@@ -9660,6 +9750,7 @@ def op_connect_memory(
             traversal_profile=traversal_profile,
             limit=limit,
             max_body_chars=max_body_chars,
+            entity_type_families=[entity_family] if entity_family else None,
         )
     if operation == "inbound-links":
         target_path = target or path
@@ -9670,7 +9761,11 @@ def op_connect_memory(
         if not name:
             raise ValueError("INVALID_TARGET: resolve-entity requires `name`")
         return entity_candidates_module.resolve_entity_candidate(
-            vault_root, name=name, entity_type=entity_type, limit=limit
+            vault_root,
+            name=name,
+            entity_type=entity_type,
+            entity_family=entity_family,
+            limit=limit,
         )
     if operation == "create-entity":
         missing = [
@@ -9699,6 +9794,8 @@ def op_connect_memory(
             decided=decided,
             project=project,
             decision_status=decision_status,
+            identity_decision=identity_decision,
+            facets=facets,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "

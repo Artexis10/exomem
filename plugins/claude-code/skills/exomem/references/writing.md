@@ -1,8 +1,9 @@
 # Writing and connecting compiled knowledge
 
 Apply the live engagement envelope from SKILL.md before these workflows.
-A batch or capture waiver never raises an action-class ceiling: entity creation,
-supersession, and restructure execution still require the applicable confirmation.
+A batch or capture waiver never raises an action-class ceiling: entity merge,
+supersession, and restructure execution still require the applicable confirmation;
+a new entity after resolve-before-create follows `proactive_capture`.
 
 ## Entity resolution
 
