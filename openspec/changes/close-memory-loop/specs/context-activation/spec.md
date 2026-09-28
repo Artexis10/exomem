@@ -94,3 +94,16 @@ SHALL stay listed. Neither rule SHALL compare anchors of different kinds.
 #### Scenario: The shared words alone stay ambiguous
 - **WHEN** a turn says only the words both hub names share
 - **THEN** the packet is `ambiguous` and every hub the turn reached stays listed
+
+### Requirement: A unit the anchor lede already says is served once
+When the packet carries a resolved anchor's own page at page level (the identity lede,
+by the page's own ref), a role-lane unit fragment of that same page whose whole text the
+lede already contains SHALL be omitted, so the sentence is neither printed nor charged
+twice nor reported as a second reference. Any other unit of that page, and the same text
+on any other page, SHALL be kept.
+
+#### Scenario: A resource's lede observation is not repeated as a unit
+- **WHEN** a resolved resource's identity lede opens with an observation that a role
+  lane also selects as a unit of that page
+- **THEN** the packet carries the lede once, by the page's ref, and no unit fragment of
+  that page repeating it

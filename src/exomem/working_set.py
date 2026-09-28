@@ -366,6 +366,39 @@ def _deduplicated(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
     return tuple(out)
 
 
+def _folded_prose(text: str) -> str:
+    return " ".join(str(text or "").casefold().split())
+
+
+def _without_lede_repeats(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
+    """Drop a unit the anchor page's own lede already says (close-memory-loop,
+    activation quality).
+
+    The identity lane serves a resolved anchor's page in its own words, at
+    page level and by the page's own ref (`provenance.source == "profile"`).
+    A role lane reading that page can select the very observation the lede
+    opens with, as a unit fragment of the same page: one sentence printed
+    twice, charged twice, and reported as a second reference where there is
+    one page. The page-level item already carries it, so the fragment goes.
+    Only a unit of THAT page whose whole text the lede contains; any other
+    unit of the page, and the same sentence on another page, are kept.
+    """
+    ledes: dict[str, list[str]] = {}
+    for item in ordered:
+        if item.level == "page" and item.path and item.provenance.get("source") == "profile":
+            ledes.setdefault(item.path, []).append(_folded_prose(item.text))
+    if not ledes:
+        return tuple(ordered)
+    out: list[LaneItem] = []
+    for item in ordered:
+        if item.level == "unit" and item.path in ledes:
+            text = _folded_prose(item.text)
+            if text and any(text in lede for lede in ledes[item.path]):
+                continue
+        out.append(item)
+    return tuple(out)
+
+
 def build_packet(
     *,
     items: Sequence[LaneItem],
@@ -406,7 +439,7 @@ def build_packet(
     # the first role in registry priority order that reached it — the most
     # specific lens that asked. A `level`-less or ref-less item is left
     # alone: its identity is not its ref.
-    ordered = _deduplicated(sorted(items, key=_sort_key))
+    ordered = _without_lede_repeats(_deduplicated(sorted(items, key=_sort_key)))
     units: list[dict[str, Any]] = []
     deferred: list[tuple[LaneItem, str]] = []
     per_role: dict[str, int] = {}
