@@ -360,17 +360,20 @@ The residue tests compare every edge after the drain with a fresh whole-vault re
 That covers a created page gaining incoming links, a stem made ambiguous, a rename, a
 removal and a retitle, with a negative control that disables the drain's widening.
 
-**A drain that withholds publication records its resolver topology.** A per-path drain
-under a moving vault lands its rows and withholds the marker, lineage and
+**A drain records the resolver topology its rows account for, and no other.** A
+per-path drain under a moving vault lands its rows and withholds the marker, lineage and
 acknowledgement. It used to withhold the stored resolver topology fingerprint as well,
-so a page it created had rows the fingerprint did not know. The next adoption proof
-then declined a snapshot that matched the disk, and a topology-changing refresh fell
-back to a whole-vault rebuild (`stored_topology_fingerprint_mismatch`). The drain now
-writes the same fingerprint the published branch writes, the topology of the resolver it
-derived under, in the transaction that lands the rows. Nothing in the publication or
-availability contract moves. The published branch's existing limit applies to both: a
-page the registry names but this batch did not drain puts the fingerprint ahead of that
-page's rows until its own receipt drains.
+so a page it created had rows the fingerprint did not know, and the next adoption proof
+declined a snapshot that matched the disk. The published branch had the opposite hole:
+it always wrote the fingerprint of the resolver it derived under, including topology
+changes this batch never widened, such as a retitled page outside the indexed corpus.
+That page has no rows and can never be residue, so the next adoption matched, accepted a
+sidecar missing the link it re-targets, and promotion retired the whole-vault marker
+that was the only repair. Both branches now write the fingerprint only when reverting
+the batch's resolver entries to the pre-pass rows reproduces the stored fingerprint,
+decided before the pass while those rows are still readable. Otherwise the stored
+fingerprint stays, the proof keeps failing closed, and the whole-vault marker stays the
+repair. Nothing in the publication or availability contract moves.
 
 Steady-state convergence under writes, meaning catch-up publication of a pass whose
 movement was all recorded, is 7.2. It is not reopened here. It was built and measured on

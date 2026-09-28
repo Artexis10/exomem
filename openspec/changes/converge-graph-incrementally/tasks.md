@@ -376,8 +376,9 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   after a success, replacing the held proof only with a newer success; the interval
   runs from the end of the last attempt and the poll stats before it reads; a promotion
   that raises leaves the standby proving; an unknown drain cause is logged as given;
-  a drain that withholds publication records its resolver topology with its rows; the
-  residue tests compare every edge with a fresh rebuild.
+  a drain, published or withheld, records its resolver topology only when its batch's
+  rows account for every change in it; the residue tests compare every edge with a
+  fresh rebuild.
 - [ ] 8.8 **Open, not built.** Evaluate a cheaper route to steady-state convergence than
   7.2: when a whole-vault pass exhausts its stabilization attempts with every movement
   recorded, run the adoption proof against the live sidecar (O(vault) hashing, no build
