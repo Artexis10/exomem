@@ -5132,7 +5132,15 @@ class EpistemicGraphIndex:
         *,
         created_paths: Iterable[Path] = (),
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
-    ) -> dict[str, int]:
+        replayed: bool = False,
+    ) -> dict[str, Any]:
+        """Refresh `paths` incrementally, or fall back as the gates require.
+
+        `replayed` is set only by the deferred-receipt replay. It admits the
+        currency proof for its paths outside the recall delta; every other
+        caller -- reconcile and explicit repair refresh unchanged pages on
+        purpose, to reproject them -- keeps the whole-vault fallback.
+        """
         if not graph_enabled():
             # Feature-off does not authorize a stale sidecar to retain sensitive
             # raw Record rows.  Purge only an already-existing sidecar; do not
@@ -5214,7 +5222,7 @@ class EpistemicGraphIndex:
                     reason="external_event_covers_these_paths",
                     graph_checkpoint=graph_checkpoint,
                 )
-                report = {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+                report: dict[str, Any] = {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
                 if queued:
                     report["queued"] = 1
                     report["external_pending"] = 1
@@ -5223,6 +5231,7 @@ class EpistemicGraphIndex:
                 paths,
                 created_paths=created_paths,
                 graph_checkpoint=graph_checkpoint,
+                replayed=replayed,
             )
         drain_scope = report.pop("_drain_after_release", None)
         if drain_scope:
@@ -5342,7 +5351,8 @@ class EpistemicGraphIndex:
         *,
         created_paths: Iterable[Path] = (),
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
-    ) -> dict[str, int]:
+        replayed: bool = False,
+    ) -> dict[str, Any]:
         # The affected set, widened as the pass learns more. It starts as what
         # the caller named, which is already the checkpoint's changed and
         # created paths, and grows to the recall delta and the resolver-affected
@@ -5532,13 +5542,13 @@ class EpistemicGraphIndex:
             snapshot.close()
             self._mark_unavailable()
             return fallback("delta_target_moved")
-        # Caller paths outside the exact retained suffix mean publication was
-        # skipped, failed, or this is a duplicate callback -- most often a
-        # deferred full-index receipt replayed long after its change landed.
-        # Prove each one against the stored rows before paying for the vault:
-        # a path the registry records as the disk has it is either already
-        # reflected (a no-op) or recorded work the drain repairs. Only a path
-        # the registry does not vouch for still rebuilds from disk.
+        # A replayed deferred receipt names a page whose change landed long
+        # before the stored checkpoint, so it lies outside the recall delta.
+        # Prove each such path against the stored rows before paying for the
+        # vault: a path the registry records as the disk has it is either
+        # already reflected (a no-op) or recorded work the drain repairs. Only
+        # a path the registry does not vouch for still rebuilds from disk. Any
+        # other caller keeps the fallback below the resolver lookup.
         delta_paths = set(delta.changed | delta.deleted)
         created_paths = list(created_paths)
         # A fan-out names its batch's created pages beside the written ones; a
@@ -5548,7 +5558,7 @@ class EpistemicGraphIndex:
                 Path(path) for path in (*paths, *created_paths) if str(path) not in delta_paths
             )
         )
-        if outside:
+        if outside and replayed:
             # Proved before the resolver is needed: a replay the rows already
             # reflect owes nothing, whether or not a resolver is resident.
             snapshot.close()
@@ -5684,6 +5694,14 @@ class EpistemicGraphIndex:
             for candidate in delta_paths
             if (rel := _vault_rel(self.vault_root, Path(candidate))) is not None
         )
+        # Caller paths outside the exact retained suffix mean publication was
+        # skipped, failed, or this is a duplicate callback whose global safety
+        # cannot be proved path-locally -- or a deliberate reprojection of an
+        # unchanged page. Rebuild from disk instead of blessing the event
+        # checkpoint. A replay's proved-current paths were already dropped.
+        if any(str(path) not in delta_paths for path in paths):
+            self._mark_unavailable()
+            return fallback("caller_path_outside_delta")
         refresh_paths = set(delta_paths)
         topology_versions: dict[str, GraphSourceSignature] = {}
         resolver_versions: dict[str, GraphSourceSignature] = {}
@@ -5794,6 +5812,46 @@ class EpistemicGraphIndex:
                 self._mark_unavailable()
         return fallback("unreachable")
 
+    def _stored_units_current(
+        self, conn: sqlite3.Connection, rel: str, path: Path, raw: bytes, page: Any
+    ) -> bool | None:
+        """Whether the page's stored semantic-unit rows are its current projection.
+
+        The file row's source hash says only that the bytes were indexed; unit
+        rows also carry the projection generation and parser version, which a
+        registry change or parser upgrade moves without touching the bytes.
+        None when the page cannot be parsed for the comparison.
+        """
+        try:
+            state = semantic_index.current_parent_index_state(
+                self.vault_root, path, source=raw.decode("utf-8")
+            )
+            expected = {
+                (_unit_node(page, unit, state).node_key, state.parent_generation, state.parser_version)
+                for unit in state.document.units
+                if unit.unit_ref is not None
+            }
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+        stored: set[tuple[str, object, object]] = set()
+        for node_key, raw_metadata in conn.execute(
+            "SELECT node_key, metadata FROM graph_nodes WHERE path = ? AND kind != 'file'",
+            (rel,),
+        ):
+            try:
+                metadata = json.loads(raw_metadata)
+            except (TypeError, ValueError):
+                return False
+            if isinstance(metadata, dict) and metadata.get("record_type") == "semantic_unit":
+                stored.add(
+                    (
+                        str(node_key),
+                        metadata.get("parent_generation"),
+                        metadata.get("parser_version"),
+                    )
+                )
+        return stored == expected
+
     def _replayed_path_currency(
         self, paths: list[Path]
     ) -> tuple[list[str], list[str]] | None:
@@ -5862,10 +5920,13 @@ class EpistemicGraphIndex:
                     )
                     if page is None:
                         return None
-                    if row is not None and str(row[0]) == page.snapshot_hash:
-                        current.append(rel)
-                    else:
+                    if row is None or str(row[0]) != page.snapshot_hash:
                         stale.append(rel)
+                        continue
+                    units_current = self._stored_units_current(conn, rel, path, raw, page)
+                    if units_current is None:
+                        return None
+                    (current if units_current else stale).append(rel)
                 elif row is None:
                     current.append(rel)
                 elif not exists:
@@ -9006,14 +9067,19 @@ def upsert_after_write(
     written_paths: list[Path],
     *,
     created_paths: Iterable[Path] = (),
+    replayed: bool = False,
 ) -> GraphDispatchResult:
-    """Dispatch graph work without allowing a required checkpoint to vanish."""
+    """Dispatch graph work without allowing a required checkpoint to vanish.
+
+    `replayed` marks the deferred-receipt replay; see `refresh_paths`.
+    """
     if not written_paths:
         return GraphDispatchResult.not_required()
     required = graph_sync.read_checkpoint(vault_root)
     mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None
     try:
         created = list(created_paths)
+        replay: dict[str, bool] = {"replayed": True} if replayed else {}
         from .writer_lease import active_manager
 
         mutation_coordinator = active_manager()._mutation_coordinator_for(vault_root)
@@ -9086,9 +9152,11 @@ def upsert_after_write(
                 )
                 return _join_registered_standalone(vault_root, result, mutation_coordinator)
             report = (
-                index.refresh_paths(written_paths, created_paths=created, graph_checkpoint=required)
+                index.refresh_paths(
+                    written_paths, created_paths=created, graph_checkpoint=required, **replay
+                )
                 if created
-                else index.refresh_paths(written_paths, graph_checkpoint=required)
+                else index.refresh_paths(written_paths, graph_checkpoint=required, **replay)
             )
             if report.get("deferred"):
                 if report.get("queued") and _caller_can_carry_pending(
@@ -9167,9 +9235,9 @@ def upsert_after_write(
                 )
             return GraphDispatchResult("completed", "incremental_completed", required)
         report = (
-            index.refresh_paths(written_paths, created_paths=created)
+            index.refresh_paths(written_paths, created_paths=created, **replay)
             if created
-            else index.refresh_paths(written_paths)
+            else index.refresh_paths(written_paths, **replay)
         )
         if (
             required is not None

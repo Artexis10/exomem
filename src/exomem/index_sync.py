@@ -1304,7 +1304,7 @@ def drain_deferred_work(
         full_batch_completed = False
         if recover_full_receipt_graph_epoch(vault_root):
             try:
-                dispatched = upsert_after_write(vault_root, full_paths)
+                dispatched = upsert_after_write(vault_root, full_paths, replayed=True)
             except Exception:  # noqa: BLE001 - isolate failures below
                 log.warning("deferred full-index batch failed; isolating receipts", exc_info=True)
             else:
@@ -1325,7 +1325,7 @@ def drain_deferred_work(
             for receipt in isolation_receipts:
                 try:
                     dispatched = upsert_after_write(
-                        vault_root, [vault_root / receipt.rel_path]
+                        vault_root, [vault_root / receipt.rel_path], replayed=True
                     )
                 except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
                     log.warning(
@@ -1441,6 +1441,7 @@ def _dispatch_upsert_components(
     watcher_deleted_rels: list[str] | None = None,
     watcher_lexical_paths: list[Path] | None = None,
     watcher_lexical_suppressed_rels: list[str] | None = None,
+    replayed: bool = False,
 ) -> list[IndexComponentOutcome]:
     from . import epistemic_graph, find, lexstore, memory_refs, mode
 
@@ -1501,13 +1502,15 @@ def _dispatch_upsert_components(
     )
 
     def graph_upsert():
+        replay: dict[str, bool] = {"replayed": True} if replayed else {}
         if created_semantic_paths:
             return epistemic_graph.upsert_after_write(
                 vault_root,
                 semantic_paths,
                 created_paths=created_semantic_paths,
+                **replay,
             )
-        return epistemic_graph.upsert_after_write(vault_root, semantic_paths)
+        return epistemic_graph.upsert_after_write(vault_root, semantic_paths, **replay)
 
     components.append(
         _graph_component(graph_upsert, items=len(semantic_paths))
@@ -1618,8 +1621,13 @@ def upsert_after_write(
     publish_corpus_change: bool = True,
     created_paths: Iterable[Path] = (),
     watcher_deleted_rel_paths: Iterable[str] | None = None,
+    replayed: bool = False,
 ) -> IndexSyncReport:
     """Fan a writer's markdown change out to every index sidecar.
+
+    ``replayed`` is set only by the deferred full-index receipt replay: its
+    graph dispatch may prove a page outside the recall delta current instead
+    of rebuilding the vault. Every other caller keeps that fallback.
 
     Paths under excluded scan dirs (`_trash/`, `_archive/`, `_Schema/`, ...) are
     dropped first: every index's FULL rebuild skips them, so the incremental
@@ -1820,6 +1828,7 @@ def upsert_after_write(
             watcher_deleted_rels=watcher_deleted_rels,
             watcher_lexical_paths=watcher_lexical_paths,
             watcher_lexical_suppressed_rels=watcher_lexical_suppressed_rels,
+            replayed=replayed,
         )
     finally:
         semantic_index.reset_parent_states(token)
