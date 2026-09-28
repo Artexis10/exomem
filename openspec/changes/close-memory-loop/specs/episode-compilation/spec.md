@@ -264,3 +264,27 @@ A host lifecycle checkpoint that asks the agent to record an episode SHALL treat
 
 - **WHEN** the host compacts the session's context and the checkpoint asks again
 - **THEN** the ask names the same episode key as before compaction, so a new record revises the same episode
+
+### Requirement: A sink page is surfaced for per-cluster disposition
+
+The final coverage pass SHALL detect a sink: one page that several distinct candidates' committed effects landed on within an episode, so that unrelated topic clusters accumulate in a single note. It SHALL report the page and its candidates and SHALL carry guidance asking the active agent to give each cluster a disposition: route it to an existing canonical page, entity, Planning or Records item, or a justified new page, or mark it `no_capture` where nothing durable remains. The guidance SHALL be surfaced through the coverage pass and the Stop checkpoint ask; it SHALL NOT block attestation, refuse a write or move content. Detection SHALL be structural over committed receipts and SHALL NOT claim to judge topic similarity.
+
+#### Scenario: Several clusters are appended to one operational note
+
+- **WHEN** an episode's committed effects append three distinct clusters to one page
+- **THEN** the coverage pass reports that page as a sink with its candidates and the per-cluster disposition guidance
+- **AND** coverage can still be attested
+
+#### Scenario: Distinct pages are not a sink
+
+- **WHEN** an episode's candidates each land on their own page
+- **THEN** the coverage pass reports no sink and carries no sink guidance
+
+### Requirement: Stable identity and contact facts route to the resolved person
+
+Capture guidance and the capture-sweep advisory SHALL recognise a stable, uniquely attributable identity or contact fact about a resolved person, including the vault owner's own entity, as an entity-level fact. Such a fact SHALL be routed to that entity, or to a linked personal-details node, under `proactive_capture`, rather than only being used in the reply. This SHALL NOT weaken the single-incidental-mention, ambiguity and unresolved-identity rules.
+
+#### Scenario: The owner's own contact detail is read from a screenshot
+
+- **WHEN** a session reads a stable contact detail attributable to the vault owner and uses it in a reply
+- **THEN** the sweep and capture guidance direct the agent to record it on the owner's entity or linked personal-details node without waiting for the user to ask

@@ -63,3 +63,18 @@ def test_capture_guidance_adds_a_native_script_alias_for_a_name_written_in_anoth
     section = writing.split("## Entity resolution", 1)[1].split("\n## ", 1)[0]
     assert 'connect_memory(operation="create-entity", aliases=' in section
     assert '"field": "aliases"' in section or "field: aliases" in section
+
+
+def test_capture_workflow_routes_stable_person_and_self_facts_to_the_entity() -> None:
+    text = " ".join(
+        (SCHEMA / "workflow-skills" / "exomem-capture" / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+
+    assert "identity or contact fact" in text
+    assert "vault owner" in text
+    assert "personal-details" in text
+    assert "proactive_capture" in text
+    # A fact used in the reply is not yet captured: it is written when learned.
+    assert "not just in the reply" in text
