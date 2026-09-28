@@ -68,7 +68,9 @@ from typing import Any
 SCHEMA_VERSION = 1
 
 #: The closed set `principal_kind` may record; anything else is written as null.
-_PRINCIPAL_KINDS = frozenset({"owner", "owner-oauth", "principal", "unresolved"})
+_PRINCIPAL_KINDS = frozenset(
+    {"owner", "owner-oauth", "owner-local", "principal", "unresolved"}
+)
 
 #: The `prev_hash` of the very first row of a fresh ledger.
 GENESIS_HASH = "0" * 64
@@ -328,7 +330,9 @@ def build_row(
         if caller_principal_hash
         else None,
         # Which kind of caller that hash is: `owner`, `owner-oauth` (a remote
-        # session the host bound as the owner), `principal` or `unresolved`.
+        # session the host bound as the owner), `owner-local` (a local client
+        # token over the supervisor's local listener), `principal` or
+        # `unresolved`.
         # The hash stays the remote identity's, so a bound remote owner's
         # action is still traceable to the remote door.
         "principal_kind": principal_kind
