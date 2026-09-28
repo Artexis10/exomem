@@ -12,6 +12,7 @@ The caller batches them with the source file into a single atomic write.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -145,6 +146,31 @@ def compute_updates(
     )
 
 
+def _count_markdown_pages(root: Path, *, skip_underscore_dirs: bool = False) -> int:
+    """Non-index `*.md` entries under `root`, recursively, in one scandir pass.
+
+    The same set `root.rglob("*.md")` minus `index.md` yields (symlinked
+    directories are not descended), without a `stat` per entry: this runs
+    inside the commit of every write, so its cost is the write's hold time.
+    """
+    count = 0
+    pending = [os.fspath(root)]
+    while pending:
+        try:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    if entry.name.endswith(".md"):
+                        if entry.name != "index.md":
+                            count += 1
+                    elif entry.is_dir(follow_symlinks=False) and not (
+                        skip_underscore_dirs and entry.name.startswith("_")
+                    ):
+                        pending.append(entry.path)
+        except OSError:
+            continue
+    return count
+
+
 def _count_sources(sources_dir: Path) -> dict[str, int]:
     """Per top-level source-type count, including themed nested folders."""
     out: dict[str, int] = {}
@@ -153,12 +179,7 @@ def _count_sources(sources_dir: Path) -> dict[str, int]:
     for sub in sources_dir.iterdir():
         if not sub.is_dir() or sub.name.startswith("_"):
             continue
-        out[sub.name] = sum(
-            1
-            for f in sub.rglob("*.md")
-            if f.name != "index.md"
-            and not any(part.startswith("_") for part in f.relative_to(sub).parts[:-1])
-        )
+        out[sub.name] = _count_markdown_pages(sub, skip_underscore_dirs=True)
     return out
 
 
@@ -190,12 +211,7 @@ def _count_notes(notes_dir: Path) -> dict[str, int]:
         key = _NOTES_FOLDER_TO_TYPE.get(sub.name)
         if key is None:
             continue  # unknown top-level folder under Notes/; ignore
-        count = 0
-        for path in sub.rglob("*.md"):
-            if path.name == "index.md":
-                continue
-            count += 1
-        out[key] = count
+        out[key] = _count_markdown_pages(sub)
     return out
 
 
@@ -539,18 +555,15 @@ def _count_notes_by_subfolder(notes_dir: Path) -> dict[str, dict[str, int]]:
             continue
         inner: dict[str, int] = {}
         # Detect whether this type folder has subfolders or is flat.
-        has_subfolders = any(
-            child.is_dir() and not child.name.startswith("_")
-            for child in type_folder.iterdir()
-        )
+        with os.scandir(type_folder) as children:
+            has_subfolders = any(
+                not child.name.startswith("_") and child.is_dir() for child in children
+            )
         if has_subfolders:
             for sub in type_folder.iterdir():
                 if not sub.is_dir() or sub.name.startswith("_"):
                     continue
-                count = sum(
-                    1 for p in sub.rglob("*.md") if p.name != "index.md"
-                )
-                inner[sub.name] = count
+                inner[sub.name] = _count_markdown_pages(sub)
             # Also count top-level .md files (not under any subfolder)
             top_level = sum(
                 1 for p in type_folder.glob("*.md") if p.name != "index.md"
@@ -558,10 +571,7 @@ def _count_notes_by_subfolder(notes_dir: Path) -> dict[str, dict[str, int]]:
             if top_level:
                 inner[""] = top_level
         else:
-            count = sum(
-                1 for p in type_folder.rglob("*.md") if p.name != "index.md"
-            )
-            inner[""] = count
+            inner[""] = _count_markdown_pages(type_folder)
         out[type_folder.name] = inner
     return out
 

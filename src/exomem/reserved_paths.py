@@ -2332,6 +2332,29 @@ def identity_catalogue_refusal(vault_root: Path) -> str | None:
     return cause
 
 
+def warm_identity_catalogue_before_boundary(vault_root: Path) -> None:
+    """Build a cold inventory now, on the caller's thread, before it takes the
+    mutation boundary.
+
+    The walk is whole-vault ("tens of seconds on a mature vault"). A write that
+    met it cold inside its boundary built it inline and held every other writer
+    stopped for that long, so a capture write calls this first: single-flighted,
+    a no-op when warm, and never raising -- a failure here only means the write
+    pays for the walk where it always did.
+    """
+
+    if identity_catalogue_ready(vault_root) or _identity_coordination_active(vault_root):
+        return
+    try:
+        _baseline_identity_catalogue(vault_root)
+    except BaseException as error:  # noqa: BLE001 - a best-effort warm never refuses a write
+        if not isinstance(error, Exception):
+            raise
+        log.warning(
+            "identity catalogue pre-boundary warm failed: %s", type(error).__name__
+        )
+
+
 def schedule_identity_catalogue_warm(vault_root: Path) -> None:
     """Single-flight a cold inventory build away from the request thread.
 

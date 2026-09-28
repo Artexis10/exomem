@@ -4233,6 +4233,13 @@ class LeaseManager:
             receipt_key_digest = None
         request_id = mutation_request_id or str(uuid.uuid4())
         receipt = _receipt_tag(key) if key else None
+        # The private-identity inventory is a whole-vault walk. Build it here,
+        # before any boundary is taken, so a write that meets it cold does not
+        # hold every other writer stopped while it walks.
+        if receipt_vault_root is not None:
+            from . import reserved_paths
+
+            reserved_paths.warm_identity_catalogue_before_boundary(receipt_vault_root)
         vocabulary_binding = None
         vocabulary_replay_terminal = self.idempotency.completed_terminal(key, digest)
         if kwargs.get("vocabulary_ref") is not None or kwargs.get("vocabulary_fingerprint") is not None:
