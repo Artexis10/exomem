@@ -554,9 +554,9 @@ LATER_USE = LaterUse(
 # Frozen pins (re-pinned deliberately; the tests refuse drift)
 # --------------------------------------------------------------------------- #
 
-FIXTURE_SHA256 = "92ec19e5a0d1968851c0b9990621c1723df3d7257ec897618f8edcec09c4b8ca"
+FIXTURE_SHA256 = "c9040e8a247940a95776580861db56cfa9ba2fb5952fe71277706d44e53d648f"
 ACTOR_SHA256 = "b871a3e8f38fb59115bb96744b5392a1348866f4a4d3efb144961d7f20590e45"
-EVALUATOR_SHA256 = "c2dd2a8c526654b8d0cf2bc14c4802ab60a04c726a79317734d2bc68054d21b5"
+EVALUATOR_SHA256 = "684c481245dffb40461402446639a8e811413cd9755794881e3a662a2d6e2ac8"
 PRE_CAPTURE_SHA256 = "1b6ecad6bf192e1768b27bf3bd8d85bc1bf179542e8795e2b73fd8b2e79c53aa"
 
 # --------------------------------------------------------------------------- #

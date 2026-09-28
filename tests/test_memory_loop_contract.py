@@ -26,7 +26,7 @@ from epistemic.memory_loop.contract import (
     VaultState,
 )
 
-SEMANTICS_FINGERPRINT = "5e88706b4d2056c64c96204611c311e22bbc3933e16ab97cef711fd7f0c07cee"
+SEMANTICS_FINGERPRINT = "562e25a872079ebc92289c8ede87b1f83c1e2fa53606549645cb40e16ff80e18"
 
 #: Every declared default of every contract type. A changed default changes
 #: meaning without moving any fixture digest on its own, so it is pinned here
@@ -89,6 +89,27 @@ def test_changing_an_evaluator_constant_moves_the_fingerprint(
     monkeypatch: pytest.MonkeyPatch, name: str, value: object
 ) -> None:
     monkeypatch.setattr(contract, name, value)
+
+    assert contract.semantics_fingerprint() != SEMANTICS_FINGERPRINT
+
+
+@pytest.mark.parametrize("name", ["_effects", "_initiation", "_decision_trace", "_uncovered"])
+def test_changing_the_observation_gate_moves_the_fingerprint(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    from epistemic.memory_loop import observation
+
+    def edited(*args, **kwargs):  # a gate that decides differently
+        return None
+
+    monkeypatch.setattr(observation, name, edited)
+
+    assert contract.semantics_fingerprint() != SEMANTICS_FINGERPRINT
+
+
+@pytest.mark.parametrize("name", ["_SEMANTIC_PHASES", "PROMPT_SLOTS", "HOOK_SCRIPTS"])
+def test_changing_an_observation_constant_moves_the_fingerprint(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    from epistemic.memory_loop import observation
+
+    monkeypatch.setattr(observation, name, type(getattr(observation, name))())
 
     assert contract.semantics_fingerprint() != SEMANTICS_FINGERPRINT
 

@@ -712,6 +712,31 @@ def _exact_replay(record: NoNudgeObservation, frozen: Frozen) -> Verdict:
     return Verdict("pass")
 
 
+#: The functions whose code decides the gate's verdicts, read at call time.
+_GATE_FUNCTIONS: tuple[str, ...] = ("_initiation", "_decision_trace", "_effects", "_uncovered")
+
+
+def gate_semantics() -> dict[str, Any]:
+    """What the observation gate decides with: the source of each gate
+    function and the constants they read. Folded into the contract's
+    semantics fingerprint, so an edit to the gate moves every evaluator
+    digest and voids runs bound to the old one."""
+
+    import inspect
+    import sys
+
+    module = sys.modules[__name__]
+    return {
+        "functions": {name: inspect.getsource(getattr(module, name)) for name in _GATE_FUNCTIONS},
+        "harness_intervention_kinds": list(HARNESS_INTERVENTION_KINDS),
+        "product_prompt_kinds": list(PRODUCT_PROMPT_KINDS),
+        "hook_prompts": sorted(_HOOK_PROMPTS),
+        "semantic_phases": sorted(module._SEMANTIC_PHASES),
+        "prompt_slots": dict(module.PROMPT_SLOTS),
+        "hook_scripts": list(module.HOOK_SCRIPTS),
+    }
+
+
 def evaluate(record: NoNudgeObservation, frozen: Frozen) -> ObservationReport:
     """One verdict per part of the record, and the conjunctive acceptance gate
     over the record alone. :func:`accept` adds the vault check and binding."""

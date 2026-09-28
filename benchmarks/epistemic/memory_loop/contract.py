@@ -1791,8 +1791,11 @@ def _declared_defaults() -> dict[str, dict[str, Any]]:
 
 def semantics_fingerprint() -> str:
     """The predicate semantics a fixture's evaluator digest is bound to:
-    the semantics version, the evaluator constants and every declared default.
+    the semantics version, the evaluator constants, every declared default and
+    the observation gate's own semantics (its gate functions and constants).
     Read at call time, so a changed constant moves every evaluator digest."""
+
+    from . import observation
 
     return sha256_json(
         {
@@ -1805,5 +1808,6 @@ def semantics_fingerprint() -> str:
             "provenance": list(PROVENANCE),
             "planning_title": _PLANNING_TITLE.pattern,
             "defaults": _declared_defaults(),
+            "observation_gate": observation.gate_semantics(),
         }
     )
