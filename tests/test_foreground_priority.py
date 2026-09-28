@@ -295,3 +295,78 @@ def test_the_lexical_repair_rebuild_yields_and_never_under_a_lock(
     assert lexstore.get_store(tmp_path).rebuild_atomic() is True
     assert {"_walk_entries", "_materialize_catalog"} <= callers
     assert held_while_yielding == []
+
+
+def _overlapping_requests(stop: threading.Event, *, hold: float = 0.4) -> list[threading.Thread]:
+    """Two request streams offset by half a hold: `in_flight` never reaches 0."""
+
+    def stream(offset: float) -> None:
+        time.sleep(offset)
+        while not stop.is_set():
+            with foreground_priority.foreground():
+                time.sleep(hold)
+
+    threads = [
+        threading.Thread(target=stream, args=(offset,), daemon=True)
+        for offset in (0.0, hold / 2)
+    ]
+    for thread in threads:
+        thread.start()
+    return threads
+
+
+def test_a_bulk_pass_keeps_progressing_under_overlapping_requests() -> None:
+    """Review M1: with overlapping requests `in_flight` never reached zero, so
+    every unit waited the full cap (3 units took 6 s). A pass now spends at
+    most about half its elapsed time waiting, past a first grace wait."""
+    units = 100
+    unit_seconds = 0.01  # a sleep, so the unit costs time but not the GIL
+    stop = threading.Event()
+    streams = _overlapping_requests(stop)
+    done = threading.Event()
+    took: list[float] = []
+
+    def bulk_pass() -> None:
+        started = time.monotonic()
+        with foreground_priority.bulk():
+            for _unit in foreground_priority.yielding_in_bulk(range(units)):
+                time.sleep(unit_seconds)
+        took.append(time.monotonic() - started)
+        done.set()
+
+    time.sleep(0.1)
+    assert foreground_priority.in_flight() >= 1
+    worker = threading.Thread(target=bulk_pass, daemon=True)
+    worker.start()
+    try:
+        # Unyielded ~1 s. Bound: the grace wait plus twice the work, with slack.
+        finished = done.wait(timeout=foreground_priority.MAX_YIELD_SECONDS + 4 * units * unit_seconds + 2.0)
+    finally:
+        stop.set()
+        for thread in streams:
+            thread.join(5.0)
+    assert finished, "the bulk pass starved behind overlapping foreground requests"
+    assert took[0] < foreground_priority.MAX_YIELD_SECONDS + 4 * units * unit_seconds
+
+
+def test_a_lone_request_mid_pass_still_holds_the_pass() -> None:
+    """The floor must not cost a single request its priority: mid-pass, one
+    request still holds the next unit until it ends."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def request() -> None:
+        with foreground_priority.foreground():
+            entered.set()
+            release.wait(5.0)
+
+    with foreground_priority.bulk():
+        for _unit in foreground_priority.yielding_in_bulk(range(20)):
+            time.sleep(0.01)
+        worker = threading.Thread(target=request)
+        worker.start()
+        assert entered.wait(5.0)
+        threading.Timer(0.3, release.set).start()
+        waited = foreground_priority.yield_to_foreground(max_wait=5.0)
+        worker.join(5.0)
+    assert 0.2 <= waited < 2.0
