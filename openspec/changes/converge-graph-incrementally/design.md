@@ -370,8 +370,11 @@ changes this batch never widened, such as a retitled page outside the indexed co
 That page has no rows and can never be residue, so the next adoption matched, accepted a
 sidecar missing the link it re-targets, and promotion retired the whole-vault marker
 that was the only repair. Both branches now write the fingerprint only when reverting
-the batch's resolver entries to the pre-pass rows reproduces the stored fingerprint,
-decided before the pass while those rows are still readable. Otherwise the stored
+the queued pages' resolver entries to the pre-pass rows reproduces the stored
+fingerprint, decided before the pass while those rows are still readable. Pages the pass
+rewrites only as affected do not count: widening follows the queued pages' keys, so an
+affected page's own retitle was never widened (task 8.9 records the related serving-graph
+limit). Otherwise the stored
 fingerprint stays, the proof keeps failing closed, and the whole-vault marker stays the
 repair. Nothing in the publication or availability contract moves.
 

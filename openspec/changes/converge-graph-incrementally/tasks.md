@@ -386,3 +386,10 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   observed before it. Measure it on the same paired bar that parked 7.2 (longest
   unreadable stretch, write p50 and CPU at one and five writers on the 3,000-page tree)
   before any decision to ship it.
+- [ ] 8.9 **Open, pre-existing, not fixed here.** A published drain that rewrites a page
+  only as affected (its links re-target) also overwrites that page's stored title in
+  `graph_nodes`. When the page's own retitle drains later from its receipt, widening
+  reads the new title as the old one, so pages that still link the old title are
+  missed. The adoption proof fails closed on it (the drain gate counts only queued
+  pages), but the serving graph can carry the stale edge. Keep an affected page's stored
+  title until its own receipt drains, or widen on it when the pass changes it.
