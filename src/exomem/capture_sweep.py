@@ -47,6 +47,7 @@ import logging
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -309,7 +310,7 @@ def hints(
             return {}
         from . import entity_recurrence, semantic_contract
 
-        registry = _registry_index(corpus)
+        registry = _registry_index(corpus, visible)
         mentions: list[str] = []
         seen: set[str] = set()
         for raw_target, _line in links:
@@ -390,8 +391,14 @@ def entity_candidate(
         if not links:
             return None
         from . import entity_recurrence, epistemic_graph, semantic_contract
+        from .vault import writer_link_visibility
 
-        registry = _registry_index(corpus)
+        # Decided over the writer's own view, exactly like `hints()`: a page
+        # the writer may not see neither resolves the name, nor registers it,
+        # nor counts as a linking page -- otherwise the block's presence or
+        # absence would tell a restricted writer that withheld pages exist.
+        visible = writer_link_visibility(Path(vault_root))
+        registry = _registry_index(corpus, visible)
         self_path = str(getattr(page_state, "path", "") or "")
         previous_identities = _linked_identities(previous_page_state)
         candidates: list[tuple[str, entity_recurrence.Wikilink]] = []
@@ -409,7 +416,7 @@ def entity_candidate(
                 # the graph's own dependency row for this page reads right now.
                 continue
             resolution = semantic_contract._resolve_reference_wikilink_from_context(
-                corpus, raw_target
+                corpus, raw_target, visible
             )
             if resolution.status != "unresolved":
                 continue
@@ -434,7 +441,11 @@ def entity_candidate(
             # -- the dependency index can be updated synchronously with the
             # canonical commit -- so it is evaluated for eligibility exactly
             # like any other row rather than assumed present or absent.
-            others = sorted(source for source in result.sources if source != self_path)
+            others = sorted(
+                source
+                for source in result.sources
+                if source != self_path and (visible is None or visible(source))
+            )
             eligible_others = [
                 source
                 for source in others[:MAX_DEPENDENCY_ROWS]
@@ -660,13 +671,17 @@ def _proactive_capture_permitted() -> bool:
         return False
 
 
-def _registry_index(corpus: Any) -> Any:
+def _registry_index(corpus: Any, visible: Callable[[str], bool] | None = None) -> Any:
     """The entity registry's resolution surface, from pages already in memory.
 
     Reused rather than reimplemented: `entity_recurrence.registry_index` owns the
     predicate for what an active registry entity is, and this only adapts the
     corpus's page states to the two attributes it reads. `load_entity_types`
     opens one digest-cached file and nothing else.
+
+    `visible` is the writer's own view (`vault.writer_link_visibility`): an
+    Entity the writer may not see neither registers a name nor offers itself
+    as a near match. `None` admits every page.
     """
     try:
         from . import entity_recurrence, entity_types
@@ -674,7 +689,11 @@ def _registry_index(corpus: Any) -> Any:
         pages = getattr(corpus, "pages", None) or {}
         registry = entity_types.load_entity_types(getattr(corpus, "vault_root", None))
         return entity_recurrence.registry_index(
-            (_RegistryPage(state.path, state.frontmatter) for state in pages.values()),
+            (
+                _RegistryPage(state.path, state.frontmatter)
+                for state in pages.values()
+                if visible is None or visible(state.path)
+            ),
             entity_types=registry,
         )
     except Exception:  # noqa: BLE001 -- a missing registry only widens the hint
