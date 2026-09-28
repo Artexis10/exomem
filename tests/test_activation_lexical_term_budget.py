@@ -13,6 +13,7 @@ Invented, generic vocabulary throughout.
 
 from __future__ import annotations
 
+import json
 import random
 import re
 from pathlib import Path
@@ -399,6 +400,29 @@ def test_a_medium_turn_still_corroborates_on_its_dropped_everyday_words(
     for path in set(unbounded) - set(bounded):
         words = set(re.findall(r"[a-z0-9]+", (long_turn_vault / path).read_text().lower()))
         assert not words & {"zorvik", "qa7700"}, path
+
+
+def test_a_very_long_turn_counts_at_most_the_stem_budget_toward_corroboration(
+    long_turn_vault: Path, statements: list[str]
+) -> None:
+    """Sixteen hundred words: every everyday word is dropped from the MATCH,
+    and only as many of them as the stem budget leaves room for, rarest
+    first, still count toward corroboration. The corroboration list stays
+    bounded however long the turn is, and the named page still leads."""
+    rng = random.Random(17)
+    turn = _long_turn(rng, 1600, "kelvane", "throughput")
+
+    hits, state = working_set_runtime.lexical_evidence(
+        long_turn_vault, turn, _rows(long_turn_vault), limit=8
+    )
+
+    assert state == "available"
+    assert hits and hits[0].path == ANCHOR_PATH, [hit.path for hit in hits]
+    bounded = [sql for sql in statements if ") AS c JOIN fts" in sql]
+    assert len(bounded) == 1, statements
+    counted = json.loads(re.search(r"json_each\('(\[\[.*?\]\])'\)", bounded[0]).group(1))
+    assert {"kelvan", "throughput"} <= {stem for stem, _unit, _needed in counted}
+    assert 2 < len(counted) <= working_set_runtime.ACTIVATION_LEXICAL_MAX_STEMS, len(counted)
 
 
 def test_the_bounded_query_corroborates_in_rank_order_and_stops_at_k(
