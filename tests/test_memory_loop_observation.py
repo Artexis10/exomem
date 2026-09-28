@@ -32,6 +32,7 @@ FROZEN = obs.Frozen(
     turns_sha256=TURNS_SHA,
     later_turn_sha256=DIGEST,
     shipped_prompt_sha256=frozenset(obs.text_sha256(text) for text in PROMPTS.values()),
+    candidates=(("rye", ("rye",)),),
 )
 
 
@@ -557,11 +558,12 @@ def test_a_shipped_skill_asking_for_memory_is_product_guidance() -> None:
     assert obs.evaluate(obs.load_observation(record), frozen).ordinary_initiation.outcome == "pass"
 
 
-def _abstention(disposition: str = "no_capture") -> dict:
+def _abstention(disposition: str = "no_capture", text: str = "The ridge rye was milled in July.") -> dict:
     record = _record(leaf_effects=[])
     for item in record["agent_decisions"]:
         if item["phase"] == "disposition":
             item["disposition"] = disposition
+            item["text"] = text
     return record
 
 
@@ -570,6 +572,28 @@ def test_a_correct_abstention_with_no_effects_passes() -> None:
 
     assert report.leaf_effects.outcome == "pass"
     assert report.ordinary_agent_acceptance.outcome == "pass"
+
+
+def test_probe_r3c_an_abstention_that_names_no_declared_candidate_fails() -> None:
+    report = obs.evaluate(obs.load_observation(_abstention(text="anything")), FROZEN)
+
+    assert report.leaf_effects.outcome == "fail"
+    assert any("'rye'" in reason for reason in report.leaf_effects.reasons)
+
+
+def test_an_abstention_must_cover_every_declared_candidate() -> None:
+    frozen = obs.Frozen(**{**FROZEN.__dict__, "candidates": (("rye", ("rye",)), ("oats", ("oats", "oatmeal")))})
+
+    report = obs.evaluate(obs.load_observation(_abstention()), frozen)
+
+    assert report.leaf_effects.outcome == "fail"
+    assert report.leaf_effects.reasons == ("declared candidate 'oats' has no agent disposition",)
+
+
+def test_an_abstention_against_a_fixture_that_declares_no_candidates_is_unmeasured() -> None:
+    frozen = obs.Frozen(**{**FROZEN.__dict__, "candidates": ()})
+
+    assert obs.evaluate(obs.load_observation(_abstention()), frozen).leaf_effects.outcome == "unmeasured"
 
 
 def test_a_routed_candidate_without_an_effect_fails_transport() -> None:

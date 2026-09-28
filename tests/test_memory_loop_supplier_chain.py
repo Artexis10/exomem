@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 from epistemic.memory_loop import contract
+from epistemic.memory_loop import observation as obs
 from epistemic.memory_loop import supplier_chain as sc
 from epistemic.memory_loop.contract import FixtureError, read_state
 
@@ -729,3 +730,53 @@ def test_probe_r3b_an_ownership_extension_to_the_brand_fails_both_sellers(
 
     failed = set(_check("brand", root, world, before).failed())
     assert {"brand/merrow-sells-under", "brand/pellow-sells-under"} <= failed
+
+
+# --------------------------------------------------------------------------- #
+# Critic probe (round 3): an abstention covers the declared hearsay candidate
+# --------------------------------------------------------------------------- #
+
+
+def _shared_name_abstention(text: str) -> obs.NoNudgeObservation:
+    frozen = sc.frozen("shared-name")
+    return obs.load_observation(
+        {
+            "artifact_type": obs.ARTIFACT_TYPE,
+            "schema_version": 1,
+            "fixture_id": frozen.fixture_id,
+            "actor_sha256": frozen.actor_sha256,
+            "pre_capture_sha256": frozen.pre_capture_sha256,
+            "evaluator_sha256": frozen.evaluator_sha256,
+            "host_initiation": {
+                "client": {"client": "generic-mcp", "adapter_version": "0.0-test", "lifecycle": "best_effort"},
+                "input_origin": "synthetic_fixture",
+                "delivered_turns_sha256": frozen.turns_sha256,
+            },
+            "agent_decisions": [
+                {"seq": 1, "phase": "activation", "initiator": "agent"},
+                {
+                    "seq": 2,
+                    "phase": "disposition",
+                    "initiator": "agent",
+                    "candidate_key": "c1",
+                    "disposition": "no_capture",
+                    "text": text,
+                },
+            ],
+            "leaf_effects": [],
+            "publication": {"status": "not_observed"},
+        }
+    )
+
+
+def test_probe_r3c_an_untouched_vault_and_a_no_capture_on_anything_fails_shared_name() -> None:
+    report = obs.evaluate(_shared_name_abstention("anything"), sc.frozen("shared-name"))
+
+    assert report.leaf_effects.outcome == "fail"
+    assert any("hearsay" in reason for reason in report.leaf_effects.reasons)
+
+
+def test_a_no_capture_of_the_queue_hearsay_covers_shared_name() -> None:
+    record = _shared_name_abstention("Someone in the queue reckoned Merrow Farm is changing hands next spring.")
+
+    assert obs.evaluate(record, sc.frozen("shared-name")).leaf_effects.outcome == "pass"

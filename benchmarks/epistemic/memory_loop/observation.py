@@ -369,6 +369,11 @@ class Frozen:
     installed product ships (see :func:`shipped_prompt_sha256`). A public
     synthetic fixture leaves the private digests unset; an exact private
     replay, run and kept locally, sets both.
+
+    ``candidates`` declares the fixture's candidates as ``(key, markers)``
+    pairs. An abstention (no effect, nothing routed) passes transport only
+    when every declared candidate has an agent disposition whose own text
+    names at least one of its identifying markers.
     """
 
     fixture_id: str
@@ -378,6 +383,7 @@ class Frozen:
     turns_sha256: str
     later_turn_sha256: str | None = None
     shipped_prompt_sha256: frozenset[str] = frozenset()
+    candidates: tuple[tuple[str, tuple[str, ...]], ...] = ()
     private_input_sha256: str | None = None
     private_snapshot_sha256: str | None = None
 
@@ -595,13 +601,28 @@ def _initiation(record: NoNudgeObservation, frozen: Frozen) -> Verdict:
     return _verdict(reasons)
 
 
-def _effects(record: NoNudgeObservation) -> Verdict:
+def _uncovered(dispositions: list[AgentDecision], frozen: Frozen) -> list[str]:
+    """Declared candidates no agent disposition's text identifies."""
+
+    from .contract import _has_marker
+
+    return [
+        key
+        for key, markers in frozen.candidates
+        if not any(_has_marker(decision.text, marker) for decision in dispositions for marker in markers)
+    ]
+
+
+def _effects(record: NoNudgeObservation, frozen: Frozen) -> Verdict:
     """Transport: every observed effect committed or replayed from its receipt,
     and every candidate the agent routed has one.
 
     With no effect at all, a record whose agent dispositions are all
-    non-routed is a correct abstention and passes; a routed candidate without
-    an effect fails; a record with no disposition is unmeasured.
+    non-routed is a correct abstention and passes only when they cover every
+    candidate the fixture declares (see :class:`Frozen`); a fixture that
+    declares none cannot show coverage, so the abstention is unmeasured. A
+    routed candidate without an effect fails; a record with no disposition is
+    unmeasured.
     """
 
     dispositions = [
@@ -614,7 +635,14 @@ def _effects(record: NoNudgeObservation) -> Verdict:
         if routed:
             return Verdict("fail", tuple(f"routed candidate {key!r} has no effect" for key in sorted(routed)))
         if dispositions:
-            return Verdict("pass", ("every candidate was disposed of without an effect",))
+            if not frozen.candidates:
+                return Verdict("unmeasured", ("the fixture declares no candidates an abstention could cover",))
+            uncovered = _uncovered(dispositions, frozen)
+            if uncovered:
+                return Verdict(
+                    "fail", tuple(f"declared candidate {key!r} has no agent disposition" for key in uncovered)
+                )
+            return Verdict("pass", ("every declared candidate was disposed of without an effect",))
         return Verdict("unmeasured", ("no leaf effect and no disposition were observed",))
     landed = {
         effect.candidate_key for effect in record.leaf_effects if effect.outcome in {"committed", "replayed"}
@@ -690,7 +718,7 @@ def evaluate(record: NoNudgeObservation, frozen: Frozen) -> ObservationReport:
 
     initiation = _initiation(record, frozen)
     decisions = _verdict(_decision_trace(record))
-    effects = _effects(record)
+    effects = _effects(record, frozen)
     publication = _publication(record)
     later = _later(record)
     parts = {

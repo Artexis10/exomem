@@ -500,6 +500,7 @@ def frozen() -> obs.Frozen:
         turns_sha256=obs.turns_sha256(TURNS),
         later_turn_sha256=obs.text_sha256(LATER_TURN),
         shipped_prompt_sha256=obs.shipped_prompt_sha256(),
+        candidates=tuple(IDENTIFIERS.items()),
     )
 
 

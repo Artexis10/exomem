@@ -415,6 +415,14 @@ _CHANGE_OF_HANDS = (
     "up for sale",
 )
 
+#: Each episode's declared candidates and the markers that identify each in an
+#: agent's own disposition text. An abstention passes transport only when its
+#: dispositions cover these (see ``observation.Frozen``), so a no-capture of
+#: anything else does not stand in for weighing the queue hearsay.
+DECLARED_CANDIDATES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "shared-name": (("hearsay", _CHANGE_OF_HANDS),),
+}
+
 
 @dataclass(frozen=True)
 class EdgeEvidence:
@@ -887,7 +895,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
 # the tests refuse the module until these are deliberately re-pinned.
 # --------------------------------------------------------------------------- #
 
-FIXTURE_SET_SHA256 = "13d1f608f9523e57361eec2a3f6d3ca4062ad560c2bac9ba7f63358703bb0638"
+FIXTURE_SET_SHA256 = "0d45558208e82720b71179864649e0d5e865df4c687cd06a7452a874318e3672"
 ACTOR_SHA256: dict[str, str] = {
     "org-and-site": "135e9bf0556b3ef2d817d6f3477d96770c34352cb54b01b8477b554b5804235e",
     "multi-role": "2c03c998b675d80fd6e3ac1ddc92a75e7cd3b994f2461f0a5b87a2388331f42c",
@@ -897,12 +905,12 @@ ACTOR_SHA256: dict[str, str] = {
     "brand": "958f06142f148e58e923996de78a106ef3bbb00da56af85a6c4deffdba76c01c",
 }
 EVALUATOR_SHA256: dict[str, str] = {
-    "org-and-site": "e85c7d8b9525f813b559bf04aeca40a3162a166ca84e11ff3430af61d4059d21",
-    "multi-role": "8b946b199b4d7d4c79a3213cc969ef679676a07d563b4bfd86e1db90687a5580",
-    "shared-name": "a0ab5f8baca5cf4a7010298c0a048f5403320a95ee0aac4fec7e10d207d2932b",
-    "mixed-purchase": "1f6f54a7ea65672aa0101f2409d85d26fe7570efea903855cd59f7a4f9ff17c2",
-    "operator-succession": "d8b1c6dd2445d8288aef78b92be55fa048c0721f991e0e7d8c371d7ee62af694",
-    "brand": "e2c7880455543e21438d6743c927c889ee093ad72a472e08f4afbe614375f729",
+    "org-and-site": "76aab3aeb17635bd6cc56aea0984772377b7027403d705146ff75e7d4645f2b2",
+    "multi-role": "215f804c576a0887f0b26aa70be57df1d946879e1ba22a225fc2b435995b4bb4",
+    "shared-name": "54d9b9969b094f66baca8666d5b6fadda8c6af03727c409f055939f6332e889b",
+    "mixed-purchase": "7dc6b7c536475caa8a456aec2d33d282ad263cf759ec8a313aaed7966b4c3d55",
+    "operator-succession": "7f17d05421de1a5a7f5a106180a8e99742698e72db77a16cb7505261984b5d83",
+    "brand": "5baffaa96f0f8aea29e4ff3f9685c9b6417d742e33f11fd781e8fdf5979bae49",
 }
 PRE_CAPTURE_SHA256: dict[str, str] = {
     "org-and-site": "47a43d1f62175c6696516cfe4c3e822ec2e424d1180dc42dcd81dc4137449f55",
@@ -949,7 +957,8 @@ def pre_capture_spec_sha256(episode_id: str) -> str:
 
 def evaluator_sha256(episode_id: str | None = None) -> str:
     evaluator = MANIFEST if episode_id is None else expectations_for(episode_id)
-    return sha256_json({"semantics": semantics_fingerprint(), "evaluator": evaluator})
+    candidates = DECLARED_CANDIDATES if episode_id is None else DECLARED_CANDIDATES.get(episode_id, ())
+    return sha256_json({"semantics": semantics_fingerprint(), "evaluator": evaluator, "candidates": candidates})
 
 
 def fixture_set_sha256() -> str:
@@ -976,6 +985,7 @@ def frozen(episode_id: str) -> obs.Frozen:
         turns_sha256=obs.turns_sha256(item.turns),
         later_turn_sha256=obs.text_sha256(item.later_turn),
         shipped_prompt_sha256=obs.shipped_prompt_sha256(),
+        candidates=DECLARED_CANDIDATES.get(episode_id, ()),
     )
 
 
