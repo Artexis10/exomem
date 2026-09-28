@@ -4365,6 +4365,10 @@ class LeaseManager:
                     principal=effective_principal(),
                 ) as gate_context:
                     leaf_result = command.leaf(*injected, **kwargs)
+                    if vocabulary_binding is not None and not _ACTIVE_MUTATION_COMMITTED.get():
+                        from . import vocabulary_application
+
+                        vocabulary_application.refuse_identity_preparation(leaf_result)
                     if _ACTIVE_MUTATION_COMMITTED.get():
                         return attach_evidence(
                             committed_terminal(
