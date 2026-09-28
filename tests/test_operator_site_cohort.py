@@ -91,7 +91,11 @@ def _relate(root: Path, path: str, relation: str, target: str, why: str = WHY) -
 
 
 def _registered(root: Path, relation: str) -> bool:
-    return relation in read_state(root).relation_ids
+    """A core relation, or an active extension, in the vault's own registry."""
+    registry = relation_registry.load_registry(root)
+    return relation in registry.core or (
+        relation in registry.extensions and getattr(registry.extensions[relation], "status", "active") == "active"
+    )
 
 
 def _provenance(root: Path, path: str, why: str) -> bool:
@@ -118,13 +122,13 @@ def _accepted(episode_id: str, root: Path, world, before) -> None:
 
 
 def _edges(root: Path, path: str) -> list[tuple[str, str]]:
-    """The page's typed edges, each target resolved to the page it names."""
-    state = read_state(root)
-    edges = []
-    for relation, target in state.pages[path].relations:
-        resolved = state.resolve_link(target)
-        edges.append((relation, resolved.path if resolved is not None else target))
-    return edges
+    """The page's ``## Relations`` edges as the product derives them, each
+    target resolved to the page it names."""
+    return [
+        (edge.relation, edge.target)
+        for edge in read_state(root).edges
+        if edge.source == path and edge.origin == "markdown_relation"
+    ]
 
 
 def test_operator_and_same_name_site_are_distinct_identities(
@@ -276,6 +280,23 @@ def test_operator_succession_keeps_the_site_and_its_history(
 ) -> None:
     root, world, before = _world(worlds, "operator-succession", tmp_path, monkeypatch)
     site = world.key_to_path["site_merrow"]
+    # The handover retires the predecessor's operates edge: after it, only
+    # the Records history presents Merrow Farm as the site's operator.
+    predecessor = world.key_to_path["org_merrow"]
+    text = (root / predecessor).read_text(encoding="utf-8")
+    body = text.split("\n---\n", 1)[1]
+    kept = "\n".join(line for line in body.splitlines() if "vault.operates" not in line)
+    _invoke(
+        root,
+        "edit_memory",
+        path=predecessor,
+        why="the orchard changed operator",
+        operation={
+            "kind": "replace_body",
+            "new_body": kept.replace("## Relations\n", "").rstrip() + "\n",
+            "expected_hash": content_hash(text),
+        },
+    )
     callow = _create(
         root, "organization", "Callow Cider Company", "Cider maker running the north-slope orchard."
     )["path"]

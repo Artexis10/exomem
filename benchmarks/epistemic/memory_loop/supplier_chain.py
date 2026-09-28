@@ -383,6 +383,13 @@ _CALLOW = Select(entity_type="organization", tokens=("callow",))
 #: registry lacks, so the truthful edge is a governed extension in either
 #: direction; no core relation says either.
 _GOVERNED_MEANING = (Admissible(relation=EXTENSION, direction="either"),)
+#: Running a site: the core ``operates`` relation (organization to site) or a
+#: governed extension. Core ``operates`` is the registered meaning; the
+#: succession world's ``vault.operates`` predates it and stays admissible.
+_OPERATES_MEANING = (
+    Admissible(relation="operates", direction="forward"),
+    Admissible(relation=EXTENSION, direction="either"),
+)
 _HEARSAY_HEDGES = (
     "reckoned",
     "reckons",
@@ -530,7 +537,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                         polarity="positive",
                         source=_ORG_MERROW,
                         target=_SITE_MERROW_KEY,
-                        admissible=_GOVERNED_MEANING,
+                        admissible=_OPERATES_MEANING,
                         reason="The operator role as a governed relation to the site it runs.",
                     ),
                 ),
@@ -805,7 +812,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                         polarity="positive",
                         source=_CALLOW,
                         target=_SITE_MERROW_KEY,
-                        admissible=_GOVERNED_MEANING,
+                        admissible=_OPERATES_MEANING,
                         reason="The new operator relates to the site by a governed, non-ownership meaning.",
                     ),
                     Mentions(
@@ -897,7 +904,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
 # the tests refuse the module until these are deliberately re-pinned.
 # --------------------------------------------------------------------------- #
 
-FIXTURE_SET_SHA256 = "9220e902ba1c7c907532a2294570be80f0e396112923372879c95666bf4a5b26"
+FIXTURE_SET_SHA256 = "e95e44bc2062102914b04c5769ccfd5397f7935ffcd5f560970aefb0b2bae946"
 ACTOR_SHA256: dict[str, str] = {
     "org-and-site": "135e9bf0556b3ef2d817d6f3477d96770c34352cb54b01b8477b554b5804235e",
     "multi-role": "2c03c998b675d80fd6e3ac1ddc92a75e7cd3b994f2461f0a5b87a2388331f42c",
@@ -908,10 +915,10 @@ ACTOR_SHA256: dict[str, str] = {
 }
 EVALUATOR_SHA256: dict[str, str] = {
     "org-and-site": "071a332bd898c20c96778d3124df84aa9071fcc20ece22b673db842dc69edab9",
-    "multi-role": "40babd5f05fc441eb25b33398a893af398f358a421e7b6470611d7e1995f7718",
+    "multi-role": "5f832589cd17ba8d051c8b892ba06ad3f8edb27c0a9aede0918273d95e336de6",
     "shared-name": "91054c3b976568d8d7d96214c5f0093004eb5dc974d13c5b7fc7bfe3e6b43c80",
     "mixed-purchase": "570cc7d61a7dc7ac0a89008495e698ae7fa1333ec9dec407256e04b2f88c0e8f",
-    "operator-succession": "50bedaff1947d284f0d9f33bbe6b7a1f9667997ce535c11ec7a885d588b4a7b2",
+    "operator-succession": "d4b1986f3f12b0a38692c67959b25538b68245301a52a9069ad01497f6b4f9f0",
     "brand": "8e4cf35ce282c7e8bc8cccca7e763df35f58878f8661bc8780aead395d7c2e02",
 }
 PRE_CAPTURE_SHA256: dict[str, str] = {
