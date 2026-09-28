@@ -437,4 +437,6 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   refresh that ran a whole-vault pass dispatches as `graph_rebuild_completed`, and a
   queued deferral without a checkpoint as `graph_repair_queued_for_drain`, not
   `incremental_completed`. Evidence: the marker and epoch request tests and the
-  standalone code test, red on 544662fa and green after the fix.
+  standalone code test, red on 544662fa and green after the fix. Scoped graph, standby,
+  index_sync, bounded join, drain, records-recall, trash-exclusion, media-worker and
+  durable-closure suites: 1154 passed, 13 skipped.
