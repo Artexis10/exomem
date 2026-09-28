@@ -706,7 +706,9 @@ class EdgeView:
     target: str
     origin: str
     status: str
-    #: The registry family: a core relation's own, an extension's parent's.
+    #: The core family: a core relation's own, an extension's parent's core
+    #: family. Never a family the extension's proposal declares, which the
+    #: registry does not tie to its parent.
     family: str = ""
 
     @property
@@ -754,23 +756,36 @@ def _families(relations: Iterable[str]) -> frozenset[str]:
     )
 
 
+def _core_family(relation: str, registry: Any, core: Any) -> str:
+    """``relation``'s core family, or its parent's when it is an extension."""
+
+    if relation in core.core:
+        return core.core[relation].family
+    definition = registry.definition(relation)
+    parent = definition.parent if definition is not None else None
+    return core.core[parent].family if parent in core.core else ""
+
+
 def _product_edges(root: Path) -> tuple[EdgeView, ...]:
-    from exomem import semantic_contract
+    from exomem import relation_registry, semantic_contract
 
     semantic_contract.reset_corpus_context_cache()
     context = semantic_contract.build_corpus_context(root)
+    registry = relation_registry.load_registry(root)
+    core = relation_registry.core_registry()
     edges = []
     for fact in context.relation_facts:
         if fact.target_status != "resolved" or fact.origin == "wikilink":
             continue
+        relation = fact.canonical_relation or fact.raw_relation
         edges.append(
             EdgeView(
                 source=fact.logical_source_path,
-                relation=fact.canonical_relation or fact.raw_relation,
+                relation=relation,
                 target=fact.logical_target_path,
                 origin=fact.origin,
                 status=fact.registry_status,
-                family=fact.family or "",
+                family=_core_family(relation, registry, core),
             )
         )
     return tuple(sorted(set(edges), key=lambda edge: (edge.source, edge.relation, edge.target, edge.origin)))
@@ -822,7 +837,7 @@ def read_state(root: Path) -> VaultState:
 
 #: Bump when any predicate's code changes meaning; it is part of every
 #: evaluator digest, so a semantic change voids runs bound to the old one.
-SEMANTICS_VERSION = 5
+SEMANTICS_VERSION = 6
 
 #: Core relations that record that two things are connected without saying
 #: how. They are honest when nothing more precise is supported, and never

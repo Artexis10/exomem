@@ -464,7 +464,9 @@ def test_a_new_site_for_the_new_operator_fails_the_succession(
     assert _check("operator-succession", root, world, before).failed() == ("operator-succession/one-site",)
 
 
-def _save_relation(root: Path, relation: str, description: str, parent: str = "relates_to") -> None:
+def _save_relation(
+    root: Path, relation: str, description: str, parent: str = "relates_to", **declared: str
+) -> None:
     from exomem import commands, relation_registry
 
     commands.op_schema_memory(
@@ -478,6 +480,7 @@ def _save_relation(root: Path, relation: str, description: str, parent: str = "r
                     "description": description,
                     "direction": "directed",
                     "aliases": [],
+                    **declared,
                 }
             }
         },
@@ -712,6 +715,24 @@ def test_probe_r3b_an_ownership_extension_for_the_new_operator_fails(
     root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
     before = read_state(root)
     _save_relation(root, "vault.holds_site", "Holds a site.", parent="owns")
+    _correct_succession(root, world, relation="vault.holds_site")
+
+    failed = set(_check("operator-succession", root, world, before).failed())
+    assert {"operator-succession/current-operator-on-site", "operator-succession/no-new-ownership"} <= failed
+
+
+def test_probe_r4_a_declared_family_does_not_launder_an_ownership_extension(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fixture judges an extension by its parent's core family, never the
+    family the proposal declares."""
+
+    from exomem import relation_registry
+
+    root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
+    before = read_state(root)
+    _save_relation(root, "vault.holds_site", "Holds a site.", parent="owns", family="association")
+    assert relation_registry.load_registry(root).definition("vault.holds_site").family == "association"
     _correct_succession(root, world, relation="vault.holds_site")
 
     failed = set(_check("operator-succession", root, world, before).failed())
