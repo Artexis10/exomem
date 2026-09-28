@@ -49,11 +49,31 @@
 - [ ] 5.4 Exercise meaningful ownership, affiliation, operation, compatibility, production, supply/use and location relationships plus governed missing-meaning proposals; verify truthful registered reuse, per-edge provenance, contextual shared-name disambiguation by the active agent and uncertainty abstention. Verify mixed-producer lot attribution, unknown-origin silence, qualified operator succession and no inferred shortcut presented as a direct sourced edge; do not force generic edges or relation quotas.
 - [ ] 5.5 Obtain independent security review of episode recovery and the authority extension at their actual leaves; verify all blocking findings are resolved with repeatable tests before any live activation.
 - [ ] 5.6 Audit canonical vocabulary resolution across normal compiled Notes, source/domain projection, Evidence scopes and existing category/entity/type adapters on current main and overlapping work; reproduce exact-equivalence forks through public writes and identify reusable resolution, receipt and commit-revalidation seams before implementation.
+  Audit on be34c8e7, reproduced by `tests/test_source_vocabulary_resolution.py` (11 red before repair):
+  - Notes: the #1315 seam holds.
+  - Sources `add`: the permissive loader authorized domain writes under a malformed registry and chose a shared alias's owner by entry order. A request for `Health` beside a legacy `health` folder created a case sibling. `mkdir` ran before commit, so a refused commit left the folder. No receipt carried the resolution.
+  - Artifact adoption and `reclassify_source`: both re-derived the same permissive projection. Restating a domain moved a source out of its legacy folder into a case sibling.
+  - Evidence scope and category: validated and stored byte for byte, with no alias or slug folding (`preserve.destination_segment_refusal`). Case variants are distinct identifiers; now pinned by a test.
+  - Categories (`normalize_label`), relations (`normalize_relation`), entity identity (`entity_candidates.identity_key`) and project keys (slug gate): no fork reproduced. They resolve under their own registries; resolution surfaces as write diagnostics or typed refusals.
+  - Entity types: registry-closed. The folder comes from the registry and is re-spelled only on folding volumes. A hand-made case-sibling type folder is not reused on a case-sensitive volume. No public-write fork was reproduced.
+  - Source kind axis: domain-less captures still use the permissive loader. Kind-folder case siblings are outside the domain seam.
+  - Reusable seams: `resolve_notes_domain`'s strict snapshot and existing-spelling projection; the single `valid_public_resolution` validator shared by the terminal, the lease projection and graph receipts; `required_guards` in `batch_atomic_write`.
 - [x] 5.7 Prove the first Notes-domain slice with a strict write-side snapshot over the existing domain taxonomy, one canonical metadata/projection binding and bounded pre-destination neighbour preparation; verify exact/Unicode/slug/case and reviewed-alias reuse, explicit agent reuse/create/defer, legitimate new meanings and ambiguity refusal without silent migrations. Delivered in PR #1315, merged as bcf6827d after independent review and required CI.
 - [x] 5.8 Thread that binding through immutable drafts and both creation commit branches, receipt validation and compact/full/replay projections; verify registry and directory-census changes cannot retarget an old draft or create an equivalent sibling, and MCP/CLI/REST carry identical finite decision semantics. Delivered in PR #1315; live connector rollout remains separate.
 - [x] 5.9 Add end-to-end Notes fixtures for existing Health/requested health, Food/food, reviewed aliases, malformed/unreadable registry, duplicate canonical/alias owners, equivalent legacy siblings, development/software-engineering pre-write suggestions, distinct health/wealth, canonical metadata and requested/resolved/destination receipts; exercise two-client and validate-to-commit races. Delivered in PR #1315 with resolver, draft, public-receipt, race and compatibility regressions.
 - [ ] 5.10 Adapt Sources and artifact-adoption paths to the proven domain seam, including atomic registry additions and destination guards; verify cross-writer alias/metadata/receipt parity and no pre-commit directory fork.
+  Branch `feat/resolver-families`. `resolve_source_domain` shares the Notes strict snapshot, canonical key and existing-spelling projection with `add`, adoption and `reclassify_source`.
+  - The registry guard reaches the batch unless the batch rewrites the registry under its own guard.
+  - No directory is created before commit.
+  - `capture_source` text and file lanes carry the same `vocabulary_resolution` record as Notes.
+  - A malformed or ambiguous registry refuses only domain-bearing captures, and says a capture without `domain` still succeeds.
+  - A census guard over `Sources/<Kind>/` is deliberately absent: it would refuse past its entry bound, and on every sync write, inside a boundary that already serializes writers.
+  - Open: Sources keep the post-write `DOMAIN_NEAR_MISS` warning instead of the pre-destination decision. Gating capture on it conflicts with command-surface "A previously unseen meaningful domain is accepted" and needs a ruling.
 - [ ] 5.11 Integrate category/entity/type/relation family adapters under their existing contracts, preserving open categories and current authority; define Evidence scope/category handling separately so incident identifiers cannot inherit domain aliases or slug collapsing.
+  Branch `feat/resolver-families`.
+  - `valid_public_resolution` admits the additive `entity_type` family. Entity creation reports the requested type, canonical id, folder and registry fingerprint; an unregistered type is still refused.
+  - Evidence scope and category are excluded by name (`PUBLIC_FAMILIES`) and pinned by a test.
+  - Open: category and relation labels resolve many times per write and project no destination, so the single receipt record cannot carry them without a list-valued contract. They stay on their existing write diagnostics pending a ruling.
 
 ## 6. Demonstrate client coverage and excellent activation
 

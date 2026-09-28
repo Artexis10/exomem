@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import move_file as move_file_module
-from . import source_taxonomy
+from . import source_taxonomy, vocabulary_resolution
 from .kbdir import kb_dirname
 from .vault import (
     VaultPathError,
@@ -255,6 +255,27 @@ def _destination(vault_root: Path, rel: str, kind, domain) -> str:
     return "/".join((kb_dirname(), *segments, rel.rsplit("/", 1)[-1]))
 
 
+def _projection(
+    vault_root: Path,
+    rel: str,
+    taxonomy: source_taxonomy.SourceTaxonomy,
+    kind: str,
+    domain: str | None,
+):  # noqa: ANN202 - (kind, domain, destination)
+    """Resolve a correction through the capture's own domain seam.
+
+    A domain projects through the strict snapshot and reuses the one existing
+    equivalent folder, so restating a source's domain never moves it into a
+    case-only sibling of the folder it already lives in.
+    """
+    if not domain:
+        kind_resolution = taxonomy.resolve_kind(kind)
+        return kind_resolution, None, _destination(vault_root, rel, kind_resolution, None)
+    binding = vocabulary_resolution.resolve_source_domain(vault_root, kind=kind, domain=domain)
+    destination = "/".join((kb_dirname(), *binding.segments, rel.rsplit("/", 1)[-1]))
+    return binding.kind, binding.domain, destination
+
+
 def _refuse_episode_kind(current_kind: str, target_kind: str | None) -> None:
     """A recap is only what `episode_memory` recorded and bound, in one folder.
 
@@ -369,13 +390,11 @@ def propose(
     relocation_required = False
     if proposed_kind is not None or proposed_domain is not None:
         try:
-            kind_resolution = taxonomy.resolve_kind(proposed_kind or current_kind)
-            domain_resolution = (
-                taxonomy.resolve_domain(effective_domain) if effective_domain else None
+            _, _, destination = _projection(
+                vault_root, rel, taxonomy, proposed_kind or current_kind, effective_domain
             )
-            destination = _destination(vault_root, rel, kind_resolution, domain_resolution)
             relocation_required = destination != rel
-        except source_taxonomy.TaxonomyError:
+        except (source_taxonomy.TaxonomyError, vocabulary_resolution.VocabularyResolutionError):
             destination = None
 
     return ReclassifyProposal(
@@ -433,19 +452,19 @@ def reclassify(
 
     taxonomy = source_taxonomy.load_taxonomy(vault_root)
     try:
-        kind_resolution = taxonomy.resolve_kind(source_kind or current_kind)
         effective_domain = domain if domain is not None else current_domain
-        domain_resolution = (
-            taxonomy.resolve_domain(effective_domain) if effective_domain else None
+        kind_resolution, domain_resolution, destination = _projection(
+            vault_root, rel, taxonomy, source_kind or current_kind, effective_domain
         )
     except source_taxonomy.TaxonomyError as error:
         raise ReclassifyError("INVALID_CLASSIFICATION", str(error)) from error
+    except vocabulary_resolution.VocabularyResolutionError as error:
+        raise ReclassifyError(error.code, error.reason) from error
     _refuse_episode_kind(current_kind, kind_resolution.key)
 
     plan = source_taxonomy.plan_registrations(
         vault_root, kind=kind_resolution, domain=domain_resolution
     )
-    destination = _destination(vault_root, rel, kind_resolution, domain_resolution)
     relocating = destination != rel
 
     def transform(current: str) -> str:

@@ -31,6 +31,7 @@ from . import (
     source_taxonomy,
     tag_variants,
     temporal,
+    vocabulary_resolution,
 )
 from .kbdir import kb_prefix
 from .vault import (
@@ -105,6 +106,8 @@ class AddResult:
     artifact_hash: str | None = None
     artifact_size: int | None = None
     adoption: dict[str, object] | None = None
+    # The shared domain identity record, present only when a domain was given.
+    vocabulary_resolution: dict[str, str] | None = None
 
     def as_dict(self) -> dict:
         out = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
@@ -119,6 +122,8 @@ class AddResult:
             out["size"] = self.artifact_size
         if self.adoption is not None:
             out["adoption"] = self.adoption
+        if self.vocabulary_resolution is not None:
+            out["vocabulary_resolution"] = self.vocabulary_resolution
         return out
 
 
@@ -256,22 +261,37 @@ def add(
         if not content or not content.strip():
             content = _describe_artifact(safe_name, artifact_digest, artifact_size)
 
-    taxonomy = source_taxonomy.load_taxonomy(vault_root)
+    # No kind supplied means unclassified, not invalid: capture is never
+    # gated on classification.
+    requested_kind = source_type if source_type else source_taxonomy.FALLBACK_KIND
+    domain_binding: vocabulary_resolution.SourceDomainBinding | None = None
     try:
-        # No kind supplied means unclassified, not invalid: capture is never
-        # gated on classification.
-        kind = taxonomy.resolve_kind(
-            source_type if source_type else source_taxonomy.FALLBACK_KIND
-        )
-        domain_resolution = (
-            taxonomy.resolve_domain(domain) if domain is not None else None
-        )
+        if domain is not None:
+            # A domain projects a destination, so it resolves through the same
+            # strict snapshot and existing-spelling rule as Notes experiments.
+            domain_binding = vocabulary_resolution.resolve_source_domain(
+                vault_root, kind=requested_kind, domain=domain
+            )
+            taxonomy = domain_binding.taxonomy
+            kind = domain_binding.kind
+            domain_resolution: source_taxonomy.Resolution | None = domain_binding.domain
+        else:
+            taxonomy = source_taxonomy.load_taxonomy(vault_root)
+            kind = taxonomy.resolve_kind(requested_kind)
+            domain_resolution = None
     except source_taxonomy.TaxonomyError as e:
         axis = getattr(e, "axis", "source_kind")
         raise AddError(
             code="INVALID_SOURCE",
             missing=["source_type" if axis == "source_kind" else "domain"],
             reason=str(e),
+        ) from e
+    except vocabulary_resolution.VocabularyResolutionError as e:
+        raise AddError(
+            code=e.code,
+            missing=["domain"],
+            reason=f"{e.reason}. Domain is optional: capture without `domain` "
+            "to preserve the material now",
         ) from e
 
     episode_lines = _episode_frontmatter_lines(kind.key, extra_frontmatter, supersede)
@@ -327,7 +347,11 @@ def add(
     # The location is a projection of the canonical semantic keys, not the
     # ontology. `folder_name` stays the *top-level* segment because that is what
     # the source index counts and labels by; a domain adds one level below it.
-    segments = source_taxonomy.source_segments(kind, domain_resolution)
+    segments = (
+        domain_binding.segments
+        if domain_binding is not None
+        else source_taxonomy.source_segments(kind, domain_resolution)
+    )
     folder_name = segments[1]
     folder_path = kb_root(vault_root).joinpath(*segments)
     if adoption_seed is not None:
@@ -349,7 +373,8 @@ def add(
 
     supersede_targets = _supersede_targets(vault_root, folder_path, supersede)
     stem = f"{date_iso}-{filename_slug}"
-    folder_path.mkdir(parents=True, exist_ok=True)
+    # No directory is created here: the batch creates the folder with the page
+    # and removes it again if the commit is refused.
     if artifact is None:
         artifact_path: Path | None = None
         source_path = unique_path(folder_path, stem)
@@ -411,8 +436,8 @@ def add(
     )
 
     # Plan the source file write so the counts in compute_updates() are
-    # *post*-creation: the folder already exists (name resolution had to list
-    # it), compute_updates re-scans, and the new file joins the batch — so the
+    # *post*-creation: compute_updates re-scans, the folder may not exist
+    # until the batch creates it, and the new file joins the batch — so the
     # in-memory counts are bumped explicitly to include it.
     rel_source_no_ext = (
         source_path.relative_to(vault_root).with_suffix("").as_posix()
@@ -510,6 +535,13 @@ def add(
             )
         )
 
+    # The registry the domain resolved against must still be the one on disk.
+    # A registration rewrites it in this batch under its own content guard.
+    required_guards = (
+        (domain_binding.registry_guard,)
+        if domain_binding is not None and not taxonomy_plan.writes
+        else ()
+    )
     try:
         if defer_fanout_to_terminal:
             publication_intents: list[object] = []
@@ -517,11 +549,12 @@ def add(
             committed = batch_atomic_write(
                 writes,
                 vault_root=vault_root,
+                required_guards=required_guards,
                 post_commit_fanout=False,
                 publication_intents_out=publication_intents,
             )
         else:
-            batch_atomic_write(writes, vault_root=vault_root)
+            batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards)
     except Exception as e:
         log.exception("partial write during add(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")
@@ -631,6 +664,7 @@ def add(
             folder_path, kind, domain_resolution
         ),
         adoption=adoption_receipt,
+        vocabulary_resolution=domain_binding.as_dict() if domain_binding is not None else None,
     )
 
 
