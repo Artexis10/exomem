@@ -28,4 +28,4 @@
 
 - [x] 6.1 Document the local listener, token lifecycle, attach helper and hook settings.
 - [x] 6.2 Run the scoped suites for every touched module, lint, the privacy gate, strict OpenSpec validation and the derived-artifact checks.
-- [ ] 6.3 Independent security review of the listener, stamp, verifier and principal.
+- [x] 6.3 Independent security review of the listener, stamp, verifier and principal. APPROVE after one correction round (3627baaa closes the bearer parse, key inheritance and public counter findings).
