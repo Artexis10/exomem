@@ -182,6 +182,9 @@ class AgentDecision(StrictModel):
     #: leaf content); what the evaluator's model-free matcher reads.
     text: str = Field(default="", max_length=8000)
     reason: str = Field(default="", max_length=1000)
+    #: Paths of the pages the agent inspected before choosing this
+    #: destination (the proposal's bounded ``alternatives``).
+    alternatives: tuple[str, ...] = Field(default=(), max_length=8)
 
     @model_validator(mode="after")
     def _phase_fields(self) -> "AgentDecision":
@@ -195,8 +198,13 @@ class AgentDecision(StrictModel):
                 raise ValueError("a destination decision needs a route")
             if (self.target is None) == (self.title is None):
                 raise ValueError("a destination names exactly one existing target or new title")
-        elif self.route is not None or self.target is not None or self.title is not None:
-            raise ValueError("route, target and title belong to the destination phase")
+        elif (
+            self.route is not None
+            or self.target is not None
+            or self.title is not None
+            or self.alternatives
+        ):
+            raise ValueError("route, target, title and alternatives belong to the destination phase")
         if (self.phase == "disposition") != (self.disposition is not None):
             raise ValueError("a disposition belongs to exactly the disposition phase")
         return self

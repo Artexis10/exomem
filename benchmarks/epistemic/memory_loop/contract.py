@@ -861,15 +861,24 @@ class Mentions:
         return _result(self.key, self.polarity, not missing, f"{found[0].path} missing: {missing}")
 
 
+_WIKILINK = re.compile(r"\[\[[^\[\]\n]*\]\]")
+
+
 @dataclass(frozen=True)
 class NoNewMention:
-    """No selected page gained a line carrying any of ``markers``."""
+    """No selected page gained a line carrying any of ``markers``.
+
+    With ``ignore_links`` a marker that appears only inside a wikilink does
+    not count: a backlink to a new home is a scope-owned navigation update,
+    while restating that home's content on the page is not.
+    """
 
     key: str
     polarity: Literal["positive", "negative"]
     markers: tuple[str, ...]
     reason: str
     select: Select | None = None
+    ignore_links: bool = False
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
         pages = (
@@ -882,9 +891,36 @@ class NoNewMention:
             for page in pages
             for line in _new_lines(before, page)
             for marker in self.markers
-            if _has_marker(line, marker)
+            if _has_marker(_WIKILINK.sub(" ", line) if self.ignore_links else line, marker)
         ]
         return _result(self.key, self.polarity, not hits, f"new mentions: {hits}")
+
+
+@dataclass(frozen=True)
+class NewPages:
+    """Exactly ``exactly`` canonical pages were created outside ``exclude`` folders.
+
+    Episode recaps and other Sources are retained input, not destinations, so
+    they are excluded by default.
+    """
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    exactly: int
+    reason: str
+    exclude: tuple[str, ...] = (f"{KB}/Sources/",)
+    exclude_types: tuple[str, ...] = ()
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        created = sorted(
+            path
+            for path, page in after.pages.items()
+            if path not in before.pages
+            and page.page_type != "collection"
+            and page.page_type not in self.exclude_types
+            and not path.startswith(self.exclude)
+        )
+        return _result(self.key, self.polarity, len(created) == self.exactly, f"new pages: {created}")
 
 
 @dataclass(frozen=True)
@@ -1207,6 +1243,7 @@ Expectation = (
     | Distinct
     | Mentions
     | NoNewMention
+    | NewPages
     | AttributedLines
     | HedgedLines
     | CoLocated
