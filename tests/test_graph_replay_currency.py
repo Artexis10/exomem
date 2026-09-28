@@ -544,7 +544,7 @@ def _terminal_graph_diagnostic(
 
 
 @pytest.mark.parametrize("marker", [False, True], ids=["epoch", "marker"])
-def test_a_request_replay_deferral_under_an_acknowledged_checkpoint_reports_pending(
+def test_a_request_replay_deferral_under_an_acknowledged_checkpoint_dispatches_as_queued(
     vault: Path,
     whole_vault_passes: list[str],
     caller_whole_vault_calls: list[str],
@@ -553,8 +553,10 @@ def test_a_request_replay_deferral_under_an_acknowledged_checkpoint_reports_pend
 ) -> None:
     """The live state: a durable checkpoint the acknowledgement covers, graph available.
 
-    A request replay that leaves its repair to the drain is pending work with a
-    queued receipt, whatever the acknowledgement covers -- not a completed rebuild.
+    A request replay that leaves its repair to the drain dispatches as a queued
+    deferral with a coverage code, and the terminal's graph diagnostic says so,
+    whatever the acknowledgement covers -- not a completed rebuild. The terminal's
+    separate `graph_sync` probe is a follow-up (task 9.5).
     """
     from exomem import graph_sync
 
