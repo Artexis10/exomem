@@ -16,4 +16,9 @@ ssl_min_protocol_version = 'TLSv1.2'
 wal_level = replica
 archive_mode = on
 archive_command = 'pgbackrest --stanza={{ postgres_pgbackrest_stanza }} archive-push %p'
+## Ship WAL at least once a minute. archive-push sends only whole 16 MB
+## segments, which this quiet database fills every few days, so without a
+## timeout a lost server loses every write since the nightly backup.
+## Reloadable: no restart needed to change it.
+archive_timeout = 60
 max_wal_senders = 3
