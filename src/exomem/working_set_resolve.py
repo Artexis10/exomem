@@ -617,11 +617,15 @@ def embedded_words(
     `exact_alias`; a name inside a longer stretch (`白樺並木`) is still only
     contained (`_contained_names`).
 
-    A hiragana run is an edge only when the WHOLE run is one of `boundaries`
-    (the declared particles, plus the vocabulary's filler words from
-    `analyze_turn`). Any other hiragana is part of the stretch around it: a
-    name written partly in hiragana (`ねこやなぎ銀行`) keeps its own edge, and
-    its kanji tail (`銀行`) is only contained, as in `ハヤブサ号線`.
+    A hiragana run is an edge when the WHOLE run is one of `boundaries` (the
+    declared particles, plus the vocabulary's filler words from
+    `analyze_turn`). With a stretch open, a run that STARTS with a declared
+    particle also ends it, matching the longest particle, and the rest of the
+    run joins the next stretch: a particle glued to the next kana word
+    (`ハヤブサ号はどう`, `をまた`) still marks the name's edge. Any other
+    hiragana is part of the stretch around it, so a name written partly in
+    hiragana (`ねこやなぎ銀行`, also after `駅前の`) keeps its own edge, and its
+    kanji tail (`銀行`) is only contained, as in `ハヤブサ号線`.
 
     A stretch counts only when it holds at least two code points besides
     hiragana and is not the whole token: one Han character is as often a verb
@@ -648,6 +652,11 @@ def embedded_words(
                     if stretch:
                         pieces.append(stretch)
                     stretch = ""
+                elif kana and stretch and (particle := _leading_particle(part)):
+                    # A particle glued to the next kana word (はどう, をまた)
+                    # still ends the stretch; the rest joins the next one.
+                    pieces.append(stretch)
+                    stretch = part[len(particle):]
                 else:
                     stretch += part
             if stretch:
@@ -664,6 +673,15 @@ def embedded_words(
             ):
                 words.append(word)
     return tuple(words)
+
+
+#: The declared particles, longest first, for `_leading_particle`.
+_PARTICLES_LONGEST_FIRST = tuple(sorted(JAPANESE_PARTICLES, key=len, reverse=True))
+
+
+def _leading_particle(kana: str) -> str | None:
+    """The longest declared particle `kana` starts with, if any."""
+    return next((particle for particle in _PARTICLES_LONGEST_FIRST if kana.startswith(particle)), None)
 
 
 def _hiragana_segments(run: str) -> list[tuple[bool, str]]:

@@ -337,7 +337,9 @@ by the anchor-name yardstick MAY grant rare-term evidence, never exact-alias
 evidence; a name whose every occurrence lies inside a longer contained name
 SHALL be consumed by it. A Japanese run's stretch holding at least two
 characters besides hiragana, between hiragana runs that are each wholly a
-declared particle or filler word, and a word of another script glued to an
+declared particle or filler word, or ended by a hiragana run that starts with
+a declared particle (the rest of that run joining the next stretch), and a
+word of another script glued to an
 unspaced run, SHALL be read as a word of the turn, so a name equal to it grants
 exact-alias evidence as a spaced token does; any other hiragana belongs to the
 stretch around it, and a name inside a longer stretch stays contained. Because the band is an aggregate over the whole anchor
@@ -504,8 +506,11 @@ fast abstention or compiler-only timing.
   two particles (`山小屋の白樺を借りられるか`), or glues a Latin anchor
   name to a Japanese phrase (`Exomemのレイテンシ`)
 - **THEN** the anchor earns `exact_alias` and resolves without a band
-- **AND** a name written partly in hiragana (`ねこやなぎ銀行の口座`) keeps its
-  own edge: a shorter anchor named by its kanji tail (`銀行`) is only contained
+- **AND** a particle glued to the next kana word still ends the name
+  (`ハヤブサ号はどう？`, `ハヤブサ号をまた洗車した`)
+- **AND** a name written partly in hiragana (`ねこやなぎ銀行の口座`,
+  `駅前のねこやなぎ銀行`) keeps its own edge: a shorter anchor named by its
+  kanji tail (`銀行`) is only contained
 - **AND** a pointing-back Japanese turn made only of a declared cue and filler
   (`続けてください`) is referential, while one that also says something of its
   own (`続きを読んで`) is not
