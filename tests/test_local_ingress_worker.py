@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -124,8 +125,10 @@ def _oauth(public: SessionAuthority, local: SessionAuthority | None) -> ExomemSe
 
 @pytest.fixture
 def managed(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """A worker whose manager gave it the proof, as every managed spawn does."""
+    """A worker whose manager gave it the proof, claimed as the worker entry does."""
+    monkeypatch.setattr(local_ingress, "_PROOF_KEY", None)
     monkeypatch.setenv(INGRESS_KEY_ENV, KEY)
+    local_ingress.claim_proof_key()
     monkeypatch.setenv("EXOMEM_BASE_URL", ISSUER)
     monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", str(OWNER_ID))
     return monkeypatch
@@ -424,6 +427,7 @@ async def test_a_worker_its_manager_gave_no_proof_refuses_every_stamp(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv(INGRESS_KEY_ENV, raising=False)
+    monkeypatch.setattr(local_ingress, "_PROOF_KEY", None)
     public, local = _authorities(tmp_path)
     harness = _Harness(_probe_app(vault, auth=_oauth(public, local)), public, local)
     token, _ = await _issue_local(harness)
@@ -773,7 +777,7 @@ async def test_local_requests_are_logged_with_ingress_and_client_and_nothing_sec
 
 
 @pytest.mark.anyio
-async def test_owner_static_credentials_through_the_tunnel_are_counted_not_refused(
+async def test_owner_static_credentials_through_the_tunnel_are_logged_not_refused(
     real_worker: _RealWorker, managed: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _capture_rest_principal(managed)
@@ -803,3 +807,98 @@ async def test_owner_static_credentials_through_the_tunnel_are_counted_not_refus
         "event=owner_credential_transit credential=rest_api_key transit=cloudflare",
         "event=owner_credential_transit credential=upload_token transit=cloudflare",
     ]
+    # Log-only: the unauthenticated /metrics.json, reachable through the
+    # tunnel, must not tell anyone which owner credential is in use.
+    async with _real_doors(real_worker) as doors:
+        metrics = await doors.public.get("/metrics.json", headers=tunnel)
+    assert metrics.status_code == 200
+    assert "owner_credential" not in metrics.text
+
+
+# ---- review round: bearer parsing agrees with the MCP SDK -----------------------
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        (b"Bearer tok", "tok"),
+        (b"bearer tok", "tok"),
+        (b"Bearer  tok", None),
+        (b"Bearer tok ", None),
+        (b"Bearer\ttok", None),
+        (b"Bearer ", None),
+        (b"Basic tok", None),
+    ],
+)
+def test_the_gate_reads_a_bearer_exactly_as_the_sdk_does(header: bytes, expected) -> None:
+    assert local_ingress._bearer([(b"authorization", header)]) == expected
+
+
+@pytest.mark.anyio
+async def test_a_padded_bearer_is_refused_the_same_way_on_mcp_and_api(
+    real_worker: _RealWorker, managed: pytest.MonkeyPatch
+) -> None:
+    """`Bearer  <token>`: the SDK reads a leading space into the token, so the
+    gate must not strip it and admit what the SDK would then refuse."""
+    kinds = _capture_rest_principal(managed)
+    padded = {"authorization": f"Bearer  {real_worker.local_token}"}
+    async with _real_doors(real_worker) as doors:
+        mcp = await _post_mcp(doors.local, None, extra=padded)
+        api = await doors.local.post("/api/ask_memory", headers=padded, json={"query": "x"})
+
+    for response in (mcp, api):
+        assert response.status_code == 401
+        assert "resource_metadata" not in response.headers.get("www-authenticate", "")
+    assert kinds == []
+
+
+# ---- review round: the proof never reaches a descendant --------------------------
+
+
+def test_the_worker_entry_claims_the_proof_before_anything_can_inherit_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+    import sys
+
+    from exomem import service_manager
+
+    if sys.platform != "linux":
+        pytest.skip("Managed lifecycle is Linux-only")
+    monkeypatch.setattr(local_ingress, "_PROOF_KEY", None)
+    monkeypatch.setenv(INGRESS_KEY_ENV, KEY)
+    seen: dict[str, object] = {}
+
+    def fake_run(**_kwargs: object) -> None:
+        # What any child the worker spawns (the media worker included) inherits.
+        child = subprocess.run(
+            [sys.executable, "-c", f"import os; print(os.environ.get({INGRESS_KEY_ENV!r}))"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        seen["child"] = child.stdout.strip()
+        seen["claimed"] = local_ingress._PROOF_KEY
+
+    monkeypatch.setattr(server, "run", fake_run)
+    directory = service_manager.private_directory(tmp_path / "private")
+    assert service_manager.main(
+        ["worker", "--socket", str(directory / "w.sock"), "--host", "127.0.0.1", "--port", "8765"]
+    ) == 0
+
+    assert seen == {"child": "None", "claimed": KEY}
+    assert INGRESS_KEY_ENV not in os.environ
+    # The claimed proof still arms a gate built after the claim.
+    gate = local_ingress.LocalIngressMiddleware(lambda *a: None)
+    assert gate._proven([b"local"], [KEY.encode()])
+
+
+def test_the_media_child_environment_lacks_the_proof_after_the_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import asr_runtime
+
+    monkeypatch.setattr(local_ingress, "_PROOF_KEY", None)
+    monkeypatch.setenv(INGRESS_KEY_ENV, KEY)
+    local_ingress.claim_proof_key()
+    assert INGRESS_KEY_ENV not in asr_runtime.cuda_runtime_child_env(os.environ)

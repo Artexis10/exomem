@@ -1103,9 +1103,9 @@ A client then points at `http://127.0.0.1:8764/mcp` with
 
 The owner REST key and the static upload token keep working on the public path.
 Their use on a Cloudflare-transited request is logged as
-`event=owner_credential_transit` and counted in
-`exomem_owner_credential_transit_total`, so a later release can refuse them
-there once no remote client uses them.
+`event=owner_credential_transit`, so a later release can refuse them there once
+no remote client uses them. It is kept out of `/metrics.json`, which is served
+without authentication.
 
 ## Deploying a new version
 

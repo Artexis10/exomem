@@ -1570,8 +1570,10 @@ def main(argv: list[str] | None = None) -> int:
     if sys.platform != "linux":
         parser.error("managed services currently require Linux systemd user units")
     if args.command == "worker":
-        from . import server
+        from . import local_ingress, server
 
+        # First, before anything can spawn a child that would inherit it.
+        local_ingress.claim_proof_key()
         private_directory(args.socket.parent)
         server.run(
             transport="streamable-http",

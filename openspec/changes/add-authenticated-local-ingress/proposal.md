@@ -31,7 +31,8 @@ per-client attribution, and none can be revoked for one client without breaking 
 - The retrieve hook's REST-first rung may use the local listener with a local token file,
   falling back to today's lifted-key rung for one release.
 - Logs stay content-free and name the ingress and client. Owner REST-key and static
-  upload-token use on Cloudflare-transited requests is counted, not refused.
+  upload-token use on Cloudflare-transited requests is logged, not refused, and kept out
+  of the unauthenticated metrics.
 
 Default-off: nothing changes on a host that does not set `EXOMEM_LOCAL_PORT`, and the
 manager half only takes effect after the manager itself restarts.

@@ -12,7 +12,7 @@
 - [x] 3.1 Add failing coverage: a proven stamp with a local token is accepted; an OAuth token, the REST key and the upload token are 401s without `resource_metadata` on local ingress; a local token on the public path is the ordinary 401; an unproven stamp is refused; the public path is unchanged.
 - [x] 3.2 Add the local issuer and audience, the local session authority, the worker middleware in the OAuth proxy's middleware and the no-auth server list, and the grant branch in `load_access_token`.
 - [x] 3.3 Resolve a local grant to `owner-local` with issuer family `mcp-local`, record it in the call ledger, and accept the local token on REST and `/upload` on local ingress.
-- [x] 3.4 Log `ingress=local` and the client id on local requests, content-free refusals, and count owner REST-key and upload-token use on Cloudflare-transited requests.
+- [x] 3.4 Log `ingress=local` and the client id on local requests, content-free refusals, and log (never in the public metrics) owner REST-key and upload-token use on Cloudflare-transited requests.
 - [x] 3.5 Prove the threat scenarios end to end through a real worker behind the real ingress.
 
 ## 4. CLI

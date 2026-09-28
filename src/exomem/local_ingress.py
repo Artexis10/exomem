@@ -71,6 +71,20 @@ class LocalGrant:
 
 _GRANT: ContextVar[LocalGrant | None] = ContextVar("exomem_local_ingress_grant", default=None)
 
+#: The manager's proof, taken out of the environment once at worker start.
+_PROOF_KEY: str | None = None
+
+
+def claim_proof_key() -> None:
+    """Take the manager's proof out of this process's environment.
+
+    Called once, first thing in a managed worker, so no descendant (the media
+    worker, a converter subprocess) inherits a credential meant for this
+    process alone.
+    """
+    global _PROOF_KEY
+    _PROOF_KEY = os.environ.pop(INGRESS_KEY_ENV, "").strip() or None
+
 
 def current_grant() -> LocalGrant | None:
     """The live request's verified local grant, or None off local ingress."""
@@ -145,23 +159,18 @@ class LocalCredentialVerifier:
 
 
 def note_owner_credential(credential: str, headers: Any) -> None:
-    """Count owner static-credential use on a Cloudflare-transited request.
+    """Log owner static-credential use on a Cloudflare-transited request.
 
     Measurement only: whether any remote client still uses the owner REST key
     or the static upload token decides when they can be refused through the
     tunnel. Nothing is refused here, and nothing but the credential's kind is
-    recorded.
+    recorded. Log-only on purpose: the metrics registry is served
+    unauthenticated at `/metrics.json`, which the tunnel reaches.
     """
     try:
         if headers.get("cf-ray") is None:
             return
         logger.info("event=owner_credential_transit credential=%s transit=cloudflare", credential)
-        from . import metrics
-
-        metrics.inc_counter(
-            "exomem_owner_credential_transit_total",
-            {"credential": credential, "transit": "cloudflare"},
-        )
     except Exception:  # noqa: BLE001 - observability must never break a request
         pass
 
@@ -178,7 +187,11 @@ def _bearer(headers: list[tuple[bytes, bytes]]) -> str | None:
         scheme, _, credential = values[0].decode("ascii").partition(" ")
     except UnicodeDecodeError:
         return None
-    credential = credential.strip()
+    # The MCP SDK takes everything after `Bearer ` as the token, whitespace
+    # included. Refusing padding here keeps the gate and the SDK reading the
+    # same token, so no request passes one and fails the other.
+    if credential != credential.strip():
+        return None
     return credential if scheme.lower() == "bearer" and credential else None
 
 
@@ -224,8 +237,8 @@ class LocalIngressMiddleware:
     ) -> None:
         self.app = app
         self.verifier = verifier or LocalCredentialVerifier()
-        key = proof_key if proof_key is not None else os.environ.get(INGRESS_KEY_ENV, "")
-        self._proof_key = key.strip().encode("ascii", "replace") if key.strip() else None
+        key = (proof_key if proof_key is not None else _PROOF_KEY or "").strip()
+        self._proof_key = key.encode("ascii", "replace") if key else None
 
     def _proven(self, stamps: list[bytes], proofs: list[bytes]) -> bool:
         if self._proof_key is None or stamps != [b"local"] or len(proofs) != 1:

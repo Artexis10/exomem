@@ -124,7 +124,8 @@ local path.
 A request served on local ingress SHALL be logged with `ingress=local` and its session's
 client id, and a refusal SHALL name only its reason. No log line SHALL contain a bearer, a
 proof, a header value, or request content. Use of the owner REST key or the static upload
-token on a Cloudflare-transited request SHALL be counted without being refused.
+token on a Cloudflare-transited request SHALL be recorded in a content-free log event
+without being refused, and SHALL NOT appear in the unauthenticated metrics.
 
 #### Scenario: Local request logged
 - **WHEN** a local client's request completes
@@ -132,4 +133,5 @@ token on a Cloudflare-transited request SHALL be counted without being refused.
 
 #### Scenario: Owner key used through the tunnel
 - **WHEN** the owner REST key authorizes a request carrying `cf-ray`
-- **THEN** the request is served as before and a content-free counter records it
+- **THEN** the request is served as before and a content-free log event records it
+- **AND** `/metrics.json` carries nothing about it

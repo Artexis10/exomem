@@ -45,6 +45,8 @@ untouched.
   `x-exomem-internal-ingress-proof: <key>`. The key is random per manager process and
   reaches workers only through `EXOMEM_INTERNAL_INGRESS_KEY` in the environment the
   manager builds for each child, overriding any value in the service environment file.
+  The worker takes it out of its own environment first thing at startup, so none of
+  its descendants (the media worker, converter subprocesses) inherit it.
   The proof closes the upgrade window: a new worker can be deployed by seamless handoff
   under an old manager that does not strip internal headers, and without a proof a remote
   caller could forge the stamp through it. Under an old manager the worker has no key and
