@@ -119,12 +119,14 @@ def _principal(context: authorization_session_lifecycle.AuthorizationSessionCont
 def test_floor_two_pending_session_activation_and_session_revocation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    now = int(time.time())
     vault = tmp_path / "vault"
     init.init_vault(vault)
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "lease"))
     wire._configure_v4_authority(vault, tmp_path / "custody", monkeypatch)
     (tmp_path / "custody").chmod(0o700)
+    # Taken after authority setup, which stamps issued_at from its own clock;
+    # a slow vault init must not leave now behind issued_at.
+    now = int(time.time())
     _publish_floor_two(authorization_custody.load_authorization_custody(vault, now=now))
 
     with pytest.raises(vocabulary_admission.VocabularyAdmissionError):
