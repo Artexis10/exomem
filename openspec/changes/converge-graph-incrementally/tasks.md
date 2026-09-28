@@ -401,3 +401,14 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   its own receipt drains, adoption can accept a sidecar with an extra edge. Its receipt
   repairs it, so this matters only when that receipt is lost. Count such a page as
   explained only when it has a pending graph receipt.
+
+## 9. Replayed paths outside the recall delta (0.96.0 live latency)
+
+- [ ] 9.1 Red tests: a replayed receipt whose bytes match the stored row rebuilds
+  nothing; a replayed stale page is drained incrementally; a replayed page the registry
+  does not vouch for still falls back; every case is compared edge for edge with a fresh
+  rebuild.
+- [ ] 9.2 Prove caller paths outside the delta against the stored rows and the live
+  registry before `caller_path_outside_delta`; drop current paths, queue and drain stale
+  ones for a standalone caller, and fall back only when unprovable.
+- [ ] 9.3 Scoped suites and gates green.
