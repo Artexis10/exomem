@@ -430,3 +430,11 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   Evidence: `tests/test_graph_replay_currency.py` (11 passed; the alias and
   created-path tests red before the fix). Scoped graph, standby, index_sync, bounded
   join and drain suites: 936 passed, 13 skipped.
+  Recheck follow-up: a caller that can report pending (a mutation request, a direct
+  mutation guard, a parent handoff) no longer drains the replay's scope while a full
+  marker stands or the epoch refuses per-path repair, since either runs a whole-vault
+  pass on its thread; it returns queued and the drain daemon pays the debt once. A
+  refresh that ran a whole-vault pass dispatches as `graph_rebuild_completed`, and a
+  queued deferral without a checkpoint as `graph_repair_queued_for_drain`, not
+  `incremental_completed`. Evidence: the marker and epoch request tests and the
+  standalone code test, red on 544662fa and green after the fix.
