@@ -47,3 +47,19 @@ def test_people_pages_document_aliases_and_about_entity() -> None:
     people = page_types.split("### People", 1)[1].split("### ", 1)[0]
     assert "aliases" in people
     assert "about_entity" in people
+
+
+def test_capture_guidance_adds_a_native_script_alias_for_a_name_written_in_another_script() -> None:
+    """A Japanese turn about a page named in English reaches it only through a
+    Japanese alias the agent wrote at capture or edit time: the shipped
+    guidance has to ask for one."""
+    writing = (SCHEMA / "references" / "writing.md").read_text(encoding="utf-8")
+    capture = (SCHEMA / "workflow-skills" / "exomem-capture" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    for text in (writing, capture):
+        assert "aliases" in text
+        assert "native-script alias" in text
+    section = writing.split("## Entity resolution", 1)[1].split("\n## ", 1)[0]
+    assert 'connect_memory(operation="create-entity", aliases=' in section
+    assert '"field": "aliases"' in section or "field: aliases" in section

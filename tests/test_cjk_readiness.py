@@ -462,6 +462,88 @@ def test_cross_lingual_latin_name_in_a_japanese_sentence_is_a_lead_not_a_decisio
 
 
 # --------------------------------------------------------------------------- #
+# Capture-time bilingual aliases (the owner's ruling: option C)
+# --------------------------------------------------------------------------- #
+
+CORVANE = f"{KB}/Entities/Organizations/Corvane Motors.md"
+TESSARY = f"{KB}/Entities/Organizations/Tessary Works.md"
+
+
+def _create_entity(vault: Path, name: str, summary: str, **kwargs) -> str:
+    result = commands.op_connect_memory(
+        vault,
+        operation="create-entity",
+        entity_type="organization",
+        name=name,
+        summary=summary,
+        **kwargs,
+    )
+    working_set_index.WorkingSetIndex(vault).update()
+    _fresh_session()
+    return result["path"]
+
+
+def test_a_japanese_turn_reaches_an_english_entity_captured_with_a_japanese_alias(
+    ja_vault: Path,
+) -> None:
+    """The agent writes the English page and, in the same capture, the name the
+    user says in Japanese. The Japanese turn resolves the page by that alias;
+    its twin, captured without one, stays out of reach."""
+    corvane = _create_entity(
+        ja_vault,
+        "Corvane Motors",
+        "The carmaker that built the family wagon.",
+        aliases=["コルヴェイン"],
+    )
+    tessary = _create_entity(ja_vault, "Tessary Works", "The tool shop by the station.")
+    assert (corvane, tessary) == (CORVANE, TESSARY)
+
+    packet = _activate(ja_vault, "コルヴェインの保証はいつまで？")
+    assert _resolved(packet) == [CORVANE], (packet.get("abstention"), packet["anchors"])
+    assert "exact_alias" in packet["anchors"][0]["evidence"]
+
+    twin = _activate(ja_vault, "テッサリーの工具はどこ？")
+    assert TESSARY not in _resolved(twin), twin["anchors"]
+    assert TESSARY not in _statuses(twin)
+
+
+def test_a_japanese_alias_added_by_edit_reaches_the_english_entity(ja_vault: Path) -> None:
+    """The same alias, added later through the owner's alias field."""
+    _create_entity(ja_vault, "Tessary Works", "The tool shop by the station.")
+    turn = "テッサリーの工具はどこ？"
+    assert TESSARY not in _statuses(_activate(ja_vault, turn))
+
+    text = (ja_vault / TESSARY).read_text(encoding="utf-8")
+    writer_lease.invoke_command(
+        _command("edit_memory"),
+        ja_vault,
+        path=TESSARY,
+        why="the user writes the shop's name in katakana",
+        operation={
+            "kind": "patch_frontmatter",
+            "field": "aliases",
+            "value": ["テッサリー"],
+            "expected_hash": content_hash(text),
+        },
+    )
+    working_set_index.WorkingSetIndex(ja_vault).update()
+    _fresh_session()
+
+    packet = _activate(ja_vault, turn)
+    assert _resolved(packet) == [TESSARY], (packet.get("abstention"), packet["anchors"])
+
+
+def test_a_japanese_alias_inside_a_longer_compound_is_never_resolved(ja_vault: Path) -> None:
+    """The alias is a name like any other: inside a longer compound it is only
+    contained, and a contained name never resolves on its own."""
+    _create_entity(
+        ja_vault, "Corvane Motors", "The carmaker.", aliases=["コルヴェイン"]
+    )
+    packet = _activate(ja_vault, "コルヴェインスキーの小説を読んだ")
+    assert CORVANE not in _resolved(packet), packet["anchors"]
+
+
+# --------------------------------------------------------------------------- #
 # Negative twins and the budget
 # --------------------------------------------------------------------------- #
 
