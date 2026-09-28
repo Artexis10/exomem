@@ -88,9 +88,12 @@ PRE_REGISTERED_THRESHOLDS = {
 #: anchor lede is not repeated as a unit, and a qualifier narrows two senses.
 PASSING_TODAY = frozenset({"T2", "T3", "T4", "C5", "T5", "C6", "C7", "T7", "T9"})
 RED_TODAY: dict[str, tuple[str, ...]] = {
+    # A page the turn names beside the resolved collection is carried beside
+    # it (recall breadth): the weekly-limit note arrives, the capacity-ceilings
+    # note shares no word with the turn and no link with the collection.
     "C1": (
-        "gold recall 0.33 below the 0.9 floor",
-        "missing required fact(s): ['weekly limit', 'capacity ceiling']",
+        "gold recall 0.67 below the 0.9 floor",
+        "missing required fact(s): ['capacity ceiling']",
     ),
     # The retrieval carry is live on this corpus and carries the step-count
     # fitness-goal page (C1's pre-registered poison): outside T1's empty gold.
@@ -108,8 +111,7 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
     # run lacks; a keyed variant belongs in the continuity group.
     "C3": (
         "expected status 'resolved', observed 'unresolved'",
-        "1 poison anchor(s) surfaced",
-        "gold recall 0.00 below the 0.9 floor",
+        "gold recall 0.50 below the 0.9 floor",
     ),
     "C4": (
         "expected status 'resolved', observed 'unresolved'",
@@ -117,13 +119,19 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
     ),
     # The carry reaches an ordinary note on temperature conversions.
     "T6": ("twin surfaced a ref outside its own gold", "precision 0.00 below the 0.8 floor"),
+    # The carried page now serves its current-state unit (a carried page is
+    # read through the lenses its own units answer), so the gold page arrives
+    # and the required fact is present; the raw score still reads a carried
+    # page as `unresolved` (R1, amendment A8).
     "C8": (
         "expected status 'resolved', observed 'unresolved'",
-        "gold recall 0.00 below the 0.9 floor",
+        "precision 0.00 below the 0.8 floor",
     ),
+    # A page named by its title with one distinctive word is carried, and a
+    # twin's unit fragment is outside its own gold (D9).
     "T8": (
         "expected status 'resolved', observed 'unresolved'",
-        "gold recall 0.00 below the 0.9 floor",
+        "twin surfaced a ref outside its own gold",
     ),
     # As C2, on the padded tree (R3).
     "C9": (
@@ -140,11 +148,11 @@ AMENDED_PASSING_TODAY = PASSING_TODAY
 #: The same packets under amendment A7 alone (ambiguity candidates in a
 #: positive case's precision). C7's real packet names only its gold hubs as
 #: ambiguity, so A7 changes no verdict on corpus v4.
-A7_PASSING_TODAY = frozenset({"T2", "C5", "C6", "C7", "T9"})
+A7_PASSING_TODAY = PASSING_TODAY
 
 #: The same packets under amendment A8 alone (a carried gold page with its
 #: units satisfies the status, and its units count in precision).
-A8_PASSING_TODAY = frozenset({"T2", "C5", "C6", "C7", "T9"})
+A8_PASSING_TODAY = PASSING_TODAY | {"C8"}
 
 #: Negative controls whose pre-registered mechanism does not change their
 #: outcome. Empty on corpus v4: C6, T1, T2 and T9 each fail with the naming

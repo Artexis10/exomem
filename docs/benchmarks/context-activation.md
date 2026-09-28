@@ -247,6 +247,86 @@ fresh run. After a deliberate product or corpus change, re-record it:
 CONTEXT_ACTIVATION_RECORD_REPORT=docs/benchmarks/context-activation-product-2026-09-v4.json uv run pytest tests/test_context_activation_real_compiler.py -k recorded_report
 ```
 
+### Round 4 on corpus v4 (2026-09-28): recall breadth, 9/18 raw, 10/18 under A8
+
+The recall-breadth round changes the product only: no fixture, threshold or
+scorer line. Its rules come from three incident shapes seen in live use, none of
+which the eighteen fixtures contain, so each is measured by a generalisation
+test with invented names rather than by a case:
+
+| Shape | Rule | Test |
+|-------|------|------|
+| A turn names two domains and one is dropped | Same-kind anchors the turn spelled apart (every member spelled, no shared token) are concurrent, not competing senses; a page a turn names by its own phrase is carried beside what it resolved; phrases naming different pages carry each (at most three) | `test_working_set_concurrent_contexts.py`, `test_working_set_named_domains.py` |
+| A follow-up about a page listed in this conversation's recent context abstains | The caller's own session tier is a candidate for a turn that resolved nothing, gated by name overlap; served `partial`, `carried_by: follow_up` | `test_working_set_thread_overlap.py` |
+| The entity resolves and its settled conclusions are not served | An entity anchor also reads the decision, insight and finding units of the pages linked to it (`precedents` defaults to entity anchors) | `test_working_set_entity_conclusions.py` |
+
+Two rules follow from reading the red cases:
+
+- **A carried page is read through the lenses its own units answer.** C8's note
+  filed its observation under a category the sixth-priority lens cut off, so the
+  carry read nothing. The lenses are now those that select what the page holds,
+  chosen from one indexed category read (`lexstore.unit_categories_of`, about a
+  millisecond; a unit-query probe cost 150-190 ms and was replaced).
+- **A page is named by its title when one distinctive word sits beside an
+  ordinary title word** (T8's "support rota"). Only when no two distinctive
+  words named a page, and only where a current page's own title carries both
+  words.
+
+Per-case result after each mechanism, raw (with gold pages reached) and, where
+it differs, amendment A8. Measured with the harness's own `activate` and scorer
+on both trees; the sandbox could not fetch the o200k tokenizer, so only the
+token count was approximated (case verdicts do not depend on it):
+
+| Case | base (#1440) | +M1 same-kind | +M2-M4 named domains, thread, entity | +M5 lenses | +M6 title-named |
+|------|------|------|------|------|------|
+| C1 | red 1/3 | red 1/3 | red 2/3 | red 2/3 | red 2/3 |
+| T1 | red | red | red | red | red |
+| C2 | red 1/2 | red 1/2 | red 1/2 | red 1/2 | red 1/2 |
+| T2 | pass | pass | pass | pass | pass |
+| C3 | red 0/2 | red 0/2 | red 0/2 | red 0/2 | red 1/2 |
+| T3 | pass | pass | pass | pass | pass |
+| C4 | red 1/2 | red 1/2 | red 1/2 | red 1/2 | red 1/2 |
+| T4 | pass | pass | pass | pass | pass |
+| C5 | pass | pass | pass | pass | pass |
+| T5 | pass | pass | pass | pass | pass |
+| C6 | pass | pass | pass | pass | pass |
+| T6 | red | red | red | red | red |
+| C7 | pass | pass | pass | pass | pass |
+| T7 | pass | pass | pass | pass | pass |
+| C8 | red 0/1 | red 0/1 | red 0/1 | red 1/1 (A8 pass) | red 1/1 (A8 pass) |
+| T8 | red 0/1 | red 0/1 | red 0/1 | red 0/1 | red 1/1 |
+| C9 | red 1/2 | red 1/2 | red 1/2 | red 1/2 | red 1/2 |
+| T9 | pass | pass | pass | pass | pass |
+| **raw / A8** | 9 / 9 | 9 / 9 | 9 / 9 | 9 / 10 | 9 / 10 |
+
+No positive case flips raw: C8, C4, T8 and C1 are read as `unresolved` or fail
+precision on fragment refs, which is what amendment A8 (merged from the
+benchmark branch) addresses; C8 passes under it. C1 reaches two of its three
+gold pages (the weekly-limit note is carried beside the resolved collection);
+the capacity-ceilings note shares no word with the turn and no link with the
+collection. The negative controls C6, T2 and T9 pass and are still load-bearing:
+the naming-gate removal now targets the per-phrase seam.
+
+**Evaluated and not shipped: a subject-tag relation.** C1's missing relation
+from a collection to its notes is a shared tag (`subscriptions`). Relating a
+note to a resolved anchor because it carries a tag equal to a word of the
+anchor's name, when at most six pages carry that tag, was built and measured:
+
+- Applied to every anchor kind it regressed T3 and T7, whose poison notes carry
+  a tag equal to a shared title word ("roadmap", "search").
+- Restricted to collections it left T3 and T7 alone and brought C1's third gold
+  note, but the corpus's ordinary "subscription audit" note (a streaming
+  service) carries the same tag, so C1's precision under A8 fell to 0.67, below
+  the 0.8 floor, in the very case the rule targets.
+
+A tag is a filing habit, not a relation, so the rule cannot separate a note about
+the anchor from one that shares its word, and it is not in the product.
+
+Activation latency, three interleaved pairs (base is #1440), 18 fixtures times
+five rounds, cold caches per call, ceil-rank percentiles:
+
+LATENCY_TABLE
+
 ### Round 3 on corpus v4 (2026-09-28): red, 9/18
 
 The activation-quality round (close-memory-loop, context-activation ADDED
