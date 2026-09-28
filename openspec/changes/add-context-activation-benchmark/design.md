@@ -150,6 +150,14 @@ in its place, and the recorded report carries both columns.
   referents, is pre-registered with a pinned digest before its first run, and
   reported whatever it shows. It is not one of the eighteen and does not
   enter their verdict.
+- **A7 — Ambiguity candidates in precision (2026-09-28).** The raw scorer
+  leaves ambiguity candidates out of precision, so a positive case can list a
+  wrong page as a candidate beside its gold and still pass (C7). Disclosed,
+  and the raw scorer stays frozen. The opt-in amendment puts every ambiguity
+  candidate of a non-twin case into the precision denominator, like a served
+  anchor. It is reported in its own column beside the raw and A2+A4 scores.
+  Twins are unchanged: a candidate outside a twin's gold is already a false
+  activation.
 
 ## Risks / Trade-offs
 

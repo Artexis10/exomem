@@ -456,7 +456,12 @@ PADDING_PRECISION_FLOOR = 0.80
 #: ``partial`` anchor from the twin's own gold is a hedge, not poison.
 UNIT_PARENT_RECALL = "unit_parent_recall"
 HEDGED_POISON = "hedged_poison"
-AMENDMENTS: frozenset[str] = frozenset({UNIT_PARENT_RECALL, HEDGED_POISON})
+#: A7: on a positive (non-twin) case, every ambiguity candidate joins the
+#: precision denominator like a served anchor, so a candidate outside the
+#: case's gold counts against precision. The raw scorer leaves ambiguity out
+#: of precision, so a wrong candidate beside C7's gold still passes raw.
+AMBIGUITY_PRECISION = "ambiguity_precision"
+AMENDMENTS: frozenset[str] = frozenset({UNIT_PARENT_RECALL, HEDGED_POISON, AMBIGUITY_PRECISION})
 
 
 def _resolved_refs(packet: ActivationPacket) -> set[str]:
@@ -729,6 +734,8 @@ def score_case(
     # transparently marking it is correct compiler behaviour, not irrelevant
     # padding, and must not be penalised as if it were.
     precision_denominator_refs = resolved | {unit.ref for unit in packet.units} | {p.ref for p in packet.pointers}
+    if AMBIGUITY_PRECISION in applied and not fixture.case_id.startswith("T"):
+        precision_denominator_refs |= set(packet.ambiguity)
     precision_denominator_refs -= credited
     relevant_precision_refs = set(gold_refs)
     relevant_precision_refs.update(
@@ -1259,6 +1266,7 @@ def write_report(report: AuditReport, path: Path) -> Path:
 
 
 __all__ = [
+    "AMBIGUITY_PRECISION",
     "AMENDMENTS",
     "DISABLED_PACKET",
     "GOLD_RECALL_FLOOR",

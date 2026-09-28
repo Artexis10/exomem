@@ -257,6 +257,17 @@ floor of 100. The fixtures and thresholds are unchanged. Every amended score
 A4 removes a hedged poison hit and nothing else: it never marks a case as
 hedging, so it cannot waive a status mismatch (integrity review F1).
 
+**Known gap in the raw scorer (disclosed, not fixed).** Raw precision counts
+resolved anchors, units and pointers, never ambiguity candidates, and a
+listed candidate turns the status into `ambiguous`. So a C7 packet holding
+its gold hubs as `partial` anchors, with the gold facts in the rendered
+ambiguity, passes with a wrong page added as an ambiguity candidate. The same
+packet without that candidate fails on status. This predates round 2, and the
+raw scorer stays frozen. Amendment A7 (opt-in) puts every ambiguity candidate
+of a positive case into the precision denominator, like a served anchor. It
+is reported in its own column. On v4 the real C7 packet lists only its two
+gold hubs, so A7 changes no verdict.
+
 The ordinary notes are realistic, topic-diverse pages, and several share words
 with the fixture turns on purpose. One is a deliberately hard lexical
 distractor: "Oven temperature conversions" was written with T6's turn in view,
@@ -264,27 +275,28 @@ and carries its distinctive words (temperature, Fahrenheit, Celsius). It makes
 T6 harder, not easier, and it is kept by ruling (F5): a vault in real use has
 distractors like it.
 
-| Case | Raw | Amended | Why it fails today |
-|------|-----|---------|--------------------|
-| C1 | red | red | Resolves the subscriptions collection; the two gold notes never arrive (recall 1/3) |
-| T1 | red | red | The carry reaches T1's own fitness-goal note, outside its empty gold |
-| C2, C9 | red | red | The grill stays `partial`; the turn abstains (recall 1/2) |
-| T2 | pass | pass | |
-| C3 | red | red | Product red (A3, close-memory-loop 6.12): the plan anchor is the collection, not the item |
-| T3 | red | red | Product red (A3): resolves the other workstream's collection |
-| C4 | red | red | The carry brings the failure note; nothing reaches the colleague's entity |
-| T4 | red | red | Product red (A5): a bare first name stays `partial`; the carry also reaches C4's failure note |
-| C5 | pass | pass | |
-| T5 | red | red | The scanner cart's own resource unit is served; D9 counts the fragment as foreign, and A2 amends recall only |
-| C6 | pass | pass | |
-| T6 | red | red | The carry reaches an ordinary note on oven temperature conversions |
-| C7 | pass | pass | |
-| T7 | red | red | Product red (A5): the scoped turn also resolves the market hub |
-| C8, T8 | red | red | The gold notes are not anchors, and no word of the turn carries them |
-| T9 | pass | pass | |
+| Case | Raw | A2+A4 | A7 | Why it fails today |
+|------|-----|-------|----|--------------------|
+| C1 | red | red | red | Resolves the subscriptions collection; the two gold notes never arrive (recall 1/3) |
+| T1 | red | red | red | The carry reaches T1's own fitness-goal note, outside its empty gold |
+| C2, C9 | red | red | red | The grill stays `partial`; the turn abstains (recall 1/2) |
+| T2 | pass | pass | pass | |
+| C3 | red | red | red | Product red (A3, close-memory-loop 6.12): the plan anchor is the collection, not the item |
+| T3 | red | red | red | Product red (A3): resolves the other workstream's collection |
+| C4 | red | red | red | The carry brings the failure note; nothing reaches the colleague's entity |
+| T4 | red | red | red | Product red (A5): a bare first name stays `partial`; the carry also reaches C4's failure note |
+| C5 | pass | pass | pass | |
+| T5 | red | red | red | The scanner cart's own resource unit is served; D9 counts the fragment as foreign, and A2 amends recall only |
+| C6 | pass | pass | pass | |
+| T6 | red | red | red | The carry reaches an ordinary note on oven temperature conversions |
+| C7 | pass | pass | pass | |
+| T7 | red | red | red | Product red (A5): the scoped turn also resolves the market hub |
+| C8, T8 | red | red | red | The gold notes are not anchors, and no word of the turn carries them |
+| T9 | pass | pass | pass | |
 
-Raw 5/18, amended 5/18. Neither amendment changes a verdict on v4: no gold
-note reaches a packet only as a unit, and no poison is served as a hedge.
+Raw 5/18, A2+A4 5/18, A7 5/18. No amendment changes a verdict on v4: no gold
+note reaches a packet only as a unit, no poison is served as a hedge, and no
+positive case lists an ambiguity candidate outside its gold.
 
 Mechanism removal on v4. The kill switch fails every positive case. C5 fails
 without governed current state and C7 without competing-sense abstention.

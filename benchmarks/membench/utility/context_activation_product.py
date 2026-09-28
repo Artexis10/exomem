@@ -530,6 +530,9 @@ def activate_tree(tree: Tree, *, mechanism_removed: str | None = None) -> dict[s
 #: The scoring amendments a product run reports beside its raw score
 #: (design.md "Amendments": A2 and A4). Never applied to the raw score.
 REPORTED_AMENDMENTS: tuple[str, ...] = (audit.UNIT_PARENT_RECALL, audit.HEDGED_POISON)
+#: Amendment A7 (ambiguity candidates in a positive case's precision),
+#: reported in its own column beside the raw and the A2+A4 scores.
+AMBIGUITY_AMENDMENTS: tuple[str, ...] = (audit.AMBIGUITY_PRECISION,)
 
 
 def score_trees(
@@ -636,11 +639,13 @@ def recorded_report(
     *,
     removals: Mapping[str, audit.AuditReport],
     amended: audit.AuditReport,
+    amended_a7: audit.AuditReport,
 ) -> dict[str, Any]:
     """The reproducible part of one product run (task 4.2).
 
     ``report`` is the raw pre-registered score; ``amended`` is the same
-    packets scored under :data:`REPORTED_AMENDMENTS`, recorded beside it.
+    packets scored under :data:`REPORTED_AMENDMENTS` and ``amended_a7``
+    under :data:`AMBIGUITY_AMENDMENTS`, each recorded beside it.
 
     Everything here is a function of the fixtures, the thresholds, the
     logical corpus and the compiler. Exact corpus bytes carry writer-minted
@@ -650,7 +655,19 @@ def recorded_report(
     """
 
     full = audit.report_to_dict(report)
-    amended_full = audit.report_to_dict(amended)
+
+    def amended_block(amendments: tuple[str, ...], scored: audit.AuditReport) -> dict[str, Any]:
+        scored_full = audit.report_to_dict(scored)
+        return {
+            "amendments": list(amendments),
+            "audit_passed": audit.audit_passed(scored),
+            "hedged_twins": scored_full["hedged_twins"],
+            "c9_padding_robustness": scored_full["c9_padding_robustness"],
+            "per_case": [
+                {name: row[name] for name in AMENDED_CASE_FIELDS}
+                for row in scored_full["per_case"]
+            ],
+        }
     return {
         "instrument": "context-activation deterministic audit, real compiler",
         "corpus_id": CORPUS_ID,
@@ -682,16 +699,8 @@ def recorded_report(
         "per_case": [
             {name: row[name] for name in RECORDED_CASE_FIELDS} for row in full["per_case"]
         ],
-        "amended": {
-            "amendments": list(REPORTED_AMENDMENTS),
-            "audit_passed": audit.audit_passed(amended),
-            "hedged_twins": amended_full["hedged_twins"],
-            "c9_padding_robustness": amended_full["c9_padding_robustness"],
-            "per_case": [
-                {name: row[name] for name in AMENDED_CASE_FIELDS}
-                for row in amended_full["per_case"]
-            ],
-        },
+        "amended": amended_block(REPORTED_AMENDMENTS, amended),
+        "amended_a7": amended_block(AMBIGUITY_AMENDMENTS, amended_a7),
         "fixture_mechanisms": dict(FIXTURE_MECHANISMS),
         "mechanism_removal": {
             mechanism: {
@@ -720,6 +729,7 @@ def run_product_audit(
 
 
 __all__ = [
+    "AMBIGUITY_AMENDMENTS",
     "AMENDED_CASE_FIELDS",
     "FIXTURE_MECHANISMS",
     "MECHANISMS",

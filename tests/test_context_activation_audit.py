@@ -1492,3 +1492,53 @@ def test_run_audit_passes_amendments_through() -> None:
     report = run_audit({"T7": packet}, manifest=validate_manifest(MANIFEST), amendments={HEDGED_POISON})
     t7 = next(score for score in report.per_case if score.case_id == "T7")
     assert t7.poison_hit == 0
+
+
+# -- Amendment A7: ambiguity candidates count toward a positive case's precision
+
+
+def _c7_with_ambiguity(*candidates: str) -> ActivationPacket:
+    """C7's gold as partial hubs, its facts in the rendered ambiguity, and
+    `candidates` listed as the ambiguity (the integrity recheck's probe)."""
+    return ActivationPacket(
+        anchors=_partial("c7_hub_feature", "c7_hub_market", "c7_hub_search_ux"),
+        ambiguity=candidates,
+        ambiguity_text=("AI search feature", "AI search market"),
+        abstained=True,
+        abstention_reason="ambiguous",
+    )
+
+
+def test_raw_scoring_still_passes_c7_with_a_wrong_ambiguity_candidate() -> None:
+    """Disclosed, not fixed: the raw scorer is pre-registered and frozen."""
+    assert score_case(_c7_with_ambiguity("zz_wrong_page"), fixture_by_id("C7")).passed
+
+
+def test_a7_a_wrong_ambiguity_candidate_fails_c7_on_precision() -> None:
+    from membench.utility.context_activation import AMBIGUITY_PRECISION
+
+    amended = _amended(_c7_with_ambiguity("zz_wrong_page"), "C7", amendments={AMBIGUITY_PRECISION})
+    assert not amended.passed
+    assert amended.precision == 0.0
+    assert "precision 0.00 below the 0.8 floor" in amended.failure_reasons
+
+
+def test_a7_gold_ambiguity_candidates_keep_c7_passing() -> None:
+    from membench.utility.context_activation import AMBIGUITY_PRECISION
+
+    packet = _c7_with_ambiguity("c7_hub_feature", "c7_hub_market")
+    raw = score_case(packet, fixture_by_id("C7"))
+    amended = _amended(packet, "C7", amendments={AMBIGUITY_PRECISION})
+    assert raw.passed and amended.passed
+    assert amended.precision == 1.0
+
+
+def test_a7_leaves_twins_to_their_own_rules() -> None:
+    """On a twin an ambiguity candidate outside its gold is already a false
+    activation; A7 changes nothing there."""
+    from membench.utility.context_activation import AMBIGUITY_PRECISION
+
+    packet = ActivationPacket(ambiguity=("zz_wrong_page",), abstained=True, abstention_reason="ambiguous")
+    raw = score_case(packet, fixture_by_id("T7"))
+    amended = _amended(packet, "T7", amendments={AMBIGUITY_PRECISION})
+    assert (amended.precision, amended.failure_reasons) == (raw.precision, raw.failure_reasons)
