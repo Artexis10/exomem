@@ -887,9 +887,79 @@ def test_connect_subresources_in_cell_namespaces_are_admitted_only_for_break_gla
     expression = validation["expression"]
     assert f"'{BREAK_GLASS_GROUP}' in request.userInfo.groups" in expression
     assert "object" not in expression.replace("request.userInfo", "")
-    # The same namespace shape cellctl is confined to.
+    # Cell namespaces, in the shape cellctl is confined to, and export scratch
+    # namespaces (exo-scratch-<cell id>-<8 hex>), which hold a restored
+    # plaintext vault.
     scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
     assert "matches('^exo-cell-[a-z2-7]{16}$')" in " ".join(v["expression"] for v in scope["spec"]["validations"])
-    assert "request.namespace.matches('^exo-cell-[a-z2-7]{16}$')" in expression
+    guarded = "^exo-(cell-[a-z2-7]{16}|scratch-[a-z2-7]{16}-[0-9a-f]{8})$"
+    assert f"request.namespace.matches('{guarded}')" in expression
+    import re
+
+    pattern = re.compile(guarded)
+    for name in ("exo-cell-" + "a" * 16, "exo-scratch-" + "a" * 16 + "-0123abcd"):
+        assert pattern.fullmatch(name), name
+    for name in ("exo-cell-" + "a" * 15, "exo-scratch-" + "a" * 16, "exo-scratch-" + "a" * 8, "exomem-cloud", "exo-cell-" + "A" * 16):
+        assert not pattern.fullmatch(name), name
     binding = _find(documents, "ValidatingAdmissionPolicyBinding", "exomem-cell-connect-guard")["spec"]
     assert binding == {"policyName": "exomem-cell-connect-guard", "validationActions": ["Deny"]}
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_edge_namespace_is_default_deny_and_traefik_egresses_only_to_the_gateway_dns_and_api() -> None:
+    # harden-exomem-cloud-operator-access D1 (task 1.6): a compromised edge
+    # process reaches no other in-cluster service, node port or metadata
+    # endpoint. Ingress is websecure alone, the hostPort 443 container port.
+    documents = _helm_template()
+    policies = {
+        doc["metadata"]["name"]: doc["spec"]
+        for doc in documents
+        if doc.get("kind") == "NetworkPolicy" and doc["metadata"].get("namespace") == EDGE_NAMESPACE
+    }
+    assert set(policies) == {"default-deny", "traefik"}
+    assert policies["default-deny"] == {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]}
+
+    traefik = _find(documents, "Deployment", TRAEFIK)
+    edge = policies["traefik"]
+    assert edge["policyTypes"] == ["Ingress", "Egress"]
+    assert _selects(edge["podSelector"], traefik["spec"]["template"]["metadata"]["labels"])
+    assert edge["podSelector"] == {"matchLabels": {"exomem.io/ingress": "traefik"}}
+
+    (ingress,) = edge["ingress"]
+    assert "from" not in ingress, "websecure is the public entrypoint: any source"
+    (port,) = ingress["ports"]
+    container_ports = {p["name"]: p for p in traefik["spec"]["template"]["spec"]["containers"][0]["ports"]}
+    assert port == {"port": "websecure", "protocol": "TCP"}
+    assert container_ports["websecure"]["hostPort"] == 443
+
+    values = yaml.safe_load((PLATFORM_CHART / "values.validation.yaml").read_text(encoding="utf-8"))
+    gateway, dns, api = edge["egress"]
+    assert gateway == {
+        "to": [{
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "exomem-cloud"}},
+            "podSelector": {"matchLabels": {"app.kubernetes.io/name": "exomem-cloud-gateway"}},
+        }],
+        "ports": [{"port": 8080, "protocol": "TCP"}],
+    }
+    assert dns == {
+        "to": [{
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+            "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+        }],
+        "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}],
+    }
+    # kube-router evaluates egress after kube-proxy's DNAT, so the API server
+    # is the server node's own address on 6443, never the Service IP.
+    assert api == {
+        "to": [{"ipBlock": {"cidr": cidr}} for cidr in values["edge"]["apiServerCidrs"]],
+        "ports": [{"port": 6443, "protocol": "TCP"}],
+    }
+    assert values["edge"]["apiServerCidrs"] and all(c.endswith("/32") for c in values["edge"]["apiServerCidrs"])
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_edge_api_server_address_is_required_and_a_single_host() -> None:
+    for setting in ("edge.apiServerCidrs=[]", 'edge.apiServerCidrs=["10.0.0.0/8"]', 'edge.apiServerCidrs=["0.0.0.0/0"]'):
+        result = _helm_template_result("--set-json", setting)
+        assert result.returncode != 0, setting
+        assert "apiServerCidrs" in result.stderr, (setting, result.stderr)

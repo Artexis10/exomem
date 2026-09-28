@@ -1301,7 +1301,7 @@ RESTRICTED_POD_SECURITY = {
 }
 
 
-def _render_platform(*templates: str) -> list[dict[str, Any]]:
+def _render_platform(*templates: str, settings: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     """The chart's documents from these template paths, in render order. A
     path the chart does not have contributes nothing, so the same fixture
     runs against an older chart and fails on behaviour, not on rendering."""
@@ -1311,6 +1311,7 @@ def _render_platform(*templates: str) -> list[dict[str, Any]]:
             HELM, "template", EDGE_RELEASE, str(PLATFORM_CHART),
             "--namespace", "exomem-platform",
             "--values", str(PLATFORM_CHART / "values.validation.yaml"),
+            *settings,
         ]
     ).stdout
     documents = []
@@ -1377,6 +1378,8 @@ class EdgePlatform:
     traefik_namespace: str
     traefik_account: str
     certificate_namespace: str
+    # The API server's address after kube-proxy's DNAT: the node, on 6443.
+    api_server_ip: str
 
 
 @pytest.fixture(scope="module")
@@ -1403,6 +1406,10 @@ def edge_platform(k3s: K3sCluster, tmp_path_factory: pytest.TempPathFactory) -> 
         _kubectl(k3s.name, ["wait", "--for=condition=Established", f"crd/{crd['metadata']['name']}", "--timeout=60s"])
 
     print("[edge] applying the chart's namespaces, Traefik, Cloud route, gateway policy and operator RBAC")
+    api_server_ip = _kubectl(
+        k3s.name, ["get", "endpoints", "kubernetes", "--output=jsonpath={.subsets[0].addresses[0].ip}"]
+    ).stdout.strip()
+    assert api_server_ip, "the kubernetes Service has no endpoint"
     platform = _render_platform(
         "templates/namespaces.yaml",
         "templates/cloud-ingress.yaml",
@@ -1413,6 +1420,7 @@ def edge_platform(k3s: K3sCluster, tmp_path_factory: pytest.TempPathFactory) -> 
             "rbac/clusterrole.yaml", "rbac/clusterrolebinding.yaml",
             "deployment.yaml", "service.yaml", "ingressclass.yaml",
         )),
+        settings=("--set-json", f'edge.apiServerCidrs=["{api_server_ip}/32"]'),
     )
     # The gateway Deployment runs Substrate's image, replaced by a stand-in
     # below; cellctl.yaml contributes only exomem-cloud and its default-deny.
@@ -1464,6 +1472,7 @@ def edge_platform(k3s: K3sCluster, tmp_path_factory: pytest.TempPathFactory) -> 
     return EdgePlatform(
         image=image, cell_namespace=cell_namespace, gateway_service_ip=service_ip,
         traefik_namespace=traefik_namespace, traefik_account=traefik_account, certificate_namespace=certificate_namespace,
+        api_server_ip=api_server_ip,
     )
 
 
@@ -1518,6 +1527,73 @@ def test_the_edge_reads_no_key_and_still_reaches_the_gateway(k3s: K3sCluster, ed
     assert echoed["headers"]["host"] == MCP_HOSTNAME
     unrouted, _ = _public_request(k3s, "/hosted/mcp")
     assert unrouted == 404, unrouted
+
+    print("[edge] scenario: the edge is default-deny; Traefik-labelled egress reaches only the gateway, DNS and the API server")
+    edge = edge_platform.traefik_namespace
+    target = _probe_pod(
+        "edge-egress-target", "exomem-platform", edge_platform.image,
+        labels={"app.kubernetes.io/name": "edge-egress-target"},
+        command=["python3", "-m", "http.server", "8080"], port=8080,
+    )
+    target_service = {
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": {"name": "edge-egress-target", "namespace": "exomem-platform"},
+        "spec": {"selector": {"app.kubernetes.io/name": "edge-egress-target"}, "ports": [{"port": 8080, "targetPort": 8080}]},
+    }
+    control = _probe_pod("edge-egress-control", "exomem-platform", edge_platform.image)
+    edge_probe = _probe_pod("edge-egress-probe", edge, edge_platform.image, labels={"exomem.io/ingress": "traefik"})
+    _apply_server_side(k3s.name, [target, target_service, control, edge_probe])
+    _wait_pods_ready(k3s.name, "exomem-platform", "edge-egress-target", "edge-egress-control")
+    _wait_pods_ready(k3s.name, edge, "edge-egress-probe")
+    target_ip = json.loads(
+        _kubectl(k3s.name, ["get", "service", "edge-egress-target", "--namespace", "exomem-platform", "--output=json"]).stdout
+    )["spec"]["clusterIP"]
+    api_service_ip = json.loads(_kubectl(k3s.name, ["get", "service", "kubernetes", "--output=json"]).stdout)["spec"]["clusterIP"]
+    try:
+        _wait_for(
+            lambda: _tcp_probe(k3s.name, "exomem-platform", "edge-egress-control", target_ip, 8080),
+            timeout=60, interval=2, description="a pod outside the edge to reach the target (else the refusal is vacuous)",
+        )
+    except AssertionError:
+        print(_kubectl(k3s.name, ["logs", "--namespace", "exomem-platform", "edge-egress-target"], check=False).stdout)
+        print(_kubectl(k3s.name, ["get", "endpoints", "edge-egress-target", "--namespace", "exomem-platform", "-o", "yaml"], check=False).stdout)
+        raise
+    # kube-router admits a new pod's traffic until it syncs the pod into its
+    # sets, so wait for the refusal before asserting what stays open.
+    _wait_for(
+        lambda: not _tcp_probe(k3s.name, edge, "edge-egress-probe", target_ip, 8080),
+        timeout=90, interval=3, description="the edge's default-deny to refuse a Service in exomem-platform",
+    )
+    reached = {
+        "exomem-platform Service": _tcp_probe(k3s.name, edge, "edge-egress-probe", target_ip, 8080),
+        "node kubelet 10250": _tcp_probe(k3s.name, edge, "edge-egress-probe", edge_platform.api_server_ip, 10250),
+        "gateway 8080": _tcp_probe(k3s.name, edge, "edge-egress-probe", edge_platform.gateway_service_ip, 8080),
+        "API server via its Service": _tcp_probe(k3s.name, edge, "edge-egress-probe", api_service_ip, 443),
+    }
+    dns = _exec_py(
+        k3s.name, edge, "edge-egress-probe",
+        "import socket; socket.setdefaulttimeout(3); print(socket.gethostbyname('kubernetes.default.svc.cluster.local'))",
+        check=False,
+    )
+    print(f"[edge] from a Traefik-labelled edge pod: {reached}, DNS exit={dns.returncode}")
+    assert reached == {
+        "exomem-platform Service": False,
+        "node kubelet 10250": False,
+        "gateway 8080": True,
+        "API server via its Service": True,
+    }
+    assert dns.returncode == 0, dns.stderr
+    print("[edge] scenario: with the policy enforced, Traefik stays Ready (kubelet probes pass) and still serves /mcp")
+    time.sleep(15)  # beyond one readiness period (10 s, failureThreshold 1)
+    ready = _kubectl(
+        k3s.name,
+        ["get", "pods", "--namespace", edge, "--selector=app.kubernetes.io/name=traefik",
+         "--output=jsonpath={.items[*].status.conditions[?(@.type=='Ready')].status}"],
+    ).stdout.split()
+    assert ready == ["True"], ready
+    assert _public_request(k3s, "/mcp")[0] == 200
+    for namespace, name in (("exomem-platform", "edge-egress-target"), ("exomem-platform", "edge-egress-control"), (edge, "edge-egress-probe")):
+        _kubectl(k3s.name, ["delete", "pod", name, "--namespace", namespace, "--wait=false"])
 
     print("[edge] scenario: the gateway admits no pod but the edge's Traefik, not even a Traefik-labelled one elsewhere")
     impostors = [
@@ -1604,10 +1680,13 @@ def test_cell_connect_admission_is_enforced_for_every_identity_but_break_glass(
 ) -> None:
     cell = edge_platform.cell_namespace
     other = "exomem-connect-probe"
-    _apply_server_side(k3s.name, [{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": other}}])
-    _apply_server_side(k3s.name, [_probe_pod("probe", cell, edge_platform.image), _probe_pod("probe", other, edge_platform.image)])
-    _wait_pods_ready(k3s.name, cell, "probe")
-    _wait_pods_ready(k3s.name, other, "probe")
+    # The export runbook's scratch shape: exo-scratch-<cell id>-<8 hex>.
+    scratch = f"exo-scratch-{cell.removeprefix('exo-cell-')}-{uuid.uuid4().hex[:8]}"
+    for namespace in (other, scratch):
+        _apply_server_side(k3s.name, [{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}}])
+    _apply_server_side(k3s.name, [_probe_pod("probe", namespace, edge_platform.image) for namespace in (cell, other, scratch)])
+    for namespace in (cell, other, scratch):
+        _wait_pods_ready(k3s.name, namespace, "probe")
 
     policy = json.loads(
         _kubectl(k3s.name, ["get", "validatingadmissionpolicy", "exomem-cell-connect-guard", "--output=json"]).stdout
@@ -1638,6 +1717,15 @@ def test_cell_connect_admission_is_enforced_for_every_identity_but_break_glass(
         print(f"[connect]   {described}: exit={outcome[0]} output={outcome[1]!r}")
         assert _denied_by_policy(outcome), (described, outcome)
 
+    print("[connect] observed in an export scratch namespace, as the same admin:")
+    for described, args in (
+        ("exec", ["exec", "--namespace", scratch, "probe", "--", "true"]),
+        ("raw CONNECT portforward", ["get", "--raw", f"/api/v1/namespaces/{scratch}/pods/probe/portforward?ports=8765"]),
+    ):
+        outcome = _kubectl_bounded(k3s.name, args)
+        print(f"[connect]   {described} in {scratch}: exit={outcome[0]} output={outcome[1]!r}")
+        assert _denied_by_policy(outcome), (described, outcome)
+
     print("[connect] observed outside a cell namespace, as the same admin:")
     outcome = _kubectl_bounded(k3s.name, ["exec", "--namespace", other, "probe", "--", "true"])
     print(f"[connect]   exec in {other}: exit={outcome[0]} output={outcome[1]!r}")
@@ -1646,6 +1734,7 @@ def test_cell_connect_admission_is_enforced_for_every_identity_but_break_glass(
     print("[connect] observed as the break-glass group:")
     for described, args in (
         ("exec", [*BREAK_GLASS, *exec_args]),
+        ("exec in scratch", [*BREAK_GLASS, "exec", "--namespace", scratch, "probe", "--", "true"]),
         ("ephemeral container", [*BREAK_GLASS, *probes["ephemeral container"]]),
         ("raw CONNECT portforward", [*BREAK_GLASS, *probes["raw CONNECT portforward"]]),
     ):
@@ -1733,6 +1822,9 @@ def test_the_operator_access_runbook_on_real_k3s(
         _runbook_block("mint-break-glass"),
         'kubectl --kubeconfig "$BREAK_GLASS_KUBECONFIG" auth whoami',
         f'kubectl --kubeconfig "$BREAK_GLASS_KUBECONFIG" exec --namespace {cell} runbook-probe -- true',
+        # An admin impersonating the group is break-glass use too.
+        f'kubectl --kubeconfig "$ADMIN_KUBECONFIG" --as=impersonation-probe --as-group=exomem:break-glass '
+        f'get pods --namespace {cell} >/dev/null',
         _runbook_block("end-break-glass"),
         # No file for the identity outlives the task.
         'test -z "$(ls -A "$BREAK_GLASS_TMP")"',
@@ -1742,8 +1834,11 @@ def test_the_operator_access_runbook_on_real_k3s(
     ))
     result = _bash(session)
     lines = result.stdout.splitlines()
-    print("[runbook] " + "\n[runbook] ".join(line for line in lines if not line.startswith("{")))
-    enddate = next(line for line in lines if line.startswith("notAfter="))
+    # The mint's own progress, notAfter included, goes to stderr: only the
+    # directory comes back on stdout.
+    progress = result.stderr.splitlines()
+    print("[runbook] " + "\n[runbook] ".join([*progress, *(line for line in lines if not line.startswith("{"))]))
+    enddate = next(line for line in progress if line.startswith("notAfter="))
     expires = time.mktime(time.strptime(enddate.removeprefix("notAfter="), "%b %d %H:%M:%S %Y %Z"))
     assert expires - time.time() <= 3600 + 120, enddate
     audit = [json.loads(line) for line in lines if line.startswith("{")]
@@ -1756,6 +1851,8 @@ def test_the_operator_access_runbook_on_real_k3s(
     assert exec_events and exec_events[0]["objectRef"]["namespace"] == cell
     assert exec_events[0]["objectRef"]["name"] == "runbook-probe"
     assert "exomem:break-glass" in exec_events[0]["user"]["groups"]
+    impersonated = [event for event in audit if "exomem:break-glass" in event.get("impersonatedUser", {}).get("groups", [])]
+    assert impersonated and impersonated[0]["user"]["username"] != "exomem-break-glass", audit
     for event in audit:
         assert event["level"] == "Metadata", event
         assert "requestObject" not in event and "responseObject" not in event, event

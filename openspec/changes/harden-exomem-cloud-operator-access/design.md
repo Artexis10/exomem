@@ -22,7 +22,7 @@ cellctl's own writes are already confined by ValidatingAdmissionPolicies. Tenant
 
 ### D1. Traefik moves to its own namespace inside the same release
 
-Set the Traefik subchart's `namespaceOverride: exomem-edge`, `rbac.namespaced: true`, and `providers.kubernetesCRD.namespaces: [exomem-edge]`. Its Role then grants Secret reads only in `exomem-edge`. The chart renders no Traefik ClusterRole in this mode, because the template is gated on `not rbac.namespaced`. The platform chart creates the `exomem-edge` namespace with Pod Security `enforce: privileged` and `audit`/`warn: restricted`, matching `exomem-platform`. Restricted includes Baseline, which forbids any non-zero hostPort and has no allow-list, so enforcing it would refuse Traefik's hostPort 443 pod. Only the admin identity can create pods there.
+Set the Traefik subchart's `namespaceOverride: exomem-edge`, `rbac.namespaced: true`, and `providers.kubernetesCRD.namespaces: [exomem-edge]`. Its Role then grants Secret reads only in `exomem-edge`. The chart renders no Traefik ClusterRole in this mode, because the template is gated on `not rbac.namespaced`. The platform chart creates the `exomem-edge` namespace with Pod Security `enforce: privileged` and `audit`/`warn: restricted`, matching `exomem-platform`. Restricted includes Baseline, which forbids any non-zero hostPort and has no allow-list, so enforcing it would refuse Traefik's hostPort 443 pod. Only the admin identity can create pods there. The namespace is default-deny: ingress only on Traefik's websecure port, egress only to the gateway, cluster DNS and the API server. A compromised edge process therefore cannot reach other in-cluster services, node ports or the cloud metadata endpoint.
 
 - *Rejected: namespaced RBAC in place.* Traefik always watches its own release namespace, and `exomem-platform` holds the volume-encryption passphrase. The Cloud route namespace holds every Cloud key.
 - *Rejected: a separate Helm release for Traefik.* It adds a second release lifecycle for no isolation gain over `namespaceOverride`.
@@ -56,7 +56,7 @@ A ClusterIssuer can be named from any namespace, and cert-manager's edit Cluster
 
 ### D5. Admission denies connect subresources in cell namespaces to everyone but break-glass
 
-A ValidatingAdmissionPolicy matches CONNECT on `pods/exec`, `pods/attach` and `pods/portforward`, and UPDATE on `pods/ephemeralcontainers`, in namespaces matching `^exo-cell-[a-z2-7]{16}$`. It denies these unless `request.userInfo.groups` contains `exomem:break-glass`. It reads only user info and the namespace. Admission applies to `system:masters` too, so the deploy identity cannot open a shell in a cell by accident. Masters can still delete the policy or approve their own break-glass CSR, so this guards against accidents, not intent. `pods/proxy` is denied to the everyday identity by RBAC (D4) and is not part of this policy.
+A ValidatingAdmissionPolicy matches CONNECT on `pods/exec`, `pods/attach` and `pods/portforward`, and UPDATE on `pods/ephemeralcontainers`, in cell namespaces (`exo-cell-<id>`) and export scratch namespaces (`exo-scratch-<id>-<8 hex>`), which hold a restored plaintext vault. It denies these unless `request.userInfo.groups` contains `exomem:break-glass`. It reads only user info and the namespace. Admission applies to `system:masters` too, so the deploy identity cannot open a shell in a cell by accident. Masters can still delete the policy or approve their own break-glass CSR, so this guards against accidents, not intent. `pods/proxy` is denied to the everyday identity by RBAC (D4) and is not part of this policy.
 
 The chart ships this only after the live-K3s suite proves the API server matches these CONNECT operations under this policy type. If it does not, the policy is left out, the identity split in D4 stands alone, and this design records the observed behaviour.
 
@@ -70,13 +70,15 @@ Observed 2026-09-28 on K3s v1.35.6+k3s1: the API server enforces this policy on 
 - the recipients file must be supplied by the tenant, with its fingerprint recorded before the restore;
 - the procedure stops if any listed recipient matches a registered operator or escrow key.
 
+Only age X25519 recipients are accepted, because SSH keys cannot be matched against the registered set. The tenant sends the file's SHA-256 separately; the operator compares it, and hashes the file again immediately before encrypting. The tenant's own verification counts the recipient stanzas in the archive header, and that count must equal the number of recipients the tenant supplied. That is the end-to-end check that no operator key was added.
+
 ### D7. The audit policy already satisfies the break-glass record, on the node
 
 Metadata-level logging captures the user, groups, verb, resource, subresource, namespace and time for every request, including exec and CSR approval, with no bodies. A task confirms this on the live node. The log lives on the node for 7 days and root can rewrite it, so it is a trail under the operator's control, not tamper-proof evidence. Shipping it off the node is deferred.
 
 ### D8. Content-free logs are proven with a canary
 
-`pods/log` must be granted cluster-wide: RBAC cannot exclude cell namespaces created at runtime, and admission does not gate reads. So the guarantee rests on what cells and controllers emit. A live check writes a unique canary through a cell, exercises search, recall and review, then asserts the canary appears in no pod log, in the cell, cellctl or the gateway. It runs on the production node through the Cloud connector, as a runbook procedure, with a negative control that shows the same log search finds a deliberately echoed canary. The live-K3s suite cannot host it: its cell is a stand-in with no search, recall or review.
+`pods/log` must be granted cluster-wide: RBAC cannot exclude cell namespaces created at runtime, and admission does not gate reads. So the guarantee rests on what cells and controllers emit. A live check writes a unique canary through a cell, exercises search, recall and review, then asserts the canary, and its base64 forms, appears in no pod log, in the cell, cellctl or the gateway. On the node it also searches the kubelet's log files, rotated ones included, because `kubectl logs` returns only the current file. It runs outside the nightly backup window, because a finished Job's logs disappear with its pod. Traefik access logs are off, so the edge is not scanned. It runs on the production node through the Cloud connector, as a runbook procedure, with a negative control that shows the same log search finds a deliberately echoed canary. The live-K3s suite cannot host it: its cell is a stand-in with no search, recall or review.
 
 ## Risks / Trade-offs
 

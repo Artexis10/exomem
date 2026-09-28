@@ -40,6 +40,9 @@ cloudGateway:
   trustedIngressSourceValue: validation-only-ingress-source-value-0123456789
   databaseEgressCidrs:
     - 10.0.1.5/32
+edge:
+  apiServerCidrs:
+    - 10.0.1.2/32
 cloudIngress:
   enabled: true
   hostname: mcp.example.test

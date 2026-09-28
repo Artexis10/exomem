@@ -68,3 +68,13 @@
   retries: 30
   delay: 2
   until: k3s_ready.rc == 0 and k3s_ready.stdout == "ok"
+
+# harden-exomem-cloud-operator-access D4: the admin kubeconfig is root-only.
+# K3s rewrites k3s.yaml in place and keeps an existing file's group, so a node
+# that once wrote it to the operators group needs its ownership reset here.
+- name: Keep the admin kubeconfig root-only
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/k3s.yaml
+    owner: root
+    group: root
+    mode: "0600"

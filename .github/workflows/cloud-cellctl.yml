@@ -100,13 +100,57 @@ jobs:
             exit 1
           fi
 
+  # The chart tests pin the admission and network policies' text, not their
+  # logic: only the live suite proves a rule denies what it should
+  # (harden-exomem-cloud-operator-access 2.7). So a pull request touching
+  # those templates, or the live suite itself, runs it too. values.yaml is
+  # left out on purpose: release bumps touch it.
+  live-k3s-scope:
+    name: Does this change reach the live K3s policy scenarios
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Match the pull request's changed files
+        id: scope
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          LIVE_K3S_PATHS: |-
+            infra/helm/platform/templates/operator-access.yaml
+            infra/helm/platform/templates/cloud-ingress.yaml
+            infra/helm/platform/templates/cloud-gateway.yaml
+            infra/helm/platform/templates/namespaces.yaml
+            infra/cellctl/tests/test_k3s_integration.py
+        run: |
+          case "$EVENT" in
+            workflow_dispatch) run=true ;;
+            pull_request)
+              if git diff --name-only "$BASE...$HEAD" | grep -Fxq -f <(printf '%s\n' "$LIVE_K3S_PATHS"); then
+                run=true
+              else
+                run=false
+              fi
+              ;;
+            *) run=false ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "live K3s suite runs: $run"
+
   # The live suite builds stand-in images and runs K3s and MinIO in Docker
-  # (privileged) for about 12 minutes. It runs on manual dispatch and at each
-  # delivery, not on every pull request.
+  # (privileged) for about 15 minutes. It runs on manual dispatch, at each
+  # delivery, and on pull requests live-k3s-scope matches.
   live-k3s:
-    name: Live K3s integration suite (manual)
-    if: github.event_name == 'workflow_dispatch'
-    needs: checks
+    name: Live K3s integration suite
+    if: needs.live-k3s-scope.outputs.run == 'true'
+    needs: [checks, live-k3s-scope]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

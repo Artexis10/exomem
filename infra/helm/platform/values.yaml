@@ -127,6 +127,13 @@ hcloud-csi:
         tag: v2.21.1@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f
         pullPolicy: IfNotPresent
 
+# harden-exomem-cloud-operator-access D1 (task 1.6): the edge namespace's
+# NetworkPolicy lets Traefik reach the API server only at these addresses on
+# 6443. Set it to the K3s server's advertise address as /32 (the address
+# `kubectl get endpoints kubernetes` lists). The render fails while it is empty.
+edge:
+  apiServerCidrs: []
+
 traefik:
   # harden-exomem-cloud-operator-access D1: the internet-facing edge runs in
   # its own namespace (namespaces.yaml) with namespaced RBAC, so its Role

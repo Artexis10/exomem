@@ -49,8 +49,10 @@ subjects:
     name: exomem:break-glass
     apiGroup: rbac.authorization.k8s.io
 ---
-# D5: exec, attach, port-forward and ephemeral containers in a cell namespace
-# are admitted only for the break-glass group. Admission applies to
+# D5: exec, attach, port-forward and ephemeral containers in a cell namespace,
+# or in an export scratch namespace (exo-scratch-<cell id>-<8 hex>, which
+# holds a restored plaintext vault), are admitted only for the break-glass
+# group. Admission applies to
 # system:masters too, so the deploy identity cannot open a shell in a cell by
 # accident. Masters can still delete this policy or approve their own
 # break-glass CSR, so it guards against accidents, not intent; the audit log
@@ -75,9 +77,9 @@ spec:
         resources: ["pods/ephemeralcontainers"]
   validations:
     - expression: >-
-        !request.namespace.matches('^exo-cell-[a-z2-7]{16}$') ||
+        !request.namespace.matches('^exo-(cell-[a-z2-7]{16}|scratch-[a-z2-7]{16}-[0-9a-f]{8})$') ||
         (has(request.userInfo.groups) && 'exomem:break-glass' in request.userInfo.groups)
-      message: exec, attach, port-forward and ephemeral containers in a cell namespace need the break-glass identity (docs/runbooks/cloud-operator-access.md).
+      message: exec, attach, port-forward and ephemeral containers in a cell or export scratch namespace need the break-glass identity (docs/runbooks/cloud-operator-access.md).
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

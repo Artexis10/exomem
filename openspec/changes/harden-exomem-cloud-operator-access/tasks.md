@@ -15,6 +15,7 @@
   - Traefik's ServiceAccount is refused `get secret` in `exomem-cloud`, `exomem-platform` and a cell namespace;
   - a request through the public route reaches the gateway.
   Verify: the suite passes in the `cloud-cellctl` workflow's live job.
+- [ ] 1.6 Make `exomem-edge` default-deny (D1): ingress only on websecure, egress only to the gateway, cluster DNS and the API server. Verify: chart tests pin the policy, and the live-K3s edge scenario still serves `/mcp` through Traefik with the policy applied, while an egress probe from the edge to another namespace is refused.
 
 ## 2. Operator identities and admission (D4–D5)
 
@@ -23,6 +24,7 @@
 - [ ] 2.3 If 2.2 proves enforcement, ship the policy and binding in the chart, with chart tests and a live test that the `exomem:break-glass` group is admitted. Otherwise record the decision in D5. Verify: the tests pass, or the D5 record is merged.
 - [ ] 2.4 Write `docs/runbooks/cloud-operator-access.md`. It covers issuing the 30-day operator certificate through the CSR API, minting a one-hour break-glass certificate on demand (with no standing file), installing kubeconfigs root-only, re-issue, making the operator kubeconfig the default, and finding CSR approvals and break-glass use in `/var/lib/rancher/k3s/server/logs/audit.log`. Verify: the privacy gate passes, and the runbook commands pass the live-K3s rehearsal.
 - [ ] 2.5 Write the D8 canary procedure into `docs/runbooks/cloud-operator-access.md`: seed a unique string through a cell over the Cloud connector, exercise search, recall and review, then search every cell, cellctl and gateway pod log with the operator identity. Include a negative control that echoes the canary from a throwaway pod outside cell namespaces and shows the same search finds it. Verify: the privacy gate and shellcheck pass on the runbook blocks; the live run is task 4.4.
+- [ ] 2.7 Make the admission policies' logic, not just their text, a pull-request gate: run the live-K3s job on pull requests that touch the operator-access, cloud-ingress, cloud-gateway or namespaces templates, or the live test itself. Verify: the workflow's path filter covers those files, and a mutation that inverts a policy's rule fails the live test.
 - [ ] 2.6 Make the K3s admin kubeconfig root-only (D4): the K3s configuration template writes it `0600`, root-owned, with no group. Verify: a red-first Ansible contract test pins the mode and the absence of `write-kubeconfig-group`.
 
 ## 3. Tenant-only exports (D6)
