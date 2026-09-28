@@ -269,3 +269,44 @@ def test_a_label_reaching_two_registered_categories_is_not_proposed(tmp_path: Pa
     assert not semantic_language_registry.load_registry(vault).findings
     _quiet(vault)
     assert _open(vault, batch_id) is None
+
+
+def test_a_registered_category_outside_the_page_scope_is_never_named(tmp_path: Path) -> None:
+    vault = fx.build_vocabulary(tmp_path, with_graph=False)
+    scoped = (
+        "schema_version: 1\n"
+        "categories:\n"
+        "  field_trial:\n"
+        "    description: A trial run outside the lab.\n"
+        "    scope:\n"
+        "      projects: [rig]\n"
+    )
+    fx.write(vault, fx.REGISTRY, scoped)
+    fx.write(
+        vault,
+        fx.CATEGORY_NOTE,
+        fx.note(
+            "Pump bench results",
+            category=fx.CATEGORY_LABEL,
+            observation="The seal held for nine hours.",
+            frontmatter="project: bench\n",
+        ),
+    )
+    freshness.clear()
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    _quiet(vault)
+    assert _open(vault, CATEGORY_ID) is None
+    # Inside the category's scope, the same label is proposed.
+    fx.edit(
+        vault,
+        fx.CATEGORY_NOTE,
+        fx.note(
+            "Pump bench results",
+            category=fx.CATEGORY_LABEL,
+            observation="The seal held for nine hours.",
+            frontmatter="project: rig\n",
+        ),
+    )
+    _quiet(vault)
+    assert _open(vault, CATEGORY_ID)["measures"]["target"] == "field_trial"

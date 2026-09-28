@@ -30,7 +30,13 @@ from exomem.writer_lease import invoke_command
 LATER = time.time() + 3 * 3600
 #: Sorts before every visible note, so withheld rows come first in each key.
 RESTRICTED = f"{fx.KB}/Notes/A-Restricted"
-ALIAS_REF = upkeep.upkeep_ref(dreamer_store.candidate_id("anchor.alias", fx.ENTITY, fx.VARIANT_KEY))
+
+
+def _alias_ref(subject: str, key: str) -> str:
+    return upkeep.upkeep_ref(dreamer_store.candidate_id("anchor.alias", subject, key))
+
+
+ALIAS_REF = _alias_ref(fx.ENTITY, fx.VARIANT_KEY)
 TAG_REF = upkeep.upkeep_ref(dreamer_store.candidate_id("convention.tag", "", fx.TAG_KEY))
 REFS = {"alias": ALIAS_REF, "tag": TAG_REF}
 
@@ -100,14 +106,44 @@ def _crowd() -> dict[str, str]:
     }
 
 
+def _carriers() -> dict[str, str]:
+    """33 withheld pages that carry the entity's name, ahead of it in path order."""
+    return {f"{RESTRICTED}/orbit-pump-{index:02d}.md": fx.note("Orbit Pump") for index in range(33)}
+
+
+#: A visible page that shares the entity's title: the variant links are then an
+#: ambiguity, reported under the audit category that owns the link.
+_VISIBLE_TWIN = {f"{fx.KB}/Notes/Insights/orbit-pump-copy.md": fx.note("Orbit Pump")}
+
+
+def _edit_withheld(vault: Path, withheld: bool) -> None:
+    """Edit only a withheld member's body; its tag is unchanged."""
+    if withheld:
+        rel = f"{RESTRICTED}/pump-care-a.md"
+        fx.edit(
+            vault, rel, fx.note("Restricted care a", tags=(fx.TAG_MINORITY,), observation="New.")
+        )
+    results = fx.run_to_quiet(vault, now=LATER + 7200)
+    assert all(result.stop_reason != "error" for result in results), results
+
+
+GLOBS = ["Notes/A-Restricted/**"]
 CASES = {
-    "competing_name": {"extra": _rival, "globs": ["Notes/A-Restricted/**"], "absent": ()},
-    "majority_spelling": {"extra": _majority, "globs": ["Notes/A-Restricted/**"], "absent": ()},
-    "member_bound": {"extra": _crowd, "globs": ["Notes/A-Restricted/**"], "absent": ()},
+    "competing_name": {"extra": _rival},
+    "majority_spelling": {"extra": _majority},
+    "member_bound": {"extra": _crowd},
+    "name_carriers": {"extra": _carriers},
+    "integrity": {
+        "extra": lambda: {f"{RESTRICTED}/orbit-pump-00.md": fx.note("Orbit Pump")},
+        "shared": _VISIBLE_TWIN,
+        "served": False,
+    },
+    "withheld_edit": {"extra": _majority, "after": _edit_withheld},
     "subject": {
         "extra": dict,
-        "globs": ["Notes/A-Restricted/**", "Notes/Entities/orbit-pump.md"],
+        "globs": [*GLOBS, "Notes/Entities/orbit-pump.md"],
         "absent": (fx.ENTITY,),
+        "served": False,
     },
 }
 
@@ -168,12 +204,14 @@ def _outcome(call) -> tuple[str, str]:
         return (type(error).__name__, str(error))
 
 
-def _carry(vault: Path, clock: _Clock, sessions: int, tag: str) -> list[object]:
+def _carry(
+    vault: Path, clock: _Clock, sessions: int, tag: str, recent: tuple[str, ...] = ()
+) -> list[object]:
     out = []
     for index in range(sessions):
         clock.advance(11 * 60)
         packet = {
-            "recent_context": [],
+            "recent_context": [{"path": path, "title": "t", "why": "edited"} for path in recent],
             "anchors": [],
             "budget": {"limit_chars": 4000, "used_chars": 0},
             "abstention": {"reason": "unresolved"},
@@ -204,6 +242,8 @@ def _observe(vault: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
             seen[f"context:{name}"] = _outcome(
                 lambda ref=ref: invoke_command(_cmd("review_item_context"), vault, ref=ref)
             )
+        # A recently edited visible member is offered first, whatever is withheld.
+        seen["carrier_recent"] = _carry(vault, clock, 1, "recent", recent=(fx.TAG_TWO,))
         seen["carrier"] = _carry(vault, clock, 4, "before")
         for name, ref in REFS.items():
             seen[f"triage:{name}"] = _outcome(
@@ -222,23 +262,30 @@ def test_a_withheld_member_equals_an_absent_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
     spec = CASES[case]
-    withheld = _build(tmp_path / "withheld", extra=spec["extra"](), globs=spec["globs"])
-    absent = _build(tmp_path / "absent", extra={}, globs=spec["globs"], absent=spec["absent"])
+    globs = spec.get("globs", GLOBS)
+    shared = dict(spec.get("shared", {}))
+    withheld = _build(tmp_path / "withheld", extra={**shared, **spec["extra"]()}, globs=globs)
+    absent = _build(tmp_path / "absent", extra=shared, globs=globs, absent=spec.get("absent", ()))
+    if "after" in spec:
+        spec["after"](withheld, True)
+        spec["after"](absent, False)
     left = _observe(withheld, monkeypatch)
     right = _observe(absent, monkeypatch)
     assert left == right
-    if case != "subject":
+    if spec.get("served", True):
         # Not a vacuous equality: the caller really is served both items.
         assert right["item:alias"][0] == "ok", right["item:alias"]
         assert right["item:tag"][0] == "ok", right["item:tag"]
         assert any(block and block.get("items") for block in right["carrier"]), right["carrier"]
+    elif case == "integrity":
+        assert '"forward_reference": 1' in right["review"][1], right["review"]
     else:
         assert "REVIEW_ITEM_NOT_FOUND" in right["item:alias"][1]
 
 
 def test_the_owner_counts_every_member_toward_the_bound(tmp_path: Path) -> None:
     """The member bound does bite for a caller who sees the crowd."""
-    vault = _build(tmp_path, extra=_crowd(), globs=["Notes/A-Restricted/**"])
+    vault = _build(tmp_path, extra=_crowd(), globs=GLOBS)
     with request_scope(owner_principal()):
         kinds = {item["kind"] for item in upkeep.review(vault, limit=50)["items"]}
     assert "anchor.alias" not in kinds
@@ -247,7 +294,7 @@ def test_the_owner_counts_every_member_toward_the_bound(tmp_path: Path) -> None:
 
 
 def test_the_owner_and_the_caller_see_different_minorities(tmp_path: Path) -> None:
-    vault = _build(tmp_path, extra=_majority(), globs=["Notes/A-Restricted/**"])
+    vault = _build(tmp_path, extra=_majority(), globs=GLOBS)
     with request_scope(owner_principal()):
         owner = next(
             item
@@ -271,3 +318,48 @@ def test_the_owner_and_the_caller_see_different_minorities(tmp_path: Path) -> No
         )
     assert caller["subject"]["title"] == "Pump care checklist"
     assert caller["fingerprint"] != owner["fingerprint"]
+
+
+OLFILTER = f"{fx.KB}/Notes/Entities/olfilter.md"
+OLFILTER_NOTE = f"{fx.KB}/Notes/Insights/olfilter-check.md"
+
+
+def test_a_non_ascii_crowd_of_resolving_links_hides_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spellings compare casefolded: `ÖLFILTER` names `Ölfilter`, `Ölfilters` does not.
+
+    33 withheld notes link the page by its own title in capitals, ahead of the
+    one visible note that links a variant. The caller is served the variant
+    exactly as on a vault without the crowd.
+    """
+    shared = {
+        OLFILTER: fx.entity().replace("title: Orbit Pump", "title: Ölfilter"),
+        OLFILTER_NOTE: fx.note("Oil filter check", links="Check the [[Ölfilters]] monthly."),
+    }
+    crowd = {
+        f"{RESTRICTED}/ol-{index:02d}.md": fx.note(
+            f"Crowd {index:02d}", links="Swap the [[ÖLFILTER]] yearly."
+        )
+        for index in range(33)
+    }
+    withheld = _build(tmp_path / "withheld", extra={**shared, **crowd}, globs=GLOBS)
+    absent = _build(tmp_path / "absent", extra=shared, globs=GLOBS)
+    ref = _alias_ref(OLFILTER, "ölfilter")
+
+    def observe(vault: Path) -> dict[str, object]:
+        freshness.clear()
+        fx.seed(vault)
+        _reset_caches()
+        with request_scope(_external()):
+            return {
+                "review": _outcome(lambda: upkeep.review(vault, limit=50)),
+                "item": _outcome(
+                    lambda: invoke_command(_cmd("review_memory"), vault, mode="item", ref=ref)
+                ),
+            }
+
+    left, right = observe(withheld), observe(absent)
+    assert left == right
+    assert right["item"][0] == "ok", right["item"]
+    assert "Ölfilters" in right["item"][1]
