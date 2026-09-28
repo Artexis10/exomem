@@ -177,12 +177,13 @@ The background worker SHALL write only its own disposable sidecar. It SHALL NOT 
 
 ### Requirement: Alias and convention upkeep are corpus-derived and audience-exact
 
-The alias/anchor family SHALL propose adding a spelling to a page's `aliases` only when other pages refer to that page by an unresolved link whose shared `vocabulary_fold.fold_term` equals one of its names, and SHALL name `edit_memory` as the route. The convention/category family SHALL propose a tag spelling choice only for a fold-equal cluster of two or more authored spellings, without the server declaring a canonical spelling. It SHALL propose a category label change only against the semantic-language registry, meaning a label that folds to exactly one registered category or reviewed alias, or one whose definition names `replaced_by`. Both families SHALL derive their evidence from page contributions held in the dreamer's own sidecar, the published graph and the parse cache. They SHALL NOT use a model, turn text, the activation miss counter, a vault write or a walk, and SHALL stay within the tick's page and CPU budgets with at most 16 names, targets, tags or labels per page. A fold key carried by more than 32 pages a caller may see SHALL NOT be served to that caller, and pages withheld from that caller SHALL NOT count toward that bound. A fold key that reaches two or more pages' names is an identity ambiguity and SHALL NOT be proposed over. Under a governed policy every served field, count, fingerprint and liveness check of these items SHALL be computed from released members only, so that a withheld page is indistinguishable from an absent one. Candidate identity SHALL be independent of the producer, so that a later correction producer can support the same proposal.
+The alias/anchor family SHALL propose adding a spelling to a page's `aliases` only when other pages refer to that page by an unresolved link whose shared `vocabulary_fold.fold_term` equals one of its names, and SHALL name `edit_memory` as the route. Its proposal SHALL be identified by the fold key alone and served on the one page carrying the name that the caller may see. The convention/category family SHALL propose a tag spelling choice only for a fold-equal cluster of two or more authored spellings, without the server declaring a canonical spelling. It SHALL propose a category label change only against the semantic-language registry, meaning a label that folds to exactly one registered category or reviewed alias, or one whose definition names `replaced_by`. Both families SHALL derive their evidence from page contributions held in the dreamer's own sidecar, the published graph and the parse cache. They SHALL NOT use a model, turn text, the activation miss counter, a vault write or a walk, and SHALL stay within the tick's page and CPU budgets with at most 16 names, targets, tags or labels per page. A fold key carried by more than 32 pages a caller may see SHALL NOT be served to that caller, and pages withheld from that caller SHALL NOT count toward that bound. A fold key that reaches two or more pages' names is an identity ambiguity and SHALL NOT be proposed over. Under a governed policy every served field, count, fingerprint, liveness check, settle time, order and integrity count of these items SHALL be computed from released members only, so that a withheld page is indistinguishable from an absent one. No row cap SHALL evict their rows; past the sidecar's size cap they SHALL record and deliver nothing, which is their one residual. Candidate identity SHALL be independent of the producer, so that a later correction producer can support the same proposal.
 
 #### Scenario: Other notes name a page by a variant spelling
 
 - **WHEN** two notes link a name that folds to a page's title but does not resolve, and no other page carries that fold
 - **THEN** one alias proposal names the page, the referring notes and their spelling, and routes to `edit_memory` on the page's `aliases`
+- **AND** the proposal's reference does not depend on any page's path
 - **AND** when the page gains the alias, or a second page gains that name, the proposal resolves or is withheld as an ambiguity
 
 #### Scenario: A learned name confirmed by the corpus is offered for promotion
@@ -210,6 +211,11 @@ The alias/anchor family SHALL propose adding a spelling to a page's `aliases` on
 
 - **WHEN** more than 32 pages carry a fold key but no more than 32 of them are released to a caller
 - **THEN** item, context, triage and the carrier return exactly what they return on a vault where the withheld pages do not exist
+
+#### Scenario: A withheld member's activity is invisible
+
+- **WHEN** only a withheld member page changes, or withheld pages make a name ambiguous for the owner
+- **THEN** the caller's items, their order, their delivery time and the integrity counts are those of a vault where the withheld pages do not exist
 
 #### Scenario: A reseed does not deliver half-counted clusters
 
