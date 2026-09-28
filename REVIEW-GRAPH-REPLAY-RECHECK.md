@@ -264,3 +264,56 @@ files, and neither did the PR's evidence.
 
 **Recheck 3 verdict: REQUEST_CHANGES** (red CI: mypy, the reconcile regression in
 NEW CONCERN 3, and three obsolete test setups).
+
+## Recheck 4 (head `b722f62`)
+
+Reviewed `41a103b..52da51d`: `epistemic_graph.py`, `index_sync.py`, the spec delta,
+task 9.4/9.5 and three test files. The head then moved to `b722f62`, whose only change
+is a line wrap of the unit tuple in `_stored_units_current`. Local results below are
+from `52da51d`; CI is from `b722f62`.
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| mypy | **FIXED** | `refresh_paths` and `_refresh_paths_locked` now return `dict[str, Any]`. Run locally with the CI command, `epistemic_graph.py` has no errors. The 5 remaining errors are missing `yaml` stubs in my environment, identical on `origin/main`. CI `lint + targeted types` passes. |
+| NEW CONCERN 3 | **FIXED** | The proof runs only when `outside and replayed` is true (`epistemic_graph.py:5561`). Every other caller hits the restored `caller_path_outside_delta` fallback. `replayed=True` is passed only by `drain_deferred_work`'s batch and isolation dispatches (`index_sync.py:1307,1328`), through `index_sync.upsert_after_write` to the graph dispatch. `_stored_units_current` compares `(node_key, parent_generation, parser_version)` with the stored semantic-unit rows; `parent_source_hash` is covered by the file-hash check before it. All three `test_semantic_unit_reconcile.py` failures pass. The new unit-generation replay test would fail without the check. |
+| Freshness tests | **PASS unmodified** | Both `test_epistemic_graph_freshness.py` tests and the liveness-contract test pass with their original setup. |
+| Task 9.4 / 9.5 | **Accurate** | 9.4 records this round. 9.5 is left open for the `_durable_graph_outcome` follow-up from Recheck 3, which keeps the change active, as it should be. |
+
+**The no-checkpoint label** (`completed/graph_repair_queued_for_drain`): nothing
+mislabels it.
+- `index_sync.full_upsert_succeeded` skips `completed` components
+  (`index_sync.py:801`), so the full receipt clears while the graph receipt stays queued.
+  That is correct custody: the graph queue owns the repair, and no extra whole-component
+  refresh is minted.
+- The request terminal's `graph_sync` comes from `_durable_graph_outcome`, which returns
+  `None` when there is no checkpoint (`writer_lease.py:1201-1203`). No graph field is
+  written, so nothing claims convergence.
+- `whole_vault_attempted` is False, and no `src/` code matches on either code string.
+- The only leftover is the terminal diagnostic entry, which reads `state: completed`
+  next to an honest code. That is cosmetic, and the type rejects `deferred` without a
+  checkpoint.
+- Replays now run only in the file-watcher daemon and the CLI (the only callers of
+  `drain_deferred_work`), never under a request, so request terminals rarely see this.
+
+**Thread-spy repros** rerun on `52da51d` (marker/epoch × no checkpoint/acknowledged
+checkpoint):
+- Replayed request callers: zero whole-vault calls on the caller thread in all four
+  variants. The daemon's first drain clears the receipt, the second returns 0, and the
+  graph matches a fresh rebuild.
+- Non-replay callers: they keep `main`'s inline fallback, now truthfully labelled
+  `graph_rebuild_completed` instead of `incremental_completed`.
+- Standalone joins are unchanged.
+
+**Verification**
+- The same 66-file sweep as Recheck 3: **1635 passed, 18 skipped, 0 failed** (was 6
+  failed).
+- The reconcile, replay and freshness files: 111 passed.
+
+**PR CI on `b722f62`** (run 36455436570): `required CI gate` succeeded; lint + targeted
+types, OpenSpec validation, capabilities doc, package build, Windows NTFS, product E2E,
+onboarding, terminal UI, core shards 1-12 and harness shards 1-4 all passed; Conventional
+Commit title passed; the remaining jobs were skipped by workflow condition. No failures.
+
+**Recheck 4 verdict: APPROVE.** The one residual item, `_durable_graph_outcome`
+reporting `completed` under an acknowledged checkpoint, is tracked as open task 9.5 and
+does not block this PR.
