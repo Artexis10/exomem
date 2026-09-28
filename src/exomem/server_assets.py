@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -128,7 +129,7 @@ class _LivenessSnapshot:
     """Serve `/health` facts from memory; refresh them off the event loop.
 
     Read once at construction (route registration, before any load), then at
-    most once per `HEALTH_SNAPSHOT_TTL_SECONDS` on a daemon thread. A refresh
+    most once per `HEALTH_SNAPSHOT_TTL_SECONDS` on an executor thread. A refresh
     that blocks leaves the previous snapshot in service instead of the probe.
     """
 
@@ -138,20 +139,16 @@ class _LivenessSnapshot:
         self._lock = threading.Lock()
         self._refreshing = False
 
-    def current(self) -> dict[str, object]:
+    def current(self) -> tuple[dict[str, object], bool]:
+        """The served facts, and whether the caller should start a refresh."""
         with self._lock:
             stale = time.monotonic() - self._read_at >= HEALTH_SNAPSHOT_TTL_SECONDS
             start = stale and not self._refreshing
             if start:
                 self._refreshing = True
-            facts = self._facts
-        if start:
-            threading.Thread(
-                target=self._refresh, name="exomem-health-snapshot", daemon=True
-            ).start()
-        return dict(facts)
+            return dict(self._facts), start
 
-    def _refresh(self) -> None:
+    def refresh(self) -> None:
         try:
             facts = _read_liveness_facts()
         finally:
@@ -205,7 +202,12 @@ def register_health_routes(
         gets the pod killed mid index build."""
         _record_health_probe()
         payload: dict[str, object] = {"status": "ok", "service": "exomem"}
-        payload.update(liveness.current())
+        facts, refresh = liveness.current()
+        payload.update(facts)
+        if refresh:
+            # Hand the read to the executor without waiting for it: starting a
+            # thread here would block the loop until that thread wins the GIL.
+            asyncio.get_running_loop().run_in_executor(None, liveness.refresh)
         return JSONResponse(
             payload,
             headers={"Cache-Control": "no-store"},
