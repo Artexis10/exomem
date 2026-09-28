@@ -151,3 +151,45 @@ def test_an_existing_page_write_upserts_lexical_rows_inline_and_mints_no_receipt
     assert components["lexstore"] == "completed", result["semantic"]["index"]
     assert scheduled == []
     assert deferred_index.snapshot_full(tmp_path) == []
+
+
+def test_a_death_before_the_released_fanout_still_converges_on_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review L3: the fan-out now runs after the creation lock is released, so
+    a process can die with the batch committed and its fan-out not yet run.
+    The next process's reconcile must still find the committed words."""
+    insight = tmp_path / INSIGHT
+    insight.parent.mkdir(parents=True, exist_ok=True)
+    insight.write_text(
+        "---\ntitle: Fanout crash\ntype: insight\nstatus: active\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000182\nupdated: 2026-07-15\n---\n\n"
+        "# Fanout crash\n\nExisting prose.\n",
+        encoding="utf-8",
+    )
+    if not lexstore.maintained_content_index_enabled():
+        pytest.skip("no maintained lexical index on this SQLite build")
+    lexstore.ensure_fresh(tmp_path)
+    assert not lexstore.search_bm25(tmp_path, "quillmarrow", 5)
+
+    dropped: list[int] = []
+    # The process dies after the commit, before any released-lock work runs.
+    monkeypatch.setattr(
+        vault_module, "_run_after_release", lambda pending: dropped.append(len(pending))
+    )
+    commands.op_observe_memory(
+        tmp_path,
+        path=INSIGHT,
+        operation="add",
+        category="rule",
+        content="The quillmarrow ledger closes weekly",
+    )
+    assert dropped and dropped[0] >= 1, "no fan-out was left to the released lock"
+    assert "quillmarrow" in insight.read_text(encoding="utf-8")
+    monkeypatch.undo()
+
+    # A fresh process: no in-memory store, no memoized freshness.
+    lexstore.clear_stores()
+    lexstore.reset_memo()
+    hits = lexstore.search_bm25(tmp_path, "quillmarrow", 5)
+    assert hits and hits[0][0] == INSIGHT
