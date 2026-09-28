@@ -85,3 +85,105 @@ newer revisions. Other writers' delta pages in the scope were queued by this pas
   (the F1 rules). At `d1879d9`, 2 failed (F3, F4).
 - The deferred-queue, drain, index_sync and replay suites: 124 passed.
 - `uvx ruff check --select F src tests`: clean.
+
+## Recheck 2 (head `99aae8b`)
+
+Reviewed `544662f..99aae8b`: `epistemic_graph.py`, `tests/test_graph_replay_currency.py`
+and task 9.4.
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| NEW CONCERN 1 | **FIXED** | Before the drain (`epistemic_graph.py:5237-5250`), a caller that can carry `pending` returns `deferred`+`queued` when a marker stands or the epoch refuses. |
+| Label change | **PARTIAL** | Correct when there is no checkpoint. When the acknowledgement covers the checkpoint, the new deferral is reported as `graph_rebuild_completed` (see NEW CONCERN 2). |
+| Task 9.4 | **Accurate** | Its claims hold, but it doesn't cover concern 2. The three new tests fail with `544662f`'s `epistemic_graph.py` and pass at the head. |
+
+**Thread-spy repros** (spies on `converge_full_graph_marker`, `rebuild_all` and
+`_rebuild_all_off_boundary`; a mutation-request trace; then `drain_graph_work` twice as
+the daemon would):
+
+```
+REQ-MARKER caller_calls=[]  marker=1 available=False  queued=[retitled]
+           daemon: drain1=2 [converge, rebuild_all, off_boundary]  drain2=0  left=[]
+REQ-EPOCH  caller_calls=[]  available=False  queued=[retitled]
+           daemon: drain1=1 (per-path, no whole-vault call)  drain2=0  left=[]
+```
+
+- The caller thread made zero whole-vault calls in both cases.
+- The daemon drained each receipt once: the second drain returns 0, and the oracle
+  matches a fresh rebuild.
+- Standalone callers keep their join. The marker case runs `converge` inline and the
+  epoch case runs `off_boundary` inline; both end available with
+  `graph_rebuild_completed`.
+
+## NEW CONCERN 2: in the live state, the request deferral is reported as a completed rebuild
+
+**Where:** `src/exomem/epistemic_graph.py:9174-9185`. The pre-existing
+`required is not None and report.get("deferred")` block runs *before* the new labels at
+9191-9197.
+
+**Scenario:** the vault has a durable graph checkpoint, the acknowledgement covers it,
+and the graph is available. That is the ordinary state for a replayed receipt. The replay
+proves a page stale, and the request defers. The report has `deferred`+`queued`, so the
+dispatch enters the old block and `acknowledged.covers(required)` is true. It returns
+`("completed", "graph_rebuild_completed")` even though:
+
+- no rebuild ran;
+- the graph is unavailable;
+- the receipt is still queued.
+
+As a result the request terminal (`writer_lease.py:445-453`) reports the graph as
+converged, `whole_vault_attempted` is true for a pass that never ran, and
+`index_sync.py:809-819` doesn't treat the result as a coverage code.
+
+**Reproduction:** `_built` → `_write_floor(1)` + `_write_checkpoint(gen 1)` →
+`rebuild_all` → `_publish_past_a_stale_row` → (marker, or an epoch patched to refuse) →
+request replay.
+
+```
+AV marker=False result=completed/graph_rebuild_completed available=False queued=[retitled]
+AV marker=True  result=completed/graph_rebuild_completed available=False queued=[retitled]
+```
+
+Two variants route correctly: a checkpoint newer than the acknowledgement, and an
+unavailable predecessor. Both withdraw availability first, so they take the checkpoint
+door, which returns `deferred/graph_repair_queued`.
+
+**Minimal fix:** put this just before line 9174:
+
+```python
+if (
+    required is not None
+    and report.get("deferred")
+    and report.get("queued")
+    and _caller_can_carry_pending(vault_root, mutation_coordinator)
+):
+    return GraphDispatchResult("deferred", "graph_repair_queued", required)
+```
+
+That is the same code the checkpoint door uses, and it is a coverage code. I prototyped
+it: both AV repros return `deferred/graph_repair_queued` with zero caller-thread passes
+and one daemon drain. The existing suite plus my repros pass (37). Add an AV-shaped test,
+red first.
+
+Keep `required is not None` in the guard: a `deferred` result without a checkpoint is
+rejected (`graph_dispatch_failed`). That is also why the no-checkpoint request result
+stays `completed/graph_repair_queued_for_drain`. It is acceptable because it is not
+covered as pending, but task 9.4 should say so.
+
+## Also checked
+
+- `{**rebuilt, "whole_vault": 1}` moved the return outside the `with`, still inside the
+  `try`, so `GraphRebuildInProgress` handling is unchanged. Only `upsert_after_write`
+  consumes `refresh_paths`.
+- `marker_stands` is sampled before the drain. If another process clears the marker in
+  between, a per-path drain gets labelled as a rebuild. That window is benign.
+
+## Verification
+
+- `test_graph_replay_currency.py`: 14 passed at the head (3 red against `544662f`'s
+  source).
+- The replay, deferred-queue, drain, index_sync, post-handoff, records-recall,
+  trash-exclusion and media-worker suites: 320 passed.
+- ruff F is clean, and `openspec validate --all --strict` gives 217 passed.
+
+**Recheck 2 verdict: REQUEST_CHANGES** (NEW CONCERN 2).
