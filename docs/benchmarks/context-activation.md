@@ -268,6 +268,25 @@ of a positive case into the precision denominator, like a served anchor. It
 is reported in its own column. On v4 the real C7 packet lists only its two
 gold hubs, so A7 changes no verdict.
 
+**Amendment A8 (opt-in): a carried gold page counts.** When a positive case's
+gold page is served `retrieval_carried` together with at least one of its own
+units, the expected `resolved` status is read as satisfied. Every `#unit-`
+fragment of a bound gold page is credited to that page in precision as well as
+recall; A2 amended recall only. Units of any other page stay distinct. The
+reason: the product labels carried context honestly, and what matters to the
+user is whether the agent receives the right page and fact. A8 is reported in
+its own column. On v4 it moves only C4: status and precision are satisfied,
+but C4 stays red on recall (0.50), because the colleague's entity is never
+reached.
+
+**Pinned reds by ruling.**
+- **C2 and C9 (R3).** The grill resolves only partially. A shared tag is not
+  corroboration on a real vault, and semantic corroboration is future
+  sensed-model work.
+- **C3 (R4).** Besides the Planning identity (A3), "the next roadmap item"
+  relies on workspace context a cold run lacks. The keyed variant belongs in
+  the continuity group; it waits on the corpus v5 ruling.
+
 The ordinary notes are realistic, topic-diverse pages, and several share words
 with the fixture turns on purpose. One is a deliberately hard lexical
 distractor: "Oven temperature conversions" was written with T6's turn in view,
@@ -275,26 +294,26 @@ and carries its distinctive words (temperature, Fahrenheit, Celsius). It makes
 T6 harder, not easier, and it is kept by ruling (F5): a vault in real use has
 distractors like it.
 
-| Case | Raw | A2+A4 | A7 | Why it fails today |
-|------|-----|-------|----|--------------------|
-| C1 | red | red | red | Resolves the subscriptions collection; the two gold notes never arrive (recall 1/3) |
-| T1 | red | red | red | The carry reaches T1's own fitness-goal note, outside its empty gold |
-| C2, C9 | red | red | red | The grill stays `partial`; the turn abstains (recall 1/2) |
-| T2 | pass | pass | pass | |
-| C3 | red | red | red | Product red (A3, close-memory-loop 6.12): the plan anchor is the collection, not the item |
-| T3 | red | red | red | Product red (A3): resolves the other workstream's collection |
-| C4 | red | red | red | The carry brings the failure note; nothing reaches the colleague's entity |
-| T4 | red | red | red | Product red (A5): a bare first name stays `partial`; the carry also reaches C4's failure note |
-| C5 | pass | pass | pass | |
-| T5 | red | red | red | The scanner cart's own resource unit is served; D9 counts the fragment as foreign, and A2 amends recall only |
-| C6 | pass | pass | pass | |
-| T6 | red | red | red | The carry reaches an ordinary note on oven temperature conversions |
-| C7 | pass | pass | pass | |
-| T7 | red | red | red | Product red (A5): the scoped turn also resolves the market hub |
-| C8, T8 | red | red | red | The gold notes are not anchors, and no word of the turn carries them |
-| T9 | pass | pass | pass | |
+| Case | Raw | A2+A4 | A7 | A8 | Why it fails today |
+|------|-----|-------|----|----|--------------------|
+| C1 | red | red | red | red | Resolves the subscriptions collection; the two gold notes never arrive (recall 1/3) |
+| T1 | red | red | red | red | The carry reaches the step-count fitness-goal page, a fixture page bound as C1's poison, outside T1's empty gold (see the corpus v5 ruling request) |
+| C2, C9 | red | red | red | red | The grill stays `partial`; the turn abstains (recall 1/2). Pinned by ruling R3 |
+| T2 | pass | pass | pass | pass | |
+| C3 | red | red | red | red | Product red (A3, close-memory-loop 6.12): the plan anchor is the collection, not the item. Also relies on workspace context a cold run lacks (R4) |
+| T3 | red | red | red | red | Product red (A3): resolves the other workstream's collection |
+| C4 | red | red | red | red | The carry brings the failure note; nothing reaches the colleague's entity (under A8 only recall 0.50 remains) |
+| T4 | red | red | red | red | Product red (A5): a bare first name stays `partial`; the carry also reaches C4's failure note |
+| C5 | pass | pass | pass | pass | |
+| T5 | red | red | red | red | The scanner cart's own resource unit is served; D9 counts the fragment as foreign, and A2 amends recall only |
+| C6 | pass | pass | pass | pass | |
+| T6 | red | red | red | red | The carry reaches an ordinary note on oven temperature conversions |
+| C7 | pass | pass | pass | pass | |
+| T7 | red | red | red | red | Product red (A5): the scoped turn also resolves the market hub |
+| C8, T8 | red | red | red | red | The gold notes are not anchors, and no word of the turn carries them |
+| T9 | pass | pass | pass | pass | |
 
-Raw 5/18, A2+A4 5/18, A7 5/18. No amendment changes a verdict on v4: no gold
+Raw 5/18, A2+A4 5/18, A7 5/18, A8 5/18. No amendment changes a verdict on v4: no gold
 note reaches a packet only as a unit, no poison is served as a hedge, and no
 positive case lists an ambiguity candidate outside its gold.
 
