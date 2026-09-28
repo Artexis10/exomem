@@ -374,7 +374,17 @@ the queued pages' resolver entries to the pre-pass rows reproduces the stored
 fingerprint, decided before the pass while those rows are still readable. Pages the pass
 rewrites only as affected do not count: widening follows the queued pages' keys, so an
 affected page's own retitle was never widened (task 8.9 records the related serving-graph
-limit). Otherwise the stored
+limit). A change split across drains -- `DRAIN_LIMIT` truncation, or a page landing
+between the queue snapshot and the drain -- would leave no single drain able to explain
+it, so the fingerprint would stick until a whole-vault publication. A drain that may not
+record the topology therefore carries its queued indexed pages' pre-pass resolver
+entries forward in `graph_meta` (`recall_resolver_topology_carry`, first entry per page
+kept, at most `TOPOLOGY_CARRY_LIMIT` = 256 pages). The next drain and the adoption proof
+revert those entries too, and a carried page whose row no longer matches the resolver
+explains nothing. Recording a fingerprint clears the record, and a whole-vault
+publication starts without one. Past the bound the record is dropped and repair takes
+the whole-vault path, as before. Affected pages and pages outside the indexed corpus
+never enter it. Otherwise the stored
 fingerprint stays, the proof keeps failing closed, and the whole-vault marker stays the
 repair. Nothing in the publication or availability contract moves.
 
