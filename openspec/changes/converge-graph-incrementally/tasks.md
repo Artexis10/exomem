@@ -448,3 +448,19 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   `deferred`, so it stays `completed`/`graph_repair_queued_for_drain`, which is not
   treated as pending coverage. Evidence: the acknowledged-checkpoint request test
   (marker and epoch), red on 99aae8b6 and green after the fix.
+  Recheck 3: the proof made reconcile's deliberate refresh of unchanged pages a no-op,
+  so unit drift and parser upgrades stopped repairing. The deferred full-index replay
+  now passes an explicit `replayed` flag through `index_sync.upsert_after_write` to the
+  graph refresh, and only it takes the proof; every other caller keeps the
+  `caller_path_outside_delta` fallback at its original place. A replayed page is also
+  judged stale when its stored semantic-unit rows differ from its current projection
+  generation or parser version. The refresh report is typed `dict[str, Any]`, which
+  clears the targeted mypy check. Evidence: the non-replay and unit-generation replay
+  tests, red on 41a103bd and green after the fix; the three
+  `test_semantic_unit_reconcile.py` failures and the three freshness tests pass again
+  with their original setup.
+- [ ] 9.5 **Follow-up, not built here.** `writer_lease._durable_graph_outcome` reports
+  `graph_sync: completed` whenever the acknowledgement covers the committed checkpoint,
+  even when the graph is unavailable and a graph receipt is still queued (a request
+  replay deferral, or the external-pending door). Report `pending` while graph
+  receipts for the committed generation remain queued or availability is withdrawn.
