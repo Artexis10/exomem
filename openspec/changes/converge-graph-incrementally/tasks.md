@@ -421,3 +421,12 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   (a latency median under load, and the rebuild-lock test that fails in this tmp dir).
   `tests/test_graph_value_benchmark.py` hit the 60 s thread timeout in the scoped run
   at load 37 and passes alone (163 passed).
+- [x] 9.4 Review corrections: the replay's repair runs through
+  `index_sync.drain_graph_work(paths=...)`, so a standing full marker, an unsettled
+  epoch and receipt CAS apply to it; the proof judges a path under the vault's own
+  spelling; created paths outside the delta are proved and filtered with the written
+  ones; the replay oracle also compares `graph_nodes` (kind, path, title) and
+  `graph_dependencies`, and its retitle fixture links each title from its own page.
+  Evidence: `tests/test_graph_replay_currency.py` (11 passed; the alias and
+  created-path tests red before the fix). Scoped graph, standby, index_sync, bounded
+  join and drain suites: 936 passed, 13 skipped.
