@@ -11,6 +11,12 @@ never writes the vault, never takes the writer lease or the mutation guard,
 never enqueues graph debt, never marks freshness pending, never builds or
 repairs an index, never writes review state, and never loads or runs a model.
 
+Sensing (default off, `sensing`). With sensing on, a tick also advances the
+sensed epistemic model (`sensed_model`), which projects the readings ledger into
+its own disposable file, and the loop supervises the sensor worker
+(`sensor_worker`), a separate child process. Only that child ever loads or runs
+a model. The dreamer thread starts it, gates it and kills it.
+
 When it runs. Only when the service is idle and the graph owes nothing
 (`dreamer_policy.decide`): graph work strictly outranks upkeep and there is no
 max-wait, because nothing online waits on it. Inside a tick it yields per page
@@ -45,6 +51,7 @@ from typing import Any
 
 from . import dreamer_delta, dreamer_families, dreamer_store, foreground_activity, freshness
 from . import dreamer_policy as policy
+from . import sensed_model, sensor_worker
 
 log = logging.getLogger(__name__)
 
@@ -144,6 +151,13 @@ def setting() -> str:
     return policy.resolve_setting(os.environ.get(ENV), mode.read_config())
 
 
+def sensing_on() -> bool:
+    """Whether the sensed model runs in this worker (`sensing`, default off)."""
+    from . import sensing
+
+    return sensing.enabled()
+
+
 def write_setting(value: str) -> Path:
     """Persist the operator setting in the per-machine config file (atomic).
 
@@ -234,6 +248,7 @@ def stop(timeout: float = 2.0) -> None:
     stop_event.set()
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout=timeout)
+    sensor_worker.shutdown()
 
 
 def running() -> bool:
@@ -273,6 +288,10 @@ def _run(vault_root: Path, stop_event: threading.Event) -> None:
         except Exception:  # noqa: BLE001 - the worker must outlive any one loop
             log.warning("dreamer: loop failed", exc_info=True)
             sleep = policy.POLL_SECONDS
+        if sensor_worker.alive(vault_root):
+            # A living sensor child is re-gated often: a foreground request or
+            # quiet mode must stop it promptly.
+            sleep = min(sleep, sensor_worker.POLL_WHILE_ALIVE_SECONDS)
         if stop_event.wait(sleep):
             break
     # What this process delivered since the last write outlives the thread.
@@ -285,6 +304,8 @@ def _loop_once(vault_root: Path, clock: Clock, stop_event: threading.Event | Non
     decision = policy.decide(signals)
     with _LOCK:
         _STATE.setting = signals.setting
+    # The sensor child inherits this gate: it runs only while a tick could.
+    sensor_worker.supervise(vault_root, gate_run=decision.run, gate_reason=decision.reason)
     if not decision.run:
         _note_waiting(decision.reason, clock)
         # No tick will record the carrier's deliveries (paused delivers too).
@@ -477,6 +498,30 @@ def run_once(
                     processed and store.pending_count(conn) > 0
                 ):
                     stop_reason = "pages"
+            if sensing_on():
+                # The sensed model follows `seen` in its own file, inside what
+                # is left of this tick's budgets.
+                def halt() -> str | None:
+                    spent = policy.tick_exhausted(
+                        pages=len(processed) + sensed.processed,
+                        cpu=clock.thread_time() - started_cpu,
+                        wall=clock.monotonic() - started_wall,
+                        page_limit=budget.pages,
+                        cpu_limit=budget.cpu,
+                        wall_limit=budget.wall,
+                    )
+                    if spent is not None:
+                        return spent
+                    if should_stop is not None and should_stop():
+                        return "stop"
+                    if foreground_activity.foreground_since(vault_root, started_real):
+                        return "foreground"
+                    return None
+
+                sensed = sensed_model.TickReport()
+                sensed_model.run_tick(
+                    vault_root, seen=store.seen_map(conn), halt=halt, now=clock.time(), report=sensed
+                )
             now = clock.time()
             delivered = _record_deliveries(store, conn)
             token = dreamer_families.review_state_token(vault_root)
