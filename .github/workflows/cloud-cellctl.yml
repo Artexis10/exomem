@@ -100,13 +100,65 @@ jobs:
             exit 1
           fi
 
+  # The chart tests pin the admission and network policies' text, not their
+  # logic: only the live suite proves a rule denies what it should
+  # (harden-exomem-cloud-operator-access 2.7). So a pull request touching
+  # those templates, or the live suite itself, runs it too. values.yaml is
+  # left out on purpose: release bumps touch it.
+  live-k3s-scope:
+    name: Does this change reach the live K3s policy scenarios
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Match the pull request's changed files
+        id: scope
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          # Every file whose change can alter what the live suite proves:
+          # all platform templates (including cellctl's scope policy), the
+          # values schema and validation values, the vendored subcharts, the
+          # cell manifest renderer, and the live suite itself. values.yaml
+          # is left out because release bumps touch it; chart tests pin the
+          # invariants it carries. Git quotes a path with special or
+          # non-ASCII characters, hence the optional leading quote.
+          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/tests/test_k3s_integration\.py$)'
+        run: |
+          case "$EVENT" in
+            workflow_dispatch) run=true ;;
+            pull_request)
+              # No rename detection, so a renamed template still shows its
+              # old path. A diff that cannot be computed runs the suite. The
+              # match reads a here-string, not a pipe: grep -q exiting early
+              # would SIGPIPE the writer and, under pipefail, read as no match.
+              if ! changed=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
+                run=true
+              elif grep -Eq "$LIVE_K3S_PATTERN" <<< "$changed"; then
+                run=true
+              else
+                run=false
+              fi
+              ;;
+            *) run=false ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "live K3s suite runs: $run"
+
   # The live suite builds stand-in images and runs K3s and MinIO in Docker
-  # (privileged) for about 12 minutes. It runs on manual dispatch and at each
-  # delivery, not on every pull request.
+  # (privileged) for about 15 minutes. It runs on manual dispatch, at each
+  # delivery, and on pull requests live-k3s-scope matches.
   live-k3s:
-    name: Live K3s integration suite (manual)
-    if: github.event_name == 'workflow_dispatch'
-    needs: checks
+    name: Live K3s integration suite
+    if: needs.live-k3s-scope.outputs.run == 'true'
+    needs: [checks, live-k3s-scope]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

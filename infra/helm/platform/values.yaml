@@ -127,7 +127,22 @@ hcloud-csi:
         tag: v2.21.1@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f
         pullPolicy: IfNotPresent
 
+# harden-exomem-cloud-operator-access D1 (task 1.6): the edge namespace's
+# NetworkPolicy lets Traefik reach the API server only at these addresses on
+# 6443. Set it to the K3s server's advertise address as /32 (the address
+# `kubectl get endpoints kubernetes` lists). The render fails while it is empty.
+edge:
+  apiServerCidrs: []
+
 traefik:
+  # harden-exomem-cloud-operator-access D1: the internet-facing edge runs in
+  # its own namespace (namespaces.yaml) with namespaced RBAC, so its Role
+  # grants Secrets there alone and the subchart renders no ClusterRole. The
+  # CRD provider below watches that namespace only; the Role list is the
+  # union of this override and every enabled provider's namespaces.
+  namespaceOverride: exomem-edge
+  rbac:
+    namespaced: true
   image:
     registry: docker.io
     repository: traefik
@@ -189,7 +204,13 @@ traefik:
   providers:
     kubernetesCRD:
       enabled: true
+      # D2: the Cloud route reaches the gateway through an ExternalName
+      # Service in the edge namespace (cloud-ingress.yaml), never by a
+      # cross-namespace reference: watching exomem-cloud would grant its
+      # Secrets to the edge.
       allowCrossNamespace: false
+      allowExternalNameServices: true
+      namespaces: [exomem-edge]
     kubernetesIngress:
       enabled: false
   accessLog:
@@ -319,6 +340,11 @@ cloudIngress:
 
 cert-manager:
   enabled: true
+  # harden-exomem-cloud-operator-access D3: the Cloud ClusterIssuer's DNS-01
+  # token and ACME account key resolve here. It must equal cellctl.namespace
+  # (cloud-ingress.yaml fails the render otherwise), where the signed secret
+  # registry delivers exomem-cloudflare-dns-token; never the edge namespace.
+  clusterResourceNamespace: exomem-cloud
   crds:
     # The chart installs cert-manager's own CRDs (ClusterIssuer, Certificate,
     # ...); installCRDs is set via crds.enabled (the chart's current key),

@@ -84,7 +84,26 @@ def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
     assert 'checksum: "sha256:{{ k3s_sha256_amd64 }}"' in tasks
     assert "cluster-init: true" in config
     assert "secrets-encryption: true" in config
-    assert 'write-kubeconfig-mode: "0640"' in config
+    # harden-exomem-cloud-operator-access D4/2.6: the admin kubeconfig is
+    # root-only. The operators group holds the administrator login, which
+    # reaches cluster-admin only through sudo.
+    assert 'write-kubeconfig-mode: "0600"' in config
+    assert "write-kubeconfig-group" not in config
+    # K3s rewrites k3s.yaml in place and keeps its old group, so a node that
+    # once wrote it to the operators group keeps that group until the role
+    # resets the file itself, after K3s has started and written it.
+    import yaml
+
+    server = yaml.safe_load(_read("roles/k3s/tasks/server.yml"))
+    names = [task["name"] for task in server]
+    (reset,) = [
+        task for task in server
+        if task.get("ansible.builtin.file", {}).get("path") == "/etc/rancher/k3s/k3s.yaml"
+    ]
+    assert reset["ansible.builtin.file"] == {
+        "path": "/etc/rancher/k3s/k3s.yaml", "owner": "root", "group": "root", "mode": "0600",
+    }
+    assert names.index(reset["name"]) > names.index("Wait for the local Kubernetes API readiness endpoint")
     assert "disable:\n  - traefik\n  - servicelb\n  - local-storage" in config
     assert "service-account-max-token-expiration=24h" in config
     assert "image-gc-high-threshold=75" in config
