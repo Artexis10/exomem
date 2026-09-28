@@ -24,7 +24,7 @@ from epistemic.memory_loop.contract import (
     VaultState,
 )
 
-SEMANTICS_FINGERPRINT = "cdbfd8bc3bfb9cd3670e7d800810de1349efc221d7145ded567d1ec3efc758cf"
+SEMANTICS_FINGERPRINT = "5934e6de99fe5386a421dab214d03888aa56cfc9aa093232802fb7049036c1a2"
 
 #: Every declared default of every contract type. A changed default changes
 #: meaning without moving any fixture digest on its own, so it is pinned here
@@ -32,6 +32,7 @@ SEMANTICS_FINGERPRINT = "cdbfd8bc3bfb9cd3670e7d800810de1349efc221d7145ded567d1ec
 DECLARED_DEFAULTS = {
     "AttributedLines": {"allow_none": False},
     "Candidate": {"attributed_to": None, "partition": None, "same_home_as": [], "uncertain": False},
+    "EdgeView": {"family": ""},
     "EntitySeed": {"aliases": []},
     "FieldIs": {"any_of": [], "empty": False, "equals": [], "tokens": []},
     "LaterUse": {"audience": "owner", "expected_status": None, "wrong": []},
@@ -124,8 +125,10 @@ def _state(*edges: EdgeView, pages: tuple[PageView, ...] = ()) -> VaultState:
     return VaultState(pages={page.path: page for page in pages}, records=(), edges=edges)
 
 
-def _edge(source: str, relation: str, target: str, status: str = "core") -> EdgeView:
-    return EdgeView(source=source, relation=relation, target=target, origin="markdown_relation", status=status)
+def _edge(source: str, relation: str, target: str, status: str = "core", family: str = "") -> EdgeView:
+    return EdgeView(
+        source=source, relation=relation, target=target, origin="markdown_relation", status=status, family=family
+    )
 
 
 WORLD = {"a": A, "b": B}
@@ -166,6 +169,32 @@ def test_the_extension_sentinel_accepts_governed_extensions_but_not_core_relatio
 
     assert expectation.evaluate(WORLD, _state(), governed).outcome == "pass"
     assert expectation.evaluate(WORLD, _state(), core).outcome == "fail"
+
+
+@pytest.mark.parametrize(
+    "family", ["ownership", "composition", "supersession", "duplication", "contradiction", "causality"]
+)
+def test_an_extension_under_a_structural_or_epistemic_parent_is_not_a_governed_meaning(family: str) -> None:
+    after = _state(_edge(A, "vault.holds", B, status="extension", family=family))
+
+    assert _typed(Admissible(EXTENSION, "either")).evaluate(WORLD, _state(), after).outcome == "fail"
+
+
+def test_an_extension_under_a_generic_parent_is_a_governed_meaning() -> None:
+    after = _state(_edge(A, "vault.sells_under", B, status="extension", family="relation"))
+
+    assert _typed(Admissible(EXTENSION, "either")).evaluate(WORLD, _state(), after).outcome == "pass"
+
+
+def test_a_forbidden_relation_also_forbids_extensions_of_its_family() -> None:
+    check = NoEdgeBetween(
+        key="k", polarity="negative", first=Select(key="a"), second=Select(key="b"), forbidden=("owns",), reason="r"
+    )
+    owning = _state(_edge(A, "vault.holds_site", B, status="extension", family="ownership"))
+    operating = _state(_edge(A, "vault.operates", B, status="extension", family="relation"))
+
+    assert check.evaluate(WORLD, _state(), owning).outcome == "fail"
+    assert check.evaluate(WORLD, _state(), operating).outcome == "pass"
 
 
 def test_edge_count_needs_its_declared_share_of_targets() -> None:

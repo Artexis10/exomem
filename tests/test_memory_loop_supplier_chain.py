@@ -463,7 +463,7 @@ def test_a_new_site_for_the_new_operator_fails_the_succession(
     assert _check("operator-succession", root, world, before).failed() == ("operator-succession/one-site",)
 
 
-def _save_relation(root: Path, relation: str, description: str) -> None:
+def _save_relation(root: Path, relation: str, description: str, parent: str = "relates_to") -> None:
     from exomem import commands, relation_registry
 
     commands.op_schema_memory(
@@ -473,7 +473,7 @@ def _save_relation(root: Path, relation: str, description: str) -> None:
         proposal={
             "upsert": {
                 relation: {
-                    "parent": "relates_to",
+                    "parent": parent,
                     "description": description,
                     "direction": "directed",
                     "aliases": [],
@@ -567,7 +567,7 @@ def test_scripted_brand_capture_passes_and_a_generic_relation_does_not(
 # --------------------------------------------------------------------------- #
 
 
-def _correct_succession(root: Path, world) -> None:
+def _correct_succession(root: Path, world, relation: str = "vault.operates") -> None:
     """Callow runs the site; the predecessor's operates edge is retired, and the
     Records history is the only place the old assignment survives."""
 
@@ -578,7 +578,7 @@ def _correct_succession(root: Path, world) -> None:
     kept = kept.replace("## Relations\n", "").rstrip()
     _replace_body(root, org, kept + "\n")
     callow = _entity(root, "organization", "Callow Cider Company", "Cider maker running the north-slope orchard.")
-    _relate(root, callow, "vault.operates", "Merrow Farm Orchard")
+    _relate(root, callow, relation, "Merrow Farm Orchard")
     _append(
         root,
         OPERATORS,
@@ -698,3 +698,34 @@ def test_the_later_shared_name_turn_is_ambiguous_for_the_owner_audience(
     assert packet.get("turn_status") == "ambiguous" or (
         packet["abstained"] and packet["abstention"]["reason"] == "ambiguous"
     ), packet
+
+
+# --------------------------------------------------------------------------- #
+# Critic probes (round 3): an ownership-parented extension is not a governed meaning
+# --------------------------------------------------------------------------- #
+
+
+def test_probe_r3b_an_ownership_extension_for_the_new_operator_fails(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
+    before = read_state(root)
+    _save_relation(root, "vault.holds_site", "Holds a site.", parent="owns")
+    _correct_succession(root, world, relation="vault.holds_site")
+
+    failed = set(_check("operator-succession", root, world, before).failed())
+    assert {"operator-succession/current-operator-on-site", "operator-succession/no-new-ownership"} <= failed
+
+
+def test_probe_r3b_an_ownership_extension_to_the_brand_fails_both_sellers(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(worlds, "brand", tmp_path, monkeypatch)
+    before = read_state(root)
+    _entity(root, "brand", "Tarrow Crown", "The valley growers' quality mark.")
+    _save_relation(root, "vault.owns_mark", "Owns a mark.", parent="owns")
+    _relate(root, world.key_to_path["org_merrow"], "vault.owns_mark", "Tarrow Crown")
+    _relate(root, world.key_to_path["org_pellow"], "vault.owns_mark", "Tarrow Crown")
+
+    failed = set(_check("brand", root, world, before).failed())
+    assert {"brand/merrow-sells-under", "brand/pellow-sells-under"} <= failed

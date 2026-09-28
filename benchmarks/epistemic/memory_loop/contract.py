@@ -706,6 +706,8 @@ class EdgeView:
     target: str
     origin: str
     status: str
+    #: The registry family: a core relation's own, an extension's parent's.
+    family: str = ""
 
     @property
     def active(self) -> bool:
@@ -741,6 +743,17 @@ def _core_relations() -> frozenset[str]:
     return frozenset(relation_registry.core_registry().keys)
 
 
+def _families(relations: Iterable[str]) -> frozenset[str]:
+    """The core registry families of ``relations``."""
+
+    from exomem import relation_registry
+
+    registry = relation_registry.core_registry()
+    return frozenset(
+        definition.family for relation in relations if (definition := registry.definition(relation)) is not None
+    )
+
+
 def _product_edges(root: Path) -> tuple[EdgeView, ...]:
     from exomem import semantic_contract
 
@@ -757,6 +770,7 @@ def _product_edges(root: Path) -> tuple[EdgeView, ...]:
                 target=fact.logical_target_path,
                 origin=fact.origin,
                 status=fact.registry_status,
+                family=fact.family or "",
             )
         )
     return tuple(sorted(set(edges), key=lambda edge: (edge.source, edge.relation, edge.target, edge.origin)))
@@ -808,7 +822,7 @@ def read_state(root: Path) -> VaultState:
 
 #: Bump when any predicate's code changes meaning; it is part of every
 #: evaluator digest, so a semantic change voids runs bound to the old one.
-SEMANTICS_VERSION = 2
+SEMANTICS_VERSION = 3
 
 #: Core relations that record that two things are connected without saying
 #: how. They are honest when nothing more precise is supported, and never
@@ -819,6 +833,14 @@ GENERIC_RELATIONS: frozenset[str] = frozenset({"relates_to", "links_to", "mentio
 #: reusable meaning the core registry lacks. Its semantics are reviewed where
 #: it is registered; a fixture can only require that one is used.
 EXTENSION = "extension"
+
+#: Parent families an extension may not carry to satisfy :data:`EXTENSION`.
+#: An extension inherits its parent's family, so one parented on ``owns`` or
+#: ``supersedes`` says ownership or supersession under a new name, not a
+#: governed meaning the core registry lacks.
+NON_GOVERNED_FAMILIES: frozenset[str] = frozenset(
+    {"ownership", "composition", "supersession", "duplication", "contradiction", "causality"}
+)
 
 
 def _fold(text: str) -> str:
@@ -1258,7 +1280,7 @@ def _edge_admissible(edge: EdgeView, admissible: tuple[Admissible, ...], forward
     for option in admissible:
         if option.direction != "either" and (option.direction == "forward") != forward:
             continue
-        if option.relation == EXTENSION and edge.extension:
+        if option.relation == EXTENSION and edge.extension and edge.family not in NON_GOVERNED_FAMILIES:
             return True
         if option.relation == edge.relation:
             return True
@@ -1334,9 +1356,10 @@ class EdgeCount:
 @dataclass(frozen=True)
 class NoEdgeBetween:
     """No edge (either direction) between the selections carries a forbidden
-    meaning: a relation in ``forbidden`` when it is given, otherwise any
-    relation not in ``tolerated``. It reads the whole vault after capture, so
-    an edge the world already had must be retired too."""
+    meaning: a relation in ``forbidden``, or any relation of a forbidden
+    relation's family (an extension inherits its parent's), when it is given;
+    otherwise any relation not in ``tolerated``. It reads the whole vault after
+    capture, so an edge the world already had must be retired too."""
 
     key: str
     polarity: Literal["positive", "negative"]
@@ -1350,10 +1373,15 @@ class NoEdgeBetween:
         found = _edges_between(
             after, self.first.matches(world, after, before), self.second.matches(world, after, before)
         )
+        families = _families(self.forbidden)
         bad = [
             (edge.source, edge.relation, edge.target)
             for edge, _forward in found
-            if (edge.relation in self.forbidden if self.forbidden else edge.relation not in self.tolerated)
+            if (
+                edge.relation in self.forbidden or edge.family in families
+                if self.forbidden
+                else edge.relation not in self.tolerated
+            )
         ]
         return _result(self.key, self.polarity, not bad, f"edges: {bad}")
 
@@ -1758,6 +1786,7 @@ def semantics_fingerprint() -> str:
             "semantics_version": SEMANTICS_VERSION,
             "generic_relations": sorted(GENERIC_RELATIONS),
             "extension": EXTENSION,
+            "non_governed_families": sorted(NON_GOVERNED_FAMILIES),
             "retained_input_roots": list(RETAINED_INPUT_ROOTS),
             "empty_values": sorted(_EMPTY_VALUES),
             "provenance": list(PROVENANCE),
