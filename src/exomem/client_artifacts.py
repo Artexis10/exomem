@@ -93,6 +93,9 @@ class StagedArtifact:
     sha256: str
     content_type: str | None
     filename: str
+    #: The claimed hold behind a local client's held upload, so a command that
+    #: stores nothing can put it back.
+    held: object | None = None
 
 
 @dataclass(frozen=True)
@@ -361,14 +364,43 @@ def _redeem_held(
         )
     except held_uploads.HeldUploadError as error:
         raise SafeFetchError(error.code, error.reason) from None
-    budget.consume(held.size)
-    content_type = held.content_type or _content_type(file.get("mime_type"))
+    try:
+        budget.consume(held.size)
+        content_type = held.content_type or _content_type(file.get("mime_type"))
+    except BaseException:
+        held_uploads.restore(vault_root, held)
+        raise
     filename = (
         str(file.get("file_name") or "").strip()
         or held.filename
         or fallback_filename(held.sha256, content_type)
     )
-    return StagedArtifact(file_id, held.path, held.size, held.sha256, content_type, filename)
+    return StagedArtifact(
+        file_id, held.path, held.size, held.sha256, content_type, filename, held=held
+    )
+
+
+def _release_staged(
+    vault_root: Path, staged: Mapping[int, StagedArtifact], outcomes: list[dict | None]
+) -> None:
+    """Remove staged bytes, putting back each claimed hold whose file was not stored.
+
+    A hold is spent only by storing its file (or finding it already stored); a
+    per-file failure after the claim leaves the handle redeemable until expiry.
+    """
+    from . import held_uploads
+
+    for index, artifact in staged.items():
+        outcome = outcomes[index] if index < len(outcomes) else None
+        try:
+            if artifact.held is not None and (
+                outcome is None or outcome.get("outcome") != "stored"
+            ):
+                held_uploads.restore(vault_root, artifact.held)
+            else:
+                artifact.path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def stage_artifact(
@@ -1409,11 +1441,7 @@ def capture_source_artifacts(
                     artifact.file_id, SafeFetchError(error.code, error.reason)
                 )
     finally:
-        for artifact in staged.values():
-            try:
-                artifact.path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        _release_staged(vault_root, staged, outcomes)
 
     resolved = [outcome for outcome in outcomes if outcome is not None]
     stored = sum(1 for outcome in resolved if outcome.get("outcome") == "stored")
@@ -1525,13 +1553,13 @@ def preserve_artifacts(
                         "content_type": artifact.content_type,
                         "warnings": [],
                     }
-                    if artifact.file_id in transcribed:
+                    if index in transcribed:
                         outcomes[index]["transcription"] = {
                             "state": "not_recorded",
                             "reason": "the original was already preserved; its page is unchanged",
                         }
                     continue
-                transcription = transcribed.get(artifact.file_id)
+                transcription = transcribed.get(index)
                 with manager.mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
@@ -1612,8 +1640,7 @@ def preserve_artifacts(
             except (PreserveError, SafeFetchError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
     finally:
-        for artifact in staged.values():
-            artifact.path.unlink(missing_ok=True)
+        _release_staged(vault_root, staged, outcomes)
     return _batch_result(outcomes)
 
 
@@ -1632,18 +1659,27 @@ def _refuse_transcriptions(reason: str) -> None:
 
 def _transcriptions_by_file(
     transcriptions: object, files: object
-) -> dict[str, str]:
-    """Validate transcriptions against the supplied files, before anything is staged."""
+) -> dict[int, str]:
+    """Validate transcriptions against the supplied files, before anything is staged.
+
+    Each transcription is bound to the position of the one file its `file_id`
+    names, never to the label itself: a label is caller-editable, so when
+    transcriptions are supplied every file's `file_id` must be unique.
+    """
     if not transcriptions:
         return {}
     if not isinstance(transcriptions, (list, tuple)) or len(transcriptions) > MAX_FILES:
         _refuse_transcriptions(f"transcriptions must be a list of at most {MAX_FILES} objects")
-    supplied = {
-        file.get("file_id").strip()
-        for file in (files if isinstance(files, (list, tuple)) else ())
-        if isinstance(file, Mapping) and isinstance(file.get("file_id"), str)
-    }
-    by_file: dict[str, str] = {}
+    supplied: dict[str, int] = {}
+    for index, file in enumerate(files if isinstance(files, (list, tuple)) else ()):
+        if isinstance(file, Mapping) and isinstance(file.get("file_id"), str):
+            label = file["file_id"].strip()
+            if label in supplied:
+                _refuse_transcriptions(
+                    "file_id values must be unique when transcriptions are supplied"
+                )
+            supplied[label] = index
+    by_file: dict[int, str] = {}
     for item in transcriptions:
         file_id = item.get("file_id") if isinstance(item, Mapping) else None
         text = item.get("text") if isinstance(item, Mapping) else None
@@ -1662,7 +1698,7 @@ def _transcriptions_by_file(
         file_id = file_id.strip()
         if file_id not in supplied:
             _refuse_transcriptions("a transcription names no supplied file")
-        if file_id in by_file:
+        if supplied[file_id] in by_file:
             _refuse_transcriptions("a file has more than one transcription")
-        by_file[file_id] = text
+        by_file[supplied[file_id]] = text
     return by_file

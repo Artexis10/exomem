@@ -12,7 +12,10 @@ local client session that sent it and to one lane, redeemable once, and gone
 after `HOLD_TTL_SECONDS`. Every reason a handle cannot be redeemed by the
 caller presenting it -- unknown, malformed, another session's, expired, spent
 -- gets one answer, so a handle leaks nothing about holds its presenter does
-not own. Checks run before the claim, so a refused redemption consumes nothing.
+not own. Checks run before the claim, so a refused redemption consumes nothing,
+and a command that claims a hold but stores nothing puts it back with `restore`.
+Each local session may keep at most `HOLD_MAX_COUNT` holds and `HOLD_MAX_BYTES`
+held bytes at once.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import tempfile
 import time
 from collections.abc import Callable
@@ -40,6 +44,10 @@ HOLD_TTL_SECONDS = 3600
 #: Lanes a hold can be committed through, and the command that commits each.
 LANE_COMMANDS = {"evidence": "preserve_artifacts", "source": "capture_source"}
 STORE_DIRNAME = "held-uploads"
+#: Live holds one local session may keep: two full file-handle batches.
+HOLD_MAX_COUNT = 16
+#: Held bytes one local session may keep across its live holds.
+HOLD_MAX_BYTES = 256 * 1024 * 1024
 
 _SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
 _CHUNK = 1024 * 1024
@@ -65,6 +73,8 @@ class Redeemed:
     sha256: str
     content_type: str | None
     filename: str
+    key: str = ""
+    record: dict | None = None
 
 
 def is_held_reference(value: object) -> bool:
@@ -84,6 +94,16 @@ def _store(vault_root: Path) -> Path:
 
     store = ensure_vault_state_dir(vault_root) / STORE_DIRNAME
     store.mkdir(mode=0o700, exist_ok=True)
+    # `mkdir` leaves an existing directory as it was; a hold directory is
+    # private whoever created it.
+    info = os.lstat(store)
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError(f"held-upload store is not a directory: {store}")
+    if os.name == "posix":
+        if info.st_uid != os.geteuid():
+            raise OSError(f"held-upload store is owned by another user: {store}")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            os.chmod(store, 0o700)
     return store
 
 
@@ -121,6 +141,43 @@ def _sweep(store: Path, now: float) -> None:
             _remove(leftover)
 
 
+def _usage(store: Path, binding: str) -> tuple[int, int]:
+    """Live holds and held bytes of one binding, after a sweep."""
+    count = 0
+    size = 0
+    for meta_path in store.glob("*.json"):
+        try:
+            record = json.loads(meta_path.read_text(encoding="utf-8"))
+            if not hmac.compare_digest(
+                str(record["binding"]).encode("utf-8"), binding.encode("utf-8")
+            ):
+                continue
+            size += int(record.get("size") or 0)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        count += 1
+    return count, size
+
+
+def _quota() -> HeldUploadError:
+    return HeldUploadError(
+        "HELD_UPLOAD_QUOTA",
+        "this session holds too many uploads; redeem or let some expire first",
+    )
+
+
+def _write_record(store: Path, key: str, record: dict) -> None:
+    meta_fd, meta_raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
+    try:
+        with os.fdopen(meta_fd, "w", encoding="utf-8") as sink:
+            json.dump(record, sink)
+        # The record is what makes a hold redeemable, so it lands last.
+        os.replace(meta_raw, store / f"{key}.json")
+    except BaseException:
+        _remove(Path(meta_raw))
+        raise
+
+
 def hold(
     vault_root: Path,
     stream: BinaryIO,
@@ -144,6 +201,9 @@ def hold(
     store = _store(vault_root)
     now = _now()
     _sweep(store, now)
+    held_count, held_bytes = _usage(store, binding)
+    if held_count >= HOLD_MAX_COUNT:
+        raise _quota()
     secret = secrets.token_urlsafe(32)
     key = _key(secret)
     fd, raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
@@ -156,6 +216,8 @@ def hold(
                 size += len(chunk)
                 if size > max_bytes:
                     raise HeldUploadError("TOO_LARGE", "upload exceeds the configured limit")
+                if held_bytes + size > HOLD_MAX_BYTES:
+                    raise _quota()
                 digest.update(chunk)
                 sink.write(chunk)
         os.replace(part, store / f"{key}.bin")
@@ -168,11 +230,7 @@ def hold(
             "filename": name,
             "expires": now + HOLD_TTL_SECONDS,
         }
-        meta_fd, meta_raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
-        with os.fdopen(meta_fd, "w", encoding="utf-8") as sink:
-            json.dump(record, sink)
-        # The record is what makes a hold redeemable, so it lands last.
-        os.replace(meta_raw, store / f"{key}.json")
+        _write_record(store, key, record)
     except BaseException:
         _remove(part, store / f"{key}.bin")
         raise
@@ -214,6 +272,7 @@ def redeem(
     if binding is None or _SECRET.fullmatch(secret) is None or lane is None:
         raise _unavailable()
     store = _store(vault_root)
+    _sweep(store, _now())
     key = _key(secret)
     meta_path = store / f"{key}.json"
     try:
@@ -264,4 +323,31 @@ def redeem(
         sha256=digest.hexdigest(),
         content_type=record.get("content_type") or None,
         filename=str(record.get("filename") or ""),
+        key=key,
+        record=record,
     )
+
+
+def restore(vault_root: Path, redeemed: Redeemed) -> None:
+    """Put claimed bytes back as the same hold when their command stored nothing.
+
+    The handle, lane, binding and expiry are unchanged, so the holding session
+    can retry until the hold expires. Bytes that cannot be put back are removed.
+    """
+    record = redeemed.record
+    if not redeemed.key or record is None:
+        _remove(redeemed.path)
+        return
+    try:
+        store = _store(vault_root)
+        if float(record["expires"]) <= _now():
+            raise OSError("hold expired")
+        payload = store / f"{redeemed.key}.bin"
+        os.rename(redeemed.path, payload)
+        try:
+            _write_record(store, redeemed.key, record)
+        except BaseException:
+            _remove(payload)
+            raise
+    except (OSError, ValueError, KeyError, TypeError):
+        _remove(redeemed.path)

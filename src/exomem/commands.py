@@ -564,7 +564,8 @@ _OptionalClientTranscriptions = Annotated[
         description=(
             "Optional transcriptions of supplied originals, each {file_id, text}. "
             "Each is saved on its original's Evidence page, bound to the "
-            "original's bytes, and only when that original is stored."
+            "original's bytes, and only when that original is stored. Files "
+            "must have unique file_id values when transcriptions are supplied."
         ),
     ),
 ]
@@ -8056,9 +8057,10 @@ def op_preserve_artifacts(
 
     Use this canonical binary-preservation command when the client can supply
     file handles: a chat client's attachments, or the handle `exomem attach`
-    prints on a local client. When a shared file is evidence, preserve the
-    original first and put any transcription in `transcriptions`, never
-    instead. Exomem retrieves each handle server-side and returns one terminal
+    prints on a local client (single use: storing its file spends it, while a
+    refused or failed file leaves it redeemable until it expires). When a
+    shared file is evidence, preserve the original first and put any
+    transcription in `transcriptions`, never instead. Exomem retrieves each handle server-side and returns one terminal
     state per file — `stored`, `already_stored`, or
     `failed`. `already_stored` means those exact bytes are already under that
     destination, so nothing was written and the outcome names the existing path

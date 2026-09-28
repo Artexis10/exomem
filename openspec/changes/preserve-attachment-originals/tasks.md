@@ -12,11 +12,13 @@
 - [x] 3.1 Add failing coverage for holding on local ingress, byte-identical redemption, wrong-session, public-path and no-grant refusal, reuse, expiry, lane mismatch and integrity refusal.
 - [x] 3.2 Add the hold store, the additive `hold=1` branch on `/upload`, and redemption in `stage_artifact` for both lanes.
 - [x] 3.3 Hold from `exomem attach` when no destination is given, with `--lane`.
+- [x] 3.4 Security review: put a claimed hold back when its file is not stored (both lanes), sweep expired holds on redemption, cap live holds and held bytes per local session, make an existing hold directory private, and redeem a hold over the MCP transport in a test.
 
 ## 4. Transcriptions
 
 - [x] 4.1 Add failing coverage that a transcription is written with its stored original and bound to its SHA-256, size and content type, is refused when it names no file, and is written nowhere when the original fails.
 - [x] 4.2 Add `transcriptions` to `preserve_artifacts`, the `client-transcription` marker, and the compact terminal projection.
+- [x] 4.3 Security review: refuse repeated `file_id` values before staging when transcriptions are supplied, and bind each transcription to its file's position rather than its label.
 
 ## 5. Guidance and delivery
 

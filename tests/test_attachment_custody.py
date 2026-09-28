@@ -11,7 +11,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import re
+import stat
 import struct
 import zlib
 from collections.abc import Iterator
@@ -27,6 +29,7 @@ import pytest
 from test_local_ingress_worker import (  # noqa: F401 - fixtures are used by name
     ISSUER,
     OWNER_ID,
+    PROTOCOL_VERSION,
     UPLOAD_TOKEN,
     _real_doors,
     _RealWorker,
@@ -477,6 +480,153 @@ def test_a_held_markdown_file_is_preserved_byte_for_byte(vault: Path, lease) -> 
     assert row["hash"] == hashlib.sha256(original).hexdigest()
 
 
+def test_repeated_file_ids_with_transcriptions_refuse_before_anything_is_staged(
+    vault: Path, lease
+) -> None:
+    """A transcription cannot land on another original's page by sharing a label."""
+    from exomem.cli_ops import OpError
+
+    with _local_session("session-home"):
+        first = _hold(vault, _png(2, 2))["file"]
+        second = dict(_hold(vault, _png(3, 3), name="other.png")["file"])
+        second["file_id"] = first["file_id"]
+        with pytest.raises(OpError) as refused:
+            commands.op_preserve_artifacts(
+                vault,
+                scope="Clinic",
+                category="Appointments",
+                files=[first, second],
+                transcriptions=[{"file_id": first["file_id"], "text": TRANSCRIPTION}],
+            )
+        # Neither hold was consumed by the refused call.
+        second["file_id"] = "held-other"
+        kept = _preserve(lease, vault, [first, second], "after-repeat")
+
+    assert refused.value.code == "INVALID_PRESERVE"
+    assert refused.value.details["field"] == "transcriptions"
+    assert [row["state"] for row in kept["files"]] == ["stored", "stored"]
+    assert not _vault_text_contains(vault, TRANSCRIPTION)
+
+
+def test_a_failed_preserve_leaves_the_claimed_hold_redeemable(
+    vault: Path, lease, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import client_artifacts
+    from exomem.preserve import PreserveError
+
+    real = client_artifacts.preserve_stream
+
+    def refuse_once(*args: Any, **kwargs: Any):
+        monkeypatch.setattr(client_artifacts, "preserve_stream", real)
+        raise PreserveError("TARGET_EXISTS", [], "a different file already has this name")
+
+    monkeypatch.setattr(client_artifacts, "preserve_stream", refuse_once)
+    with _local_session("session-home"):
+        handle = _hold(vault, _png())["file"]
+        failed = _preserve(lease, vault, [handle], "claim-then-fail")
+        again = _preserve(lease, vault, [handle], "claim-then-retry")
+
+    assert failed["files"][0]["state"] == "failed", failed
+    assert again["files"][0]["state"] == "stored", again
+    assert (vault / again["files"][0]["stored_path"]).read_bytes() == _png()
+
+
+def test_a_failed_capture_leaves_the_claimed_source_hold_redeemable(
+    vault: Path, lease, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import add as add_module
+
+    real = add_module.add
+
+    def refuse_once(*args: Any, **kwargs: Any):
+        monkeypatch.setattr(add_module, "add", real)
+        raise add_module.AddError("TARGET_EXISTS", [], "a source already has this title")
+
+    monkeypatch.setattr(add_module, "add", refuse_once)
+    original = b"%PDF-1.4 synthetic trail guide\n"
+    with _local_session("session-home"):
+        handle = _hold(vault, original, lane="source", name="guide.pdf")["file"]
+        results = [
+            lease.invoke_command(
+                _command("capture_source"),
+                vault,
+                _source_schema(vault),
+                title="Trail guide",
+                files=[handle],
+                idempotency_key=key,
+            )
+            for key in ("source-fail", "source-retry")
+        ]
+
+    assert results[0]["files"][0]["outcome"] == "failed", results[0]
+    assert results[1]["files"][0]["outcome"] == "stored", results[1]
+
+
+def _store_dir(vault: Path) -> Path:
+    from exomem import held_uploads, state_paths
+
+    return state_paths.vault_state_dir(vault) / held_uploads.STORE_DIRNAME
+
+
+def test_redemption_also_sweeps_expired_holds(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import held_uploads
+
+    with _local_session("session-home"):
+        _hold(vault, _png(), name="forgotten.png")
+        now = held_uploads._now()
+        monkeypatch.setattr(held_uploads, "_now", lambda: now + held_uploads.HOLD_TTL_SECONDS + 1)
+        with pytest.raises(held_uploads.HeldUploadError):
+            held_uploads.redeem(vault, "exomem-held:" + "A" * 43, lane="evidence")
+
+    assert list(_store_dir(vault).iterdir()) == []
+
+
+def test_holds_are_capped_per_local_session(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import held_uploads
+
+    monkeypatch.setattr(held_uploads, "HOLD_MAX_COUNT", 2)
+    with _local_session("session-home"):
+        _hold(vault, _png(2, 2))
+        _hold(vault, _png(3, 3))
+        with pytest.raises(held_uploads.HeldUploadError) as refused:
+            _hold(vault, _png(4, 4))
+    assert refused.value.code == "HELD_UPLOAD_QUOTA"
+    # Another session's quota is its own.
+    with _local_session("session-laptop", client_id="laptop"):
+        _hold(vault, _png(4, 4))
+    assert len(list(_store_dir(vault).glob("*.bin"))) == 3
+
+
+def test_held_bytes_are_capped_per_local_session(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import held_uploads
+
+    first = _png(2, 2)
+    monkeypatch.setattr(held_uploads, "HOLD_MAX_BYTES", len(first) + 10)
+    with _local_session("session-home"):
+        _hold(vault, first)
+        with pytest.raises(held_uploads.HeldUploadError) as refused:
+            _hold(vault, _png(3, 3))
+    assert refused.value.code == "HELD_UPLOAD_QUOTA"
+    assert len(list(_store_dir(vault).glob("*.bin"))) == 1
+    assert not list(_store_dir(vault).glob("*.part"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_an_existing_hold_directory_is_made_private(vault: Path) -> None:
+    store = _store_dir(vault)
+    store.mkdir(parents=True, exist_ok=True)
+    store.chmod(0o755)
+    with _local_session("session-home"):
+        _hold(vault, _png())
+    assert stat.S_IMODE(store.stat().st_mode) == 0o700
+
+
 # ---- End to end through the real local door ---------------------------------------
 
 
@@ -536,6 +686,87 @@ async def test_attach_hold_then_preserve_over_the_local_listener(
     assert (vault / row["stored_path"]).read_bytes() == original
     assert row["transcription"]["state"] == "recorded"
     assert ISSUER not in json.dumps(held.json())
+
+
+@pytest.mark.anyio
+async def test_a_hold_is_redeemed_over_the_mcp_transport(
+    real_worker: _RealWorker,  # noqa: F811 - the imported fixture, by name
+    vault: Path,
+) -> None:
+    """The local grant reaches the tool task, not only the REST handler."""
+    original = _png(5, 5)
+    home = {"authorization": f"Bearer {real_worker.local_token}"}
+    app = real_worker.app
+
+    async def call(client: httpx.AsyncClient, handle: dict, request_id: int) -> dict:
+        response = await client.post(
+            "/mcp",
+            headers={
+                **home,
+                "accept": "application/json, text/event-stream",
+                "content-type": "application/json",
+                "mcp-protocol-version": PROTOCOL_VERSION,
+                "mcp-method": "tools/call",
+                "mcp-name": "preserve_artifacts",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+                        "io.modelcontextprotocol/clientCapabilities": {},
+                        "io.modelcontextprotocol/clientInfo": {
+                            "name": "local-client",
+                            "version": "1",
+                        },
+                    },
+                    "name": "preserve_artifacts",
+                    "arguments": {
+                        "scope": "Clinic",
+                        "category": "Appointments",
+                        "files": [handle],
+                        "transcriptions": [
+                            {"file_id": handle["file_id"], "text": TRANSCRIPTION}
+                        ],
+                    },
+                },
+            },
+        )
+        assert response.status_code == 200, response.text
+        text = response.text
+        if text.lstrip().startswith("event:") or "\ndata:" in text:
+            text = next(
+                line.removeprefix("data:").strip()
+                for line in text.splitlines()
+                if line.startswith("data:")
+            )
+        return json.loads(text)
+
+    async with app.router.lifespan_context(app):
+        async with _real_doors(real_worker) as doors:
+            held = await doors.local.post(
+                "/upload",
+                headers=home,
+                files={"file": ("card.png", original, "image/png")},
+                data={"hold": "1"},
+            )
+            assert held.status_code == 201, held.text
+            handle = held.json()["file"]
+            first = await call(doors.local, handle, 1)
+            spent = await call(doors.local, handle, 2)
+
+    result = first["result"]
+    assert not result.get("isError"), result
+    [row] = result["structuredContent"]["files"]
+    assert row["state"] == "stored", row
+    assert (vault / row["stored_path"]).read_bytes() == original
+    assert row["transcription"]["state"] == "recorded"
+    # The same call replays its terminal answer; the hold itself is spent.
+    assert spent["result"]["structuredContent"]["files"] == [row]
+    assert not list(_store_dir(vault).glob("*.bin"))
+    assert not list(_store_dir(vault).glob("*.json"))
 
 
 # ---- exomem attach ----------------------------------------------------------------

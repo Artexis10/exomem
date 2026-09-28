@@ -36,7 +36,15 @@ within one hour of the hold. An unknown, malformed, foreign-session, expired or 
 redeemed handle SHALL fail with `HELD_UPLOAD_UNAVAILABLE` and one reason for all of those
 cases, and a refused redemption SHALL NOT consume the hold. A lane mismatch for the
 holding session SHALL fail with `HELD_UPLOAD_LANE` and leave the hold redeemable. Held
-bytes that no longer match their recorded SHA-256 SHALL NOT be committed.
+bytes that no longer match their recorded SHA-256 SHALL NOT be committed. A hold is spent
+only when its file is stored or found already stored; when a claimed hold's file fails
+without being stored, the bytes SHALL be put back as the same hold, redeemable by the
+holding session until the original expiry.
+
+One local session SHALL keep at most 16 live holds and 256 MiB of held bytes; a hold
+beyond either SHALL be refused with `HELD_UPLOAD_QUOTA` and hold nothing. Expired holds
+SHALL be removed when a hold is made and when one is redeemed, and an existing hold
+directory SHALL be made private to its owner before it is used.
 
 `exomem attach <file>` without `--scope` and `--category` SHALL hold the file and print
 the returned handle; `--lane source` SHALL hold it for `capture_source`.
@@ -63,6 +71,16 @@ the returned handle; `--lane source` SHALL hold it for `capture_source`.
 - **WHEN** the holding session passes an evidence-lane handle to `capture_source`
 - **THEN** that file fails with `HELD_UPLOAD_LANE` and the hold remains redeemable by `preserve_artifacts`
 
+#### Scenario: A claimed hold's file fails
+
+- **WHEN** the holding session redeems a handle and that file fails after the claim without being stored
+- **THEN** the same handle is still redeemable by that session until its expiry
+
+#### Scenario: A session exceeds its hold quota
+
+- **WHEN** a local session with 16 live holds, or 256 MiB of held bytes, holds another upload
+- **THEN** it is refused with `HELD_UPLOAD_QUOTA`, nothing more is held, and another session's holds are unaffected
+
 #### Scenario: A public upload asks to hold
 
 - **WHEN** a request authorised by an upload token on the public path sends `hold=1`
@@ -73,7 +91,10 @@ the returned handle; `--lane source` SHALL hold it for `capture_source`.
 `preserve_artifacts` SHALL accept optional `transcriptions`, each an object with a
 `file_id` naming one supplied file and a non-empty `text`. A transcription naming no
 supplied file, or naming one file twice, SHALL refuse the whole call before any file is
-staged. When the named original is stored, the transcription SHALL be written in the same
+staged. Because a `file_id` is a caller-editable label, a call with transcriptions whose
+files repeat a `file_id` SHALL also be refused before any file is staged, and each
+transcription SHALL be bound to the one supplied file its `file_id` names, never to
+another file carrying the same label. When the named original is stored, the transcription SHALL be written in the same
 Evidence write as the original's extracted text, with `extracted_by: client-transcription`
 and a `transcription` record of the original's SHA-256, size and content type, and the
 file's outcome SHALL report `transcription.state == "recorded"` with the page path. When
@@ -91,6 +112,11 @@ SHALL be written anywhere.
 
 - **WHEN** a transcription names a file whose retrieval fails
 - **THEN** that file's outcome is `failed` and the transcription text appears in no vault file
+
+#### Scenario: Two files share a file_id
+
+- **WHEN** a call supplies transcriptions and two of its files carry the same `file_id`
+- **THEN** the call is refused before any file is staged, no hold is consumed and no transcription is written
 
 ### Requirement: Guidance preserves the original first
 
