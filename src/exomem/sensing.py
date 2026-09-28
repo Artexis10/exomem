@@ -62,8 +62,11 @@ def resolve_setting(env_value: str | None, config: Mapping[str, Any] | None) -> 
 #: How long a config-file reading of the setting is trusted. The status check
 #: sits on every page read, so sensing off must add no per-read I/O; a changed
 #: config file takes effect within this long (the env var takes effect at once).
+#: A reading belongs to the config file it came from (`EXOMEM_CONFIG_PATH`).
 CONFIG_MEMO_SECONDS = 5.0
-_CONFIG_MEMO: list[tuple[float, str]] = []
+#: `mode.config_path`'s override; read here without importing `mode` per call.
+CONFIG_PATH_ENV = "EXOMEM_CONFIG_PATH"
+_CONFIG_MEMO: list[tuple[float, str | None, str]] = []
 _CONFIG_LOCK = threading.Lock()
 
 
@@ -78,14 +81,17 @@ def setting() -> str:
     if env_value in SETTINGS:
         return env_value
     now = time.monotonic()
+    config_env = os.environ.get(CONFIG_PATH_ENV)
     with _CONFIG_LOCK:
-        if _CONFIG_MEMO and now - _CONFIG_MEMO[0][0] < CONFIG_MEMO_SECONDS:
-            return _CONFIG_MEMO[0][1]
+        if _CONFIG_MEMO:
+            stamped, memo_env, memo_value = _CONFIG_MEMO[0]
+            if memo_env == config_env and now - stamped < CONFIG_MEMO_SECONDS:
+                return memo_value
     from . import mode
 
     value = resolve_setting(None, mode.read_config())
     with _CONFIG_LOCK:
-        _CONFIG_MEMO[:] = [(now, value)]
+        _CONFIG_MEMO[:] = [(now, config_env, value)]
     return value
 
 

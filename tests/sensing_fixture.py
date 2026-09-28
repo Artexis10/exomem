@@ -43,8 +43,9 @@ STUB = sensing.InstrumentIdentity(
     fixture_set="relation-v1-multilingual",
 )
 
-#: A served-encoder fingerprint in the shape `EncoderProfile.fingerprint()` writes.
-ENCODER = "BAAI/bge-m3|cls|l2|0123456789abcdef"
+#: The served bge-m3 fingerprint (`EncoderProfile.fingerprint()` of the pinned int8
+#: artefact), the one space `sensed_model.COSINE_THETA` calibrates.
+ENCODER = "BAAI/bge-m3|cls|l2|74068c180d6514e8"
 
 CONTRA = [0.01, 0.02, 0.97]
 ENTAIL = [0.97, 0.02, 0.01]

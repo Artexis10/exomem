@@ -59,12 +59,16 @@ PAGE_CAP = 128
 #: each tick on the current count: over it, no page keeps a cosine pair; back
 #: under it, every page with units is proposed again (`_follow_cosine`).
 MAX_COSINE_UNITS = 16384
-#: The cosine threshold per encoder vector space, keyed by the fingerprint's
-#: space family (`model|pooling|l2`, `EncoderProfile.fingerprint()` without its
-#: artefact digest). It is fixed per pair, never top-k and never
-#: corpus-relative; an unlisted or unknown space proposes nothing, and a
-#: changed exact fingerprint re-reads every vector (`_follow_cosine`).
-COSINE_THETA: dict[str, float] = {"BAAI/bge-m3|cls|l2": 0.72}
+#: The cosine threshold per encoder vector space, keyed by the exact
+#: `EncoderProfile.fingerprint()`: model, pooling, prefixes, sequence limit,
+#: quantisation and the served bytes. It is fixed per pair, never top-k and
+#: never corpus-relative. Any other fingerprint, another build or precision of
+#: the same model included, proposes nothing until it is calibrated here, and a
+#: changed fingerprint re-reads every vector (`_follow_cosine`).
+COSINE_THETA: dict[str, float] = {
+    # BAAI/bge-m3, CLS pooling, 512 tokens, the pinned ONNX int8 artefact.
+    "BAAI/bge-m3|cls|l2|74068c180d6514e8": 0.72,
+}
 #: The cosine is compared, and recorded, at this precision.
 COSINE_DECIMALS = 6
 #: Authored link targets two pages must share to be a temporal same-subject pair.
@@ -394,10 +398,7 @@ def theta_for(fingerprint: str | None) -> float | None:
     """The cosine threshold for an encoder fingerprint, or None (no proposals)."""
     if not fingerprint:
         return None
-    parts = str(fingerprint).split("|")
-    if len(parts) < 3:
-        return None
-    return COSINE_THETA.get("|".join(parts[:3]))
+    return COSINE_THETA.get(str(fingerprint))
 
 
 def _embeddings_readonly(vault_root: Path) -> sqlite3.Connection | None:
@@ -1417,6 +1418,11 @@ class _View:
         a, b = self.page(other), self.page(than)
         return a is not None and b is not None and a[0] > b[0]
 
+    def dropped(self, path: str) -> int:
+        """How many of `path`'s edges to released partners were dropped as not live."""
+        self.edges(path)
+        return self._dropped.get(path, 0)
+
     def complete(self, path: str) -> bool:
         """No edge of `path` was dropped as stale and none still needs a reading."""
         self.edges(path)
@@ -1484,7 +1490,10 @@ def _chain(view: _View, start: str) -> list[str]:
             successors |= {
                 other
                 for other in page[2]
-                if view.visible(other) and view.page(other) is not None and view.later(other, current)
+                if view.visible(other)
+                and view.page(other) is not None
+                and view.live(other)
+                and view.later(other, current)
             }
         for other in sorted(successors, key=lambda p: (view.page(p)[0], p)):
             if other not in found and len(found) < CHAIN_BOUND:
@@ -1527,6 +1536,11 @@ def _status(view: _View, path: str) -> dict[str, Any] | None:
     )
     contradictions = sorted({e.other: e for e in edges if view.open_contradiction(e)}.items())
     if not refined and not contradictions:
+        # Nothing to say, unless edges to released partners were dropped as not
+        # live: then the page says its evidence is incomplete rather than going
+        # silent (D3). The drop count covers visible partners only.
+        if view.dropped(path):
+            return {"refined_by_later": 0, "open_contradictions": 0, "evidence_complete": False}
         return None
     parts = []
     if refined:
@@ -1620,8 +1634,9 @@ def for_packet(vault_root: Path, packet: dict[str, Any]) -> None:
                 anchor["epistemic_status"] = {
                     key: status[key]
                     for key in ("line", "refined_by_later", "open_contradictions", "evidence_complete")
+                    if key in status
                 }
-                budget["used_chars"] = int(budget.get("used_chars") or 0) + len(status["line"])
+                budget["used_chars"] = int(budget.get("used_chars") or 0) + len(status.get("line", ""))
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 - a status never breaks an activation

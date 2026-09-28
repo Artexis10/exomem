@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from exomem import sensing
@@ -206,3 +208,19 @@ def test_sensing_off_adds_no_per_read_config_io(monkeypatch) -> None:
     for _ in range(50):
         assert sensing.enabled() is False
     assert len(reads) == 1
+
+
+def test_the_config_memo_follows_the_config_path(tmp_path: Path, monkeypatch) -> None:
+    """Recheck INFO 4: a memoised reading belongs to one config file."""
+    on, off = tmp_path / "on.json", tmp_path / "off.json"
+    on.write_text('{"sensing": "on"}', encoding="utf-8")
+    off.write_text('{"sensing": "off"}', encoding="utf-8")
+    monkeypatch.delenv("EXOMEM_SENSING", raising=False)
+    sensing.clear_memo()
+    monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(on))
+    assert sensing.enabled() is True
+    monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(off))
+    assert sensing.enabled() is False
+    monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(on))
+    assert sensing.enabled() is True
+    sensing.clear_memo()

@@ -380,16 +380,96 @@ def test_a_changed_instrument_is_not_served_before_the_projection_follows(
     vault = sf.build(tmp_path)
     sf.converge(vault, sf.StubInstrument(sf.default_table()))
     sf.enable(monkeypatch, sf.with_identity(revision="2"))
-    assert sensed_model.status_for(vault, sf.SEAL) is None
+    # Every edge was dropped: the page says its evidence is incomplete rather
+    # than going silent (recheck of slice 1, M2 residual).
+    assert sensed_model.status_for(vault, sf.SEAL) == {
+        "refined_by_later": 0,
+        "open_contradictions": 0,
+        "evidence_complete": False,
+    }
 
 
-def test_theta_is_keyed_by_the_encoder_fingerprint() -> None:
-    """LOW 8: a threshold belongs to an encoder's vector space, not its name."""
-    assert sensed_model.theta_for(sf.ENCODER) == 0.72
-    assert sensed_model.theta_for("BAAI/bge-m3|cls|l2") == 0.72
-    assert sensed_model.theta_for("BAAI/bge-m3") is None
-    assert sensed_model.theta_for("BAAI/bge-m3|mean|l2|0123") is None
-    assert sensed_model.theta_for(None) is None
+def test_a_page_with_nothing_dropped_and_nothing_to_say_stays_silent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    assert sensed_model.status_for(vault, sf.INLET) is None
+
+
+NEWER = f"{sf.KB}/Notes/Insights/seal-wear-revised.md"
+
+
+def _superseding_note(created: str) -> str:
+    return (
+        "---\n"
+        "title: Seal wear revised\n"
+        "type: insight\n"
+        "status: active\n"
+        f"created: {created}\n"
+        f"updated: {created}\n"
+        'supersedes: "[[Notes/Insights/seal-wear]]"\n'
+        "---\n\n"
+        "# Seal wear revised\n\n"
+        "## Observations\n\n"
+        "- [finding] Pump housings are cast in one piece.\n"
+    )
+
+
+def test_a_supersession_partner_that_moved_leaves_the_chain_before_a_tick(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Recheck concern 1: chain members come from live pages only."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    fx.write(vault, NEWER, _superseding_note("2026-06-01"))
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    assert sensed_model.status_for(vault, sf.SEAL)["chain"] == [sf.SEAL, sf.WINTER, NEWER]
+    # Re-dated before the page it supersedes: its projected date is stale.
+    fx.edit(vault, NEWER, _superseding_note("2026-01-01"))
+    assert sensed_model.status_for(vault, sf.SEAL)["chain"] == [sf.SEAL, sf.WINTER]
+    fx.remove(vault, NEWER)
+    assert sensed_model.status_for(vault, sf.SEAL)["chain"] == [sf.SEAL, sf.WINTER]
+
+
+def _served_fingerprint(**changes) -> str:
+    from exomem import embedding_backend as eb
+
+    served = eb.served_artifact("BAAI/bge-m3")
+    query, passage, pooling, pad = eb._DECLARED["BAAI/bge-m3"]
+    fields = dict(
+        model="BAAI/bge-m3", pooling=pooling, query_prefix=query, passage_prefix=passage,
+        max_seq=eb.SERVED_MAX_SEQ, pad_token=pad, revision=served.revision,
+        quantization=served.quantization, file_format=served.file_format,
+        artifact_digest=served.digest[:16],
+    )
+    fields.update(changes)
+    return eb.EncoderProfile(**fields).fingerprint()
+
+
+def test_theta_is_keyed_by_the_exact_encoder_fingerprint() -> None:
+    """LOW 8 (recheck residual): a threshold belongs to one exact vector space.
+
+    Quantisation, sequence limit, pooling and the served bytes are all part of
+    it, and anything else, the model's name or prefix included, proposes nothing.
+    """
+    served = _served_fingerprint()
+    assert sensed_model.theta_for(served) == 0.72
+    assert sf.ENCODER == served
+    for other in (
+        _served_fingerprint(quantization=None, file_format=None, artifact_digest=None),
+        _served_fingerprint(max_seq=8192),
+        _served_fingerprint(pooling="mean"),
+        _served_fingerprint(artifact_digest="0" * 16),
+        "BAAI/bge-m3|cls|l2",
+        "BAAI/bge-m3|cls|l2|0123456789abcdef",
+        "BAAI/bge-m3",
+        None,
+    ):
+        assert sensed_model.theta_for(other) is None, other
 
 
 def _cosine_vault(tmp_path: Path, count: int = 4):
