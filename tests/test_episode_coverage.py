@@ -461,3 +461,190 @@ def test_the_coverage_pass_is_a_read_only_action_of_the_command() -> None:
     assert commands.invocation_is_read_only(command, {"action": "coverage"}) is True
     with pytest.raises(ValueError, match="EPISODE_INVALID"):
         commands.op_episode_memory(Path("."), None, action="coverage", episode=KEY, candidate="x")
+
+
+# --------------------------------------------------------------------------- #
+# Historical versus current coverage: one chain per path (ruling on 4.2)
+# --------------------------------------------------------------------------- #
+#
+# A later leaf of the same episode may edit a page an earlier leaf wrote. Each
+# earlier leaf's recorded result must equal the next leaf's recorded starting
+# state on that path, and only the last leaf per path is checked against the
+# live page. Any gap -- a missing receipt, a mismatched hash, or a live page
+# that differs from the last leaf -- leaves coverage unproven.
+
+ENTITY = "Knowledge Base/Entities/Organizations/Marsh Dyeworks.md"
+THESIS = f"{INSIGHTS}/indigo-vat-thesis.md"
+
+
+def _seed_entity(vault: Path) -> None:
+    from exomem import curation
+
+    proposed = curation.propose(
+        vault,
+        {
+            "version": 1,
+            "title": "Seed an entity",
+            "steps": [
+                {
+                    "step_id": "seed",
+                    "kind": "create-entity",
+                    "args": {
+                        "entity_type": "organization",
+                        "name": "Marsh Dyeworks",
+                        "summary": "Dye supplier for the loom trial.",
+                    },
+                }
+            ],
+        },
+    )
+    curation.apply(
+        vault,
+        run_id=proposed["run_id"],
+        plan_id=proposed["plan_id"],
+        expected_plan_fingerprint=proposed["plan_fingerprint"],
+        why="Seed the synthetic fixture.",
+    )
+
+
+def _create_thesis(vault: Path) -> dict:
+    reviewed = _route(
+        vault,
+        "thesis",
+        _proposal(
+            "focused_note",
+            [
+                {
+                    "leaf_key": "write",
+                    "effect_revision": 1,
+                    "kind": "create-note",
+                    "args": {
+                        "title": "Indigo vat thesis",
+                        "slug": "indigo-vat-thesis",
+                        "content": (
+                            "## Observations\n\n- [finding] Indigo vats keep a stable warm"
+                            " bath. ^indigo-vat-thesis\n\n"
+                            f"## Relations\n\nSee [[{ENTITY.removesuffix('.md')}]].\n"
+                        ),
+                    },
+                }
+            ],
+            title="Indigo vat thesis",
+        ),
+    )
+    return _resume(vault, reviewed)
+
+
+def _accept_link(vault: Path) -> dict:
+    """A later leaf accepts a relation on the note the earlier leaf created."""
+    from exomem import deferred_index, epistemic_graph, find, index_sync, semantic_contract
+
+    find.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    for _ in range(12):
+        if not deferred_index.list_graph_paths(vault):
+            break
+        index_sync.drain_graph_work(vault, limit=64)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+        semantic_contract.build_corpus_context(vault)
+        review = commands.op_review_memory(vault, mode="relation-queue")
+    item = next(
+        item
+        for group in review["groups"]
+        for item in group["items"]
+        if item["from"] == THESIS and item["to"] == ENTITY
+    )
+    expected_hash = next(g["content_hash"] for g in review["groups"] if g["path"] == THESIS)
+    reviewed = _route(
+        vault,
+        "link",
+        _proposal(
+            "relation_only",
+            [
+                {
+                    "leaf_key": "accept",
+                    "effect_revision": 1,
+                    "kind": "accept-relation",
+                    "args": {
+                        "ref": item["ref"],
+                        "expected_hash": expected_hash,
+                        "why": "The thesis names the supplier it depends on.",
+                        "expected_fingerprint": item["fingerprint"],
+                    },
+                }
+            ],
+            target=ENTITY,
+        ),
+    )
+    executed = _resume(vault, reviewed)
+    assert executed["status"] == "ok", (executed["blocked"], executed["stale"])
+    assert [row["path"] for row in executed["executed"]] == [THESIS]
+    return executed
+
+
+def _chained(vault: Path) -> dict:
+    _record(vault)
+    _seed_entity(vault)
+    _create_thesis(vault)
+    return _accept_link(vault)
+
+
+def test_a_relation_accepted_on_an_earlier_leafs_note_still_attests(
+    vault: Path, owner, enabled
+) -> None:
+    executed = _chained(vault)
+
+    passed = _episode(vault, action="coverage")
+    assert {row["candidate_key"]: row["readback"] for row in passed["receipts"]} == {
+        "thesis": "verified",
+        "link": "verified",
+    }
+    attested = _resume(vault, executed, postcommit=True)
+    assert attested["complete"] is True
+    assert attested["covered_through_input_revision"] == 1
+
+
+def test_a_missing_receipt_breaks_the_chain(vault: Path, owner, enabled) -> None:
+    from exomem import curation
+
+    executed = _chained(vault)
+    thesis_run = next(
+        c["leaves"][0]["run_id"] for c in executed["candidates"] if c["candidate_key"] == "thesis"
+    )
+    receipts = list(curation.CurationStore(vault).receipts_dir(thesis_run).rglob("*.json"))
+    assert receipts
+    for receipt in receipts:
+        receipt.unlink()
+
+    with pytest.raises(ValueError, match="EPISODE_OUTCOME_UNCERTAIN"):
+        _resume(vault, executed, postcommit=True)
+
+
+def test_an_unrecorded_edit_between_leaves_breaks_the_chain(vault: Path, owner, enabled) -> None:
+    _record(vault)
+    _seed_entity(vault)
+    _create_thesis(vault)
+    # The page changes between the two leaves, outside the episode: the later
+    # leaf's recorded starting state no longer equals the earlier leaf's result.
+    page = vault / THESIS
+    page.write_text(page.read_text(encoding="utf-8") + "\nAn unrecorded edit.\n", encoding="utf-8")
+    executed = _accept_link(vault)
+
+    passed = _episode(vault, action="coverage")
+    assert passed["coverage_current"] == "changed"
+    with pytest.raises(ValueError, match="EPISODE_OUTCOME_UNCERTAIN"):
+        _resume(vault, executed, postcommit=True)
+
+
+def test_a_live_page_that_differs_from_the_last_leaf_breaks_the_chain(
+    vault: Path, owner, enabled
+) -> None:
+    executed = _chained(vault)
+    page = vault / THESIS
+    page.write_text(page.read_text(encoding="utf-8") + "\nEdited after both.\n", encoding="utf-8")
+
+    passed = _episode(vault, action="coverage")
+    assert {row["readback"] for row in passed["receipts"]} == {"changed"}
+    with pytest.raises(ValueError, match="EPISODE_OUTCOME_UNCERTAIN"):
+        _resume(vault, executed, postcommit=True)

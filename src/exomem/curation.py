@@ -50,6 +50,13 @@ STEP_KINDS: Final[tuple[str, ...]] = (
     "delete",
     "recover",
 )
+#: The episode Records leaf (close-memory-loop 3.5). It is not a general
+#: curation kind: only a plan the episode `records` route seals may carry it
+#: (`propose(..., allow_records=True)`, alone in its plan), so no curation door
+#: gains a Records write. It delegates to the Records writer, the one leaf that
+#: may touch the protected Records tree, and its witness holds only while that
+#: writer's own receipt -- its audit transition -- corroborates it.
+RECORDS_STEP_KIND: Final[str] = "append-record"
 MAX_STEPS: Final[int] = 64
 MAX_PLAN_BYTES: Final[int] = 256 * 1024
 MAX_TITLE_CHARS: Final[int] = 500
@@ -142,6 +149,9 @@ _CREATE_ENTITY_FIELDS = frozenset(
     }
 )
 _ACCEPT_RELATION_FIELDS = frozenset({"ref", "expected_hash", "why", "expected_fingerprint"})
+_APPEND_RECORD_FIELDS = frozenset(
+    {"collection", "item", "item_key", "body", "why", "expected_container_hash"}
+)
 _EDIT_FIELDS = frozenset({"path", "why", "operation"})
 _SUPERSEDE_FIELDS = frozenset(
     {
@@ -202,6 +212,7 @@ _ARG_FIELDS = {
     "move": _MOVE_FIELDS,
     "delete": _DELETE_FIELDS,
     "recover": _RECOVER_FIELDS,
+    RECORDS_STEP_KIND: _APPEND_RECORD_FIELDS,
 }
 _REQUIRED_FIELDS = {
     "create-note": frozenset({"content", "title"}),
@@ -212,6 +223,7 @@ _REQUIRED_FIELDS = {
     "move": frozenset({"old_path", "new_path"}),
     "delete": frozenset({"path", "confirm"}),
     "recover": frozenset({"trash_path"}),
+    RECORDS_STEP_KIND: frozenset({"collection", "item", "why", "expected_container_hash"}),
 }
 
 
@@ -331,7 +343,12 @@ PROTECTED_TREES: Final = frozenset(
 )
 
 
-def normalize_target_path(path: Any, *, field: str = "path", allow_trash: bool = False) -> str:
+def normalize_target_path(
+    path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False
+) -> str:
+    """A confined governed path. `allow_records` is the Records leaf's alone:
+    it admits the Records tree and nothing else, so that leaf can neither leave
+    the tree nor open it to any other kind."""
     raw = _require_string(path, field).replace("\\", "/").strip().lstrip("/")
     if (
         raw.endswith("/")
@@ -345,6 +362,10 @@ def normalize_target_path(path: Any, *, field: str = "path", allow_trash: bool =
     relative = raw[len(prefix) :]
     first = relative.split("/", 1)[0].casefold()
     compact = relative.casefold().replace("_", "-")
+    if allow_records:
+        if first != "records" or "/" not in relative:
+            raise _error("CURATION_TARGET_PROTECTED", f"{field} must stay inside Records")
+        return raw
     if first in PROTECTED_TREES or compact.startswith("workflow-contract/"):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} belongs to another typed owner")
     if first == "_trash" and not allow_trash:
@@ -398,6 +419,20 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
         _require_string(
             args.get("title"), f"steps[{ordinal}].args.title", max_chars=MAX_TITLE_CHARS
         )
+    elif kind == RECORDS_STEP_KIND:
+        _require_string(args.get("collection"), f"steps[{ordinal}].args.collection", max_chars=2048)
+        if not isinstance(args.get("item"), Mapping):
+            raise _error("INVALID_CURATION_PLAN", "append-record item must be an object")
+        args["item"] = json.loads(canonical_json(args["item"]))
+        if "item_key" in args:
+            _require_string(args["item_key"], f"steps[{ordinal}].args.item_key", max_chars=512)
+        if "body" in args and not isinstance(args["body"], str):
+            raise _error("INVALID_CURATION_PLAN", "append-record body must be a string")
+        _require_string(args.get("why"), f"steps[{ordinal}].args.why", max_chars=MAX_WHY_CHARS)
+        if not _HEX64.fullmatch(str(args.get("expected_container_hash") or "")):
+            raise _error(
+                "INVALID_CURATION_PLAN", "append-record requires the reviewed expected_container_hash"
+            )
     elif kind == "move":
         args["old_path"] = normalize_target_path(args.get("old_path"), field="old_path")
         args["new_path"] = normalize_target_path(args.get("new_path"), field="new_path")
@@ -537,7 +572,10 @@ def _validate_entity_candidate_binding(raw: Any) -> dict[str, Any]:
     }
 
 
-def validate_forward_plan(raw: Any) -> dict[str, Any]:
+def validate_forward_plan(raw: Any, *, allow_records: bool = False) -> dict[str, Any]:
+    """A closed forward plan. `allow_records` admits the episode Records leaf;
+    only the episode seal and already-sealed plans pass it."""
+    kinds = (*STEP_KINDS, RECORDS_STEP_KIND) if allow_records else STEP_KINDS
     if not isinstance(raw, Mapping):
         raise _error("INVALID_CURATION_PLAN", "plan must be an object")
     value = dict(raw)
@@ -566,7 +604,7 @@ def validate_forward_plan(raw: Any) -> dict[str, Any]:
             raise _error("DUPLICATE_STEP_ID", f"step id {step_identity!r} is duplicated")
         seen.add(step_identity)
         kind = step.get("kind")
-        if kind not in STEP_KINDS:
+        if kind not in kinds:
             raise _error("INVALID_STEP_KIND", f"step kind must be one of {list(STEP_KINDS)}")
         normalized_steps.append(
             {
@@ -576,6 +614,10 @@ def validate_forward_plan(raw: Any) -> dict[str, Any]:
             }
         )
     normalized = {"version": 1, "title": title, "steps": normalized_steps}
+    if any(step["kind"] == RECORDS_STEP_KIND for step in normalized_steps) and (
+        len(normalized_steps) != 1 or "entity_candidate" in value
+    ):
+        raise _error("CURATION_RECORDS_LEAF_ALONE", "a Records leaf is sealed alone in its plan")
     if "entity_candidate" in value:
         normalized["entity_candidate"] = _validate_entity_candidate_binding(
             value["entity_candidate"]
@@ -589,7 +631,9 @@ def _validate_sealed_plan(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise _error("CURATION_PLAN_CORRUPT", "stored plan is not an object")
     base = {key: value for key, value in raw.items() if key in _PLAN_FIELDS}
-    normalized = validate_forward_plan(base)
+    # A stored plan was admitted by `propose`, which alone decides whether a
+    # Records leaf may be sealed.
+    normalized = validate_forward_plan(base, allow_records=True)
     _unknown_fields(dict(raw), _PLAN_FIELDS | _SEALED_FIELDS, "stored plan")
     manifest = raw.get("binding_manifest", [])
     registries = raw.get("registry_ids", {})
@@ -1205,6 +1249,55 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
             after_hash = None
             effect_before = [{"path": path, "content_hash": before_hash}]
             effect_after = [{"path": path, "exists": True}]
+        elif kind == RECORDS_STEP_KIND:
+            from . import record_governance
+            from . import records as records_module
+
+            # The Records owner's own gates, in the order `record_memory`
+            # applies them: a released collection, then the records profile.
+            manifest = record_governance.require_records_profile(
+                record_governance.resolve_collection_for_mutation(vault_root, args["collection"])
+            )
+            appended = records_module.prepare_append(
+                vault_root,
+                manifest,
+                item=args["item"],
+                item_key=args.get("item_key"),
+                body=args.get("body"),
+                expected_container_hash=args["expected_container_hash"],
+                why=args["why"],
+            )
+            if appended["semantic_profile"] != "records":
+                raise _error("RECORDS_PROFILE_REQUIRED", "a Records leaf appends to Records only")
+            if appended["strategy"] != "markdown-items":
+                # One file per item: the witness must name the item alone.
+                raise _error(
+                    "CURATION_RECORDS_STORAGE_UNSUPPORTED",
+                    "a Records leaf appends to a markdown-items collection",
+                )
+            path = normalize_target_path(appended["path"], field="destination", allow_records=True)
+            manifest_path = normalize_target_path(
+                appended["manifest_path"], field="collection", allow_records=True
+            )
+            _manifest_text, manifest_hash = _read_target(vault_root, manifest_path)
+            if not _guarded_absent(vault_root, path):
+                raise _error("CURATION_BINDING_STALE", f"record destination {path!r} exists")
+            expected_absent = True
+            prepared = {
+                "destination": path,
+                "collection_id": appended["collection_id"],
+                "manifest_path": manifest_path,
+                "item_key": appended["item_key"],
+                "payload_hash": appended["payload_hash"],
+            }
+            after_hash = None
+            # Every Records transition rewrites the manifest's audit head, so
+            # its hash stands for the whole collection as reviewed.
+            effect_before = [
+                {"path": path, "absent": True},
+                {"path": manifest_path, "content_hash": manifest_hash},
+            ]
+            effect_after = [{"path": path, "exists": True}]
         elif kind == "move":
             validation = move_module.move_file(vault_root, validate_only=True, **args)
             if not isinstance(validation, move_module.MoveFileValidation):
@@ -1355,9 +1448,13 @@ def _validate_entity_candidate_plan(
             )
 
 
-def propose(vault_root: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
+def propose(
+    vault_root: Path, plan: Mapping[str, Any], *, allow_records: bool = False
+) -> dict[str, Any]:
+    """Seal a plan. `allow_records` is the episode `records` route's alone
+    (`episode_workflow`); every public curation door leaves it off."""
     root = Path(vault_root)
-    validated = validate_forward_plan(plan)
+    validated = validate_forward_plan(plan, allow_records=allow_records)
     # Candidate identity and state are re-read before any plan artifact is
     # published.  A stale review must not leave an inert but misleading plan in
     # the governed run store.
@@ -1393,7 +1490,10 @@ def propose(vault_root: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
     _require_plan_relocation_history(root, validated)
     registries = registry_identities(root)
     return CurationStore(root).create_forward(
-        validated, binding_manifest=manifest, registry_ids=registries
+        validated,
+        binding_manifest=manifest,
+        registry_ids=registries,
+        allow_records=allow_records,
     )
 
 
@@ -1514,6 +1614,9 @@ def compensation_kind(kind: str) -> str:
         "move": "move",
         "delete": "recover",
         "recover": "delete",
+        # Records history is corrected by a later Records transition, never
+        # by removing the one that happened.
+        RECORDS_STEP_KIND: "unavailable",
     }[kind]
 
 
@@ -1580,6 +1683,7 @@ def _witness_basis(
         "move": "manage_memory_file:move",
         "delete": "manage_memory_file:delete",
         "recover": "manage_memory_file:recover",
+        RECORDS_STEP_KIND: "record_memory:append",
     }[step["kind"]]
     return {
         "version": 1,
@@ -1743,6 +1847,7 @@ def _validate_witness(
                 item.get("path"),
                 field="witness.after.path",
                 allow_trash=kind in {"delete", "recover"},
+                allow_records=kind == RECORDS_STEP_KIND,
             )
         except CurationError as error:
             raise _error("CURATION_OUTCOME_UNCERTAIN", "curation postimage is invalid") from error
@@ -1789,7 +1894,49 @@ def _validate_witness(
     return dict(value)
 
 
-def _verify_live_postcondition(vault_root: Path, witness: Mapping[str, Any]) -> None:
+def _verify_records_receipt(
+    vault_root: Path,
+    binding: Mapping[str, Any],
+    witness: Mapping[str, Any],
+) -> None:
+    """A Records leaf's witness holds only while the Records receipt agrees.
+
+    The receipt is read back from the Records owner: the item still exists
+    under the sealed key with the sealed payload, and exactly one audit append
+    transition names that key, path and item hash. That item path and hash
+    must be the witness's own postimage.
+    """
+    from . import records as records_module
+
+    prepared = dict(binding.get("prepared") or {})
+    receipt = records_module.append_receipt(
+        vault_root,
+        str(prepared.get("manifest_path") or ""),
+        item_key=str(prepared.get("item_key") or ""),
+        payload_hash=str(prepared.get("payload_hash") or ""),
+    )
+    after = list(witness["after"])
+    if (
+        receipt is None
+        or receipt["collection_id"] != prepared.get("collection_id")
+        or len(after) != 1
+        or [receipt["canonical_path"], receipt["after_item_hash"]]
+        != [after[0].get("path"), after[0].get("content_hash")]
+    ):
+        raise _error("CURATION_OUTCOME_UNCERTAIN", "the Records receipt does not corroborate")
+
+
+def _verify_live_postcondition(
+    vault_root: Path,
+    witness: Mapping[str, Any],
+    *,
+    step: Mapping[str, Any] | None = None,
+    binding: Mapping[str, Any] | None = None,
+) -> None:
+    if step is not None and step.get("kind") == RECORDS_STEP_KIND:
+        if binding is None:
+            raise _error("CURATION_OUTCOME_UNCERTAIN", "a Records witness needs its binding")
+        _verify_records_receipt(vault_root, binding, witness)
     for item in witness["after"]:
         relative = str(item["path"])
         if item.get("absent") is True:
@@ -1879,6 +2026,29 @@ def _dispatch_step(
             draft_token=prepared["draft_token"],
             **relation,
         )
+    if kind == RECORDS_STEP_KIND:
+        from . import record_governance
+        from . import records as records_module
+
+        manifest = record_governance.require_records_profile(
+            record_governance.resolve_collection_for_mutation(vault_root, args["collection"])
+        )
+        if (manifest.collection_id, manifest.path) != (
+            prepared["collection_id"],
+            prepared["manifest_path"],
+        ):
+            raise _error("CURATION_BINDING_STALE", "the Records collection changed identity")
+        result = records_module.append_record(
+            vault_root,
+            manifest,
+            item=args["item"],
+            item_key=prepared["item_key"],
+            expected_container_hash=args["expected_container_hash"],
+            why=args["why"],
+            body=args.get("body"),
+            hold=False,
+        )
+        return {**result, "path": prepared["destination"]}
     if kind == "move":
         return commands.op_manage_memory_file(vault_root, operation="move", **args)
     if kind == "delete":
@@ -2112,8 +2282,14 @@ def _validated_operation_witness(
     binding: Mapping[str, Any],
     operation_identity: str,
     compensation: bool,
+    live: bool = True,
 ) -> dict[str, Any] | None:
-    """Load one exact immutable witness, distinguishing absence from corruption."""
+    """Load one exact immutable witness, distinguishing absence from corruption.
+
+    `live=False` validates the witness as historical evidence only; its live
+    postcondition is then the caller's to check (the episode coverage chain
+    checks it for the last leaf on each path alone).
+    """
     try:
         raw = store._read_json(_evidence_path(store, run_identity, operation_identity))
     except CurationError as error:
@@ -2130,7 +2306,8 @@ def _validated_operation_witness(
         binding=binding,
         parent_compensation_plan_id=plan_identity if compensation else None,
     )
-    _verify_live_postcondition(store.vault_root, witness)
+    if live:
+        _verify_live_postcondition(store.vault_root, witness, step=step, binding=binding)
     return witness
 
 
@@ -2396,7 +2573,7 @@ def _execute_next(
             binding=execution_binding,
             parent_compensation_plan_id=plan_identity if compensation else None,
         )
-        _verify_live_postcondition(vault_root, witness)
+        _verify_live_postcondition(vault_root, witness, step=step, binding=execution_binding)
     except CurationError as error:
         try:
             committed_witness = _validated_operation_witness(
@@ -2950,8 +3127,9 @@ class CurationStore:
         binding_manifest: Iterable[Mapping[str, Any]],
         registry_ids: Mapping[str, str],
         today: dt.date | None = None,
+        allow_records: bool = False,
     ) -> dict[str, Any]:
-        validated = validate_forward_plan(plan)
+        validated = validate_forward_plan(plan, allow_records=allow_records)
         _require_plan_relocation_history(self.vault_root, validated)
         sealed = {
             **validated,
@@ -3419,6 +3597,11 @@ def _compensation_args(
 ) -> tuple[str, dict[str, Any]]:
     kind = str(forward_step["kind"])
     inverse = compensation_kind(kind)
+    if kind == RECORDS_STEP_KIND:
+        raise _error(
+            "CURATION_COMPENSATION_UNAVAILABLE",
+            "a Records append is history; a later Records transition corrects it",
+        )
     effect = dict(receipt.get("effect") or {})
     if kind in {"create-note", "create-entity"}:
         path = str(effect.get("path") or binding["postcondition"]["path"])

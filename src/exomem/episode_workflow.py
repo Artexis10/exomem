@@ -4,7 +4,14 @@ The active agent decides every candidate, destination and disposition; this
 module validates, records and (only when enabled) executes them. A candidate
 names a typed destination for an existing writer -- one closed curation step
 of a kind its route owns (fields checked by `curation.validate_forward_plan`)
--- never a free-form effect.
+-- never a free-form effect. The `records` route's `append-record` leaf is the
+one step that reaches the Records tree, through the Records writer; only this
+module's seal admits it.
+
+`resume` `postcommit` attests current coverage as a chain per path (see
+`episode_reconciliation.current_coverage`): each earlier leaf's recorded
+result must be the next leaf's recorded start, and only the last leaf on a
+path answers to the live page.
 
 What each action writes (close-memory-loop task 5.5):
 
@@ -49,7 +56,7 @@ from typing import Any
 
 from . import curation, episode_capture, memory_refs
 from . import episode_model as model
-from .episode_reconciliation import reconcile_curation_leaf
+from .episode_reconciliation import current_coverage, reconcile_curation_leaf
 from .episode_recovery import EpisodeInputOwner
 from .episode_store import EpisodeStore
 from .governance import egress
@@ -270,26 +277,6 @@ def inspect(vault_root: Path, *, episode: Any) -> dict[str, Any]:
 # --- the final coverage pass (close-memory-loop 4.2) --------------------------
 
 
-def _readback(session: _Session, candidate_id: str, leaf: Mapping[str, Any]) -> bool:
-    """Whether a committed leaf's recorded proof still verifies against its page.
-
-    The re-reconciliation a postcommit attestation runs, on a copy marked
-    uncertain; nothing is recorded and no writer runs.
-    """
-    check = model._copy(session.state)  # noqa: SLF001
-    model._owned(check, candidate_id, leaf["leaf_id"]).update(  # noqa: SLF001
-        outcome="uncertain", outcome_proof=None
-    )
-    try:
-        verified = reconcile_curation_leaf(session.vault_root, check, candidate_id, leaf["leaf_id"])
-    except model.EpisodeError as error:
-        if error.code != "EPISODE_OUTCOME_UNCERTAIN":
-            raise
-        return False
-    current = model._owned(verified, candidate_id, leaf["leaf_id"])  # noqa: SLF001
-    return current["outcome_proof"] == leaf["outcome_proof"]
-
-
 def _written_path(vault_root: Path, binding: Mapping[str, Any]) -> str | None:
     """The page a committed leaf's sealed plan names as its postcondition."""
     try:
@@ -325,6 +312,7 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     receipts = []
     # One consistent view of every committed page, as an attestation takes.
     with session.store._guard():  # noqa: SLF001
+        current = current_coverage(session.vault_root, state)
         for candidate in state["candidates"]:
             for leaf in candidate["leaves"]:
                 if leaf["outcome"] != "committed":
@@ -336,7 +324,7 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
                     or (keep is not None and not keep(path))
                 ):
                     path, readback = None, "unavailable"
-                elif _readback(session, candidate["candidate_id"], leaf):
+                elif current[leaf["leaf_id"]]:
                     readback = "verified"
                 else:
                     readback = "changed"
@@ -379,6 +367,9 @@ def _seal(vault_root: Path, leaf: Mapping[str, Any]) -> dict[str, Any]:
             "title": f"Episode leaf {leaf['leaf_key']}",
             "steps": [{"step_id": "leaf", "kind": leaf["kind"], "args": leaf["args"]}],
         },
+        # The pure model has already held the leaf to its route's kinds, so
+        # only a `records` candidate reaches here with a Records leaf.
+        allow_records=True,
     )
 
 

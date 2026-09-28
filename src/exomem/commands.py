@@ -7738,6 +7738,7 @@ _EpisodeProposalArgument = Annotated[
                                             "accept-relation",
                                             "edit",
                                             "supersede",
+                                            "append-record",
                                         ]
                                     },
                                     "args": {"type": "object"},
@@ -7798,7 +7799,9 @@ def op_episode_memory(
     to execute the routed ones. A leaf is one typed step for an existing
     writer, of a kind its route owns: focused_note creates a note, entity an
     entity, relation_only accepts a relation, existing_page and semantic_unit
-    edit or supersede. It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
+    edit or supersede, and records appends one item to a Records collection
+    (append-record: {collection, item, item_key?, body?, why,
+    expected_container_hash}). It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
     service enables episode execution. After it runs, make one final
     `coverage` pass: compare the input it names with each receipt and its
     readback, prepare anything omitted or misrouted, then attest with
