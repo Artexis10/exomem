@@ -9171,6 +9171,16 @@ def upsert_after_write(
             if created
             else index.refresh_paths(written_paths)
         )
+        if (
+            required is not None
+            and report.get("deferred")
+            and report.get("queued")
+            and _caller_can_carry_pending(vault_root, mutation_coordinator)
+        ):
+            # The queue owns this repair whatever the acknowledgement covers: a
+            # covered checkpoint below would report a rebuild that never ran for
+            # a graph that is unavailable with its receipt still queued.
+            return GraphDispatchResult("deferred", "graph_repair_queued", required)
         if required is not None and report.get("deferred"):
             if graph_sync.registered_checkpoint(
                 vault_root, state_root=mutation_coordinator.state_root
