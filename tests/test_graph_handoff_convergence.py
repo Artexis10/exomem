@@ -892,3 +892,51 @@ def test_a_drain_does_not_record_topology_it_did_not_widen(
         _assert_matches_a_fresh_rebuild(root)
     assert adoption.adopted is False
     assert adoption.reason == "resolver_topology_mismatch"
+
+
+def _titled(title: str, extra: str) -> str:
+    return f"---\ntype: pattern\nstatus: active\ntitle: {title}\n---\n\nbody\n{extra}\n"
+
+
+@pytest.mark.parametrize("withheld", [True, False], ids=["withheld", "published"])
+def test_a_drain_does_not_own_an_affected_page_s_own_retitle(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, withheld: bool
+) -> None:
+    """M2 review: widening follows the queued pages' keys, so only they explain topology.
+
+    `linker` is rewritten as a page whose link now resolves to the created
+    `fresh-target`, but its own retitle on disk was never queued and nothing
+    widened to `mentioner`, which still links the old title. Owning that
+    retitle would stamp the fingerprint over a `mentioner -> linker` edge a
+    rebuild drops.
+    """
+    linker = f"{GENERATED}/linker.md"
+    root = _build_small(
+        vault,
+        {
+            linker: _titled("Linker Old", "See [[fresh-target]]."),
+            f"{GENERATED}/mentioner.md": _note(600, []) + "\nSee [[Linker Old]].\n",
+        },
+    )
+    created = root / GENERATED / "fresh-target.md"
+    created.write_text(_note(501, []), encoding="utf-8")
+    (root / linker).write_text(_titled("Linker New", "See [[fresh-target]]."), encoding="utf-8")
+    freshness.rebaseline(root)
+    real_identity = epistemic_graph._incremental_projection_identity
+    calls = iter(range(1_000_000))
+
+    def moving(vault_root):
+        identity = real_identity(vault_root)
+        return (identity, next(calls)) if withheld else identity
+
+    monkeypatch.setattr(epistemic_graph, "_incremental_projection_identity", moving, raising=True)
+    EpistemicGraphIndex(root).drain_paths([created])
+    monkeypatch.setattr(
+        epistemic_graph, "_incremental_projection_identity", real_identity, raising=True
+    )
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+    if adoption.adopted:
+        _assert_matches_a_fresh_rebuild(root)
+    assert adoption.adopted is False
+    assert adoption.reason == "resolver_topology_mismatch"
