@@ -313,23 +313,32 @@ referent and for the `recent_context` block. The earlier session's acts go
 through supported doors (an `anchor` pick, an `episode_memory` record, an
 `edit_memory` commit), then one fresh `activate_context` call is made.
 
-The current group is v2 (digest `b208a986…`, pinned in a commit before its
-first run). It keeps v1's cases and gold and tightens the scorer after the
-integrity review. Every served anchor, whatever its status, and every
-ambiguity candidate must be one of the referents, so the right page plus a
-wrong one fails; the keyless K3 must serve nothing at all, partial anchors and
-ambiguity included. The digest also covers a sha256 of the scorer module's
-source. The result is in
-`docs/benchmarks/context-activation-continuity-2026-09-v2.json`. v1 (digest
-`de5e7900…`, 4/4, `context-activation-continuity-2026-09.json`) is kept as
-history; its scorer passed packets that v2 fails.
+The current group is v3 (digest `8c6eb814…`, pinned in a commit before its
+first run). It keeps v1's cases and gold. Everything a packet serves must
+belong to a referent page: anchors of every status, ambiguity candidates,
+units, pointers and current-state entries. A unit or state entry of the
+referent page is fine; one of any other page fails. The keyless K3 must serve
+nothing at all. Refs are compared on canonical page identity, read back from
+the vault before the fresh turn: a memory ref, a path, a path without the
+knowledge-base prefix, and a `#fragment` of any of them all name the same
+page. So a hot-page ambiguity that lists a page by path matches its anchor.
+The digest also covers a sha256 of the scorer module's source. The result is
+in `docs/benchmarks/context-activation-continuity-2026-09-v3.json`.
+
+History, kept as recorded:
+- v1 (`de5e7900…`, 4/4, `context-activation-continuity-2026-09.json`) did not
+  check extra served pages.
+- v2 (`b208a986…`, 4/4, `context-activation-continuity-2026-09-v2.json`)
+  checked anchors and ambiguity only, on one exact ref spelling. Its scorer
+  passed packets carrying a unit, pointer or state entry of a wrong page,
+  which v3 fails.
 
 | Case | Scenario | Result |
 |------|----------|--------|
-| K1 | "continue" from a fresh session in the earlier session's workspace, after newer work in another workspace | v2 pass (v1 pass) |
-| K2 | "where were we" after a recorded episode | v2 pass (v1 pass) |
-| K3 | a keyless bare "continue" | v2 pass (v1 pass): abstains, names nothing, still lists the page |
-| K4 | "continue" after an edit of an ordinary, non-anchor note | v2 pass (v1 pass): carried on recency |
+| K1 | "continue" from a fresh session in the earlier session's workspace, after newer work in another workspace | v3 pass (v2, v1 pass): serves only the bench, its units and its state |
+| K2 | "where were we" after a recorded episode | v3 pass (v2, v1 pass): serves only the entity and its unit |
+| K3 | a keyless bare "continue" | v3 pass (v2, v1 pass): abstains, serves nothing, still lists the page |
+| K4 | "continue" after an edit of an ordinary, non-anchor note | v3 pass (v2, v1 pass): carried on recency, only its own units |
 
 The group is not one of the eighteen and does not enter their verdict.
 
