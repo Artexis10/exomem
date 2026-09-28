@@ -105,6 +105,15 @@ The system SHALL resolve and enrich existing entities before creating duplicates
 - **THEN** the agent proposes or applies permitted hydration of that identity instead of creating a duplicate
 - **AND** ambiguous or incidental mentions do not cause automatic identity assignment
 
+#### Scenario: An entity is captured with a name in another script
+
+- **WHEN** the agent creates an entity whose title is in a script other than
+  the user's spelling of its name, passing that spelling as an alias
+- **THEN** the page records it in its owner `aliases`, stripped, deduplicated
+  and never repeating the title
+- **AND** an empty, multi-line or over-long alias, more than eight, or one
+  another active entity already answers to, refuses the whole creation
+
 #### Scenario: A useful reusable relationship is missing
 
 - **WHEN** no current registered relation truthfully expresses a supported reusable distinction
@@ -492,6 +501,16 @@ fast abstention or compiler-only timing.
 - **AND** a pointing-back Japanese turn made only of a declared cue and filler
   (`続けてください`) is referential, while one that also says something of its
   own (`続きを読んで`) is not
+
+#### Scenario: A turn in another script reaches a page through its native-script alias
+
+- **WHEN** an English-titled entity page was captured, or later edited, with a
+  Japanese owner alias, and a Japanese turn holds that alias as a word
+- **THEN** the page earns `exact_alias` and resolves
+- **AND** a twin English-titled entity page without a Japanese alias is not
+  resolved by a Japanese turn naming it, and no band alone resolves it
+- **AND** the alias inside a longer compound is only contained and does not
+  resolve on its own
 
 #### Scenario: A same-language unrelated anchor earns no band
 

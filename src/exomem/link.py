@@ -422,6 +422,7 @@ def _render_entity(
     decision_status: str | None,
     exomem_id: str,
     definition: EntityTypeDefinition,
+    aliases: list[str] | None = None,
 ) -> str:
     lines = ["---"]
     lines.append("type: entity")
@@ -431,6 +432,8 @@ def _render_entity(
     lines.append("status: active")
     lines.append(f"created: {date_iso}")
     lines.append(f"updated: {date_iso}")
+    if aliases:
+        lines.append("aliases: [" + ", ".join(yaml_scalar(alias) for alias in aliases) + "]")
 
     optional_values = _entity_writer_optional_values(
         affiliation=affiliation,
@@ -563,6 +566,45 @@ def _clean_tags(tags: list[str] | None) -> list[str]:
     return out
 
 
+
+#: Capture-time aliases share the learned-name bounds: at most this many per
+#: page, each at most `MAX_ALIAS_CHARS` code points.
+MAX_ALIASES = 8
+MAX_ALIAS_CHARS = 64
+
+
+def _clean_aliases(name: str, aliases: list[str] | None) -> list[str]:
+    """The owner's alternate names for a new entity, in the order given.
+
+    Another spelling of the name, in any script: a Japanese user's name for a
+    page titled in English is what lets a Japanese turn reach it. Each is
+    stripped; a repeat, or the name itself, by identity key (NFKC, casefold,
+    collapsed spaces) is dropped. An empty one, one spanning lines, one over
+    `MAX_ALIAS_CHARS`, or more than `MAX_ALIASES` refuses the whole write.
+    """
+    if not aliases:
+        return []
+    out: list[str] = []
+    seen = {entity_candidates.identity_key(name)}
+    for raw in aliases:
+        alias = str(raw).strip()
+        if not alias or "\n" in alias or "\r" in alias or len(alias) > MAX_ALIAS_CHARS:
+            raise LinkError(
+                "INVALID_LINK",
+                ["aliases"],
+                f"alias {raw!r} must be one line of 1-{MAX_ALIAS_CHARS} characters",
+            )
+        key = entity_candidates.identity_key(alias)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(alias)
+    if len(out) > MAX_ALIASES:
+        raise LinkError(
+            "INVALID_LINK", ["aliases"], f"at most {MAX_ALIASES} aliases per entity"
+        )
+    return out
+
 def _activity_summary(
     *,
     rel_entity_no_ext: str,
@@ -643,6 +685,7 @@ def link(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    aliases: list[str] | None = None,
     today: dt.date | None = None,
     validate_only: bool = False,
 ) -> LinkResult:
@@ -705,6 +748,18 @@ def link(
             "the exact title or alias matches multiple active entities; reconcile the identity first",
             list(identity_resolution["candidates"]),
         )
+    aliases_clean = _clean_aliases(display_name, aliases)
+    for alias in aliases_clean:
+        # An alias is a name the page answers to: one another active entity
+        # already answers to would make both ambiguous.
+        claimed = entity_candidates.resolve_entity_candidate(vault_root, name=alias)
+        if claimed["status"] != "no_match":
+            raise LinkError(
+                "ENTITY_EXISTS",
+                ["aliases"],
+                f"an active entity already has the title or alias {alias!r}",
+                list(claimed["candidates"]),
+            )
     folder = kb_root(vault_root) / "Entities" / definition.folder
     entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
     # Re-spell the destination to the real on-disk casing *before* it is bound
@@ -753,6 +808,7 @@ def link(
         decision_status=decision_status,
         exomem_id=identity,
         definition=definition,
+        aliases=aliases_clean,
     )
     registrations = tuple(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)

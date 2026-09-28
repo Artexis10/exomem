@@ -4553,6 +4553,7 @@ def op_link(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    aliases: list[str] | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -4584,6 +4585,11 @@ def op_link(
             `## Relations` as conservative `relates_to` edges. Same path
             conventions as `note.sources`.
         (per-type fields): see the bullet list above.
+        aliases: Other names the entity answers to, in any script, written to
+            its `aliases`. Give the native-script spelling of a name written
+            in another script (a Japanese name for an English-titled page) so
+            a turn in that script reaches it. At most 8, one line and 64
+            characters each; one another active entity answers to refuses.
 
     Returns:
         {path, warnings}.
@@ -4614,6 +4620,7 @@ def op_link(
             decided=decided,
             project=project,
             decision_status=decision_status,
+            aliases=aliases,
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
@@ -9428,6 +9435,7 @@ def op_connect_memory(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    aliases: list[str] | None = None,
     ref: str | None = None,
     expected_hash: str | None = None,
     why: str | None = None,
@@ -9491,6 +9499,8 @@ def op_connect_memory(
         decided: Decision date.
         project: Decision project key.
         decision_status: Decision status.
+        aliases: Other names the entity answers to, in any script; give the
+            native-script spelling of a name written in another script.
         ref: Relation-queue item ref for accept-relation.
         expected_hash: Target page `content_hash` drift guard for accept-relation.
             Required for accept-relation.
@@ -9541,6 +9551,7 @@ def op_connect_memory(
             "decided": None,
             "project": None,
             "decision_status": None,
+            "aliases": None,
             "ref": None,
             "expected_hash": None,
             "why": None,
@@ -9699,6 +9710,7 @@ def op_connect_memory(
             decided=decided,
             project=project,
             decision_status=decision_status,
+            aliases=aliases,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
