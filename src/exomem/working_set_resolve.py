@@ -1971,23 +1971,22 @@ def _without_named_apart(group: Sequence[ResolvedAnchor]) -> list[ResolvedAnchor
 
     Concurrent contexts (activation recall breadth): competing senses are
     anchors the turn's SAME words reach. A member the turn spelled by its own
-    name, in words no other member was reached through, is a second topic the
-    turn also named ("book the autumn trip given the course schedule"), not a
-    sense of the others. The test is about the turn's own spelling and never
-    about the vault: the member has a spelled name (`exact_alias`) and shares
-    no token with the spelled name or the reached name words of any other
-    member. A member reached only by shared or retrieved words has no spelling
-    to set it apart, so it keeps competing, and two members spelled with a
-    shared word ("tide model rollout", "tide model research") still compete.
+    name ("book the autumn trip given the course schedule") is a second topic
+    the turn also named, not a sense of the others, when every OTHER member
+    was spelled too and no two spelled names share a token. The test is about
+    the turn's own spelling and never about the vault. A member reached only
+    by shared, retrieved or semantic evidence has no spelling to set it
+    apart, so it keeps competing with a spelled one ("Cargo Sled or cedar"
+    still asks), and two members spelled with a shared word ("tide model
+    rollout", "tide model research") still compete.
     """
-    reached = [_spelled_tokens(anchor) | anchor.name_contact for anchor in group]
+    spelled = [_spelled_tokens(anchor) for anchor in group]
     kept: list[ResolvedAnchor] = []
     for index, anchor in enumerate(group):
-        spelled = _spelled_tokens(anchor)
-        apart = bool(spelled) and all(
-            not (spelled | anchor.name_contact) & reached[other]
-            for other in range(len(group))
-            if other != index
+        apart = bool(spelled[index]) and all(
+            other and not spelled[index] & other
+            for other_index, other in enumerate(spelled)
+            if other_index != index
         )
         if not apart:
             kept.append(anchor)

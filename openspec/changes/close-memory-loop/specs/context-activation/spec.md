@@ -58,6 +58,80 @@ within that interval.
 - **THEN** its row carries neither the turn text nor the raw session value
 - **AND** a content-private packet's row carries no anchor identifiers
 
+### Requirement: Categorical anchor evidence and resolution
+Anchor candidates SHALL carry only categorical evidence kinds. Contact kinds —
+`exact_alias`, `lexical_overlap`, `vector_band`, `claims_match` and `retrieval` —
+establish that the turn reached the anchor; qualifier kinds — `category_match`,
+`graph_corroboration` and `usage_prior` — strengthen an anchor the turn already reached
+and SHALL never create a candidate on their own. No float score SHALL appear in the
+packet. An anchor SHALL resolve as `resolved` when it carries `exact_alias` or at least
+two independent kinds other than `usage_prior`, at least one of them a contact kind; as
+`partial` when it carries exactly one kind other than `usage_prior`; the turn SHALL be
+`ambiguous` when two or more resolved anchors of the same anchor kind share no anchor
+neighbour, neither is a neighbour of the other, and the turn reached them through the
+same words (a same-kind anchor the turn spelled by its own name, in words that no other
+same-kind anchor was reached through, is a second topic the turn also named, never a
+sense of the others), where an anchor's anchor
+neighbourhood is the set of its typed-link neighbours that are themselves anchors in
+the activation index (resolved anchors of different kinds are complementary; a shared
+page that is not an anchor, reached by alias or otherwise, never makes two anchors
+complementary; a direct typed link between the two always does; project-key anchors
+have no page, so they can neither bridge two anchors nor be anyone's neighbour, and two
+resolved project anchors are therefore trivially competing); otherwise,
+when no anchor is `resolved`, the turn SHALL be `unresolved` and the operation SHALL
+abstain with an empty packet. Lexical overlap SHALL ignore stopwords, and turn tokens
+SHALL keep their order and repetitions for n-gram construction so that two anchors
+sharing a word in their names can both receive `exact_alias` from one turn. `usage_prior` SHALL only break ties between
+otherwise equal candidates and SHALL never contribute to the two-kinds rule.
+`claims_match` SHALL be computed with the existing collection-claims routing and
+`graph_corroboration` SHALL count a typed edge between two candidates even when both
+already appear in ordinary recall.
+
+#### Scenario: Two kinds resolve a resource anchor
+- **WHEN** a turn mentions a resource whose profile page title matches lexically and
+  whose Records collection claims cover the turn's terms
+- **THEN** the anchor resolves with evidence `[lexical_overlap, claims_match]`
+
+#### Scenario: Ambiguous domain is reported, not guessed
+- **WHEN** a turn's terms resolve two hub anchors whose anchor neighbourhoods share no
+  anchor
+- **THEN** the packet status is `ambiguous`, both anchors are listed under
+  `ambiguity` with their neighbourhood sizes, and no role lane runs for either
+
+#### Scenario: Two directly linked anchors are complementary, not competing
+- **WHEN** a turn resolves two same-kind anchors and one of them links the other
+- **THEN** the packet is not `ambiguous`, both anchors are served, and both carry
+  `graph_corroboration`
+
+#### Scenario: A shared boilerplate page does not suppress ambiguity
+- **WHEN** two same-kind resolved anchors both link one page that is not an anchor,
+  for example a handbook reached through a short alias, and share no anchor neighbour
+- **THEN** the packet status is still `ambiguous`
+
+#### Scenario: Two names sharing a word both resolve
+- **WHEN** a turn names two anchors whose names share a word, such as "Alpha
+  Initiative and Beta Initiative"
+- **THEN** both anchors carry `exact_alias`
+
+#### Scenario: Negative twin abstains
+- **WHEN** a turn is lexically similar to an anchor's domain but carries no alias, no
+  claims coverage and no corroborating kind
+- **THEN** no anchor is `resolved`, the packet is `abstained: true` with
+  `abstention.reason = "unresolved"`, and `units` and `pointers` are empty
+
+#### Scenario: Usage never resolves
+- **WHEN** a candidate carries only `usage_prior` and `vector_band`
+- **THEN** it is at most `partial`
+
+#### Scenario: Two same-kind domains named apart are both served
+- **WHEN** a turn spells the names of two same-kind anchors that share no anchor
+  neighbour, in words neither name shares
+- **THEN** the packet is not `ambiguous` and both anchors are served
+
+#### Scenario: One shared name two same-kind anchors carry is still a question
+- **WHEN** a turn says only words two unlinked same-kind anchors share
+- **THEN** the packet status is `ambiguous`, as before
+
 ## ADDED Requirements
 
 ### Requirement: Competing senses decided by the turn's own words
@@ -144,19 +218,10 @@ share. Current pages SHALL still count, and the corpus page total SHALL be uncha
 ### Requirement: A turn that names several domains is served all of them
 Activation SHALL compile the smallest sufficient SET of concurrently relevant contexts,
 and the count SHALL be driven by relevance, never capped at one. Each domain a turn
-explicitly names, with a resolvable page, is a candidate in its own right. Competing
-senses are anchors the turn's SAME words reach: a same-kind anchor the turn spelled by
-its own name, in words that no other same-kind anchor was reached through, SHALL NOT be
-listed as a sense of them and SHALL NOT make the turn `ambiguous`. Two anchors reached
-through a shared spelled word SHALL still compete exactly as before.
-
-#### Scenario: Two same-kind domains named apart are both served
-- **WHEN** a turn spells the names of two unlinked hubs in disjoint words
-- **THEN** both resolve, the turn is not `ambiguous`, and both are served
-
-#### Scenario: One shared name two hubs carry is still a question
-- **WHEN** a turn says only the words two same-kind hubs share
-- **THEN** the turn is `ambiguous` between them, as before
+explicitly names, with a resolvable page, is a candidate in its own right: same-kind
+anchors named apart are served together (see the modified resolution requirement), and
+an ordinary page the turn names by a distinctive phrase of its own is carried beside
+whatever the turn resolved.
 
 #### Scenario: A domain that is an ordinary page is served beside the resolved anchor
 - **WHEN** a turn resolves an anchor and also names, by a distinctive phrase of its own,

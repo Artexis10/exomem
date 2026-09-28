@@ -25,19 +25,19 @@ def test_two_same_kind_domains_named_apart_are_both_served() -> None:
     assert resolution.ambiguity == ()
 
 
-def test_the_same_pair_is_served_when_only_one_is_spelled_apart_from_a_third_sense() -> None:
-    """A third same-kind sense that shares the trip's spelled words still
-    competes with it; the pottery domain, named apart from both, is not
-    dragged into the question."""
+def test_a_third_sharing_the_trips_spelled_words_keeps_competing_with_it() -> None:
+    """Two hubs spelled with a shared word still compete; the pottery domain,
+    spelled apart from both, is not dragged into the question."""
 
     other_trip = _row("hubs/autumn-orchard-harvest.md", "Autumn orchard harvest", kind="hub")
     resolution = _resolve(
-        "should I book the autumn orchard visit given the pottery course schedule?",
+        "should I book the autumn orchard trip, or the autumn orchard harvest, "
+        "given the pottery course schedule?",
         (TRIP, other_trip, COURSE),
     )
 
-    if resolution.status == "ambiguous":
-        assert {item["ref"] for item in resolution.ambiguity} <= {TRIP.path, other_trip.path}
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {TRIP.path, other_trip.path}
 
 
 def test_two_senses_reached_by_the_same_words_still_compete() -> None:
@@ -54,11 +54,10 @@ def test_two_senses_reached_by_the_same_words_still_compete() -> None:
     assert {item["ref"] for item in resolution.ambiguity} == {left.path, right.path}
 
 
-def test_a_domain_named_apart_is_not_pulled_into_anothers_sense_question() -> None:
-    """The pottery domain is spelled and shares no word with the two tide
-    hubs, so it is never listed as a third sense of them. Under the existing
-    named-anchor rule it carries the packet and the weak tide pair is demoted
-    to a partial menu."""
+def test_a_spelled_domain_still_competes_with_a_sense_only_reached_by_shared_words() -> None:
+    """The conservative edge: apart means every member was spelled. A hub the
+    turn only reached by shared words and retrieval has no spelling to set
+    it apart, so the spelled one is still part of the question."""
 
     left = _row("hubs/tide-model-research.md", "Tide model research", kind="hub")
     right = _row("hubs/tide-model-rollout.md", "Tide model rollout", kind="hub")
@@ -68,5 +67,5 @@ def test_a_domain_named_apart_is_not_pulled_into_anothers_sense_question() -> No
         retrieved=(left.path, right.path),
     )
 
-    assert COURSE.path not in {item["ref"] for item in resolution.ambiguity}
-    assert [a.path for a in resolution.resolved_anchors] == [COURSE.path]
+    assert resolution.status == "ambiguous"
+    assert COURSE.path in {item["ref"] for item in resolution.ambiguity}
