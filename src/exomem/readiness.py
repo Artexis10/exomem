@@ -238,15 +238,9 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
         # Explicit rollback mode retains its historical request-time polling
         # fallback.  Startup catalog verification still happens off-thread.
         return admission
-    try:
-        from . import lexstore
-
-        proof_current = lexstore.runtime_retrieval_catalog_current(
-            vault_root,
-            schedule_repair=False,
-        )
-    except Exception:  # noqa: BLE001 - readiness uncertainty fails closed
-        proof_current = False
+    proof_current = _shared_catalog_proof(
+        vault_root, proof_generation, admitted=bool(admission["admitted"])
+    )
     with _lock:
         if proof_generation != _retrieval_generation:
             # A watcher, warm transition, or another proof changed admission
@@ -264,6 +258,54 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
             _events["retrieval_catalog"].clear()
             _retrieval_generation += 1
         return _retrieval_admission_locked()
+
+
+class _ProofFlight:
+    """One catalogue proof in progress, and its answer once done."""
+
+    __slots__ = ("done", "current")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.current = False
+
+
+#: Catalogue proofs in progress, by (vault, generation, admitted). Once the
+#: required warm is done every unadmitted request re-proves, and each proof
+#: takes reserved-state locks: callers that arrive while one runs for the same
+#: generation share its answer instead of queueing proofs of their own. A
+#: finished flight is never reused; the next caller proves again.
+_proof_flights: dict[tuple[str, int, bool], _ProofFlight] = {}
+_proof_flights_lock = threading.Lock()
+#: A sharer waits at most this long for the owner's answer, then fails closed.
+_PROOF_SHARE_TIMEOUT_SECONDS = 30.0
+
+
+def _shared_catalog_proof(vault_root: Path, generation: int, *, admitted: bool) -> bool:
+    key = (str(vault_root), generation, admitted)
+    with _proof_flights_lock:
+        flight = _proof_flights.get(key)
+        owner = flight is None
+        if owner:
+            flight = _proof_flights[key] = _ProofFlight()
+    if not owner:
+        if not flight.done.wait(_PROOF_SHARE_TIMEOUT_SECONDS):
+            return False
+        return flight.current
+    try:
+        from . import lexstore
+
+        flight.current = bool(
+            lexstore.runtime_retrieval_catalog_current(vault_root, schedule_repair=False)
+        )
+    except Exception:  # noqa: BLE001 - readiness uncertainty fails closed
+        flight.current = False
+    finally:
+        with _proof_flights_lock:
+            if _proof_flights.get(key) is flight:
+                del _proof_flights[key]
+        flight.done.set()
+    return flight.current
 
 
 def _retrieval_admission_locked() -> dict[str, object]:
