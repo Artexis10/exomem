@@ -2057,7 +2057,10 @@ def test_a_residue_adoption_keeps_reads_refusing_until_the_repair_lands(
 _DECLINE_REASONS = {
     "recall_membership_unreadable": "the recall scope could not be read at all",
     "source_unparseable": "a page the snapshot indexes no longer parses",
-    "indexed_membership_differs": "a different corpus, not a bounded repair",
+    "indexed_membership_differs": (
+        "a page the snapshot indexes is still on disk but no longer admitted; "
+        "created and removed pages are residue"
+    ),
     "indexed_sources_differ": "same, for a caller that cannot carry a residue",
     "resolver_topology_mismatch": "the link topology is not the one published",
     "projection_moved_during_proof": "the projection changed under the proof",
