@@ -161,6 +161,7 @@ _CONFLICT_CODES = frozenset(
         "DEST_EXISTS",
         "ENTITY_EXISTS",
         "ENTITY_AMBIGUOUS",
+        "STALE_IDENTITY_DECISION",
         "ALREADY_SUPERSEDED",
         "ALREADY_TRASHED",
         "STALE_EDIT",

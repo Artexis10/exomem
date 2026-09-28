@@ -27,6 +27,7 @@ def assemble_context(
     traversal_profile: str | None = None,
     limit: int = 5,
     max_body_chars: int = 3000,
+    entity_type_families: list[str] | None = None,
 ) -> dict[str, Any]:
     """Return a single bounded context envelope for one page or a query."""
     unit_controls = unit_ref is not None or bool(categories) or bool(kinds)
@@ -66,6 +67,7 @@ def assemble_context(
             depth=depth,
             relation_types=relation_types,
             node_types=node_types,
+            entity_type_families=entity_type_families,
             max_nodes=max_nodes,
             max_edges=max_edges,
             traversal_profile=traversal_profile,
@@ -142,6 +144,7 @@ def assemble_context(
             depth=depth,
             relation_types=relation_types,
             node_types=node_types,
+            entity_type_families=entity_type_families,
             max_nodes=max_nodes,
             max_edges=max_edges,
             traversal_profile=traversal_profile,
@@ -277,6 +280,7 @@ def _merge_graph_contexts(
     max_edges: int,
     traversal_profile: str | None = None,
     keep: Any = None,
+    entity_type_families: list[str] | None = None,
 ) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: dict[str, dict[str, Any]] = {}
@@ -297,6 +301,7 @@ def _merge_graph_contexts(
             depth=depth,
             relation_types=relation_types,
             node_types=node_types,
+            entity_type_families=entity_type_families,
             max_nodes=max_nodes,
             max_edges=max_edges,
             traversal_profile=traversal_profile,

@@ -21,7 +21,10 @@ from pathlib import Path
 from . import entity_candidates, indexes, memory_refs, semantic_writes, tag_variants, temporal
 from .entity_types import (
     ENTITY_WRITER_OPTIONAL_FRONTMATTER,
+    MAX_FACET_TEXT_CHARS,
+    MAX_FACET_VALUES,
     EntityTypeDefinition,
+    EntityTypeRegistry,
     load_entity_types,
 )
 from .kbdir import kb_prefix
@@ -60,6 +63,8 @@ class LinkResult:
     # See NoteResult.slug — callers must link by this, not by re-slugging.
     # Declared last so the positional LinkResult(...) construction stays valid.
     slug: str = ""
+    # The explicit shared-name decision this creation committed under, if any.
+    identity_decision: dict | None = None
 
     def as_dict(self) -> dict:
         value: dict[str, object] = {
@@ -71,6 +76,8 @@ class LinkResult:
             value["slug"] = self.slug
         if self.creation is not None:
             value["creation"] = self.creation
+        if self.identity_decision is not None:
+            value["identity_decision"] = self.identity_decision
         return value
 
 
@@ -80,6 +87,9 @@ class LinkError(Exception):
     missing: list[str]
     reason: str
     candidates: list[dict[str, str]] | None = None
+    # Present when the refusal can be overridden by an explicit `distinct`
+    # decision bound to exactly these candidates.
+    candidate_fingerprint: str | None = None
 
     def as_dict(self) -> dict:
         value: dict[str, object] = {
@@ -89,7 +99,122 @@ class LinkError(Exception):
         }
         if self.candidates:
             value["candidates"] = self.candidates
+        if self.candidate_fingerprint is not None:
+            value["candidate_fingerprint"] = self.candidate_fingerprint
         return value
+
+
+IDENTITY_DECISION_OUTCOMES = ("distinct",)
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class IdentityPreparation:
+    """A shared-name decision point. Nothing was written.
+
+    The requested name already denotes active entities of other types. The
+    active agent decides from its own context whether the new identity is
+    distinct (and re-submits with an `identity_decision` bound to the
+    fingerprint), reuses a candidate, or abstains.
+    """
+
+    evidence: dict[str, object]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "mutated": False,
+            "identity_preparation": self.evidence,
+            "identity_decision": "required",
+        }
+
+
+def _identity_decision(value: object) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"outcome", "candidate_fingerprint"}
+        or value.get("outcome") not in IDENTITY_DECISION_OUTCOMES
+        or not isinstance(value.get("candidate_fingerprint"), str)
+        or not _FINGERPRINT_RE.fullmatch(value["candidate_fingerprint"])
+    ):
+        raise LinkError(
+            "INVALID_IDENTITY_DECISION",
+            ["identity_decision"],
+            "identity_decision must be {outcome: 'distinct', candidate_fingerprint: "
+            "<the 64-hex fingerprint a preparation or refusal returned>}",
+        )
+    return {"outcome": value["outcome"], "candidate_fingerprint": value["candidate_fingerprint"]}
+
+
+def _facet_error(reason: str) -> LinkError:
+    return LinkError("INVALID_ENTITY_FACET", ["facets"], reason)
+
+
+def _validated_facets(
+    registry: EntityTypeRegistry,
+    definition: EntityTypeDefinition,
+    facets: object,
+) -> list[tuple[str, str, list[str], bool]]:
+    """Check `facets` against the type's declarations; wikilinks stay raw.
+
+    Returns `(name, value_kind, values, multi)` in declaration order. Only
+    declared facets are accepted, so a facet can never set a core writer field.
+    """
+    if facets is None:
+        return []
+    if not isinstance(facets, dict) or any(not isinstance(key, str) for key in facets):
+        raise _facet_error("facets must be an object of declared facet names")
+    declared = {facet.name: facet for facet in registry.facets_for(definition.id)}
+    undeclared = sorted(set(facets) - set(declared))
+    if undeclared:
+        raise LinkError(
+            "ENTITY_FACET_UNDECLARED",
+            ["facets"],
+            f"entity_type {definition.id!r} declares no facet {undeclared}; "
+            f"declared: {sorted(declared)}. Declare it in the registry's `facets` first.",
+        )
+    out: list[tuple[str, str, list[str], bool]] = []
+    for name, facet in declared.items():
+        if name not in facets:
+            continue
+        raw = facets[name]
+        if facet.cardinality == "single":
+            if not isinstance(raw, str):
+                raise _facet_error(f"facet {name!r} takes one string value")
+            values = [raw]
+        else:
+            if (
+                not isinstance(raw, list)
+                or not 0 < len(raw) <= MAX_FACET_VALUES
+                or any(not isinstance(item, str) for item in raw)
+            ):
+                raise _facet_error(
+                    f"facet {name!r} takes a list of 1-{MAX_FACET_VALUES} string values"
+                )
+            values = list(raw)
+        cleaned: list[str] = []
+        for item in values:
+            value = item.strip()
+            if not value or len(value) > MAX_FACET_TEXT_CHARS or "\n" in value or "\r" in value:
+                raise _facet_error(
+                    f"facet {name!r} values are single-line, 1-{MAX_FACET_TEXT_CHARS} characters"
+                )
+            if facet.value == "date":
+                try:
+                    parsed = dt.date.fromisoformat(value)
+                except ValueError:
+                    parsed = None
+                if parsed is None or parsed.isoformat() != value:
+                    raise _facet_error(f"facet {name!r} takes YYYY-MM-DD dates")
+            elif facet.value == "wikilink":
+                value = value.removeprefix("[[").removesuffix("]]").strip()
+                if not value or "[" in value or "]" in value:
+                    raise _facet_error(f"facet {name!r} takes wikilink targets")
+            if value not in cleaned:
+                cleaned.append(value)
+        out.append((name, facet.value, cleaned, facet.cardinality == "multi"))
+    return out
 
 
 def _entity_exists_reason(vault_root: Path, rel_entity: str) -> str:
@@ -422,6 +547,7 @@ def _render_entity(
     decision_status: str | None,
     exomem_id: str,
     definition: EntityTypeDefinition,
+    facets: list[tuple[str, list[str], bool]] | None = None,
 ) -> str:
     lines = ["---"]
     lines.append("type: entity")
@@ -452,6 +578,12 @@ def _render_entity(
             lines.append(f"{field}: [" + ", ".join(value) + "]")
         else:
             lines.append(f"{field}: {value}")
+    # Declared facets, already validated and normalized: (name, values, multi).
+    for field, values, multi in facets or ():
+        if multi:
+            lines.append(f"{field}: [" + ", ".join(yaml_scalar(v) for v in values) + "]")
+        else:
+            lines.append(f"{field}: {yaml_scalar(values[0])}")
 
     if tags:
         lines.append("tags: [" + ", ".join(tags) + "]")
@@ -643,10 +775,18 @@ def link(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    identity_decision: dict | None = None,
+    facets: dict | None = None,
     today: dt.date | None = None,
     validate_only: bool = False,
-) -> LinkResult:
-    """Create an entity through detached structural preflight."""
+) -> LinkResult | IdentityPreparation:
+    """Create an entity through detached structural preflight.
+
+    A name that already denotes active entities only of OTHER types returns a
+    non-mutating `IdentityPreparation`; a same-type match stays ENTITY_EXISTS
+    or ENTITY_AMBIGUOUS. Either commits only with an explicit `distinct`
+    `identity_decision` bound to the current candidate fingerprint.
+    """
     registry = load_entity_types(vault_root)
     definition = registry.resolve(entity_type)
     if definition is None:
@@ -671,6 +811,7 @@ def link(
     )
     if err is not None:
         raise LinkError(err.code, err.missing, err.reason)
+    declared_facets = _validated_facets(registry, definition, facets)
     from . import find as find_module
     from . import project_keys as project_keys_module
 
@@ -688,22 +829,64 @@ def link(
     stamp_iso = temporal.stamp(now)
     identity = memory_refs.new_id()
     display_name = name.strip()
+    decision = _identity_decision(identity_decision)
     identity_resolution = entity_candidates.resolve_entity_candidate(
         vault_root, name=display_name
     )
-    if identity_resolution["status"] == "match":
-        raise LinkError(
-            "ENTITY_EXISTS",
-            ["name"],
-            "an active entity already has this exact title or alias; update or link it instead",
-            list(identity_resolution["candidates"]),
+    candidates = list(identity_resolution["candidates"])
+    fingerprint = entity_candidates.candidate_fingerprint(
+        name=display_name, entity_type=entity_type, resolution=identity_resolution
+    )
+    accepted_decision: dict | None = None
+    if decision is not None:
+        if identity_resolution["status"] == "no_match" or (
+            decision["candidate_fingerprint"] != fingerprint
+        ):
+            raise LinkError(
+                "STALE_IDENTITY_DECISION",
+                ["identity_decision"],
+                "what this name resolves to changed since the decision; decide again "
+                "against the returned candidates",
+                candidates,
+                None if identity_resolution["status"] == "no_match" else fingerprint,
+            )
+        accepted_decision = {
+            **decision,
+            "distinct_from": [str(item.get("ref") or item["path"]) for item in candidates],
+        }
+    elif identity_resolution["status"] != "no_match":
+        same_type = identity_resolution["omitted_candidate_count"] or any(
+            item["entity_type"] == entity_type for item in candidates
         )
-    if identity_resolution["status"] == "ambiguous":
+        if not same_type:
+            return IdentityPreparation(
+                {
+                    "name": display_name,
+                    "entity_type": entity_type,
+                    "candidates": candidates,
+                    "omitted_candidate_count": identity_resolution["omitted_candidate_count"],
+                    "candidate_fingerprint": fingerprint,
+                    "outcomes": list(IDENTITY_DECISION_OUTCOMES),
+                }
+            )
+        if identity_resolution["status"] == "match":
+            raise LinkError(
+                "ENTITY_EXISTS",
+                ["name"],
+                "an active entity already has this exact title or alias; update or link "
+                "it instead, or pass identity_decision {outcome: distinct} with this "
+                "candidate_fingerprint if it is a different identity",
+                candidates,
+                fingerprint,
+            )
         raise LinkError(
             "ENTITY_AMBIGUOUS",
             ["name"],
-            "the exact title or alias matches multiple active entities; reconcile the identity first",
-            list(identity_resolution["candidates"]),
+            "the exact title or alias matches multiple active entities; reconcile the "
+            "identity first, or pass identity_decision {outcome: distinct} with this "
+            "candidate_fingerprint if it is a different identity",
+            candidates,
+            fingerprint,
         )
     folder = kb_root(vault_root) / "Entities" / definition.folder
     entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
@@ -715,13 +898,25 @@ def link(
         vault_root, entity_path.relative_to(vault_root).as_posix()
     )
     if entity_path.exists():
-        raise LinkError("ENTITY_EXISTS", ["name"], _entity_exists_reason(vault_root, rel_entity))
+        reason = _entity_exists_reason(vault_root, rel_entity)
+        if accepted_decision is not None:
+            reason += " A distinct identity needs its own `slug`."
+        raise LinkError("ENTITY_EXISTS", ["name"], reason)
     rel_entity_no_ext = rel_entity.removesuffix(".md")
     resolver = find_module.writer_resolver_snapshot(vault_root)
     resolver.add_pending(rel_entity_no_ext, title=display_name)
     connections_norm, connection_warnings = _normalize_connections(
         connections, vault_root=vault_root, resolver=resolver
     )
+    facet_values: list[tuple[str, list[str], bool]] = []
+    for facet_name, value_kind, values, multi in declared_facets:
+        if value_kind == "wikilink":
+            targets, target_warnings = _normalize_connections(
+                values, vault_root=vault_root, resolver=resolver
+            )
+            connection_warnings.extend(target_warnings)
+            values = [f"[[{render_wikilink_target(item, vault_root)}]]" for item in targets]
+        facet_values.append((facet_name, values, multi))
     summary_clean, summary_warnings = normalize_body_wikilinks(
         summary, vault_root, resolver=resolver
     )
@@ -753,6 +948,7 @@ def link(
         decision_status=decision_status,
         exomem_id=identity,
         definition=definition,
+        facets=facet_values,
     )
     registrations = tuple(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)
@@ -846,6 +1042,7 @@ def link(
             warnings,
             preflight.as_dict(),
             slug=filename_slug or "",
+            identity_decision=accepted_decision,
         )
     committed = semantic_writes.commit_creation(
         vault_root,
@@ -860,4 +1057,5 @@ def link(
         warnings,
         committed.as_dict(),
         slug=filename_slug or "",
+        identity_decision=accepted_decision,
     )

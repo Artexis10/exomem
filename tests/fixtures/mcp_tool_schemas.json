@@ -1767,6 +1767,74 @@
           "default": null,
           "description": "Exact reviewed vocabulary fingerprint; grants no write permission."
         },
+        "identity_decision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "outcome": {
+                  "enum": [
+                    "distinct"
+                  ]
+                },
+                "candidate_fingerprint": {
+                  "description": "candidate_fingerprint returned for this name.",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "outcome",
+                "candidate_fingerprint"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "create-entity only. When the name already denotes\nother active entities, `{outcome: \"distinct\", candidate_fingerprint}`\nfrom that preparation or refusal commits a separate identity;\nomit it to reuse a candidate or abstain."
+        },
+        "facets": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 16,
+                    "type": "array"
+                  }
+                ]
+              },
+              "maxProperties": 16,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "create-entity only. Values for the facets the registry\ndeclares for entity_type (string for single, list for multi)."
+        },
+        "entity_family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Parent family from the entity registry. On resolve-entity it matches every leaf type in that family; on context and graph-context it keeps only entity neighbours of it."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",

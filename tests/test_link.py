@@ -395,3 +395,211 @@ def test_link_connections_use_kb_relative_form_for_nested_obsidian_root(
     text = _read(vault / result.path)
     assert "- relates_to [[Notes/Insights/foo]]" in text
     assert "[[Knowledge Base/" not in text
+
+
+# --- shared names: a distinct identity is a decision, not a refusal ---------
+#
+# `memory-loop` "Contextual name resolution preserves genuine ambiguity": an
+# organization and its physical site may share one surface name. Creating the
+# second is a non-mutating preparation naming the existing candidates and a
+# fingerprint over them; only an explicit `distinct` decision bound to that
+# fingerprint commits, and it never touches the other identity's page.
+
+
+def _write_site_registry(vault: Path) -> None:
+    path = vault / "Knowledge Base" / "_Schema" / "entity-types.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entity_types": {
+                    "site": {
+                        "folder": "Sites",
+                        "label": "Site",
+                        "aliases": [],
+                        "capture_guidance": "A stable physical site identity.",
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _vault_bytes(vault: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(vault).as_posix(): path.read_bytes()
+        for path in sorted((vault / "Knowledge Base").rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_shared_name_distinct_identity_needs_decision_not_refusal(vault: Path) -> None:
+    from exomem import commands
+
+    _write_site_registry(vault)
+    organization = link_module.link(
+        vault,
+        entity_type="organization",
+        name="Kestrel Farm",
+        summary="A synthetic farm business that operates a site of the same name.",
+        today=TODAY,
+    )
+    organization_path = vault / organization.path
+    organization_bytes = organization_path.read_bytes()
+    before = _vault_bytes(vault)
+
+    prepared = link_module.link(
+        vault,
+        entity_type="site",
+        name="Kestrel Farm",
+        summary="The physical farm site the business operates.",
+        today=TODAY,
+    )
+
+    assert isinstance(prepared, link_module.IdentityPreparation)
+    preparation = prepared.as_dict()
+    assert preparation["mutated"] is False
+    assert preparation["identity_decision"] == "required"
+    evidence = preparation["identity_preparation"]
+    assert [item["path"] for item in evidence["candidates"]] == [organization.path]
+    assert evidence["candidates"][0]["entity_type"] == "organization"
+    assert evidence["omitted_candidate_count"] == 0
+    fingerprint = evidence["candidate_fingerprint"]
+    assert len(fingerprint) == 64 and set(fingerprint) <= set("0123456789abcdef")
+    assert _vault_bytes(vault) == before
+
+    # The public command returns the same preparation rather than an error.
+    via_command = commands.op_connect_memory(
+        vault,
+        operation="create-entity",
+        entity_type="site",
+        name="Kestrel Farm",
+        summary="The physical farm site the business operates.",
+    )
+    assert via_command["mutated"] is False
+    assert via_command["identity_preparation"]["candidate_fingerprint"] == fingerprint
+    assert _vault_bytes(vault) == before
+
+    created = link_module.link(
+        vault,
+        entity_type="site",
+        name="Kestrel Farm",
+        summary="The physical farm site the business operates.",
+        identity_decision={"outcome": "distinct", "candidate_fingerprint": fingerprint},
+        today=TODAY,
+    )
+
+    assert isinstance(created, link_module.LinkResult)
+    assert created.path == "Knowledge Base/Entities/Sites/Kestrel Farm.md"
+    site = _fm(vault / created.path)
+    assert site["entity_type"] == "site"
+    assert "aliases" not in site
+    decision = created.as_dict()["identity_decision"]
+    assert decision["outcome"] == "distinct"
+    assert decision["candidate_fingerprint"] == fingerprint
+    assert decision["distinct_from"] == [organization.ref]
+    # The other identity keeps its page, name and aliases untouched.
+    assert organization_path.read_bytes() == organization_bytes
+    resolved = entity_candidates.resolve_entity_candidate(vault, name="Kestrel Farm")
+    assert resolved["status"] == "ambiguous"
+    assert sorted(item["entity_type"] for item in resolved["candidates"]) == [
+        "organization",
+        "site",
+    ]
+
+
+def test_same_type_duplicate_is_refused_until_a_distinct_decision(vault: Path) -> None:
+    existing = entity_candidates.resolve_entity_candidate(vault, name="Ada Lovelace")
+    assert existing["status"] == "match"
+
+    with pytest.raises(link_module.LinkError) as refused:
+        link_module.link(
+            vault,
+            entity_type="person",
+            name="Ada Lovelace",
+            summary="A second, unrelated person who shares the name.",
+            today=TODAY,
+        )
+
+    assert refused.value.code == "ENTITY_EXISTS"
+    fingerprint = refused.value.candidate_fingerprint
+    assert fingerprint is not None and len(fingerprint) == 64
+    assert refused.value.as_dict()["candidate_fingerprint"] == fingerprint
+
+    created = link_module.link(
+        vault,
+        entity_type="person",
+        name="Ada Lovelace",
+        slug="ada-lovelace-engineer",
+        summary="A second, unrelated person who shares the name.",
+        identity_decision={"outcome": "distinct", "candidate_fingerprint": fingerprint},
+        today=TODAY,
+    )
+
+    assert created.path == "Knowledge Base/Entities/People/ada-lovelace-engineer.md"
+    assert entity_candidates.resolve_entity_candidate(vault, name="Ada Lovelace")[
+        "status"
+    ] == "ambiguous"
+
+
+def test_distinct_decision_refuses_stale_candidate_fingerprint(vault: Path) -> None:
+    _write_site_registry(vault)
+    link_module.link(
+        vault,
+        entity_type="organization",
+        name="Kestrel Farm",
+        summary="A synthetic farm business.",
+        today=TODAY,
+    )
+    prepared = link_module.link(
+        vault,
+        entity_type="site",
+        name="Kestrel Farm",
+        summary="The physical farm site.",
+        today=TODAY,
+    )
+    stale = prepared.as_dict()["identity_preparation"]["candidate_fingerprint"]
+
+    # Another identity starts answering to the same name after preparation.
+    person = vault / "Knowledge Base" / "Entities" / "People" / "Grace Hopper.md"
+    person.write_text(
+        _read(person).replace("status: active\n", "status: active\naliases: [Kestrel Farm]\n"),
+        encoding="utf-8",
+        newline="\n",
+    )
+    before = _vault_bytes(vault)
+
+    with pytest.raises(link_module.LinkError) as refused:
+        link_module.link(
+            vault,
+            entity_type="site",
+            name="Kestrel Farm",
+            summary="The physical farm site.",
+            identity_decision={"outcome": "distinct", "candidate_fingerprint": stale},
+            today=TODAY,
+        )
+
+    assert refused.value.code == "STALE_IDENTITY_DECISION"
+    assert refused.value.candidate_fingerprint not in (None, stale)
+    assert len(refused.value.candidates or []) == 2
+    assert _vault_bytes(vault) == before
+
+    for malformed in (
+        {"outcome": "merge", "candidate_fingerprint": stale},
+        {"outcome": "distinct", "candidate_fingerprint": "not-a-fingerprint"},
+        {"outcome": "distinct"},
+    ):
+        with pytest.raises(link_module.LinkError) as invalid:
+            link_module.link(
+                vault,
+                entity_type="site",
+                name="Kestrel Farm",
+                summary="The physical farm site.",
+                identity_decision=malformed,
+                today=TODAY,
+            )
+        assert invalid.value.code == "INVALID_IDENTITY_DECISION"
+    assert _vault_bytes(vault) == before
