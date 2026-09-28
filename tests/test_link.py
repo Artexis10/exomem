@@ -603,3 +603,29 @@ def test_distinct_decision_refuses_stale_candidate_fingerprint(vault: Path) -> N
             )
         assert invalid.value.code == "INVALID_IDENTITY_DECISION"
     assert _vault_bytes(vault) == before
+
+
+def test_adoption_refuses_a_shared_name_instead_of_recording_no_page(vault: Path) -> None:
+    """An adoption carries no distinct decision, so a name other types carry
+    refuses the apply rather than reporting success with no page."""
+    from exomem import adoption_proposals
+
+    _write_site_registry(vault)
+    link_module.link(
+        vault,
+        entity_type="organization",
+        name="Kestrel Farm",
+        summary="A synthetic farm business.",
+        today=TODAY,
+    )
+    before = _vault_bytes(vault)
+
+    with pytest.raises(ValueError, match="IDENTITY_DECISION_REQUIRED"):
+        adoption_proposals._route_apply(
+            vault,
+            "entity",
+            {"entity_type": "site", "name": "Kestrel Farm", "summary": "The farm site."},
+            why="adopt the site",
+            expected_hash=None,
+        )
+    assert _vault_bytes(vault) == before
