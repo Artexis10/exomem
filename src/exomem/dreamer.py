@@ -414,11 +414,18 @@ def run_once(
     conn = None
     from . import state_paths
 
+    #: One tick's memo, shared by every page it processes.
+    shared: dict[str, Any] = {}
     try:
         conn = store.connect()
         # One tick is one unit of placement: resolve the state directory once.
         with state_paths.resolution_scope(), foreground_activity.background_scope(vault_root):
             generation = freshness.generation(vault_root, dreamer_delta.SCOPE)
+            dreamer_families.tick_start(
+                dreamer_families.Context(
+                    vault_root=vault_root, store=store, conn=conn, now=clock.time(), shared=shared
+                )
+            )
             has_work = dreamer_delta.has_work(store, conn, vault_root)
             work = dreamer_delta.Work()
             if has_work:
@@ -448,7 +455,7 @@ def run_once(
                     stop_reason = "generation"
                     break
                 try:
-                    _process(store, conn, vault_root, rel, now=clock.time())
+                    _process(store, conn, vault_root, rel, now=clock.time(), shared=shared)
                 except dreamer_families.Deferred as deferred:
                     # Not now: the page stays pending, behind the pages that can run.
                     with store.write(conn):
@@ -485,7 +492,7 @@ def run_once(
                     dreamer_delta.advance_if_drained(store, conn)
                     if refresh:
                         ctx = dreamer_families.Context(
-                            vault_root=vault_root, store=store, conn=conn, now=now
+                            vault_root=vault_root, store=store, conn=conn, now=now, shared=shared
                         )
                         store.set_meta(
                             conn, "next_settle_at", dreamer_families.precompute_deliverable(ctx)
@@ -539,10 +546,17 @@ def _process(
     rel: str,
     *,
     now: float,
+    shared: dict[str, Any] | None = None,
 ) -> None:
     """One page, one transaction: contribution, `seen` and `pending` together."""
     signature = dreamer_delta.live_signature(vault_root, rel)
-    ctx = dreamer_families.Context(vault_root=vault_root, store=store, conn=conn, now=now)
+    ctx = dreamer_families.Context(
+        vault_root=vault_root,
+        store=store,
+        conn=conn,
+        now=now,
+        shared=shared if shared is not None else {},
+    )
     try:
         with store.write(conn):
             changed = dreamer_store.encode_sig(signature) != store.seen_get(conn, rel)

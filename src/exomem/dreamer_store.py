@@ -35,7 +35,9 @@ from .state_paths import vault_state_dir
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+#: 3 added the alias and convention families' page-contribution tables. A
+#: mismatch wipes the file and reseeds, which also resets the delivery ledger.
+SCHEMA_VERSION = 3
 SIDECAR_NAME = "dreamer.sqlite"
 
 #: Past this size the global-count families disable themselves (`capacity`)
@@ -59,6 +61,19 @@ MAX_DELIVERY_ROWS = 4 * MAX_ROWS
 
 #: Families that need vault-wide counts, and so stop at the size cap.
 GLOBAL_FAMILIES = frozenset({"upkeep_alias", "upkeep_convention"})
+
+#: A fold key carried by more pages than this, among the pages one caller may
+#: see, is not served to that caller. Withheld pages never count toward it.
+MEMBER_BOUND = 32
+
+#: The page-contribution tables of the global families: each page replaces its
+#: own rows. The second column is the name's source (`name_keys`) or the
+#: authored spelling (`name_refs`, `term_uses`).
+CONTRIBUTION_TABLES: dict[str, str] = {
+    "name_keys": "source",
+    "name_refs": "raw",
+    "term_uses": "raw",
+}
 
 #: SQLite page cache for the worker's connection: 1 MiB.
 _CACHE_SIZE_KIB = 1024
@@ -102,11 +117,31 @@ _TABLES = (
     """
     CREATE TABLE IF NOT EXISTS integrity (
         category TEXT NOT NULL, path_set TEXT NOT NULL, observed_at REAL NOT NULL,
+        fold_key TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (category, path_set)
     )
     """,
+    "CREATE INDEX IF NOT EXISTS integrity_fold_key ON integrity(fold_key)",
+    *(
+        statement
+        for table, second in CONTRIBUTION_TABLES.items()
+        for statement in (
+            f"CREATE TABLE IF NOT EXISTS {table} (fold_key TEXT NOT NULL, path TEXT NOT NULL, "
+            f"{second} TEXT NOT NULL, PRIMARY KEY (fold_key, path, {second}))",
+            f"CREATE INDEX IF NOT EXISTS {table}_path ON {table}(path)",
+        )
+    ),
+    "CREATE INDEX IF NOT EXISTS term_uses_raw ON term_uses(fold_key, raw)",
 )
-_DATA_TABLES = ("seen", "pending", "candidates", "candidate_paths", "deliveries", "integrity")
+_DATA_TABLES = (
+    "seen",
+    "pending",
+    "candidates",
+    "candidate_paths",
+    "deliveries",
+    "integrity",
+    *CONTRIBUTION_TABLES,
+)
 
 
 def sidecar_path(vault_root: Path) -> Path:
@@ -758,12 +793,23 @@ class DreamerStore:
 
     @staticmethod
     def note_integrity(
-        conn: sqlite3.Connection, category: str, paths: Iterable[str], now: float
+        conn: sqlite3.Connection,
+        category: str,
+        paths: Iterable[str],
+        now: float,
+        *,
+        fold_key: str = "",
     ) -> None:
         conn.execute(
-            "INSERT OR REPLACE INTO integrity(category, path_set, observed_at) VALUES (?, ?, ?)",
-            (category, _dumps(sorted(set(paths))), now),
+            "INSERT OR REPLACE INTO integrity(category, path_set, observed_at, fold_key) "
+            "VALUES (?, ?, ?, ?)",
+            (category, _dumps(sorted(set(paths))), now, fold_key),
         )
+
+    @staticmethod
+    def clear_integrity_key(conn: sqlite3.Connection, fold_key: str) -> None:
+        """Drop what the global families recorded for one fold key."""
+        conn.execute("DELETE FROM integrity WHERE fold_key=? AND fold_key<>''", (fold_key,))
 
     @staticmethod
     def clear_integrity_for(conn: sqlite3.Connection, category: str, paths: Iterable[str]) -> None:
@@ -771,6 +817,114 @@ class DreamerStore:
             "DELETE FROM integrity WHERE category=? AND path_set=?",
             (category, _dumps(sorted(set(paths)))),
         )
+
+    # ------------------------------------------------------------------
+    # page contributions: the global families' vault-wide membership
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def contribution_keys(conn: sqlite3.Connection, table: str, path: str) -> set[str]:
+        """The fold keys `path` contributes to `table`."""
+        _check_table(table)
+        return {
+            str(row[0])
+            for row in conn.execute(f"SELECT DISTINCT fold_key FROM {table} WHERE path=?", (path,))
+        }
+
+    @staticmethod
+    def replace_contributions(
+        conn: sqlite3.Connection, table: str, path: str, rows: Iterable[tuple[str, str]]
+    ) -> None:
+        """Replace `path`'s rows in `table` with `(fold_key, value)` pairs."""
+        _check_table(table)
+        second = CONTRIBUTION_TABLES[table]
+        conn.execute(f"DELETE FROM {table} WHERE path=?", (path,))
+        conn.executemany(
+            f"INSERT OR IGNORE INTO {table}(fold_key, path, {second}) VALUES (?, ?, ?)",
+            ((key, path, value) for key, value in rows if key),
+        )
+
+    @staticmethod
+    def members(
+        conn: sqlite3.Connection,
+        table: str,
+        fold_key: str,
+        *,
+        keep: Callable[[str], bool] | None = None,
+        pages: int = MEMBER_BOUND + 1,
+    ) -> list[tuple[str, str]]:
+        """`(path, value)` rows for one fold key, from at most `pages` pages.
+
+        Pages come in path order. Under a release predicate a withheld page's
+        rows are skipped and never counted, so the answer is exactly what it
+        would be on a vault where that page did not exist; only the number of
+        rows read grows with the withheld pages it passes.
+        """
+        _check_table(table)
+        second = CONTRIBUTION_TABLES[table]
+        cursor = conn.execute(
+            f"SELECT path, {second} FROM {table} WHERE fold_key=? ORDER BY path, {second}",
+            (fold_key,),
+        )
+        out: list[tuple[str, str]] = []
+        verdicts: dict[str, bool] = {}
+        taken: set[str] = set()
+        for path, value in cursor:
+            path = str(path)
+            if path not in verdicts:
+                verdicts[path] = keep is None or bool(keep(path))
+                if verdicts[path]:
+                    if len(taken) >= pages:
+                        break
+                    taken.add(path)
+            if verdicts[path]:
+                out.append((path, str(value)))
+        cursor.close()
+        return out
+
+    @staticmethod
+    def first_member(conn: sqlite3.Connection, table: str, fold_key: str) -> str | None:
+        _check_table(table)
+        row = conn.execute(
+            f"SELECT path FROM {table} WHERE fold_key=? ORDER BY path LIMIT 1", (fold_key,)
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    @staticmethod
+    def spelling_span(conn: sqlite3.Connection, fold_key: str) -> tuple[str, str] | None:
+        """The least and greatest spelling of one tag fold key, each one index probe."""
+        low = conn.execute(
+            "SELECT min(raw) FROM term_uses WHERE fold_key=?", (fold_key,)
+        ).fetchone()[0]
+        high = conn.execute(
+            "SELECT max(raw) FROM term_uses WHERE fold_key=?", (fold_key,)
+        ).fetchone()[0]
+        return None if low is None or high is None else (str(low), str(high))
+
+
+def _check_table(table: str) -> None:
+    if table not in CONTRIBUTION_TABLES:
+        raise ValueError(f"not a contribution table: {table!r}")
+
+
+def open_readonly(vault_root: Path) -> sqlite3.Connection | None:
+    """A read-only, non-waiting connection to this binary's sidecar, or None."""
+    path = sidecar_path(Path(vault_root))
+    if not path.is_file():
+        return None
+    try:
+        conn = _open_readonly(path)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
+    except sqlite3.Error:
+        conn.close()
+        return None
+    if row is None or str(row[0]) != str(SCHEMA_VERSION):
+        conn.close()
+        return None
+    return conn
 
 
 def _pair_group(subject: str, measures_json: Any) -> tuple[str, ...] | None:

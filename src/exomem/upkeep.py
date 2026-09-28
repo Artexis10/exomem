@@ -11,11 +11,15 @@ ref names the same candidate for context.
 Nothing here scans the vault. An item is revalidated from its own subject and
 evidence pages only, never through the attention union or an audit, and every
 count is taken after egress and triage filtering: a withheld page never
-appears, not even as a number.
+appears, not even as a number. Alias and convention items go further: each is
+recomputed per request from the members its caller may see
+(`dreamer_families.release`), so a withheld page equals an absent one in the
+served fingerprint too.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import threading
@@ -40,15 +44,18 @@ FAMILY_ORDER: tuple[str, ...] = (
     "upkeep_fold",
     dreamer_families.HYDRATION_FAMILY,
     dreamer_families.LINK_FAMILY,
-    "upkeep_alias",
+    dreamer_families.ALIAS_FAMILY,
     "upkeep_profile",
-    "upkeep_convention",
+    dreamer_families.CONVENTION_FAMILY,
 )
 
 #: Closed per-kind labels. UI strings, not matching lists.
 LABELS: dict[str, str] = {
     dreamer_families.LINK_KIND: "Two notes could be connected",
     dreamer_families.HYDRATION_KIND: "Facts about an entity live on other pages",
+    dreamer_families.ALIAS_KIND: "Other notes name this page another way",
+    dreamer_families.TAG_KIND: "A tag is spelled more than one way",
+    dreamer_families.CATEGORY_KIND: "A unit label varies from the registered one",
 }
 
 _LINK_WHY: dict[str, str] = {
@@ -119,6 +126,21 @@ def _why(row: dict[str, Any], visible_origins: int) -> str:
             f"{visible_origins} independent sources added facts that link here "
             "after it was last updated"
         )
+    measures = row.get("measures") or {}
+    if kind == dreamer_families.ALIAS_KIND:
+        count = int(measures.get("referrers") or 0)
+        notes = f"{count} other note{'' if count == 1 else 's'} link"
+        spelling = str(measures.get("spelling") or "")
+        if row.get("reason_code") == "learned_alias_referenced":
+            return f'{notes} "{spelling}", a name this page learned that links cannot resolve'
+        return f'{notes} "{spelling}", which resolves to no page and matches this page\'s name'
+    if kind == dreamer_families.TAG_KIND:
+        return f"tag spellings in use: {measures.get('why') or ''}"
+    if kind == dreamer_families.CATEGORY_KIND:
+        label, target = str(measures.get("label") or ""), str(measures.get("target") or "")
+        if row.get("reason_code") == "category_replaced":
+            return f'unit label "{label}" is replaced by "{target}" in the registry'
+        return f'unit label "{label}" is unregistered and folds to the registered "{target}"'
     return "a structural pattern suggests this change"
 
 
@@ -154,6 +176,12 @@ def serve(
     elif kind == dreamer_families.HYDRATION_KIND:
         if len(origins) < dreamer_families.HYDRATION_MIN_ORIGINS:
             return None
+    elif kind == dreamer_families.ALIAS_KIND:
+        if not any(item.get("role") == "referrer" for item in others):
+            return None
+    elif kind == dreamer_families.TAG_KIND:
+        if not others:
+            return None
     subject_entry = next((item for item in evidence if item.get("path") == subject), {})
     ref = str(row.get("ref") or upkeep_ref(str(row["id"])))
     route = _visible_route(row.get("route") or {}, keep)
@@ -171,7 +199,11 @@ def serve(
             "title": subject_entry.get("title"),
         },
         "evidence": [
-            {"ref": str(item.get("ref") or ""), "title": item.get("title")}
+            {
+                "ref": str(item.get("ref") or ""),
+                "title": item.get("title"),
+                **({"spelling": item["spelling"]} if item.get("spelling") else {}),
+            }
             for item in others[:SHOWN_EVIDENCE]
         ],
         "evidence_count": len(others),
@@ -259,16 +291,20 @@ def review(
     collected: list[tuple[tuple, dict[str, Any]]] = []
     families: dict[str, int] = {}
     integrity: dict[str, int] = {}
-    with egress.disclosure_boundary(Path(vault_root), "upkeep_review"):
+    ctx = _request_context(Path(vault_root))
+    with egress.disclosure_boundary(Path(vault_root), "upkeep_review"), contextlib.closing(ctx):
         keep = _keep(Path(vault_root))
-        for row in view.candidates:
-            if row.get("state") != "open":
+        for stored in view.candidates:
+            if stored.get("state") != "open":
                 continue
-            family = str(row.get("family") or "")
+            family = str(stored.get("family") or "")
             if wanted and family not in wanted:
                 continue
             disposition = review_state.disposition_for(family, payload=payload)
             if disposition == "off":
+                continue
+            row = dreamer_families.release(ctx, stored, keep)
+            if row is None:
                 continue
             decision = _decision_state(Path(vault_root), row, payload)
             served = serve(
@@ -334,23 +370,47 @@ def _current(vault_root: Path, ref: str) -> tuple[dict[str, Any], dict[str, Any]
     # absent id too, so the two take the same work.
     keep = _keep(Path(vault_root))
     row = _row(Path(vault_root), cid)
-    if row is None or serve(row, keep=keep) is None:
-        raise _not_found(ref)
-    ctx = dreamer_families.Context(
-        vault_root=Path(vault_root), store=None, conn=None, now=time.time()
-    )
+    ctx = _request_context(Path(vault_root))
     try:
-        proposal = dreamer_families.propose(ctx, row)
-    except dreamer_families.Deferred as exc:
-        raise ValueError(
-            "REVIEW_REFRESH_REQUIRED: the upkeep proposal cannot be revalidated right "
-            f"now; try {ref} again shortly"
-        ) from exc
+        if row is None or not _subject_visible(row, keep):
+            raise _not_found(ref)
+        released = dreamer_families.release(ctx, row, keep)
+        if released is None or serve(released, keep=keep) is None:
+            raise _not_found(ref)
+        try:
+            proposal = dreamer_families.propose(ctx, row)
+        except dreamer_families.Deferred as exc:
+            raise ValueError(
+                "REVIEW_REFRESH_REQUIRED: the upkeep proposal cannot be revalidated right "
+                f"now; try {ref} again shortly"
+            ) from exc
+        if proposal is None:
+            raise _not_found(ref)
+        # The current proposal as this caller may see it: its served
+        # fingerprint is the one item, context and triage bind to.
+        current = dreamer_families.release(ctx, {**row, **proposal}, keep)
     finally:
         ctx.close()
-    if proposal is None:
+    if current is None:
         raise _not_found(ref)
-    return row, {**row, **proposal}
+    return row, current
+
+
+def _request_context(vault_root: Path) -> dreamer_families.Context:
+    """A request's in-memory family context: it writes nothing."""
+    return dreamer_families.Context(
+        vault_root=Path(vault_root), store=None, conn=None, now=time.time()
+    )
+
+
+def _subject_visible(row: dict[str, Any], keep) -> bool:
+    """The cheap first gate: a subject every audience's view shares is released.
+
+    A tag cluster's served subject depends on the caller, so it has none.
+    """
+    if row.get("kind") == dreamer_families.TAG_KIND:
+        return True
+    return _visible(keep, str(row.get("subject_path") or ""))
 
 
 def item(vault_root: Path, ref: str, *, expected_fingerprint: str | None = None) -> dict[str, Any]:
@@ -698,6 +758,24 @@ def _signatures_live(vault_root: Path, row: dict[str, Any]) -> bool:
     )
 
 
+def _released_open(vault_root: Path, stored: dict[str, Any], row: dict[str, Any]) -> bool:
+    """A served fingerprint that differs from the stored one is checked on its own.
+
+    Triage and delivery bind to what the caller was served, so a decision
+    recorded against the served fingerprint holds it here, exactly as a
+    decision on the stored one holds a row the worker precomputed.
+    """
+    from . import dreamer
+
+    cid, fingerprint = str(row["id"]), str(row["fingerprint"])
+    if fingerprint == str(stored.get("fingerprint") or ""):
+        return True
+    if dreamer.disposed(cid, fingerprint):
+        return False
+    payload = _carrier_payload(vault_root, dreamer_families.review_state_token(vault_root))
+    return payload is not None and _decision_state(vault_root, row, payload) == "open"
+
+
 def _earlier(view: dreamer_store.StoreView, row: dict[str, Any]) -> list[tuple[str, float]]:
     """Earlier deliveries of this `(id, fingerprint)`: stored plus in-process."""
     cid, fingerprint = str(row["id"]), str(row["fingerprint"])
@@ -781,9 +859,13 @@ def _choose(
     budget = packet.get("budget") or {}
     room = int(budget.get("limit_chars") or 0) - int(budget.get("used_chars") or 0)
     caller = _caller_hash(key)
-    with egress.disclosure_boundary(vault_root, "upkeep_advisory"):
+    ctx = _request_context(vault_root)
+    with egress.disclosure_boundary(vault_root, "upkeep_advisory"), contextlib.closing(ctx):
         keep = _keep(vault_root)
-        for row in rows[:MAX_TRIED]:
+        for stored in rows[:MAX_TRIED]:
+            row = dreamer_families.release(ctx, stored, keep)
+            if row is None or not _released_open(vault_root, stored, row):
+                continue
             earlier = _earlier(view, row)
             if len(earlier) >= dreamer_families.MAX_DELIVERIES:
                 continue

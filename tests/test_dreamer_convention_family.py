@@ -18,7 +18,14 @@ from pathlib import Path
 import dreamer_fixture as fx
 import pytest
 
-from exomem import dreamer, dreamer_families, dreamer_store, freshness, upkeep
+from exomem import (
+    dreamer,
+    dreamer_families,
+    dreamer_store,
+    freshness,
+    semantic_language_registry,
+    upkeep,
+)
 
 LATER = time.time() + 3 * 3600
 TAG_ID = dreamer_store.candidate_id("convention.tag", "", fx.TAG_KEY)
@@ -185,10 +192,8 @@ def test_a_registry_change_moves_the_category_fingerprint(tmp_path: Path) -> Non
     before = upkeep.item(vault, ref)["item"]["fingerprint"]
     stored = _open(vault, CATEGORY_ID)["fingerprint"]
     assert before == stored
-    fx.write(
-        vault,
-        fx.REGISTRY,
-        fx.registry(extra="  bench_note:\n    description: A note from the bench.\n"),
+    fx.save_registry(
+        vault, fx.registry(extra="  bench_note:\n    description: A note from the bench.\n")
     )
     assert upkeep.item(vault, ref)["item"]["fingerprint"] != before
     # The worker notices the registry moved and revalidates the stored row.
@@ -219,7 +224,9 @@ def test_a_label_named_by_a_replaced_definition_is_proposed(tmp_path: Path) -> N
     fx.seed(vault)
     fx.publish_graph(vault)
     _quiet(vault)
-    row = _open(vault, dreamer_store.candidate_id("convention.category", fx.CATEGORY_NOTE, "bench-test"))
+    row = _open(
+        vault, dreamer_store.candidate_id("convention.category", fx.CATEGORY_NOTE, "bench-test")
+    )
     assert row is not None
     assert row["reason_code"] == "category_replaced"
     assert row["measures"]["target"] == "field_trial"
@@ -253,12 +260,12 @@ def test_a_label_reaching_two_registered_categories_is_not_proposed(tmp_path: Pa
     batch_id = dreamer_store.candidate_id("convention.category", fx.CATEGORY_NOTE, "batch")
     assert _open(vault, batch_id)["measures"]["target"] == "batch"
     # `batches` folds alike: the label now reaches two registered categories.
-    fx.write(
+    fx.save_registry(
         vault,
-        fx.REGISTRY,
         fx.registry(
             extra="  batch:\n    description: One run.\n  batches:\n    description: Runs.\n"
         ),
     )
+    assert not semantic_language_registry.load_registry(vault).findings
     _quiet(vault)
     assert _open(vault, batch_id) is None

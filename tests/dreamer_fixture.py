@@ -383,10 +383,7 @@ def note(
         "type: insight\n"
         "status: active\n"
         "created: 2026-04-02\n"
-        f"updated: {updated}\n"
-        + (f"tags:\n{tag_lines}" if tags else "")
-        + frontmatter
-        + "---\n\n"
+        f"updated: {updated}\n" + (f"tags:\n{tag_lines}" if tags else "") + frontmatter + "---\n\n"
         f"# {title}\n\n"
         f"{links}\n\n"
         "## Observations\n\n"
@@ -402,6 +399,14 @@ def registry(*, extra: str = "") -> str:
         "    description: A trial run outside the lab.\n"
         f"{extra}"
     )
+
+
+def save_registry(vault: Path, text: str) -> None:
+    """Replace the category registry the way a governed registry save lands.
+
+    It is not a page: no parse cache, freshness map or graph is touched.
+    """
+    (vault / REGISTRY).write_text(text, encoding="utf-8")
 
 
 def build_vocabulary(root: Path, *, with_graph: bool = True) -> Path:
