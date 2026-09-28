@@ -367,11 +367,13 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   30 s, and never after promotion or discard has begun.
 - [x] 8.5 Promotion retires the full marker its proof covered, recorded in the handoff
   record.
-- [ ] 8.6 Scoped suites green (`tests/test_standby_*`, `tests/test_graph_*`, index_sync);
+- [x] 8.6 Scoped suites green (`tests/test_standby_*`, `tests/test_graph_*`, index_sync);
   ruff and the public-artifact gate green; author-independent review.
   Evidence for 8.1-8.5: `tests/test_graph_handoff_convergence.py` (15 tests) was red
-  on the base (14 failed, 1 guard passed) and is green with the fix.
-- [ ] 8.7 Review follow-ups: a proof holds only the snapshot it read; promotion retires
+  on the base (14 failed, 1 guard passed) and is green with the fix. The graph handoff
+  files, `test_standby_promotion.py` and `test_graph_deferred_queue.py` pass (162); the
+  independent review approved the final round after five rounds of probes.
+- [x] 8.7 Review follow-ups: a proof holds only the snapshot it read; promotion retires
   the marker only at the proof's durable generation, and the standby keeps re-proving
   after a success, replacing the held proof only with a newer success; the interval
   runs from the end of the last attempt and the poll stats before it reads; a promotion
@@ -393,3 +395,9 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   missed. The adoption proof fails closed on it (the drain gate counts only queued
   pages), but the serving graph can carry the stale edge. Keep an affected page's stored
   title until its own receipt drains, or widen on it when the pass changes it.
+- [ ] 8.10 **Open, not fixed here.** The carry's exactness check counts a Knowledge Base
+  page that is on disk with no row (or a differing row) and not queued as explained, so a
+  drain can derive an edge to it. If that page is deleted, or retitled and back, before
+  its own receipt drains, adoption can accept a sidecar with an extra edge. Its receipt
+  repairs it, so this matters only when that receipt is lost. Count such a page as
+  explained only when it has a pending graph receipt.
