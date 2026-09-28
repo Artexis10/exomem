@@ -290,8 +290,8 @@ Use the owner's own Cloud account; never write a canary into a friend's vault.
 Run the write and the scan outside the nightly backup window, 02:00–05:00 UTC
 (`cells.backupWindow` in the same file), and when no cell upgrade or restore is
 due. A finished backup or restore Job's logs go when its pod does, so the scan
-lists every cell Job that finished after the write. For each one listed, its
-logs were not searched unless its pod was still there.
+lists, from the audit log, every cell or scratch Job created after the write.
+For each one listed, its logs were not searched unless its pod was still there.
 
 Make the canary on the node:
 
@@ -390,7 +390,11 @@ canary_file_hits() {
   for name in "$@"; do names+=(-o -name "$name"); done
   while IFS= read -r -d '' file; do
     CANARY_FILES=$((CANARY_FILES + 1))
-    count=$(zcat -f -- "$file" | grep -cF "${CANARY_PATTERNS[@]}" || true)
+    # containerd splits a long line into partial (P) records at 16 KiB;
+    # rejoin them so a canary straddling a split is still one line.
+    count=$(zcat -f -- "$file" \
+      | awk '{ tag = $3; sub(/^[^ ]+ [^ ]+ [^ ]+ /, ""); buf = buf $0; if (tag != "P") { print buf; buf = "" } } END { if (buf != "") print buf }' \
+      | grep -cF "${CANARY_PATTERNS[@]}" || true)
     CANARY_FILE_HITS=$((CANARY_FILE_HITS + count))
     if [ "$count" -gt 0 ]; then printf '%s hits=%s\n' "$file" "$count"; fi
   done < <(find "$root" -mindepth 1 -maxdepth 1 -type d \( "${names[@]:1}" \) -exec find {} -type f -print0 \;)
@@ -435,12 +439,32 @@ before=$CANARY_PODS
 canary_hits exomem-cloud app.kubernetes.io/name=exomem-cloud-gateway
 gateway=$((CANARY_PODS - before))
 canary_file_hits 'exo-cell-*' 'exo-scratch-*' 'exomem-cloud_*'
+# Jobs are deleted with their pods 300 s after they finish, so the cluster
+# cannot list the ones whose logs are gone. The audit log records every Job
+# create at Metadata level; list those in cell and scratch namespaces since
+# the write.
+test -r "${AUDIT_LOG:-/var/lib/rancher/k3s/server/logs/audit.log}"
 jobs_after=0
-while read -r namespace job finished; do
+while read -r namespace job created; do
   jobs_after=$((jobs_after + 1))
-  echo "job finished after the write, logs searched only while its pod exists: $namespace/$job at $finished"
-done < <(op get jobs --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.status.completionTime}{"\n"}{end}' \
-  | awk -v since="$CANARY_WRITTEN_AT" '$1 ~ /^exo-(cell|scratch)-/ && $3 != "" && $3 >= since')
+  echo "job created after the write, logs searched only while its pod exists: $namespace/$job at $created"
+done < <(python3 - "$CANARY_WRITTEN_AT" "${AUDIT_LOG:-/var/lib/rancher/k3s/server/logs/audit.log}" <<'PY'
+import json, re, sys
+since, path = sys.argv[1][:19], sys.argv[2]
+scope = re.compile(r"^exo-(cell-[a-z2-7]{16}|scratch-[a-z2-7]{16}-[0-9a-f]{8})$")
+with open(path, encoding="utf-8") as log:
+    for line in log:
+        event = json.loads(line)
+        ref = event.get("objectRef") or {}
+        if event.get("verb") != "create" or ref.get("resource") != "jobs":
+            continue
+        if not scope.match(ref.get("namespace") or "") or event.get("stage") != "ResponseComplete":
+            continue
+        created = event.get("requestReceivedTimestamp", "")
+        if created[:19] >= since:
+            print(ref["namespace"], ref.get("name", "?"), created)
+PY
+)
 echo "cells=$cells cellctl=$cellctl gateway=$gateway pods=$CANARY_PODS streams=$CANARY_STREAMS unreadable=$CANARY_UNREADABLE hits=$CANARY_HITS files=$CANARY_FILES file_hits=$CANARY_FILE_HITS jobs_after_write=$jobs_after"
 test "$cells" -gt 0
 test "$cellctl" -ge 1

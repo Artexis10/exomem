@@ -326,9 +326,12 @@ Transfer ciphertext and digest/size through the approved protected channel.
 The authorized recipient compares the digest, then counts the recipient
 stanzas in the archive header. The count of `-> X25519` stanzas must equal the
 number of recipients they supplied, and no other recipient type may appear.
-That is the end-to-end proof that no operator key was added. Only then do they
-decrypt with their own private age identity and verify archive members
-without extracting or printing contents:
+The count alone catches an added key but not a swapped one, so every identity
+behind the supplied recipients must then decrypt the archive. Together these
+prove it is encrypted to exactly the recipients the tenant supplied. Grease
+stanzas, which some age implementations add and which carry no key, are
+ignored. Then the recipient verifies archive members without extracting or
+printing contents:
 
 ```bash
 set -euo pipefail
@@ -341,7 +344,13 @@ if [ "$x25519" != "$SUPPLIED_RECIPIENTS" ] || [ "$others" != 0 ]; then
   echo 'the archive is encrypted to a recipient you did not supply; do not use it' >&2
   exit 1
 fi
-age -d -i "$RECIPIENT_IDENTITY" "$RECEIVED_ARCHIVE" | python3 -c '
+# One identity file per supplied recipient; each must open the archive.
+read -r -a identities <<< "${RECIPIENT_IDENTITIES:-$RECIPIENT_IDENTITY}"
+[ "${#identities[@]}" = "$SUPPLIED_RECIPIENTS" ]
+for identity in "${identities[@]}"; do
+  age -d -i "$identity" "$RECEIVED_ARCHIVE" > /dev/null
+done
+age -d -i "${identities[0]}" "$RECEIVED_ARCHIVE" | python3 -c '
 import sys, tarfile
 count = 0
 with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as stream:

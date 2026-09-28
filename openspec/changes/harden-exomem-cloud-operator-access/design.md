@@ -70,7 +70,7 @@ Observed 2026-09-28 on K3s v1.35.6+k3s1: the API server enforces this policy on 
 - the recipients file must be supplied by the tenant, with its fingerprint recorded before the restore;
 - the procedure stops if any listed recipient matches a registered operator or escrow key.
 
-Only age X25519 recipients are accepted, because SSH keys cannot be matched against the registered set. The tenant sends the file's SHA-256 separately; the operator compares it, and hashes the file again immediately before encrypting. The tenant's own verification counts the recipient stanzas in the archive header, and that count must equal the number of recipients the tenant supplied. That is the end-to-end check that no operator key was added.
+Only age X25519 recipients are accepted, because SSH keys cannot be matched against the registered set. The tenant sends the file's SHA-256 separately; the operator compares it, and hashes the file again immediately before encrypting. The tenant's own verification counts the recipient stanzas in the archive header, which must equal the number of recipients the tenant supplied, and then decrypts with every one of the tenant's identities. The count catches an added key, and the decryptions catch a swapped one. Together they prove the archive is encrypted to exactly the tenant's recipients.
 
 ### D7. The audit policy already satisfies the break-glass record, on the node
 

@@ -123,17 +123,24 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
-          LIVE_K3S_PATHS: |-
-            infra/helm/platform/templates/operator-access.yaml
-            infra/helm/platform/templates/cloud-ingress.yaml
-            infra/helm/platform/templates/cloud-gateway.yaml
-            infra/helm/platform/templates/namespaces.yaml
-            infra/cellctl/tests/test_k3s_integration.py
+          # Every file whose change can alter what the live suite proves:
+          # all platform templates (including cellctl's scope policy), the
+          # values schema and validation values, the vendored subcharts, the
+          # cell manifest renderer, and the live suite itself. values.yaml
+          # is left out because release bumps touch it; chart tests pin the
+          # invariants it carries.
+          LIVE_K3S_PATTERN: '^(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/tests/test_k3s_integration\.py$)'
         run: |
           case "$EVENT" in
             workflow_dispatch) run=true ;;
             pull_request)
-              if git diff --name-only "$BASE...$HEAD" | grep -Fxq -f <(printf '%s\n' "$LIVE_K3S_PATHS"); then
+              # No rename detection, so a renamed template still shows its
+              # old path. A diff that cannot be computed runs the suite. The
+              # match reads a here-string, not a pipe: grep -q exiting early
+              # would SIGPIPE the writer and, under pipefail, read as no match.
+              if ! changed=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
+                run=true
+              elif grep -Eq "$LIVE_K3S_PATTERN" <<< "$changed"; then
                 run=true
               else
                 run=false
