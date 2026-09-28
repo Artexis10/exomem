@@ -238,3 +238,78 @@ def test_a_publish_that_never_becomes_readable_leaves_the_job_queued(tmp_path, m
 def test_publication_signal_is_a_non_blocking_no_op_without_a_watcher(tmp_path):
     vocabulary_recovery.note_graph_published(tmp_path)
     assert not vocabulary_recovery.publication_waiting(tmp_path)
+
+
+def test_a_publish_that_becomes_readable_after_the_window_still_drains(tmp_path, monkeypatch):
+    """A publication readable only after the bounded wait must not strand the job.
+
+    The watcher re-arms itself while work is queued, so the late snapshot is
+    still delivered without waiting for an unrelated later publication.
+    """
+    import threading
+    import time
+
+    from exomem import epistemic_graph, graph_sync, server_runtime
+
+    with library_scope():
+        vocabulary_recovery.enqueue(tmp_path, "0", "Knowledge Base/Notes/0.md")
+    readable_at = []
+
+    def readable():
+        return bool(readable_at) and time.monotonic() >= readable_at[0]
+
+    monkeypatch.setattr(vocabulary_delivery.vocabulary_review, "_visible", lambda root, item: True)
+    monkeypatch.setattr(
+        vocabulary_delivery,
+        "_project",
+        lambda root, path, continuation: {"sync": {"state": "current"}, "continuation": None, "items": []},
+    )
+    monkeypatch.setattr(
+        graph_sync, "status", lambda root: {"state": "current" if readable() else "stale"}
+    )
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "available", lambda self: readable())
+    monkeypatch.setitem(server_runtime.drain_vocabulary_recovery.__kwdefaults__, "wait_seconds", 0.2)
+    monkeypatch.setitem(server_runtime.redrain_after_publish.__kwdefaults__, "ready_seconds", 0.3)
+    shutdown = threading.Event()
+    watcher = threading.Thread(
+        target=server_runtime.watch_vocabulary_recovery, args=(tmp_path, shutdown), daemon=True
+    )
+    watcher.start()
+    try:
+        assert _wait_for(lambda: vocabulary_recovery.publication_waiting(tmp_path))
+        time.sleep(0.4)  # the activation drain gives up: nothing is readable yet
+        vocabulary_recovery.note_graph_published(tmp_path)
+        readable_at.append(time.monotonic() + 0.8)
+
+        def drained():
+            with library_scope():
+                return vocabulary_recovery.page(tmp_path, limit=4) == ()
+
+        assert _wait_for(drained, seconds=10.0), "job stranded after a late-readable publish"
+    finally:
+        shutdown.set()
+        watcher.join(timeout=10)
+    assert not watcher.is_alive()
+
+
+def test_the_publication_signal_fires_only_once_the_publish_is_readable(tmp_path, monkeypatch):
+    """A full rebuild publishes by swapping a private copy into place.
+
+    Signalling inside the publishing transaction woke the watcher while the
+    marker sat in the temporary database; the swap, not the transaction, is
+    what makes the publication readable.
+    """
+    from exomem import epistemic_graph
+
+    readable_when_signalled = []
+    monkeypatch.setattr(
+        vocabulary_recovery,
+        "note_graph_published",
+        lambda root: readable_when_signalled.append(
+            epistemic_graph.EpistemicGraphIndex(root).available()
+        ),
+    )
+    _published_note(tmp_path)
+
+    assert readable_when_signalled
+    assert all(readable_when_signalled), readable_when_signalled

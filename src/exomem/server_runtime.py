@@ -148,6 +148,9 @@ class LocalRuntimeActivation:
         self.file_watcher: Any | None = None
         self.derived_drain: Any | None = None
         self.vocabulary_recovery: Any | None = None
+        # The recovery watcher runs until told to stop, so it has its own stop
+        # event: every path that stops the other workers stops it too.
+        self._vocabulary_stop = threading.Event()
         self.recall_reembed: Any | None = None
         self.dreamer: Any | None = None
 
@@ -307,6 +310,17 @@ class LocalRuntimeActivation:
                 _stop_dreamer()
             except Exception:  # noqa: BLE001 - shutdown still has to join activation
                 log.warning("dreamer runtime shutdown failed", exc_info=True)
+        self._vocabulary_stop.set()
+        self._join_vocabulary_recovery()
+
+    def _join_vocabulary_recovery(self) -> None:
+        """Join the recovery watcher, bounded; it exits within one poll."""
+        thread = self.vocabulary_recovery
+        if not isinstance(thread, threading.Thread) or thread is threading.current_thread():
+            return
+        thread.join(timeout=VOCABULARY_WATCHER_JOIN_SECONDS)
+        if thread.is_alive():
+            log.warning("vocabulary recovery watcher did not stop before its deadline")
 
     def _start_component(self, label: str, starter: Callable[[Path], Any]) -> None:
         try:
@@ -328,7 +342,7 @@ class LocalRuntimeActivation:
         """Drain queued recovery in the background, not on a client review call."""
         thread = threading.Thread(
             target=watch_vocabulary_recovery,
-            args=(vault_root, self._shutdown),
+            args=(vault_root, self._vocabulary_stop),
             name="exomem-vocabulary-recovery",
             daemon=True,
         )
@@ -381,6 +395,10 @@ class LocalRuntimeActivation:
                 self._stop_background_workers()
                 if thread is not None and thread is not threading.current_thread():
                     await anyio.to_thread.run_sync(thread.join)
+                # Activation may have started the watcher after the stop above;
+                # it saw the stop event already set, so this join is short.
+                self._vocabulary_stop.set()
+                await anyio.to_thread.run_sync(self._join_vocabulary_recovery)
                 # A discarded standby must not leave the catalogue it built
                 # behind; a no-op for any worker that is not an unpromoted one.
                 # Off the loop: it may wait, bounded, for a build to stop, and
@@ -646,9 +664,15 @@ def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:
 VOCABULARY_DRAIN_WAIT_SECONDS = 120.0
 VOCABULARY_DRAIN_PASSES = 256
 #: How long a publication-triggered drain waits for the published snapshot to
-#: become readable. A publication that never commits is followed by another one,
-#: which wakes the watcher again.
+#: become readable. The signal fires after the commit or swap, but a snapshot
+#: can still be refused or slow to prove readable, so a wait that times out with
+#: work queued re-arms the watcher, up to `VOCABULARY_REDRAIN_RETRIES` times in
+#: a row; after that only the next publication wakes it.
 VOCABULARY_REDRAIN_READY_SECONDS = 10.0
+VOCABULARY_REDRAIN_RETRIES = 30
+#: How long shutdown waits for the watcher. It polls its stop event every
+#: quarter second, so this bounds only a recovery pass already in flight.
+VOCABULARY_WATCHER_JOIN_SECONDS = 5.0
 
 
 def drain_vocabulary_recovery(
@@ -706,13 +730,16 @@ def redrain_after_publish(
     shutdown: threading.Event,
     *,
     ready_seconds: float = VOCABULARY_REDRAIN_READY_SECONDS,
+    retry: threading.Event | None = None,
 ) -> int | None:
     """Drain once after a graph publication, when there is work and it can land.
 
     Returns None when nothing is queued. Otherwise waits, bounded, for the read
     snapshot the publication made, then runs the same bounded drain activation
     runs. Claims are compare-and-set, so this never repeats a job the activation
-    drain or an explicit review already completed.
+    drain or an explicit review already completed. When the wait times out with
+    work still queued, `retry` (the watcher's wake-up) is set so the job is not
+    stranded until an unrelated later publication.
     """
     from . import epistemic_graph
 
@@ -728,6 +755,8 @@ def redrain_after_publish(
         if readable:
             return drain_vocabulary_recovery(vault_root, shutdown, wait_seconds=ready_seconds)
         if time.monotonic() >= deadline:
+            if retry is not None and vocabulary_recovery.page(vault_root, limit=1):
+                retry.set()
             return 0
         shutdown.wait(0.25)
     return 0
@@ -741,16 +770,19 @@ def watch_vocabulary_recovery(vault_root: Path, shutdown: threading.Event) -> No
     only set an event, so many coalesce into one drain and none waits for it.
     """
     published = vocabulary_recovery.publication_signal(vault_root)
+    retries = 0
     try:
         drain_vocabulary_recovery(vault_root, shutdown)
         while not shutdown.is_set():
             if not published.wait(timeout=0.5):
                 continue
             published.clear()
+            retry = published if retries < VOCABULARY_REDRAIN_RETRIES else None
             try:
-                redrain_after_publish(vault_root, shutdown)
+                redrain_after_publish(vault_root, shutdown, retry=retry)
             except Exception:  # noqa: BLE001 - the next publication retries
                 log.warning("vocabulary recovery redrain failed", exc_info=True)
+            retries = retries + 1 if published.is_set() else 0
     finally:
         vocabulary_recovery.release_publication_signal(vault_root, published)
 
