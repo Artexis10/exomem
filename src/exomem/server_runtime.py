@@ -29,6 +29,7 @@ from . import (
     privacy_log,
     project_keys,
     schema,
+    vocabulary_recovery,
 )
 from .dotenv_guard import working_directory_dotenv
 from .governance import authorization_session_lifecycle, projection_runtime
@@ -326,7 +327,7 @@ class LocalRuntimeActivation:
     def _start_vocabulary_recovery(self, vault_root: Path) -> None:
         """Drain queued recovery in the background, not on a client review call."""
         thread = threading.Thread(
-            target=drain_vocabulary_recovery,
+            target=watch_vocabulary_recovery,
             args=(vault_root, self._shutdown),
             name="exomem-vocabulary-recovery",
             daemon=True,
@@ -644,6 +645,10 @@ def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:
 #: it will run (`seamless-managed-worker-handoff` D12).
 VOCABULARY_DRAIN_WAIT_SECONDS = 120.0
 VOCABULARY_DRAIN_PASSES = 256
+#: How long a publication-triggered drain waits for the published snapshot to
+#: become readable. A publication that never commits is followed by another one,
+#: which wakes the watcher again.
+VOCABULARY_REDRAIN_READY_SECONDS = 10.0
 
 
 def drain_vocabulary_recovery(
@@ -694,6 +699,60 @@ def drain_vocabulary_recovery(
     if drained:
         log.info("drained %d queued vocabulary recovery job(s)", drained)
     return drained
+
+
+def redrain_after_publish(
+    vault_root: Path,
+    shutdown: threading.Event,
+    *,
+    ready_seconds: float = VOCABULARY_REDRAIN_READY_SECONDS,
+) -> int | None:
+    """Drain once after a graph publication, when there is work and it can land.
+
+    Returns None when nothing is queued. Otherwise waits, bounded, for the read
+    snapshot the publication made, then runs the same bounded drain activation
+    runs. Claims are compare-and-set, so this never repeats a job the activation
+    drain or an explicit review already completed.
+    """
+    from . import epistemic_graph
+
+    if not vocabulary_recovery.page(vault_root, limit=1):
+        return None
+    graph = epistemic_graph.EpistemicGraphIndex(vault_root)
+    deadline = time.monotonic() + ready_seconds
+    while not shutdown.is_set():
+        try:
+            readable = graph.available()
+        except Exception:  # noqa: BLE001 - a background drain never breaks the runtime
+            readable = False
+        if readable:
+            return drain_vocabulary_recovery(vault_root, shutdown, wait_seconds=ready_seconds)
+        if time.monotonic() >= deadline:
+            return 0
+        shutdown.wait(0.25)
+    return 0
+
+
+def watch_vocabulary_recovery(vault_root: Path, shutdown: threading.Event) -> None:
+    """Drain at activation, then again after every graph publication.
+
+    Graph churn withdraws the read snapshot a write's guidance needs, which
+    strands its recovery job until something drains the queue. Publications
+    only set an event, so many coalesce into one drain and none waits for it.
+    """
+    published = vocabulary_recovery.publication_signal(vault_root)
+    try:
+        drain_vocabulary_recovery(vault_root, shutdown)
+        while not shutdown.is_set():
+            if not published.wait(timeout=0.5):
+                continue
+            published.clear()
+            try:
+                redrain_after_publish(vault_root, shutdown)
+            except Exception:  # noqa: BLE001 - the next publication retries
+                log.warning("vocabulary recovery redrain failed", exc_info=True)
+    finally:
+        vocabulary_recovery.release_publication_signal(vault_root, published)
 
 
 def _start_metrics_persistence() -> None:

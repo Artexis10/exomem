@@ -43,6 +43,7 @@ from . import (
     semantic_units,
     sidecar_store,
     traversal_profiles,
+    vocabulary_recovery,
 )
 from . import find as find_module
 from . import vault as vault_module
@@ -4459,6 +4460,9 @@ class EpistemicGraphIndex:
             )
         if graph_checkpoint is not None:
             self._write_graph_sync_acknowledgement(conn, graph_checkpoint)
+        # Only sets an event; the recovery watcher waits for this transaction's
+        # snapshot to become readable before it drains anything.
+        vocabulary_recovery.note_graph_published(self.vault_root)
 
     @staticmethod
     def _write_graph_sync_acknowledgement(
