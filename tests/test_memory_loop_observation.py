@@ -635,7 +635,7 @@ def test_probe_r6c_a_genuine_formatted_episode_ask_passes_initiation(fixture: st
 def test_probe_r6d_the_scaffold_skill_as_a_standing_instruction_passes_initiation(fixture: str) -> None:
     from importlib.resources import files
 
-    skill = files("exomem._scaffold").joinpath("_Schema", "SKILL.md").read_text(encoding="utf-8")
+    skill = files("exomem._scaffold").joinpath("_Schema").joinpath("SKILL.md").read_text(encoding="utf-8")
     instruction = obs.standing_instruction("installed_skill", skill)
     assert instruction["asks_for_memory"] is True
     frozen = _fixture_frozen()[fixture]

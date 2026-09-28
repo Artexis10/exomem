@@ -415,7 +415,7 @@ def product_prompt_templates() -> tuple[str, ...]:
     from exomem import episode_nudge, server
     from exomem._hooks import exomem_capture_nudge as nudge
 
-    skill = files("exomem._scaffold").joinpath("_Schema", "SKILL.md").read_text(encoding="utf-8")
+    skill = files("exomem._scaffold").joinpath("_Schema").joinpath("SKILL.md").read_text(encoding="utf-8")
     return (server.SERVER_INSTRUCTIONS, nudge.REMINDER, nudge.EPISODE_ASK, episode_nudge.EPISODE_RULE, skill)
 
 
