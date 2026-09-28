@@ -8,7 +8,11 @@ of a kind its route owns (fields checked by `curation.validate_forward_plan`)
 
 What each action writes (close-memory-loop task 5.5):
 
-* `inspect` reads the caller's own episode ledger. It writes nothing.
+* `inspect` reads the caller's own episode ledger. It writes nothing. Its
+  `coverage` block says what was attempted, what is pending and what comes
+  next, for a host checkpoint that must not treat a write as completion.
+* `coverage` reads the final pass's evidence -- the input ref and each
+  committed leaf's receipt and current readback -- and writes nothing.
 * `prepare` and `disposition` write only the caller's audience-bound episode
   journal and inert sealed single-step curation plans. Preparation runs the
   same read-only leaf preparation `maintain_memory mode=curation` propose runs;
@@ -143,6 +147,60 @@ def _candidate_by_key(state: Mapping[str, Any], key: str) -> dict[str, Any] | No
     return next((item for item in state["candidates"] if item["candidate_key"] == key), None)
 
 
+def _coverage(state: Mapping[str, Any]) -> dict[str, Any]:
+    """What this episode attempted, what is pending and what comes next (task 4.1).
+
+    A host checkpoint reads this instead of treating a successful write as
+    completion. `next` names the agent's next step: `decide` a candidate with
+    no disposition at the current input revision, `resume` a routed leaf not
+    yet committed (or still uncertain), `attest` committed results the last
+    postcommit attestation did not review, else `none` -- which deferred or
+    awaiting-authority work may still leave pending. Coverage rests on the
+    agent's attestation against its input: the server never claims the
+    candidates exhaust it.
+    """
+    current = state["input_revisions"][-1]["revision"]
+    candidates = state["candidates"]
+    leaves = [(candidate, leaf) for candidate in candidates for leaf in candidate["leaves"]]
+    committed = {leaf["leaf_id"] for _candidate, leaf in leaves if leaf["outcome"] == "committed"}
+    attestations = state["postcommit_attestations"]
+    if not candidates:
+        step = "none"
+    elif any(
+        item["disposition"] is None or item["disposition"]["input_revision"] != current
+        for item in candidates
+    ):
+        step = "decide"
+    elif any(
+        candidate["disposition"]["value"] == "routed" and leaf["outcome"] != "committed"
+        for candidate, leaf in leaves
+    ):
+        step = "resume"
+    elif (
+        state["reviewed_through_input_revision"] != current
+        or not attestations
+        or set(attestations[-1]["leaf_ids"]) != committed
+    ):
+        step = "attest"
+    else:
+        step = "none"
+    return {
+        "attempted": sum(
+            1
+            for _candidate, leaf in leaves
+            if leaf["attempts"] or any(item["attempts"] for item in leaf["effect_history"])
+        ),
+        "pending": len(model._pending(state)),  # noqa: SLF001
+        "covered_through_input_revision": state["covered_through_input_revision"],
+        "historically_covered_through": max(
+            (item["input_revision"] for item in attestations if not item["pending"]),
+            default=None,
+        ),
+        "next": step,
+        "basis": "agent_attestation",
+    }
+
+
 def _projection(session: _Session) -> dict[str, Any]:
     """Identities, routes and outcomes only: never leaf args or proposal text."""
     state = session.state
@@ -199,6 +257,7 @@ def _projection(session: _Session) -> dict[str, Any]:
         "reviewed_through_input_revision": state["reviewed_through_input_revision"],
         "covered_through_input_revision": state["covered_through_input_revision"],
         "complete": state["complete"],
+        "coverage": _coverage(state),
         "coverage_current": "unchecked",
         "execution": "enabled" if enabled() else "disabled",
     }
@@ -206,6 +265,104 @@ def _projection(session: _Session) -> dict[str, Any]:
 
 def inspect(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     return _projection(_Session(vault_root, episode))
+
+
+# --- the final coverage pass (close-memory-loop 4.2) --------------------------
+
+
+def _readback(session: _Session, candidate_id: str, leaf: Mapping[str, Any]) -> bool:
+    """Whether a committed leaf's recorded proof still verifies against its page.
+
+    The re-reconciliation a postcommit attestation runs, on a copy marked
+    uncertain; nothing is recorded and no writer runs.
+    """
+    check = model._copy(session.state)  # noqa: SLF001
+    model._owned(check, candidate_id, leaf["leaf_id"]).update(  # noqa: SLF001
+        outcome="uncertain", outcome_proof=None
+    )
+    try:
+        verified = reconcile_curation_leaf(session.vault_root, check, candidate_id, leaf["leaf_id"])
+    except model.EpisodeError as error:
+        if error.code != "EPISODE_OUTCOME_UNCERTAIN":
+            raise
+        return False
+    current = model._owned(verified, candidate_id, leaf["leaf_id"])  # noqa: SLF001
+    return current["outcome_proof"] == leaf["outcome_proof"]
+
+
+def _written_path(vault_root: Path, binding: Mapping[str, Any]) -> str | None:
+    """The page a committed leaf's sealed plan names as its postcondition."""
+    try:
+        plan = curation.CurationStore(vault_root).load_plan(binding["run_id"])
+        item = plan["binding_manifest"][binding["ordinal"]]
+    except (curation.CurationError, KeyError, IndexError, TypeError):
+        return None
+    post = item.get("postcondition") if isinstance(item, Mapping) else None
+    path = post.get("path") if isinstance(post, Mapping) else None
+    return path if isinstance(path, str) else None
+
+
+def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
+    """The evidence for the agent's final coverage pass. Read-only.
+
+    The pass is the active agent's, separate from the precommit destination
+    review: it compares its dispositions with the episode's current input --
+    read through `read_memory` at `input.ref`, under the ordinary release
+    checks -- and with what each committed leaf left, a receipt and a readback
+    reverified now against the live page. It attests with `resume`
+    `postcommit=true`. A page the caller may no longer read reads back
+    `unavailable`, exactly like a page that is gone. Nothing here judges
+    whether the candidates exhaust the input.
+    """
+    session = _Session(vault_root, episode)
+    state = session.state
+    latest = state["input_revisions"][-1]
+    ref = latest["evidence"].get("reference")
+    page = _page_ref(ref)
+    if page is None or page not in _visible(session.vault_root, [page]):
+        ref = None
+    keep = egress.restricted_release_filter(session.vault_root, principal=effective_principal())
+    receipts = []
+    # One consistent view of every committed page, as an attestation takes.
+    with session.store._guard():  # noqa: SLF001
+        for candidate in state["candidates"]:
+            for leaf in candidate["leaves"]:
+                if leaf["outcome"] != "committed":
+                    continue
+                path = _written_path(session.vault_root, leaf["binding"])
+                if (
+                    path is None
+                    or not (session.vault_root / path).is_file()
+                    or (keep is not None and not keep(path))
+                ):
+                    path, readback = None, "unavailable"
+                elif _readback(session, candidate["candidate_id"], leaf):
+                    readback = "verified"
+                else:
+                    readback = "changed"
+                receipts.append(
+                    {
+                        "candidate_key": candidate["candidate_key"],
+                        "leaf_id": leaf["leaf_id"],
+                        "operation_id": leaf["binding"]["operation_id"],
+                        "receipt_digest": leaf["outcome_proof"]["receipt_digest"],
+                        "path": path,
+                        "readback": readback,
+                    }
+                )
+    return {
+        **_projection(session),
+        "action": "coverage",
+        "input": {
+            "input_revision": latest["revision"],
+            "ref": ref,
+            "recovery": latest["recovery"] if ref is not None else "unavailable",
+        },
+        "receipts": receipts,
+        "coverage_current": (
+            "verified" if all(item["readback"] == "verified" for item in receipts) else "changed"
+        ),
+    }
 
 
 def _seal(vault_root: Path, leaf: Mapping[str, Any]) -> dict[str, Any]:
