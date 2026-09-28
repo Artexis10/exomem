@@ -70,6 +70,7 @@ from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import envelope as envelope_module
 from . import episode_memory as episode_memory_module
+from . import episode_workflow as episode_workflow_module
 from . import episode_nudge as episode_nudge_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
@@ -1280,8 +1281,8 @@ def op_bootstrap(
                 "Records silently infer goals, success, failure, or personal judgments."
             ),
             "manual_first": (
-                "Canonical Records remain ordinary editable files; direct human edits and "
-                "work without an agent are supported product paths."
+                "Canonical Records remain ordinary editable files; manual edits without "
+                "Exomem are a supported path."
             ),
             "template_rule": (
                 "Templates are ordinary editable entry scaffolds; collection schema and "
@@ -1318,8 +1319,8 @@ def op_bootstrap(
             "uncommitted commitment, unknown health, and inbox horizon."
         ),
         "manual_first": (
-            "Canonical Planning remains ordinary editable Markdown; direct human edits and "
-            "work without an agent are supported product paths."
+            "Canonical Planning remains ordinary editable Markdown; manual edits without "
+            "Exomem are a supported path."
         ),
         "template_independence": (
             "Templates are optional editable scaffolds; Planning schema and validation do not "
@@ -1385,8 +1386,8 @@ def op_bootstrap(
             ),
             "state_the_expectation_first": (
                 "Write down what you expect before the answer arrives. A durable "
-                "expectation about a future observation is a prediction unit with a "
-                "check_by date; an expectation recorded afterwards proves nothing."
+                "expectation is a prediction unit with a check_by date; an expectation "
+                "recorded afterwards proves nothing."
             ),
             "judge_categorically": (
                 "Close a claim with one word from the outcome vocabulary below. This "
@@ -1429,10 +1430,10 @@ def op_bootstrap(
             },
         },
         "capture_nudge": (
-            "When the user states a durable expectation about a future observation, "
-            "capture it then as a prediction unit with a check_by date. Left in prose, "
-            "or in the assistant's own short-term memory, nothing can ever check it. "
-            "Skip passing speculation; capture what the user would want held to."
+            "When the user states a durable expectation, capture it then as a "
+            "prediction unit with a check_by date. Left in prose, or in the "
+            "assistant's own short-term memory, nothing can ever check it. Skip "
+            "passing speculation; capture what the user would want held to."
         ),
         "capture_the_outcome": (
             "When a concrete method was actually carried out and the user reports the "
@@ -1647,13 +1648,13 @@ def op_bootstrap(
                 "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "records_routing": (
-                    "a committed compiled note or Evidence write may name one existing "
-                    "Records collection whose claims match the observation; this is advisory "
-                    "and never appends from the advisory alone"
+                    "a committed note or Evidence write may name one Records collection whose "
+                    "claims or claims.match cover it; never append from the advisory alone. Its "
+                    "disposition carries its own instruction"
                 ),
                 "records_routing_handling": (
-                    "read the observation, then route it into the named collection under the "
-                    "served capture disposition; resume a held candidate when one exists"
+                    "route the observation under the served capture disposition, resuming a "
+                    "held candidate; ask about a grouped backfill once at any prominence"
                 ),
                 "collection_candidate": (
                     "a strong collection_candidate is a proposal: draft its schema through "
@@ -1683,7 +1684,10 @@ def op_bootstrap(
                 # and it matters MOST here: the block arrives unasked on a
                 # hookless client's ordinary write response, and that client has
                 # no detector-aware skill behind it.
-                "capture_sweep_handling": "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping, judged by whether it would materially improve a later decision, lookup, repeated task, comparison or continuation. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does",
+                # The "worth keeping" bar is the same one `engagement.contract.capture`
+                # spells out in full (a later decision, lookup, repeated task,
+                # comparison or continuation); it is not repeated here.
+                "capture_sweep_handling": "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does",
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
                 "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
@@ -4760,14 +4764,22 @@ def op_preserve(
     _note_committed_artifact_targets(payload)
     from . import semantic_writes
 
-    routing_terms = [
-        f"Evidence: {Path(result.path).name}",
+    routing_tags = [
         "evidence",
         scope.lower().replace(" ", "-"),
         category.lower().replace(" ", "-"),
+    ]
+    routing_terms = [
+        f"Evidence: {Path(result.path).name}",
+        *routing_tags,
         description.strip() if description and description.strip() else "",
     ]
-    routing = semantic_writes._records_routing_from_terms(vault_root, routing_terms)
+    # The facets the sidecar's own frontmatter carries, so `claims.match`
+    # decides an Evidence write exactly as the recompute will.
+    routing_facets = {"type": ["source"], "tags": routing_tags}
+    routing = semantic_writes._records_routing_from_terms(
+        vault_root, routing_terms, routing_facets
+    )
     try:
         from . import due_state
 
@@ -4778,6 +4790,7 @@ def op_preserve(
             terms=routing_terms,
             routing=routing,
             observation_aliases=(str(result.path or ""),),
+            facets=routing_facets,
         )
     except Exception:  # noqa: BLE001 -- due-state advice never breaks Evidence custody
         log.debug("Evidence observation due-state delta failed (non-fatal)", exc_info=True)
@@ -6094,7 +6107,15 @@ def op_activate_context(
     ordinary page reached this way is served as `kind: "page"`, `status:
     "resolved"`, evidence `["recency"]` and `generation.carried_by:
     "recency"`; a page tied with anything else abstains `ambiguous`, listing
-    both, for you to pick with `anchor`.
+    both, for you to pick with `anchor`. Without `session`, `workspace` or a
+    `continuity` token, other conversations' recent work orders
+    `recent_context` but is never taken as the referent.
+
+    A short follow-up that names nothing new ("what about the second one?",
+    "and the results?") is answered from this conversation's own thread:
+    where that thread holds one page clearly ahead of the rest, it is carried
+    as a single `partial` anchor with `generation.carried_by: "follow_up"`;
+    where two are close, both are listed under `ambiguity` for `anchor`.
 
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
@@ -6150,8 +6171,12 @@ def op_activate_context(
             audience may see for a stated purpose; leaving it unset is
             deterministic, not a wildcard. Never affects ranking, and never
             enters the packet cache key.
-        continuity: The opaque `continuity` token a previous packet of this
-            conversation returned. On a turn that names nothing ("continue",
+        continuity: The opaque `continuity` token the previous packet of this
+            conversation returned: pass it back verbatim on every call. Every
+            packet returns one, an abstention too. It identifies this
+            conversation, so a client that passes no `session` still has its
+            own thread; only a salted hash of that identity is stored, and it
+            lapses after six idle hours. On a turn that names nothing ("continue",
             "where were we") the anchors or page it names are the first thing
             the turn is taken to refer to, and may resolve on that alone. On any other turn it
             only strengthens anchors the turn already reaches on its own
@@ -6187,8 +6212,9 @@ def op_activate_context(
             conversation runs in, at most 256 characters, such as a hash of
             the working directory. A fresh conversation in the same workspace
             continues that workspace's thread before the rest of the vault's.
-            Only a salted hash of it is stored. Omitting both keys ranks by
-            the whole vault's recent work.
+            Only a salted hash of it is stored. Omitting both keys, a turn
+            that names nothing is answered from this conversation's
+            `continuity` thread alone, never from other conversations' work.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
@@ -6199,7 +6225,10 @@ def op_activate_context(
              `partial`, `retrieval_named` or competing `ambiguity` candidate),
              `ambiguity` and `missing` may still be populated.
              `generation.continuity` reports whether a token you passed was
-             `applied`, `stale` or `absent`. `generation.hot_profile` reports
+             `applied`, `stale` or `absent`; `generation.continuity_thread`
+             whether its conversation was continued (`applied`), had lapsed
+             or was unreadable (`stale`, answered as a new conversation, never
+             refused) or was not passed (`absent`). `generation.hot_profile` reports
              the recent-work projection's `state` (`current`, `partial`,
              `seeded`, `behind` or `empty`) and `session_start`, the date
              its current working session began.
@@ -6294,6 +6323,7 @@ def op_activate_context(
         finally:
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
+    _carry_thread_through_abstention(packet, continuity)
     _withhold_vault_generation(vault_root, packet, purpose=purpose)
     query_log.log_activation_call(
         vault_root,
@@ -6303,6 +6333,36 @@ def op_activate_context(
         duration_ms=round((time.perf_counter() - started) * 1000, 3),
     )
     return packet
+
+
+#: Abstentions that say something about this server rather than the turn:
+#: the caller's token was never evaluated.
+_SERVER_ABSTENTIONS = frozenset(
+    {
+        working_set_runtime_module.WARMING,
+        working_set_runtime_module.UNAVAILABLE,
+        working_set_runtime_module.DISABLED,
+    }
+)
+
+
+def _carry_thread_through_abstention(packet: Any, continuity: str | None) -> None:
+    """Every packet reports `generation.continuity_thread`; a packet the
+    server abstained on before it could read the caller's token hands that
+    token back as it came, so a keyless caller's conversation survives a
+    warming index or a spent budget. Only a token that carries a thread, the
+    only kind a caller could lose that way; nothing in it is trusted here."""
+    if not isinstance(packet, dict):
+        return
+    generation = packet.setdefault("generation", {})
+    if not isinstance(generation, dict) or "continuity_thread" in generation:
+        return
+    generation["continuity_thread"] = working_set_runtime_module.unevaluated_continuity(continuity)
+    if "continuity" in packet or _abstention_reason(packet) not in _SERVER_ABSTENTIONS:
+        return
+    payload = working_set_runtime_module.decode_continuity(continuity)
+    if payload is not None and payload["thread"]:
+        packet["continuity"] = str(continuity).strip()
 
 
 #: Packet generation fields that move with every file in the vault: the
@@ -6350,12 +6410,16 @@ def _op_activate_context_body(
         "roles_hash": "",
         "continuity": working_set_runtime_module.unevaluated_continuity(continuity),
     }
+    # `(identity, thread, thread_ns, state, salt)` once the caller's thread has
+    # been read below: an abstention after that point still carries it forward.
+    thread_carry: tuple[str, str, int | None, str, str] | None = None
 
     def _abstain(
         reason: str,
         *,
         generation: Mapping[str, Any] | None = None,
         budget_caused: bool = False,
+        carry_thread: bool = True,
     ) -> dict:
         """One abstained packet, always carrying timings when they were asked
         for. Every early exit below must keep `serve`'s own promise — abstain,
@@ -6371,6 +6435,12 @@ def _op_activate_context_body(
         caused, never for an unrelated failure that also resolves to
         `unavailable` (release-plane/guard exceptions), so a caller reading
         `request_budget` can trust it names the real cause.
+
+        Once the caller's thread is read, the packet carries it forward in a
+        token, minted after the vault generation is withheld from this
+        audience, exactly as a served packet's is: `generation` here is the
+        compiled packet's, which no guard has seen. `carry_thread=False` mints
+        nothing, for a packet the guard withheld whole.
         """
         packet = working_set_module.abstained_packet(
             reason=reason,
@@ -6384,6 +6454,23 @@ def _op_activate_context_body(
             block = active_budget.as_response_block() if active_budget is not None else None
             if block is not None:
                 packet["request_budget"] = block
+        if thread_carry is not None:
+            identity_now, thread_now, started, state, salt_now = thread_carry
+            _withhold_vault_generation(vault_root, packet, purpose=purpose)
+            token_now = (
+                working_set_runtime_module.mint_continuity(
+                    packet,
+                    identity=identity_now,
+                    thread=thread_now,
+                    thread_ns=started,
+                    salt=salt_now,
+                )
+                if carry_thread
+                else ""
+            )
+            if token_now:
+                packet["continuity"] = token_now
+            packet["generation"]["continuity_thread"] = state
         return packet
 
     if not turn.strip():
@@ -6562,6 +6649,9 @@ def _op_activate_context_body(
         # second one will, and the gate asks the budget for room in
         # proportion to it.
         lexical_started = time.monotonic()
+        # How many of the turn's units the bounded stage kept and dropped;
+        # counts only, so the diagnostic never carries the turn's words.
+        lexical_selection: dict[str, int] = {}
         with find_types.timing_span(timings, "working_set.lexical"):
             if anchor:
                 hits, lexical_state = [], "agent_choice"
@@ -6577,8 +6667,11 @@ def _op_activate_context_body(
                     ),
                     freshness=lexical_freshness,
                     recall_checkpoint=(snapshot.recall_checkpoint("kb") if snapshot else None),
+                    selection=lexical_selection,
                 )
         lexical_seconds = max(0.0, time.monotonic() - lexical_started)
+        if timings is not None and lexical_selection:
+            timings.profile["working_set.lexical"] = dict(lexical_selection)
         if working_set_module.budget_exhausted("working_set.release"):
             return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
         with find_types.timing_span(timings, "working_set.release"):
@@ -6627,13 +6720,35 @@ def _op_activate_context_body(
             raise
         except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
             log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
+    # The caller's conversation (the token's thread): a valid one is this
+    # caller's session tier when it supplied no session key of its own. An
+    # invalid or lapsed one is reported and served as keyless, never refused,
+    # and every packet below carries a thread forward, a fresh one if need be.
+    identity = working_set_runtime_module.identity_for(vault_root)
+    # The key the thread's times are signed with: they are the caller's
+    # claim until the server's MAC over them verifies.
+    salt = working_set_heat_module.load(vault_root).salt
+    thread, thread_ns, thread_state = working_set_runtime_module.read_continuity_thread(
+        continuity, identity=identity, salt=salt
+    )
+    if thread_state != working_set_runtime_module.CONTINUITY_APPLIED:
+        thread, thread_ns = working_set_runtime_module.new_thread()
+        caller_thread = None
+    else:
+        caller_thread = thread
+    thread_carry = (identity, thread, thread_ns, thread_state, salt)
     # The caller's derived keys, once: ruling S5-1's tiers, the pick's own
     # attribution and the session's last served thread all use the same one.
     attribution = (
         working_set_heat_module.attribution_for(
-            vault_root, client=client, session=session, workspace=workspace
+            vault_root,
+            client=client,
+            session=session,
+            workspace=workspace,
+            salt=salt or None,
+            thread=caller_thread,
         )
-        if client or session or workspace
+        if client or session or workspace or caller_thread
         else None
     )
     packet = working_set_runtime_module.serve(
@@ -6703,15 +6818,25 @@ def _op_activate_context_body(
     ):
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     if guarded is None:
-        return _abstain("withheld", generation=packet.get("generation") or generation_stub)
+        return _abstain(
+            "withheld",
+            generation=packet.get("generation") or generation_stub,
+            carry_thread=False,
+        )
     packet = guarded
     # Before the token is minted: it carries the index generation too.
     _withhold_vault_generation(vault_root, packet, purpose=purpose)
     token = working_set_runtime_module.mint_continuity(
-        packet, identity=working_set_runtime_module.identity_for(vault_root)
+        packet, identity=identity, thread=thread, thread_ns=thread_ns, salt=salt
     )
     if token:
         packet["continuity"] = token
+    packet.setdefault("generation", {})["continuity_thread"] = thread_state
+    # Whether the token names what this packet served: an abstention, or a
+    # packet whose only anchor is a `partial` carry, still carries a thread
+    # but no refs, and no served thread for the session to remember.
+    minted = working_set_runtime_module.decode_continuity(token) if token else None
+    served = bool(minted and minted["refs"])
     if anchor:
         # The pick is also the learning sensor (close-memory-loop step 5):
         # classified after the guard admitted it and BEFORE it is recorded as
@@ -6757,14 +6882,14 @@ def _op_activate_context_body(
                 paths=tuple(
                     str(item.get("path") or "")
                     for item in (packet.get("anchors") or ())
-                    if token
+                    if served
                     and isinstance(item, Mapping)
                     and item.get("status") in working_set_runtime_module.MINTED_STATUSES
                     and item.get("path")
                 ),
                 minted_ns=(
                     working_set_runtime_module.continuity_minted_ns(token) or time.time_ns()
-                    if token
+                    if served
                     else 0
                 ),
                 seen_ns=time.time_ns(),
@@ -7553,10 +7678,86 @@ def op_capture_source(
     return out
 
 
+_EpisodeProposalArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["route", "alternatives", "evidence", "reason", "leaves"],
+                    "properties": {
+                        "route": {
+                            "enum": [
+                                "existing_page",
+                                "semantic_unit",
+                                "focused_note",
+                                "entity",
+                                "records",
+                                "planning",
+                                "experiment",
+                                "source",
+                                "evidence",
+                                "relation_only",
+                                "no_capture",
+                            ]
+                        },
+                        "target": {"type": "string"},
+                        "title": {"type": "string"},
+                        "alternatives": {
+                            "type": "array",
+                            "maxItems": 8,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["target", "scope", "version"],
+                                "properties": {
+                                    "target": {"type": "string"},
+                                    "scope": {"type": "string"},
+                                    "version": {"type": "string"},
+                                },
+                            },
+                        },
+                        "evidence": {"enum": ["complete", "truncated", "missing"]},
+                        "reason": {"type": "string"},
+                        "leaves": {
+                            "type": "array",
+                            "maxItems": 16,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["leaf_key", "effect_revision", "kind", "args"],
+                                "properties": {
+                                    "leaf_key": {"type": "string"},
+                                    "effect_revision": {"type": "integer", "minimum": 1},
+                                    "kind": {
+                                        "enum": [
+                                            "create-note",
+                                            "create-entity",
+                                            "accept-relation",
+                                            "edit",
+                                            "supersede",
+                                        ]
+                                    },
+                                    "args": {"type": "object"},
+                                },
+                            },
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+
+
+
 def op_episode_memory(
     vault_root: Path,
     source_schema: object,
-    action: Literal["record", "inspect"],
+    action: Literal["record", "inspect", "candidates", "prepare", "disposition", "resume"],
     episode: str | None = None,
     subject: str | None = None,
     summary: str | None = None,
@@ -7566,6 +7767,18 @@ def op_episode_memory(
     said: list[str] | None = None,
     about: list[str] | None = None,
     client: str | None = None,
+    candidate: str | None = None,
+    proposal: _EpisodeProposalArgument = None,
+    disposition: Literal[
+        "routed", "no_capture", "uncertain", "rejected", "deferred", "awaiting_authority"
+    ]
+    | None = None,
+    reason: str | None = None,
+    input_revision: int | None = None,
+    journal_digest: str | None = None,
+    order: list[str] | None = None,
+    max_leaves: int | None = None,
+    postcommit: bool | None = None,
 ) -> dict:
     """Record what a conversation worked on, decided and left open, for the next session on any client.
 
@@ -7577,13 +7790,24 @@ def op_episode_memory(
     Recording again under the same `episode` with changed content adds a
     revision and retires the previous one; an identical retry writes nothing.
 
+    A recorded episode can also carry typed candidates for its durable
+    changes: `prepare` one candidate's destination, set its `disposition`
+    (including honest no_capture, deferred or rejected ones), and `resume`
+    to execute the routed ones. A leaf is one typed step for an existing
+    writer, of a kind its route owns: focused_note creates a note, entity an
+    entity, relation_only accepts a relation, existing_page and semantic_unit
+    edit or supersede. It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
+    service enables episode execution.
+
     Args:
         action: `record` writes a recap revision; `inspect` reads this
-            episode's revision history back.
+            episode's revision history back; `candidates` reads its
+            candidates; `prepare`, `disposition` and `resume` plan and
+            execute them.
         episode: The `ep-` key a previous record returned, or the one a hook
             named. Omit it on a conversation's first record and reuse the
             returned key for the rest of that conversation. Required for
-            `inspect`.
+            every other action.
         subject: What the conversation was about, one line, at most 120
             characters.
         summary: One line on where it stands, at most 180 characters.
@@ -7599,35 +7823,126 @@ def op_episode_memory(
             Refs you cannot see are dropped and counted in `about_skipped`.
         client: Optional lowercase client label, e.g. `claude-code` or
             `chatgpt`.
+        candidate: For `prepare`/`disposition`: a stable key you choose for
+            one durable change, reused when you revise it.
+        proposal: For `prepare`: {route, target?, title?, alternatives,
+            evidence, reason, leaves: [{leaf_key, effect_revision, kind,
+            args}]}. A changed leaf needs the next `effect_revision`; a
+            committed one cannot change.
+        disposition: For `disposition`: routed, no_capture, uncertain,
+            rejected, deferred or awaiting_authority.
+        reason: For `disposition`: why, in one or two sentences.
+        input_revision: For `resume`: the input revision your coverage
+            review covered, the current one.
+        journal_digest: For `resume`: the `journal_digest` your last
+            candidates, prepare or disposition result returned. A resume
+            after any later change is refused with EPISODE_REVISION_CONFLICT.
+        order: For `resume`: leaf ids to run, in this order.
+        max_leaves: For `resume`: at most this many leaves this pass, 1 to
+            16 (default 8); the rest stay pending.
+        postcommit: For `resume`: true attests your review of the committed
+            results instead of executing anything.
 
     Returns: record -> {episode, revision, source: {ref, path, title},
         idempotent, recovery, ledger, about_skipped}; inspect -> {episode,
         revisions: [{revision, recovery}], latest_source_ref,
-        coverage_current}. Newlines, credential-shaped text and anything over
-        a cap are refused with nothing written.
+        coverage_current}; candidates/prepare/disposition -> {episode,
+        input_revision, candidates: [{candidate_key, route, disposition,
+        pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete,
+        execution}; resume adds {status, executed, replayed, stale,
+        diverged, reconciled, blocked, deferred, publication}. Newlines, credential-shaped text and anything
+        over a cap are refused with nothing written.
     """
-    if action == "inspect":
-        if any(
-            value is not None
-            for value in (subject, summary, worked_on, decided, open, said, about, client)
-        ):
+    recap = {
+        "subject": subject,
+        "summary": summary,
+        "worked_on": worked_on,
+        "decided": decided,
+        "open": open,
+        "said": said,
+        "about": about,
+        "client": client,
+    }
+    workflow = {
+        "candidate": candidate,
+        "proposal": proposal,
+        "disposition": disposition,
+        "reason": reason,
+        "input_revision": input_revision,
+        "journal_digest": journal_digest,
+        "order": order,
+        "max_leaves": max_leaves,
+        "postcommit": postcommit,
+    }
+    allowed, required = {
+        "record": (set(recap), set()),
+        "inspect": (set(), set()),
+        "candidates": (set(), set()),
+        "prepare": ({"candidate", "proposal"}, {"candidate", "proposal"}),
+        "disposition": (
+            {"candidate", "disposition", "reason"},
+            {"candidate", "disposition", "reason"},
+        ),
+        "resume": (
+            {"input_revision", "journal_digest", "order", "max_leaves", "postcommit"},
+            {"input_revision", "journal_digest"},
+        ),
+    }.get(action, (None, None))
+    if allowed is None:
+        raise ValueError(
+            "EPISODE_INVALID: action must be record, inspect, candidates, prepare, "
+            "disposition or resume"
+        )
+    supplied = {**recap, **workflow}
+    if any(value is not None and name not in allowed for name, value in supplied.items()):
+        if action == "inspect":
             raise ValueError("EPISODE_INVALID: inspect takes only an episode key")
+        raise ValueError(f"EPISODE_INVALID: {action} takes {sorted(allowed) or 'only an episode key'}")
+    if any(supplied[name] is None for name in required):
+        raise ValueError(f"EPISODE_INVALID: {action} requires {sorted(required)}")
+    if action == "inspect":
         return episode_memory_module.inspect(vault_root, episode=episode)
-    if action != "record":
-        raise ValueError("EPISODE_INVALID: action must be record or inspect")
-    return episode_memory_module.record(
-        vault_root,
-        source_schema,
-        episode=episode,
-        subject=subject,
-        summary=summary,
-        worked_on=worked_on,
-        decided=decided,
-        open=open,
-        said=said,
-        about=about,
-        client=client,
-    )
+    if action == "record":
+        return episode_memory_module.record(
+            vault_root,
+            source_schema,
+            episode=episode,
+            subject=subject,
+            summary=summary,
+            worked_on=worked_on,
+            decided=decided,
+            open=open,
+            said=said,
+            about=about,
+            client=client,
+        )
+    if action == "candidates":
+        return episode_workflow_module.inspect(vault_root, episode=episode)
+    if action == "prepare":
+        return episode_workflow_module.prepare(
+            vault_root, episode=episode, candidate=candidate, proposal=proposal
+        )
+    if action == "disposition":
+        return episode_workflow_module.disposition(
+            vault_root,
+            episode=episode,
+            candidate=candidate,
+            disposition=disposition,
+            reason=reason,
+        )
+    from . import due_state as due_state_module
+
+    with due_state_module.batch_scope(vault_root):
+        resumed = episode_workflow_module.resume(
+            vault_root,
+            episode=episode,
+            journal_digest=journal_digest,
+            input_revision=input_revision,
+            order=order,
+            max_leaves=max_leaves,
+            postcommit=bool(postcommit),
+        )
+    return _carrying_batch_advisories(vault_root, resumed)
 
 
 def op_compile_source(
@@ -9637,7 +9952,13 @@ def op_adoption_studio(
 def op_maintain_memory(
     vault_root: Path,
     mode: Literal[
-        "audit", "fix", "reconcile", "backfill-ids", "structured-files", "curation"
+        "audit",
+        "fix",
+        "reconcile",
+        "backfill-ids",
+        "structured-files",
+        "curation",
+        "tag-variants",
     ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
@@ -9670,6 +9991,7 @@ def op_maintain_memory(
     expected_plan_fingerprint: str | None = None,
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
+    exclude_groups: list[str] | None = None,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
@@ -9699,6 +10021,15 @@ def op_maintain_memory(
     shared mutation terminal. Curation cannot target raw Sources or Evidence,
     Planning, Records, workflow contracts, schema/admin state, or trash internals.
 
+    `mode="tag-variants"` lists tags that differ only by case, separator, or
+    plural, grouped with the page counts you may see and the most-used written
+    form as canonical; a tie is listed, never rewritten. Preview is read-only;
+    `apply=true` with the preview's `plan_id` and a one-line `why` rewrites one
+    bounded batch of minority variants to the canonical tag and logs a rollback
+    record. Only the `tags` key changes; Sources, Evidence, Records, Planning
+    and other owned trees are untouched. Preview again for the next batch.
+    `exclude_groups` keeps named groups out of preview and apply alike.
+
     `mode="fix"` also collapses media sidecars that accumulated nested copies of
     themselves (audit category `duplicated_sidecar`, reportable on its own via
     `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest
@@ -9709,7 +10040,8 @@ def op_maintain_memory(
     recovered text is only the fallback.
 
     Args:
-        mode: audit, fix, reconcile, backfill-ids, structured-files, or curation.
+        mode: audit, fix, reconcile, backfill-ids, structured-files, curation,
+            or tag-variants.
         categories: Optional audit category filter.
         dry_run: Report without writing when true. Defaults to true for
             fix/backfill-ids (safety net) and false for reconcile (matches
@@ -9721,9 +10053,9 @@ def op_maintain_memory(
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
         collection: One Planning or Records collection for structured-files.
         apply: Omit for preview; true applies the exact reviewed plan.
-        plan_id: Exact structured-files preview identity required for apply.
+        plan_id: Exact structured-files or tag-variants preview identity for apply.
         source_snapshot: Exact structured-files preview snapshot required for apply.
-        why: Bounded audit reason required for structured-files apply.
+        why: Bounded audit reason required for structured-files or tag-variants apply.
         curation_action: Closed curation action when mode is curation.
         run_id: Governed curation run identity.
         plan: Agent-authored closed forward plan for curation propose.
@@ -9735,6 +10067,7 @@ def op_maintain_memory(
         expected_plan_fingerprint: Exact reviewed plan fingerprint for approval.
         vocabulary_ref: Optional vocabulary decision correlated with curation apply or resume.
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
+        exclude_groups: Tag-variant group keys to leave out; part of the plan_id.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -9742,6 +10075,8 @@ def op_maintain_memory(
     )
     if rebuild_graph and mode != "reconcile":
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
+    if exclude_groups is not None and mode != "tag-variants":
+        raise ValueError("INVALID_ARGUMENTS: exclude_groups applies only to tag-variants")
     if mode == "curation":
         from . import curation as curation_module
         from . import due_state as due_state_module
@@ -9900,6 +10235,40 @@ def op_maintain_memory(
         # deltas. A verified replay commits nothing and the carrier's commit
         # gate keeps its closed receipt shape untouched.
         return _carrying_batch_advisories(vault_root, migrated)
+    if mode == "tag-variants":
+        from . import tag_variants as tag_variants_module
+
+        if (
+            categories is not None
+            or dry_run is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: tag-variants accepts only apply, plan_id, why, "
+                "and exclude_groups"
+            )
+        if apply is None:
+            if plan_id is not None or why is not None:
+                raise ValueError(
+                    "INVALID_ARGUMENTS: tag-variants preview does not accept apply guards"
+                )
+            return tag_variants_module.preview(vault_root, exclude=exclude_groups)
+        if apply is not True or plan_id is None or why is None:
+            raise ValueError(
+                "INVALID_ARGUMENTS: tag-variants apply requires true, plan_id, and why"
+            )
+        from . import due_state as due_state_module
+
+        with due_state_module.batch_scope(vault_root):
+            reconciled = tag_variants_module.apply(
+                vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
+            )
+        return _carrying_batch_advisories(vault_root, reconciled)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -9945,7 +10314,7 @@ def op_maintain_memory(
         return _carrying_batch_advisories(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, structured-files, or curation"
+        "backfill-ids, structured-files, curation, or tag-variants"
     )
 
 

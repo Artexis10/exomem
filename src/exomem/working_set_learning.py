@@ -501,7 +501,7 @@ def observe_pick(
                 analysis, rows, counts, visible
             )
         row = next((item for item in rows if item.path == chosen_path), None)
-        leads = working_set_heat.leading(profile, attribution=attribution)
+        leads = working_set_heat.leading(profile, attribution=attribution, for_referent=True)
         leading = working_set_heat.members(leads, limit=working_set.HOT_PROFILE_K).paths
         recent = [
             contact.path

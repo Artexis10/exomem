@@ -26,7 +26,12 @@ role-registry hash, the index generation, the served anchor refs and the roles.
 The server trusts nothing in it beyond matching its own identity and roles hash,
 re-validates every ref against the current index, and only ever QUALIFIES an
 anchor the current turn already reached. It is minted from the packet as served —
-after the egress guard — so it can never carry a ref that guard removed.
+after the egress guard — so it can never carry a ref that guard removed. It also
+names the caller's thread (`CONTINUITY_THREAD_BYTES`), a random value echoed
+back by a caller that supplies no session key, whose salted derivation is that
+caller's session tier; the thread itself is never stored. The thread and its
+times are the one part the server signs (`working_set_heat.thread_mac`): they
+decide how long a conversation lives, and nothing else re-checks them.
 """
 
 from __future__ import annotations
@@ -35,10 +40,12 @@ import base64
 import binascii
 import copy
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -84,6 +91,21 @@ CONTINUITY_ABSENT = "absent"
 CONTINUITY_MAX_CHARS = 8192
 CONTINUITY_MAX_REFS = 32
 CONTINUITY_MAX_ROLES = 32
+
+#: The token's THREAD: an opaque random value naming one keyless caller's
+#: conversation, echoed back on every turn so a caller that supplies no
+#: session key (a remote connector over stateless HTTP) still has a session
+#: tier. It is never stored: the heat projection keeps only its salted,
+#: audience-scoped derivation (`working_set_heat.derive_key`), exactly as it
+#: keeps a supplied session key. Its lifetime is bounded twice: it lapses
+#: after `CONTINUITY_THREAD_IDLE_NS` without a served packet (the heat
+#: projection's own session gap), and `CONTINUITY_THREAD_MAX_NS` after it
+#: began whatever happened since. A lapsed thread is reported `stale` and the
+#: caller is answered as a keyless one, with a fresh thread in the new token.
+CONTINUITY_THREAD_BYTES = 16
+CONTINUITY_THREAD_MAX_CHARS = 64
+CONTINUITY_THREAD_IDLE_NS = working_set_heat.SESSION_GAP_NS
+CONTINUITY_THREAD_MAX_NS = 7 * 24 * 3600 * 1_000_000_000
 
 READY = "ready"
 #: The abstention reason a managed runtime returns while the derived index is
@@ -278,10 +300,13 @@ def encode_continuity(
     refs: Iterable[str],
     roles: Iterable[str],
     minted_ns: int | None = None,
+    thread: str = "",
+    thread_ns: int | None = None,
+    salt: str = "",
 ) -> str:
-    """Base64 of the compact JSON payload. No secret, and no signature.
+    """Base64 of the compact JSON payload. No secret, and the refs unsigned.
 
-    There is nothing to sign: every field is re-checked against the serving
+    The refs need no signature: each is re-checked against the serving
     state, and a forged token can at most name refs the current turn already
     reached by a contact kind — or, on a turn that only points back, refs the
     vault still holds as anchors, which is what the turn asked for.
@@ -291,6 +316,15 @@ def encode_continuity(
     happened from one the user has since moved on from (`working_set.
     hot_profile`). Omitted, the token reads as it did before the field
     existed, and its refs lead the profile unconditionally.
+
+    `thread` and `thread_ns` are the caller's conversation and when it began
+    (`CONTINUITY_THREAD_BYTES`). The session key is derived from the thread
+    with the sidecar's salt and the caller's audience, so a forged thread
+    names at most a session of the forger's own. Its lifetime is another
+    matter: nothing on the server remembers when a thread began or was last
+    served, so those times are signed with `salt` (`mac`), and a token whose
+    thread, times or audience no longer match reads `stale`. Without a salt
+    the thread is carried unsigned and never continues.
     """
     payload = {
         "v": CONTINUITY_VERSION,
@@ -309,6 +343,19 @@ def encode_continuity(
     }
     if minted_ns is not None:
         payload["minted_ns"] = int(minted_ns)
+    if thread:
+        payload["thread"] = str(thread)
+        if thread_ns is not None:
+            payload["thread_ns"] = int(thread_ns)
+        mac = working_set_heat.thread_mac(
+            salt,
+            identity=str(identity),
+            thread=str(thread),
+            thread_ns=thread_ns,
+            minted_ns=minted_ns,
+        )
+        if mac:
+            payload["mac"] = mac
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     # `surrogatepass`, symmetrically with `decode_continuity`. A vault path reaches
     # Python through filesystem decoding, so a filename with invalid UTF-8 arrives
@@ -375,6 +422,16 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
     # older token's behaviour rather than a stale token's.
     minted = payload.get("minted_ns")
     minted_ns = minted if isinstance(minted, int) and not isinstance(minted, bool) and minted > 0 else None
+    # The thread is optional in the same way: a token minted before it existed,
+    # or carrying one of the wrong shape, simply names no thread.
+    thread = payload.get("thread")
+    if not isinstance(thread, str) or len(thread) > CONTINUITY_THREAD_MAX_CHARS:
+        thread = ""
+    started = payload.get("thread_ns")
+    thread_ns = (
+        started if isinstance(started, int) and not isinstance(started, bool) and started > 0 else None
+    )
+    mac = payload.get("mac")
     return {
         "identity": identity,
         "roles_hash": roles_hash,
@@ -383,6 +440,9 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
         "refs": [ref for ref in refs if isinstance(ref, str) and ref],
         "roles": [role for role in roles if isinstance(role, str) and role],
         "minted_ns": minted_ns,
+        "thread": thread,
+        "thread_ns": thread_ns if thread else None,
+        "mac": mac if thread and isinstance(mac, str) else "",
     }
 
 
@@ -432,7 +492,68 @@ def read_continuity(
         return frozenset(), CONTINUITY_STALE
     if payload["conventions_hash"] != str(conventions_hash):
         return frozenset(), CONTINUITY_STALE
+    if not payload["refs"]:
+        # A token that carries only its thread: the packet behind it resolved
+        # nothing, so for the anchor refs it is exactly no token. Before the
+        # thread existed such a packet minted no token at all.
+        return frozenset(), CONTINUITY_ABSENT
     return frozenset(payload["refs"]), CONTINUITY_APPLIED
+
+
+def new_thread() -> tuple[str, int]:
+    """A fresh thread and when it began."""
+    return secrets.token_urlsafe(CONTINUITY_THREAD_BYTES), time.time_ns()
+
+
+def read_continuity_thread(
+    token: str | None, *, identity: str, salt: str, now_ns: int | None = None
+) -> tuple[str, int | None, str]:
+    """`(thread, thread_ns, state)` for one inbound token's conversation.
+
+    `applied` for a thread this vault's index minted for this audience that
+    has not lapsed; `stale` for a token that cannot be read, was minted by
+    another index, carries no valid `mac` under `salt` (unsigned, rewritten,
+    or minted for another audience), or whose thread has lapsed
+    (`CONTINUITY_THREAD_IDLE_NS` since the packet that carried it,
+    `CONTINUITY_THREAD_MAX_NS` since it began); `absent`
+    for no token, or one minted before threads existed. Only the identity is
+    checked, not the registry hashes: a conventions edit changes how turns
+    are read, not who is asking, so it strands no conversation. Never raises,
+    and never refuses: every other answer is served as a keyless caller.
+    """
+    if not str(token or "").strip():
+        return "", None, CONTINUITY_ABSENT
+    try:
+        payload = decode_continuity(token)
+    except Exception:  # noqa: BLE001 - a caller's string must not fail the request
+        log.debug("continuity thread could not be read; ignoring", exc_info=True)
+        return "", None, CONTINUITY_STALE
+    if payload is None or not identity or payload["identity"] != identity:
+        return "", None, CONTINUITY_STALE
+    thread = payload["thread"]
+    if not thread:
+        return "", None, CONTINUITY_ABSENT
+    # Before the times are read at all: they are the caller's claim until the
+    # MAC says the server made it.
+    expected = working_set_heat.thread_mac(
+        salt,
+        identity=payload["identity"],
+        thread=thread,
+        thread_ns=payload["thread_ns"],
+        minted_ns=payload["minted_ns"],
+    )
+    if not expected or not hmac.compare_digest(
+        expected.encode("ascii"), payload["mac"].encode("utf-8", "surrogatepass")
+    ):
+        return "", None, CONTINUITY_STALE
+    now = time.time_ns() if now_ns is None else int(now_ns)
+    served = payload["minted_ns"]
+    started = payload["thread_ns"] or served
+    if served is None or now - served > CONTINUITY_THREAD_IDLE_NS:
+        return "", None, CONTINUITY_STALE
+    if started is None or now - started > CONTINUITY_THREAD_MAX_NS:
+        return "", None, CONTINUITY_STALE
+    return thread, started, CONTINUITY_APPLIED
 
 
 #: The anchor statuses a token carries forward: what the packet served.
@@ -440,8 +561,20 @@ MINTED_STATUSES = frozenset({"resolved", working_set_resolve.RETRIEVAL_CARRIED_S
 _MINTED_STATUSES = MINTED_STATUSES
 
 
-def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
+def mint_continuity(
+    packet: Mapping[str, Any],
+    *,
+    identity: str,
+    thread: str = "",
+    thread_ns: int | None = None,
+    salt: str = "",
+) -> str:
     """The token for a packet AS SERVED, or `""` when there is nothing to carry.
+
+    With a `thread`, every packet carries one — an abstention too, with no
+    refs — so a caller that supplies no session key keeps its conversation
+    across a turn that resolved nothing. The refs follow the rules below
+    whatever the thread: an abstained packet names none.
 
     The caller passes the packet the guard returned, which is the whole point:
     an anchor the guard removed is not in `anchors[]`, so it cannot reach the
@@ -460,17 +593,19 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     only resume it if the token names it. Its ref is its path, which is what
     the hot profile resumes as a page referent; a later turn's `continuity` still
     only qualifies an anchor that turn reached.
+
+    `salt` signs the thread and its times (`encode_continuity`).
     """
-    if not identity or packet.get("abstained"):
+    if not identity:
         return ""
     anchors = [
         item
-        for item in packet.get("anchors") or ()
+        for item in (() if packet.get("abstained") else packet.get("anchors") or ())
         if isinstance(item, Mapping) and item.get("status") in _MINTED_STATUSES
     ]
     refs = [str(item.get("ref") or "") for item in anchors]
     refs = [ref for ref in refs if ref]
-    if not refs:
+    if not refs and not thread:
         return ""
     generation = packet.get("generation")
     generation = generation if isinstance(generation, Mapping) else {}
@@ -486,10 +621,16 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
             identity=identity,
             roles_hash=str(generation.get("roles_hash") or ""),
             conventions_hash=str(generation.get("conventions_hash") or ""),
-            generation=int(generation.get("index_generation") or 0),
+            # A token naming no ref names no generation either: nothing is
+            # re-validated against it, and an abstention's packet is not one
+            # the guard decided.
+            generation=int(generation.get("index_generation") or 0) if refs else 0,
             refs=refs,
-            roles=[role for role in roles if role],
+            roles=[role for role in roles if role] if refs else [],
             minted_ns=time.time_ns(),
+            thread=thread,
+            thread_ns=thread_ns,
+            salt=salt,
         )
     except Exception:  # noqa: BLE001 - a token is an optimisation, never a promise
         log.debug("continuity token could not be minted; serving without", exc_info=True)
@@ -727,13 +868,58 @@ def _schedule_reembed(
     _schedule_build(root, freshness_stamp=freshness_stamp)
 
 
+#: The most query units (a spaced word, or an unspaced run) the lexical
+#: stage asks the catalogue about, rarest first. PROVISIONAL: a long turn's
+#: head of distinctive words is what names a page, and the whole turn made
+#: the stage cost 3.2-4.3 s on long live turns. Re-measure, don't hand-tune.
+ACTIVATION_LEXICAL_MAX_TERMS = 12
+#: The most stems those units carry into the MATCH: the dense side's own cap
+#: on a turn (`embeddings.ACTIVATION_TURN_MAX_TOKENS`). Only unspaced runs
+#: come near it; a spaced word is one stem.
+ACTIVATION_LEXICAL_MAX_STEMS = 40
+#: On a turn with more units than `ACTIVATION_LEXICAL_MAX_TERMS`, a unit on
+#: more than this share of the knowledge base's pages is a near-stopword for
+#: this corpus and is not asked about. PROVISIONAL.
+ACTIVATION_LEXICAL_COMMON_FRACTION = 0.1
+#: The smallest catalogue that share is believed on; below it every unit
+#: competes on rarity alone. PROVISIONAL, and the carry's own floor
+#: (`working_set.RETRIEVAL_CARRY_MIN_PAGES`) for the same reason.
+ACTIVATION_LEXICAL_COMMON_MIN_PAGES = 100
+
+
+def lexical_term_budget():
+    """The activation lexical stage's `lexstore.QueryTermBudget`."""
+    from . import lexstore
+
+    return lexstore.QueryTermBudget(
+        max_units=ACTIVATION_LEXICAL_MAX_TERMS,
+        max_stems=ACTIVATION_LEXICAL_MAX_STEMS,
+        common_fraction=ACTIVATION_LEXICAL_COMMON_FRACTION,
+        common_min_pages=ACTIVATION_LEXICAL_COMMON_MIN_PAGES,
+    )
+
+
 def lexical_evidence(
-    vault_root: Path, turn: str, rows, *, limit: int, freshness=None, recall_checkpoint=None
+    vault_root: Path,
+    turn: str,
+    rows,
+    *,
+    limit: int,
+    freshness=None,
+    recall_checkpoint=None,
+    selection: dict | None = None,
 ):
     """Rank only anchor pages in the maintained full-page text index.
 
     This is own-page retrieval evidence, not a second vote for title overlap.
     Unavailable FTS never falls back to a corpus walk or foreground repair.
+
+    Bounded on any turn: at most `ACTIVATION_LEXICAL_MAX_TERMS` of the
+    turn's units, the rarest in the knowledge base, carrying at most
+    `ACTIVATION_LEXICAL_MAX_STEMS` stems, reach the MATCH (see
+    `lexical_term_budget`); ranking and corroboration then read every row
+    they match. `selection`, when given, receives how many units were kept
+    and dropped — counts only, never the turn's words.
     """
     from . import find_types, lexstore
 
@@ -744,13 +930,9 @@ def lexical_evidence(
         # A full-page match on the same single name word is not a second fact.
         # Require two distinct content units (words or unspaced runs); exact
         # aliases still resolve alone.
-        content_turn = " ".join(
-            token for token in working_set_index.tokens_of(working_set_index.normalize(turn))
-            if token not in working_set_index.STOPWORDS
-        )
         result = lexstore.search_bm25_result(
             vault_root,
-            content_turn,
+            content_words(turn),
             min(limit, len(by_path)),
             scope="kb",
             freshness=freshness,
@@ -758,6 +940,8 @@ def lexical_evidence(
             allow_delta=False,
             min_matched_terms=2,
             recall_checkpoint=recall_checkpoint,
+            term_budget=lexical_term_budget(),
+            term_selection=selection,
         )
         if not result.readiness.complete:
             return [], result.readiness.status
@@ -1337,6 +1521,18 @@ def serve(
             continuity_passed=continuity_passed,
             released_paths=released_paths,
         )
+        # A caller with no key of its own, or only a token's thread, is never
+        # given the vault tier's referent (`working_set_heat.leading`'s
+        # `for_referent`), so on a turn that points back its packet differs
+        # from a keyed caller's even where both have nothing of their own and
+        # share the vault's digest. Only on such a turn: on any other both are
+        # compiled alike and still share one entry.
+        who = attribution or working_set_heat.Attribution()
+        stranger = not (who.workspace or (who.session and not who.thread_only))
+        if stranger and working_set_resolve.analyze_turn(
+            turn, vocabulary=conventions_registry.conventions.referential
+        ).referential:
+            heat_digest = hashlib.sha256(f"{heat_digest}:stranger".encode()).hexdigest()[:16]
 
     key = cache_key(
         freshness_key=freshness_key,

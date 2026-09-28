@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from . import dreamer_store, find_corpus
+from .vocabulary_fold import fold_term
 
 #: Every served item says this, the vocabulary advisory's exact phrase.
 PERMISSION = "consideration does not authorize mutation"
@@ -77,6 +78,10 @@ class Context:
     _graph: list[Any] = field(default_factory=list)
     _resolver: list[Any] = field(default_factory=list)
     _authored: dict[str, set[tuple[str, str]]] = field(default_factory=dict)
+    #: One tick's memo, shared by every page it processes (the category
+    #: registry is loaded once per tick). Empty on the request path.
+    shared: dict[str, Any] = field(default_factory=dict)
+    _members: list[sqlite3.Connection] = field(default_factory=list)
 
     def graph(self) -> Any:
         """One validated graph read snapshot for this page, opened once.
@@ -97,6 +102,46 @@ class Context:
     def close(self) -> None:
         while self._graph:
             self._graph.pop().close()
+        while self._members:
+            self._members.pop().close()
+
+    def members_conn(self) -> sqlite3.Connection:
+        """The sidecar the page contributions live in.
+
+        The worker's own connection, or on the request path one read-only,
+        non-waiting connection opened once for this context. Raises `Deferred`
+        when the sidecar cannot be read.
+        """
+        if self.conn is not None:
+            return self.conn
+        if not self._members:
+            conn = dreamer_store.open_readonly(self.vault_root)
+            if conn is None:
+                raise Deferred("sidecar_unavailable")
+            self._members.append(conn)
+        return self._members[0]
+
+    def member_sig(self, rel_path: str) -> str | None:
+        """The signature a page's contribution stands on.
+
+        The worker records the live signature of the page it processes. A
+        request reads the signature the worker processed the page at (`seen`),
+        so the carrier's liveness check fails once the page moves on.
+        """
+        if self.conn is not None:
+            return _sig(self, rel_path)
+        row = (
+            self.members_conn().execute("SELECT sig FROM seen WHERE path=?", (rel_path,)).fetchone()
+        )
+        return None if row is None else str(row[0])
+
+    def registry(self) -> Any:
+        """The semantic-language registry, loaded once per tick."""
+        if "registry" not in self.shared:
+            from . import semantic_language_registry
+
+            self.shared["registry"] = semantic_language_registry.load_registry(self.vault_root)
+        return self.shared["registry"]
 
     def resolver(self) -> Any:
         """A wikilink resolver over the graph snapshot's pages, built once, no I/O.
@@ -268,6 +313,10 @@ class Family:
     propose: Callable[[Context, dict[str, Any]], dict[str, Any] | None] | None = None
     #: Needs vault-wide counts, so stays silent until a reseed drains.
     global_counts: bool = False
+    #: The row as one caller may see it: per-item egress recomputed from the
+    #: members that caller may see, or None when the family's minimum does not
+    #: hold on them. Families without it are served from the stored row.
+    release: Callable[[Context, dict[str, Any], Any], dict[str, Any] | None] | None = None
 
 
 def _status(page: Any) -> str:
@@ -811,8 +860,810 @@ HYDRATION = Family(
 )
 
 
+# ----------------------------------------------------------------------
+# shared by the global families: alias/anchor and convention/category
+# ----------------------------------------------------------------------
+
+#: Names, link targets, tags or labels read from one page.
+PER_PAGE_TERMS = 16
+
+#: Members named in one item's evidence besides its subject.
+_OTHER_MEMBERS = dreamer_store.EVIDENCE_CAP - 1
+
+
+def _member_entry(ctx: Context, rel_path: str, role: str, **extra: Any) -> dict[str, Any]:
+    """One evidence entry: the page's ref and title through the parse cache."""
+    page = ctx.page(rel_path)
+    frontmatter = page.frontmatter if page is not None else {}
+    exomem_id = frontmatter.get("exomem_id") if isinstance(frontmatter, dict) else None
+    return {
+        "path": rel_path,
+        "ref": _memory_or_path_ref(rel_path, exomem_id if isinstance(exomem_id, str) else None),
+        "sig": ctx.member_sig(rel_path),
+        "role": role,
+        "origin": "",
+        "title": getattr(page, "title", None),
+        **extra,
+    }
+
+
+def _governed(ctx: Context, rel_path: str) -> Any | None:
+    """The parsed page when it is an active governed page, else None."""
+    from . import activation
+
+    page = ctx.page(rel_path)
+    if page is None or not activation.is_eligible_governed_page(ctx.vault_root, page):
+        return None
+    return page
+
+
+def _pages_in(rows: list[tuple[str, ...]]) -> dict[str, list[Any]]:
+    """`(path, *columns)` rows grouped by page, in path order.
+
+    One column comes back as its value, several as a tuple.
+    """
+    pages: dict[str, list[Any]] = {}
+    for path, *values in rows:
+        pages.setdefault(path, []).append(values[0] if len(values) == 1 else tuple(values))
+    return pages
+
+
+def _released(view: dict[str, Any] | None, row: dict[str, Any]) -> dict[str, Any] | None:
+    """A stored row replaced by one caller's view of it, with the served fingerprint."""
+    if view is None:
+        return None
+    released = {**row, **view}
+    released["evidence"] = sorted(view["evidence"], key=lambda item: str(item.get("path") or ""))
+    released["fingerprint"] = dreamer_store.proposal_fingerprint(
+        family=view["family"],
+        subject_ref=view["subject_ref"],
+        signal_version=view["signal_version"],
+        evidence=released["evidence"],
+    )
+    return released
+
+
+# ----------------------------------------------------------------------
+# alias/anchor: `upkeep_alias`
+# ----------------------------------------------------------------------
+
+ALIAS_FAMILY = "upkeep_alias"
+ALIAS_KIND = "anchor.alias"
+
+
+def alias_id(key: str) -> str:
+    """An alias proposal's identity: its fold key alone.
+
+    The page it is served on is chosen per caller, as the one page carrying
+    the name that caller may see, so no path is part of the identity.
+    """
+    return dreamer_store.candidate_id(ALIAS_KIND, "", key)
+
+
+def _page_names(rel_path: str, page: Any) -> list[tuple[str, str, str]]:
+    """`(fold key, source, spelling)` for a page's names, at most 16.
+
+    Its title, its file stem, its frontmatter `aliases` and its accepted
+    `learned_aliases`. The spelling is casefolded; a learned name is kept in
+    the activation index's own normal form, which is casefolded too.
+    """
+    from . import activation_conventions, working_set_index
+
+    frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
+    learned, _rejected = working_set_index.learned_alias_verdicts(
+        frontmatter.get(working_set_index.LEARNED_ALIASES_FIELD),
+        filler=activation_conventions.shipped_conventions().conventions.referential_filler,
+    )
+    spellings = [
+        ("title", str(frontmatter.get("title") or page.title or "").strip()),
+        ("stem", Path(rel_path).stem),
+        *(("alias", alias) for alias in working_set_index._strings(frontmatter.get("aliases"))),
+        *(("learned", name) for name in learned),
+    ]
+    out: list[tuple[str, str, str]] = []
+    for source, spelling in spellings:
+        key = fold_term(spelling) if spelling else ""
+        folded = spelling if source == "learned" else spelling.casefold()
+        if key and (key, source, folded) not in out:
+            out.append((key, source, folded))
+        if len(out) >= PER_PAGE_TERMS:
+            break
+    return out
+
+
+def _page_refs(ctx: Context, rel_path: str) -> list[tuple[str, str, str]]:
+    """`(fold key, spelling, casefolded spelling)` for a page's bare link targets, at most 16.
+
+    Read from the published graph's authored dependencies. A path-shaped
+    target is not a name: an alias can only answer a bare one. Whether a bare
+    target resolves depends on who is asking (it resolves by title or stem to
+    a page that then carries the same fold key), so every one is a member.
+    """
+    out: list[tuple[str, str, str]] = []
+    for (raw,) in ctx.graph().execute(
+        "SELECT DISTINCT raw_target FROM graph_dependencies WHERE source_path = ? "
+        "ORDER BY raw_target",
+        (rel_path,),
+    ):
+        spelling = str(raw).split("|", 1)[0].split("#", 1)[0].strip()
+        spelling = spelling.removesuffix(".md").strip()
+        if not spelling or "/" in spelling or any(spelling == seen for _k, seen, _c in out):
+            continue
+        key = fold_term(spelling)
+        if key:
+            out.append((key, spelling, spelling.casefold()))
+        if len(out) >= PER_PAGE_TERMS:
+            break
+    return out
+
+
+def _alias_view(
+    ctx: Context, key: str, *, keep: Callable[[str], bool] | None
+) -> dict[str, Any] | None:
+    """The alias proposal on one fold key as a caller whose predicate is `keep` sees it.
+
+    Served when exactly one page the caller may see carries the name, it is an
+    active governed page, another page the caller may see links the name by a
+    spelling that page does not resolve, and the key is within the member
+    bound among the pages the caller may see. Every input is a released row.
+    """
+    from . import working_set_index
+
+    conn = ctx.members_conn()
+    names = _pages_in(dreamer_store.DreamerStore.members(conn, "name_keys", key, keep=keep))
+    refs = _pages_in(dreamer_store.DreamerStore.members(conn, "name_refs", key, keep=keep))
+    if len(set(names) | set(refs)) > dreamer_store.MEMBER_BOUND or len(names) != 1:
+        return None
+    subject = next(iter(names))
+    if ctx.member_sig(subject) is None or _governed(ctx, subject) is None:
+        return None
+    resolving = {spelling for source, spelling in names[subject] if source != "learned"}
+    learned = {spelling for source, spelling in names[subject] if source == "learned"}
+    referrers = {
+        path: sorted({raw for raw, folded in rows if folded not in resolving})
+        for path, rows in refs.items()
+        if path != subject
+    }
+    referrers = {path: raws for path, raws in referrers.items() if raws}
+    if not referrers:
+        return None
+    uses: dict[str, int] = {}
+    for raws in referrers.values():
+        for raw in raws:
+            uses[raw] = uses.get(raw, 0) + 1
+    spelling = min(uses, key=lambda raw: (-uses[raw], raw))
+    reason = (
+        "learned_alias_referenced"
+        if working_set_index.normalize(spelling) in learned
+        else "variant_reference"
+    )
+    subject_entry = _member_entry(ctx, subject, "subject")
+    return {
+        "family": ALIAS_FAMILY,
+        "kind": ALIAS_KIND,
+        "subject_path": subject,
+        "subject_ref": subject_entry["ref"],
+        "proposal_key": key,
+        "evidence": [
+            subject_entry,
+            *(
+                _member_entry(ctx, path, "referrer", spelling=raws[0])
+                for path, raws in sorted(referrers.items())[:_OTHER_MEMBERS]
+            ),
+        ],
+        "evidence_count": len(referrers) + 1,
+        "route": {
+            "tool": "edit_memory",
+            "args": {
+                "path": subject,
+                "operation": {"kind": "patch_frontmatter", "field": "aliases"},
+            },
+        },
+        "reason_code": reason,
+        "signal_version": review_state_digest(
+            [key, reason, spelling, sorted((p, r) for p, raws in referrers.items() for r in raws)]
+        ),
+        "measures": {"fold_key": key, "spelling": spelling, "referrers": len(referrers)},
+    }
+
+
+#: A link spelling that fails to resolve to at least one page carrying the
+#: name: for a caller who sees only that page and the link, it is a variant.
+#: Two counts per spelling, whatever the key's size.
+_VARIANTS_SQL = (
+    "SELECT DISTINCT r.raw_cf FROM name_refs r WHERE r.fold_key = ?1 AND ("
+    "SELECT count(DISTINCT n.path) FROM name_keys n WHERE n.fold_key = ?1 "
+    "AND n.source <> 'learned' AND n.spelling = r.raw_cf) < ?2 ORDER BY r.raw_cf LIMIT ?3"
+)
+
+
+def _alias_stored(ctx: Context, key: str) -> dict[str, Any] | None:
+    """The stored row for one fold key: the owner's view when it is served,
+    else the superset row, which exists whenever some caller could be served.
+
+    That is: some page carries the name, and some link spelling fails to
+    resolve to at least one of those pages. The superset row is bookkeeping:
+    every served field is recomputed per caller (`_alias_release`).
+    """
+    conn = ctx.members_conn()
+    carriers = int(
+        conn.execute(
+            "SELECT count(DISTINCT path) FROM name_keys WHERE fold_key = ?", (key,)
+        ).fetchone()[0]
+    )
+    if not carriers:
+        return None
+    variants = [str(row[0]) for row in conn.execute(_VARIANTS_SQL, (key, carriers, PER_PAGE_TERMS))]
+    if not variants:
+        return None
+    owner = _alias_view(ctx, key, keep=None)
+    if owner is not None:
+        return owner
+    subject = str(
+        conn.execute(
+            "SELECT path FROM name_keys WHERE fold_key = ? ORDER BY path LIMIT 1", (key,)
+        ).fetchone()[0]
+    )
+    marks = ",".join("?" for _ in variants)
+    referrers = _pages_in(
+        [
+            (str(path), str(raw))
+            for path, raw in conn.execute(
+                f"SELECT path, raw FROM name_refs WHERE fold_key = ? AND raw_cf IN ({marks}) "
+                "ORDER BY path, raw LIMIT ?",
+                (key, *variants, 4 * _OTHER_MEMBERS),
+            )
+        ]
+    )
+    subject_entry = _member_entry(ctx, subject, "subject")
+    return {
+        "family": ALIAS_FAMILY,
+        "kind": ALIAS_KIND,
+        "subject_path": subject,
+        "subject_ref": subject_entry["ref"],
+        "proposal_key": key,
+        "evidence": [
+            subject_entry,
+            *(
+                _member_entry(ctx, path, "referrer", spelling=raws[0])
+                for path, raws in list(referrers.items())[:_OTHER_MEMBERS]
+                if path != subject
+            ),
+        ],
+        "evidence_count": carriers + len(referrers),
+        "route": {
+            "tool": "edit_memory",
+            "args": {
+                "path": subject,
+                "operation": {"kind": "patch_frontmatter", "field": "aliases"},
+            },
+        },
+        "reason_code": "variant_reference",
+        "signal_version": review_state_digest([key, "superset", carriers, variants]),
+        "measures": {"fold_key": key, "spelling": variants[0], "referrers": len(referrers)},
+    }
+
+
+def _alias_refresh_key(ctx: Context, key: str) -> None:
+    """Recompute the one proposal on a fold key, and its ambiguity mark."""
+    store, conn = ctx.store, ctx.conn
+    kwargs = _alias_stored(ctx, key)
+    if kwargs is None:
+        store.resolve(conn, alias_id(key), producer=PRODUCER, now=ctx.now)
+    else:
+        store.upsert_proposal(
+            conn,
+            producer=PRODUCER,
+            now=ctx.now,
+            parked=ctx.parked,
+            identity=alias_id(key),
+            **kwargs,
+        )
+    # Two pages carry the name and a page links it: for a caller who sees
+    # them, the link is an ambiguity owned by the audit's link categories.
+    # Which category, and whether any, is judged per request (`ambiguity`).
+    store.clear_integrity_key(conn, key)
+    linked = conn.execute("SELECT 1 FROM name_refs WHERE fold_key=? LIMIT 1", (key,)).fetchone()
+    shared = conn.execute(
+        "SELECT count(DISTINCT path) >= 2 FROM name_keys WHERE fold_key=?", (key,)
+    ).fetchone()[0]
+    if linked is not None and shared:
+        store.note_ambiguity(conn, key, ctx.now)
+
+
+def ambiguity(ctx: Context, key: str, keep) -> str | None:
+    """The audit category a caller would see for one fold key's links, or None.
+
+    Two or more pages the caller may see carry the name, and a page the
+    caller may see links it by a spelling that resolves to none of them
+    (`forward_reference`) or to more than one (`broken_wikilink`). Reads the
+    released rows of that key only, within the member bound items keep, and
+    takes titles from the name rows: no page is parsed and a withheld page
+    never counts.
+    """
+    from . import vault as vault_module
+
+    conn = ctx.members_conn()
+    names = _pages_in(dreamer_store.DreamerStore.members(conn, "name_keys", key, keep=keep))
+    if len(names) < 2:
+        return None
+    refs = dreamer_store.DreamerStore.members(conn, "name_refs", key, keep=keep)
+    if not refs or len(set(names) | {row[0] for row in refs}) > dreamer_store.MEMBER_BOUND:
+        return None
+    titles = [
+        (path, next((spelling for source, spelling in rows if source == "title"), None))
+        for path, rows in names.items()
+    ]
+    resolver = vault_module.WikilinkResolver.from_entries(ctx.vault_root, titles)
+    category = None
+    for raw in sorted({raw for _path, raw, _folded in refs}):
+        _canonical, warning = vault_module.normalize_wikilink(
+            raw, ctx.vault_root, resolver=resolver, strict=False, visible=keep
+        )
+        if warning is None:
+            continue
+        if "does not resolve" not in warning:
+            return "broken_wikilink"
+        category = "forward_reference"
+    return category
+
+
+def _alias_contribute(
+    ctx: Context,
+    rel_path: str,
+    names: list[tuple[str, str, str]],
+    refs: list[tuple[str, str, str]],
+) -> None:
+    store, conn = ctx.store, ctx.conn
+    keys = store.contribution_keys(conn, "name_keys", rel_path)
+    keys |= store.contribution_keys(conn, "name_refs", rel_path)
+    store.replace_contributions(conn, "name_keys", rel_path, names)
+    store.replace_contributions(conn, "name_refs", rel_path, refs)
+    keys |= {row[0] for row in names} | {row[0] for row in refs}
+    for key in sorted(keys):
+        _alias_refresh_key(ctx, key)
+
+
+def _alias_on_page(ctx: Context, rel_path: str) -> None:
+    page = ctx.page(rel_path)
+    if page is None:
+        _alias_contribute(ctx, rel_path, [], [])
+        return
+    refs = _page_refs(ctx, rel_path)  # raises Deferred when the graph cannot be read
+    _alias_contribute(ctx, rel_path, _page_names(rel_path, page), refs)
+
+
+def _alias_on_delete(ctx: Context, rel_path: str) -> None:
+    _alias_contribute(ctx, rel_path, [], [])
+
+
+def _alias_revalidate(ctx: Context, row: dict[str, Any]) -> None:
+    _alias_refresh_key(ctx, str(row.get("proposal_key") or ""))
+
+
+def _alias_propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
+    return _alias_stored(ctx, str(row.get("proposal_key") or ""))
+
+
+def _alias_release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
+    return _released(_alias_view(ctx, str(row.get("proposal_key") or ""), keep=keep), row)
+
+
+ALIAS = Family(
+    name=ALIAS_FAMILY,
+    kinds=(ALIAS_KIND,),
+    on_page=_alias_on_page,
+    on_delete=_alias_on_delete,
+    revalidate=_alias_revalidate,
+    propose=_alias_propose,
+    global_counts=True,
+    release=_alias_release,
+)
+
+
+# ----------------------------------------------------------------------
+# convention/category: `upkeep_convention`
+# ----------------------------------------------------------------------
+
+CONVENTION_FAMILY = "upkeep_convention"
+TAG_KIND = "convention.tag"
+CATEGORY_KIND = "convention.category"
+
+#: The registry content hash the stored category rows were checked against.
+_REGISTRY_META = "category_registry"
+
+#: Set when a global family skipped a page at the size cap; cleared by the
+#: reseed that makes the skipped pages good again.
+CAPACITY_BEHIND_META = "capacity_behind"
+
+
+def _page_tags(page: Any) -> list[tuple[str, str]]:
+    """`(fold key, spelling)` for a page's raw frontmatter tags, at most 16."""
+    value = page.frontmatter.get("tags") if isinstance(page.frontmatter, dict) else None
+    raws = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    out: list[tuple[str, str]] = []
+    for raw in raws:
+        spelling = raw.strip() if isinstance(raw, str) else ""
+        key = fold_term(spelling) if spelling else ""
+        if key and (key, spelling) not in out:
+            out.append((key, spelling))
+        if len(out) >= PER_PAGE_TERMS:
+            break
+    return out
+
+
+def _spelling_counts(counts: dict[str, int]) -> str:
+    ordered = sorted(counts, key=lambda raw: (-counts[raw], raw))
+    return ", ".join(
+        f'"{raw}" on {counts[raw]} note{"" if counts[raw] == 1 else "s"}' for raw in ordered
+    )
+
+
+def _tag_view(
+    ctx: Context, key: str, *, keep: Callable[[str], bool] | None, strict: bool
+) -> dict[str, Any] | None:
+    """One tag cluster over the members `keep` admits (None: all of them).
+
+    Strict is a caller's view: two or more spellings are released, the served
+    subject's spelling is strictly outnumbered, and the cluster is within the
+    member bound. The server never declares which spelling is the vault's.
+    """
+    pages = _pages_in(
+        dreamer_store.DreamerStore.members(ctx.members_conn(), "term_uses", key, keep=keep)
+    )
+    if strict and len(pages) > dreamer_store.MEMBER_BOUND:
+        return None
+    counts: dict[str, int] = {}
+    for raws in pages.values():
+        for raw in set(raws):
+            counts[raw] = counts.get(raw, 0) + 1
+    if len(counts) < 2:
+        return None
+    minority = min(counts, key=lambda raw: (counts[raw], raw))
+    if strict and max(counts.values()) <= counts[minority]:
+        return None
+    subject = next(path for path, raws in pages.items() if minority in raws)
+    others = [
+        (path, next(raw for raw in raws if raw != minority))
+        for path, raws in pages.items()
+        if path != subject and any(raw != minority for raw in raws)
+    ]
+    if not others:
+        return None
+    subject_entry = _member_entry(ctx, subject, "subject", spelling=minority)
+    return {
+        "family": CONVENTION_FAMILY,
+        "kind": TAG_KIND,
+        "subject_path": subject,
+        "subject_ref": subject_entry["ref"],
+        "proposal_key": key,
+        "evidence": [
+            subject_entry,
+            *(
+                _member_entry(ctx, path, "member", spelling=raw)
+                for path, raw in others[:_OTHER_MEMBERS]
+            ),
+        ],
+        "evidence_count": len(others) + 1,
+        "route": {
+            "tool": "edit_memory",
+            "args": {"path": subject, "operation": {"kind": "replace_tags"}},
+        },
+        "reason_code": "tag_spelling_variant",
+        "signal_version": review_state_digest(
+            [key, sorted((path, raw) for path, raws in pages.items() for raw in raws)]
+        ),
+        "measures": {
+            "fold_key": key,
+            "spelling": minority,
+            "counts": dict(sorted(counts.items())),
+            "why": _spelling_counts(counts),
+        },
+    }
+
+
+def _tag_kwargs(ctx: Context, key: str) -> dict[str, Any] | None:
+    """The stored superset row for one tag fold key, or None.
+
+    It exists whenever two spellings are carried at all (two index probes),
+    whatever any one caller may see; the stored `subject_path` is the first
+    member by path and is bookkeeping only.
+    """
+    conn = ctx.members_conn()
+    span = dreamer_store.DreamerStore.spelling_span(conn, key)
+    if span is None or span[0] == span[1]:
+        return None
+    view = _tag_view(ctx, key, keep=None, strict=False)
+    if view is None:
+        # Past the member bound one spelling can fill every page read; the
+        # row still exists, since a caller who sees fewer pages may see both.
+        firsts = dreamer_store.DreamerStore.spelling_firsts(conn, key)
+        view = _tag_fallback(ctx, key, firsts)
+    first = dreamer_store.DreamerStore.first_member(conn, "term_uses", key)
+    return {**view, "subject_path": first or view["subject_path"]}
+
+
+def _tag_fallback(ctx: Context, key: str, firsts: list[tuple[str, str]]) -> dict[str, Any]:
+    """A stored cluster row from the first page of two spellings (two index seeks)."""
+    (subject, minority), *others = firsts
+    subject_entry = _member_entry(ctx, subject, "subject", spelling=minority)
+    return {
+        "family": CONVENTION_FAMILY,
+        "kind": TAG_KIND,
+        "subject_path": subject,
+        "subject_ref": subject_entry["ref"],
+        "proposal_key": key,
+        "evidence": [
+            subject_entry,
+            *(_member_entry(ctx, path, "member", spelling=raw) for path, raw in others),
+        ],
+        "evidence_count": len(firsts),
+        "route": {
+            "tool": "edit_memory",
+            "args": {"path": subject, "operation": {"kind": "replace_tags"}},
+        },
+        "reason_code": "tag_spelling_variant",
+        "signal_version": review_state_digest([key, "past-bound", firsts]),
+        "measures": {"fold_key": key, "spelling": minority, "counts": {}, "why": ""},
+    }
+
+
+def _tag_refresh(ctx: Context, key: str) -> None:
+    cid = dreamer_store.candidate_id(TAG_KIND, "", key)
+    kwargs = _tag_kwargs(ctx, key)
+    if kwargs is None:
+        ctx.store.resolve(ctx.conn, cid, producer=PRODUCER, now=ctx.now)
+        return
+    ctx.store.upsert_proposal(
+        ctx.conn, producer=PRODUCER, now=ctx.now, parked=ctx.parked, identity=cid, **kwargs
+    )
+
+
+def _registry_folds(registry: Any) -> dict[str, frozenset[str]]:
+    """Fold key -> the registered category keys a label of that fold names."""
+    memo = _FOLD_MEMO.get(registry.content_hash)
+    if memo is not None and memo[0] is registry:
+        return memo[1]
+    folds: dict[str, set[str]] = {}
+    for labels in (
+        {key: key for key in registry.core_categories},
+        registry.core_category_aliases,
+        {key: key for key in registry.categories},
+        registry.category_aliases,
+    ):
+        for label, canonical in labels.items():
+            folded = fold_term(label)
+            if folded:
+                folds.setdefault(folded, set()).add(str(canonical))
+    frozen = {key: frozenset(values) for key, values in folds.items()}
+    _FOLD_MEMO.clear()
+    _FOLD_MEMO[registry.content_hash] = (registry, frozen)
+    return frozen
+
+
+_FOLD_MEMO: dict[str, tuple[Any, dict[str, frozenset[str]]]] = {}
+
+
+def _in_scope(registry: Any, key: str, projects: tuple[str, ...], page_type: str | None) -> bool:
+    """Whether a registered category may be used on a page with these projects.
+
+    The unit parser's own rule: in scope for any one of the page's projects.
+    A core category has no scope.
+    """
+    from . import semantic_language_registry
+
+    definition = registry.categories.get(key)
+    if definition is None:
+        return key in registry.core_categories
+    return any(
+        not semantic_language_registry._scope_findings(
+            "categories", key, definition, project=project, page_type=page_type
+        )
+        for project in projects or (None,)
+    )
+
+
+def _page_labels(ctx: Context, rel_path: str) -> list[str]:
+    """A page's semantic-unit category labels as authored, at most 16, from the graph."""
+    import json
+
+    labels: list[str] = []
+    for (metadata,) in ctx.graph().execute(
+        "SELECT metadata FROM graph_nodes WHERE path = ? AND unit_ref IS NOT NULL "
+        "ORDER BY line_start, node_key",
+        (rel_path,),
+    ):
+        try:
+            label = (json.loads(metadata) or {}).get("category_raw")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(label, str) and label.strip() and label.strip() not in labels:
+            labels.append(label.strip())
+        if len(labels) >= PER_PAGE_TERMS:
+            break
+    return labels
+
+
+def _category_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
+    """The category proposals whose page is `rel_path`, by candidate id."""
+    from . import semantic_language_registry
+
+    page = _governed(ctx, rel_path) if _sig(ctx, rel_path) is not None else None
+    if page is None:
+        return {}
+    registry = ctx.registry()
+    folds = _registry_folds(registry)
+    projects = tuple(sorted(find_corpus.all_projects(page.frontmatter)))
+    view = semantic_language_registry.for_attached_projects(registry, projects)
+    out: dict[str, dict[str, Any]] = {}
+    for label in _page_labels(ctx, rel_path):
+        resolution = view.resolve_category(label, page_type=page.page_type)
+        key = fold_term(resolution.key)
+        if resolution.status == "unregistered":
+            # Only a category this page may use is ever named, and the fold
+            # must reach exactly one of them.
+            targets = {
+                target
+                for target in folds.get(key, frozenset())
+                if _in_scope(registry, target, projects, page.page_type)
+            }
+            if len(targets) != 1:
+                continue
+            target, reason = next(iter(targets)), "category_fold_registered"
+        elif resolution.status == "deprecated" and resolution.replacement:
+            target, reason = str(resolution.replacement), "category_replaced"
+            if not _in_scope(registry, target, projects, page.page_type):
+                continue
+        else:
+            continue
+        cid = dreamer_store.candidate_id(CATEGORY_KIND, rel_path, key)
+        if not key or cid in out:
+            continue
+        subject_entry = _member_entry(ctx, rel_path, "subject", spelling=label)
+        out[cid] = {
+            "family": CONVENTION_FAMILY,
+            "kind": CATEGORY_KIND,
+            "subject_path": rel_path,
+            "subject_ref": subject_entry["ref"],
+            "proposal_key": key,
+            "evidence": [subject_entry],
+            "route": {
+                "tool": "edit_memory",
+                "args": {"path": rel_path, "operation": {"kind": "replace_string"}},
+            },
+            "reason_code": reason,
+            "signal_version": review_state_digest([label, reason, target, registry.content_hash]),
+            "measures": {"label": label, "target": target, "registry": registry.content_hash},
+        }
+    return out
+
+
+def _open_category_rows(ctx: Context, rel_path: str) -> set[str]:
+    return {
+        str(row[0])
+        for row in ctx.conn.execute(
+            "SELECT id FROM candidates WHERE family=? AND kind=? AND subject_path=? "
+            "AND state='open'",
+            (CONVENTION_FAMILY, CATEGORY_KIND, rel_path),
+        )
+    }
+
+
+def _category_refresh(ctx: Context, rel_path: str) -> None:
+    proposals = _category_proposals(ctx, rel_path)
+    _resolve_all(ctx, _open_category_rows(ctx, rel_path) - set(proposals))
+    for cid, kwargs in sorted(proposals.items()):
+        ctx.store.upsert_proposal(
+            ctx.conn, producer=PRODUCER, now=ctx.now, parked=ctx.parked, identity=cid, **kwargs
+        )
+
+
+def _convention_contribute(ctx: Context, rel_path: str, tags: list[tuple[str, str]]) -> None:
+    store, conn = ctx.store, ctx.conn
+    keys = store.contribution_keys(conn, "term_uses", rel_path)
+    store.replace_contributions(conn, "term_uses", rel_path, tags)
+    for key in sorted(keys | {key for key, _raw in tags}):
+        _tag_refresh(ctx, key)
+
+
+def _convention_on_page(ctx: Context, rel_path: str) -> None:
+    page = _governed(ctx, rel_path)
+    _convention_contribute(ctx, rel_path, _page_tags(page) if page is not None else [])
+    _category_refresh(ctx, rel_path)
+
+
+def _convention_on_delete(ctx: Context, rel_path: str) -> None:
+    _convention_contribute(ctx, rel_path, [])
+    _resolve_all(ctx, _open_category_rows(ctx, rel_path))
+
+
+def _convention_revalidate(ctx: Context, row: dict[str, Any]) -> None:
+    if row.get("kind") == TAG_KIND:
+        _tag_refresh(ctx, str(row.get("proposal_key") or ""))
+    else:
+        _category_refresh(ctx, str(row.get("subject_path") or ""))
+
+
+def _convention_propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
+    if row.get("kind") == TAG_KIND:
+        return _tag_kwargs(ctx, str(row.get("proposal_key") or ""))
+    return _category_proposals(ctx, str(row.get("subject_path") or "")).get(str(row.get("id")))
+
+
+def _convention_release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
+    if row.get("kind") != TAG_KIND:
+        # A category row names only its own page: egress is exact already.
+        return row
+    return _released(
+        _tag_view(ctx, str(row.get("proposal_key") or ""), keep=keep, strict=True), row
+    )
+
+
+CONVENTION = Family(
+    name=CONVENTION_FAMILY,
+    kinds=(TAG_KIND, CATEGORY_KIND),
+    on_page=_convention_on_page,
+    on_delete=_convention_on_delete,
+    revalidate=_convention_revalidate,
+    propose=_convention_propose,
+    global_counts=True,
+    release=_convention_release,
+)
+
+
+def tick_start(ctx: Context) -> None:
+    """Once per tick: resume after the size cap, and follow a registry change.
+
+    A global family that skipped pages at the size cap reseeds once the file
+    is back under it: every indexed page is queued again and the families
+    report incomplete until that drains. A category row's signal is anchored
+    on the registry's content hash, which no page change reports, so its
+    pages are queued again when the hash moves. Writes only on either change.
+    """
+    store, conn = ctx.store, ctx.conn
+    if store.get_meta(conn, CAPACITY_BEHIND_META) and not store.capacity_exceeded(conn):
+        with store.write(conn):
+            store.pending_add(conn, sorted(store.seen_map(conn)))
+            store.set_meta(conn, "reseeding", True)
+            store.set_meta(conn, CAPACITY_BEHIND_META, None)
+    registry = ctx.registry()
+    if ctx.store.get_meta(ctx.conn, _REGISTRY_META) == registry.content_hash:
+        return
+    subjects = sorted(
+        {
+            str(row[0])
+            for row in ctx.conn.execute(
+                "SELECT subject_path FROM candidates WHERE family=? AND kind=? AND state='open'",
+                (CONVENTION_FAMILY, CATEGORY_KIND),
+            )
+        }
+    )
+    with ctx.store.write(ctx.conn):
+        if subjects:
+            ctx.store.pending_add(ctx.conn, subjects)
+        ctx.store.set_meta(ctx.conn, _REGISTRY_META, registry.content_hash)
+
+
+def release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
+    """One stored row as a caller whose release predicate is `keep` may see it.
+
+    A family without per-item egress is served from its stored row. A global
+    family recomputes the row from the members that caller may see, so a
+    withheld page equals an absent one in every served field, count and
+    fingerprint. None when the family's minimum does not hold on them, or the
+    sidecar cannot be read without waiting.
+    """
+    family = family_for(str(row.get("family") or ""))
+    if family is None or family.release is None:
+        return row
+    try:
+        return family.release(ctx, row, keep)
+    except (sqlite3.Error, Deferred):
+        return None
+
+
 #: The families this build implements, in registry order.
-REGISTRY: list[Family] = [LINK, HYDRATION]
+REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION]
 
 
 def family_names() -> tuple[str, ...]:
@@ -836,6 +1687,13 @@ def process_page(ctx: Context, rel_path: str, *, exists: bool, changed: bool = T
     """
     cited_by = set(ctx.store.candidates_for_path(ctx.conn, rel_path)) if changed else set()
     for family in REGISTRY:
+        # Past the size cap a global family records nothing more (a deletion
+        # only removes rows, so it still runs). The skipped page is owed: the
+        # family is marked behind, reports incomplete and delivers nothing,
+        # and reseeds once there is room again (`tick_start`).
+        if exists and family.global_counts and not ctx.store.family_enabled(ctx.conn, family.name):
+            ctx.store.set_meta(ctx.conn, CAPACITY_BEHIND_META, True)
+            continue
         if exists:
             family.on_page(ctx, rel_path)
         else:
@@ -918,10 +1776,16 @@ def precompute_deliverable(ctx: Context, *, extra_deliveries=()) -> float | None
     not held (delivered twice without a disposition). The two directions of one
     link pair are one proposal: only the smaller source path is ever offered,
     so a decision on it holds the other direction too. An
-    unreadable review state fails closed: nothing is deliverable.
+    unreadable review state fails closed: nothing is deliverable. While a
+    reseed drains, a family that needs vault-wide counts delivers nothing:
+    its membership is not complete yet.
     """
     from . import review_state
 
+    reseeding = bool(ctx.store.get_meta(ctx.conn, "reseeding")) and (
+        ctx.store.pending_count(ctx.conn) > 0
+    )
+    counting = {family.name for family in REGISTRY if family.global_counts}
     token = review_state_token(ctx.vault_root)
     payload = ctx.review_payload()
     store = ctx.review_store()
@@ -943,6 +1807,7 @@ def precompute_deliverable(ctx: Context, *, extra_deliveries=()) -> float | None
         family = str(row.get("family") or "")
         eligible[cid] = (
             state == "open"
+            and not (reseeding and family in counting)
             and review_state.disposition_for(family, payload=payload) == "normal"
             and counts.get((cid, str(row["fingerprint"])), 0) < MAX_DELIVERIES
             # A decision on either direction of a link pair holds the pair,
@@ -996,4 +1861,11 @@ def propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
     proposal["evidence"] = sorted(
         proposal["evidence"], key=lambda item: str(item.get("path") or "")
     )[: dreamer_store.EVIDENCE_CAP]
+    if "fingerprint" not in proposal:
+        proposal["fingerprint"] = dreamer_store.proposal_fingerprint(
+            family=proposal["family"],
+            subject_ref=proposal["subject_ref"],
+            signal_version=proposal["signal_version"],
+            evidence=proposal["evidence"],
+        )
     return proposal

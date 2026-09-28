@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.96.0](https://github.com/Artexis10/exomem/compare/v0.95.2...v0.96.0) (2026-09-28)
+
+
+### Features
+
+* keyless continuity, incident routing, dreamer families and graph convergence under writes ([#1424](https://github.com/Artexis10/exomem/issues/1424)) ([84f95bc](https://github.com/Artexis10/exomem/commit/84f95bc914dfa999d347f71103b899f075d195fb))
+
+## [0.95.2](https://github.com/Artexis10/exomem/compare/v0.95.1...v0.95.2) (2026-09-27)
+
+
+### Bug Fixes
+
+* **cloud:** give cell backup keys listBuckets and replace keys without it ([#1422](https://github.com/Artexis10/exomem/issues/1422)) ([4024cd0](https://github.com/Artexis10/exomem/commit/4024cd03ea8beeff222b76087e6da22e9da70fb9))
+
+## [0.95.1](https://github.com/Artexis10/exomem/compare/v0.95.0...v0.95.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **cloud:** expose only the Cloud MCP routes and unblock Traefik rollouts ([#1417](https://github.com/Artexis10/exomem/issues/1417)) ([d900c59](https://github.com/Artexis10/exomem/commit/d900c5967bc92506c12a65cf73a56886083f27ed))
+* **upgrade:** carry a standby-built lexical catalogue across a schema bump ([#1419](https://github.com/Artexis10/exomem/issues/1419)) ([c670656](https://github.com/Artexis10/exomem/commit/c6706566b0ae1dc50e8d3450730e5b0f2f440179))
+
+## [0.95.0](https://github.com/Artexis10/exomem/compare/v0.94.0...v0.95.0) (2026-09-27)
+
+
+### Features
+
+* **activation:** learn names and referential cues from the agent's corrections ([#1380](https://github.com/Artexis10/exomem/issues/1380)) ([1abb81c](https://github.com/Artexis10/exomem/commit/1abb81c79702045a3b301634dd6905b3c8a9a703))
+* **cloud:** prepare backup storage in the existing B2 account ([#1404](https://github.com/Artexis10/exomem/issues/1404)) ([e31aa26](https://github.com/Artexis10/exomem/commit/e31aa26d4b676f5c7a50196667231d2a12183f0e))
+* **observability:** record which hostname a request arrived on ([#1415](https://github.com/Artexis10/exomem/issues/1415)) ([c84a2e7](https://github.com/Artexis10/exomem/commit/c84a2e71cd7da4ccc0a9d4492dfee59e417d343b))
+
+
+### Bug Fixes
+
+* **cellctl:** paginate B2 file versions before deletion ([#1402](https://github.com/Artexis10/exomem/issues/1402)) ([8062421](https://github.com/Artexis10/exomem/commit/8062421557c1e87eb70e3e27bcc4b8f8cec890ad))
+* **ci:** run Cloud chart tests after dependency build ([#1408](https://github.com/Artexis10/exomem/issues/1408)) ([c3253cd](https://github.com/Artexis10/exomem/commit/c3253cd96ae763dd4c4ccfda17ff067f5656f03e))
+* **cloud:** keep legacy workers stopped across Helm upgrades ([#1406](https://github.com/Artexis10/exomem/issues/1406)) ([f57a7c2](https://github.com/Artexis10/exomem/commit/f57a7c208be3b153f7bdae7a016226c4b6dd2795))
+* **cloud:** omit legacy database hook while paused ([#1411](https://github.com/Artexis10/exomem/issues/1411)) ([9ed4d2e](https://github.com/Artexis10/exomem/commit/9ed4d2e5e590b69c7a34c3665e3585957a080b1b))
+* **cloud:** preserve database TLS identity on private connections ([#1405](https://github.com/Artexis10/exomem/issues/1405)) ([f6d893b](https://github.com/Artexis10/exomem/commit/f6d893b1baedf975a27ad4666bcb552b79131078))
+* **cloud:** publish complete production secret registry ([#1410](https://github.com/Artexis10/exomem/issues/1410)) ([4b9f8f0](https://github.com/Artexis10/exomem/commit/4b9f8f02a0911aa61e1e025969b1d5341fe8f141))
+* **fast-ack:** preserve visibility and advisories through recovery ([#1379](https://github.com/Artexis10/exomem/issues/1379)) ([5af64d8](https://github.com/Artexis10/exomem/commit/5af64d84c53fd13cd2c8e261c1bcac8ffdac210e))
+* harden routing, setup and managed hook upgrades ([#1383](https://github.com/Artexis10/exomem/issues/1383)) ([36a636d](https://github.com/Artexis10/exomem/commit/36a636dd34865105108b7c8f45d00930b145488c))
+* **test:** reconcile hosted gateway and admission tests on main ([#1414](https://github.com/Artexis10/exomem/issues/1414)) ([17ba04f](https://github.com/Artexis10/exomem/commit/17ba04f5f4a58da18a405b6c174f95471a347932))
+* **writes:** release the write lock before recap indexing ([#1412](https://github.com/Artexis10/exomem/issues/1412)) ([0c29ca1](https://github.com/Artexis10/exomem/commit/0c29ca1c3cfa30e6693801eab4691cc0fca172c5))
+
 ## [0.94.0](https://github.com/Artexis10/exomem/compare/v0.93.0...v0.94.0) (2026-09-26)
 
 

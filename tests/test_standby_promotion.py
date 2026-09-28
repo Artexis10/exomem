@@ -148,12 +148,14 @@ def test_promotion_records_a_checkpoint_that_moved_under_the_standby(
     """With no migration, promotion re-compares the checkpoint pair."""
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
-    tokens = iter(["checkpoint-1", "checkpoint-2"])
-    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: next(tokens))
+    token = {"value": "checkpoint-1"}
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: token["value"])
     _stub_adoption(monkeypatch)
     service_standby.enter_standby()
     service_standby.register_activation(_Activation())
     service_standby.prove_graph_snapshot(tmp_path)
+    # The proof reads the token on both sides of itself; the snapshot moves after.
+    token["value"] = "checkpoint-2"
     record = service_standby.promote(tmp_path, migrated=False)
     assert record["snapshot"] == "advanced"
     assert record["revalidated"] is True
@@ -622,8 +624,9 @@ def test_a_component_the_standby_never_finished_is_not_carried(monkeypatch, tmp_
 @pytest.mark.parametrize(
     ("tokens", "verdict"),
     [
-        (["checkpoint-1", "checkpoint-2"], "advanced"),
-        (["checkpoint-1", None], "rebuild-after-promotion"),
+        # The proof reads the token on both sides of itself, then promotion once.
+        (["checkpoint-1", "checkpoint-1", "checkpoint-2"], "advanced"),
+        (["checkpoint-1", "checkpoint-1", None], "rebuild-after-promotion"),
     ],
 )
 def test_a_snapshot_that_moved_under_the_standby_carries_no_graph_handoff(
@@ -742,6 +745,130 @@ def test_the_standbys_corpus_build_writes_nothing_under_the_vault_or_the_state_r
     assert service_standby.build_semantic_corpus(vault) is True
     assert census(vault) == before_vault
     assert census(state) == before_state
+
+
+def _catalogue_vault(tmp_path: Path, monkeypatch) -> Path:
+    """A vault whose serving worker already published its lexical catalogue."""
+    from exomem import freshness, lexstore
+
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    for index in range(3):
+        (notes / f"note-{index}.md").write_text(
+            f"---\ntype: note\n---\n\n# Note {index}\n\nBody {index}, see [[Note 0]].\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
+    freshness.clear()
+    lexstore.clear_stores()
+    lexstore.ensure_fresh(vault)
+    lexstore.clear_stores()
+    freshness.clear()
+    return vault
+
+
+def _sqlite_update_meta(vault: Path, key: str, value: str) -> None:
+    import sqlite3
+
+    from exomem import lexstore
+
+    connection = sqlite3.connect(lexstore.lexical_path(vault))
+    try:
+        connection.execute("UPDATE meta SET value = ? WHERE key = ?", (value, key))
+        connection.commit()
+    finally:
+        connection.close()
+    lexstore.clear_stores()
+
+
+def _bytes_census(root: Path) -> dict[str, bytes]:
+    import hashlib
+    import os
+
+    out: dict[str, bytes] = {}
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            path = Path(dirpath) / name
+            try:
+                out[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).digest()
+            except OSError:
+                continue
+    return out
+
+
+def test_a_standby_over_an_older_schema_catalogue_is_cutover_ready_without_writing_live_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The schema-bump upgrade: `lexical` must not wait out the warm budget.
+
+    The serving worker's catalogue carries an earlier release's schema, and
+    that worker keeps it current for its own code, so no amount of waiting
+    makes it current for this one. The standby builds this release's catalogue
+    into a rebuild temp instead. Every byte the serving worker owns -- the vault
+    and every file already in the vault's state directory -- is unchanged; the
+    only new files are the temp family, which the promotion adopts.
+    """
+    from exomem import lexstore, state_paths
+
+    vault = _catalogue_vault(tmp_path, monkeypatch)
+    _sqlite_update_meta(vault, "schema_version", str(lexstore.SCHEMA_VERSION - 1))
+    _sqlite_update_meta(vault, "catalog_identity", "an-earlier-release")
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+
+    state = state_paths.vault_state_dir(vault)
+    before_vault, before_state = _bytes_census(vault), _bytes_census(state)
+    service_standby.enter_standby()
+    service_standby.warm(vault)
+
+    assert service_standby.cutover_components()["lexical"] == "ready"
+    assert service_standby.cutover_ready() is True
+    after_state = _bytes_census(state)
+    assert _bytes_census(vault) == before_vault
+    changed = sorted(
+        name for name, digest in before_state.items() if after_state.get(name) != digest
+    )
+    assert changed == [], f"a standby changed live state: {changed}"
+    created = sorted(set(after_state) - set(before_state))
+    live_name = lexstore.lexical_path(vault).name
+    assert created and all(
+        name.startswith(f"{live_name}.rebuild-") for name in created
+    ), created
+    lexstore.discard_detached_catalogs()
+
+
+def test_a_same_schema_stale_catalogue_still_leaves_lexical_waiting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Only an incompatible catalogue is the standby's to rebuild.
+
+    A catalogue at this release's schema and identity that merely lags the
+    corpus is the serving worker's repair owner's to catch up, exactly as
+    before: the standby builds nothing and `lexical` stays the waiting
+    component.
+    """
+    from exomem import lexstore
+
+    vault = _catalogue_vault(tmp_path, monkeypatch)
+    (vault / "Knowledge Base" / "Notes" / "note-3.md").write_text(
+        "---\ntype: note\n---\n\n# Note 3\n\nWritten after the catalogue.\n",
+        encoding="utf-8",
+    )
+    assert lexstore.live_catalog_compatible(vault) is True
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    live = lexstore.lexical_path(vault)
+
+    service_standby.enter_standby()
+    service_standby.warm(vault)
+
+    assert service_standby.waiting_component() == "lexical"
+    assert service_standby.cutover_ready() is False
+    assert sorted(live.parent.glob(f"{live.name}.rebuild-*")) == []
 
 
 def _promotion_vault(tmp_path: Path, monkeypatch) -> Path:

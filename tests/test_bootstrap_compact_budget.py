@@ -370,6 +370,48 @@ from exomem import commands
 #: 192 bytes is not a budget, and the next addition at `maximal` trips the
 #: ceiling. The two redundancies above are still the place to get them from; do
 #: not raise this to buy room for one more sentence.
+#:
+#: `close-memory-loop`'s `episode_memory` command (2026-09-24) spent that
+#: margin: it added the command to `product_commands` (primary, routes,
+#: `first_run_safe`) and to the `capture` action's `advanced` list, ~110 bytes
+#: at every engagement level alike because none of it is level-gated text.
+#: Measured `(default surface, claude-code)`: balanced 447 / 438, maximal
+#: 82 / 73. `HEADROOM_WARNING_BYTES` was dropped to 400 as a stopgap so the
+#: planned, reviewed command could land without an emergency trim; the ceiling
+#: itself did not move.
+#:
+#: TRIMMED, restoring the margin the stopgap deferred. Bytes came back from
+#: REDUNDANCY, the same method as the two entries above: text the payload
+#: already states somewhere else, not a rule dropped.
+#:
+#:   authoring_contract.post_write.capture_sweep_handling   115  restated, in
+#:       full, the "worth keeping" bar `engagement.contract.capture`'s episode
+#:       pass already spells out ("a later decision, lookup, repeated task,
+#:       comparison or continuation"); the handling entry now says only to
+#:       make that pass, and a code comment points at the section that still
+#:       defines the bar
+#:   records.manual_first / planning.manual_first            48  both said
+#:       "direct human edits and work without an agent are supported product
+#:       paths" verbatim; shortened to "manual edits without Exomem are a
+#:       supported path" in both, losing no clause
+#:   epistemic_contract.commitments.state_the_expectation_first
+#:     and .capture_nudge                                    54  both restated
+#:       "about a future observation"; `records.intent_boundary.prediction`
+#:       (pinned exactly by `test_bootstrap.py`) already carries that same
+#:       clause on the same concept, so dropping it from these two loses
+#:       nothing the payload states nowhere else
+#:
+#: 217 bytes recovered, all from compact-wide text served at every engagement
+#: level, so the fix lifts every level's headroom by the same amount rather
+#: than trading one level's margin for another's. Measured
+#: `(default surface, claude-code)`: balanced 664 / 655, maximal 299 / 290 --
+#: `HEADROOM_WARNING_BYTES` restored to 512 below. `MINIMUM_SAVING_RATIO` is
+#: untouched.
+#:
+#: What did NOT leave: no rule and no tool mention. `episode_memory` keeps its
+#: place in `product_commands` and the `capture` action's `advanced` list;
+#: every commitment, capture class and post-write advisory still says what it
+#: said, only without repeating a clause the payload already states elsewhere.
 COMPACT_BYTE_CEILING = 63_300
 
 #: The defect was compact and full being near-identical. A profile that does not
@@ -395,8 +437,12 @@ def _size(payload: dict) -> int:
 #: Warn rather than fail: the remaining bytes are still legitimately spendable,
 #: and turning "nearly full" into a failure would just be the ceiling moved down
 #: without the argument the ceiling's own docstring demands.
-#: 512 -> 400 (2026-09-23): `episode_memory` is a planned, reviewed close-memory-loop product command; the margin stops unplanned growth, not planned surface.
-HEADROOM_WARNING_BYTES = 400
+#: 400 -> 512 (2026-09-25): the stopgap drop for `episode_memory` is repaid. The
+#: compact-bootstrap trim recorded on `COMPACT_BYTE_CEILING` above recovered 217
+#: bytes of redundant prose, restoring the default level to 664/655 bytes of
+#: headroom `(default surface, claude-code)` -- clear of the 512-byte band this
+#: constant re-asserts, and of the 256-byte floor `maximal` is held to below.
+HEADROOM_WARNING_BYTES = 512
 
 
 def test_compact_stays_under_its_byte_ceiling(payloads):

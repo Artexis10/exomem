@@ -1255,3 +1255,104 @@ def test_debt_pending_is_read_only_and_matches_pending(
     monkeypatch.setattr(graph_drain, "_marker_pending", explode)
     assert graph_drain.debt_pending(tmp_path) is True
     assert writes == []
+
+
+@pytest.mark.parametrize("already_pending", [False, True])
+def test_cold_drain_resolver_does_not_hold_the_writer_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, already_pending: bool
+) -> None:
+    """A cold resolver must not make an unrelated writer wait for its build."""
+    vault = _published_vault(tmp_path)
+    index = EpistemicGraphIndex(vault)
+    path = vault / "Knowledge Base/Notes/Insights/a.md"
+    find_module.evict_resolver_caches(vault)
+    if already_pending:
+        freshness.mark_external_pending(vault, paths=[path])
+    entered = threading.Event()
+    release = threading.Event()
+    failures: list[BaseException] = []
+    reports: list[dict[str, Any]] = []
+    real_snapshot = find_module.recall_resolver_snapshot
+
+    def slow_snapshot(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        entered.set()
+        assert release.wait(10)
+        return real_snapshot(*args, **kwargs)
+
+    def drain() -> None:
+        try:
+            reports.append(index.drain_paths([path]))
+        except BaseException as error:  # noqa: BLE001 - propagate thread failures
+            failures.append(error)
+
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", slow_snapshot)
+    thread = threading.Thread(target=drain, name="cold-drain-resolver")
+    thread.start()
+    try:
+        assert entered.wait(10)
+        with index._mutation_coordinator.hold(
+            timeout_seconds=0.2, operation="independent_writer", holder_kind="command"
+        ):
+            pass
+    finally:
+        release.set()
+        thread.join(10)
+    assert not thread.is_alive()
+    assert failures == []
+    assert reports[0]["published"] is True
+
+
+@pytest.mark.parametrize("dispatch_event", [False, True])
+def test_drain_rejects_a_resolver_prepared_before_a_concurrent_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatch_event: bool
+) -> None:
+    """A prepared fork cannot be relabeled with a newer checkpoint."""
+    vault = _published_vault(tmp_path)
+    index = EpistemicGraphIndex(vault)
+    path = vault / "Knowledge Base/Notes/Insights/a.md"
+    sibling = vault / "Knowledge Base/Notes/Insights/b.md"
+    queued = [path.relative_to(vault).as_posix()]
+    deferred_index.add_graph(vault, queued)
+    assert deferred_index.list_graph_paths(vault) == queued
+    real_snapshot = find_module.recall_resolver_snapshot
+    passes: list[bool] = []
+
+    def racing_snapshot(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        resolver = real_snapshot(*args, **kwargs)
+        sibling.write_text(_page("Renamed B", "A new link target."), encoding="utf-8")
+        if dispatch_event:
+            freshness.on_files_changed(vault, changed=[sibling])
+        else:
+            freshness.mark_external_pending(vault, paths=[sibling])
+        return resolver
+
+    def forbidden_pass(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        passes.append(True)
+        return {"indexed_files": 0, "nodes": 0, "edges": 0}
+
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", racing_snapshot)
+    monkeypatch.setattr(index, "_refresh_paths_pass", forbidden_pass)
+    report = index.drain_paths([path])
+    assert report.get("moved") == 1
+    assert report["published"] is False
+    assert passes == []
+    assert deferred_index.list_graph_paths(vault) == [path.relative_to(vault).as_posix()]
+
+
+def test_drain_withholds_availability_when_a_new_external_event_arrives_during_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _published_vault(tmp_path)
+    index = EpistemicGraphIndex(vault)
+    path = vault / "Knowledge Base/Notes/Insights/a.md"
+    sibling = vault / "Knowledge Base/Notes/Insights/b.md"
+    real_current = index._source_versions_current
+
+    def new_event(versions):  # noqa: ANN001, ANN202
+        freshness.mark_external_pending(vault, paths=[sibling])
+        return real_current(versions)
+
+    monkeypatch.setattr(index, "_source_versions_current", new_event)
+    report = index.drain_paths([path])
+    assert report["indexed_files"] >= 1
+    assert report["published"] is False

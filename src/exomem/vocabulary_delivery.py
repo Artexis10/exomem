@@ -7,6 +7,7 @@ mutation, changes its identity, or treats unavailable evidence as an empty KB.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from . import (
     deferred_index,
     envelope,
     mutation_terminal,
+    tag_variants,
     vocabulary_notifications,
     vocabulary_projection,
     vocabulary_recovery,
@@ -23,6 +25,42 @@ from . import (
 )
 from .vocabulary_state import VocabularyState
 from .vocabulary_workflow import _hash
+
+log = logging.getLogger(__name__)
+
+#: Closed projection reasons the public sync may name. Collapsing them all to
+#: ``guidance_unavailable`` hid that an unpublished or lagging graph snapshot,
+#: not a raised failure, is the ordinary cause of an unavailable sync.
+PROJECTION_REASONS = frozenset(
+    {
+        "graph_projection_unavailable",
+        "target_projection_unavailable",
+        "target_projection_changed",
+        "ambiguous_entity_identity",
+    }
+)
+PUBLIC_REASONS = PROJECTION_REASONS | {
+    "guidance_unavailable",
+    "projection_unavailable",
+    "origin_independence_unavailable",
+    "source_discovery_pending",
+}
+
+
+def _log_unavailable(stage: str, exc: BaseException) -> None:
+    """Name the swallowed failure by type and raising frame, never by content.
+
+    Exception messages can quote page text, so only the class and the
+    innermost code location travel into the operator log.
+    """
+    frame = exc.__traceback__
+    while frame is not None and frame.tb_next is not None:
+        frame = frame.tb_next
+    where = (
+        f"{frame.tb_frame.f_globals.get('__name__', '?')}:{frame.tb_lineno}"
+        if frame is not None else "?"
+    )
+    log.warning("vocabulary %s unavailable: %s at %s", stage, type(exc).__name__, where)
 
 
 def _sync(state: str, reason: str | None = None) -> dict[str, Any]:
@@ -43,7 +81,14 @@ def _project(vault_root: Path, path: str, continuation: str | None = None) -> di
             "continuation": projected["continuation"],
         }
     if projected["status"] != "current":
-        return {"sync": _sync("unavailable", "projection_unavailable"), "items": []}
+        reason = projected.get("reason")
+        return {
+            "sync": _sync(
+                "unavailable",
+                reason if reason in PROJECTION_REASONS else "projection_unavailable",
+            ),
+            "items": [],
+        }
     if any(signal.get("eligibility") == "unavailable" for signal in projected.get("signals", [])):
         return {"sync": _sync("unavailable", "origin_independence_unavailable"), "items": []}
     return {
@@ -53,9 +98,47 @@ def _project(vault_root: Path, path: str, continuation: str | None = None) -> di
     }
 
 
+def _with_tag_advisory(result: dict[str, Any], notice: Mapping[str, Any] | None) -> Any:
+    """Fill the single advisory slot with a tag notice only when it is free.
+
+    A relation review notice is evidence-bound work, so it keeps the slot; the
+    tag variant stays discoverable through its maintenance route.
+    """
+    if notice is None or "vocabulary_advisory" in result:
+        return result
+    return {**result, "vocabulary_advisory": dict(notice)}
+
+
+def _tag_advisory(vault_root: Path, path: str) -> dict[str, Any] | None:
+    try:
+        if envelope.resolved()["classes"]["structural_suggestions"]["disposition"] == "off":
+            return None
+        from . import prominence
+
+        if prominence.resolve() == "maximal":
+            # At maximal the tag writers already warned about every variant
+            # (`tag_variants.advise_authored`); one channel carries the advice.
+            return None
+        return tag_variants.advisory_for_page(vault_root, path)
+    except Exception as exc:  # noqa: BLE001 - optional guidance cannot change a committed outcome
+        _log_unavailable("tag advisory", exc)
+        return None
+
+
 @call_spans.timed("delivery.vocabulary_after_commit")
 def after_commit(vault_root: Path, result: Any) -> Any:
     """Preserve the canonical terminal even if any optional-guidance step fails."""
+    guided = _after_commit(vault_root, result)
+    if guided is result:
+        # Early exits (not a committed write, no page path, or an off envelope)
+        # carry no tag guidance either.
+        return result
+    leaf = result.get("leaf_result")
+    path = deferred_index._safe_markdown_rel_path(leaf.get("path"))
+    return _with_tag_advisory(guided, _tag_advisory(vault_root, path))
+
+
+def _after_commit(vault_root: Path, result: Any) -> Any:
     if (
         not isinstance(result, Mapping)
         or result.get("_terminal") != mutation_terminal._TERMINAL_MARKER
@@ -107,7 +190,8 @@ def after_commit(vault_root: Path, result: Any) -> Any:
                 vault_root, job, continuation=projected["continuation"]
             )
         return {**result, **guidance}
-    except Exception:  # noqa: BLE001 - optional guidance cannot change a committed outcome
+    except Exception as exc:  # noqa: BLE001 - optional guidance cannot change a committed outcome
+        _log_unavailable("guidance", exc)
         return {**result, "vocabulary_sync": _sync("unavailable", "guidance_unavailable")}
 
 
@@ -144,6 +228,7 @@ def recover(vault_root: Path, *, limit: int = 4) -> dict[str, Any]:
             processed += 1
         except Exception as exc:  # noqa: BLE001 - recovery never repeats content mutation
             unavailable = True
+            _log_unavailable("recovery", exc)
             if isinstance(exc, ValueError) and str(exc).startswith("VOCABULARY_CONTINUATION_STALE"):
                 vocabulary_recovery.reset_cursor(vault_root, job)
     return {
@@ -160,13 +245,20 @@ def public_projection(result: Mapping[str, Any]) -> dict[str, Any]:
     public = {}
     sync = result.get("vocabulary_sync")
     if isinstance(sync, Mapping) and sync.get("state") in {"current", "warming", "unavailable"}:
+        default = {
+            "unavailable": "guidance_unavailable",
+            "warming": "source_discovery_pending",
+        }.get(sync["state"])
+        reason = sync.get("reason")
         public["vocabulary_sync"] = _sync(
-            sync["state"],
-            {"unavailable": "guidance_unavailable", "warming": "source_discovery_pending"}.get(
-                sync["state"]
-            ),
+            sync["state"], reason if default and reason in PUBLIC_REASONS else default
         )
     notice = result.get("vocabulary_advisory")
+    if tag_variants.valid_advisory(notice):
+        # Derived from tag counts, not review state: the bounded shape is the
+        # whole disclosure, so it is re-emitted as validated.
+        public["vocabulary_advisory"] = dict(notice)
+        return public
     root = result.get("_vocabulary_vault")
     if not isinstance(notice, Mapping) or not isinstance(root, str):
         return public

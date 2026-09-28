@@ -210,7 +210,9 @@ A backup SHALL:
 - be written to the cell's own object-storage prefix with a key restricted to that prefix;
 - be encrypted with a random per-cell data key, envelope-encrypted by a master key held outside the database.
 
-The wrapped data key and the wrapped per-cell object-storage key SHALL be stored once on the cell row, so that a stateless controller can re-render the cell's Secret and delete the key later.
+The wrapped data key and the wrapped per-cell object-storage key SHALL be stored once on the cell row, so that a stateless controller can re-render the cell's Secret and delete the key later. The only exception is a per-cell object-storage key that lacks a capability the backup needs, which SHALL be replaced.
+
+The per-cell object-storage key SHALL carry every capability the backup tool needs through the provider's S3-compatible API, including bucket listing where the provider needs it to report a missing object as absent rather than forbidden. When cellctl applies a cell outside a hold and the provider's key listing shows the stored key without one of those capabilities, it SHALL create a fresh key, replace the stored one in a single guarded write, and delete the old key, before any backup Job of the next hold renders. A key the listing does not show, a failed listing, or a failed key creation SHALL keep the stored key. A running backup or restore hold SHALL never have its key replaced.
 
 Platform credentials with multiple fields SHALL be handed off as one complete, immutable, versioned SOPS Kubernetes Secret artifact. The declared exact key sets SHALL be enforced at the matrix, source, ciphertext and decrypted apply boundaries; every sensitive field SHALL be encrypted and verification decryption SHALL reproduce the full input document before publication. A server-side apply SHALL use the validated fields as base64 Secret `data` without changing the stored ciphertext artifact. Apply SHALL verify that the live Secret contains exactly the expected data key names before reporting success, including when another field manager retains an old key; verification output SHALL contain no secret values.
 
@@ -234,6 +236,13 @@ A restore into a new namespace SHALL produce a cell that answers recall, reports
 - **WHEN** a backup is restored into a scratch namespace and a cell starts on it
 - **THEN** recall returns the notes that existed at backup time, governance status matches the source cell, and a governed write commits
 - **AND** the source cell is unaffected
+
+#### Scenario: Stored key lacks a capability the backup needs
+
+- **WHEN** cellctl starts a backup hold for a cell whose stored object-storage key the provider lists without a required capability
+- **THEN** the cell row and the cell's Secret carry a fresh key with every required capability
+- **AND** the old key is deleted
+- **AND** the next backup can open or initialize the cell's repository
 
 #### Scenario: Backup job attempts another tenant's prefix
 

@@ -5019,11 +5019,22 @@ class LeaseManager:
             and kwargs.get("operation") == "save-relations"
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        # `maintain_memory(mode="tag-variants")` plans over the tag catalogue
+        # and every candidate page before it writes; its leaf takes the
+        # mutation boundary itself around only the batch re-verification and
+        # commit (`tag_variants.apply`). Every other maintenance mode still
+        # relies on this outer boundary.
+        narrow_tag_variant_commit = (
+            command.name == "maintain_memory"
+            and kwargs.get("mode") == "tag-variants"
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         narrow_boundary = (
             narrow_media_commit
             or narrow_tier2_file_commit
             or narrow_source_artifact_commit
             or narrow_relation_registry_commit
+            or narrow_tag_variant_commit
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
@@ -5834,7 +5845,7 @@ def invoke_command(
     active_surface = capabilities_module.current_active_surface()
     if (
         command.name == "maintain_memory"
-        and kwargs.get("mode") != "structured-files"
+        and kwargs.get("mode") not in {"structured-files", "tag-variants"}
         and not _profile_admits_request_bound_curation(active_surface, kwargs)
         and not read_only
         and selector_error is None

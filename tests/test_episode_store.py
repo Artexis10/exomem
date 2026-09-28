@@ -389,3 +389,36 @@ def test_failed_attempt_record_write_does_not_start_executor(vault: Path, monkey
     assert path.read_bytes() == before
     recovered = store.read(current["state"]["episode_id"])
     assert recovered["state"]["candidates"][0]["leaves"][0]["attempts"] == 0
+
+
+@pytest.mark.parametrize("cap", ["journal", "state"])
+def test_a_reconcile_always_fits_after_an_accepted_mark(vault: Path, monkeypatch, cap):
+    from exomem import episode_store
+
+    store = _store(vault)
+    current, candidate, leaf, proposed = _prepared(store, start_attempt=False)
+    _apply(vault, proposed)
+    path = store.path(current["state"]["episode_id"])
+    saved = path.read_bytes()
+    base = len(saved) if cap == "journal" else len(model._json(current["state"]).encode())
+    marks = 0
+    for extra in range(0, 8 * 1024, 256):
+        path.write_bytes(saved)
+        if cap == "journal":
+            monkeypatch.setattr(episode_store, "MAX_JOURNAL_BYTES", base + extra)
+        else:
+            monkeypatch.setattr(model, "MAX_STATE_BYTES", base + extra)
+        try:
+            marked = _advance(
+                store, current, "mark_attempt_started", candidate=candidate, leaf=leaf
+            )
+        except model.EpisodeError as error:
+            assert error.code == "EPISODE_TOO_LARGE"
+            continue
+        marks += 1
+        # Whatever cap admitted the mark also admits its reconcile.
+        reconciled = _advance(
+            store, marked, "reconcile_curation_leaf", candidate=candidate, leaf=leaf
+        )
+        assert reconciled["state"]["candidates"][0]["leaves"][0]["outcome"] == "committed"
+    assert marks

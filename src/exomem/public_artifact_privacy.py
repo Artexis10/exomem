@@ -307,6 +307,8 @@ def _kind(name: str) -> str:
     lowered = name.lower()
     if lowered.endswith(_ARCHIVE_SUFFIXES):
         return "archive"
+    if lowered.endswith((".public.pem", ".json.complete")):
+        return "text"
     pure = PurePosixPath(name.replace("\\", "/"))
     if pure.name in _TEXT_BASENAMES or pure.suffix.lower() in _TEXT_SUFFIXES:
         return "text"

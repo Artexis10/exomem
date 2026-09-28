@@ -99,17 +99,25 @@ def test_declared_claims_round_trip_through_manifest_inspection_and_describe(
     }
     assert {name: list(values) for name, values in manifest.claims.items()} == expected
     assert inspected["contract"]["claims"] == expected
-    assert described["json_schema"]["properties"]["claims"] == {
-        "type": "object",
-        "properties": {
-            name: {
-                "type": "array",
-                "maxItems": 24,
-                "items": {"type": "string"},
-            }
-            for name in ("tags", "terms", "entity_types", "evidence_kinds")
-        },
-        "additionalProperties": False,
+    claims_schema = described["json_schema"]["properties"]["claims"]
+    assert claims_schema["additionalProperties"] is False
+    assert {
+        name: claims_schema["properties"][name]
+        for name in ("tags", "terms", "entity_types", "evidence_kinds")
+    } == {
+        name: {
+            "type": "array",
+            "maxItems": 24,
+            "items": {"type": "string"},
+        }
+        for name in ("tags", "terms", "entity_types", "evidence_kinds")
+    }
+    assert set(claims_schema["properties"]) == {
+        "tags",
+        "terms",
+        "entity_types",
+        "evidence_kinds",
+        "match",
     }
     assert described["claims"]["maximum_items_per_list"] == 24
 
@@ -163,6 +171,8 @@ def test_effective_claims_unions_declared_and_recurring_derived_values(tmp_path:
         "tags": {"subscriptions": 2, "other": 4, "snapshot": 3},
     }
 
+    # Compared in folded form: "subscriptions" and "subscription" are one
+    # term; "billing" and "cancelled" keep their -ing/-ed (see vocabulary_fold).
     assert record_governance.effective_claims(manifest, observed) == frozenset(
         {
             "account",
@@ -173,7 +183,7 @@ def test_effective_claims_unions_declared_and_recurring_derived_values(tmp_path:
             "cancelled",
             "provider",
             "alpha",
-            "subscriptions",
+            "subscription",
         }
     )
 
@@ -252,7 +262,7 @@ def test_route_returns_only_a_strict_winner_with_bounded_sorted_terms() -> None:
     assert advisory == {
         "collection": winner.collection,
         "title": "Accounts",
-        "matched_terms": ["accounts", "active", "billing", "monthly", "provider", "renewal"],
+        "matched_terms": ["account", "active", "billing", "monthly", "provider", "renewal"],
         "natural_key": ["account", "effective_on"],
         "strength": "moderate",
     }
@@ -264,6 +274,71 @@ def test_route_stays_silent_on_a_tie_or_miss() -> None:
 
     assert route(["billing", "accounts"], [left, right]) is None
     assert route(["billing"], [left]) is None
+
+
+def _generic_overlap_corpus() -> tuple[RoutingTarget, RoutingTarget, RoutingTarget, RoutingTarget]:
+    metrics = _target(
+        "Knowledge Base/Records/Metrics/_collection.md",
+        {"capture", "release", "review", "dashboard"},
+    )
+    standups = _target(
+        "Knowledge Base/Records/Standups/_collection.md", {"capture", "release"}
+    )
+    retros = _target("Knowledge Base/Records/Retros/_collection.md", {"review", "capture"})
+    okrs = _target("Knowledge Base/Records/OKRs/_collection.md", {"release", "review"})
+    return metrics, standups, retros, okrs
+
+
+def test_route_stays_silent_on_generic_term_overlap_alone() -> None:
+    """"capture", "release" and "review" are each declared by most of these
+    invented collections, so their corpus-wide document frequency is high --
+    a strict raw-count winner on those terms alone still gets no suggestion."""
+    metrics, standups, retros, okrs = _generic_overlap_corpus()
+
+    assert route(["capture", "release", "review"], [metrics, standups, retros, okrs]) is None
+
+
+def test_route_still_fires_on_a_collection_distinctive_term() -> None:
+    """The same generic overlap, plus one term ("dashboard") only Metrics
+    declares, gives a real subject signal and still routes."""
+    metrics, standups, retros, okrs = _generic_overlap_corpus()
+
+    advisory = route(
+        ["capture", "release", "review", "dashboard"],
+        [metrics, standups, retros, okrs],
+    )
+
+    assert advisory == {
+        "collection": metrics.collection,
+        "title": "Metrics",
+        "matched_terms": ["capture", "dashboard", "release", "review"],
+        "natural_key": ["account", "effective_on"],
+        "strength": "moderate",
+    }
+
+
+@pytest.mark.parametrize("population", [3, 5])
+def test_route_rejects_majority_terms_in_an_odd_population(population: int) -> None:
+    winner = _target("Knowledge Base/Records/Ledger/_collection.md", {"cloud", "project"})
+    others = [
+        _target(f"Knowledge Base/Records/Other{index}/_collection.md", {term})
+        for index, term in enumerate(["cloud", "project"] * (population // 2))
+    ]
+
+    assert route(["cloud", "project"], [winner, *others]) is None
+
+
+@pytest.mark.parametrize("population", [1, 2, 4])
+def test_route_preserves_singleton_and_half_population_claims(population: int) -> None:
+    winner = _target("Knowledge Base/Records/Ledger/_collection.md", {"cloud", "project"})
+    others = [
+        _target(f"Knowledge Base/Records/Other{index}/_collection.md", claims)
+        for index, claims in enumerate(
+            [{"cloud"}, {"project"}, {"unrelated"}][: population - 1]
+        )
+    ]
+
+    assert route(["cloud", "project"], [winner, *others])["collection"] == winner.collection
 
 
 def test_claim_routing_normalizes_nfkc_for_authored_and_declared_terms(
@@ -393,7 +468,7 @@ def test_claims_projection_reconcile_equals_bounded_record_folds(
     )
     due_state.reconcile(tmp_path)
     baseline = due_state.routing_targets(tmp_path)[0]
-    assert {"active", "provider", "alpha", "subscriptions"} <= baseline.claims
+    assert {"active", "provider", "alpha", "subscription"} <= baseline.claims
 
     first_path = _write_item(
         tmp_path,
@@ -448,7 +523,7 @@ def test_claims_projection_reconcile_equals_bounded_record_folds(
         },
     )
     folded = due_state.routing_targets(tmp_path)[0]
-    assert {"cancelled", "provider", "beta", "licences"} <= folded.claims
+    assert {"cancelled", "provider", "beta", "licence"} <= folded.claims
 
     monkeypatch.undo()
     reconciled = due_state.reconcile(tmp_path)
@@ -496,7 +571,7 @@ def test_incomplete_claims_census_keeps_declared_terms_but_suppresses_derived(
 
     target = due_state.routing_targets(tmp_path, payload=payload)[0]
 
-    assert {"account", "subscriptions"} <= target.claims
+    assert {"account", "subscription"} <= target.claims
     assert "provider" not in target.claims
     assert "alpha" not in target.claims
 
@@ -557,7 +632,7 @@ def test_compiled_page_routing_uses_title_page_tags_and_unit_tags(
 
     assert advisory is not None
     assert advisory["collection"] == target.collection
-    assert advisory["matched_terms"] == ["account", "alpha", "subscriptions"]
+    assert advisory["matched_terms"] == ["account", "alpha", "subscription"]
 
 
 def test_routing_analysis_failure_is_absent_and_never_becomes_a_warning(
@@ -645,9 +720,11 @@ def test_evidence_preserve_routes_sidecar_title_tags_and_description_after_write
     from exomem import commands
 
     seen: list[str] = []
+    seen_facets: list[object] = []
 
-    def route(_root: Path, terms: list[str]) -> dict[str, object]:
+    def route(_root: Path, terms: list[str], facets: object = None) -> dict[str, object]:
         seen.extend(terms)
+        seen_facets.append(facets)
         return {
             "collection": MANIFEST_PATH,
             "title": "Warranty ledger",
@@ -674,6 +751,10 @@ def test_evidence_preserve_routes_sidecar_title_tags_and_description_after_write
         "home-warranty",
         "receipts",
         "Receipt for the vacuum warranty",
+    ]
+    # The sidecar's own facets, so `claims.match` decides it as the recompute will.
+    assert seen_facets == [
+        {"type": ["source"], "tags": ["evidence", "home-warranty", "receipts"]}
     ]
     assert (tmp_path / result["sidecar_path"]).exists()
 
@@ -1314,24 +1395,27 @@ def test_collection_candidate_detector_excludes_already_claimed_term() -> None:
     assert all(item.term != "studio-licence" for item in findings)
 
 
-def _write_candidate_pages(tmp_path: Path) -> None:
+def _write_candidate_pages(tmp_path: Path, *, domain: str = "studio-licence") -> None:
     notes = tmp_path / "Knowledge Base/Notes/Insights"
     notes.mkdir(parents=True, exist_ok=True)
+    studio = domain == "studio-licence"
+    stem = "studio" if studio else domain
+    identities = "#provider-alpha #workspace-beta" if studio else f"#{domain}-vendor #{domain}-site"
+    digit = "5" if studio else "6"
     for index, row in enumerate(_candidate_rows(), start=1):
-        (notes / f"studio-{index}.md").write_text(
+        (notes / f"{stem}-{index}.md").write_text(
             "---\n"
             "type: insight\n"
-            f"exomem_id: 55555555-5555-4555-8555-55555555555{index}\n"
-            f"title: Studio licence event {index}\n"
+            f"exomem_id: 55555555-5555-4555-8555-5555555555{digit}{index}\n"
+            f"title: {stem.replace('-', ' ').capitalize()} event {index}\n"
             f"created: {row['date'].isoformat()}\n"
             f"updated: {row['date'].isoformat()}\n"
             "status: active\n"
-            "tags: [studio-licence]\n"
+            f"tags: [{domain}]\n"
             "sources: []\n"
             "---\n\n"
             "## Observations\n\n"
-            f"- [purchase] {row['text']} #studio-licence #provider-alpha "
-            f"#workspace-beta ^event\n",
+            f"- [purchase] {row['text']} #{domain} {identities} ^event\n",
             encoding="utf-8",
         )
 
@@ -1342,12 +1426,18 @@ def test_candidate_audit_projects_subject_metadata_and_resolves_by_claims(
     _write_candidate_pages(tmp_path)
 
     report = audit.audit(tmp_path, categories=["collection_candidate"])
-    studio = next(
+    # Terms carried by exactly the same units are one domain and one finding.
+    (studio,) = [
         finding
         for finding in report.findings
-        if finding.meta["review_partition"] == "studio-licence"
-    )
-    assert studio.meta["domain_terms"][:1] == ["studio-licence"]
+        if "studio-licence" in finding.meta["domain_terms"]
+    ]
+    term = studio.meta["review_partition"]
+    assert set(studio.meta["domain_terms"]) == {
+        "studio-licence",
+        "provider-alpha",
+        "workspace-beta",
+    }
     assert len(studio.meta["evidence_units"]) == 4
     projection = due_state.reconcile(tmp_path)
     entries = [
@@ -1355,20 +1445,18 @@ def test_candidate_audit_projects_subject_metadata_and_resolves_by_claims(
         for bucket in projection["categories"]["collection_candidate"].values()
         for entry in bucket["open"]
     ]
-    projected = next(
-        entry for entry in entries if entry["component"]["term"] == "studio-licence"
-    )
+    projected = next(entry for entry in entries if entry["component"]["term"] == term)
     assert projected["meta"]["domain_terms"] == studio.meta["domain_terms"]
     assert projected["component"]["evidence_units"] == studio.meta["evidence_units"]
 
     _write_manifest(tmp_path, claims="claims:\n  terms: [studio licence]\n")
 
     healed = due_state.reconcile(tmp_path)
-    assert all(
-        entry["component"]["term"] != "studio-licence"
+    assert not [
+        entry
         for bucket in healed["categories"]["collection_candidate"].values()
         for entry in bucket["open"]
-    )
+    ]
 
 
 def test_candidate_is_opt_in_for_attention_but_registered_for_due_state(tmp_path: Path) -> None:
@@ -1429,6 +1517,7 @@ def test_carrier_reuses_projection_and_routing_within_each_audience_read(
     from exomem.governance import egress
 
     _write_candidate_pages(tmp_path)
+    _write_candidate_pages(tmp_path, domain="garden-lease")
     _write_manifest(tmp_path, claims="claims:\n  terms: [account, subscriptions]\n")
     _write_observation(tmp_path)
     now = dt.datetime(2026, 9, 3, 12, tzinfo=dt.UTC)

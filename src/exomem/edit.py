@@ -45,6 +45,7 @@ from . import (
     reserved_paths,
     semantic_contract,
     semantic_writes,
+    tag_variants,
     temporal,
 )
 from . import find as find_module
@@ -254,8 +255,10 @@ def edit(
         fm_text = _set_or_append(fm_text, "updated", date_iso)
 
     # Patch tags: if provided.
+    tag_warnings: list[str] = []
     if tags is not None:
         tags_clean = _clean_tags(tags)
+        tag_warnings = tag_variants.advise_authored(vault_root, tags_clean)
         fm_text = _remove_yaml_key(fm_text, "tags")
         if tags_clean:
             fm_text = fm_text.rstrip() + "\ntags: [" + ", ".join(tags_clean) + "]"
@@ -378,7 +381,7 @@ def edit(
         date_iso=date_iso,
         why=why,
         changed=changed,
-        extra_warnings=body_warnings,
+        extra_warnings=body_warnings + tag_warnings,
         expected_before_hash=editable.semantic_before_hash,
         semantic_transition_token=semantic_transition_token,
         relation_disposition=relation_disposition,
@@ -442,6 +445,26 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     # Shared with `replace._resolve_kb_path` and the hosted protected-tree
     # guard. See `kbdir.kb_relative_form` for why this must not be inlined.
     candidate, rel = kb_page_target(vault_root, path)
+    # The literal (NFKC) spelling may be absent because the on-disk name is a
+    # different Unicode normalization -- a macOS-origin NFD name on a
+    # byte-exact filesystem (Linux ext4) -- or it may sit beside such a twin.
+    # Resolving never renames: see `reserved_paths.physical_spelling_refusal`.
+    # A collision is refused even when the NFKC spelling exists, so reads and
+    # writes agree on the path; a non-canonical name only when the NFKC
+    # spelling does not open, because a normalization-insensitive filesystem
+    # (APFS) opens it through the NFD name and that edit always worked.
+    refusal = reserved_paths.physical_spelling_refusal(vault_root, rel)
+    if refusal is not None and (refusal[0] == "AMBIGUOUS_PATH" or not candidate.exists()):
+        from .get_page import path_withheld
+
+        if path_withheld(vault_root, rel):
+            # A withheld page answers exactly like a missing one.
+            raise EditError(
+                code="NOT_FOUND",
+                missing=["path"],
+                reason=f"file does not exist: {rel}",
+            )
+        raise EditError(code=refusal[0], missing=["path"], reason=refusal[1])
     try:
         resolved = candidate.resolve()
         kb_relative = resolved.relative_to(kb_root(vault_root).resolve())

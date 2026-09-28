@@ -2330,13 +2330,17 @@ def _structure_suggestion(
 
 
 def _records_routing_from_terms(
-    vault_root: Path, terms: Sequence[str]
+    vault_root: Path,
+    terms: Sequence[str],
+    facets: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any] | None:
     """Route authored terms through visible projected claims. Advisory; fail open."""
     try:
         from . import collection_claims, due_state
 
-        return collection_claims.route(terms, due_state.routing_targets(vault_root))
+        return collection_claims.route(
+            terms, due_state.routing_targets(vault_root), facets=facets
+        )
     except Exception:  # noqa: BLE001 -- routing advice never breaks a commit
         log.debug("collection claims routing failed (non-fatal)", exc_info=True)
         return None
@@ -2344,13 +2348,24 @@ def _records_routing_from_terms(
 
 def _records_routing(vault_root: Path, state: Any) -> dict[str, Any] | None:
     """Collect only the written compiled page's declared routing vocabulary."""
-    return _records_routing_from_terms(vault_root, _records_routing_terms(state))
+    return _records_routing_from_terms(
+        vault_root, _records_routing_terms(state), _records_routing_facets(state)
+    )
 
 
 def _records_routing_for_delivery(
-    vault_root: Path, routing: Mapping[str, Any] | None
+    vault_root: Path,
+    routing: Mapping[str, Any] | None,
+    *,
+    state: Any = None,
+    created: bool = True,
 ) -> dict[str, Any] | None:
-    """Suppress a routed advisory when its review family is quiet or off."""
+    """Suppress a routed advisory when its review family is quiet or off.
+
+    Given the written `state`, a strong route of a failure-shaped observation
+    also carries the prominence-driven `disposition` (see `records_disposition`).
+    An edit (`created=False`) carries one only while the page is still unfiled.
+    """
     if routing is None:
         return None
     try:
@@ -2367,19 +2382,69 @@ def _records_routing_for_delivery(
     except Exception:  # noqa: BLE001 -- disposition failure costs only advice
         log.debug("collection routing disposition read failed (non-fatal)", exc_info=True)
         return None
-    return dict(routing)
+    delivered = dict(routing)
+    if state is not None:
+        try:
+            from . import prominence, records_disposition
+
+            extra = records_disposition.disposition(
+                vault_root,
+                routing,
+                state,
+                level=prominence.effective_capture_level(),
+                created=created,
+            )
+        except Exception:  # noqa: BLE001 -- a disposition failure costs only the disposition
+            log.debug("records routing disposition failed (non-fatal)", exc_info=True)
+            extra = None
+        if extra:
+            delivered.update(extra)
+    return delivered
+
+
+def _frontmatter_strings(frontmatter: Any, *names: str) -> list[str]:
+    values: list[str] = []
+    if not isinstance(frontmatter, Mapping):
+        return values
+    for name in names:
+        raw = frontmatter.get(name)
+        items = [raw] if isinstance(raw, str) else raw if isinstance(raw, (list, tuple)) else ()
+        values.extend(str(item) for item in items if type(item) in {str, int, float, bool})
+    return [value for value in values if value.strip()]
+
+
+def _records_routing_facets(state: Any) -> dict[str, list[str]]:
+    """The page facets `claims.match` predicates test: type, category, project, tags.
+
+    `category` is the page's own `category` plus the categories of its units,
+    so a note that records a `[failure]` unit is failure-shaped even when its
+    `type` says otherwise. `project` reads both `project` and `projects`.
+    """
+    frontmatter = getattr(state, "frontmatter", None) or {}
+    document = getattr(state, "document", None)
+    unit_categories = [
+        str(category)
+        for unit in (getattr(document, "units", None) or ())
+        if (category := getattr(unit, "category", None))
+    ]
+    facets = {
+        "type": _frontmatter_strings(frontmatter, "type"),
+        "category": [*_frontmatter_strings(frontmatter, "category"), *unit_categories],
+        "project": _frontmatter_strings(frontmatter, "project", "projects"),
+        "tags": _frontmatter_strings(frontmatter, "tags"),
+    }
+    return {key: list(dict.fromkeys(values)) for key, values in facets.items() if values}
 
 
 def _records_routing_terms(state: Any) -> list[str]:
-    """Authored title, page tags and unit tags from one compiled state."""
+    """Authored title, page tags and unit tags.
+
+    Type, category and project are predicates (`_records_routing_facets`), not
+    words: counted as coverage terms they let a note about one product reach a
+    collection for another through a shared `type`.
+    """
     frontmatter = getattr(state, "frontmatter", None) or {}
-    raw_tags = frontmatter.get("tags") if isinstance(frontmatter, Mapping) else ()
-    if isinstance(raw_tags, str):
-        page_tags = [raw_tags]
-    elif isinstance(raw_tags, (list, tuple)):
-        page_tags = [str(value) for value in raw_tags]
-    else:
-        page_tags = []
+    page_tags = _frontmatter_strings(frontmatter, "tags")
     document = getattr(state, "document", None)
     unit_tags = [
         str(tag)
@@ -2408,6 +2473,7 @@ def _observation_delta(
             terms=_records_routing_terms(state),
             routing=routing,
             observation_aliases=(str(getattr(state, "path", "") or ""),),
+            facets=_records_routing_facets(state),
         )
     except Exception:  # noqa: BLE001 -- observation advice never breaks a commit
         log.debug("observation due-state delta failed (non-fatal)", exc_info=True)
@@ -2527,7 +2593,9 @@ def commit_existing(
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
     routing = _records_routing(vault_root, preflight.after)
     _observation_delta(vault_root, preflight.after, routing)
-    delivered_routing = _records_routing_for_delivery(vault_root, routing)
+    delivered_routing = _records_routing_for_delivery(
+        vault_root, routing, state=preflight.after, created=False
+    )
     due = _due_state_block(vault_root, preflight.path)
     sweep = _capture_sweep_block(vault_root, preflight.after, preflight.after_corpus)
     context = {
@@ -4062,7 +4130,9 @@ def commit_creation(
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
     routing = _records_routing(vault_root, preflight.semantic_state)
     _observation_delta(vault_root, preflight.semantic_state, routing)
-    delivered_routing = _records_routing_for_delivery(vault_root, routing)
+    delivered_routing = _records_routing_for_delivery(
+        vault_root, routing, state=preflight.semantic_state
+    )
     due = _due_state_block(vault_root, preflight.destination)
     sweep = _capture_sweep_block(vault_root, preflight.semantic_state, preflight.corpus)
     context = {

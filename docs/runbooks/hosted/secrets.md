@@ -470,7 +470,7 @@ old value on receipt evidence alone.
 ## Signed active-secret registry
 
 The registry signer is a release-custodian operation. It produces an immutable
-registry/public-key pair for every one of the 34 active K3s destinations; it
+registry/public-key pair for every active K3s destination; it
 does not decrypt an artifact or apply anything. Disable tracing and use the
 pre-created private directory `/secure/operator/exomem-hosted/active-secret-registry/`.
 It must be owned by the current operator, mode `0700`, and contain neither a

@@ -9,6 +9,7 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 - Add a bounded episode contract that partitions independently reusable objects by retrieval question, subject/domain, temporal episode and epistemic role before selecting destinations; preserves attributed uncertainty and independent provenance through multi-page fan-out; and resumes partial work without duplicate writes. A successful write is not an episode-completion signal.
 - Require active-agent destination review before committing: similarity supplies candidates, while title/scope, artifact role and independent future use determine the canonical home. Prove separately named synthesis and minor-refinement cases without rewarding needless fragmentation.
 - Support the same core operations through MCP, CLI and REST. Verify Claude Code, Codex, ChatGPT, Claude app and a generic MCP client, reporting lifecycle enforcement separately from tool-only best effort.
+- Keep already-installed Claude Code lifecycle hooks aligned with a successfully promoted managed release; report refresh failures without rolling back the release or installing hooks into unwired profiles.
 - Complete dynamic entity/type/relation authoring and extend the existing opt-in additive-authority design to relationships involving future in-vault endpoints. Planning commitments still require expressed user intent; destructive changes remain separately controlled.
 - Resolve canonical vocabulary before writes and destination projection: deterministic exact/alias reuse, bounded semantic candidates for the active agent, inspectable receipts and protection against concurrent identity forks. Exercise readable title-first citations across clients under the existing presentation contract.
 - Separate independently meaningful actors, physical sites and brands while keeping multiple roles on one identity. Add contextual name ambiguity, operator changes and lot-specific supplier provenance to the existing capture-to-activation acceptance cohort; reuse the dynamic registry instead of hardcoding a farm ontology.
@@ -27,6 +28,8 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 - `development-candidates`: immutable local-wheel iteration through managed staging.
 
 ### Modified Capabilities
+
+- `managed-service-upgrades`: a release that changes the lexical catalogue schema cuts over through a catalogue its standby built instead of a cold start.
 
 The existing `activate-agent-led-vocabulary-evolution` change continues to own scoped additive authority; its artifacts are revised with this programme rather than introducing a competing authority delta. The existing `add-context-activation-benchmark` change retains its fixture/scoring ownership. The integration contract adds no second mutation executor or canonical storage engine.
 

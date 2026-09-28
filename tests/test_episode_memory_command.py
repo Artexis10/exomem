@@ -3,14 +3,17 @@
 One leaf behind MCP, REST and the CLI. `record` writes one canonical recap per
 content change through the ordinary Source writer and binds it to the caller's
 own episode ledger by the writer's receipt; `inspect` reads that ledger back.
-Nothing else is accepted: no curation leaves, proposals or dispositions.
+A record accepts no curation leaves, proposals or dispositions: those belong to
+the typed candidate actions, pinned in `test_episode_workflow.py`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -379,6 +382,264 @@ def test_episode_memory_holds_the_wide_mutation_boundary() -> None:
     assert "episode_memory" not in writer_lease._NARROW_BOUNDARY_COMMANDS
 
 
+def test_blocked_episode_fanout_does_not_hold_the_next_writer(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import vault as vault_module
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
+    fanout_started = threading.Event()
+    release_fanout = threading.Event()
+    second_committed = threading.Event()
+    second_entered = threading.Event()
+    second_errors = []
+    outcomes = []
+    real_fanout = vault_module.post_commit_batch_fanout
+
+    def held_fanout(*args, **kwargs):
+        if args[0] is not None and any("/Episodes/" in str(path) for path in args[1]):
+            fanout_started.set()
+            assert release_fanout.wait(15)
+        return real_fanout(*args, **kwargs)
+
+    monkeypatch.setattr(vault_module, "post_commit_batch_fanout", held_fanout)
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "lease"))
+    episode_command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    schema = schema_module.load_source_schema(vault)
+
+    def record_episode():
+        try:
+            with request_scope(owner_principal(surface="mcp")):
+                outcomes.append(manager.invoke(
+                    episode_command,
+                    (vault, schema),
+                    {
+                        "action": "record", "episode": KEY,
+                        "subject": "Harbor Lamp purchase",
+                        "summary": "Chose the brass lamp; delivery date still open.",
+                        "worked_on": ["Compared two lamps for Project Alpha"],
+                    },
+                ))
+        except Exception as error:  # noqa: BLE001 - assert worker failures in the test thread
+            outcomes.append(error)
+
+    def write_next():
+        path = vault / "Knowledge Base" / "next-writer.md"
+
+        def leaf(_vault):
+            second_entered.set()
+            vault_module.batch_atomic_write([vault_module.PlannedWrite(path, "next")])
+            second_committed.set()
+            return "next"
+
+        command = SimpleNamespace(name="next_writer", read_only=False, leaf=leaf)
+        try:
+            manager.invoke(command, (vault,), {})
+        except Exception as error:  # noqa: BLE001 - assert worker failures in the test thread
+            second_errors.append(error)
+
+    first = threading.Thread(target=record_episode, daemon=True)
+    second = threading.Thread(target=write_next, daemon=True)
+    first.start()
+    try:
+        assert fanout_started.wait(15)
+        second.start()
+        assert second_committed.wait(3), (second_entered.is_set(), second_errors)
+    finally:
+        release_fanout.set()
+        first.join(timeout=15)
+        if second.ident is not None:
+            second.join(timeout=15)
+    assert not first.is_alive() and not second.is_alive()
+    assert len(outcomes) == 1 and not isinstance(outcomes[0], BaseException)
+
+
+def test_direct_episode_record_runs_fanout_with_durable_exact_paths(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import deferred_index
+    from exomem import vault as vault_module
+
+    calls = []
+
+    def observe(_vault, replaced, _reports, _states, **kwargs):
+        calls.append((list(replaced), list(kwargs["created_paths"])))
+        return True
+
+    monkeypatch.setattr(vault_module, "post_commit_batch_fanout", observe)
+    with request_scope(owner_principal(surface="mcp")):
+        result = _record(vault)
+
+    assert len(calls) == 1
+    replaced, created = calls[0]
+    source = vault / result["source"]["path"]
+    assert source in replaced and source in created
+    assert vault / "Knowledge Base" / "Sources" / "index.md" in replaced
+    assert all(path in replaced for path in created)
+    queued = set(deferred_index.full_status(vault)["paths"])
+    assert {path.relative_to(vault).as_posix() for path in replaced if path.suffix == ".md"} <= queued
+
+
+def test_episode_fanout_failure_keeps_a_committed_result_and_durable_demand(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import deferred_index
+    from exomem import vault as vault_module
+
+    def fail_fanout(*_args, **_kwargs):
+        raise OSError("derived fanout unavailable")
+
+    monkeypatch.setattr(vault_module, "post_commit_batch_fanout", fail_fanout)
+    with request_scope(owner_principal(surface="mcp")):
+        result = _record(vault)
+    assert result["ledger"] == "bound"
+    assert (vault / result["source"]["path"]).exists()
+    assert result["source"]["path"] in deferred_index.full_status(vault)["paths"]
+
+
+def test_episode_without_durable_demand_or_fanout_reports_committed_uncertainty(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import deferred_index
+    from exomem import vault as vault_module
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    monkeypatch.setattr(
+        deferred_index, "add_full", lambda *_args: (_ for _ in ()).throw(OSError("queue down"))
+    )
+    monkeypatch.setattr(
+        vault_module, "post_commit_batch_fanout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("fanout down")),
+    )
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "lease"))
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    schema = schema_module.load_source_schema(vault)
+    with request_scope(owner_principal(surface="mcp")):
+        with pytest.raises(Exception) as caught:
+            manager.invoke(
+                command, (vault, schema),
+                {
+                    "action": "record", "episode": KEY,
+                    "subject": "Harbor Lamp purchase",
+                    "summary": "Chose the brass lamp; delivery date still open.",
+                    "worked_on": ["Compared two lamps for Project Alpha"],
+                },
+            )
+    assert getattr(caught.value, "committed", None) is True
+    assert getattr(caught.value, "code", None) == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
+    assert len(_episodes(vault)) == 1
+
+
+@pytest.mark.parametrize("same_content", [False, True], ids=["changed", "identical"])
+def test_concurrent_initial_episode_records_keep_one_live_revision(
+    vault: Path, tmp_path: Path, same_content: bool
+) -> None:
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "lease"))
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    schema = schema_module.load_source_schema(vault)
+    start = threading.Barrier(3)
+    outcomes = []
+
+    def record(summary: str):
+        start.wait(timeout=15)
+        try:
+            with request_scope(owner_principal(surface="mcp")):
+                outcomes.append(manager.invoke(
+                    command, (vault, schema),
+                    {
+                        "action": "record", "episode": KEY,
+                        "subject": "Harbor Lamp purchase", "summary": summary,
+                        "worked_on": ["Compared two lamps for Project Alpha"],
+                    },
+                ))
+        except Exception as error:  # noqa: BLE001 - assert worker failures in the test thread
+            outcomes.append(error)
+
+    first_summary = "Chose the brass lamp; delivery date still open."
+    second_summary = first_summary if same_content else "Delivery booked for Friday."
+    threads = [
+        threading.Thread(target=record, args=(summary,), daemon=True)
+        for summary in (first_summary, second_summary)
+    ]
+    for thread in threads:
+        thread.start()
+    start.wait(timeout=15)
+    for thread in threads:
+        thread.join(timeout=15)
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(outcomes) == 2 and all(not isinstance(item, BaseException) for item in outcomes)
+    live = [page for page in _episodes(vault) if "status" not in _frontmatter(page)]
+    assert len(live) == 1
+    if same_content:
+        assert sorted(item["idempotent"] for item in outcomes) == [False, True]
+        assert {item["revision"] for item in outcomes} == {1}
+        assert len(_episodes(vault)) == 1
+    else:
+        assert sorted(item["revision"] for item in outcomes) == [1, 2]
+        assert all(item["idempotent"] is False for item in outcomes)
+        newest = next(item for item in outcomes if item["revision"] == 2)
+        assert live[0] == vault / newest["source"]["path"]
+
+
+@pytest.mark.parametrize("fast_ack", [False, True], ids=["ordinary", "fast-ack"])
+def test_episode_derived_work_has_one_owner_in_both_ack_modes(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_ack: bool
+) -> None:
+    from exomem import deferred_index
+    from exomem import vault as vault_module
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    if fast_ack:
+        monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    else:
+        monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
+    calls = []
+
+    def observe(_vault, replaced, _reports, _states, **_kwargs):
+        calls.append(list(replaced))
+        return True
+
+    monkeypatch.setattr(vault_module, "post_commit_batch_fanout", observe)
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "lease"))
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    schema = schema_module.load_source_schema(vault)
+    with request_scope(owner_principal(surface="mcp")):
+        result = manager.invoke(
+            command, (vault, schema),
+            {
+                "action": "record", "episode": KEY,
+                "subject": "Harbor Lamp purchase",
+                "summary": "Chose the brass lamp; delivery date still open.",
+                "worked_on": ["Compared two lamps for Project Alpha"],
+            },
+        )
+    assert result["ledger"] == "bound"
+    assert (vault / result["source"]["path"]).exists()
+    if fast_ack:
+        assert calls == []
+    else:
+        assert len(calls) == 1
+        assert result["source"]["path"] in deferred_index.full_status(vault)["paths"]
+
+
+def test_direct_heat_failure_does_not_turn_committed_episode_into_retryable_error(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import working_set_heat
+
+    def fail_attribution(*_args, **_kwargs):
+        raise OSError("heat state unavailable")
+
+    monkeypatch.setattr(working_set_heat, "attribution_for", fail_attribution)
+    with request_scope(owner_principal(surface="mcp")):
+        result = _record(vault)
+    assert result["ledger"] == "bound"
+    assert (vault / result["source"]["path"]).exists()
+
+
 def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -650,7 +911,7 @@ def test_unknown_fields_and_leaves_are_refused_at_every_door(
 ) -> None:
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     client = _rest_client(monkeypatch)
-    for field in ("leaves", "proposal", "disposition"):
+    for field in ("leaves", "effects", "payload"):
         response = client.post(
             "/api/episode_memory",
             json={**_payload("ep-" + "b2" * 16), field: ["anything"]},
@@ -658,6 +919,16 @@ def test_unknown_fields_and_leaves_are_refused_at_every_door(
         )
         assert response.status_code >= 400, response.text
         assert "UNKNOWN_PARAM" in response.text
+    # Candidate fields belong to the typed candidate actions (task 3.3); a
+    # record carrying one is refused before anything is written.
+    for field, value in (("proposal", {"route": "no_capture"}), ("disposition", "routed")):
+        response = client.post(
+            "/api/episode_memory",
+            json={**_payload("ep-" + "b2" * 16), field: value},
+            headers={"Authorization": "Bearer sekret"},
+        )
+        assert response.status_code >= 400, response.text
+        assert "EPISODE_INVALID" in response.text
 
     mcp = server.build_server(require_auth=False)
     with request_scope(owner_principal(surface="mcp")):

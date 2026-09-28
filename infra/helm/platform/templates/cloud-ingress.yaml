@@ -77,8 +77,11 @@ spec:
   tls:
     secretName: exomem-cloud-gateway-tls
   routes:
+    # Only the Cloud MCP path and its protected-resource metadata are public.
+    # The gateway also serves the hosted MCP path, which must stay unreachable
+    # through the Cloud hostname.
     - kind: Rule
-      match: Host(`{{ .Values.cloudIngress.hostname }}`)
+      match: Host(`{{ .Values.cloudIngress.hostname }}`) && (Path(`{{ .Values.cloudGateway.mcpPath }}`) || Path(`/.well-known/oauth-protected-resource{{ .Values.cloudGateway.mcpPath }}`))
       middlewares:
         - name: exomem-cloud-trusted-ingress
       services:

@@ -78,15 +78,35 @@ NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 
 _TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
 
-# Title words that carry no subject. Deliberately small: this is a stop list for
-# glue, not an attempt to model English.
-_STOPWORDS = frozenset(
+#: Closed-class English function words: prepositions, conjunctions, auxiliaries,
+#: pronouns, determiners and a few ubiquitous verbs. Never a content word, however
+#: common. Shared by every comparison built on `_terms` (scope divergence here,
+#: collection claims routing), so declared prose such as "not because after first
+#: use" contributes no term that an unrelated page could share.
+FUNCTION_WORDS = frozenset(
     {
-        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "in",
-        "into", "is", "it", "its", "of", "on", "or", "our", "over", "the", "their",
-        "this", "to", "via", "was", "were", "what", "when", "which", "why", "with",
-        "note", "notes", "plan", "plans", "draft", "overview", "summary",
+        "a", "about", "across", "after", "again", "against", "all", "also", "am",
+        "among", "an", "and", "any", "are", "around", "as", "at", "be", "because",
+        "been", "before", "being", "between", "both", "but", "by", "can", "could",
+        "did", "do", "does", "done", "down", "during", "each", "either", "else",
+        "every", "first", "for", "from", "had", "has", "have", "he", "her", "here",
+        "his", "how", "if", "in", "into", "is", "it", "its", "just", "last", "may",
+        "might", "more", "most", "must", "neither", "never", "no", "nor", "not",
+        "now", "of", "off", "on", "once", "only", "onto", "or", "other", "our",
+        "out", "over", "per", "same", "shall", "she", "should", "since", "so",
+        "some", "still", "such", "than", "that", "the", "their", "them", "then",
+        "there", "these", "they", "this", "those", "through", "thus", "too",
+        "toward", "towards", "under", "until", "upon", "use", "used", "using",
+        "very", "via", "was", "we", "were", "what", "when", "where", "whether",
+        "which", "while", "who", "whom", "whose", "why", "will", "with", "within",
+        "without", "would", "yet", "you", "your",
     }
+)
+
+# Title words that carry no subject: the function words plus navigation glue.
+# Deliberately small: this is a stop list for glue, not an attempt to model English.
+_STOPWORDS = FUNCTION_WORDS | frozenset(
+    {"note", "notes", "plan", "plans", "draft", "overview", "summary"}
 )
 
 

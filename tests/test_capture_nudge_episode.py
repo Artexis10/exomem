@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -280,6 +284,393 @@ def test_the_deployed_capture_hook_matches_the_packaged_one() -> None:
     assert deployed.read_bytes() == packaged.read_bytes()
 
 
+# --- a recap recorded through any door counts, not only through this hook's --
+# --- own transcript-scan detector --------------------------------------------
+
+
+class _RestResponse:
+    def __init__(self, payload: bytes, status: int = 200) -> None:
+        self._payload = payload
+        self._status = status
+
+    def getcode(self) -> int:
+        return self._status
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _inspect_payload(revision_count: int) -> bytes:
+    return json.dumps(
+        {
+            "success": True,
+            "data": {
+                "revisions": [
+                    {"revision": i + 1, "recovery": "kept"} for i in range(revision_count)
+                ],
+                "latest_source_ref": None,
+                "coverage_current": "unchecked",
+            },
+        }
+    ).encode("utf-8")
+
+
+@pytest.mark.parametrize("route", ["episode", "recall", "working_set"])
+def test_hook_rest_redirect_does_not_forward_file_key(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, route: str
+) -> None:
+    received: list[str | None] = []
+
+    class Destination(BaseHTTPRequestHandler):
+        def do_GET(self):
+            received.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        do_POST = do_GET
+
+        def log_message(self, *_args):
+            pass
+
+    destination = ThreadingHTTPServer(("127.0.0.1", 0), Destination)
+
+    class Redirect(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{destination.server_port}/redirected")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    source = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True)
+        for server in (source, destination)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        monkeypatch.setenv("EXOMEM_HOST", "127.0.0.1")
+        monkeypatch.setenv("EXOMEM_REST_PORT", str(source.server_port))
+        monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+        service_env = tmp_path / "service.env"
+        service_env.write_text("EXOMEM_REST_API_KEY=disposable-test-key\n", encoding="utf-8")
+        monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(service_env))
+        if route == "episode":
+            assert hook._episode_revision_count("ep-test") is None
+        else:
+            key, origin = retrieve_hook._resolve_rest_key()
+            assert origin == "file"
+            if route == "recall":
+                assert retrieve_hook._fetch_via_rest("test", key) is None
+            else:
+                assert retrieve_hook._fetch_packet_via_rest("test", key, "", 1.0) is None
+        assert received == []
+    finally:
+        for server in (source, destination):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("route", ["episode", "recall", "working_set"])
+def test_hook_rest_file_key_bypasses_environment_proxy(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, route: str
+) -> None:
+    direct: list[str | None] = []
+    proxied: list[str | None] = []
+
+    class Intended(BaseHTTPRequestHandler):
+        def do_POST(self):
+            direct.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"success":true,"data":{"revisions":[],"hits":[],"abstained":true}}')
+
+        def log_message(self, *_args):
+            pass
+
+    class Proxy(BaseHTTPRequestHandler):
+        def do_POST(self):
+            proxied.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    intended = ThreadingHTTPServer(("127.0.0.1", 0), Intended)
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True)
+        for server in (intended, proxy)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        monkeypatch.setenv("EXOMEM_HOST", "127.0.0.1")
+        monkeypatch.setenv("EXOMEM_REST_PORT", str(intended.server_port))
+        monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+        service_env = tmp_path / "service.env"
+        service_env.write_text("EXOMEM_REST_API_KEY=disposable-test-key\n", encoding="utf-8")
+        monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(service_env))
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy.server_port}")
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+        if route == "episode":
+            hook._episode_revision_count("ep-test")
+        else:
+            key, origin = retrieve_hook._resolve_rest_key()
+            assert origin == "file"
+            if route == "recall":
+                retrieve_hook._fetch_via_rest("test", key)
+            else:
+                retrieve_hook._fetch_packet_via_rest("test", key, "", 1.0)
+        assert proxied == []
+        assert direct == ["Bearer disposable-test-key"]
+    finally:
+        for server in (intended, proxy):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=2)
+
+
+def test_a_revision_recorded_through_the_rest_door_suppresses_the_next_ask(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A recap recorded straight over REST -- a door this hook's transcript
+    scan never sees -- still counts, exactly like a successful tool call."""
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "test-key")
+    calls: list[dict] = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(json.loads(request.data.decode("utf-8")))
+        return _RestResponse(_inspect_payload(1))
+
+    monkeypatch.setattr(hook, "_open_no_redirect", fake_urlopen)
+
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    results = _stops(monkeypatch, capsys, tmp_path, k)
+
+    assert not any(_is_episode_ask(result) for result in results)
+    assert calls, "the door should have been checked once the ask was about to fire"
+    assert calls[0] == {
+        "action": "inspect",
+        "episode": episode_capture.hook_key("claude-code", SESSION),
+    }
+
+    # The counter reset there too; the next ask needs another full K turns,
+    # and since the door now reports no NEW revision beyond what it already
+    # saw, that one fires normally.
+    more = _stops(monkeypatch, capsys, tmp_path, k)
+    assert not any(_is_episode_ask(result) for result in more[:-1])
+    assert _is_episode_ask(more[-1])
+
+
+def test_an_unconfigured_door_falls_back_to_todays_behavior(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """No REST key resolves anywhere -- what a client that never enabled REST
+    looks like -- and the ask fires exactly as it did before this door check
+    existed. The hook must not even attempt a call in this case."""
+    monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+    monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(tmp_path / "does-not-exist.env"))
+
+    def fail_urlopen(request, timeout):
+        raise AssertionError("no key resolved; the hook must not call out")
+
+    monkeypatch.setattr(hook, "_open_no_redirect", fail_urlopen)
+
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    results = _stops(monkeypatch, capsys, tmp_path, k)
+    assert not any(_is_episode_ask(result) for result in results[:-1])
+    assert _is_episode_ask(results[-1])
+
+
+@pytest.mark.parametrize(
+    "make_response",
+    [
+        lambda: _RestResponse(b"not json"),
+        lambda: _RestResponse(_inspect_payload(0), status=500),
+        lambda: (_ for _ in ()).throw(TimeoutError("timed out")),
+    ],
+)
+def test_a_door_error_falls_back_to_todays_behavior(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    make_response,
+) -> None:
+    """A configured door that errors -- a bad status, a malformed body, a
+    timeout -- is exactly as silent as an unconfigured one: the ask fires."""
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "test-key")
+
+    def flaky_urlopen(request, timeout):
+        return make_response()
+
+    monkeypatch.setattr(hook, "_open_no_redirect", flaky_urlopen)
+
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    results = _stops(monkeypatch, capsys, tmp_path, k)
+    assert not any(_is_episode_ask(result) for result in results[:-1])
+    assert _is_episode_ask(results[-1])
+
+
+def test_the_door_check_stays_within_its_bounded_timeout(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A door that hangs must not stall the Stop past the bounded timeout —
+    the whole reason the retrieve hook's `_bounded` join pattern is reused
+    rather than a bare blocking call."""
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "test-key")
+    monkeypatch.setattr(hook, "_EPISODE_DOOR_TIMEOUT_SECONDS", 0.05)
+
+    def slow_urlopen(request, timeout):
+        time.sleep(2.0)
+        return _RestResponse(_inspect_payload(0))
+
+    monkeypatch.setattr(hook, "_open_no_redirect", slow_urlopen)
+
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    _stops(monkeypatch, capsys, tmp_path, k - 1)
+    transcript = _transcript(tmp_path, SUBSTANTIVE, name="slow.jsonl")
+    started = time.monotonic()
+    result = _stop(monkeypatch, capsys, transcript)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, elapsed
+    assert _is_episode_ask(result)  # the door didn't answer in time -> today's behaviour
+
+
+def test_a_transcript_record_still_counts_without_consulting_the_door(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A successful `episode_memory` tool call resets the counter before the
+    ask is ever about to fire, so the door check -- which only runs right
+    before an otherwise-due ask -- is never reached for it."""
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "test-key")
+
+    def fail_urlopen(request, timeout):
+        raise AssertionError("a transcript-observed record needs no door check")
+
+    monkeypatch.setattr(hook, "_open_no_redirect", fail_urlopen)
+
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    _stops(monkeypatch, capsys, tmp_path, k - 1)
+    recorded = _transcript(
+        tmp_path,
+        SUBSTANTIVE,
+        tool="mcp__exomem__episode_memory",
+        tool_input={"action": "record", "subject": "Harbor Lamp purchase"},
+        name="r2.jsonl",
+    )
+    assert not _is_episode_ask(_stop(monkeypatch, capsys, recorded))
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a FIFO")
+def test_a_blocking_service_env_stays_within_the_door_timeout(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Reading the REST key from `service.env` is part of the door check, so a
+    service env that never yields (a FIFO nobody writes) is bounded too."""
+    monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+    fifo = tmp_path / "service.env"
+    os.mkfifo(fifo)
+    monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(fifo))
+    monkeypatch.setattr(hook, "_EPISODE_DOOR_TIMEOUT_SECONDS", 0.05)
+
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    _stops(monkeypatch, capsys, tmp_path, k - 1)
+    transcript = _transcript(tmp_path, SUBSTANTIVE, name="fifo.jsonl")
+    outcome: list = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(_stop(monkeypatch, capsys, transcript)), daemon=True
+    )
+    worker.start()
+    worker.join(2.0)
+    if worker.is_alive():
+        # Release the blocked reader so the test process can exit.
+        with open(fifo, "w", encoding="utf-8"):
+            pass
+        worker.join(2.0)
+        pytest.fail("the Stop blocked on reading service.env")
+    assert _is_episode_ask(outcome[0])
+
+
+def _counting_door(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """A door whose reported revision count the test moves by hand."""
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "test-key")
+    count = {"n": 0}
+
+    def fake_urlopen(request, timeout):
+        return _RestResponse(_inspect_payload(count["n"]))
+
+    monkeypatch.setattr(hook, "_open_no_redirect", fake_urlopen)
+    return count
+
+
+def _recorded_transcript(tmp_path: Path, name: str) -> Path:
+    return _transcript(
+        tmp_path,
+        SUBSTANTIVE,
+        tool="mcp__exomem__episode_memory",
+        tool_input={"action": "record", "subject": "Harbor Lamp purchase"},
+        name=name,
+    )
+
+
+@pytest.mark.parametrize("continuation", [False, True], ids=["turn", "continuation"])
+def test_a_record_the_hook_saw_does_not_swallow_the_next_due_ask(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    continuation: bool,
+) -> None:
+    """The door later reports the very record the transcript already showed.
+    That is not a new revision from another door, so it must not suppress the
+    next ask and stretch the cadence to 2K turns."""
+    count = _counting_door(monkeypatch)
+    _stop(monkeypatch, capsys, _recorded_transcript(tmp_path, "rec.jsonl"), active=continuation)
+    count["n"] = 1  # that record is now in the ledger
+
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    results = _stops(monkeypatch, capsys, tmp_path, k)
+    assert not any(_is_episode_ask(result) for result in results[:-1])
+    assert _is_episode_ask(results[-1])
+
+
+def test_a_revision_after_the_ledger_count_drops_still_suppresses_the_ask(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A restored vault can report fewer revisions than were last seen. A new
+    revision from another door after that must still count, not stay hidden
+    until it passes the old high-water mark."""
+    monkeypatch.setenv("EXOMEM_EPISODE_ASK_COOLDOWN_SEC", "0")
+    count = _counting_door(monkeypatch)
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+
+    count["n"] = 2
+    assert not any(_is_episode_ask(result) for result in _stops(monkeypatch, capsys, tmp_path, k))
+
+    count["n"] = 1  # the ledger was restored to an earlier state
+    assert _is_episode_ask(_stops(monkeypatch, capsys, tmp_path, k)[-1])
+
+    count["n"] = 2  # another door records a new revision
+    assert not _is_episode_ask(_stops(monkeypatch, capsys, tmp_path, 1)[-1])
+
+
 # --- the retrieve hook sends attribution with every packet request ------------
 
 
@@ -310,7 +701,7 @@ def test_the_retrieve_hook_sends_client_and_session_on_both_rungs(
         return _Response(json.dumps({"success": True, "data": {"abstained": True}}).encode())
 
     monkeypatch.setattr(retrieve_hook, "_rest_port", lambda: 1234)
-    monkeypatch.setattr(retrieve_hook.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(retrieve_hook, "_open_no_redirect", fake_urlopen)
     attribution = retrieve_hook.attribution("rollout-9")
     retrieve_hook._fetch_packet_via_rest("continue", "key", "", 1.0, attribution)
 
@@ -367,7 +758,7 @@ def test_an_older_service_that_refuses_attribution_still_serves_the_packet(
         return _Response()
 
     monkeypatch.setattr(retrieve_hook, "_rest_port", lambda: 1234)
-    monkeypatch.setattr(retrieve_hook.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(retrieve_hook, "_open_no_redirect", fake_urlopen)
     packet = retrieve_hook._fetch_packet_via_rest(
         "continue", "key", "", 1.0, retrieve_hook.attribution("s")
     )

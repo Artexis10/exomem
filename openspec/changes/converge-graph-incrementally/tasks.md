@@ -350,3 +350,54 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   `epistemic_graph_dispatch_full_marker`, from the dispatcher waiting on the batch lock
   held by a writer waiting on the boundary
   (`tests/test_graph_repair_coalescing.py::test_the_dispatcher_never_waits_on_a_committing_batch_under_the_boundary`).
+
+## 8. Handoff convergence — the 2026-09-27 cold fallback
+
+- [x] 8.1 Red tests: a page created after the last publication does not strand the
+  standby; a standby re-proves after the serving worker republishes; a removed page is
+  adopted as residue and its rows are deleted by the drain; promotion retires a full
+  marker its proof covered and retains one raised after; rebuild outcome lines carry a
+  reason and report a refused claim as coalesced.
+- [x] 8.2 Rebuild outcome logging: `_rebuild_outcome` names the reason and reports
+  `GraphRebuildInProgress` as `coalesced`; start-up validation and the reconcile
+  rebuild log their outcome; the drain's whole-vault request names its branch.
+- [x] 8.3 Adoption residue for created and removed pages, bounded by one drain pass,
+  with topology accepted only when the residue explains it.
+- [x] 8.4 A waiting standby re-proves on a changed generation or snapshot, at most every
+  30 s, and never after promotion or discard has begun.
+- [x] 8.5 Promotion retires the full marker its proof covered, recorded in the handoff
+  record.
+- [x] 8.6 Scoped suites green (`tests/test_standby_*`, `tests/test_graph_*`, index_sync);
+  ruff and the public-artifact gate green; author-independent review.
+  Evidence for 8.1-8.5: `tests/test_graph_handoff_convergence.py` (15 tests) was red
+  on the base (14 failed, 1 guard passed) and is green with the fix. The graph handoff
+  files, `test_standby_promotion.py` and `test_graph_deferred_queue.py` pass (162); the
+  independent review approved the final round after five rounds of probes.
+- [x] 8.7 Review follow-ups: a proof holds only the snapshot it read; promotion retires
+  the marker only at the proof's durable generation, and the standby keeps re-proving
+  after a success, replacing the held proof only with a newer success; the interval
+  runs from the end of the last attempt and the poll stats before it reads; a promotion
+  that raises leaves the standby proving; an unknown drain cause is logged as given;
+  a drain, published or withheld, records its resolver topology only when its queued
+  pages and the carry-forward record account for every change in it; the residue
+  tests compare every edge with a fresh rebuild.
+- [ ] 8.8 **Open, not built.** Evaluate a cheaper route to steady-state convergence than
+  7.2: when a whole-vault pass exhausts its stabilization attempts with every movement
+  recorded, run the adoption proof against the live sidecar (O(vault) hashing, no build
+  or publication) and, when it adopts, queue the residue and retire the full marker
+  observed before it. Measure it on the same paired bar that parked 7.2 (longest
+  unreadable stretch, write p50 and CPU at one and five writers on the 3,000-page tree)
+  before any decision to ship it.
+- [ ] 8.9 **Open, pre-existing, not fixed here.** A drain (published or withheld) that
+  rewrites a page only as affected (its links re-target) also overwrites that page's stored title in
+  `graph_nodes`. When the page's own retitle drains later from its receipt, widening
+  reads the new title as the old one, so pages that still link the old title are
+  missed. The adoption proof fails closed on it (the drain gate counts only queued
+  pages), but the serving graph can carry the stale edge. Keep an affected page's stored
+  title until its own receipt drains, or widen on it when the pass changes it.
+- [ ] 8.10 **Open, not fixed here.** The carry's exactness check counts a Knowledge Base
+  page that is on disk with no row (or a differing row) and not queued as explained, so a
+  drain can derive an edge to it. If that page is deleted, or retitled and back, before
+  its own receipt drains, adoption can accept a sidecar with an extra edge. Its receipt
+  repairs it, so this matters only when that receipt is lost. Count such a page as
+  explained only when it has a pending graph receipt.

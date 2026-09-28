@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_context_activation_resolver_soundness import _live_hot_profile, _statuses
+from test_context_activation_resolver_soundness import LOCAL, _live_hot_profile, _statuses
 from test_governance_egress import _reset_caches
 from test_working_set_carry import _seed_carry_pages
 from test_working_set_hot_projection import _live, _one_old_tick
@@ -125,9 +125,13 @@ def test_a_correction_teaches_a_referential_cue_in_another_language(journey_vaul
         {"kind": "patch_frontmatter", "field": "last_checked", "value": "2026-09-20"},
     )
     turn = "on reprend ?"
-    assert _resolved(commands.op_activate_context(journey_vault, turn=turn)) == []
+    assert _resolved(
+        commands.op_activate_context(journey_vault, turn=turn, session="session-one")
+    ) == []
 
-    advisory = commands.op_activate_context(journey_vault, turn=turn, anchor=SLED)["learning"]
+    advisory = commands.op_activate_context(
+        journey_vault, turn=turn, anchor=SLED, session="session-one"
+    )["learning"]
     cue = next(option for option in advisory["options"] if option["family"] == "referential_cue")
     proposal = {
         "schema_version": 1,
@@ -159,11 +163,15 @@ def test_a_correction_teaches_a_referential_cue_in_another_language(journey_vaul
     )
 
     _fresh_session()
-    packet = commands.op_activate_context(journey_vault, turn=turn)
+    packet = commands.op_activate_context(journey_vault, turn=turn, session="session-two")
     assert _resolved(packet) == [SLED], (packet.get("abstention"), packet["anchors"])
     assert "recency" in packet["anchors"][0]["evidence"]
+    # A learned cue does not hand a caller with no key the vault's newest work.
+    assert _resolved(commands.op_activate_context(journey_vault, turn=turn)) == []
     # The cue only points back: said with a name, the name decides.
-    named = commands.op_activate_context(journey_vault, turn="on reprend Marit Solheim")
+    named = commands.op_activate_context(
+        journey_vault, turn="on reprend Marit Solheim", session="session-two"
+    )
     assert _resolved(named) == ["Knowledge Base/Entities/People/Marit Solheim.md"]
 
 
@@ -216,7 +224,9 @@ def test_reverting_a_learned_cue_restores_the_earlier_reading(journey_vault: Pat
         expected_hash=activation_conventions.load_conventions(journey_vault).content_hash,
     )
     _fresh_session()
-    assert _resolved(commands.op_activate_context(journey_vault, turn="weiter")) == [SLED]
+    assert _resolved(
+        commands.op_activate_context(journey_vault, turn="weiter", session="session-two")
+    ) == [SLED]
 
     version = commands.op_schema_memory(
         journey_vault, subject="activation-conventions", operation="history"
@@ -230,7 +240,9 @@ def test_reverting_a_learned_cue_restores_the_earlier_reading(journey_vault: Pat
         expected_hash=activation_conventions.load_conventions(journey_vault).content_hash,
     )
     _fresh_session()
-    assert _resolved(commands.op_activate_context(journey_vault, turn="weiter")) == []
+    assert _resolved(
+        commands.op_activate_context(journey_vault, turn="weiter", session="session-three")
+    ) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -275,19 +287,19 @@ def test_the_negative_twins_stay_negative_with_learned_vocabulary(
     _live_hot_profile(vault, freshest=manifest.hub_paths[0])
     working_set_runtime.reset_caches_for_tests()
 
-    learned_cue = working_set.compile_packet(vault, turn="weiter", max_chars=4000)
+    learned_cue = working_set.compile_packet(vault, turn="weiter", max_chars=4000, attribution=LOCAL)
     assert _statuses(learned_cue).get(manifest.hub_paths[0]) == "resolved", (
         "the learned cue must be live, or the negatives below prove nothing"
     )
-    learned_name = working_set.compile_packet(vault, turn="der Zugwegknoten", max_chars=4000)
+    learned_name = working_set.compile_packet(vault, turn="der Zugwegknoten", max_chars=4000, attribution=LOCAL)
     assert _statuses(learned_name).get(manifest.hub_paths[1]) == "resolved"
 
     for turn in (T10_TURN, T11_TURN, f"weiter {T10_TURN}"):
-        packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
+        packet = working_set.compile_packet(vault, turn=turn, max_chars=4000, attribution=LOCAL)
         assert packet["abstained"] is True, turn
         assert packet["abstention"] == {"reason": "unresolved"}, turn
         assert all("recency" not in item["evidence"] for item in packet["anchors"]), turn
 
-    one_word = working_set.compile_packet(vault, turn=C10_TURN, max_chars=4000)
+    one_word = working_set.compile_packet(vault, turn=C10_TURN, max_chars=4000, attribution=LOCAL)
     assert _statuses(one_word).get(manifest.bike_path) == "resolved"
     assert all("recency" not in item["evidence"] for item in one_word["anchors"])

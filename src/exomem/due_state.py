@@ -177,6 +177,9 @@ TOP_LIMIT = 5
 # PROVISIONAL: tune from observed behavior, never from preference.
 OBSERVATION_GRACE_HOURS = 24
 OBSERVATION_LOOKBACK_DAYS = 90
+#: The grouped `unreflected_observations` entry that stands for every existing
+#: page a Records collection's claims newly cover. Recompute-only.
+BACKFILL_KIND = "backfill"
 
 #: Past every date a human could plausibly author, so one pass over the shipped
 #: predicates yields every obligation the vault will ever owe. See the module
@@ -504,6 +507,16 @@ def _entry(vault_root: Path, finding: Any, refs: dict[str, str]) -> dict[str, An
     }
 
 
+def observation_facets_component(
+    facets: Mapping[str, Iterable[str]] | None,
+) -> dict[str, Any]:
+    """The stored, folded page facets an observation component carries, if any."""
+    from . import collection_claims
+
+    folded = collection_claims.normalize_match(facets)
+    return {"facets": {key: sorted(values) for key, values in folded.items()}} if folded else {}
+
+
 def _entries_from_findings(
     vault_root: Path, findings: list[Any]
 ) -> dict[str, dict[str, list[dict[str, Any]]]]:
@@ -656,14 +669,17 @@ def _survivors_only(
             for term in target.claims
         }
         projects = component.get("project_terms") or ()
+        common = component.get("common_terms") or ()
         # Only this entry's own term is recomposed: a term's candidacy depends
         # on nothing but the units that carry it, so restricting the detector
         # is exact, and it is what turns O(terms x units) per entry into O(units).
+        # The distinctiveness verdict is the full table's, stored with the entry.
         candidates = collection_candidate.detect(
             visible_rows,
             covered_terms=covered,
             project_terms=projects,
             terms=(str(component.get("term") or ""),),
+            common_terms=common,
         )
         candidate = next(
             (item for item in candidates if item.term == component.get("term")), None
@@ -674,6 +690,7 @@ def _survivors_only(
             candidate,
             visible_rows,
             project_terms=projects,
+            common_terms=common,
         )
         if finding is None:
             return None
@@ -683,6 +700,15 @@ def _survivors_only(
         )
     if component.get("family") == "unreflected_observations":
         collection = str(component.get("collection") or "")
+        if component.get("kind") == BACKFILL_KIND:
+            from . import audit as audit_module
+
+            if not collection or not keep(collection):
+                return None
+            finding = audit_module.backfill_component(component, keep)
+            if finding is None:
+                return None
+            return _entry(vault_root, finding, refs([finding.path]))
         page_path = str(component.get("page_path") or "")
         if not collection or not page_path or not keep(collection) or not keep(page_path):
             return None
@@ -692,6 +718,7 @@ def _survivors_only(
         advisory = collection_claims.route(
             component.get("terms") or (),
             routing(),
+            facets=component.get("facets") or None,
         )
         if not advisory or advisory.get("collection") != collection:
             return None
@@ -715,7 +742,9 @@ def _survivors_only(
             if support is None and matched == previous:
                 return None
         finding = audit_module.unreflected_observation_component(
-            component, advisory.get("matched_terms") or ()
+            component,
+            advisory.get("matched_terms") or (),
+            advisory.get("matched_predicates") or (),
         )
         if finding is None:
             return None
@@ -913,6 +942,9 @@ def recompute(
         "bindings": audit_module.outcome_binding_index(Path(vault_root)),
         "claims": _recompute_claims(Path(vault_root)),
         "role_state": role_marker,
+        # Where each collection's bounded backfill scan resumes, keyed by its
+        # collection id and claims signal. Carried by deltas, rebuilt only here.
+        "backfill_cursors": dict(report.backfill_cursors or {}),
     }
 
 
@@ -1103,9 +1135,38 @@ def routing_targets(
                     manifest.schema.fields[name].type for name in manifest.schema.natural_key
                 ),
                 natural_key_values=frozenset(natural_values),
+                match=collection_claims.normalize_match(manifest.claim_match),
             )
         )
     return targets
+
+
+def visible_claim_items(vault_root: Path, manifest_path: str) -> list[dict[str, Any]]:
+    """One collection's projected items this audience may read. No collection read.
+
+    The claims projection already holds each item's key and its routing-relevant
+    values, so a write can compare an observation against existing items
+    without re-reading the collection. Empty on any doubt.
+    """
+    from .governance import egress as egress_module
+
+    root = Path(vault_root)
+    row = ((load(root) or {}).get("claims") or {}).get(manifest_path)
+    if not isinstance(row, Mapping) or not isinstance(row.get("items"), list):
+        return []
+    try:
+        keep = egress_module.release_walk_filter(root)
+    except Exception:  # noqa: BLE001 -- disclosure failure costs the comparison
+        return []
+    if keep is not None and not keep(manifest_path):
+        return []
+    return [
+        dict(item)
+        for item in row["items"]
+        if isinstance(item, Mapping)
+        and type(item.get("path")) is str
+        and (keep is None or keep(str(item["path"])))
+    ]
 
 
 def _routing_snapshot(
@@ -1177,6 +1238,13 @@ def collection_observation_coverage(
             if rebuilt is None:
                 continue
             component = rebuilt.get("component") or {}
+            if component.get("kind") == BACKFILL_KIND:
+                open_refs.update(
+                    str(row["ref"])
+                    for row in component.get("pages") or ()
+                    if isinstance(row, Mapping) and _page_exists(Path(vault_root), str(row["path"]))
+                )
+                continue
             page_path = str(component.get("page_path") or "")
             if not page_path or not _page_exists(Path(vault_root), page_path):
                 continue
@@ -1410,6 +1478,7 @@ def apply_write_delta(
             ),
             "claims": dict(current.get("claims") or {}),
             "role_state": role_index,
+            **_carried_backfill_cursors(current),
         }
         save(vault_root, updated)
     return updated
@@ -1451,8 +1520,14 @@ def apply_observation_write_delta(
     routing: Mapping[str, Any] | None,
     observed_at: dt.datetime | None = None,
     observation_aliases: Iterable[str] = (),
+    facets: Mapping[str, Iterable[str]] | None = None,
 ) -> dict[str, Any] | None:
-    """Fold one committed observation into its own structured family."""
+    """Fold one committed observation into its own structured family.
+
+    `facets` are the page's type, category, project and tags; they are stored
+    so a serve under a narrower audience re-applies `claims.match` exactly as
+    the write did.
+    """
     if not _observations_at_write_time() or not state_path(vault_root).exists():
         return None
     now = observed_at or dt.datetime.now(dt.UTC)
@@ -1488,9 +1563,12 @@ def apply_observation_write_delta(
                     )[:3],
                     "terms": sorted(collection_claims.normalize_terms(terms)),
                     "observed_at": now.isoformat(),
+                    **observation_facets_component(facets),
                 }
                 finding = audit_module.unreflected_observation_component(
-                    component, routing.get("matched_terms") or ()
+                    component,
+                    routing.get("matched_terms") or (),
+                    routing.get("matched_predicates") or (),
                 )
                 if finding is not None:
                     refs = review_state_module.refs_for_paths(
@@ -1580,7 +1658,12 @@ def _settle_observations_for_record(
             if not isinstance(component, Mapping) or component.get("family") != _OBSERVATION_FAMILY:
                 retained.append(entry)
                 continue
-            if str(component.get("collection") or "") != str(manifest.path):
+            if (
+                str(component.get("collection") or "") != str(manifest.path)
+                or component.get("kind") == BACKFILL_KIND
+            ):
+                # A grouped backfill is recompute-only: reconcile re-derives
+                # which of its pages a record now reflects.
                 retained.append(entry)
                 continue
             reflectors = [
@@ -1807,9 +1890,16 @@ def _persist_delta(
         ),
         "claims": claims if claims is not None else dict(current.get("claims") or {}),
         "role_state": current.get("role_state"),
+        **_carried_backfill_cursors(current),
     }
     save(vault_root, updated)
     return updated
+
+
+def _carried_backfill_cursors(current: Mapping[str, Any]) -> dict[str, Any]:
+    """A write learns nothing about backfill progress; keep what recompute left."""
+    cursors = current.get("backfill_cursors")
+    return {"backfill_cursors": dict(cursors)} if isinstance(cursors, dict) else {}
 
 
 def _prune_missing_joined(
@@ -2638,6 +2728,7 @@ def _served_entries_uncached(
             role_token = "unavailable"
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {}
+    candidate_rows: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     for category in PROJECTION_CATEGORIES:
         if category in excluded:
             # A count of things the user asked not to hear about is a nag by
@@ -2693,15 +2784,29 @@ def _served_entries_uncached(
                     )
                     if effective != "open":
                         continue  # already triaged; a counter must not re-raise it
-                    rows.append(
-                        {
-                            "category": category,
-                            "ref": str(entry.get("ref") or ""),
-                            "due_since": due.isoformat(),
-                            "fingerprint": str(entry.get("fingerprint") or ""),
-                            "path": path,
-                        }
-                    )
+                    row = {
+                        "category": category,
+                        "ref": str(entry.get("ref") or ""),
+                        "due_since": due.isoformat(),
+                        "fingerprint": str(entry.get("fingerprint") or ""),
+                        "path": path,
+                    }
+                    if category == "collection_candidate":
+                        candidate_rows.append((_candidate_rank(entry, row), row))
+                        continue
+                    rows.append(row)
+    # The noise budget: at most `MAX_SERVED_CANDIDATES` collection candidates in
+    # one response, strongest and widest first. Counted after the audience
+    # filter and triage above, so a withheld or dismissed candidate never takes
+    # a slot and the next one surfaces in its place.
+    from . import collection_candidate
+
+    rows.extend(
+        row
+        for _rank, row in sorted(candidate_rows, key=lambda pair: pair[0])[
+            : collection_candidate.MAX_SERVED_CANDIDATES
+        ]
+    )
     # Dated first, oldest first; dateless last. A defect a human authored no date
     # for is reported with a floor date internally, and left to sort naively it
     # would outrank every genuinely overdue prediction in a five-slot `top`.
@@ -2714,6 +2819,18 @@ def _served_entries_uncached(
         )
     )
     return rows, horizon, asked, role_token
+
+
+def _candidate_rank(entry: Mapping[str, Any], row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Strength, then page spread, then reference: the candidate serve order."""
+    component = entry.get("component") if isinstance(entry.get("component"), Mapping) else {}
+    meta = entry.get("meta") if isinstance(entry.get("meta"), Mapping) else {}
+    pages = {
+        str(unit.get("page"))
+        for unit in component.get("units") or ()
+        if isinstance(unit, Mapping)
+    }
+    return (meta.get("strength") != "strong", -len(pages), str(row.get("ref") or ""))
 
 
 def _excluded_families(state_payload: dict[str, Any]) -> frozenset[str]:

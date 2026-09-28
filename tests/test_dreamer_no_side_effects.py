@@ -218,6 +218,26 @@ def test_no_review_state_write(tmp_path: Path, monkeypatch) -> None:
         assert before.read_bytes() == snapshot
 
 
+def test_vocabulary_families_have_no_side_effects(tmp_path: Path, monkeypatch) -> None:
+    """Alias and convention upkeep, over a vault that has all three shapes."""
+    vault = fx.build_vocabulary(tmp_path)
+    before = fx.tree_state(vault)
+    state = review_state.state_path(vault)
+    existed = state.exists()
+    spies = _install_all(monkeypatch)
+    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
+    results = _run_to_quiet(vault)
+    assert all(result.stop_reason != "error" for result in results), results
+    assert spies.calls == {}
+    assert fx.tree_state(vault) == before
+    assert not freshness.external_pending(vault)
+    assert state.exists() is existed
+    kinds = {
+        row["kind"] for row in dreamer_store.read_view(vault).candidates if row["state"] == "open"
+    }
+    assert kinds >= {"anchor.alias", "convention.tag", "convention.category"}
+
+
 def _command(name: str):
     return next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
 

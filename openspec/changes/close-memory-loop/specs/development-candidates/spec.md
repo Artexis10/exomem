@@ -4,6 +4,27 @@ Allow fast isolated development and managed personal candidate testing without r
 
 ## ADDED Requirements
 
+### Requirement: Successful managed promotion refreshes already-installed hooks
+
+After confirming the staged release active, the managed upgrade operator SHALL refresh already-wired local Claude Code profiles through the promoted interpreter's hook installer. It SHALL preserve unrelated configuration and the installer's secure filesystem checks, leave unwired profiles untouched, support an explicit opt-out, and never refresh on failed or incomplete promotion. Refresh operations SHALL be bounded and SHALL report their outcomes without failing or rolling back an already successful promotion. A machine-local report SHALL support read-only doctor inspection; its persistence SHALL reject unsafe path substitutions, and reported errors SHALL NOT expose credentials. Tests SHALL use disposable profile and operator state.
+
+#### Scenario: An existing profile follows the promoted release
+
+- **WHEN** the operator confirms a new managed release active and a local profile already wires the retrieval hook
+- **THEN** the promoted interpreter refreshes that profile using the existing installer checks
+- **AND** unwired profiles and unrelated settings remain unchanged
+
+#### Scenario: One profile refuses a refresh
+
+- **WHEN** a profile's settings fail the installer's permission or path checks
+- **THEN** its refresh is reported as failed without relaxing the checks or undoing promotion
+- **AND** other eligible profiles may still be refreshed and doctor can report the failure
+
+#### Scenario: Promotion fails or refresh is explicitly disabled
+
+- **WHEN** the target is not confirmed active or the operator explicitly disables hook refresh
+- **THEN** no profile is refreshed and the reported outcome does not claim successful refresh
+
 ### Requirement: Managed staging accepts immutable local wheel candidates
 
 The staging path SHALL accept an explicit local wheel as an alternative to a published version and record its digest, source revision and actual installed interpreter/package identity. Candidate installation SHALL use a dedicated immutable environment and the existing managed standby, admission, single-writer and cutover protocol. It SHALL NOT mutate the serving interpreter in place, bypass the actual service manager or label an unpublished candidate as a public release.

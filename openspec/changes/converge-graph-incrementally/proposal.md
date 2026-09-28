@@ -95,6 +95,11 @@ rebuilds everything.
 - `live-index-freshness`: the graph joins the inbound-link index in being
   event-maintained and incrementally patched, with the same full-rebuild
   equivalence obligation and the same fall-back-to-rebuild clause.
+- `instant-start`: snapshot adoption carries pages created or removed since the
+  publication as bounded residue, with a topology difference accepted only when that
+  residue explains it (design addendum, 2026-09-27 upgrade).
+- `managed-service-upgrades`: a waiting standby re-proves its graph snapshot when the
+  graph moves, and promotion retires whole-vault debt its source proof covered.
 
 ## Impact
 

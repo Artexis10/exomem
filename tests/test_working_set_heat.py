@@ -378,8 +378,45 @@ def test_the_callers_own_session_leads_over_a_newer_act_elsewhere() -> None:
 
     assert top(profile, attribution=MINE) == (SLED,)
     assert top(profile, attribution=OTHER) == (MARIT,)
-    # A caller with no keys gets the vault-wide ranking, which is today's.
+    # A caller with no keys still gets the vault-wide RANKING, which is today's...
     assert top(profile) == top(profile, attribution=heat.Attribution()) == (DEPOT,)
+    # ...but never its referent: whatever another session did last is not what
+    # a stranger's turn refers to (the keyless-connector incident), so asked
+    # for a referent it gets no tier at all, nor does a caller whose only
+    # session is a token's thread. Either may still order its recent-context
+    # block (`recent`). A keyed caller is unchanged.
+    assert heat.leading(profile, for_referent=True) == ()
+    thread = heat.Attribution(session="t-one", thread_only=True)
+    assert heat.leading(profile, attribution=thread, for_referent=True) == ()
+    assert top(profile, attribution=MINE, for_referent=True) == (SLED,)
+    fresh = heat.Attribution(session="s-new")
+    assert top(profile, attribution=fresh, for_referent=True) == (DEPOT,)
+
+
+def test_a_follow_up_is_answered_from_the_callers_own_tier_only() -> None:
+    thread = heat.Attribution(session="t-one", thread_only=True)
+    profile = profile_of(
+        ev(T0, SLED, "pick", session="t-one"),
+        ev(T0 + H, MARIT, "pick", session="s-two"),
+        ev(T0 + 2 * H, DEPOT, "work"),
+    )
+
+    assert heat.own_referents(profile, attribution=thread) == (SLED,)
+    assert heat.own_referents(profile, attribution=heat.Attribution()) == ()
+    assert heat.own_referents(profile, attribution=heat.Attribution(session="t-new")) == ()
+    # Two of its own pages within the tie window: both, for the agent to choose.
+    near = profile_of(
+        ev(T0, SLED, "pick", session="t-one"),
+        ev(T0 + heat.FOLLOW_UP_TIE_NS, NOTE, "pick", session="t-one"),
+        ev(T0 + H, MARIT, "pick", session="s-two"),
+    )
+    assert heat.own_referents(near, attribution=thread) == tuple(sorted((SLED, NOTE)))
+    # Further apart, the newer one dominates.
+    apart = profile_of(
+        ev(T0, SLED, "pick", session="t-one"),
+        ev(T0 + H, NOTE, "pick", session="t-one"),
+    )
+    assert heat.own_referents(apart, attribution=thread) == (NOTE,)
 
 
 def test_a_sessions_last_served_thread_leads_its_own_tier() -> None:

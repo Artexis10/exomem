@@ -54,6 +54,10 @@ def _operator(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> 
     variables = os.environ.copy()
     variables["PYTHONPATH"] = str(ROOT / "src")
     variables["EXOMEM_STATE_ROOT"] = str(tmp_path / "state")
+    if not env or "HOME" not in env:
+        operator_home = tmp_path / "operator-home"
+        operator_home.mkdir(exist_ok=True)
+        variables["HOME"] = str(operator_home)
     if env:
         variables.update(env)
     return subprocess.run(
@@ -65,6 +69,29 @@ def _operator(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> 
         timeout=20,
         check=False,
     )
+
+
+def test_operator_uses_disposable_child_home_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_home = os.environ.get("HOME")
+    child_homes = []
+
+    def fake_run(argv, **kwargs):
+        child_homes.append(kwargs["env"]["HOME"])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _operator(tmp_path, "--status").returncode == 0
+    assert Path(child_homes[0]).parent == tmp_path
+    assert Path(child_homes[0]).is_dir()
+    assert os.environ.get("HOME") == parent_home
+
+    explicit_home = tmp_path / "explicit-home"
+    explicit_home.mkdir()
+    assert _operator(tmp_path, "--status", env={"HOME": str(explicit_home)}).returncode == 0
+    assert child_homes[1] == str(explicit_home)
+    assert os.environ.get("HOME") == parent_home
 
 
 def _control(
@@ -163,6 +190,61 @@ def test_upgrade_stages_immutable_release_before_sending_target(tmp_path: Path) 
     assert str(tmp_path / "launcher") not in trace.read_text(encoding="utf-8").splitlines()[-1]
 
 
+def test_upgrade_result_carries_a_hook_refresh_report_without_failing(tmp_path: Path) -> None:
+    """The promotion step refreshes wired Claude Code hooks and reports the
+    outcome alongside the upgrade result; an empty home has nothing wired, so
+    this also proves a clean run never touches the exit code."""
+    requests, thread = _control(tmp_path)
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = venv ]; then\n"
+        "  mkdir -p \"$4/bin\"\n"
+        "  cat > \"$4/bin/python\" <<'STUB'\n"
+        "#!/bin/sh\n"
+        "echo '{\"version\": \"0.2.0\", \"state_descriptors\": []}'\n"
+        "STUB\n"
+        "  chmod +x \"$4/bin/python\"\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    empty_home = tmp_path / "empty-home"
+    empty_home.mkdir()
+    result = _operator(
+        tmp_path,
+        "--package-version", "0.2.0", "--profile", "lean",
+        env={"EXOMEM_UV": str(fake_uv), "HOME": str(empty_home)},
+    )
+    thread.join(3)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["hook_refresh"] == {
+        "skipped": False,
+        "reason": None,
+        "profiles": [],
+        "success": True,
+    }
+
+
+def test_unexpected_hook_refresh_failure_is_scrubbed_and_persisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import install_hook, service_upgrade
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError("api-key:hunter2hunter2 failed")
+
+    monkeypatch.setattr(install_hook, "refresh_wired_profiles", fail_refresh)
+    report = service_upgrade._refresh_hooks_after_promotion({"python": sys.executable})
+    assert report["success"] is False
+    assert "hunter2hunter2" not in json.dumps(report)
+    assert install_hook.read_last_upgrade_refresh(home=home) == report
+
+
 def test_unavailable_manager_fails_before_creating_release(tmp_path: Path) -> None:
     result = _operator(tmp_path, "--package-version", "0.2.0")
     assert result.returncode != 0
@@ -193,16 +275,197 @@ def test_operator_lock_refuses_symlink_without_touching_target(tmp_path: Path) -
     assert outside.stat().st_mode & 0o777 == 0o644
 
 
-def test_stage_failure_does_not_echo_package_manager_output(tmp_path: Path) -> None:
+def test_stage_failure_surfaces_diagnostic_tail_but_scrubs_credentials(tmp_path: Path) -> None:
+    """uv's stderr now helps diagnose staging failures (e.g. a stale index),
+
+    but anything credential-shaped in that output must still never reach the
+    operator's own stderr.
+    """
     requests, thread = _control(tmp_path, count=1)
     fake_uv = tmp_path / "uv"
-    fake_uv.write_text("#!/bin/sh\necho private-registry-credential >&2\nexit 2\n", encoding="utf-8")
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "echo 'stale package index: exomem 0.2.0 not found (HTTP 404)' >&2\n"
+        "echo 'retry url: https://deploy:S3cr3tTok3n9876@pypi.example.com/simple/exomem/' >&2\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
     fake_uv.chmod(0o700)
     result = _operator(tmp_path, env={"EXOMEM_UV": str(fake_uv)})
     thread.join(3)
     assert result.returncode != 0
     assert requests == [{"command": "status"}]
-    assert "private-registry-credential" not in result.stderr
+    assert "stale package index" in result.stderr
+    assert "S3cr3tTok3n9876" not in result.stderr
+    assert "deploy:" not in result.stderr
+
+
+def test_stage_failure_truncates_large_uv_stderr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import service_upgrade
+
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        f"#!/bin/sh\n{sys.executable} -c \"import sys; sys.stderr.write(('x' * 1023 + '\\\\n') * 1024)\"\nexit 2\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    monkeypatch.setenv("EXOMEM_UV", str(fake_uv))
+    with pytest.raises(RuntimeError) as excinfo:
+        service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "0.2.0")
+    message = str(excinfo.value)
+    tail = message.split("uv stderr: ", 1)[1]
+    assert len(tail.encode("utf-8")) <= 4096
+
+
+def test_stage_failure_scrubs_url_userinfo_credential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import service_upgrade
+
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "echo 'retry url: https://deploy:S3cr3tTok3n9876@pypi.example.com/simple/exomem/' >&2\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    monkeypatch.setenv("EXOMEM_UV", str(fake_uv))
+    with pytest.raises(RuntimeError) as excinfo:
+        service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "0.2.0")
+    message = str(excinfo.value)
+    assert "S3cr3tTok3n9876" not in message
+    assert "deploy:" not in message
+    assert "pypi.example.com" in message
+
+
+def test_stage_failure_surfaces_uv_stderr_tail_from_fake_uv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import service_upgrade
+
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\necho 'stale package index: exomem 0.2.0 not found (HTTP 404)' >&2\nexit 2\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    monkeypatch.setenv("EXOMEM_UV", str(fake_uv))
+    with pytest.raises(RuntimeError, match="stale package index"):
+        service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "0.2.0")
+
+
+def test_stage_success_is_unchanged_when_uv_writes_to_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import service_upgrade
+
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = venv ]; then\n"
+        "  mkdir -p \"$4/bin\"\n"
+        "  cat > \"$4/bin/python\" <<'STUB'\n"
+        "#!/bin/sh\n"
+        "echo '{\"version\": \"0.2.0\", \"state_descriptors\": []}'\n"
+        "STUB\n"
+        "  chmod +x \"$4/bin/python\"\n"
+        "fi\n"
+        "echo 'noise on stderr that must not affect success' >&2\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    monkeypatch.setenv("EXOMEM_UV", str(fake_uv))
+    target = service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "0.2.0")
+    assert target["version"] == "0.2.0"
+
+
+def test_uv_stderr_tail_never_leaks_a_password_split_by_the_byte_clip() -> None:
+    """A clip landing inside `https://user:` must not strip the scheme the
+    userinfo scrub depends on and then emit the password."""
+    from exomem import service_upgrade
+
+    url = b"https://deploy:S3cr3tTok3n9876@pypi.example.com/simple/ "
+    for offset in range(0, len(url)):
+        data = url + b"y" * (4096 - len(url) + offset)
+        tail = service_upgrade._uv_stderr_tail(data)
+        assert "S3cr3tTok3n9876" not in tail, offset
+        assert "ploy:" not in tail, offset
+
+
+def test_uv_stderr_tail_drops_a_leading_partial_line_from_the_read_window() -> None:
+    from exomem import service_upgrade
+
+    # The credential line straddles the start of the bounded read window, so
+    # only its `ploy:S3cr3t…@host` remainder is inside it.
+    url = b"https://deploy:S3cr3tTok3n9876@pypi.example.com/simple/"
+    last = b"\nerror: stale package index\n"
+    window = service_upgrade._UV_STDERR_READ_WINDOW_BYTES
+    padding = b"y" * (window - (len(url) - 10) - 1 - len(last))
+    data = b"z" * (200 * 1024) + url + b" " + padding + last
+    assert data[-window:].startswith(b"ploy:S3cr3t")
+    tail = service_upgrade._uv_stderr_tail(data)
+    assert "S3cr3tTok3n9876" not in tail
+    assert tail == "error: stale package index"
+
+
+def test_uv_stderr_tail_stays_within_its_byte_bound_after_scrubbing() -> None:
+    from exomem import service_upgrade
+
+    for data in (
+        b"https://u:p@h " * 400,
+        b"\n".join([b"https://a:b@h/" * 30] * 30),
+    ):
+        tail = service_upgrade._uv_stderr_tail(data)
+        assert "u:p@" not in tail and "a:b@" not in tail
+        assert len(tail.encode("utf-8")) <= 4096
+
+
+def test_uv_stderr_tail_scrubs_token_only_url_userinfo() -> None:
+    from exomem import service_upgrade
+
+    tail = service_upgrade._uv_stderr_tail(b"error: https://hunter2hunter2@pypi.example.com/simple/")
+    assert "hunter2hunter2" not in tail
+    assert "pypi.example.com/simple/" in tail
+
+
+def test_uv_stderr_tail_scrubs_labelled_password_assignments() -> None:
+    from exomem import service_upgrade
+
+    tail = service_upgrade._uv_stderr_tail(b"UV_INDEX_PASSWORD=S3cr3tTok3n9876 failed")
+    assert "S3cr3tTok3n9876" not in tail
+    assert "failed" in tail
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        b"api_key=hunter2hunter2",
+        b"api-key: hunter2hunter2",
+        b"apikey=hunter2hunter2",
+        b"passwd: hunter2hunter2",
+        b"Authorization: Basic dXNlcjpwYXNz",
+    ],
+)
+def test_uv_stderr_tail_scrubs_common_low_entropy_credentials(diagnostic: bytes) -> None:
+    from exomem import service_upgrade
+
+    tail = service_upgrade._uv_stderr_tail(b"error: package index refused " + diagnostic + b"; retry later")
+    assert "hunter2hunter2" not in tail
+    assert "dXNlcjpwYXNz" not in tail
+    assert "package index refused" in tail
+    assert "retry later" in tail
+    assert len(tail.encode("utf-8")) <= service_upgrade._UV_STDERR_TAIL_MAX_BYTES
+
+
+@pytest.mark.parametrize("label", [b"UV_INDEX_PASSWORD", b"api_key"])
+def test_uv_stderr_tail_scrubs_semicolon_inside_credential(label: bytes) -> None:
+    from exomem import service_upgrade
+
+    tail = service_upgrade._uv_stderr_tail(
+        b"error: package index refused " + label + b"=hunter;2hunter2\nretry later"
+    )
+    assert "hunter" not in tail
+    assert "package index refused" in tail
+    assert "retry later" in tail
 
 
 def test_runtime_symlink_is_refused_before_operator_lock_creation(tmp_path: Path) -> None:
