@@ -873,16 +873,18 @@ def _schedule_reembed(
 #: head of distinctive words is what names a page, and the whole turn made
 #: the stage cost 3.2-4.3 s on long live turns. Re-measure, don't hand-tune.
 ACTIVATION_LEXICAL_MAX_TERMS = 12
-#: A unit on more than this share of the catalogue's pages is a
-#: near-stopword for this corpus and is not asked about. PROVISIONAL.
+#: The most stems those units carry into the MATCH: the dense side's own cap
+#: on a turn (`embeddings.ACTIVATION_TURN_MAX_TOKENS`). Only unspaced runs
+#: come near it; a spaced word is one stem.
+ACTIVATION_LEXICAL_MAX_STEMS = 40
+#: On a turn with more units than `ACTIVATION_LEXICAL_MAX_TERMS`, a unit on
+#: more than this share of the knowledge base's pages is a near-stopword for
+#: this corpus and is not asked about. PROVISIONAL.
 ACTIVATION_LEXICAL_COMMON_FRACTION = 0.1
 #: The smallest catalogue that share is believed on; below it every unit
 #: competes on rarity alone. PROVISIONAL, and the carry's own floor
 #: (`working_set.RETRIEVAL_CARRY_MIN_PAGES`) for the same reason.
 ACTIVATION_LEXICAL_COMMON_MIN_PAGES = 100
-#: The rows, ranked by bm25 inside SQL, that the corroboration test reads.
-#: PROVISIONAL; far wider than the packet's own retrieval limit.
-ACTIVATION_LEXICAL_CANDIDATE_CAP = 256
 
 
 def lexical_term_budget():
@@ -891,9 +893,9 @@ def lexical_term_budget():
 
     return lexstore.QueryTermBudget(
         max_units=ACTIVATION_LEXICAL_MAX_TERMS,
+        max_stems=ACTIVATION_LEXICAL_MAX_STEMS,
         common_fraction=ACTIVATION_LEXICAL_COMMON_FRACTION,
         common_min_pages=ACTIVATION_LEXICAL_COMMON_MIN_PAGES,
-        candidate_cap=ACTIVATION_LEXICAL_CANDIDATE_CAP,
     )
 
 
@@ -913,10 +915,11 @@ def lexical_evidence(
     Unavailable FTS never falls back to a corpus walk or foreground repair.
 
     Bounded on any turn: at most `ACTIVATION_LEXICAL_MAX_TERMS` of the
-    turn's units reach the MATCH, the rarest in the catalogue, and the
-    corroboration test reads a capped candidate window (see
-    `lexical_term_budget`). `selection`, when given, receives how many units
-    were kept and dropped — counts only, never the turn's words.
+    turn's units, the rarest in the knowledge base, carrying at most
+    `ACTIVATION_LEXICAL_MAX_STEMS` stems, reach the MATCH (see
+    `lexical_term_budget`); ranking and corroboration then read every row
+    they match. `selection`, when given, receives how many units were kept
+    and dropped — counts only, never the turn's words.
     """
     from . import find_types, lexstore
 

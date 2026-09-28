@@ -379,11 +379,19 @@ limit. Missing or stale publication SHALL remain explicit and SHALL NOT trigger
 foreground repair. Managed-service warm latency and offline cold filesystem
 proof SHALL be reported separately. The lexical evidence query SHALL stay
 bounded on any turn: it SHALL ask the catalogue about a bounded number of the
-turn's units, chosen rarest first by the catalogue's own document frequencies
-on the tokens the index stores, and SHALL run its corroboration test over a
-capped candidate window ranked inside the catalogue query. Selection SHALL NOT
-drop a unit for containing digits, SHALL count an unspaced run as one unit, and
-SHALL be reported in activation diagnostics as kept and dropped counts only.
+turn's units carrying a bounded number of stems, chosen rarest first by
+document frequencies measured over the scope it queries on the tokens the
+index stores, and SHALL rank and run its corroboration test over every row
+those units match, so that for the same units it returns what the unbounded
+query returns. A turn whose units the scope holds fit within the unit bound
+SHALL NOT lose a unit for being common; on a longer turn a unit dropped for
+being common SHALL leave the MATCH but SHALL still count toward
+corroboration, rarest first, while the stems counted toward corroboration
+stay within the same bounded number of stems as the MATCH. Selection SHALL
+NOT drop a unit for
+containing digits, SHALL count an unspaced run as one unit carrying only its
+content bigrams, and SHALL be reported in activation diagnostics as kept and
+dropped counts only.
 
 Packet generation metadata SHALL identify semantic evidence as ready, disabled,
 absent, uncalibrated, audience_restricted, warming, busy, unavailable or
@@ -432,6 +440,15 @@ fast abstention or compiler-only timing.
   rare words are among them, and the anchor is still reached
 - **AND** a turn left with no content word, or with only words the catalogue
   never holds, issues no MATCH and abstains without error
+
+#### Scenario: A short turn's lexical stage matches the unbounded query
+
+- **WHEN** a turn names two rare words held on different pages and one word
+  common in the catalogue that each of those pages also holds
+- **THEN** the common word is still asked about and both pages are returned
+  in the order the unbounded query returns them
+- **AND** padded with everyday words past the unit bound, the everyday words
+  leave the MATCH but still corroborate, and both pages are still returned
 
 #### Scenario: A turn similar to many anchors earns no band
 
