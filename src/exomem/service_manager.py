@@ -414,6 +414,8 @@ class Supervisor:
         #: went away can still read what happened.
         self.transition_id: str | None = None
         self.last_transition: dict[str, Any] | None = None
+        #: The loopback listener's port once it serves; None while it is closed.
+        self.local_port: int | None = None
 
     def _replacement_budget(self) -> float:
         """How long a replacement may take to report ready with nothing serving."""
@@ -446,6 +448,7 @@ class Supervisor:
             "unit": self.identity.get("unit"),
             "ingress": self.ingress.stats,
             "port": getattr(self.runtime, "port", None),
+            "local_port": self.local_port,
             "transition": self.transition_id,
             "last_transition": self.last_transition,
         }
@@ -800,6 +803,43 @@ def enable_subreaper() -> None:
 
 WORKER_PROTOCOL = 1
 
+LOCAL_PORT_ENV = "EXOMEM_LOCAL_PORT"
+
+
+def local_port_setting(
+    public_port: int, environ: Any = None
+) -> tuple[int | None, str | None]:
+    """`(port, problem)` for the optional loopback listener.
+
+    Unset is `(None, None)`. A malformed value or the public port itself is
+    `(None, reason)`: the local listener is an optional door, so a bad value
+    closes it with a reason rather than stopping the public listener.
+    """
+    raw = str((os.environ if environ is None else environ).get(LOCAL_PORT_ENV) or "").strip()
+    if not raw:
+        return None, None
+    if not raw.isascii() or not raw.isdigit() or not 0 < int(raw) < 65536:
+        return None, "malformed"
+    if int(raw) == public_port:
+        return None, "same-as-public"
+    return int(raw), None
+
+
+def bind_local_listener(port: int):
+    """Bind the loopback listener before serving, so a busy port is an error
+    the caller can report instead of uvicorn exiting the whole manager."""
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sock.close()
+        raise
+    sock.set_inheritable(False)
+    return sock
+
 
 def remove_stale_socket(path: Path) -> None:
     try:
@@ -829,10 +869,12 @@ class WorkerRuntime:
         port: int,
         environment_file: Path | str | None = None,
         environment_files: Any = None,
+        ingress_key: str | None = None,
     ):
         self.socket_path = socket_path
         self.host = host
         self.port = port
+        self.ingress_key = ingress_key
         self.child: asyncio.subprocess.Process | None = None
         self.client: Any = None
         self.standby: asyncio.subprocess.Process | None = None
@@ -905,6 +947,23 @@ class WorkerRuntime:
         if not values:
             return None
         return {**os.environ, **values}
+
+    def _spawn_environment(self) -> dict[str, str] | None:
+        """The child's environment with this manager's ingress proof applied.
+
+        The proof is the manager's own to give: it overrides any value the
+        service environment carries, and a manager with no local listener
+        removes one, so no worker honours a stamp this manager did not make.
+        """
+        from .service_ingress import INGRESS_KEY_ENV
+
+        environment = self._child_environment()
+        inherited = os.environ if environment is None else environment
+        if self.ingress_key:
+            return {**inherited, INGRESS_KEY_ENV: self.ingress_key}
+        if INGRESS_KEY_ENV not in inherited:
+            return environment
+        return {name: value for name, value in inherited.items() if name != INGRESS_KEY_ENV}
 
     @staticmethod
     def _parse_environment(text: str) -> dict[str, str]:
@@ -1007,7 +1066,7 @@ class WorkerRuntime:
             asyncio.create_subprocess_exec(
                 *command,
                 start_new_session=True,
-                env=self._child_environment(),
+                env=self._spawn_environment(),
             )
         )
         try:
@@ -1398,9 +1457,39 @@ async def control_server(path: Path, supervisor: Supervisor) -> asyncio.Server:
     return listener
 
 
-async def serve(supervisor: Supervisor, *, host: str, port: int) -> None:
-    """Keep ingress and control alive until the owning unit stops this daemon."""
+async def serve(
+    supervisor: Supervisor, *, host: str, port: int, local_socket: Any = None
+) -> None:
+    """Keep ingress and control alive until the owning unit stops this daemon.
+
+    ``local_socket`` is the pre-bound loopback listener, when one is
+    configured. It serves the same ingress, so an upgrade pauses and drains
+    both doors together, and it closes whenever the public listener does.
+    """
+    import contextlib
+
     import uvicorn
+
+    from .service_ingress import LocalListener
+
+    class _LocalServer(uvicorn.Server):
+        # The public server owns the unit's signals; this one stops with it.
+        @contextlib.contextmanager
+        def capture_signals(self):  # type: ignore[override]
+            yield
+
+    local_server = (
+        _LocalServer(
+            uvicorn.Config(
+                LocalListener(supervisor.ingress),
+                lifespan="off",
+                access_log=False,
+                timeout_graceful_shutdown=10,
+            )
+        )
+        if local_socket is not None
+        else None
+    )
 
     async with await control_server(supervisor.records.directory / "control.sock", supervisor):
         await supervisor.start()
@@ -1426,9 +1515,17 @@ async def serve(supervisor: Supervisor, *, host: str, port: int) -> None:
                     return
 
         monitoring = asyncio.create_task(monitor())
+        local_serving = None
+        if local_server is not None:
+            local_serving = asyncio.create_task(local_server.serve(sockets=[local_socket]))
+            supervisor.local_port = local_socket.getsockname()[1]
         try:
             await server.serve()
         finally:
+            if local_serving is not None:
+                local_server.should_exit = True
+                await asyncio.gather(local_serving, return_exceptions=True)
+                supervisor.local_port = None
             monitoring.cancel()
             await asyncio.gather(monitoring, return_exceptions=True)
             if supervisor.transition_task is not None and not supervisor.transition_task.done():
@@ -1494,23 +1591,47 @@ def main(argv: list[str] | None = None) -> int:
         with deployment_lock(directory):
             identity = verify_systemd_identity(args.unit_name)
             enable_subreaper()
+            import secrets
+
             from .service_ingress import ServiceIngress
 
             host = os.environ.get("EXOMEM_HOST") or args.host
+            local_port, problem = local_port_setting(args.port)
+            if problem is not None:
+                print(
+                    f"managed service: {LOCAL_PORT_ENV} is {problem}; local listener closed",
+                    file=sys.stderr,
+                )
+            local_socket = None
+            if local_port is not None:
+                try:
+                    local_socket = bind_local_listener(local_port)
+                except OSError as error:
+                    print(
+                        "managed service: local listener closed: "
+                        f"{error.strerror or type(error).__name__}",
+                        file=sys.stderr,
+                    )
+            # One proof per manager process; it never leaves this process
+            # except in the environment of the workers it spawns.
+            ingress_key = secrets.token_urlsafe(32) if local_socket is not None else None
             runtime = WorkerRuntime(
                 directory / "worker.sock",
                 host=host,
                 port=args.port,
                 environment_files=identity.get("environment_files"),
+                ingress_key=ingress_key,
             )
             supervisor = Supervisor(
                 directory,
                 initial_target={"python": args.worker_python, "version": version("exomem")},
-                ingress=ServiceIngress(),
+                ingress=ServiceIngress(ingress_key=ingress_key),
                 runtime=runtime,
                 identity=identity,
             )
-            asyncio.run(serve(supervisor, host=host, port=args.port))
+            asyncio.run(
+                serve(supervisor, host=host, port=args.port, local_socket=local_socket)
+            )
     except (OSError, ValueError, RuntimeError) as error:
         print(f"managed service: {error}", file=sys.stderr)
         return 1
