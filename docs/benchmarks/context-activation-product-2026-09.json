@@ -1,0 +1,1111 @@
+{
+  "audit_passed": false,
+  "blocked": {
+    "count": 0,
+    "total": 18
+  },
+  "c9_padding_robustness": {
+    "base_case_id": "C2",
+    "padded_case_id": "C9",
+    "passed": false,
+    "precision_delta": null,
+    "precision_padded": null,
+    "reasons": [
+      "padded-tree precision below the 0.8 floor"
+    ],
+    "recall_base": 0.5,
+    "recall_padded": 0.5
+  },
+  "fixture_mechanisms": {
+    "C1": "resolver",
+    "C2": "resolver",
+    "C3": "resolver",
+    "C4": "resolver",
+    "C5": "records_state",
+    "C6": "naming_gate",
+    "C7": "competing_senses",
+    "C8": "naming_gate",
+    "C9": "resolver",
+    "T1": "naming_gate",
+    "T2": "naming_gate",
+    "T3": "resolver",
+    "T4": "competing_senses",
+    "T5": "resolver",
+    "T6": "soundness",
+    "T7": "competing_senses",
+    "T8": "naming_gate",
+    "T9": "naming_gate"
+  },
+  "fixture_set_digest": "a49d85f49b18c2ce8f0349933ed01ceb4fb5ca176dca066700c9c2f93605426f",
+  "hedged_twins": {
+    "count": 0,
+    "total": 4
+  },
+  "instrument": "context-activation deterministic audit, real compiler",
+  "mechanism": "product_activate_context",
+  "mechanism_removal": {
+    "competing_senses": {
+      "audit_passed": false,
+      "passing_cases": [
+        "T1",
+        "T2",
+        "C5",
+        "T5",
+        "C6",
+        "T9"
+      ],
+      "removes": "competing-sense abstention: disconnected same-kind resolved anchors never abstain"
+    },
+    "naming_gate": {
+      "audit_passed": false,
+      "passing_cases": [
+        "T1",
+        "T2",
+        "C5",
+        "T5",
+        "C6",
+        "C7",
+        "T9"
+      ],
+      "removes": "the retrieval carry's naming gate: the top lexical hit for the turn's words is carried, with no corpus-rare phrase, corpus-size floor or single-page rule"
+    },
+    "records_state": {
+      "audit_passed": false,
+      "passing_cases": [
+        "T1",
+        "T2",
+        "T5",
+        "C6",
+        "C7",
+        "T9"
+      ],
+      "removes": "governed current state: no Records or profile state reaches the packet"
+    },
+    "resolver": {
+      "audit_passed": false,
+      "passing_cases": [
+        "T1",
+        "T2",
+        "C6",
+        "T6",
+        "T9"
+      ],
+      "removes": "anchor resolution: no candidate resolves, so no anchor, lane or current state is served"
+    },
+    "soundness": {
+      "audit_passed": false,
+      "passing_cases": [
+        "T1",
+        "T2",
+        "T4",
+        "C5",
+        "T5",
+        "C6",
+        "T9"
+      ],
+      "removes": "the soundness rule: any one contact kind (a rare term or retrieval alone) resolves"
+    },
+    "working_set": {
+      "audit_passed": false,
+      "passing_cases": [
+        "T1",
+        "T2",
+        "C6",
+        "T6",
+        "T9"
+      ],
+      "removes": "the whole compiler: the documented EXOMEM_DISABLE_WORKING_SET kill switch"
+    }
+  },
+  "packet_size_tokens": {
+    "over_hard_cap": [],
+    "p50": 4,
+    "p95": 123
+  },
+  "per_case": [
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 0,
+            "total": 2
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        },
+        {
+          "gold": {
+            "hit": 1,
+            "total": 1
+          },
+          "kind": "records_collection",
+          "poison": {
+            "hit": 0,
+            "total": 0
+          }
+        }
+      ],
+      "case_id": "C1",
+      "expected_status": "resolved",
+      "failure_reasons": [
+        "gold recall 0.33 below the 0.9 floor",
+        "missing required fact(s): ['weekly limit', 'capacity ceiling']"
+      ],
+      "gold": {
+        "hit": 1,
+        "total": 3
+      },
+      "hedged": false,
+      "is_twin": false,
+      "must_exclude_present": [],
+      "must_include_missing": [
+        "weekly limit",
+        "capacity ceiling"
+      ],
+      "observed_status": "resolved",
+      "packet_chars": 325,
+      "packet_tokens": 76,
+      "passed": false,
+      "poison": {
+        "hit": 0,
+        "total": 1
+      },
+      "precision": 1.0,
+      "status_match": true,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 0,
+            "total": 0
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 2
+          }
+        },
+        {
+          "gold": {
+            "hit": 0,
+            "total": 0
+          },
+          "kind": "records_collection",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        }
+      ],
+      "case_id": "T1",
+      "expected_status": "unresolved",
+      "failure_reasons": [],
+      "gold": {
+        "hit": 0,
+        "total": 0
+      },
+      "hedged": false,
+      "is_twin": true,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "unresolved",
+      "packet_chars": 0,
+      "packet_tokens": 0,
+      "passed": true,
+      "poison": {
+        "hit": 0,
+        "total": 3
+      },
+      "precision": null,
+      "status_match": true,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 1,
+            "total": 1
+          },
+          "kind": "equipment",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        },
+        {
+          "gold": {
+            "hit": 0,
+            "total": 1
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 0
+          }
+        }
+      ],
+      "case_id": "C2",
+      "expected_status": "resolved",
+      "failure_reasons": [
+        "expected status 'resolved', observed 'unresolved'",
+        "gold recall 0.50 below the 0.9 floor",
+        "missing required fact(s): ['grill', 'cooking method']"
+      ],
+      "gold": {
+        "hit": 1,
+        "total": 2
+      },
+      "hedged": false,
+      "is_twin": false,
+      "must_exclude_present": [],
+      "must_include_missing": [
+        "grill",
+        "cooking method"
+      ],
+      "observed_status": "unresolved",
+      "packet_chars": 20,
+      "packet_tokens": 4,
+      "passed": false,
+      "poison": {
+        "hit": 0,
+        "total": 1
+      },
+      "precision": null,
+      "status_match": false,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 0,
+            "total": 0
+          },
+          "kind": "equipment",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        },
+        {
+          "gold": {
+            "hit": 0,
+            "total": 0
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        }
+      ],
+      "case_id": "T2",
+      "expected_status": "unresolved",
+      "failure_reasons": [],
+      "gold": {
+        "hit": 0,
+        "total": 0
+      },
+      "hedged": false,
+      "is_twin": true,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "unresolved",
+      "packet_chars": 0,
+      "packet_tokens": 0,
+      "passed": true,
+      "poison": {
+        "hit": 0,
+        "total": 2
+      },
+      "precision": null,
+      "status_match": true,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 0,
+            "total": 1
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 0
+          }
+        },
+        {
+          "gold": {
+            "hit": 0,
+            "total": 1
+          },
+          "kind": "planning_item",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        }
+      ],
+      "case_id": "C3",
+      "expected_status": "resolved",
+      "failure_reasons": [
+        "expected status 'resolved', observed 'unresolved'",
+        "gold recall 0.00 below the 0.9 floor",
+        "missing required fact(s): ['extending the reporting module']"
+      ],
+      "gold": {
+        "hit": 0,
+        "total": 2
+      },
+      "hedged": false,
+      "is_twin": false,
+      "must_exclude_present": [],
+      "must_include_missing": [
+        "extending the reporting module"
+      ],
+      "observed_status": "unresolved",
+      "packet_chars": 46,
+      "packet_tokens": 9,
+      "passed": false,
+      "poison": {
+        "hit": 0,
+        "total": 1
+      },
+      "precision": null,
+      "status_match": false,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 0,
+            "total": 0
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        },
+        {
+          "gold": {
+            "hit": 0,
+            "total": 1
+          },
+          "kind": "planning_item",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        }
+      ],
+      "case_id": "T3",
+      "expected_status": "resolved",
+      "failure_reasons": [
+        "twin surfaced a ref outside its own gold",
+        "gold recall 0.00 below the 0.9 floor",
+        "precision 0.00 below the 0.8 floor"
+      ],
+      "gold": {
+        "hit": 0,
+        "total": 1
+      },
+      "hedged": false,
+      "is_twin": true,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "resolved",
+      "packet_chars": 154,
+      "packet_tokens": 33,
+      "passed": false,
+      "poison": {
+        "hit": 0,
+        "total": 2
+      },
+      "precision": 0.0,
+      "status_match": true,
+      "twin_false_activation": true
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 0,
+            "total": 1
+          },
+          "kind": "entity",
+          "poison": {
+            "hit": 0,
+            "total": 2
+          }
+        },
+        {
+          "gold": {
+            "hit": 0,
+            "total": 1
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 0
+          }
+        }
+      ],
+      "case_id": "C4",
+      "expected_status": "resolved",
+      "failure_reasons": [
+        "expected status 'resolved', observed 'unresolved'",
+        "gold recall 0.00 below the 0.9 floor",
+        "missing required fact(s): ['failed on the Mac build']"
+      ],
+      "gold": {
+        "hit": 0,
+        "total": 2
+      },
+      "hedged": false,
+      "is_twin": false,
+      "must_exclude_present": [],
+      "must_include_missing": [
+        "failed on the Mac build"
+      ],
+      "observed_status": "unresolved",
+      "packet_chars": 0,
+      "packet_tokens": 0,
+      "passed": false,
+      "poison": {
+        "hit": 0,
+        "total": 2
+      },
+      "precision": null,
+      "status_match": false,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 2,
+            "total": 2
+          },
+          "kind": "entity",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        },
+        {
+          "gold": {
+            "hit": 0,
+            "total": 0
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        }
+      ],
+      "case_id": "T4",
+      "expected_status": "ambiguous",
+      "failure_reasons": [
+        "expected status 'ambiguous', observed 'unresolved'"
+      ],
+      "gold": {
+        "hit": 2,
+        "total": 2
+      },
+      "hedged": false,
+      "is_twin": true,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "unresolved",
+      "packet_chars": 21,
+      "packet_tokens": 5,
+      "passed": false,
+      "poison": {
+        "hit": 0,
+        "total": 2
+      },
+      "precision": null,
+      "status_match": false,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 1,
+            "total": 1
+          },
+          "kind": "records_collection",
+          "poison": {
+            "hit": 0,
+            "total": 0
+          }
+        },
+        {
+          "gold": {
+            "hit": 1,
+            "total": 1
+          },
+          "kind": "resource",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        }
+      ],
+      "case_id": "C5",
+      "expected_status": "resolved",
+      "failure_reasons": [],
+      "gold": {
+        "hit": 2,
+        "total": 2
+      },
+      "hedged": false,
+      "is_twin": false,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "resolved",
+      "packet_chars": 435,
+      "packet_tokens": 90,
+      "passed": true,
+      "poison": {
+        "hit": 0,
+        "total": 1
+      },
+      "precision": 1.0,
+      "status_match": true,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 0,
+            "total": 0
+          },
+          "kind": "records_collection",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        },
+        {
+          "gold": {
+            "hit": 1,
+            "total": 1
+          },
+          "kind": "resource",
+          "poison": {
+            "hit": 0,
+            "total": 0
+          }
+        }
+      ],
+      "case_id": "T5",
+      "expected_status": "resolved",
+      "failure_reasons": [],
+      "gold": {
+        "hit": 1,
+        "total": 1
+      },
+      "hedged": false,
+      "is_twin": true,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "resolved",
+      "packet_chars": 321,
+      "packet_tokens": 72,
+      "passed": true,
+      "poison": {
+        "hit": 0,
+        "total": 1
+      },
+      "precision": 1.0,
+      "status_match": true,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [],
+      "case_id": "C6",
+      "expected_status": "unresolved",
+      "failure_reasons": [],
+      "gold": {
+        "hit": 0,
+        "total": 0
+      },
+      "hedged": false,
+      "is_twin": false,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "unresolved",
+      "packet_chars": 0,
+      "packet_tokens": 0,
+      "passed": true,
+      "poison": {
+        "hit": 0,
+        "total": 0
+      },
+      "precision": null,
+      "status_match": true,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 0,
+            "total": 0
+          },
+          "kind": "equipment",
+          "poison": {
+            "hit": 1,
+            "total": 1
+          }
+        }
+      ],
+      "case_id": "T6",
+      "expected_status": "unresolved",
+      "failure_reasons": [
+        "1 poison anchor(s) surfaced"
+      ],
+      "gold": {
+        "hit": 0,
+        "total": 0
+      },
+      "hedged": false,
+      "is_twin": true,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "unresolved",
+      "packet_chars": 20,
+      "packet_tokens": 4,
+      "passed": false,
+      "poison": {
+        "hit": 1,
+        "total": 1
+      },
+      "precision": null,
+      "status_match": true,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 3,
+            "total": 3
+          },
+          "kind": "hub",
+          "poison": {
+            "hit": 0,
+            "total": 0
+          }
+        }
+      ],
+      "case_id": "C7",
+      "expected_status": "ambiguous",
+      "failure_reasons": [],
+      "gold": {
+        "hit": 3,
+        "total": 3
+      },
+      "hedged": false,
+      "is_twin": false,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "ambiguous",
+      "packet_chars": 334,
+      "packet_tokens": 123,
+      "passed": true,
+      "poison": {
+        "hit": 0,
+        "total": 0
+      },
+      "precision": 1.0,
+      "status_match": true,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 1,
+            "total": 1
+          },
+          "kind": "hub",
+          "poison": {
+            "hit": 2,
+            "total": 2
+          }
+        }
+      ],
+      "case_id": "T7",
+      "expected_status": "resolved",
+      "failure_reasons": [
+        "expected status 'resolved', observed 'ambiguous'",
+        "2 poison anchor(s) surfaced",
+        "twin surfaced a ref outside its own gold",
+        "precision 0.50 below the 0.8 floor"
+      ],
+      "gold": {
+        "hit": 1,
+        "total": 1
+      },
+      "hedged": false,
+      "is_twin": true,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "ambiguous",
+      "packet_chars": 334,
+      "packet_tokens": 123,
+      "passed": false,
+      "poison": {
+        "hit": 2,
+        "total": 2
+      },
+      "precision": 0.5,
+      "status_match": false,
+      "twin_false_activation": true
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 0,
+            "total": 1
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 2
+          }
+        }
+      ],
+      "case_id": "C8",
+      "expected_status": "resolved",
+      "failure_reasons": [
+        "expected status 'resolved', observed 'unresolved'",
+        "gold recall 0.00 below the 0.9 floor",
+        "missing required fact(s): ['version 3']"
+      ],
+      "gold": {
+        "hit": 0,
+        "total": 1
+      },
+      "hedged": false,
+      "is_twin": false,
+      "must_exclude_present": [],
+      "must_include_missing": [
+        "version 3"
+      ],
+      "observed_status": "unresolved",
+      "packet_chars": 0,
+      "packet_tokens": 0,
+      "passed": false,
+      "poison": {
+        "hit": 0,
+        "total": 2
+      },
+      "precision": null,
+      "status_match": false,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 0,
+            "total": 1
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 2
+          }
+        }
+      ],
+      "case_id": "T8",
+      "expected_status": "resolved",
+      "failure_reasons": [
+        "expected status 'resolved', observed 'unresolved'",
+        "gold recall 0.00 below the 0.9 floor"
+      ],
+      "gold": {
+        "hit": 0,
+        "total": 1
+      },
+      "hedged": false,
+      "is_twin": true,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "unresolved",
+      "packet_chars": 0,
+      "packet_tokens": 0,
+      "passed": false,
+      "poison": {
+        "hit": 0,
+        "total": 2
+      },
+      "precision": null,
+      "status_match": false,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 1,
+            "total": 1
+          },
+          "kind": "equipment",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        },
+        {
+          "gold": {
+            "hit": 0,
+            "total": 1
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 0
+          }
+        }
+      ],
+      "case_id": "C9",
+      "expected_status": "resolved",
+      "failure_reasons": [
+        "expected status 'resolved', observed 'unresolved'",
+        "gold recall 0.50 below the 0.9 floor",
+        "missing required fact(s): ['grill', 'cooking method']"
+      ],
+      "gold": {
+        "hit": 1,
+        "total": 2
+      },
+      "hedged": false,
+      "is_twin": false,
+      "must_exclude_present": [],
+      "must_include_missing": [
+        "grill",
+        "cooking method"
+      ],
+      "observed_status": "unresolved",
+      "packet_chars": 20,
+      "packet_tokens": 4,
+      "passed": false,
+      "poison": {
+        "hit": 0,
+        "total": 1
+      },
+      "precision": null,
+      "status_match": false,
+      "twin_false_activation": false
+    },
+    {
+      "blocked": false,
+      "by_anchor_kind": [
+        {
+          "gold": {
+            "hit": 0,
+            "total": 0
+          },
+          "kind": "equipment",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        },
+        {
+          "gold": {
+            "hit": 0,
+            "total": 0
+          },
+          "kind": "note",
+          "poison": {
+            "hit": 0,
+            "total": 1
+          }
+        }
+      ],
+      "case_id": "T9",
+      "expected_status": "unresolved",
+      "failure_reasons": [],
+      "gold": {
+        "hit": 0,
+        "total": 0
+      },
+      "hedged": false,
+      "is_twin": true,
+      "must_exclude_present": [],
+      "must_include_missing": [],
+      "observed_status": "unresolved",
+      "packet_chars": 0,
+      "packet_tokens": 0,
+      "passed": true,
+      "poison": {
+        "hit": 0,
+        "total": 2
+      },
+      "precision": null,
+      "status_match": true,
+      "twin_false_activation": false
+    }
+  ],
+  "threshold_digest": "7b2785cf81437ad98eeede3fb9bb046baa80fdcddf883d33c293cae91fbf867a",
+  "thresholds": {
+    "end_to_end_p50_ms_ceiling": 10744.641,
+    "end_to_end_p95_ms_ceiling": 16488.201,
+    "gold_recall_floor": 0.9,
+    "hedged_twins_ceiling": 1,
+    "padding_precision_floor": 0.8,
+    "precision_floor": 0.8,
+    "statement_max_chars": 200,
+    "token_hard_cap": 2000,
+    "token_p50_ceiling": 900,
+    "token_p95_ceiling": 1500,
+    "working_set_p50_ms_ceiling": 800,
+    "working_set_p95_ms_ceiling": 2500
+  },
+  "trees": [
+    {
+      "distractor_count": 0,
+      "fixtures": [
+        "C1",
+        "T1",
+        "C2",
+        "T2",
+        "C3",
+        "T3",
+        "C4",
+        "T4",
+        "C5",
+        "T5",
+        "C6",
+        "T6",
+        "C7",
+        "T7",
+        "C8",
+        "T8"
+      ],
+      "graph": {
+        "edges": 45,
+        "indexed_files": 38,
+        "nodes": 65
+      },
+      "indexed_pages": 37,
+      "logical_corpus_digest": "0b8a8eef2bdf0d2461520f51b5e7a8e46a54ff61f417dfd6827e7097a284ffcb",
+      "published_anchors": 18,
+      "topology_findings": [
+        {
+          "case_id": "C1",
+          "finding": "no anchor, and the retrieval carry refuses a corpus of 37 indexed pages (minimum 100)",
+          "key": "c1_weekly_limit_insight",
+          "key_kind": "note"
+        },
+        {
+          "case_id": "C1",
+          "finding": "no anchor, and the retrieval carry refuses a corpus of 37 indexed pages (minimum 100)",
+          "key": "c1_capacity_ceilings_pattern",
+          "key_kind": "note"
+        },
+        {
+          "case_id": "C2",
+          "finding": "no anchor, and the retrieval carry refuses a corpus of 37 indexed pages (minimum 100)",
+          "key": "c2_cooking_method_insight",
+          "key_kind": "note"
+        },
+        {
+          "case_id": "C3",
+          "finding": "planning identity: the published plan anchor is Knowledge Base/Planning/Roadmap/_collection.md, not the gold item",
+          "key": "c3_planning_item",
+          "key_kind": "planning_item"
+        },
+        {
+          "case_id": "C3",
+          "finding": "no anchor, and the retrieval carry refuses a corpus of 37 indexed pages (minimum 100)",
+          "key": "c3_design_pointer",
+          "key_kind": "note"
+        },
+        {
+          "case_id": "T3",
+          "finding": "planning identity: the published plan anchor is Knowledge Base/Planning/Other Workstream/_collection.md, not the gold item",
+          "key": "t3_other_project_planning_item",
+          "key_kind": "planning_item"
+        },
+        {
+          "case_id": "C4",
+          "finding": "no anchor, and the retrieval carry refuses a corpus of 37 indexed pages (minimum 100)",
+          "key": "c4_failure_note",
+          "key_kind": "note"
+        },
+        {
+          "case_id": "C8",
+          "finding": "no anchor, and the retrieval carry refuses a corpus of 37 indexed pages (minimum 100)",
+          "key": "c8_active_head",
+          "key_kind": "note"
+        },
+        {
+          "case_id": "T8",
+          "finding": "no anchor, and the retrieval carry refuses a corpus of 37 indexed pages (minimum 100)",
+          "key": "t8_unchained_active_note",
+          "key_kind": "note"
+        }
+      ]
+    },
+    {
+      "distractor_count": 200,
+      "fixtures": [
+        "C9",
+        "T9"
+      ],
+      "graph": {
+        "edges": 45,
+        "indexed_files": 238,
+        "nodes": 265
+      },
+      "indexed_pages": 37,
+      "logical_corpus_digest": "3092af49a017e75c672992f6b9fbb16daa08dfcd0ab5eb58750de62cd0b5abf3",
+      "published_anchors": 18,
+      "topology_findings": [
+        {
+          "case_id": "C9",
+          "finding": "no anchor, and the retrieval carry refuses a corpus of 37 indexed pages (minimum 100)",
+          "key": "c2_cooking_method_insight",
+          "key_kind": "note"
+        }
+      ]
+    }
+  ],
+  "verdict": "reviewed"
+}
