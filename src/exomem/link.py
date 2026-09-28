@@ -18,7 +18,15 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import entity_candidates, indexes, memory_refs, semantic_writes, tag_variants, temporal
+from . import (
+    entity_candidates,
+    indexes,
+    memory_refs,
+    semantic_writes,
+    tag_variants,
+    temporal,
+    vocabulary_resolution,
+)
 from .entity_types import (
     ENTITY_WRITER_OPTIONAL_FRONTMATTER,
     EntityTypeDefinition,
@@ -60,6 +68,8 @@ class LinkResult:
     # See NoteResult.slug — callers must link by this, not by re-slugging.
     # Declared last so the positional LinkResult(...) construction stays valid.
     slug: str = ""
+    # How the requested entity type resolved and where it projects.
+    vocabulary_resolution: dict[str, str] | None = None
 
     def as_dict(self) -> dict:
         value: dict[str, object] = {
@@ -71,6 +81,8 @@ class LinkResult:
             value["slug"] = self.slug
         if self.creation is not None:
             value["creation"] = self.creation
+        if self.vocabulary_resolution is not None:
+            value["vocabulary_resolution"] = self.vocabulary_resolution
         return value
 
 
@@ -655,6 +667,7 @@ def link(
             ["entity_type"],
             f"entity_type {entity_type!r} is not active. Active ids: {list(registry.active_ids)}",
         )
+    requested_type = entity_type
     entity_type = definition.id
     slug_warnings: list[str] = []
     filename_slug: str | None = None
@@ -716,6 +729,12 @@ def link(
     )
     if entity_path.exists():
         raise LinkError("ENTITY_EXISTS", ["name"], _entity_exists_reason(vault_root, rel_entity))
+    type_resolution = vocabulary_resolution.entity_type_record(
+        requested_type,
+        definition,
+        fingerprint=registry.fingerprint,
+        destination=rel_entity.rsplit("/", 2)[-2],
+    )
     rel_entity_no_ext = rel_entity.removesuffix(".md")
     resolver = find_module.writer_resolver_snapshot(vault_root)
     resolver.add_pending(rel_entity_no_ext, title=display_name)
@@ -846,6 +865,7 @@ def link(
             warnings,
             preflight.as_dict(),
             slug=filename_slug or "",
+            vocabulary_resolution=type_resolution,
         )
     committed = semantic_writes.commit_creation(
         vault_root,
@@ -860,4 +880,5 @@ def link(
         warnings,
         committed.as_dict(),
         slug=filename_slug or "",
+        vocabulary_resolution=type_resolution,
     )
