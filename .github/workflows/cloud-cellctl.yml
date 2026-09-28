@@ -128,8 +128,9 @@ jobs:
           # values schema and validation values, the vendored subcharts, the
           # cell manifest renderer, and the live suite itself. values.yaml
           # is left out because release bumps touch it; chart tests pin the
-          # invariants it carries.
-          LIVE_K3S_PATTERN: '^(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/tests/test_k3s_integration\.py$)'
+          # invariants it carries. Git quotes a path with special or
+          # non-ASCII characters, hence the optional leading quote.
+          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/tests/test_k3s_integration\.py$)'
         run: |
           case "$EVENT" in
             workflow_dispatch) run=true ;;

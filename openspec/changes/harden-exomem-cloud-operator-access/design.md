@@ -2,7 +2,7 @@
 
 The platform chart runs Traefik as a subchart in the `exomem-platform` release namespace. Its ClusterRole reads Secrets in every namespace. The Cloud route (IngressRoute, Middleware, Issuer, Certificate, TLS Secret) lives in `exomem-cloud`, beside cellctl's and the gateway's keys: the cell token key, backup master key, B2 key-management credential and database DSNs. `exomem-platform` holds the Cloud volume-encryption passphrase and the legacy platform's Secrets. The operator uses K3s's admin kubeconfig (`system:masters`) for everything.
 
-The node already runs a K3s audit policy (`infra/ansible/roles/k3s/files/audit-policy.yaml`). It records every request at Metadata level, and Secrets at Metadata only, retained 7 days on the node.
+The node already runs a K3s audit policy (`infra/ansible/roles/k3s/files/audit-policy.yaml`). It records every request at Metadata level, Secrets at Metadata only, and namespaces, PersistentVolumeClaims and StatefulSets with their bodies, retained 7 days on the node. None of those bodies holds Secret values or vault content.
 
 cellctl's own writes are already confined by ValidatingAdmissionPolicies. Tenant-to-tenant isolation is out of scope here; `cloud-cell` covers it.
 
@@ -74,7 +74,7 @@ Only age X25519 recipients are accepted, because SSH keys cannot be matched agai
 
 ### D7. The audit policy already satisfies the break-glass record, on the node
 
-Metadata-level logging captures the user, groups, verb, resource, subresource, namespace and time for every request, including exec and CSR approval, with no bodies. A task confirms this on the live node. The log lives on the node for 7 days and root can rewrite it, so it is a trail under the operator's control, not tamper-proof evidence. Shipping it off the node is deferred.
+Metadata-level logging captures the user, groups, verb, resource, subresource, namespace and time for every request, including exec and CSR approval, with no bodies except for namespaces, PersistentVolumeClaims and StatefulSets. A task confirms this on the live node. The log lives on the node for 7 days and root can rewrite it, so it is a trail under the operator's control, not tamper-proof evidence. Shipping it off the node is deferred.
 
 ### D8. Content-free logs are proven with a canary
 

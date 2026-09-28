@@ -237,8 +237,9 @@ unset BREAK_GLASS_KUBECONFIG
 ## Find break-glass use in the audit log
 
 The node's audit policy logs every request at Metadata level: user, groups,
-verb, resource, subresource, namespace, name and time, with no request or
-response bodies. Logs stay on the node for 7 days (`audit.log`, plus rotated
+verb, resource, subresource, namespace, name and time. It records bodies only
+for namespaces, PersistentVolumeClaims and StatefulSets, never for Secrets, and
+none of those holds vault content. Logs stay on the node for 7 days (`audit.log`, plus rotated
 `audit-*.log`). Root can rewrite them, so treat them as a trail, not
 tamper-proof evidence. Record in the operator channel the CSR name and the
 lines below:
@@ -391,9 +392,10 @@ canary_file_hits() {
   while IFS= read -r -d '' file; do
     CANARY_FILES=$((CANARY_FILES + 1))
     # containerd splits a long line into partial (P) records at 16 KiB;
-    # rejoin them so a canary straddling a split is still one line.
+    # rejoin them per stream (stdout and stderr interleave) so a canary
+    # straddling a split is still one line.
     count=$(zcat -f -- "$file" \
-      | awk '{ tag = $3; sub(/^[^ ]+ [^ ]+ [^ ]+ /, ""); buf = buf $0; if (tag != "P") { print buf; buf = "" } } END { if (buf != "") print buf }' \
+      | awk '{ s = $2; tag = $3; sub(/^[^ ]+ [^ ]+ [^ ]+ /, ""); buf[s] = buf[s] $0; if (tag != "P") { print buf[s]; buf[s] = "" } } END { for (s in buf) if (buf[s] != "") print buf[s] }' \
       | grep -cF "${CANARY_PATTERNS[@]}" || true)
     CANARY_FILE_HITS=$((CANARY_FILE_HITS + count))
     if [ "$count" -gt 0 ]; then printf '%s hits=%s\n' "$file" "$count"; fi
@@ -442,19 +444,22 @@ canary_file_hits 'exo-cell-*' 'exo-scratch-*' 'exomem-cloud_*'
 # Jobs are deleted with their pods 300 s after they finish, so the cluster
 # cannot list the ones whose logs are gone. The audit log records every Job
 # create at Metadata level; list those in cell and scratch namespaces since
-# the write.
-test -r "${AUDIT_LOG:-/var/lib/rancher/k3s/server/logs/audit.log}"
-jobs_after=0
-while read -r namespace job created; do
-  jobs_after=$((jobs_after + 1))
-  echo "job created after the write, logs searched only while its pod exists: $namespace/$job at $created"
-done < <(python3 - "$CANARY_WRITTEN_AT" "${AUDIT_LOG:-/var/lib/rancher/k3s/server/logs/audit.log}" <<'PY'
-import json, re, sys
+# the write, including rotated audit files. A failure to read them stops
+# the scan rather than reading as no Jobs.
+audit=${AUDIT_LOG:-/var/lib/rancher/k3s/server/logs/audit.log}
+test -r "$audit"
+jobs_listing=$(python3 - "$CANARY_WRITTEN_AT" "$audit" <<'PY'
+import glob, json, os, re, sys
 since, path = sys.argv[1][:19], sys.argv[2]
 scope = re.compile(r"^exo-(cell-[a-z2-7]{16}|scratch-[a-z2-7]{16}-[0-9a-f]{8})$")
-with open(path, encoding="utf-8") as log:
+stem, ext = os.path.splitext(path)
+for name in sorted(glob.glob(f"{stem}-*{ext}")) + [path]:
+  with open(name, encoding="utf-8", errors="replace") as log:
     for line in log:
-        event = json.loads(line)
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # a line still being written, or a damaged one
         ref = event.get("objectRef") or {}
         if event.get("verb") != "create" or ref.get("resource") != "jobs":
             continue
@@ -465,6 +470,12 @@ with open(path, encoding="utf-8") as log:
             print(ref["namespace"], ref.get("name", "?"), created)
 PY
 )
+jobs_after=0
+while read -r namespace job created; do
+  [ -n "$namespace" ] || continue
+  jobs_after=$((jobs_after + 1))
+  echo "job created after the write, logs searched only while its pod exists: $namespace/$job at $created"
+done <<< "$jobs_listing"
 echo "cells=$cells cellctl=$cellctl gateway=$gateway pods=$CANARY_PODS streams=$CANARY_STREAMS unreadable=$CANARY_UNREADABLE hits=$CANARY_HITS files=$CANARY_FILES file_hits=$CANARY_FILE_HITS jobs_after_write=$jobs_after"
 test "$cells" -gt 0
 test "$cellctl" -ge 1

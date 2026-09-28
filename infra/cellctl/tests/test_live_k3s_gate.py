@@ -114,9 +114,11 @@ def test_a_renamed_policy_template_still_runs_the_live_suite(repo, tmp_path) -> 
 
 
 def test_a_large_pull_request_touching_a_template_still_runs_the_live_suite(repo, tmp_path) -> None:
-    # grep -q exiting early used to SIGPIPE the diff under pipefail.
+    # grep -q exiting early used to SIGPIPE the diff under pipefail. The bulk
+    # files sort after infra/, so the match comes early and the writer still
+    # has output left when grep exits.
     root, base = repo
-    bulk = root / "docs/bulk"
+    bulk = root / "zz/bulk"
     bulk.mkdir(parents=True)
     for index in range(3000):
         (bulk / f"f{index:04}.md").write_text(f"{index}\n")
@@ -137,6 +139,14 @@ def test_a_values_bump_alone_does_not_run_the_live_suite(repo, tmp_path) -> None
     assert _run_scope(root, "pull_request", base, head, tmp_path) == "false"
     assert _run_scope(root, "workflow_dispatch", "", "", tmp_path) == "true"
     assert _run_scope(root, "push", base, head, tmp_path) == "false"
+
+
+@pytest.mark.parametrize("name", ["pölicies.yaml", 'a"b.yaml', "tab\tname.yaml"])
+def test_a_template_whose_path_git_quotes_still_runs_the_live_suite(repo, tmp_path, name) -> None:
+    root, base = repo
+    (root / "infra/helm/platform/templates" / name).write_text("kind: ConfigMap\n")
+    head = _commit(root)
+    assert _run_scope(root, "pull_request", base, head, tmp_path) == "true"
 
 
 @pytest.mark.parametrize("path", sorted(LIVE_PATHS))

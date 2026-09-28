@@ -327,7 +327,9 @@ The authorized recipient compares the digest, then counts the recipient
 stanzas in the archive header. The count of `-> X25519` stanzas must equal the
 number of recipients they supplied, and no other recipient type may appear.
 The count alone catches an added key but not a swapped one, so every identity
-behind the supplied recipients must then decrypt the archive. Together these
+behind the supplied recipients must then decrypt the archive: one key per
+identity file, and together exactly the recipients sent, so neither a repeated
+identity nor a multi-key file can stand in for a missing recipient. Together these
 prove it is encrypted to exactly the recipients the tenant supplied. Grease
 stanzas, which some age implementations add and which carry no key, are
 ignored. Then the recipient verifies archive members without extracting or
@@ -344,9 +346,22 @@ if [ "$x25519" != "$SUPPLIED_RECIPIENTS" ] || [ "$others" != 0 ]; then
   echo 'the archive is encrypted to a recipient you did not supply; do not use it' >&2
   exit 1
 fi
-# One identity file per supplied recipient; each must open the archive.
+# One identity file per supplied recipient, one key per file, and together
+# exactly the recipients you sent; then each must open the archive.
+: "${SENT_RECIPIENTS:?the recipients file you sent}"
 read -r -a identities <<< "${RECIPIENT_IDENTITIES:-$RECIPIENT_IDENTITY}"
 [ "${#identities[@]}" = "$SUPPLIED_RECIPIENTS" ]
+derived=""
+for identity in "${identities[@]}"; do
+  keys=$(age-keygen -y "$identity")
+  [ "$(printf '%s\n' "$keys" | grep -c .)" = 1 ] || { echo "$identity must hold exactly one key" >&2; exit 1; }
+  derived+="$keys"$'\n'
+done
+sent=$(grep -v -e '^#' -e '^[[:space:]]*$' "$SENT_RECIPIENTS" | sort)
+if [ "$(printf '%s' "$derived" | sort)" != "$sent" ] || [ -n "$(printf '%s' "$derived" | sort | uniq -d)" ]; then
+  echo 'your identities do not match the recipients you sent, one for one' >&2
+  exit 1
+fi
 for identity in "${identities[@]}"; do
   age -d -i "$identity" "$RECEIVED_ARCHIVE" > /dev/null
 done
