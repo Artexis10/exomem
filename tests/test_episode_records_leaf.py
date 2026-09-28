@@ -487,7 +487,7 @@ def test_the_synthetic_slice_records_event_lands_in_its_collection(
 # --------------------------------------------------------------------------- #
 
 _IDS = {"episode", "episode_id", "journal_digest", "revision", "leaf_id", "candidate_id",
-        "run_id", "operation_id", "effect_digest", "receipt_digest"}
+        "run_id", "operation_id", "effect_digest", "receipt_digest", "ref"}
 
 
 def _shape(value: object) -> object:
@@ -595,3 +595,84 @@ def test_path_folding_keeps_the_records_tree_closed(vault: Path) -> None:
         with pytest.raises(curation.CurationError) as refused:
             curation.normalize_target_path(path, allow_records=True)
         assert refused.value.code == "CURATION_TARGET_PROTECTED", spelling
+
+
+def test_a_collection_withheld_after_commit_attests_exactly_like_a_deleted_one(
+    vault: Path, enabled
+) -> None:
+    import shutil
+
+    withheld = _collection(
+        vault,
+        "Knowledge Base/Records/Withheld Readings/_collection.md",
+        exomem_id="33333333-4c5a-4b6c-8d7e-9f0a1b2c3d4e",
+    )
+    deleted = _collection(
+        vault,
+        "Knowledge Base/Records/Deleted Readings/_collection.md",
+        exomem_id="44444444-4c5a-4b6c-8d7e-9f0a1b2c3d4e",
+    )
+    keys = {withheld: "ep-" + "c7" * 16, deleted: "ep-" + "d8" * 16}
+    client = RequestPrincipal(audience_id="client-a", surface="mcp")
+    executed: dict[str, dict] = {}
+    with request_scope(client):
+        for collection, key in keys.items():
+            episode = functools.partial(
+                commands.op_episode_memory,
+                vault,
+                schema_module.load_source_schema(vault),
+                episode=key,
+            )
+            episode(
+                action="record",
+                subject="Dye vat reading",
+                summary="Logged a vat reading.",
+                decided=["Log the reading"],
+            )
+            leaf = {
+                "leaf_key": "append",
+                "effect_revision": 1,
+                "kind": "append-record",
+                "args": {
+                    "collection": collection,
+                    "item": READING,
+                    "why": "The episode logged a vat reading.",
+                    "expected_container_hash": _container(vault, collection),
+                },
+            }
+            episode(action="prepare", candidate="reading", proposal=_proposal("records", [leaf]))
+            reviewed = episode(
+                action="disposition", candidate="reading", disposition="routed", reason="r"
+            )
+            executed[collection] = episode(
+                action="resume", input_revision=1, journal_digest=reviewed["journal_digest"]
+            )
+            assert executed[collection]["status"] == "ok", executed[collection]["blocked"]
+    _withhold_records_from(vault, "client-a")
+    shutil.rmtree((vault / deleted).parent)
+
+    errors = {}
+    passes = {}
+    with request_scope(client):
+        for collection, key in keys.items():
+            episode = functools.partial(
+                commands.op_episode_memory,
+                vault,
+                schema_module.load_source_schema(vault),
+                episode=key,
+            )
+            passes[collection] = episode(action="coverage")
+            with pytest.raises(ValueError) as refused:
+                episode(
+                    action="resume",
+                    input_revision=1,
+                    postcommit=True,
+                    journal_digest=executed[collection]["journal_digest"],
+                )
+            errors[collection] = str(refused.value)
+    assert errors[withheld] == errors[deleted]
+    assert "EPISODE_OUTCOME_UNCERTAIN" in errors[withheld]
+    assert json.dumps(_shape(passes[withheld]), sort_keys=True) == json.dumps(
+        _shape(passes[deleted]), sort_keys=True
+    )
+    assert {row["readback"] for row in passes[withheld]["receipts"]} == {"unavailable"}
