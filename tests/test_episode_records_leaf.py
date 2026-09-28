@@ -7,7 +7,8 @@ Records receipt -- the audit transition that append committed -- corroborates
 it. Each authority boundary is pinned here on its own:
 
 * only the `records` route owns the kind, and it owns no other kind;
-* a general curation plan (the `maintain_memory` door) cannot carry it;
+* no general curation plan (the `maintain_memory` door) can seal it, though
+  curation apply runs one the episode sealed through the same writer;
 * every other step kind still cannot reach the protected Records tree, and a
   Records witness cannot name a page outside it;
 * the Records writer's own resolution, visibility and profile checks decide,
@@ -18,6 +19,7 @@ it. Each authority boundary is pinned here on its own:
 
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 from typing import get_args
@@ -74,11 +76,22 @@ def enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
 
 
-def _collection(vault: Path, path: str = COLLECTION, *, profile: str = "records") -> str:
+def _collection(
+    vault: Path,
+    path: str = COLLECTION,
+    *,
+    profile: str = "records",
+    exomem_id: str = "6b1f2e3d-4c5a-4b6c-8d7e-9f0a1b2c3d4e",
+) -> str:
     manifest = vault / path
     manifest.parent.mkdir(parents=True, exist_ok=True)
     (manifest.parent / "Entries").mkdir(exist_ok=True)
-    manifest.write_text(MANIFEST.replace("{profile}", profile), encoding="utf-8")
+    manifest.write_text(
+        MANIFEST.replace("{profile}", profile).replace(
+            "6b1f2e3d-4c5a-4b6c-8d7e-9f0a1b2c3d4e", exomem_id
+        ),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -191,7 +204,13 @@ def test_only_the_records_route_owns_the_records_leaf(vault: Path, owner) -> Non
     assert "append-record" in kinds
 
 
-def test_a_general_curation_plan_cannot_append_records(vault: Path, owner) -> None:
+def test_the_curation_door_cannot_seal_a_records_plan_but_runs_one_the_episode_sealed(
+    vault: Path, owner
+) -> None:
+    """The episode seal is the only way a Records plan comes to exist. Once
+    sealed, it is an ordinary curation run: `maintain_memory` curation apply
+    runs it through the same Records writer and checks `record_memory` append
+    applies, which grants nothing that append does not (ruling on L1)."""
     _collection(vault)
     args = _leaf(vault)["args"]
     with pytest.raises(curation.CurationError) as refused:
@@ -209,6 +228,25 @@ def test_a_general_curation_plan_cannot_append_records(vault: Path, owner) -> No
     )
     with pytest.raises(curation.CurationError, match="CURATION_RECORDS_LEAF_ALONE"):
         curation.propose(vault, two, allow_records=True)
+
+    # An episode-sealed Records plan, applied through the curation door.
+    _record(vault)
+    reviewed = _prepared(vault)
+    run = reviewed["candidates"][0]["leaves"][0]["run_id"]
+    plan_id, fingerprint = curation.CurationStore(vault).identities(run)
+    applied = commands.op_maintain_memory(
+        vault,
+        mode="curation",
+        curation_action="apply",
+        run_id=run,
+        plan_id=plan_id,
+        expected_plan_fingerprint=fingerprint,
+        why="Applied through the curation door.",
+    )
+    assert applied["step"]["outcome"] == "committed"
+    assert len(_entries(vault)) == 1
+    inspected = commands.op_record_memory(vault, action="inspect", collection=COLLECTION)
+    assert inspected["audit"]["status"] == "ok"
 
 
 def test_every_other_kind_stays_out_of_the_records_tree(vault: Path, owner) -> None:
@@ -441,3 +479,119 @@ def test_the_synthetic_slice_records_event_lands_in_its_collection(
     assert '"temperature_c": 41' in encoded and '"vat": "north"' in encoded
     # Nothing was expressed as Planning, and nothing appeared there.
     assert sorted((vault / "Knowledge Base").rglob("Planning/**/*.md")) == before_planning
+
+
+# --------------------------------------------------------------------------- #
+# Security review round: withheld equals absent after preparation (M1), the
+# Records tree under path folding (I1)
+# --------------------------------------------------------------------------- #
+
+_IDS = {"episode", "episode_id", "journal_digest", "revision", "leaf_id", "candidate_id",
+        "run_id", "operation_id", "effect_digest", "receipt_digest"}
+
+
+def _shape(value: object) -> object:
+    """A resume outcome without the identities that differ between episodes."""
+    if isinstance(value, dict):
+        return {key: _shape(item) for key, item in value.items() if key not in _IDS}
+    if isinstance(value, list):
+        return [_shape(item) for item in value]
+    return value
+
+
+def test_a_collection_withheld_after_preparation_resumes_exactly_like_a_deleted_one(
+    vault: Path, enabled
+) -> None:
+    import shutil
+
+    withheld = _collection(
+        vault,
+        "Knowledge Base/Records/Withheld Readings/_collection.md",
+        exomem_id="11111111-4c5a-4b6c-8d7e-9f0a1b2c3d4e",
+    )
+    deleted = _collection(
+        vault,
+        "Knowledge Base/Records/Deleted Readings/_collection.md",
+        exomem_id="22222222-4c5a-4b6c-8d7e-9f0a1b2c3d4e",
+    )
+    keys = {withheld: "ep-" + "a7" * 16, deleted: "ep-" + "b8" * 16}
+    client = RequestPrincipal(audience_id="client-a", surface="mcp")
+    reviewed: dict[str, dict] = {}
+    with request_scope(client):
+        for collection, key in keys.items():
+            episode = functools.partial(
+                commands.op_episode_memory,
+                vault,
+                schema_module.load_source_schema(vault),
+                episode=key,
+            )
+            episode(
+                action="record",
+                subject="Dye vat reading",
+                summary="Logged a vat reading.",
+                decided=["Log the reading"],
+            )
+            leaf = {
+                "leaf_key": "append",
+                "effect_revision": 1,
+                "kind": "append-record",
+                "args": {
+                    "collection": collection,
+                    "item": READING,
+                    "why": "The episode logged a vat reading.",
+                    "expected_container_hash": _container(vault, collection),
+                },
+            }
+            episode(action="prepare", candidate="reading", proposal=_proposal("records", [leaf]))
+            reviewed[collection] = episode(
+                action="disposition", candidate="reading", disposition="routed", reason="r"
+            )
+    # One collection is withheld from this caller, the other is gone.
+    _withhold_records_from(vault, "client-a")
+    shutil.rmtree((vault / deleted).parent)
+
+    outcomes = {}
+    with request_scope(client):
+        for collection, key in keys.items():
+            outcomes[collection] = commands.op_episode_memory(
+                vault,
+                schema_module.load_source_schema(vault),
+                episode=key,
+                action="resume",
+                input_revision=1,
+                journal_digest=reviewed[collection]["journal_digest"],
+            )
+    assert json.dumps(_shape(outcomes[withheld]), sort_keys=True) == json.dumps(
+        _shape(outcomes[deleted]), sort_keys=True
+    )
+    assert outcomes[withheld]["status"] == "stale"
+    assert [item["code"] for item in outcomes[withheld]["stale"]] == ["CURATION_BINDING_STALE"]
+    leaf = outcomes[withheld]["candidates"][0]["leaves"][0]
+    assert leaf["outcome"] == "pending" and leaf["attempts"] == 0
+    assert _entries(vault, withheld) == []
+
+
+def test_path_folding_keeps_the_records_tree_closed(vault: Path) -> None:
+    # Spellings a filesystem folds onto the Records tree stay refused for
+    # every other kind...
+    for spelling in ("Records.", "Records ", "records", "Recordſ", "ＲＥＣＯＲＤＳ"):
+        path = f"Knowledge Base/{spelling}/Vat Readings/Entries/reading.md"
+        with pytest.raises(curation.CurationError) as refused:
+            curation.normalize_target_path(path)
+        assert refused.value.code == "CURATION_TARGET_PROTECTED", spelling
+    for spelling in ("Sources.", "_Schema ", "Evidencе"):
+        path = f"Knowledge Base/{spelling}/x.md"
+        if spelling == "Evidencе":  # a Cyrillic homoglyph is a different name
+            assert curation.normalize_target_path(path) == path
+            continue
+        with pytest.raises(curation.CurationError) as refused:
+            curation.normalize_target_path(path)
+        assert refused.value.code == "CURATION_TARGET_PROTECTED", spelling
+    # ...and the Records leaf itself accepts only the exact Records layer.
+    exact = "Knowledge Base/Records/Vat Readings/Entries/reading.md"
+    assert curation.normalize_target_path(exact, allow_records=True) == exact
+    for spelling in ("Records.", "Records ", "records", "Recordſ"):
+        path = f"Knowledge Base/{spelling}/Vat Readings/Entries/reading.md"
+        with pytest.raises(curation.CurationError) as refused:
+            curation.normalize_target_path(path, allow_records=True)
+        assert refused.value.code == "CURATION_TARGET_PROTECTED", spelling

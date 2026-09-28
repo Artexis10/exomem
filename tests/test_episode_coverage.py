@@ -648,3 +648,321 @@ def test_a_live_page_that_differs_from_the_last_leaf_breaks_the_chain(
     assert {row["readback"] for row in passed["receipts"]} == {"changed"}
     with pytest.raises(ValueError, match="EPISODE_OUTCOME_UNCERTAIN"):
         _resume(vault, executed, postcommit=True)
+
+
+# --------------------------------------------------------------------------- #
+# Security review round (M1): a page withheld after its leaf was prepared or
+# committed answers exactly like a page that is gone -- before an attempt, and
+# at the postcommit attestation -- so neither is a one-bit existence oracle.
+# --------------------------------------------------------------------------- #
+
+_IDS = {"episode", "episode_id", "journal_digest", "revision", "leaf_id", "candidate_id",
+        "run_id", "operation_id", "effect_digest", "receipt_digest", "path", "ref"}
+
+
+def _shape(value: object) -> object:
+    if isinstance(value, dict):
+        return {key: _shape(item) for key, item in value.items() if key not in _IDS}
+    if isinstance(value, list):
+        return [_shape(item) for item in value]
+    return value
+
+
+def _client_episode(vault: Path, key: str, **kwargs: object) -> dict:
+    return commands.op_episode_memory(
+        vault, schema_module.load_source_schema(vault), episode=key, **kwargs
+    )
+
+
+def _seed_insight(vault: Path, slug: str, memory_id: str) -> str:
+    path = vault / INSIGHTS / f"{slug}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: insight\nexomem_id: {memory_id}\ntitle: "
+        + slug
+        + "\nstatus: active\ncreated: 2026-09-20\nupdated: 2026-09-20\nsources: []\ntags: []\n"
+        "---\n\n## Observations\n\n- [finding] A seeded observation. ^seed\n",
+        encoding="utf-8",
+    )
+    return f"{INSIGHTS}/{slug}.md"
+
+
+def _edit_leaf(vault: Path, page: str) -> dict:
+    return {
+        "leaf_key": "append",
+        "effect_revision": 1,
+        "kind": "edit",
+        "args": {
+            "path": page,
+            "why": "A scope-owned detail.",
+            "operation": {
+                "kind": "edit_section",
+                "heading": "Observations",
+                "new_string": "- [finding] A later detail. ^later",
+                "section_position": "append",
+                "expected_hash": commands.op_read_memory(vault, path=page)["content_hash"],
+                "relation_disposition": "reviewed_none",
+                "relation_review_reason": "No supported relation here.",
+            },
+        },
+    }
+
+
+def test_a_page_withheld_before_its_attempt_resumes_exactly_like_a_deleted_one(
+    vault: Path, enabled
+) -> None:
+    pages = {
+        "withheld": _seed_insight(vault, "withheld-dye-note", "5a5a5a5a-1111-4111-8111-111111111111"),
+        "deleted": _seed_insight(vault, "gone-dye-note", "5b5b5b5b-2222-4222-8222-222222222222"),
+    }
+    keys = {"withheld": "ep-" + "a1" * 16, "deleted": "ep-" + "b2" * 16}
+    client = RequestPrincipal(audience_id="client-a", surface="mcp")
+    reviewed = {}
+    with request_scope(client):
+        for case, key in keys.items():
+            _client_episode(
+                vault, key, action="record", subject="Dye note", summary="A detail.",
+                decided=["Add the detail"],
+            )
+            _client_episode(
+                vault,
+                key,
+                action="prepare",
+                candidate="detail",
+                proposal=_proposal("existing_page", [_edit_leaf(vault, pages[case])], target=pages[case]),
+            )
+            reviewed[case] = _client_episode(
+                vault, key, action="disposition", candidate="detail", disposition="routed", reason="r"
+            )
+    _withhold_notes_from(vault, "client-a")
+    (vault / pages["deleted"]).unlink()
+
+    with request_scope(client):
+        outcomes = {
+            case: _client_episode(
+                vault,
+                key,
+                action="resume",
+                input_revision=1,
+                journal_digest=reviewed[case]["journal_digest"],
+            )
+            for case, key in keys.items()
+        }
+    assert json.dumps(_shape(outcomes["withheld"]), sort_keys=True) == json.dumps(
+        _shape(outcomes["deleted"]), sort_keys=True
+    )
+    # The precommit destination review answers first for a bound home.
+    assert [item["code"] for item in outcomes["withheld"]["stale"]] == ["EPISODE_DESTINATION_STALE"]
+    leaf = outcomes["withheld"]["candidates"][0]["leaves"][0]
+    assert leaf["outcome"] == "pending" and leaf["attempts"] == 0
+
+
+def _linked_insight(vault: Path, slug: str, memory_id: str) -> str:
+    path = vault / INSIGHTS / f"{slug}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: insight\nexomem_id: {memory_id}\ntitle: {slug}\nstatus: active\n"
+        "created: 2026-09-20\nupdated: 2026-09-20\nsources: []\ntags: []\n---\n\n"
+        "## Observations\n\n- [finding] Indigo vats keep a stable warm bath. ^seed\n\n"
+        f"## Relations\n\nSee [[{ENTITY.removesuffix('.md')}]].\n",
+        encoding="utf-8",
+    )
+    return f"{INSIGHTS}/{slug}.md"
+
+
+def _relation_leaf(vault: Path, page: str) -> dict:
+    from exomem import deferred_index, epistemic_graph, find, index_sync, semantic_contract
+
+    find.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    for _ in range(12):
+        if not deferred_index.list_graph_paths(vault):
+            break
+        index_sync.drain_graph_work(vault, limit=64)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+        semantic_contract.build_corpus_context(vault)
+        review = commands.op_review_memory(vault, mode="relation-queue")
+    item = next(
+        item
+        for group in review["groups"]
+        for item in group["items"]
+        if item["from"] == page and item["to"] == ENTITY
+    )
+    return {
+        "leaf_key": "accept",
+        "effect_revision": 1,
+        "kind": "accept-relation",
+        "args": {
+            "ref": item["ref"],
+            "expected_hash": next(g["content_hash"] for g in review["groups"] if g["path"] == page),
+            "why": "The note names the supplier it depends on.",
+            "expected_fingerprint": item["fingerprint"],
+        },
+    }
+
+
+def test_a_relation_source_withheld_before_its_attempt_resumes_like_a_deleted_one(
+    vault: Path, enabled
+) -> None:
+    """A page leaf with no bound home: only its own permission check answers."""
+    with request_scope(owner_principal(surface="mcp")):
+        _seed_entity(vault)
+    pages = {
+        "withheld": _linked_insight(vault, "withheld-vat-note", "6a6a6a6a-1111-4111-8111-111111111111"),
+        "deleted": _linked_insight(vault, "gone-vat-note", "6b6b6b6b-2222-4222-8222-222222222222"),
+    }
+    keys = {"withheld": "ep-" + "e5" * 16, "deleted": "ep-" + "f6" * 16}
+    client = RequestPrincipal(audience_id="client-a", surface="mcp")
+    reviewed = {}
+    with request_scope(client):
+        for case, key in keys.items():
+            _client_episode(
+                vault, key, action="record", subject="Vat note", summary="A link.",
+                decided=["Link the supplier"],
+            )
+            _client_episode(
+                vault,
+                key,
+                action="prepare",
+                candidate="link",
+                proposal=_proposal("relation_only", [_relation_leaf(vault, pages[case])], target=ENTITY),
+            )
+            reviewed[case] = _client_episode(
+                vault, key, action="disposition", candidate="link", disposition="routed", reason="r"
+            )
+    _withhold_notes_from(vault, "client-a")
+    (vault / pages["deleted"]).unlink()
+
+    with request_scope(client):
+        outcomes = {
+            case: _client_episode(
+                vault,
+                key,
+                action="resume",
+                input_revision=1,
+                journal_digest=reviewed[case]["journal_digest"],
+            )
+            for case, key in keys.items()
+        }
+    assert json.dumps(_shape(outcomes["withheld"]), sort_keys=True) == json.dumps(
+        _shape(outcomes["deleted"]), sort_keys=True
+    )
+    assert [item["code"] for item in outcomes["withheld"]["stale"]] == ["CURATION_BINDING_STALE"]
+    leaf = outcomes["withheld"]["candidates"][0]["leaves"][0]
+    assert leaf["outcome"] == "pending" and leaf["attempts"] == 0
+
+
+def test_a_page_withheld_after_commit_attests_exactly_like_a_deleted_one(
+    vault: Path, enabled
+) -> None:
+    slugs = {"withheld": "withheld-lamp-note", "deleted": "gone-lamp-note"}
+    keys = {"withheld": "ep-" + "c3" * 16, "deleted": "ep-" + "d4" * 16}
+    client = RequestPrincipal(audience_id="client-a", surface="mcp")
+    executed = {}
+    with request_scope(client):
+        for case, key in keys.items():
+            _client_episode(
+                vault, key, action="record", subject="Lamp note", summary="A lamp note.",
+                decided=["Keep the lamp note"],
+            )
+            _client_episode(
+                vault,
+                key,
+                action="prepare",
+                candidate="lamp",
+                proposal=_proposal("focused_note", [_note(slugs[case], "The lamp note holds.")], title="Lamp"),
+            )
+            reviewed = _client_episode(
+                vault, key, action="disposition", candidate="lamp", disposition="routed", reason="r"
+            )
+            executed[case] = _client_episode(
+                vault,
+                key,
+                action="resume",
+                input_revision=1,
+                journal_digest=reviewed["journal_digest"],
+            )
+            assert executed[case]["status"] == "ok", executed[case]["blocked"]
+    _withhold_notes_from(vault, "client-a")
+    (vault / INSIGHTS / f"{slugs['deleted']}.md").unlink()
+
+    errors = {}
+    passes = {}
+    with request_scope(client):
+        for case, key in keys.items():
+            passes[case] = _client_episode(vault, key, action="coverage")
+            with pytest.raises(ValueError) as refused:
+                _client_episode(
+                    vault,
+                    key,
+                    action="resume",
+                    input_revision=1,
+                    postcommit=True,
+                    journal_digest=executed[case]["journal_digest"],
+                )
+            errors[case] = str(refused.value)
+    assert errors["withheld"] == errors["deleted"]
+    assert "EPISODE_OUTCOME_UNCERTAIN" in errors["withheld"]
+    assert json.dumps(_shape(passes["withheld"]), sort_keys=True) == json.dumps(
+        _shape(passes["deleted"]), sort_keys=True
+    )
+
+
+def test_an_uncertain_leaf_whose_page_is_withheld_resumes_like_a_deleted_one(
+    vault: Path, enabled, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash after the writer committed leaves the leaf uncertain; its page
+    withheld afterwards must not reconcile where a deleted one would not."""
+    slugs = {"withheld": "withheld-crash-note", "deleted": "gone-crash-note"}
+    keys = {"withheld": "ep-" + "a9" * 16, "deleted": "ep-" + "b9" * 16}
+    client = RequestPrincipal(audience_id="client-a", surface="mcp")
+    real = EpisodeStore.transition
+
+    def crash_on_reconcile(self, identity, **kwargs):
+        if kwargs.get("action") == "reconcile_curation_leaf":
+            raise KeyboardInterrupt("host lost the session")
+        return real(self, identity, **kwargs)
+
+    with request_scope(client):
+        for case, key in keys.items():
+            _client_episode(
+                vault, key, action="record", subject="Crash note", summary="A crash note.",
+                decided=["Keep the crash note"],
+            )
+            _client_episode(
+                vault,
+                key,
+                action="prepare",
+                candidate="note",
+                proposal=_proposal("focused_note", [_note(slugs[case], "The crash note holds.")], title="Crash"),
+            )
+            reviewed = _client_episode(
+                vault, key, action="disposition", candidate="note", disposition="routed", reason="r"
+            )
+            monkeypatch.setattr(EpisodeStore, "transition", crash_on_reconcile)
+            with pytest.raises(KeyboardInterrupt):
+                _client_episode(
+                    vault,
+                    key,
+                    action="resume",
+                    input_revision=1,
+                    journal_digest=reviewed["journal_digest"],
+                )
+            monkeypatch.setattr(EpisodeStore, "transition", real)
+    _withhold_notes_from(vault, "client-a")
+    (vault / INSIGHTS / f"{slugs['deleted']}.md").unlink()
+
+    with request_scope(client):
+        outcomes = {}
+        for case, key in keys.items():
+            digest = _client_episode(vault, key, action="candidates")["journal_digest"]
+            outcomes[case] = _client_episode(
+                vault, key, action="resume", input_revision=1, journal_digest=digest
+            )
+    assert json.dumps(_shape(outcomes["withheld"]), sort_keys=True) == json.dumps(
+        _shape(outcomes["deleted"]), sort_keys=True
+    )
+    assert [item["code"] for item in outcomes["withheld"]["blocked"]] == [
+        "EPISODE_OUTCOME_UNCERTAIN"
+    ]

@@ -7,11 +7,21 @@ executes a leaf, repairs a receipt, or proves a missing write did not commit.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 from . import curation, episode_model
+from .governance import egress
+from .governance.principal import effective_principal
+
+#: `current_coverage`'s default: the release filter of the current caller.
+_CALLER = object()
+
+
+def _release_filter(vault_root: Path) -> Callable[[str], bool] | None:
+    """The current caller's write-door release filter; None sees everything."""
+    return egress.restricted_release_filter(vault_root, principal=effective_principal())
 
 
 def _uncertain(reason: str) -> episode_model.EpisodeError:
@@ -145,11 +155,21 @@ def _mark(item: Mapping[str, Any]) -> str | None:
 
 
 def _tip_is_live(
-    vault_root: Path, path: str, after: str, evidence: Mapping[str, Any]
+    vault_root: Path,
+    path: str,
+    after: str,
+    evidence: Mapping[str, Any],
+    keep: Callable[[str], bool] | None,
 ) -> bool:
-    """Whether the live page at `path` is the last leaf's recorded result."""
+    """Whether the live page at `path` is the last leaf's recorded result.
+
+    A page this caller may not read is not live for it, exactly as a page
+    that is gone: the attestation must not tell withheld from deleted.
+    """
     from . import curation
 
+    if after != "absent" and keep is not None and not keep(path):
+        return False
     try:
         if evidence["step"]["kind"] == curation.RECORDS_STEP_KIND:
             # A Records item is current only while its Records receipt agrees.
@@ -163,8 +183,13 @@ def _tip_is_live(
         return False
 
 
-def current_coverage(vault_root: Path, state: Mapping[str, Any]) -> dict[str, bool]:
+def current_coverage(
+    vault_root: Path, state: Mapping[str, Any], *, keep: Any = _CALLER
+) -> dict[str, bool]:
     """Whether each committed leaf's commitment still holds as current coverage.
+
+    `keep` is the caller's release filter (default: the current caller's); a
+    last leaf whose page it withholds is unproven, as for a deleted page.
 
     Historical commitment is verified per leaf from its own evidence -- plan,
     approval, receipt and atomic witness -- and must reproduce the proof the
@@ -184,6 +209,8 @@ def current_coverage(vault_root: Path, state: Mapping[str, Any]) -> dict[str, bo
         if leaf["outcome"] == "committed"
     ]
     verdict = {leaf["leaf_id"]: False for _candidate, leaf in committed}
+    if keep is _CALLER:
+        keep = _release_filter(vault_root)
     with active_manager().consistency_guard(
         vault_root, operation="episode-coverage-chain", holder_kind="command"
     ):
@@ -248,7 +275,7 @@ def current_coverage(vault_root: Path, state: Mapping[str, Any]) -> dict[str, bo
                 len(ordered) != len(nodes)
                 or tip is None
                 or tip[2] is None
-                or not _tip_is_live(vault_root, path, tip[2], tip[3])
+                or not _tip_is_live(vault_root, path, tip[2], tip[3], keep)
             ):
                 broken.update(node[0] for node in nodes)
         for leaf_id in broken:

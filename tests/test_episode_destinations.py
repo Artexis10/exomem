@@ -800,3 +800,37 @@ def test_the_capture_guidance_carries_the_precommit_review_and_final_pass() -> N
             "never claims",
         ):
             assert phrase in section, (engagement, phrase)
+
+
+# --------------------------------------------------------------------------- #
+# Security review round (I2): a refused multi-leaf preparation seals nothing
+# --------------------------------------------------------------------------- #
+
+
+def _runs(vault: Path) -> list[str]:
+    root = curation.CurationStore(vault).root
+    return sorted(path.name for path in root.iterdir()) if root.exists() else []
+
+
+def test_a_refused_multi_leaf_preparation_leaves_no_sealed_plan(vault: Path, owner) -> None:
+    _record(vault)
+    (page, *_rest) = _antecedents(vault)
+    good = _append_leaf(vault, page, "- [finding] A valid detail. ^valid-detail", key="first")
+    stale = _append_leaf(vault, page, "- [finding] A stale detail. ^stale-detail", key="second")
+    stale["args"]["operation"]["expected_hash"] = "0" * 64
+    # Seal order follows leaf identity; these keys put the valid leaf first,
+    # which is exactly when an early seal would be orphaned.
+    identity = model.candidate_id(model.episode_id(KEY), "detail")
+    assert model.leaf_id(identity, "first") < model.leaf_id(identity, "second")
+    before, journal = _runs(vault), _journal(vault)
+
+    with pytest.raises(ValueError, match="CURATION_BINDING_STALE"):
+        _episode(
+            vault,
+            action="prepare",
+            candidate="detail",
+            proposal=_proposal("existing_page", [good, stale], target=_ref(vault, page)),
+        )
+
+    assert _runs(vault) == before, "ORPHAN RUNS: a refused preparation sealed a plan"
+    assert _journal(vault) == journal

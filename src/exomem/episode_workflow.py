@@ -312,7 +312,7 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     receipts = []
     # One consistent view of every committed page, as an attestation takes.
     with session.store._guard():  # noqa: SLF001
-        current = current_coverage(session.vault_root, state)
+        current = current_coverage(session.vault_root, state, keep=keep)
         for candidate in state["candidates"]:
             for leaf in candidate["leaves"]:
                 if leaf["outcome"] != "committed":
@@ -353,14 +353,15 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     }
 
 
-def _seal(vault_root: Path, leaf: Mapping[str, Any]) -> dict[str, Any]:
-    """Seal one leaf into its own single-step curation plan.
+def _prepare_seal(vault_root: Path, leaf: Mapping[str, Any]) -> curation.PreparedProposal:
+    """Prepare one leaf's own single-step curation plan, sealing nothing.
 
-    `curation.propose` runs the leaf's existing read-only preparation against
-    the current vault, so a new or revised effect is validated now, and the
-    sealed plan is inert until `resume` executes it.
+    `curation.prepare_proposal` runs the leaf's existing read-only preparation
+    against the current vault, so a new or revised effect is validated now;
+    `prepare` seals only once every leaf has passed, and the sealed plan is
+    inert until `resume` executes it.
     """
-    return curation.propose(
+    return curation.prepare_proposal(
         vault_root,
         {
             "version": 1,
@@ -575,8 +576,11 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
     )
     if len(commands) + len(unsealed) > transitions or needed > room:
         raise _error("EPISODE_TOO_LARGE", "the episode journal has no room for this preparation")
-    for leaf in unsealed:
-        proposed = _seal(session.vault_root, leaf)
+    # Every leaf passes its preparation before any plan is sealed, so a refused
+    # leaf leaves no sealed plan behind for its siblings.
+    ready = [(leaf, _prepare_seal(session.vault_root, leaf)) for leaf in unsealed]
+    for leaf, prepared in ready:
+        proposed = curation.seal_proposal(session.vault_root, prepared, allow_records=True)
         commands.append(
             (
                 "bind_curation_leaf",
@@ -680,6 +684,10 @@ def _reconcile_uncertain(session: _Session) -> tuple[list[dict], list[dict]]:
     for candidate_id, leaf in _leaves(session.state):
         if leaf["outcome"] != "uncertain":
             continue
+        if _refused_for_caller(session.vault_root, leaf["binding"]):
+            # What a reconcile of a missing page gives: still uncertain.
+            blocked.append({"leaf_id": leaf["leaf_id"], "code": "EPISODE_OUTCOME_UNCERTAIN"})
+            continue
         try:
             session.transition(
                 "reconcile_curation_leaf", candidate=candidate_id, leaf=leaf["leaf_id"]
@@ -693,18 +701,76 @@ def _reconcile_uncertain(session: _Session) -> tuple[list[dict], list[dict]]:
     return reconciled, blocked
 
 
+def _refused_for_caller(vault_root: Path, binding: Mapping[str, Any]) -> bool:
+    """Whether this caller may no longer write what a sealed leaf writes.
+
+    The leaf's own permission check, repeated for the current caller before
+    any attempt: a Records leaf asks the Records owner for a released
+    collection whose whole write set this caller can see; a page leaf asks the
+    write doors' release check for every path its sealed binding touches.
+    Unreadable evidence counts as refused. The caller answers a refusal exactly
+    as it answers a missing target, so a target withheld after preparation is
+    indistinguishable from one that is gone, and never costs an attempt.
+    """
+    from . import record_governance
+    from . import structured_collections as collections
+    from .vault import PathGuardError
+
+    try:
+        plan = curation.CurationStore(vault_root).load_plan(binding["run_id"])
+        step = plan["steps"][binding["ordinal"]]
+        item = plan["binding_manifest"][binding["ordinal"]]
+        if step["kind"] == curation.RECORDS_STEP_KIND:
+            manifest = record_governance.resolve_collection_for_mutation(
+                vault_root, item["prepared"]["manifest_path"]
+            )
+            record_governance.require_mutation_visibility(vault_root, manifest)
+            return False
+        rows = [*(item.get("effect_before") or ()), *(item.get("effect_after") or ())]
+        paths = {
+            item.get("path"),
+            (item.get("postcondition") or {}).get("path"),
+            *(row.get("path") for row in rows if isinstance(row, Mapping)),
+        }
+    except (
+        curation.CurationError,
+        collections.CollectionError,
+        PathGuardError,
+        OSError,
+        ValueError,
+        KeyError,
+        IndexError,
+        TypeError,
+        AttributeError,
+    ):
+        return True
+    principal = effective_principal()
+    return any(
+        isinstance(path, str)
+        and path
+        and egress.write_target_withheld(vault_root, path, principal=principal)
+        for path in paths
+    )
+
+
 def _execute(session: _Session, candidate_id: str, leaf_id: str) -> tuple[str, dict[str, Any]]:
     leaf = model._owned(session.state, candidate_id, leaf_id)  # noqa: SLF001
     binding = leaf["binding"]
     # Neither case records an attempt, so the agent can still re-prepare or
     # re-disposition the candidate. A plan committed elsewhere must still
     # reconcile, or its attempt would stay uncertain for good; any other plan
-    # must still apply to the vault it would change.
+    # must still apply to the vault it would change. A target this caller may
+    # no longer write answers exactly as a missing one does in each case.
+    refused = _refused_for_caller(session.vault_root, binding)
     if _committed(session.vault_root, binding["run_id"]):
-        code = _unverifiable(session, candidate_id, leaf_id)
+        code = "EPISODE_OUTCOME_UNCERTAIN" if refused else _unverifiable(
+            session, candidate_id, leaf_id
+        )
         if code:
             return "diverged", {"leaf_id": leaf_id, "code": code}
     else:
+        if refused:
+            return "stale", {"leaf_id": leaf_id, "code": "CURATION_BINDING_STALE"}
         blockers = _blockers(session.vault_root, binding["run_id"])
         if blockers:
             return "stale", {"leaf_id": leaf_id, "code": blockers[0]}

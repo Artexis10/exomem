@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -53,7 +54,9 @@ STEP_KINDS: Final[tuple[str, ...]] = (
 #: The episode Records leaf (close-memory-loop 3.5). It is not a general
 #: curation kind: only a plan the episode `records` route seals may carry it
 #: (`propose(..., allow_records=True)`, alone in its plan), so no curation door
-#: gains a Records write. It delegates to the Records writer, the one leaf that
+#: can seal one. A plan the episode sealed is an ordinary curation run, which
+#: `maintain_memory` apply/resume can run through the same Records writer and
+#: checks `record_memory` append applies. It delegates to that writer, the leaf that
 #: may touch the protected Records tree, and its witness holds only while that
 #: writer's own receipt -- its audit transition -- corroborates it.
 RECORDS_STEP_KIND: Final[str] = "append-record"
@@ -343,12 +346,20 @@ PROTECTED_TREES: Final = frozenset(
 )
 
 
+def _folded_segment(part: str) -> str:
+    """One path segment as a filesystem may match it: NFKC, casefolded, and
+    without the trailing dots and spaces Windows drops (`hosted_gateway`)."""
+    return unicodedata.normalize("NFKC", part).casefold().strip().rstrip(". ")
+
+
 def normalize_target_path(
     path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False
 ) -> str:
     """A confined governed path. `allow_records` is the Records leaf's alone:
-    it admits the Records tree and nothing else, so that leaf can neither leave
-    the tree nor open it to any other kind."""
+    it admits the Records tree, spelled exactly as the Records layer is, and
+    nothing else, so that leaf can neither leave the tree nor open it to any
+    other kind. Every other kind compares folded segments, so a spelling the
+    filesystem folds onto a protected tree is that tree."""
     raw = _require_string(path, field).replace("\\", "/").strip().lstrip("/")
     if (
         raw.endswith("/")
@@ -360,10 +371,13 @@ def normalize_target_path(
     if not raw.startswith(prefix):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} must target governed knowledge")
     relative = raw[len(prefix) :]
-    first = relative.split("/", 1)[0].casefold()
-    compact = relative.casefold().replace("_", "-")
+    parts = relative.split("/")
+    first = _folded_segment(parts[0])
+    compact = "/".join(_folded_segment(part) for part in parts).replace("_", "-")
     if allow_records:
-        if first != "records" or "/" not in relative:
+        # The exact layer `structured_collections._require_profile_layer` places
+        # Records collections under; no folded spelling stands in for it.
+        if parts[0] != "Records" or len(parts) < 2:
             raise _error("CURATION_TARGET_PROTECTED", f"{field} must stay inside Records")
         return raw
     if first in PROTECTED_TREES or compact.startswith("workflow-contract/"):
@@ -1448,11 +1462,45 @@ def _validate_entity_candidate_plan(
             )
 
 
+@dataclass(frozen=True)
+class PreparedProposal:
+    """A validated plan with its bindings, not yet sealed into the run store."""
+
+    plan: dict[str, Any]
+    binding_manifest: list[dict[str, Any]]
+    registry_ids: dict[str, str]
+
+
 def propose(
     vault_root: Path, plan: Mapping[str, Any], *, allow_records: bool = False
 ) -> dict[str, Any]:
     """Seal a plan. `allow_records` is the episode `records` route's alone
-    (`episode_workflow`); every public curation door leaves it off."""
+    (`episode_workflow`); every public curation door leaves it off, so none can
+    seal a Records plan."""
+    return seal_proposal(
+        vault_root,
+        prepare_proposal(vault_root, plan, allow_records=allow_records),
+        allow_records=allow_records,
+    )
+
+
+def seal_proposal(
+    vault_root: Path, prepared: PreparedProposal, *, allow_records: bool = False
+) -> dict[str, Any]:
+    """Publish a prepared plan into the run store; it re-validates the plan."""
+    return CurationStore(Path(vault_root)).create_forward(
+        prepared.plan,
+        binding_manifest=prepared.binding_manifest,
+        registry_ids=prepared.registry_ids,
+        allow_records=allow_records,
+    )
+
+
+def prepare_proposal(
+    vault_root: Path, plan: Mapping[str, Any], *, allow_records: bool = False
+) -> PreparedProposal:
+    """Every check `propose` makes, without sealing anything. Read-only, so a
+    caller preparing several plans can refuse them all before sealing one."""
     root = Path(vault_root)
     validated = validate_forward_plan(plan, allow_records=allow_records)
     # Candidate identity and state are re-read before any plan artifact is
@@ -1488,12 +1536,8 @@ def propose(
                     "hydration relation target is outside the reviewed Entity targets",
                 )
     _require_plan_relocation_history(root, validated)
-    registries = registry_identities(root)
-    return CurationStore(root).create_forward(
-        validated,
-        binding_manifest=manifest,
-        registry_ids=registries,
-        allow_records=allow_records,
+    return PreparedProposal(
+        plan=validated, binding_manifest=manifest, registry_ids=registry_identities(root)
     )
 
 
