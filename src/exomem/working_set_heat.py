@@ -36,6 +36,7 @@ This half of the module is pure: functions over events, no sidecar, no vault.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -131,11 +132,16 @@ class SessionMark(NamedTuple):
 
 
 class Attribution(NamedTuple):
-    """The caller's derived keys. Empty fields mean "not supplied"."""
+    """The caller's derived keys. Empty fields mean "not supplied".
+
+    `thread_only` says the session key was derived from a continuity token's
+    thread rather than supplied by the caller: the caller has a session tier
+    of its own, but no key that entitles it to the vault's ranking."""
 
     session: str = ""
     workspace: str = ""
     client: str = ""
+    thread_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +436,100 @@ def _holds_deliberate(events: Iterable[HeatEvent]) -> bool:
     return any(event.channel in DELIBERATE for event in events)
 
 
+def _own_lead(
+    profile: HeatProfile,
+    session: str,
+    sessions: Mapping[str, SessionMark],
+    *,
+    token_paths: frozenset[str],
+    token_minted_ns: int | None,
+    token_passed: bool,
+    admissible: Callable[[str], bool] | None,
+) -> tuple[Lead | None, Mapping[str, HeatRow]]:
+    """The caller's own session tier (`leading`'s first), and the rows it was
+    ranked from (empty for a thread taken whole): its passed token, else the
+    session's last served thread, and the deliberate acts carrying its key."""
+    own = _session_events(profile, session)
+    thread: tuple[frozenset[str], int | None] | None = None
+    if token_passed:
+        thread = (frozenset(token_paths), token_minted_ns)
+    elif (stored := sessions.get(session)) is not None and stored.paths:
+        thread = (frozenset(stored.paths), stored.minted_ns or None)
+    if thread is not None and _token_leads(own, thread[0], thread[1], admissible):
+        return Lead(TIER_SESSION, True, (tuple(sorted(thread[0])),)), {}
+    if _holds_deliberate(own) or thread is not None:
+        marked = ((path, thread[1] or 0) for path in thread[0]) if thread else ()
+        rows = aggregate(own, marks=marked)
+        return Lead(TIER_SESSION, False, _groups(rows, admissible)), rows
+    return None, {}
+
+
+#: How close in time two of a session's own pages may be before a follow-up
+#: treats them as one tie: after two pages were touched within this window, a
+#: turn saying "the second one" points at neither of them by itself.
+FOLLOW_UP_TIE_NS = BURST_GAP_NS
+
+
+def own_referents(
+    profile: HeatProfile,
+    *,
+    attribution: Attribution | None,
+    token_paths: frozenset[str] = frozenset(),
+    token_minted_ns: int | None = None,
+    token_passed: bool = False,
+    admissible: Callable[[str], bool] | None = None,
+    marks: Mapping[str, SessionMark] | None = None,
+    eligible: Callable[[str], bool] | None = None,
+    limit: int = DEFAULT_LIMIT,
+) -> tuple[str, ...]:
+    """What a short follow-up ("what about the second one?") may refer to:
+    the top of the caller's OWN session tier and nothing else, sorted by path.
+
+    Never the workspace's or the vault's rows, which are other conversations'
+    work, and nothing for a caller with no session key. The top group is
+    widened by every following group whose latest deliberate act is within
+    `FOLLOW_UP_TIE_NS` of it, so the caller can tell one dominant page (one
+    member) from a near tie (several). At most `2 * limit` eligibility
+    checks, the bound `members` keeps for the referent, doubled for the
+    widening."""
+    who = attribution or Attribution()
+    if not who.session:
+        return ()
+    sessions = profile.sessions if marks is None else marks
+    lead, rows = _own_lead(
+        profile,
+        who.session,
+        sessions,
+        token_paths=token_paths,
+        token_minted_ns=token_minted_ns,
+        token_passed=token_passed,
+        admissible=admissible,
+    )
+    if lead is None:
+        return ()
+    reads = 0
+    chosen: list[str] = []
+    top: int | None = None
+    for group in lead.groups:
+        if top is not None and (not rows or top - rows[group[0]].deliberate_ns > FOLLOW_UP_TIE_NS):
+            break
+        for path in group:
+            if admissible is not None and not admissible(path):
+                continue
+            if eligible is not None:
+                if reads >= 2 * limit:
+                    return tuple(sorted(chosen))
+                reads += 1
+                if not eligible(path):
+                    continue
+            chosen.append(path)
+        if chosen and top is None:
+            top = rows[chosen[0]].deliberate_ns if rows else 0
+        if lead.token:
+            break
+    return tuple(sorted(chosen))
+
+
 def leading(
     profile: HeatProfile,
     *,
@@ -439,6 +539,7 @@ def leading(
     token_passed: bool = False,
     admissible: Callable[[str], bool] | None = None,
     marks: Mapping[str, SessionMark] | None = None,
+    for_referent: bool = False,
 ) -> tuple[Lead, ...]:
     """The referent's candidate tiers, highest first (ruling S5-1).
 
@@ -452,6 +553,16 @@ def leading(
        latest working session keyed `(deliberate, selection)` — and, for a
        caller with no session key, the passed token under today's rule.
 
+    `for_referent` asks for the tiers a REFERENT may come from, which every
+    caller that resolves or carries on the result passes. Then the vault's
+    rows are offered only to a caller that supplied a session or workspace
+    key of its own. A caller with none — or whose only session is a
+    continuity token's thread (`Attribution.thread_only`) — is a stranger to
+    the vault's other work: whatever another session touched last is not
+    what its turn refers to, so the vault tier may order its recent-context
+    block (`recent`) but never supplies its referent. Without it, the
+    ranking itself, unchanged.
+
     A higher tier is listed only when it holds a deliberate act or a thread:
     selection alone never lifts a tier over a deliberate act below it. Nothing
     here reads a page; `members` walks the result with the caller's own
@@ -463,20 +574,19 @@ def leading(
     leads: list[Lead] = []
 
     if who.session:
-        own = _session_events(profile, who.session)
-        thread: tuple[frozenset[str], int | None] | None = None
-        if token_passed:
-            thread = (frozenset(token_paths), token_minted_ns)
-        elif (stored := sessions.get(who.session)) is not None and stored.paths:
-            thread = (frozenset(stored.paths), stored.minted_ns or None)
-        if thread is not None and _token_leads(own, thread[0], thread[1], admissible):
-            leads.append(Lead(TIER_SESSION, True, (tuple(sorted(thread[0])),)))
-            return tuple(leads)
-        if _holds_deliberate(own) or thread is not None:
-            marked = ((path, thread[1] or 0) for path in thread[0]) if thread else ()
-            leads.append(
-                Lead(TIER_SESSION, False, _groups(aggregate(own, marks=marked), admissible))
-            )
+        own, _rows = _own_lead(
+            profile,
+            who.session,
+            sessions,
+            token_paths=token_paths,
+            token_minted_ns=token_minted_ns,
+            token_passed=token_passed,
+            admissible=admissible,
+        )
+        if own is not None:
+            leads.append(own)
+            if own.token:
+                return tuple(leads)
 
     if who.workspace:
         view = replace(profile, sessions=sessions)
@@ -492,7 +602,8 @@ def leading(
         if _token_leads(profile.events, paths, token_minted_ns, admissible):
             leads.append(Lead(TIER_VAULT, True, (tuple(sorted(paths)),)))
             return tuple(leads)
-    leads.append(Lead(TIER_VAULT, False, _groups(profile.window_rows, admissible)))
+    if not for_referent or who.workspace or (who.session and not who.thread_only):
+        leads.append(Lead(TIER_VAULT, False, _groups(profile.window_rows, admissible)))
     return tuple(leads)
 
 
@@ -1341,6 +1452,38 @@ def derive_key(salt: str, kind: str, audience: str, value: object) -> str:
     return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:KEY_HEX]
 
 
+#: Domain of `thread_mac`, so the salt keys nothing else's MAC by accident.
+_THREAD_MAC_DOMAIN = "exomem-continuity-thread-v1"
+
+
+def thread_mac(
+    salt: str, *, identity: str, thread: str, thread_ns: int | None, minted_ns: int | None
+) -> str:
+    """The MAC binding a continuity token's thread to its times, or `""` when
+    there is no salt or no thread.
+
+    Keyed by the sidecar's salt, which never leaves this machine, over the
+    index identity, the caller's audience, the thread, when it began and when
+    the packet carrying it was served. A caller that rewrites either time, or
+    names another thread, holds a token that no longer verifies, so a thread
+    lapses when the server says it does rather than when its caller does."""
+    if not salt or not thread:
+        return ""
+    material = "\0".join(
+        (
+            _THREAD_MAC_DOMAIN,
+            str(identity),
+            _audience(),
+            str(thread),
+            str(int(thread_ns or 0)),
+            str(int(minted_ns or 0)),
+        )
+    )
+    return hmac.new(
+        salt.encode("utf-8"), material.encode("utf-8", "surrogatepass"), hashlib.sha256
+    ).hexdigest()
+
+
 def _audience() -> str:
     try:
         from .governance.principal import effective_principal
@@ -1365,16 +1508,24 @@ def attribution_for(
     session: object = None,
     workspace: object = None,
     salt: str | None = None,
+    thread: object = None,
 ) -> Attribution:
     """The caller's derived keys, for ranking and for recording. Reads the
-    sidecar's salt unless the caller holds a profile that carries it."""
+    sidecar's salt unless the caller holds a profile that carries it.
+
+    `thread` is a continuity token's thread: the session key of a caller
+    that supplied none, derived under its own kind so it never collides with
+    a supplied key, and marked `thread_only`."""
     if salt is None:
         salt = load(vault_root).salt
     audience = _audience()
+    supplied = derive_key(salt, "session", audience, session)
+    threaded = "" if supplied else derive_key(salt, "thread", audience, thread)
     return Attribution(
-        session=derive_key(salt, "session", audience, session),
+        session=supplied or threaded,
         workspace=derive_key(salt, "workspace", audience, workspace),
         client=client_label(client),
+        thread_only=bool(threaded),
     )
 
 

@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import entity_candidates, indexes, memory_refs, semantic_writes, temporal
+from . import entity_candidates, indexes, memory_refs, semantic_writes, tag_variants, temporal
 from .entity_types import (
     ENTITY_WRITER_OPTIONAL_FRONTMATTER,
     EntityTypeDefinition,
@@ -267,6 +267,7 @@ def _legacy_link(
         + list(conn_warnings)
         + list(summary_warnings)
         + list(why_warnings)
+        + tag_variants.advise_authored(vault_root, tags_clean)
     )
 
     # Index + log updates.
@@ -783,6 +784,7 @@ def link(
         + list(connection_warnings)
         + list(summary_warnings)
         + list(why_warnings)
+        + tag_variants.advise_authored(vault_root, _clean_tags(tags))
     )
     auxiliary: list[PlannedWrite] = list(key_plan.writes)
     derived_auxiliaries: list[tuple[str, PlannedWrite]] = []

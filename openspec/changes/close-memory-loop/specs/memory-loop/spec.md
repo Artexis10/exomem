@@ -377,7 +377,21 @@ catalogue proof or current-parent validation. Unit role queries SHALL restrict
 parent paths to the resolved anchor neighbourhood before applying their row
 limit. Missing or stale publication SHALL remain explicit and SHALL NOT trigger
 foreground repair. Managed-service warm latency and offline cold filesystem
-proof SHALL be reported separately.
+proof SHALL be reported separately. The lexical evidence query SHALL stay
+bounded on any turn: it SHALL ask the catalogue about a bounded number of the
+turn's units carrying a bounded number of stems, chosen rarest first by
+document frequencies measured over the scope it queries on the tokens the
+index stores, and SHALL rank and run its corroboration test over every row
+those units match, so that for the same units it returns what the unbounded
+query returns. A turn whose units the scope holds fit within the unit bound
+SHALL NOT lose a unit for being common; on a longer turn a unit dropped for
+being common SHALL leave the MATCH but SHALL still count toward
+corroboration, rarest first, while the stems counted toward corroboration
+stay within the same bounded number of stems as the MATCH. Selection SHALL
+NOT drop a unit for
+containing digits, SHALL count an unspaced run as one unit carrying only its
+content bigrams, and SHALL be reported in activation diagnostics as kept and
+dropped counts only.
 
 Packet generation metadata SHALL identify semantic evidence as ready, disabled,
 absent, uncalibrated, audience_restricted, warming, busy, unavailable or
@@ -417,6 +431,24 @@ fast abstention or compiler-only timing.
   English-authored anchor and is about that anchor
 - **THEN** the anchor earns `rare_term` and `vector_band` and resolves
 - **AND** with semantic evidence off the same turn leaves it partial
+
+#### Scenario: A long turn's lexical stage stays bounded
+
+- **WHEN** a turn of several hundred everyday words also names one anchor by
+  its rare words or a rare model number
+- **THEN** the lexical MATCH holds at most the bounded number of units, the
+  rare words are among them, and the anchor is still reached
+- **AND** a turn left with no content word, or with only words the catalogue
+  never holds, issues no MATCH and abstains without error
+
+#### Scenario: A short turn's lexical stage matches the unbounded query
+
+- **WHEN** a turn names two rare words held on different pages and one word
+  common in the catalogue that each of those pages also holds
+- **THEN** the common word is still asked about and both pages are returned
+  in the order the unbounded query returns them
+- **AND** padded with everyday words past the unit bound, the everyday words
+  leave the MATCH but still corroborate, and both pages are still returned
 
 #### Scenario: A turn similar to many anchors earns no band
 
@@ -797,7 +829,13 @@ session key, its own session's thread and acts SHALL rank first, where it
 supplies a workspace key its workspace's next, and the vault's last; a higher
 tier SHALL lead only while it holds a deliberate act or a thread its session was
 served, and selection alone SHALL NOT lift a tier over a deliberate act in a
-lower one. A thread SHALL be a previous packet's continuity references, or,
+lower one. A continuity token's thread SHALL stand in for the session key of a
+caller that supplies none (context-activation-continuity). The vault tier SHALL
+supply a referent only to a caller that supplied a session or workspace key of
+its own: for a caller with neither, or whose only session is a token's thread,
+the vault's rows MAY order its recent-context block but SHALL NOT, on their own,
+resolve an anchor or carry a page, because whatever another conversation touched
+last is not what a stranger's turn refers to. A thread SHALL be a previous packet's continuity references, or,
 for a session that passed none, the references of the last packet that
 session was served, and SHALL form one tier taken whole: that packet already
 resolved them together — but only while no deliberate act of that session
@@ -845,6 +883,24 @@ partial candidates when those bounds are applied, and the prior SHALL NOT
 change the order of candidates the turn reached by its own words. Where the profile is empty the turn SHALL
 abstain exactly as before, still carrying its recent-context block.
 
+A FOLLOW-UP turn is short — at most a declared number of words, saying at most
+one word of its own besides function words, the referential filler and a closed
+set of deictic, anaphoric and continuing words ("that", "the second one", "and
+…", "what about …") — and either speaks such a word or a referential cue. A
+follow-up that reaches no anchor by worded contact SHALL be answered from the
+caller's OWN session tier only — its supplied session key or its token's
+thread, never its workspace's or the vault's rows. Where that tier's top page
+leads every other of its pages by more than a declared interval, that page SHALL
+be carried as the packet's single anchor at status `partial`, its evidence
+`continuity` where the caller's token named it and `recency` otherwise, its
+material served, and `generation.carried_by = "follow_up"`; being `partial`, its
+ref SHALL NOT enter the token. Where two or more pages lie within that interval,
+the turn SHALL abstain `ambiguous` listing them and SHALL NOT choose. Where the
+carried page yields no material, the turn SHALL abstain `unresolved` listing it
+as `partial`. A caller with no session tier SHALL abstain exactly as before. A
+follow-up carry SHALL NOT resolve anything, and a withheld page SHALL be absent
+from the tier it is carried from.
+
 A referential turn names nothing, so the retrieval carry SHALL NOT run for it;
 a turn that names a page is not referential and is decided by the carry
 exactly as a turn that resolved no anchor. Where every anchor a packet resolved
@@ -878,7 +934,8 @@ from recent work and not from the turn's own words.
 #### Scenario: A short turn with no referential cue is not answered by recency
 
 - **WHEN** a turn speaks no referential cue, however few words it has, names no
-  anchor, and one anchor is hottest in the recency profile
+  anchor, and one anchor outside the caller's own session tier is hottest in the
+  recency profile
 - **THEN** that anchor does not resolve and its material is not served
 - **AND** the turn abstains `unresolved` still carrying its recent-context block,
   unless it names a compiled page the retrieval carry serves
@@ -974,7 +1031,38 @@ from recent work and not from the turn's own words.
   its first turn names nothing
 - **THEN** it resolves the thread the earlier session in that workspace was
   last served, not the vault's newest page from another project
-- **AND** a caller that passes no key is ranked over the whole vault, as before
+- **AND** a caller with a session key but an empty session and workspace tier is
+  still answered from the vault's work, as before
+
+#### Scenario: A keyless turn never resolves another conversation's topic
+
+- **WHEN** one session with a key works on pages about one topic, editing and
+  picking them, and a caller that passes no key and no valid thread sends a
+  referential turn such as "continue"
+- **THEN** no anchor resolves, no page is carried and no material is served
+- **AND** the recent-context block still lists the pages that session worked on
+
+#### Scenario: A follow-up is carried from the caller's own thread
+
+- **WHEN** a conversation's previous packet resolved one page, another session
+  then worked elsewhere, and the conversation's next turn is "what about the
+  second one?" passing that packet's token, or the same session key
+- **THEN** that page is carried as a single `partial` anchor with
+  `generation.carried_by = "follow_up"`
+- **AND** the same turn with no key and no token abstains `unresolved` and names
+  neither page
+
+#### Scenario: A follow-up over two close pages is not guessed
+
+- **WHEN** a follow-up's session tier holds two pages touched within the declared
+  interval of each other
+- **THEN** the turn abstains `ambiguous` listing both, and serves no material
+
+#### Scenario: A turn that names a new subject is not a follow-up
+
+- **WHEN** a turn opens like a follow-up but says what it is about, such as "what
+  about the quarterly budget?"
+- **THEN** it is not carried from the caller's thread
 
 #### Scenario: A recorded episode's page leads until newer work
 

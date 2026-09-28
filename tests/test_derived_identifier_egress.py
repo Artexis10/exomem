@@ -2482,6 +2482,68 @@ def test_a_restricted_packet_and_its_token_carry_no_index_generation(
     assert decoded is not None and decoded["generation"] == 0, minted.get("continuity")
 
 
+_ABSTENTION_PATHS = {
+    # The guard withholds the whole packet from a caller it cannot place.
+    "unresolved": "withheld",
+    # The request budget runs out just before the guard.
+    "budget": "unavailable",
+    # The guard cannot decide.
+    "guard-error": "unavailable",
+}
+
+
+@pytest.mark.parametrize("path", sorted(_ABSTENTION_PATHS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_abstention_and_its_token_carry_no_index_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, audience: str, path: str
+) -> None:
+    """An abstention built after the caller's thread was read carries a token
+    too, minted from the compiled packet's generation rather than a guarded
+    one, so it named the index generation the served packet withholds."""
+    from exomem import lexstore, working_set, working_set_index, working_set_runtime
+
+    hub, withheld = _ACTIVATION_SCENARIOS["same-title"]
+    vault = _materialize(tmp_path / "vault", {**_activation_base(hub), **withheld}, audience)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).reset()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    principal = _principal(audience)
+    if path == "unresolved":
+        principal = RequestPrincipal(audience_id=audience, surface="mcp", resolved=False)
+    elif path == "budget":
+        monkeypatch.setattr(
+            working_set, "budget_exhausted", lambda stage, **_: stage == "working_set.guard"
+        )
+    else:
+
+        def undecidable(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("release decision unavailable")
+
+        monkeypatch.setattr(egress, "guard_working_set", undecidable)
+
+    turn = "What is the status of the Orion Program?"
+    dispatched = _call(vault, principal, "activate_context", turn=turn)
+    # The token as minted, before the dispatcher's terminal filter.
+    _reset()
+    working_set_runtime.reset_caches_for_tests()
+    with request_scope(principal):
+        minted = commands.op_activate_context(vault, turn=turn)
+
+    for packet in (dispatched, minted):
+        assert packet["abstention"] == {"reason": _ABSTENTION_PATHS[path]}, packet
+        assert "index_generation" not in packet["generation"]
+        assert "freshness_key" not in packet["generation"]
+        token = packet.get("continuity")
+        if path == "unresolved":
+            # The guard withheld the whole packet: nothing is carried forward.
+            assert token is None, token
+            continue
+        decoded = working_set_runtime.decode_continuity(token)
+        assert decoded is not None and decoded["generation"] == 0, token
+        assert decoded["refs"] == []
+
+
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_reclassification_proposal_counts_the_links_it_may_see(
     tmp_path: Path, audience: str

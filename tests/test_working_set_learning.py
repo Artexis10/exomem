@@ -181,15 +181,18 @@ def test_a_pick_of_a_recent_page_after_a_nameless_turn_is_a_cue_miss(learning_va
 
 
 def test_a_referential_pick_moves_heat_without_a_miss(learning_vault: Path) -> None:
-    before = commands.op_activate_context(learning_vault, turn="continue")
+    # One keyed conversation, as a hook sends it: a caller with no key is
+    # never given the vault's referent (the keyless-connector ruling).
+    keys = {"session": "local-conversation-" + "a7" * 8}
+    before = commands.op_activate_context(learning_vault, turn="continue", **keys)
     assert [item["path"] for item in before["anchors"] if item["status"] == "resolved"] == [SLED]
 
-    packet = _pick(learning_vault, "continue", MARIT)
+    packet = _pick(learning_vault, "continue", MARIT, **keys)
 
     assert "learning" not in packet
     assert _misses(learning_vault) == {}
     working_set_runtime.reset_caches_for_tests()
-    after = commands.op_activate_context(learning_vault, turn="continue")
+    after = commands.op_activate_context(learning_vault, turn="continue", **keys)
     assert [item["path"] for item in after["anchors"] if item["status"] == "resolved"] == [MARIT]
 
 

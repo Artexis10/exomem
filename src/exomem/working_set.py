@@ -1672,6 +1672,132 @@ def _carried_packet(
         )
 
 
+def _follow_up_packet(
+    vault_root: Path,
+    *,
+    page: str,
+    rows: Sequence[Any],
+    evidence: tuple[str, ...],
+    analysis: Any,
+    registry: context_roles.RoleRegistry,
+    conventions: Any,
+    limit: int,
+    purpose: str | None,
+    timings: Any,
+    generation: dict[str, Any],
+    index_token: tuple[int, int, int],
+    freshness_snapshot: Any,
+    index: working_set_index.WorkingSetIndex | None,
+    recent_context: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The packet for a follow-up carried from the caller's own thread.
+
+    Its one anchor is reported `partial` on `evidence` and the packet is
+    marked `generation.carried_by = "follow_up"`. An anchor row is read
+    through its own kind's role lanes, exactly as a resolved anchor of that
+    kind; an ordinary page through the page carry (`_carried_packet`). Where
+    neither reads anything, the turn abstains `unresolved` with that anchor
+    listed, so the agent still learns which page the conversation was on."""
+    row = next((item for item in rows if item.path == page), None)
+    if row is None:
+        packet = _carried_packet(
+            vault_root,
+            page=(page, 0.0),
+            analysis=analysis,
+            registry=registry,
+            limit=limit,
+            purpose=purpose,
+            timings=timings,
+            generation=generation,
+            index_token=index_token,
+            freshness_snapshot=freshness_snapshot,
+            index=index,
+            recent_context=recent_context,
+            status="partial",
+            evidence=evidence,
+            carried_by="follow_up",
+        )
+        listed = {
+            "ref": page,
+            "path": page,
+            "title": _page_title(vault_root, page) or _indexed_title(index, page) or page,
+            "kind": "page",
+            "lifecycle": _page_lifecycle(vault_root, page),
+            "status": "partial",
+            "evidence": list(evidence),
+        }
+    else:
+        carried = working_set_resolve.ResolvedAnchor(
+            anchor_id=row.anchor_id,
+            path=row.path,
+            ref=row.ref,
+            title=row.title,
+            kind=row.kind,
+            lifecycle=row.lifecycle,
+            status="partial",
+            evidence=evidence,
+            categories=row.categories,
+            neighbourhood=row.neighbourhood,
+            anchor_neighbourhood=row.anchor_neighbourhood,
+        )
+        listed = carried.as_dict()
+        if budget_exhausted("working_set.roles"):
+            raise BudgetExhausted("working_set.roles")
+        with _span(timings, "working_set.roles"):
+            roles = context_roles.select_roles(
+                registry, anchor_kinds=(carried.kind,), analysis=analysis
+            )
+        if budget_exhausted("working_set.current_state"):
+            raise BudgetExhausted("working_set.current_state")
+        with _span(timings, "working_set.current_state"):
+            current_state = working_set_state.current_state_for(
+                vault_root,
+                anchors=(carried,),
+                purpose=purpose,
+                index_generation=index_token[1],
+                index_token=index_token,
+                state_fields=conventions.state_fields,
+                date_fields=conventions.date_fields,
+            )
+        items, missing = run_lanes(
+            vault_root,
+            anchors=(carried,),
+            roles=roles,
+            registry=registry,
+            current_state=current_state,
+            timings=timings,
+            freshness_snapshot=freshness_snapshot,
+        )
+        packet = None
+        if items or current_state:
+            if budget_exhausted("working_set.budget"):
+                raise BudgetExhausted("working_set.budget")
+            with _span(timings, "working_set.budget"):
+                packet = build_packet(
+                    items=items,
+                    anchors=(listed,),
+                    roles=roles,
+                    current_state=current_state,
+                    ambiguity=(),
+                    missing=missing,
+                    max_chars=limit,
+                    generation={**generation, "carried_by": "follow_up"},
+                    # `build_packet`'s "material was produced" flag, as in
+                    # `_carried_packet`: the anchor's own status says partial.
+                    status="resolved",
+                    recent_context=recent_context,
+                )
+    if packet is not None:
+        return packet
+    return abstained_packet(
+        reason="unresolved",
+        max_chars=limit,
+        generation=generation,
+        anchors=(listed,),
+        recent_context=recent_context,
+    )
+
+
 def _reader_view(root: Path, purpose: str | None):
     """The caller's page view for anchor resolution, or `None` for the owner."""
     from .governance import egress
@@ -1978,6 +2104,67 @@ def compile_packet(
                 recent_context=recent,
             )
 
+    # A short follow-up ("what about the second one?", "and the results?")
+    # that reached nothing by its own words points into THIS conversation's
+    # last answer. Where the caller's own session tier — its key, or its
+    # token's thread — holds one dominant page, that page is carried as a
+    # `partial` anchor with its units, `generation.carried_by = "follow_up"`:
+    # partial because a follow-up is weaker evidence than a turn that points
+    # back and names nothing, so nothing is RESOLVED and the token carries no
+    # ref of it forward. Two or more near-equal pages are listed for the
+    # agent to choose from. Never another conversation's work: a caller with
+    # no session tier abstains as before.
+    if (
+        not anchor
+        and analysis.follow_up
+        and resolution.status == "unresolved"
+        and attribution is not None
+        and attribution.session
+        and not any(
+            set(item.evidence) & working_set_resolve.WORDED_CONTACT_KINDS
+            for item in resolution.anchors
+        )
+    ):
+        pages, from_token = follow_up_referents(
+            root,
+            rows=rows,
+            continuity_refs=continuity_refs,
+            continuity_minted_ns=continuity_minted_ns,
+            continuity_passed=passed,
+            profile=heat,
+            attribution=attribution,
+            marks=marks,
+        )
+        if len(pages) == 1:
+            return _follow_up_packet(
+                root,
+                page=pages[0],
+                rows=rows,
+                evidence=("continuity",) if from_token else ("recency",),
+                analysis=analysis,
+                registry=registry,
+                conventions=conventions,
+                limit=limit,
+                purpose=purpose,
+                timings=timings,
+                generation=(
+                    {**generation, "continuity": "applied"} if from_token else generation
+                ),
+                index_token=index_token,
+                freshness_snapshot=freshness_snapshot,
+                index=index,
+                recent_context=recent,
+            )
+        if pages:
+            return abstained_packet(
+                reason="ambiguous",
+                max_chars=limit,
+                generation=generation,
+                anchors=(),
+                ambiguity=_hot_ambiguity(root, HotSet(members=frozenset(pages)), rows),
+                recent_context=recent,
+            )
+
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
         named = _carry_by_retrieval(
             root,
@@ -2263,6 +2450,32 @@ def hot_profile(
     """
     root = Path(vault_root)
     heat = profile if profile is not None else working_set_heat.profile(root)
+    by_path, admissible, eligible = _referent_filters(root, rows, heat)
+    passed = bool(continuity_refs) if continuity_passed is None else bool(continuity_passed)
+    token_paths = _token_paths(by_path, continuity_refs, admissible)
+    leads = working_set_heat.leading(
+        heat,
+        attribution=attribution,
+        token_paths=token_paths,
+        token_minted_ns=continuity_minted_ns,
+        token_passed=passed,
+        admissible=admissible,
+        marks=marks,
+        for_referent=True,
+    )
+    chosen = working_set_heat.members(leads, limit=limit, eligible=eligible)
+    members = frozenset(chosen.paths)
+    anchors = frozenset(path for path in members if path in by_path)
+    from_token = bool(chosen.token and passed and members and members <= token_paths)
+    return HotSet(members, anchors, members - anchors, chosen.tier, from_token)
+
+
+def _referent_filters(
+    root: Path, rows: Sequence[Any], heat: working_set_heat.HeatProfile
+) -> tuple[dict[str, Any], Callable[[str], bool], Callable[[str], bool]]:
+    """`(rows by path, admissible, eligible)`: the free string checks a heat
+    referent must pass, and the bounded page read each member the walk
+    reaches gets (`hot_profile`)."""
     by_path = {
         str(getattr(row, "path", "") or ""): row for row in rows if getattr(row, "path", "")
     }
@@ -2276,8 +2489,21 @@ def hot_profile(
     def admissible(path: str) -> bool:
         return path not in retired and _recent_reason_for(path, collections=collections) == "edited"
 
-    passed = bool(continuity_refs) if continuity_passed is None else bool(continuity_passed)
-    token_paths = frozenset(
+    def eligible(path: str) -> bool:
+        if path in by_path:
+            return _is_current_page(root, path)
+        return _eligible_agent_page(root, path) is not None
+
+    return by_path, admissible, eligible
+
+
+def _token_paths(
+    by_path: Mapping[str, Any],
+    continuity_refs: frozenset[str],
+    admissible: Callable[[str], bool],
+) -> frozenset[str]:
+    """The paths a token's refs name: an index row's, or a page's own."""
+    return frozenset(
         path
         for path in (
             *(
@@ -2296,26 +2522,41 @@ def hot_profile(
         )
         if admissible(path)
     )
-    leads = working_set_heat.leading(
-        heat,
+
+
+def follow_up_referents(
+    vault_root: Path,
+    *,
+    rows: Sequence[Any],
+    continuity_refs: frozenset[str] = frozenset(),
+    continuity_minted_ns: int | None = None,
+    continuity_passed: bool = False,
+    profile: working_set_heat.HeatProfile,
+    attribution: working_set_heat.Attribution | None,
+    marks: Mapping[str, working_set_heat.SessionMark] | None = None,
+    limit: int = HOT_PROFILE_K,
+) -> tuple[tuple[str, ...], bool]:
+    """`(pages, from_token)`: what a short follow-up may point at, from the
+    caller's OWN session tier only (`working_set_heat.own_referents`), under
+    the same admissibility and currency checks as `hot_profile`. Empty for a
+    caller with no session key or thread: another conversation's work is
+    never what "the second one" refers to."""
+    root = Path(vault_root)
+    by_path, admissible, eligible = _referent_filters(root, rows, profile)
+    token_paths = _token_paths(by_path, continuity_refs, admissible)
+    pages = working_set_heat.own_referents(
+        profile,
         attribution=attribution,
         token_paths=token_paths,
         token_minted_ns=continuity_minted_ns,
-        token_passed=passed,
+        token_passed=continuity_passed,
         admissible=admissible,
         marks=marks,
+        eligible=eligible,
+        limit=limit,
     )
-
-    def eligible(path: str) -> bool:
-        if path in by_path:
-            return _is_current_page(root, path)
-        return _eligible_agent_page(root, path) is not None
-
-    chosen = working_set_heat.members(leads, limit=limit, eligible=eligible)
-    members = frozenset(chosen.paths)
-    anchors = frozenset(path for path in members if path in by_path)
-    from_token = bool(chosen.token and passed and members and members <= token_paths)
-    return HotSet(members, anchors, members - anchors, chosen.tier, from_token)
+    from_token = bool(continuity_passed and pages and frozenset(pages) <= token_paths)
+    return pages, from_token
 
 
 def _hot_ambiguity(

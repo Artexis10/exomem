@@ -337,3 +337,112 @@ def build_realistic(root: Path, *, with_graph: bool = True) -> Path:
     if with_graph:
         publish_graph(vault)
     return vault
+
+
+# ----------------------------------------------------------------------
+# vocabulary shapes: alias/anchor and convention/category upkeep
+# ----------------------------------------------------------------------
+
+#: Two notes link the entity by a spelling it does not carry.
+REFERRER_ONE = f"{KB}/Notes/Insights/pump-restart.md"
+REFERRER_TWO = f"{KB}/Notes/Insights/pump-drain.md"
+VARIANT = "Orbit Pumps"
+#: The fold key the variant and the entity's title share.
+VARIANT_KEY = "orbit-pump"
+
+#: Two notes spell a tag one way, a third another way.
+TAG_ONE = f"{KB}/Notes/Insights/pump-care-log.md"
+TAG_TWO = f"{KB}/Notes/Insights/pump-care-schedule.md"
+TAG_MINOR = f"{KB}/Notes/Insights/pump-care-checklist.md"
+TAG_MAJORITY = "pump-care"
+TAG_MINORITY = "Pump Care"
+TAG_KEY = "pump-care"
+
+#: A unit label that folds to a registered category.
+CATEGORY_NOTE = f"{KB}/Notes/Insights/pump-bench-results.md"
+CATEGORY_LABEL = "field trials"
+CATEGORY_KEY = "field-trial"
+REGISTRY = f"{KB}/_Schema/semantic-language-registry.yaml"
+
+
+def note(
+    title: str,
+    *,
+    tags: tuple[str, ...] = (),
+    links: str = "",
+    observation: str = "The measurement repeats across runs.",
+    category: str = "finding",
+    frontmatter: str = "",
+    updated: str = "2026-05-04",
+) -> str:
+    """An unsourced insight with optional tags, links and a unit category."""
+    tag_lines = "".join(f'  - "{tag}"\n' for tag in tags)
+    return (
+        "---\n"
+        f"title: {title}\n"
+        "type: insight\n"
+        "status: active\n"
+        "created: 2026-04-02\n"
+        f"updated: {updated}\n" + (f"tags:\n{tag_lines}" if tags else "") + frontmatter + "---\n\n"
+        f"# {title}\n\n"
+        f"{links}\n\n"
+        "## Observations\n\n"
+        f"- [{category}] {observation}\n"
+    )
+
+
+def registry(*, extra: str = "") -> str:
+    return (
+        "schema_version: 1\n"
+        "categories:\n"
+        "  field_trial:\n"
+        "    description: A trial run outside the lab.\n"
+        f"{extra}"
+    )
+
+
+def save_registry(vault: Path, text: str) -> None:
+    """Replace the category registry the way a governed registry save lands.
+
+    It is not a page: no parse cache, freshness map or graph is touched.
+    """
+    (vault / REGISTRY).write_text(text, encoding="utf-8")
+
+
+def build_vocabulary(root: Path, *, with_graph: bool = True) -> Path:
+    """The entity, two variant referrers, a drifting tag and a variant label.
+
+    Nothing here declares a Source, so no link or hydration proposal arises:
+    the vocabulary families are the only upkeep on this vault.
+    """
+    vault = root / "vault"
+    write(vault, ENTITY, entity())
+    for rel, title, verb in (
+        (REFERRER_ONE, "Pump restart", "Restart"),
+        (REFERRER_TWO, "Pump drain", "Drain"),
+    ):
+        write(
+            vault,
+            rel,
+            note(title, links=f"{verb} the [[{VARIANT}]] after a trip.", updated="2026-05-05"),
+        )
+    for rel, title, tag in (
+        (TAG_ONE, "Pump care log", TAG_MAJORITY),
+        (TAG_TWO, "Pump care schedule", TAG_MAJORITY),
+        (TAG_MINOR, "Pump care checklist", TAG_MINORITY),
+    ):
+        write(vault, rel, note(title, tags=(tag,)))
+    write(
+        vault,
+        CATEGORY_NOTE,
+        note(
+            "Pump bench results",
+            category=CATEGORY_LABEL,
+            observation="The seal held for nine hours.",
+        ),
+    )
+    write(vault, REGISTRY, registry())
+    seed(vault)
+    if with_graph:
+        publish_graph(vault)
+    return vault

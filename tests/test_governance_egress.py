@@ -2841,6 +2841,8 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             # writer path. Which curation actions are read-only is a second
             # selector's decision, pinned by name in the conditional test below.
             "curation": False,
+            # Preview unless `apply=true`, like structured-files.
+            "tag-variants": True,
         },
     }
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}

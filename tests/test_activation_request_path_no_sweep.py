@@ -1276,7 +1276,9 @@ def test_a_referential_turn_with_the_hot_profile_on_holds_the_same_ceilings(
     calls = _FilesystemCalls(vault)
     calls.install(monkeypatch)
 
-    packet = commands.op_activate_context(vault, turn="continue")
+    # A fresh keyed conversation, as a hook sends it: a keyless caller is
+    # never given the vault's referent (the keyless-connector ruling).
+    packet = commands.op_activate_context(vault, turn="continue", session="fresh-conversation")
 
     assert scheduled == [], scheduled
     assert packet["abstained"] is False, (
@@ -1458,7 +1460,9 @@ def test_a_referential_turn_with_a_full_heat_ring_holds_the_same_ceilings(
     calls = _FilesystemCalls(vault)
     calls.install(monkeypatch)
 
-    packet = commands.op_activate_context(vault, turn="continue")
+    # A fresh keyed conversation, as a hook sends it: a keyless caller is
+    # never given the vault's referent (the keyless-connector ruling).
+    packet = commands.op_activate_context(vault, turn="continue", session="fresh-conversation")
 
     # Measured first: reading the sidecar back below is the test's cost.
     assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()

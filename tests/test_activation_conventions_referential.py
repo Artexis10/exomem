@@ -267,9 +267,12 @@ def test_the_packet_cache_key_carries_the_turn_digest(heat_vault: Path) -> None:
     """Deliberately no cache reset between the two calls: the key alone must
     turn the second request into a miss."""
     _edit(heat_vault, SLED, "A towed cargo sled", "A towed freight sled")
-    before = commands.op_activate_context(heat_vault, turn="weiter")
+    # A keyed caller: a caller with no key is never given the vault's
+    # referent (the keyless-connector ruling).
+    keys = {"session": "local-conversation-" + "b8" * 8}
+    before = commands.op_activate_context(heat_vault, turn="weiter", **keys)
     _save(heat_vault, {"add_cues": ["weiter"]})
-    after = commands.op_activate_context(heat_vault, turn="weiter")
+    after = commands.op_activate_context(heat_vault, turn="weiter", **keys)
     assert _resolved(before) == []
     assert _resolved(after) == [SLED]
 

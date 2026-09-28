@@ -41,7 +41,7 @@ from epistemic.corpora.context_activation import (  # noqa: E402
     build_soundness_probe_corpus,
 )
 
-from exomem import working_set_index, working_set_resolve  # noqa: E402
+from exomem import working_set_heat, working_set_index, working_set_resolve  # noqa: E402
 
 
 def _resolve_turn(vault: Path, turn: str, retrieval_paths: frozenset[str]):
@@ -400,6 +400,13 @@ def test_r3_a_named_project_carries_the_packet_past_two_weak_unrelated_entities(
 # --------------------------------------------------------------------------- #
 
 
+#: A local keyed conversation with no history of its own, as a hook sends
+#: one: it ranks exactly as the vault does. A caller with no key is never
+#: given another conversation's work as its referent (the keyless-connector
+#: ruling), so the live-profile checks compile as this caller.
+LOCAL = working_set_heat.Attribution(session="local-conversation")
+
+
 def _live_hot_profile(vault: Path, *, freshest: str) -> None:
     """Every page old, `freshest` just edited, the registry seeded. The old
     pages are a minute apart: each its own edit, not a write burst."""
@@ -434,13 +441,13 @@ def test_the_negative_twins_stay_unresolved_with_a_live_hot_profile(hot_probe) -
     from exomem import working_set
 
     vault, manifest = hot_probe
-    control = working_set.compile_packet(vault, turn="continue", max_chars=4000)
+    control = working_set.compile_packet(vault, turn="continue", max_chars=4000, attribution=LOCAL)
     assert _statuses(control).get(manifest.hub_paths[0]) == "resolved", (
         "the profile must be live, or the negatives below prove nothing"
     )
 
     for turn in (T10_TURN, T11_TURN):
-        packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
+        packet = working_set.compile_packet(vault, turn=turn, max_chars=4000, attribution=LOCAL)
 
         assert packet["abstained"] is True, turn
         assert packet["abstention"] == {"reason": "unresolved"}, turn
@@ -457,7 +464,7 @@ def test_the_one_word_reference_is_unchanged_by_a_live_hot_profile(hot_probe) ->
 
     vault, manifest = hot_probe
 
-    packet = working_set.compile_packet(vault, turn=C10_TURN, max_chars=4000)
+    packet = working_set.compile_packet(vault, turn=C10_TURN, max_chars=4000, attribution=LOCAL)
 
     assert _statuses(packet).get(manifest.bike_path) == "resolved"
     assert all("recency" not in item["evidence"] for item in packet["anchors"])
@@ -488,7 +495,7 @@ def test_a_retired_hot_hub_is_never_offered(probe, retire: tuple[str, str]) -> N
     working_set_index.WorkingSetIndex(vault).rebuild()
     _live_hot_profile(vault, freshest=manifest.hub_paths[0])
 
-    packet = working_set.compile_packet(vault, turn="continue", max_chars=4000)
+    packet = working_set.compile_packet(vault, turn="continue", max_chars=4000, attribution=LOCAL)
 
     assert manifest.hub_paths[0] not in _statuses(packet)
     assert packet["abstained"] is False, packet.get("abstention")
@@ -533,7 +540,7 @@ def test_no_corpus_turn_consults_the_prior_under_a_live_hot_profile(
     assert freshest in {row.path for row in index.anchors()}, "must be an anchor to be hot"
     _live_hot_profile(vault, freshest=freshest)
 
-    control = working_set.compile_packet(vault, turn="continue", max_chars=4000)
+    control = working_set.compile_packet(vault, turn="continue", max_chars=4000, attribution=LOCAL)
     assert _statuses(control).get(freshest) == "resolved", (
         "the profile must be live, or the corpus run below proves nothing"
     )
@@ -548,7 +555,7 @@ def test_no_corpus_turn_consults_the_prior_under_a_live_hot_profile(
     monkeypatch.setattr(working_set, "hot_profile", _spy)
     for fixture in FIXTURES:
         for turn in (fixture.turn, fixture.reminder_turn):
-            packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
+            packet = working_set.compile_packet(vault, turn=turn, max_chars=4000, attribution=LOCAL)
             assert all(
                 "recency" not in item["evidence"] for item in packet["anchors"]
             ), (fixture.case_id, turn)

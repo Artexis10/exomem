@@ -169,8 +169,8 @@ def test_size_cap_disables_only_global_families(
     conn = store.connect()
     _propose(store, conn)
     assert store.family_enabled(conn, "upkeep_alias") is True
-    monkeypatch.setattr(dreamer_store, "SIZE_CAP_BYTES", 1)
-    assert store.capacity_exceeded() is True
+    monkeypatch.setattr(dreamer_store, "SIZE_CAP_FLOOR_BYTES", 1)
+    assert store.capacity_exceeded(conn) is True
     assert store.family_enabled(conn, "upkeep_alias") is False
     assert store.family_enabled(conn, "upkeep_convention") is False
     assert store.family_enabled(conn, "upkeep_link") is True
@@ -361,3 +361,107 @@ def test_the_row_cap_evicts_both_directions_of_a_held_pair(
         conn.close()
     # One row over the cap, and the held pair goes whole.
     assert left == {fresh}
+
+
+def test_the_size_cap_scales_with_the_pages_indexed(vault: Path) -> None:
+    """max(floor, headroom x measured bytes per page x indexed pages)."""
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        assert store.size_cap_bytes(conn) == dreamer_store.SIZE_CAP_FLOOR_BYTES == 64 * 1024 * 1024
+        pages = 10_000
+        with store.write(conn):
+            conn.executemany(
+                "INSERT INTO seen(path, sig) VALUES (?, '1:1:1')",
+                ((f"Knowledge Base/p{index}.md",) for index in range(pages)),
+            )
+        assert store.size_cap_bytes(conn) == (
+            dreamer_store.SIZE_CAP_HEADROOM * dreamer_store.BYTES_PER_PAGE * pages
+        )
+        assert store.size_cap_bytes(conn) > dreamer_store.SIZE_CAP_FLOOR_BYTES
+    finally:
+        store.close(conn)
+
+
+def test_a_fresh_sidecar_uses_incremental_auto_vacuum(vault: Path) -> None:
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
+    finally:
+        store.close(conn)
+
+
+def _v3_file(path: Path, schema: str) -> None:
+    """A sidecar as candidate runs before schema 4 left it: old table shapes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO meta VALUES ('schema', ?)", (schema,))
+        conn.execute(
+            "CREATE TABLE name_keys (fold_key TEXT NOT NULL, path TEXT NOT NULL, "
+            "source TEXT NOT NULL, PRIMARY KEY (fold_key, path, source))"
+        )
+        conn.execute("INSERT INTO name_keys VALUES ('orbit-pump', 'a.md', 'title')")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_a_schema_three_sidecar_is_wiped_and_rebuilt(vault: Path) -> None:
+    assert dreamer_store.SCHEMA_VERSION == 4
+    store = dreamer_store.DreamerStore(vault)
+    _v3_file(store.path, "3")
+    conn = store.connect()
+    try:
+        assert conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == "4"
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(name_keys)")}
+        assert "spelling" in columns
+        assert conn.execute("SELECT count(*) FROM name_keys").fetchone()[0] == 0
+    finally:
+        store.close(conn)
+
+
+def test_a_schema_failure_wipes_instead_of_failing_every_tick(vault: Path) -> None:
+    """A file claiming this schema whose tables do not match it is wiped too."""
+    store = dreamer_store.DreamerStore(vault)
+    _v3_file(store.path, str(dreamer_store.SCHEMA_VERSION))
+    conn = store.connect()
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(name_keys)")}
+        assert "spelling" in columns
+    finally:
+        store.close(conn)
+
+
+@pytest.mark.parametrize("code", [10, 13, 8])  # SQLITE_IOERR, SQLITE_FULL, SQLITE_READONLY
+def test_a_transient_error_during_schema_setup_keeps_the_sidecar(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """Only damage or an incompatible file is a reason to wipe; a passing fault raises."""
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        store.set_meta(conn, "probe", "kept")
+    finally:
+        store.close(conn)
+    real = dreamer_store.DreamerStore._ensure_schema
+    fired: list[int] = []
+
+    def flaky(self: dreamer_store.DreamerStore, conn: sqlite3.Connection) -> None:
+        if not fired:
+            fired.append(code)
+            exc = sqlite3.OperationalError("transient fault")
+            exc.sqlite_errorcode = code
+            raise exc
+        real(self, conn)
+
+    monkeypatch.setattr(dreamer_store.DreamerStore, "_ensure_schema", flaky)
+    with pytest.raises(sqlite3.OperationalError):
+        store.connect()
+    conn = store.connect()
+    try:
+        assert store.get_meta(conn, "probe") == "kept"
+    finally:
+        store.close(conn)

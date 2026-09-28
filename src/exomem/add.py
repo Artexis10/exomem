@@ -29,6 +29,7 @@ from . import (
     project_keys,
     schema,
     source_taxonomy,
+    tag_variants,
     temporal,
 )
 from .kbdir import kb_prefix
@@ -378,6 +379,7 @@ def add(
         )
 
     tags_clean = _clean_tags(tags)
+    tag_warnings = tag_variants.advise_authored(vault_root, tags_clean)
     exomem_id = memory_refs.new_id()
 
     source_md = _render_source(
@@ -478,7 +480,7 @@ def add(
     writes.extend(project_plan.writes)
     writes.extend(supersede_writes)
 
-    warnings: list[str] = list(slug_warnings)
+    warnings: list[str] = list(slug_warnings) + tag_warnings
     # Vocabulary notices are plain per-write warnings, not dismissible advisories:
     # "registered 'field-notebook'" reports what the write did, so routing it
     # through the suppression channel would let a dismissal hide a fact.

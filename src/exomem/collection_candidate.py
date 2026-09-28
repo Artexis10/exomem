@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import collection_claims
-from .structure_promotion import BREADTH_TAGS
+from .structure_promotion import BREADTH_TAGS, FUNCTION_WORDS
 
 SPREAD_MIN_PAGES = 3  # PROVISIONAL
 DATES_MIN = 3  # PROVISIONAL
@@ -21,6 +21,16 @@ STATE_UNITS_MIN = 3  # PROVISIONAL
 IDENTITIES_MIN = 2  # PROVISIONAL
 MAX_DOMAIN_TERMS = 6  # PROVISIONAL
 MAX_EVIDENCE_UNITS = 8  # PROVISIONAL
+# Noise budget. Measured on a live vault, 355 candidate entries (302 strong)
+# sat on words such as result, technique, timing, evidence and workflow: words
+# that recur everywhere because they describe how notes are written, not a
+# domain. A domain term is distinctive: it appears in only a small share of
+# the units table. The synthetic fixture (tests/test_incident_records_routing)
+# puts generic words at ~43% of units and a real domain at ~1.3%; the ceiling
+# sits well between them.
+MAX_TERM_UNIT_SHARE = 0.05  # PROVISIONAL
+UNIT_SHARE_MIN_POPULATION = 100  # PROVISIONAL: below this a share means nothing
+MAX_SERVED_CANDIDATES = 3  # PROVISIONAL: at most this many served per response
 
 STATE_LEXEMES: tuple[str, ...] = (  # PROVISIONAL
     "activate",
@@ -154,16 +164,78 @@ def _excluded(
     covered_terms: set[str],
     project_terms: set[str],
     core_categories: set[str],
+    common_terms: frozenset[str] = frozenset(),
 ) -> bool:
     normalized = set(collection_claims.normalize_terms([term]))
     return bool(
         term in BREADTH_TAGS
+        or term in FUNCTION_WORDS
+        or not normalized
         or term in project_terms
         or term in core_categories
         or term in STATE_LEXEMES
+        or term in common_terms
         or term in covered_terms
-        or (normalized and normalized <= covered_terms)
+        or normalized <= covered_terms
     )
+
+
+def common_terms(
+    rows: Iterable[Mapping[str, Any]], *, population: int | None = None
+) -> frozenset[str]:
+    """Terms too widespread in the units table to name a domain.
+
+    A term carried by more than `MAX_TERM_UNIT_SHARE` of the units is how notes
+    are written, not what they are about. Below `UNIT_SHARE_MIN_POPULATION`
+    units a share is not evidence, so nothing is common.
+    """
+    units = _units(rows)
+    total = len(units) if population is None else population
+    if total < UNIT_SHARE_MIN_POPULATION:
+        return frozenset()
+    counts: dict[str, int] = {}
+    for unit in units:
+        for term in unit.terms:
+            counts[term] = counts.get(term, 0) + 1
+    return frozenset(
+        term for term, count in counts.items() if count / total > MAX_TERM_UNIT_SHARE
+    )
+
+
+#: `detect` takes a `common_terms` argument, which shadows the function there.
+_common_terms = common_terms
+
+
+def select(
+    candidates: Iterable[Candidate], rows: Iterable[Mapping[str, Any]]
+) -> list[Candidate]:
+    """One candidate per domain, strongest and widest first.
+
+    Terms that sit on exactly the same units name one domain from several
+    sides; they are one proposal, not three. The survivor is the term with the
+    widest page spread (then the lexicographically first), so the choice
+    depends only on the evidence.
+    """
+    units = _units(rows)
+    support: dict[str, frozenset[str]] = {}
+    pages: dict[str, int] = {}
+    for item in candidates:
+        carried = [unit for unit in units if item.term in unit.terms]
+        support[item.term] = frozenset(unit.unit_ref for unit in carried)
+        pages[item.term] = len({unit.page for unit in carried})
+    ranked = sorted(
+        candidates,
+        key=lambda item: (item.strength != "strong", -pages.get(item.term, 0), item.term),
+    )
+    seen: set[frozenset[str]] = set()
+    kept: list[Candidate] = []
+    for item in ranked:
+        key = support.get(item.term, frozenset())
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(item)
+    return kept
 
 
 def detect(
@@ -173,6 +245,8 @@ def detect(
     project_terms: Iterable[str] = (),
     core_categories: Iterable[str] = CORE_CATEGORIES,
     terms: Iterable[str] | None = None,
+    population: int | None = None,
+    common_terms: Iterable[str] | None = None,
 ) -> list[Candidate]:
     """Return deterministic candidates from a bounded authored-units table.
 
@@ -183,8 +257,19 @@ def detect(
     per served entry and needs exactly that one term; measured on the personal
     vault (355 candidate entries), letting each recomposition re-detect every
     term over its units cost 18 s of a 25 s recall.
+
+    `population` is the size of the whole units table and `common_terms` the
+    terms that table found too widespread (see `common_terms`). A caller that
+    recomposes from a subset of rows passes both, so the distinctiveness verdict
+    is the full table's, not the subset's.
     """
+    rows = list(rows)
     units = _units(rows)
+    common = (
+        frozenset(_canonical_term(term) for term in common_terms)
+        if common_terms is not None
+        else _common_terms(rows, population=population)
+    )
     covered = {_canonical_term(term) for term in covered_terms}
     projects = {_canonical_term(term) for term in project_terms}
     core = {_canonical_term(term) for term in core_categories}
@@ -212,6 +297,7 @@ def detect(
                 covered_terms=covered,
                 project_terms=projects,
                 core_categories=core,
+                common_terms=common,
             )
         return cached
 
