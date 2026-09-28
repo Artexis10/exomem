@@ -496,3 +496,24 @@ def test_a_duplicate_supplier_fails_hydration(built, tmp_path: Path, monkeypatch
     link.link(root, entity_type="organization", name="Wrenfold Mill Ltd", summary="Rye supplier.", today=TODAY)
 
     assert fx.check_capture(world, before, read_state(root)).failed() == ("rich-episode/one-supplier",)
+
+
+def test_a_blend_attributed_by_its_section_heading_keeps_its_source(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source carried by a heading qualifies the bullets beneath it."""
+
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(
+        root,
+        world,
+        rye_body=(
+            "## Observations\n\n"
+            "- [finding] The sack label says milled July 2026, 12.5% protein.\n\n"
+            "## What the miller said (unconfirmed)\n\n"
+            "- [assumption] A blend of two harvests.\n"
+        ),
+    )
+
+    assert fx.check_capture(world, before, read_state(root)).accepted

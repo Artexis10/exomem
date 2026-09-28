@@ -117,6 +117,7 @@ tests/test_membench_utility_runner.py
 tests/test_membench_utility_scenarios.py
 tests/test_membench_utility_scoring.py
 tests/test_membench_utility_world.py
+tests/test_memory_loop_decomposition.py
 tests/test_memory_loop_observation.py
 tests/test_memory_loop_rich_episode.py
 tests/test_memory_loop_supplier_chain.py

@@ -738,6 +738,23 @@ def _new_lines(before: VaultState, page: PageView) -> tuple[str, ...]:
     return tuple(line for line in page.body.splitlines() if line.strip() and line not in previous)
 
 
+def _new_lines_in_context(before: VaultState, page: PageView) -> tuple[tuple[str, str], ...]:
+    """Each new line with the context a reader sees it in: the page title and
+    the nearest heading above it. A source or a date carried by a section
+    heading ("## The miller's report") qualifies the bullets beneath it."""
+
+    old = before.pages.get(page.path)
+    previous = set(old.body.splitlines()) if old is not None else set()
+    heading = ""
+    found = []
+    for line in page.body.splitlines():
+        if re.match(r"^#{1,6}\s", line):
+            heading = line
+        if line.strip() and line not in previous:
+            found.append((line, f"{page.title}\n{heading}\n{line}"))
+    return tuple(found)
+
+
 @dataclass(frozen=True)
 class Select:
     """Which pages an expectation reads.
@@ -941,21 +958,49 @@ class AttributedLines:
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
         lines = [
-            (page.path, line)
+            (page.path, line, context)
             for page in after.pages.values()
-            for line in _new_lines(before, page)
+            for line, context in _new_lines_in_context(before, page)
             if any(_has_marker(line, marker) for marker in self.claim)
         ]
         bare = [
             f"{path}: {line.strip()}"
-            for path, line in lines
+            for path, line, context in lines
             if not (
-                any(_has_marker(line, marker) for marker in self.source)
-                and any(_has_marker(line, marker) for marker in self.hedge)
+                any(_has_marker(context, marker) for marker in self.source)
+                and any(_has_marker(context, marker) for marker in self.hedge)
             )
         ]
         ok = bool(lines) and not bare
         return _result(self.key, self.polarity, ok, f"{len(lines)} claim lines; unattributed: {bare}")
+
+
+@dataclass(frozen=True)
+class LinesCarry:
+    """At least one new line carries a claim marker, and every such line, read
+    with its title and heading, carries a marker from every group (an old
+    event keeps its own time; a detail keeps its qualifier)."""
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    claim: tuple[str, ...]
+    groups: tuple[tuple[str, ...], ...]
+    reason: str
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        lines = [
+            (page.path, line, context)
+            for page in after.pages.values()
+            for line, context in _new_lines_in_context(before, page)
+            if any(_has_marker(line, marker) for marker in self.claim)
+        ]
+        bare = [
+            f"{path}: {line.strip()}"
+            for path, line, context in lines
+            if not all(any(_has_marker(context, marker) for marker in group) for group in self.groups)
+        ]
+        ok = bool(lines) and not bare
+        return _result(self.key, self.polarity, ok, f"{len(lines)} claim lines; unqualified: {bare}")
 
 
 @dataclass(frozen=True)
@@ -992,7 +1037,8 @@ class HedgedLines:
 class CoLocated:
     """The new lines carrying each marker group all sit on one page, an admissible home.
 
-    Facts that belong together (a label and a reported formulation of the same
+    A line is read with its page title and nearest heading, as a reader sees
+    it. Facts that belong together (a label and a reported formulation of the same
     product) land in one canonical home rather than being spread or copied, and
     that home is one of ``homes`` rather than a related page whose scope does
     not own them.
@@ -1011,8 +1057,8 @@ class CoLocated:
                 {
                     page.path
                     for page in after.pages.values()
-                    for line in _new_lines(before, page)
-                    if any(_has_marker(line, marker) for marker in group)
+                    for _line, context in _new_lines_in_context(before, page)
+                    if any(_has_marker(context, marker) for marker in group)
                 }
             )
         pages = set().union(*holders) if holders else set()
@@ -1245,6 +1291,7 @@ Expectation = (
     | NoNewMention
     | NewPages
     | AttributedLines
+    | LinesCarry
     | HedgedLines
     | CoLocated
     | TypedEdge
