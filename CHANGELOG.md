@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.96.0](https://github.com/Artexis10/exomem/compare/v0.95.2...v0.96.0) (2026-09-28)
+
+
+### Features
+
+* keyless continuity, incident routing, dreamer families and graph convergence under writes ([#1424](https://github.com/Artexis10/exomem/issues/1424)) ([84f95bc](https://github.com/Artexis10/exomem/commit/84f95bc914dfa999d347f71103b899f075d195fb))
+
 ## [0.95.2](https://github.com/Artexis10/exomem/compare/v0.95.1...v0.95.2) (2026-09-27)
 
 
