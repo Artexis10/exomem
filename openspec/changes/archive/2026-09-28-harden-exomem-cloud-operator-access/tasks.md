@@ -50,16 +50,28 @@
 
 ## 4. Deployment and closure
 
-- [ ] 4.1 After the Cloud smoke test, apply the chart through one fix-forward upgrade of `exomem-platform` (no `--atomic`). Verify:
+- [x] 4.1 After the Cloud smoke test, apply the chart through one fix-forward upgrade of `exomem-platform` (no `--atomic`). Verify:
   - the Certificate is Ready in `exomem-edge`;
   - the public route serves the gateway;
   - `kubectl auth can-i get secrets -n exomem-cloud --as=system:serviceaccount:exomem-edge:<traefik>` is `no`;
   - after a Traefik restart, which forces a fresh API watch under the edge policy, the public route still serves the gateway. A wrong `edge.apiServerCidrs` otherwise fails only at the next restart.
-- [ ] 4.2 Issue and install only the 30-day operator identity on the node. Verify:
+  Evidence (2026-09-28): Helm rev 69 from #1418's merge commit `895e17a7`, after a server-side dry-run against rev 68. Traefik was Ready in `exomem-edge` about 20 s after the upgrade, and the Let's Encrypt certificate was Ready about 1 min later. Checks on the public route: `/.well-known/oauth-protected-resource/mcp` 200, `POST /mcp` 401 with `resource_metadata`, and the legacy path 404. Traefik's ServiceAccount can-i `get secrets` answers `no` in `exomem-cloud`, `exomem-platform`, the owner's cell and `kube-system`, and `yes` only in `exomem-edge`. After a Traefik restart the route still served. The orphaned Issuer-era TLS Secret in `exomem-cloud` was deleted.
+- [x] 4.2 Issue and install only the 30-day operator identity on the node. Verify:
   - with the operator identity, reading a Secret and exec into a test cell are both denied;
   - a freshly minted one-hour break-glass certificate can exec into the test cell;
   - the CSR approval and the exec appear in the audit log without content;
   - that certificate is rejected after expiry.
-- [ ] 4.3 Review user-facing Cloud privacy copy against the spec's privacy requirement. Verify: every claim maps to a stated property, and both disclosures (content in transit at the edge and gateway, and operator-held keys) are present.
-- [ ] 4.4 Run the D8 canary procedure on the production node after 4.1. Verify: the canary appears in no cell, cellctl or gateway log, and the negative control finds it.
-- [ ] 4.5 Apply 2.6 on the node: set the admin kubeconfig to `0600 root:root` and deploy the K3s configuration change. Verify: `stat` shows `0600 root root`, and the administrator login cannot read it without `sudo`.
+  Evidence (2026-09-28): the operator certificate was issued until 2026-10-28 and made root's default, and every `check-operator` probe answered `no`. In a throwaway `exo-scratch-*` namespace:
+  - operator exec was refused by RBAC;
+  - admin exec was denied by `exomem-cell-connect-guard`;
+  - a break-glass certificate with `notAfter` one hour ahead ran exec as uid 10001;
+  - the audit log shows the CSR create and approval and the exec at Metadata level, with no request or response object;
+  - nothing was left in `/dev/shm`.
+
+  A separate unprivileged 10-minute certificate authenticated while valid and was refused after expiry.
+- [x] 4.3 Review user-facing Cloud privacy copy against the spec's privacy requirement. Verify: every claim maps to a stated property, and both disclosures (content in transit at the edge and gateway, and operator-held keys) are present.
+  Evidence (2026-09-28): Substrate #187 (`e03a5345`) rewrote the privacy page. It claims isolation, a stored-key-blind edge, no accidental operator access with deliberate access audited, and encryption at rest, in backups and in transit. It discloses that the edge and gateway see traffic in transit and that the operator holds the keys on the node and could deliberately read content. It adds that server admin access is another way in and that the audit log is not tamper-proof. Owner-approved. `marketplace-surface.test.ts` enforces the claims and disclosures and rejects any "operators cannot access" wording. It failed against the previous page.
+- [x] 4.4 Run the D8 canary procedure on the production node after 4.1. Verify: the canary appears in no cell, cellctl or gateway log, and the negative control finds it.
+  Evidence (2026-09-28): the canary was written, searched, recalled by paraphrase and reviewed through the Cloud connector. The scan result was `cells=1 cellctl=1 gateway=1 pods=3 streams=4 unreadable=0 hits=0 files=4 file_hits=0 jobs_after_write=0`. The negative control found the echoed canary twice through each search.
+- [x] 4.5 Apply 2.6 on the node: set the admin kubeconfig to `0600 root:root` and deploy the K3s configuration change. Verify: `stat` shows `0600 root root`, and the administrator login cannot read it without `sudo`.
+  Evidence (2026-09-28): before, `640 root:exomem-operators`, readable by the administrator login. After, `600 root:root`, not readable by that login. `/etc/rancher/k3s/config.yaml` now matches the template (`write-kubeconfig-mode: "0600"`, no group), and `/readyz` returned ok with no restart.
