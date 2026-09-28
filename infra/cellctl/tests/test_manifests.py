@@ -341,3 +341,44 @@ def test_the_previous_bearer_reference_is_optional_so_a_refused_secret_never_blo
     env = statefulset["spec"]["template"]["spec"]["containers"][0]["env"]
     previous = next(entry for entry in env if entry["name"] == "EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS")
     assert previous["valueFrom"]["secretKeyRef"]["optional"] is True
+
+
+def _mebibytes(quantity: str) -> int:
+    if quantity.endswith("Gi"):
+        return int(quantity.removesuffix("Gi")) * 1024
+    assert quantity.endswith("Mi"), quantity
+    return int(quantity.removesuffix("Mi"))
+
+
+def test_default_cell_memory_limit_is_3gi_with_a_1gi_request() -> None:
+    """The first index build over a large restored vault peaked above 1.2 GiB and
+    was OOM-killed at 1536Mi; the request stays at what an idle cell needs."""
+    statefulset = _find(render_cell_manifests(_spec()), "StatefulSet")
+    resources = statefulset["spec"]["template"]["spec"]["containers"][0]["resources"]
+    assert resources["limits"]["memory"] == "3Gi"
+    assert resources["requests"]["memory"] == "1Gi"
+
+
+def test_quota_admits_the_serving_pod_plus_a_job_pod_under_a_hold() -> None:
+    """The quota counts every non-terminal pod, so its memory ceiling must cover
+    the serving pod's limit and a backup/restore Job's limit at the same time."""
+    from cellctl.manifests import render_backup_job, render_restore_job
+
+    spec = _spec()
+    held = CellManifestSpec(
+        **{**spec.__dict__, "hold_kind": "backup", "hold_started_at": "2026-01-01T00:00:00+00:00"}
+    )
+    quota = _find(render_cell_manifests(spec), "ResourceQuota")["spec"]["hard"]
+    serving = render_statefulset(spec)["spec"]["template"]["spec"]["containers"][0]
+    jobs = [
+        render_backup_job(held, bucket_name="b", endpoint="https://s3.example"),
+        render_restore_job(held, bucket_name="b", endpoint="https://s3.example", snapshot_id="a" * 64),
+    ]
+    job_limit = max(
+        _mebibytes(container["resources"]["limits"]["memory"])
+        for job in jobs
+        for container in job["spec"]["template"]["spec"]["containers"]
+    )
+    assert _mebibytes(quota["limits.memory"]) >= (
+        _mebibytes(serving["resources"]["limits"]["memory"]) + job_limit
+    )

@@ -62,7 +62,26 @@ class ResourceSettings:
     cpu_request: str = "250m"
     cpu_limit: str = "2"
     memory_request: str = "1Gi"
-    memory_limit: str = "1536Mi"
+    memory_limit: str = "3Gi"
+
+
+# limits.memory of one backup/restore/init Job pod (`_job_pod_spec` and the
+# cell-init container). The quota counts every non-terminal pod, so it must fit
+# a Job next to the serving pod's own limit.
+JOB_MEMORY_LIMIT_MIB = 1024
+
+
+def _memory_mib(quantity: str) -> int:
+    """A Gi/Mi memory quantity in MiB; anything else is a chart-value error."""
+    for suffix, factor in (("Gi", 1024), ("Mi", 1)):
+        if quantity.endswith(suffix) and quantity.removesuffix(suffix).isdigit():
+            return int(quantity.removesuffix(suffix)) * factor
+    raise ValueError(f"memory limit must be a whole number of Gi or Mi, got {quantity!r}")
+
+
+def _quota_memory_limit(memory_limit: str) -> str:
+    mib = _memory_mib(memory_limit) + JOB_MEMORY_LIMIT_MIB
+    return f"{mib // 1024}Gi" if mib % 1024 == 0 else f"{mib}Mi"
 
 
 @dataclass(frozen=True)
@@ -177,7 +196,7 @@ def render_resource_quota(spec: CellManifestSpec) -> dict:
                 "requests.cpu": r.cpu_request,
                 "requests.memory": r.memory_request,
                 "limits.cpu": r.cpu_limit,
-                "limits.memory": r.memory_limit,
+                "limits.memory": _quota_memory_limit(r.memory_limit),
             }
         },
     }

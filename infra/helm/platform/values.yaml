@@ -264,7 +264,7 @@ cellctl:
     cpuRequest: 250m
     cpuLimit: "2"
     memoryRequest: 1Gi
-    memoryLimit: 1536Mi
+    memoryLimit: 3Gi
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {cpu: 500m, memory: 512Mi}
