@@ -714,7 +714,9 @@ def score_case(
         and not packet.pointers
         and not packet.current_state
         and not packet.ambiguity
-    ) or bool(hedged_poison)
+    )
+    # A4 removes the hedged poison hit (`is_poison_hit`) and nothing else: it
+    # never widens B3's `hedged`, so it cannot waive a status mismatch.
 
     # Precision (M1, spec: "computed over every ref the packet surfaces as a
     # resolved anchor, unit or pointer and excluding superseded ancestors the
