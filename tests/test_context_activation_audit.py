@@ -1325,3 +1325,220 @@ def test_multilingual_latency_rows_are_ceil_rank_percentiles_over_every_case() -
     ]
     semantic = multilingual_report(rows, encoder={})["summary"]["semantic_ms"]
     assert semantic == {"p50": 50.0, "p95": 100.0, "n": 10}
+
+
+# -- Amendments A2 and A4 (design.md "Amendments"): opt-in, beside raw ----
+
+
+def _amended(packet, case_id, **kwargs):
+    from membench.utility.context_activation import score_case as score
+
+    return score(packet, fixture_by_id(case_id), **kwargs)
+
+
+def test_raw_scoring_keeps_a_unit_fragment_distinct_from_its_parent_page() -> None:
+    packet = ActivationPacket(units=(Unit(ref="page-c3#unit-1", role="methods", text="design notes"),))
+    raw = score_case(packet, fixture_by_id("C3"))
+    assert (raw.gold_hit, raw.precision) == (0, 0.0)
+
+
+def test_a2_credits_a_unit_to_its_bound_parent_for_recall_only() -> None:
+    from membench.utility.context_activation import UNIT_PARENT_RECALL
+
+    packet = ActivationPacket(units=(Unit(ref="page-c3#unit-1", role="methods", text="design notes"),))
+    amended = _amended(
+        packet,
+        "C3",
+        amendments={UNIT_PARENT_RECALL},
+        unit_parents={"page-c3": "c3_design_pointer"},
+    )
+    assert amended.gold_hit == 1
+    assert amended.precision == 0.0
+    assert amended.poison_hit == 0
+
+
+@pytest.mark.parametrize("ref", ["page-c3#current", "page-c3", "other-page#unit-1"])
+def test_a2_credits_only_a_unit_fragment_of_a_bound_parent(ref: str) -> None:
+    from membench.utility.context_activation import UNIT_PARENT_RECALL
+
+    packet = ActivationPacket(units=(Unit(ref=ref, role="methods", text="design notes"),))
+    amended = _amended(
+        packet,
+        "C3",
+        amendments={UNIT_PARENT_RECALL},
+        unit_parents={"page-c3": "c3_design_pointer"},
+    )
+    assert amended.gold_hit == 0
+
+
+def test_a2_never_counts_a_unit_of_a_poison_page_as_poison() -> None:
+    from membench.utility.context_activation import UNIT_PARENT_RECALL
+
+    packet = ActivationPacket(units=(Unit(ref="page-t3#unit-1", role="active_plans", text="item"),))
+    amended = _amended(
+        packet,
+        "C3",
+        amendments={UNIT_PARENT_RECALL},
+        unit_parents={"page-t3": "t3_other_project_planning_item"},
+    )
+    assert amended.poison_hit == 0
+    assert amended.gold_hit == 0
+
+
+def test_a2_requires_a_frozen_parent_map_and_known_amendments() -> None:
+    from membench.utility.context_activation import UNIT_PARENT_RECALL
+
+    with pytest.raises(ValueError, match="unit_parents"):
+        _amended(ActivationPacket(), "C3", amendments={UNIT_PARENT_RECALL})
+    with pytest.raises(ValueError, match="unknown amendment"):
+        _amended(ActivationPacket(), "C3", amendments={"lenient"})
+
+
+def _partial(*refs: str) -> tuple:
+    return tuple(Anchor(ref=ref, title=ref, kind="hub", status="partial") for ref in refs)
+
+
+def test_a4_poison_partial_beside_a_partial_gold_candidate_is_a_hedge() -> None:
+    from membench.utility.context_activation import HEDGED_POISON
+
+    packet = ActivationPacket(anchors=_partial("c7_hub_feature", "c7_hub_market"), abstained=True)
+    raw = score_case(packet, fixture_by_id("T7"))
+    amended = _amended(packet, "T7", amendments={HEDGED_POISON})
+    assert raw.poison_hit == 1
+    assert amended.poison_hit == 0
+    # A4 removes the poison hit and nothing else: `hedged` stays B3's.
+    assert amended.hedged is raw.hedged is False
+
+
+def test_a4_never_waives_the_status_check() -> None:
+    """Review F1: T7 expects `resolved`. An abstained packet holding a partial
+    gold hub beside a partial poison hub is not resolved, under A4 or not."""
+    from membench.utility.context_activation import HEDGED_POISON
+
+    packet = ActivationPacket(anchors=_partial("c7_hub_feature", "c7_hub_market"), abstained=True)
+    amended = _amended(packet, "T7", amendments={HEDGED_POISON})
+    assert not amended.passed
+    assert any(
+        reason.startswith("expected status 'resolved', observed") for reason in amended.failure_reasons
+    ), amended.failure_reasons
+
+
+@pytest.mark.parametrize(
+    "case_id", [f.case_id for f in FIXTURES if f.case_id.startswith("T") and f.gold and f.poison]
+)
+@pytest.mark.parametrize("amended", [False, True])
+def test_adding_poison_never_removes_a_failure_reason(case_id: str, amended: bool) -> None:
+    """Review F1: a twin's partial own-gold candidate, then the same packet with
+    a partial poison beside it. The second packet keeps every failure reason
+    of the first, raw and under A4."""
+    from membench.utility.context_activation import HEDGED_POISON
+
+    fixture = fixture_by_id(case_id)
+    amendments = {HEDGED_POISON} if amended else set()
+    base = ActivationPacket(anchors=_partial(fixture.gold[0]), abstained=True)
+    poisoned = ActivationPacket(anchors=_partial(fixture.gold[0], fixture.poison[0]), abstained=True)
+    before = _amended(base, case_id, amendments=amendments)
+    after = _amended(poisoned, case_id, amendments=amendments)
+    assert set(before.failure_reasons) <= set(after.failure_reasons), (
+        before.failure_reasons,
+        after.failure_reasons,
+    )
+    assert after.passed <= before.passed
+
+
+def test_a4_a_lone_partial_poison_stays_poison() -> None:
+    from membench.utility.context_activation import HEDGED_POISON
+
+    packet = ActivationPacket(
+        anchors=(Anchor(ref="c2_grill_equipment_page", title="grill", kind="resource", status="partial"),),
+        abstained=True,
+    )
+    amended = _amended(packet, "T6", amendments={HEDGED_POISON})
+    assert amended.poison_hit == 1
+    assert not amended.passed
+
+
+@pytest.mark.parametrize("channel", ["resolved", "unit", "pointer"])
+def test_a4_poison_served_resolved_or_through_another_channel_stays_poison(channel: str) -> None:
+    from membench.utility.context_activation import HEDGED_POISON
+
+    anchors = _partial("c7_hub_feature", "c7_hub_market")
+    units: tuple = ()
+    pointers: tuple = ()
+    if channel == "resolved":
+        anchors = (*_partial("c7_hub_feature"), Anchor(ref="c7_hub_market", title="m", kind="hub", status="resolved"))
+    elif channel == "unit":
+        units = (Unit(ref="c7_hub_market", role="methods", text="market"),)
+    else:
+        pointers = (Pointer(ref="c7_hub_market"),)
+    packet = ActivationPacket(anchors=anchors, units=units, pointers=pointers)
+    amended = _amended(packet, "T7", amendments={HEDGED_POISON})
+    assert amended.poison_hit == 1
+
+
+def test_a4_applies_to_twins_only() -> None:
+    from membench.utility.context_activation import HEDGED_POISON
+
+    packet = ActivationPacket(anchors=_partial("c1_subscriptions_collection", "t1_fitness_goal_note"))
+    raw = score_case(packet, fixture_by_id("C1"))
+    amended = _amended(packet, "C1", amendments={HEDGED_POISON})
+    assert amended.poison_hit == raw.poison_hit == 1
+
+
+def test_run_audit_passes_amendments_through() -> None:
+    from membench.utility.context_activation import HEDGED_POISON
+
+    packet = ActivationPacket(anchors=_partial("c7_hub_feature", "c7_hub_market"), abstained=True)
+    report = run_audit({"T7": packet}, manifest=validate_manifest(MANIFEST), amendments={HEDGED_POISON})
+    t7 = next(score for score in report.per_case if score.case_id == "T7")
+    assert t7.poison_hit == 0
+
+
+# -- Amendment A7: ambiguity candidates count toward a positive case's precision
+
+
+def _c7_with_ambiguity(*candidates: str) -> ActivationPacket:
+    """C7's gold as partial hubs, its facts in the rendered ambiguity, and
+    `candidates` listed as the ambiguity (the integrity recheck's probe)."""
+    return ActivationPacket(
+        anchors=_partial("c7_hub_feature", "c7_hub_market", "c7_hub_search_ux"),
+        ambiguity=candidates,
+        ambiguity_text=("AI search feature", "AI search market"),
+        abstained=True,
+        abstention_reason="ambiguous",
+    )
+
+
+def test_raw_scoring_still_passes_c7_with_a_wrong_ambiguity_candidate() -> None:
+    """Disclosed, not fixed: the raw scorer is pre-registered and frozen."""
+    assert score_case(_c7_with_ambiguity("zz_wrong_page"), fixture_by_id("C7")).passed
+
+
+def test_a7_a_wrong_ambiguity_candidate_fails_c7_on_precision() -> None:
+    from membench.utility.context_activation import AMBIGUITY_PRECISION
+
+    amended = _amended(_c7_with_ambiguity("zz_wrong_page"), "C7", amendments={AMBIGUITY_PRECISION})
+    assert not amended.passed
+    assert amended.precision == 0.0
+    assert "precision 0.00 below the 0.8 floor" in amended.failure_reasons
+
+
+def test_a7_gold_ambiguity_candidates_keep_c7_passing() -> None:
+    from membench.utility.context_activation import AMBIGUITY_PRECISION
+
+    packet = _c7_with_ambiguity("c7_hub_feature", "c7_hub_market")
+    raw = score_case(packet, fixture_by_id("C7"))
+    amended = _amended(packet, "C7", amendments={AMBIGUITY_PRECISION})
+    assert raw.passed and amended.passed
+    assert amended.precision == 1.0
+
+
+def test_a7_leaves_twins_to_their_own_rules() -> None:
+    """On a twin an ambiguity candidate outside its gold is already a false
+    activation; A7 changes nothing there."""
+    from membench.utility.context_activation import AMBIGUITY_PRECISION
+
+    packet = ActivationPacket(ambiguity=("zz_wrong_page",), abstained=True, abstention_reason="ambiguous")
+    raw = score_case(packet, fixture_by_id("T7"))
+    amended = _amended(packet, "T7", amendments={AMBIGUITY_PRECISION})
+    assert (amended.precision, amended.failure_reasons) == (raw.precision, raw.failure_reasons)
