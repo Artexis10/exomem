@@ -355,3 +355,47 @@ def test_evidence_scope_never_inherits_domain_aliases_or_slug_folding(
     assert not (vault / "Knowledge Base" / "Evidence" / "Health").exists()
     assert not (vault / "Knowledge Base" / "Evidence" / "health").exists()
     assert "vocabulary_resolution" not in upper
+
+
+def test_a_kind_only_reclassify_moves_a_domain_source_despite_a_malformed_registry(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    """The caller supplies no domain, so a registry fault refuses nothing here.
+
+    Only operations that supply a domain are refused; the source keeps the
+    domain it already carries and moves with its corrected kind.
+    """
+    captured = _capture(vault, source_schema, title="Sleep trial", domain="health")
+    _registry(vault, "domains:\n  health:\n    aliases: 123\n")
+
+    preview = rc.propose(vault, captured["source"]["path"], source_kind="research-report")
+    result = rc.reclassify(
+        vault,
+        path=captured["source"]["path"],
+        source_kind="research-report",
+        reason="it is a written investigation",
+        today=TODAY,
+    )
+
+    assert result.relocated is True
+    assert result.new_path.startswith("Knowledge Base/Sources/Reports/Health/")
+    assert preview.destination == result.new_path
+
+
+def test_a_reclassify_that_supplies_a_domain_names_the_malformed_registry(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    captured = _capture(vault, source_schema, title="Sleep trial", domain="health")
+    _registry(vault, "domains:\n  health:\n    aliases: 123\n")
+
+    with pytest.raises(rc.ReclassifyError) as refused:
+        rc.reclassify(
+            vault,
+            path=captured["source"]["path"],
+            domain="travel",
+            reason="it is about a trip",
+            today=TODAY,
+        )
+
+    assert refused.value.code == "INVALID_DOMAIN_TAXONOMY"
+    assert "(Knowledge Base/_Schema/source-taxonomy.yaml)" in str(refused.value)

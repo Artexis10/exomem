@@ -287,14 +287,18 @@ def capture_refusal_reason(vault_root: Path, error: VocabularyResolutionError) -
     A registry fault names the registry file, so the owner can repair it; every
     refusal says the material can be preserved now by omitting the domain.
     """
-    where = ""
-    if error.code == "INVALID_DOMAIN_TAXONOMY":
-        registry = source_taxonomy.registry_path(Path(vault_root)).relative_to(Path(vault_root))
-        where = f" ({registry.as_posix()})"
     return (
-        f"{error.reason}{where}. Domain is optional: capture without `domain` "
-        "to preserve the material now"
+        f"{registry_refusal_reason(vault_root, error)}. Domain is optional: "
+        "capture without `domain` to preserve the material now"
     )
+
+
+def registry_refusal_reason(vault_root: Path, error: VocabularyResolutionError) -> str:
+    """The refusal reason, naming the vault-relative registry for a registry fault."""
+    if error.code != "INVALID_DOMAIN_TAXONOMY":
+        return error.reason
+    registry = source_taxonomy.registry_path(Path(vault_root)).relative_to(Path(vault_root))
+    return f"{error.reason} ({registry.as_posix()})"
 
 
 def _projection_folder(taxonomy: source_taxonomy.SourceTaxonomy, canonical: str, parent: Path) -> str:
