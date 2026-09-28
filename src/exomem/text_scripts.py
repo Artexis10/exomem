@@ -112,6 +112,48 @@ def is_hiragana(character: str) -> bool:
     return HIRAGANA_BLOCK[0] <= ord(character) <= HIRAGANA_BLOCK[1]
 
 
+def vocabulary_words(text: str) -> list[str]:
+    """The words of normalised, non-ASCII `text` for vocabulary comparisons.
+
+    A word is a maximal run of letters, digits and combining marks, as
+    `[a-z0-9]+` reads ASCII: every other character separates. Where a word
+    changes between an unspaced script and any other, it splits: a Latin
+    name glued to a Japanese phrase is its own word. Japanese writes its
+    particles and inflections in hiragana, so a Japanese run splits at its
+    hiragana and keeps only what lies between (`エアコンの故障` holds
+    `エアコン` and `故障`); a run of hiragana alone is kept whole.
+    """
+    words: list[str] = []
+    parts: list[list[str]] = []
+
+    def close() -> None:
+        only_hiragana = all(kind == "hiragana" for kind, _part in parts)
+        words.extend(part for kind, part in parts if kind != "hiragana" or only_hiragana)
+        parts.clear()
+
+    for character in text:
+        category = unicodedata.category(character)[0]
+        if category == "M" and parts:
+            parts[-1][1] += character
+            continue
+        if category not in ("L", "N"):
+            close()
+            continue
+        kind = (
+            "hiragana"
+            if is_hiragana(character)
+            else "continua"
+            if is_scriptio_continua(character)
+            else "spaced"
+        )
+        if parts and parts[-1][0] == kind:
+            parts[-1][1] += character
+        else:
+            parts.append([kind, character])
+    close()
+    return words
+
+
 def continua_character_class() -> str:
     """The declared unspaced blocks as the body of a regex character class."""
     return "".join(

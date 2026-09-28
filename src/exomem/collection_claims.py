@@ -23,7 +23,8 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .structure_promotion import _STOPWORDS, _terms
+from .structure_promotion import _is_term, _terms
+from .text_scripts import is_scriptio_continua
 from .vocabulary_fold import fold_term
 
 MIN_CLAIM_COVERAGE = 2  # PROVISIONAL
@@ -60,9 +61,32 @@ def normalize_terms(values: Iterable[object]) -> frozenset[str]:
     out: set[str] = set()
     for token in _terms(normalize_text(value) for value in values):
         folded = fold_term(token)
-        if len(folded) > 2 and folded not in _STOPWORDS and not folded.isdigit():
+        if _is_term(folded):
             out.add(folded)
     return frozenset(out)
+
+
+def _unspaced(term: str) -> bool:
+    return all(map(is_scriptio_continua, term))
+
+
+def matched_claims(observed: frozenset[str], claims: frozenset[str]) -> frozenset[str]:
+    """The claim terms an observation holds: equal terms, and an unspaced claim
+    written inside a longer unspaced term (`空調` in `空調機`).
+
+    Japanese joins words into compounds without a space, so the observation's
+    term can be a compound that holds the claim. Only there: in a spaced
+    script a claim inside a longer word is a fragment, not the word.
+    """
+    matched = observed & claims
+    compounds = [term for term in observed if _unspaced(term)]
+    if not compounds:
+        return matched
+    return matched | frozenset(
+        claim
+        for claim in claims - matched
+        if _unspaced(claim) and any(claim in term for term in compounds)
+    )
 
 
 def fold_value(value: object) -> str:
@@ -235,7 +259,7 @@ def route(
         (
             (
                 len(evidence),
-                len(normalized & normalize_terms(target.claims)),
+                len(matched_claims(normalized, normalize_terms(target.claims))),
                 target.collection,
                 target,
                 evidence,
@@ -252,9 +276,9 @@ def route(
         return {
             "collection": target.collection,
             "title": target.title,
-            "matched_terms": sorted(normalized & normalize_terms(target.claims))[
-                :MAX_MATCHED_TERMS
-            ],
+            "matched_terms": sorted(
+                matched_claims(normalized, normalize_terms(target.claims))
+            )[:MAX_MATCHED_TERMS],
             "matched_predicates": evidence,
             "natural_key": list(target.natural_key),
             "strength": "strong",
@@ -266,7 +290,7 @@ def route(
     total_targets = len(target_claims)
     ranked = sorted(
         (
-            (len(normalized & claims), target.collection, target, claims)
+            (len(matched_claims(normalized, claims)), target.collection, target, claims)
             for target, claims in target_claims
             if not contradicts(target, observed)
         ),
@@ -277,7 +301,7 @@ def route(
     if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
         return None
     _, _, target, claims = ranked[0]
-    matched = normalized & claims
+    matched = matched_claims(normalized, claims)
     if not _has_subject_signal(raw_terms, target, matched, frequency, total_targets):
         return None
     return {

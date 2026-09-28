@@ -32,6 +32,7 @@ from test_working_set_hot_projection import _edit, _live, _one_old_tick
 
 from exomem import (
     activation_conventions,
+    capture_sweep,
     collection_claims,
     commands,
     due_state,
@@ -412,6 +413,43 @@ def test_cross_lingual_today_abstains_then_one_learned_alias_reaches_the_page(
     _fresh_session()
     packet = _activate(ja_vault, turn)
     assert _resolved(packet) == [WAGON], (packet.get("abstention"), packet["anchors"])
+
+
+def test_cross_lingual_one_correction_offers_the_japanese_name_and_teaches_it(
+    ja_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole loop, as an agent runs it: the turn misses, the agent picks
+    the English page, the pick's advisory offers the words of the Japanese
+    sentence (not the sentence as one word), and the name it teaches reaches
+    the page in a fresh session."""
+    monkeypatch.setattr(capture_sweep, "_proactive_capture_permitted", lambda: True)
+    turn = "ハーロウの油圧センサーは旅行前に交換すべき？"
+    assert _resolved(_activate(ja_vault, turn, session="session-one")) == []
+
+    picked = _activate(ja_vault, turn, anchor=WAGON, session="session-one")
+    advisory = picked["learning"]
+    assert advisory["turn_terms"][:2] == ["ハーロウ", "油圧センサー"], advisory
+    name = next(option for option in advisory["options"] if option["family"] == "name")
+    writer_lease.invoke_command(
+        _command("edit_memory"),
+        ja_vault,
+        path=name["path"],
+        why="the user calls the wagon ハーロウ",
+        operation={
+            "kind": "patch_frontmatter",
+            "field": name["field"],
+            "value": [*name["current"], advisory["turn_terms"][0]],
+            "expected_hash": name["expected_hash"],
+        },
+    )
+    working_set_index.WorkingSetIndex(ja_vault).update()
+
+    _fresh_session()
+    packet = _activate(ja_vault, turn, session="session-two")
+    assert _resolved(packet) == [WAGON], (packet.get("abstention"), packet["anchors"])
+    # The twin keeps the sentence and changes the subject: still nothing.
+    other = _activate(ja_vault, "自転車の油圧センサーは旅行前に交換すべき？", session="session-two")
+    assert WAGON not in _resolved(other)
 
 
 def test_cross_lingual_latin_name_in_a_japanese_sentence_is_a_lead_not_a_decision(
