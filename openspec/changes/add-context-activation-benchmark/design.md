@@ -165,6 +165,21 @@ in its place, and the recorded report carries both columns.
   (extending A2, which amended recall only). The product labels carried
   context honestly, and what the user needs is the right page and fact.
   Reported in its own column beside the raw, A2+A4 and A7 scores.
+- **A9 — Agent-choice scoring (2026-09-28).** Rationale: the primary agent
+  reasons and chooses; the compiler's job is recall within budget with
+  truthful labels. A positive case (not a twin, with a gold of its own)
+  passes when both hold. (1) Every gold page arrives under an honest label (a
+  `resolved`, `partial` or `retrieval_carried` anchor, or an ambiguity
+  candidate), and the case's gold facts are present in served material.
+  (2) Nothing is mislabelled: no non-gold page is served as a resolved anchor
+  or as a `current_state` entry, and no poison is served as resolved. Extra
+  honestly labelled partial or ambiguity siblings do not fail the case, within
+  the packet budget (the token hard cap and the packet's own character limit).
+  Twins, and the no-memory case C6, are scored unchanged: nothing resolved and
+  no poison. A9 replaces only the verdict, never a raw metric. Its digest
+  (`agent_choice_digest`: the rule text and the source applying it) was pinned
+  before its first run on product packets. Reported beside the raw score and
+  every other amendment.
 - **R3 and R4 — Reds kept (2026-09-28).** C2 and C9 stay red: a shared tag is
   not corroboration on a real vault, and semantic corroboration is future
   sensed-model work. C3 stays red: it relies on workspace context a cold run

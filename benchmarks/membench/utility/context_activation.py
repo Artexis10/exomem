@@ -50,6 +50,7 @@ statement came from, not what it says.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import math
 from collections.abc import Iterable, Mapping
@@ -467,9 +468,91 @@ AMBIGUITY_PRECISION = "ambiguity_precision"
 #: bound gold page is credited to that page in precision as well as recall
 #: (A2 amended recall only). Units of any other page stay distinct.
 CARRIED_GOLD = "carried_gold"
+#: A9: agent-choice scoring (see :data:`AGENT_CHOICE_RULE`).
+AGENT_CHOICE = "agent_choice"
 AMENDMENTS: frozenset[str] = frozenset(
-    {UNIT_PARENT_RECALL, HEDGED_POISON, AMBIGUITY_PRECISION, CARRIED_GOLD}
+    {UNIT_PARENT_RECALL, HEDGED_POISON, AMBIGUITY_PRECISION, CARRIED_GOLD, AGENT_CHOICE}
 )
+
+#: Amendment A9, as pre-registered. Its digest (:func:`agent_choice_digest`)
+#: covers this text and the source of the functions that apply it.
+AGENT_CHOICE_RULE = (
+    "A9 agent-choice scoring. The compiler supplies recall within budget with "
+    "truthful labels; the primary agent chooses. A positive case (not a twin, "
+    "non-empty gold) passes when both hold. (1) Every gold page arrives under an "
+    "honest label: a resolved, partial or retrieval_carried anchor, or an "
+    "ambiguity candidate; and the case's gold facts are present in served "
+    "material. (2) Nothing is mislabelled: no non-gold page is served as a "
+    "resolved anchor or as a current_state entry, and no poison is served as "
+    "resolved. Extra honestly labelled partial or ambiguity siblings do not fail "
+    "the case, within the packet budget (the token hard cap and the packet's own "
+    "character limit). Twins and the no-memory case C6 are scored unchanged."
+)
+
+
+HONEST_ANCHOR_STATUSES: frozenset[str] = frozenset({"resolved", "partial", "retrieval_carried"})
+
+
+def _agent_choice_applies(fixture: FixtureCase) -> bool:
+    """A9 scores positive cases only: not a twin, and a gold of its own."""
+
+    return not fixture.case_id.startswith("T") and bool(fixture.gold)
+
+
+def _agent_choice_failures(
+    packet: ActivationPacket,
+    *,
+    gold_refs: tuple[str, ...],
+    poison_refs: tuple[str, ...],
+    must_include_missing: tuple[str, ...],
+    unit_parents: Mapping[str, str] | None,
+) -> list[str]:
+    """Why a positive case fails under A9 (:data:`AGENT_CHOICE_RULE`)."""
+
+    parents = unit_parents or {}
+
+    def page(ref: str) -> str:
+        return parents.get(ref, ref)
+
+    gold = set(gold_refs)
+    honest = {page(anchor.ref) for anchor in packet.anchors if anchor.status in HONEST_ANCHOR_STATUSES}
+    honest.update(page(ref) for ref in packet.ambiguity)
+    resolved_pages = {page(anchor.ref) for anchor in packet.anchors if anchor.status == "resolved"}
+
+    failures: list[str] = []
+    unlabelled = [ref for ref in gold_refs if ref not in honest]
+    if unlabelled:
+        failures.append(f"A9: {len(unlabelled)} gold page(s) not served under an honest label")
+    if must_include_missing:
+        failures.append(f"A9: gold fact(s) missing from served material: {list(must_include_missing)}")
+    mislabelled = sorted(ref for ref in resolved_pages if ref not in gold)
+    if mislabelled:
+        failures.append(f"A9: {len(mislabelled)} non-gold page(s) served as resolved")
+    stated = sorted({page(entry.anchor) for entry in packet.current_state} - gold)
+    if stated:
+        failures.append(f"A9: {len(stated)} non-gold page(s) served as current_state")
+    poisoned = [ref for ref in poison_refs if ref in resolved_pages]
+    if poisoned:
+        failures.append(f"A9: {len(poisoned)} poison page(s) served as resolved")
+    over_limit = packet.budget_limit_chars is not None and packet.budget_used_chars > packet.budget_limit_chars
+    if packet_token_count(packet) > TOKEN_HARD_CAP or over_limit:
+        failures.append("A9: packet exceeds its budget")
+    return failures
+
+
+def agent_choice_digest() -> str:
+    """The pre-registered identity of A9: its rule and the code applying it."""
+
+    import inspect
+
+    parts = [
+        AGENT_CHOICE_RULE,
+        ",".join(sorted(HONEST_ANCHOR_STATUSES)),
+        inspect.getsource(_agent_choice_applies),
+        inspect.getsource(_agent_choice_failures),
+    ]
+    blob = "\n".join(part.replace("\r\n", "\n") for part in parts).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
 
 
 def _resolved_refs(packet: ActivationPacket) -> set[str]:
@@ -830,6 +913,16 @@ def score_case(
         failure_reasons.append(
             f"packet-contract violation: current_state statement exceeds {STATEMENT_MAX_CHARS} chars "
             f"for {list(overlong_statements)}"
+        )
+
+    # A9 replaces the verdict of a positive case, never its raw metrics.
+    if AGENT_CHOICE in applied and _agent_choice_applies(fixture):
+        failure_reasons = _agent_choice_failures(
+            packet,
+            gold_refs=gold_refs,
+            poison_refs=poison_refs,
+            must_include_missing=must_include_missing,
+            unit_parents=unit_parents,
         )
 
     return CaseScore(
@@ -1297,6 +1390,8 @@ def write_report(report: AuditReport, path: Path) -> Path:
 
 __all__ = [
     "AMBIGUITY_PRECISION",
+    "AGENT_CHOICE",
+    "AGENT_CHOICE_RULE",
     "AMENDMENTS",
     "CARRIED_GOLD",
     "DISABLED_PACKET",
@@ -1327,6 +1422,7 @@ __all__ = [
     "ReferenceBinding",
     "RunManifest",
     "Unit",
+    "agent_choice_digest",
     "audit_passed",
     "build_report",
     "end_to_end_latency_distribution",
