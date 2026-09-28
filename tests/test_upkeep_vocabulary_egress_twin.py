@@ -24,7 +24,7 @@ from test_governance_egress import SCOPE_ID, _external, write_rule
 
 from exomem import commands, dreamer, dreamer_families, dreamer_store, freshness, upkeep
 from exomem.governance import egress, membership, policy
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import owner_principal, request_scope
 from exomem.writer_lease import invoke_command
 
 LATER = time.time() + 3 * 3600
@@ -178,6 +178,10 @@ def _carry(vault: Path, clock: _Clock, sessions: int, tag: str) -> list[object]:
 
 def _observe(vault: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     """Everything an external caller can see, in a fixed order of calls."""
+    # Building the other twin cleared this vault's freshness map: seed it again,
+    # as the running service's watcher keeps it.
+    freshness.clear()
+    fx.seed(vault)
     _reset_caches()
     clock = _Clock()
     monkeypatch.setattr(upkeep, "_monotonic", lambda: clock.mono)
@@ -228,7 +232,8 @@ def test_a_withheld_member_equals_an_absent_one(
 def test_the_owner_counts_every_member_toward_the_bound(tmp_path: Path) -> None:
     """The member bound does bite for a caller who sees the crowd."""
     vault = _build(tmp_path, extra=_crowd(), globs=["Notes/Restricted/**"])
-    kinds = {item["kind"] for item in upkeep.review(vault, limit=50)["items"]}
+    with request_scope(owner_principal()):
+        kinds = {item["kind"] for item in upkeep.review(vault, limit=50)["items"]}
     assert "anchor.alias" not in kinds
     assert "convention.tag" not in kinds
     assert "convention.category" in kinds
@@ -236,9 +241,12 @@ def test_the_owner_counts_every_member_toward_the_bound(tmp_path: Path) -> None:
 
 def test_the_owner_and_the_caller_see_different_minorities(tmp_path: Path) -> None:
     vault = _build(tmp_path, extra=_majority(), globs=["Notes/Restricted/**"])
-    owner = next(
-        item for item in upkeep.review(vault, limit=50)["items"] if item["kind"] == "convention.tag"
-    )
+    with request_scope(owner_principal()):
+        owner = next(
+            item
+            for item in upkeep.review(vault, limit=50)["items"]
+            if item["kind"] == "convention.tag"
+        )
     assert owner["subject"]["title"] == "Pump care log"
     stored = next(
         row

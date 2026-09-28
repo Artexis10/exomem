@@ -646,7 +646,9 @@ def _record_tick(
         return
     try:
         pending = store.pending_count(conn)
-        reseeding = bool(store.get_meta(conn, "reseeding"))
+        # The flag outlives the drain until the next delta is queued: a reseed
+        # with nothing pending has drained.
+        reseeding = bool(store.get_meta(conn, "reseeding")) and pending > 0
         health["reseed_remaining"] = pending if reseeding else 0
         health["evidence_complete"] = {
             family.name: not (family.global_counts and reseeding)

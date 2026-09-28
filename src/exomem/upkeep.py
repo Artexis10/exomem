@@ -862,9 +862,17 @@ def _choose(
     ctx = _request_context(vault_root)
     with egress.disclosure_boundary(vault_root, "upkeep_advisory"), contextlib.closing(ctx):
         keep = _keep(vault_root)
-        for stored in rows[:MAX_TRIED]:
+        tried = 0
+        for stored in rows:
+            if tried >= MAX_TRIED:
+                break
+            # A row this caller may not see costs no try: which item a caller
+            # is offered never depends on what is withheld from it.
             row = dreamer_families.release(ctx, stored, keep)
-            if row is None or not _released_open(vault_root, stored, row):
+            if row is None or serve(row, keep=keep) is None:
+                continue
+            tried += 1
+            if not _released_open(vault_root, stored, row):
                 continue
             earlier = _earlier(view, row)
             if len(earlier) >= dreamer_families.MAX_DELIVERIES:

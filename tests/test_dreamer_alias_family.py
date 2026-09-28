@@ -248,6 +248,9 @@ def test_a_reseed_delivers_no_alias_item_until_it_drains(tmp_path: Path) -> None
     _quiet(vault)
     _quiet(vault, now=LATER)
     assert _open(vault)["deliverable"] is True
+    # The first enable was itself a reseed: once drained, evidence is complete.
+    dreamer_store.clear_reader_memo()
+    assert upkeep.review(vault)["evidence_complete"][dreamer_families.ALIAS_FAMILY] is True
     store = dreamer_store.DreamerStore(vault)
     conn = store.connect()
     try:
