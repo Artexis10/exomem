@@ -27,7 +27,7 @@ from epistemic.memory_loop.contract import (
     VaultState,
 )
 
-SEMANTICS_FINGERPRINT = "34e892ef23ef6b71b09e69dde39c14a09cd509fd5a45dd585d26a197acd53929"
+SEMANTICS_FINGERPRINT = "2124a0d37e1d12a60156a655fdf3fa03a63f9d72f5445ba73b98b75abd98341f"
 
 #: Every declared default of every contract type. A changed default changes
 #: meaning without moving any fixture digest on its own, so it is pinned here
@@ -36,7 +36,7 @@ DECLARED_DEFAULTS = {
     "AttributedLines": {"allow_none": False},
     "Candidate": {"attributed_to": None, "partition": None, "same_home_as": [], "uncertain": False},
     "EdgeView": {"family": ""},
-    "EntitySeed": {"aliases": []},
+    "EntitySeed": {"aliases": [], "identity_decision": None},
     "FieldIs": {"any_of": [], "empty": False, "equals": [], "tokens": []},
     "LaterUse": {"audience": "owner", "expected_status": None, "wrong": []},
     "LinesCarry": {"select": None},
