@@ -2757,6 +2757,7 @@ class EpistemicGraphIndex:
     def _carry_after_unowned_drain(
         self,
         conn: sqlite3.Connection,
+        resolver: vault_module.WikilinkResolver,
         batch_rels: set[str],
         carry: dict[str, tuple[bool, str | None]] | None,
     ) -> dict[str, tuple[bool, str | None]] | None:
@@ -2766,15 +2767,73 @@ class EpistemicGraphIndex:
         again has rows the earlier drain already rewrote. Only queued, indexed
         pages enter -- affected pages were never widened from their own keys and
         a page outside the indexed corpus has no row to revert to -- so neither
-        can ever be explained by the record. None means the bound was passed and
-        the record is dropped.
+        can ever be explained by the record.
+
+        None drops the record, leaving the whole-vault path in charge: past the
+        bound, or when this drain's resolver holds a change no indexed page
+        explains. The second is a change outside the indexed corpus, such as a
+        retitled page the resolver sees. This pass rewrites affected pages under
+        that change, so if it were later reverted, a record kept now would
+        explain the fingerprint again over rows derived under the reverted
+        topology. Reverting every indexed page that disagrees with the resolver,
+        with this batch and the record, must reproduce the stored fingerprint.
         """
         merged = dict(carry or {})
         for rel in sorted(batch_rels):
             if rel in merged or not rel.startswith(kb_prefix()):
                 continue
             merged[rel] = self._stored_resolver_entry(conn, rel)
-        return merged if len(merged) <= TOPOLOGY_CARRY_LIMIT else None
+        if len(merged) > TOPOLOGY_CARRY_LIMIT:
+            return None
+        row = conn.execute(
+            "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        explained = set(batch_rels) | self._indexed_pages_differing(conn, resolver)
+        if not self._residue_explains_topology(
+            conn, resolver, explained, str(row[0]), carry=merged
+        ):
+            return None
+        return merged
+
+    def _indexed_pages_differing(
+        self, conn: sqlite3.Connection, resolver: vault_module.WikilinkResolver
+    ) -> set[str]:
+        """Indexed pages whose stored row disagrees with `resolver`'s entry.
+
+        A row whose page is gone or retitled, and a page the indexing walk admits
+        that has no row yet. One scan of the file rows, and one ancestry check per
+        resolver page without a row; a resolver page the walk would not index
+        (a sync conflict, a hard link) is not an indexed page and is left out.
+        """
+        from . import find_corpus
+
+        rows: dict[str, tuple[bool, str | None]] = {}
+        for path, title in conn.execute(
+            "SELECT path, title FROM graph_nodes WHERE kind = 'file'"
+        ).fetchall():
+            text = str(title).strip().lower() if title is not None else ""
+            rows[str(path)] = (True, text or None)
+        differing = {
+            rel
+            for rel, entry in rows.items()
+            if entry
+            != (
+                rel.removesuffix(".md") in resolver.full_paths,
+                resolver.title_key_for_path(rel),
+            )
+        }
+        kb = self.vault_root / kb_dirname()
+        prefix = kb_prefix()
+        listings: dict[Path, frozenset[str] | None] = {}
+        for no_ext in resolver.full_paths:
+            rel = f"{no_ext}.md"
+            if rel in rows or not rel.startswith(prefix):
+                continue
+            if find_corpus.walk_md_admits(kb, self.vault_root / rel, listings):
+                differing.add(rel)
+        return differing
 
     @staticmethod
     def _write_topology_carry(
@@ -5835,7 +5894,7 @@ class EpistemicGraphIndex:
                 carry_after = (
                     None
                     if owns_topology or affected is None
-                    else self._carry_after_unowned_drain(probe, queued_rels, carry)
+                    else self._carry_after_unowned_drain(probe, resolver, queued_rels, carry)
                 )
             finally:
                 probe.close()
