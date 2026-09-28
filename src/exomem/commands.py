@@ -4067,6 +4067,14 @@ def op_get(
         else:
             out["body_truncated"] = bool(out.get("body_truncated", False))
         out["body_chars"] = len(str(out.get("body", "")))
+    if "body" in out and not frontmatter_only:
+        # Pull-first sensing (default off): what released later notes did to
+        # this page. Absent when there is nothing to say; never ranks anything.
+        from . import sensed_model
+
+        status = sensed_model.status_for(vault_root, str(out["path"]))
+        if status is not None:
+            out["epistemic_status"] = status
     return _attach_memory_ref(vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref)
 
 
@@ -6306,9 +6314,12 @@ def op_activate_context(
             # After the guard and outside the packet cache, like `continuity`:
             # at a caller's session start, at most one upkeep item, and only in
             # the process whose background worker proposed it. Never raises.
+            from . import sensed_model
             from . import upkeep as upkeep_module
 
             upkeep_module.for_packet(vault_root, packet, session=session)
+            # Also outside the cache: each resolved anchor page's sensed status.
+            sensed_model.for_packet(vault_root, packet)
         except Exception as error:
             query_log.log_activation_call(
                 vault_root,

@@ -1368,6 +1368,8 @@ def for_packet(vault_root: Path, packet: dict[str, Any]) -> None:
             view = _View(conn, _keep(Path(vault_root)), _owner_allowed(Path(vault_root)))
             budget = packet.setdefault("budget", {})
             for anchor in anchors:
+                if anchor.get("status") not in _ACTIVATED:
+                    continue
                 path = _anchor_path(anchor)
                 if not path or not view.visible(path):
                     continue
@@ -1383,6 +1385,10 @@ def for_packet(vault_root: Path, packet: dict[str, Any]) -> None:
             conn.close()
     except Exception:  # noqa: BLE001 - a status never breaks an activation
         log.debug("sensed model: packet status unavailable", exc_info=True)
+
+
+#: Anchor statuses that mean the page was activated, not merely named.
+_ACTIVATED = frozenset({"resolved", "retrieval_carried"})
 
 
 def _anchor_path(anchor: Mapping[str, Any]) -> str | None:
