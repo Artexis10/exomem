@@ -1933,7 +1933,9 @@ def _competing_groups(
     """
     groups: list[tuple[str, tuple[ResolvedAnchor, ...]]] = []
     for kind in sorted({anchor.kind for anchor in resolved}):
-        group = [anchor for anchor in resolved if anchor.kind == kind]
+        group = _without_named_apart(
+            [anchor for anchor in resolved if anchor.kind == kind]
+        )
         if len(group) < 2:
             continue
         # At most MAX_ANCHORS nodes; a bounded structural connectivity check.
@@ -1955,6 +1957,41 @@ def _competing_groups(
         if len(reached) != len(group):
             groups.append((kind, tuple(group)))
     return tuple(groups)
+
+
+def _spelled_tokens(anchor: ResolvedAnchor) -> frozenset[str]:
+    """The tokens of every phrase the turn spelled this anchor's own name by."""
+    return frozenset(
+        token for phrase in anchor.exact_alias_phrases for token in phrase.split()
+    )
+
+
+def _without_named_apart(group: Sequence[ResolvedAnchor]) -> list[ResolvedAnchor]:
+    """Drop the members of a same-kind group the turn named APART from the rest.
+
+    Concurrent contexts (activation recall breadth): competing senses are
+    anchors the turn's SAME words reach. A member the turn spelled by its own
+    name, in words no other member was reached through, is a second topic the
+    turn also named ("book the autumn trip given the course schedule"), not a
+    sense of the others. The test is about the turn's own spelling and never
+    about the vault: the member has a spelled name (`exact_alias`) and shares
+    no token with the spelled name or the reached name words of any other
+    member. A member reached only by shared or retrieved words has no spelling
+    to set it apart, so it keeps competing, and two members spelled with a
+    shared word ("tide model rollout", "tide model research") still compete.
+    """
+    reached = [_spelled_tokens(anchor) | anchor.name_contact for anchor in group]
+    kept: list[ResolvedAnchor] = []
+    for index, anchor in enumerate(group):
+        spelled = _spelled_tokens(anchor)
+        apart = bool(spelled) and all(
+            not (spelled | anchor.name_contact) & reached[other]
+            for other in range(len(group))
+            if other != index
+        )
+        if not apart:
+            kept.append(anchor)
+    return kept
 
 
 def _ambiguity_dicts(kind: str, group: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]:

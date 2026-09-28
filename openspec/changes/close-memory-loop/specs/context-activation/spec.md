@@ -140,3 +140,20 @@ share. Current pages SHALL still count, and the corpus page total SHALL be uncha
 #### Scenario: Current namesakes still make a phrase ordinary
 - **WHEN** four current pages carry the same phrase
 - **THEN** the phrase is not distinctive and no single page is carried
+
+### Requirement: A turn that names several domains is served all of them
+Activation SHALL compile the smallest sufficient SET of concurrently relevant contexts,
+and the count SHALL be driven by relevance, never capped at one. Each domain a turn
+explicitly names, with a resolvable page, is a candidate in its own right. Competing
+senses are anchors the turn's SAME words reach: a same-kind anchor the turn spelled by
+its own name, in words that no other same-kind anchor was reached through, SHALL NOT be
+listed as a sense of them and SHALL NOT make the turn `ambiguous`. Two anchors reached
+through a shared spelled word SHALL still compete exactly as before.
+
+#### Scenario: Two same-kind domains named apart are both served
+- **WHEN** a turn spells the names of two unlinked hubs in disjoint words
+- **THEN** both resolve, the turn is not `ambiguous`, and both are served
+
+#### Scenario: One shared name two hubs carry is still a question
+- **WHEN** a turn says only the words two same-kind hubs share
+- **THEN** the turn is `ambiguous` between them, as before
