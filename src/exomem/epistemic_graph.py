@@ -2685,12 +2685,13 @@ class EpistemicGraphIndex:
         resolver: vault_module.WikilinkResolver,
         batch_rels: set[str],
     ) -> bool:
-        """Whether a drain of `batch_rels` may record `resolver`'s topology.
+        """Whether a drain whose queued pages are `batch_rels` may record `resolver`'s topology.
 
         True when the stored fingerprint already matches, or when reverting the
-        batch's resolver entries to their stored rows reproduces it: then every
-        topology change is one of this batch's pages, whose rows the pass
-        rewrites and whose link dependants it widened to.
+        queued pages' resolver entries to their stored rows reproduces it: then
+        every topology change is a queued page, whose rows the pass rewrites and
+        whose link dependants it widened to. Pages the pass rewrites only as
+        affected are not passed: nothing widened from their own keys.
         """
         row = conn.execute(
             "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
@@ -5727,9 +5728,11 @@ class EpistemicGraphIndex:
                 )
                 # Decided on the pre-pass rows, which still carry the stored
                 # titles; inside the publication hook the rows already hold the
-                # new ones, and reverting to them would prove nothing.
+                # new ones, and reverting to them would prove nothing. Only the
+                # queued pages explain topology: widening follows their keys,
+                # so an affected page's own retitle was never widened.
                 owns_topology = affected is not None and self._drain_owns_topology(
-                    probe, resolver, queued_rels | affected
+                    probe, resolver, queued_rels
                 )
             finally:
                 probe.close()
