@@ -6,7 +6,9 @@
 K3s cluster of the cellctl live suite (`infra/cellctl/tests/test_k3s_integration.py`),
 which runs their marked blocks as written. The log-canary blocks carry the same
 markers but need a real cell with search, recall and review, so they run only
-on the Cloud node. Nothing here is yet exercised on the Cloud node.
+on the Cloud node. On 2026-09-28 the operator certificate, the operator
+checks, a break-glass mint, exec and audit trail, and the log canary with its
+negative control all ran on the Cloud node as written.
 
 Exomem Cloud has three cluster identities. Use the least one that does the job.
 
