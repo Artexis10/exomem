@@ -71,3 +71,51 @@ raw results are unchanged. Two changes are needed:
 - Extend `served_subset` to cover units, pointers and `current_state` under a
   new v3 digest pinned before its first run, or state the limit plainly.
 - Disclose the C7 ambiguity-shape pass in the runbook.
+
+## Recheck 3 (head `0e09560`)
+
+Commits: `7db1f3d` (A7), `932c6f5` (v3 pin), `2158e84` (v3 run) and `0e09560`
+(docs). The run commit is `2158e84`; `5b1d6ea` is not an object in this
+repository. **Tests:** 214 passed in the same three modules, with the same
+cl100k tokenizer shim.
+
+- **F3: FIXED.** v3 maps every anchor, ambiguity candidate, unit, pointer and
+  `current_state` entry to a canonical page
+  (`context_activation_continuity.py:300-320`). Spellings are read back from
+  the vault's frontmatter before the fresh turn: a memory ref, a path, a path
+  without the prefix, or any of these with a `#fragment`. All 180 recheck-2
+  probes now fail, and none removes an existing reason (it was 72 passing).
+  Spelling probes on K2: the right page as a path, a prefix-less path, or a
+  `#unit` of its path or memory ref passes in all five channels. A wrong page
+  in those spellings fails. A unit whose own ref names another known page is
+  judged on that page, not on its provenance.
+- **Pin and run order: honest.** `932c6f5` touches only the module and the
+  test. It pins `8c6eb814…` and has no JSON and no run tests. The v3 JSON and
+  the run tests arrive four minutes later in `2158e84`. The module's
+  CRLF-normalised sha256 is `1086854d…` at the pin, the run and `0e09560`,
+  matching the recorded `scorer_source_sha256`.
+- **C7 disclosure and A7: FIXED.** The runbook discloses the raw gap
+  (`docs/benchmarks/context-activation.md:260-269`), and so does
+  `design.md:153`. Under A7:
+  - with C7's gold hubs as partial anchors, a wrong candidate fails:
+    precision 0.00 alone, 0.75 beside all three gold candidates, 0.67 beside
+    two;
+  - two or three gold candidates still pass, at precision 1.0;
+  - twins are unchanged.
+
+  I also tried hiding the wrong candidate behind a credited superseded unit of
+  the same ref. That removes it from the precision denominator, but the
+  ambiguous-status rule forbids units, so the packet still fails. A7 changes
+  no verdict on v4 (5/18).
+- **Raw `per_case`: byte-identical.** The v4 JSON diff since `7dc2c2b` adds
+  lines only: a new `amended_a7` block. `per_case` and `amended` are equal as
+  objects. The historical product JSON and the v1 and v2 continuity JSON are
+  unchanged.
+
+**Minor, non-blocking:** `context_activation_continuity.py:310` skips a unit
+that is not a mapping. A malformed packet whose units are bare strings would
+therefore escape `served_subset`, and on K3 `serves_nothing` too; v2 counted
+any units. Real packets emit mappings. A one-line fallback to
+`identities.page(str(item))` would close it.
+
+**APPROVE**
