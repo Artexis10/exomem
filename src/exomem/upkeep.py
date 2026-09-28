@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import logging
+import sqlite3
 import threading
 import time
 from collections import OrderedDict
@@ -320,14 +321,18 @@ def review(
                 families[family] = families.get(family, 0) + 1
             if state != "all" and decision != state:
                 continue
-            key = (
-                _family_rank(family),
-                float(row.get("settled_at") or row.get("refreshed_at") or 0.0),
-                str(row["id"]),
-            )
+            key = (_family_rank(family), _order_time(row), str(row["id"]))
             collected.append((key, served))
-        for category, paths in view.integrity:
-            if all(_visible(keep, path) for path in paths):
+        for category, paths, fold_key in view.integrity:
+            if fold_key:
+                # A name ambiguity is judged from the pages this caller may see.
+                try:
+                    category = dreamer_families.ambiguity(ctx, fold_key, keep) or ""
+                except (sqlite3.Error, dreamer_families.Deferred):
+                    category = ""
+                if category:
+                    integrity[category] = integrity.get(category, 0) + 1
+            elif all(_visible(keep, path) for path in paths):
                 integrity[category] = integrity.get(category, 0) + 1
     collected.sort(key=lambda pair: pair[0])
     complete = view.health.get("evidence_complete") or {}
@@ -344,6 +349,14 @@ def review(
         "integrity": integrity,
         "truncated": len(collected) > bound,
     }
+
+
+def _order_time(row: dict[str, Any]) -> float:
+    """The time a row sorts by. A global family's stored clocks move with
+    withheld members, so its rows sort by rank and id alone."""
+    if _global(row):
+        return 0.0
+    return float(row.get("settled_at") or row.get("refreshed_at") or 0.0)
 
 
 def _row(vault_root: Path, cid: str) -> dict[str, Any] | None:
@@ -377,6 +390,10 @@ def _current(vault_root: Path, ref: str) -> tuple[dict[str, Any], dict[str, Any]
         released = dreamer_families.release(ctx, row, keep)
         if released is None or serve(released, keep=keep) is None:
             raise _not_found(ref)
+        if _per_key(row):
+            # Recomputed from the members this caller may see; that is the
+            # whole revalidation, and its fingerprint is the one bound to.
+            return row, released
         try:
             proposal = dreamer_families.propose(ctx, row)
         except dreamer_families.Deferred as exc:
@@ -403,12 +420,22 @@ def _request_context(vault_root: Path) -> dreamer_families.Context:
     )
 
 
+def _per_key(row: dict[str, Any]) -> bool:
+    """A proposal identified by its fold key alone: its subject is chosen per caller."""
+    return row.get("kind") in {dreamer_families.ALIAS_KIND, dreamer_families.TAG_KIND}
+
+
+def _global(row: dict[str, Any]) -> bool:
+    """A row whose delivery is judged per caller from released evidence."""
+    return str(row.get("family") or "") in dreamer_store.GLOBAL_FAMILIES
+
+
 def _subject_visible(row: dict[str, Any], keep) -> bool:
     """The cheap first gate: a subject every audience's view shares is released.
 
-    A tag cluster's served subject depends on the caller, so it has none.
+    A per-key proposal's served subject depends on the caller, so it has none.
     """
-    if row.get("kind") == dreamer_families.TAG_KIND:
+    if _per_key(row):
         return True
     return _visible(keep, str(row.get("subject_path") or ""))
 
@@ -554,8 +581,18 @@ def deliverable_rows(vault_root: Path, view: dreamer_store.StoreView) -> list[di
     payload: dict[str, Any] | None = None
     loaded = False
     out: list[dict[str, Any]] = []
+    complete = view.health.get("evidence_complete") or {}
     for row in view.candidates:
-        if row.get("state") != "open" or not row.get("deliverable"):
+        if row.get("state") != "open":
+            continue
+        if _global(row):
+            # Judged per caller in `_choose`, on released evidence only: the
+            # worker's `deliverable` and settle clock move with withheld
+            # members. Nothing while the family's membership is incomplete.
+            if complete.get(str(row.get("family") or "")):
+                out.append(row)
+            continue
+        if not row.get("deliverable"):
             continue
         cid, fingerprint = str(row["id"]), str(row["fingerprint"])
         if dreamer.disposed(cid, fingerprint):
@@ -742,8 +779,9 @@ def _row_paths(row: dict[str, Any]) -> set[str]:
     }
 
 
-def _signatures_live(vault_root: Path, row: dict[str, Any]) -> bool:
-    """Every stored evidence signature still equals the live one."""
+def _signatures_live(vault_root: Path, row: dict[str, Any]) -> tuple[bool, float]:
+    """Whether every evidence signature still equals the live one, and the
+    newest modification time among them (seconds; 0.0 when none)."""
     from . import dreamer_delta, freshness
 
     evidence = [item for item in row.get("evidence") or () if item.get("path")]
@@ -751,10 +789,28 @@ def _signatures_live(vault_root: Path, row: dict[str, Any]) -> bool:
         vault_root, dreamer_delta.SCOPE, [Path(vault_root) / str(item["path"]) for item in evidence]
     )
     if live is None:
-        return False
-    return all(
+        return False, 0.0
+    fresh = all(
         signature is not None and dreamer_store.encode_sig(signature) == item.get("sig")
         for item, signature in zip(evidence, live, strict=True)
+    )
+    newest = max((int(signature[0]) for signature in live if signature is not None), default=0)
+    return fresh, newest / 1e9
+
+
+def _global_open(vault_root: Path, row: dict[str, Any]) -> bool:
+    """A global row's decision, family disposition and in-process disposal,
+    all on the fingerprint this caller is served."""
+    from . import dreamer
+
+    cid, fingerprint = str(row["id"]), str(row["fingerprint"])
+    if dreamer.disposed(cid, fingerprint):
+        return False
+    payload = _carrier_payload(vault_root, dreamer_families.review_state_token(vault_root))
+    return (
+        payload is not None
+        and _decision_state(vault_root, row, payload) == "open"
+        and review_state.disposition_for(str(row["family"]), payload=payload) == "normal"
     )
 
 
@@ -848,31 +904,56 @@ def _choose(
     if not rows:
         return None
     recent = _packet_paths(packet)
-    rows.sort(
-        key=lambda row: (
-            0 if recent & _row_paths(row) else 1,
-            _family_rank(str(row.get("family") or "")),
-            float(row.get("settled_at") or 0.0),
-            str(row["id"]),
-        )
-    )
     budget = packet.get("budget") or {}
     room = int(budget.get("limit_chars") or 0) - int(budget.get("used_chars") or 0)
     caller = _caller_hash(key)
     ctx = _request_context(vault_root)
     with egress.disclosure_boundary(vault_root, "upkeep_advisory"), contextlib.closing(ctx):
         keep = _keep(vault_root)
+        released: dict[str, dict[str, Any] | None] = {}
+
+        def view_of(stored: dict[str, Any]) -> dict[str, Any] | None:
+            cid = str(stored["id"])
+            if cid not in released:
+                row = dreamer_families.release(ctx, stored, keep)
+                released[cid] = row if row is not None and serve(row, keep=keep) else None
+            return released[cid]
+
+        # The recent-page boost reads the pages this caller is served. A
+        # per-key row is released for it only when a recent page is among its
+        # members at all (one keyed lookup), so the boost costs no scan.
+        touched = _recent_members(ctx, recent) if recent else set()
+
+        def boosted(stored: dict[str, Any]) -> bool:
+            if not recent:
+                return False
+            if _per_key(stored):
+                row = view_of(stored) if str(stored["id"]) in touched else None
+                return row is not None and bool(recent & _row_paths(row))
+            return bool(recent & _row_paths(stored))
+
+        rows.sort(
+            key=lambda stored: (
+                0 if boosted(stored) else 1,
+                _family_rank(str(stored.get("family") or "")),
+                _order_time(stored),
+                str(stored["id"]),
+            )
+        )
         tried = 0
         for stored in rows:
             if tried >= MAX_TRIED:
                 break
             # A row this caller may not see costs no try: which item a caller
             # is offered never depends on what is withheld from it.
-            row = dreamer_families.release(ctx, stored, keep)
-            if row is None or serve(row, keep=keep) is None:
+            row = view_of(stored)
+            if row is None:
                 continue
             tried += 1
-            if not _released_open(vault_root, stored, row):
+            if _global(stored):
+                if not _global_open(vault_root, row):
+                    continue
+            elif not _released_open(vault_root, stored, row):
                 continue
             earlier = _earlier(view, row)
             if len(earlier) >= dreamer_families.MAX_DELIVERIES:
@@ -881,7 +962,12 @@ def _choose(
                 first_caller, first_at = earlier[0]
                 if first_caller == caller or wall - first_at < SECOND_DELIVERY_AFTER_SECONDS:
                     continue
-            if not _signatures_live(vault_root, row):
+            fresh, newest = _signatures_live(vault_root, row)
+            if not fresh:
+                continue
+            # A global row settles on its released evidence: an hour after the
+            # newest released page changed, whatever a withheld one did.
+            if _global(stored) and wall < newest + dreamer_families.SETTLE_SECONDS:
                 continue
             item = serve(row, keep=keep, delivered_before=len(earlier))
             if item is None:
@@ -891,3 +977,29 @@ def _choose(
                 continue
             return row, item
     return None
+
+
+def _recent_members(ctx: dreamer_families.Context, recent: set[str]) -> set[str]:
+    """The per-key rows a recent page is a member of, by candidate id."""
+    paths = sorted(recent)
+    marks = ",".join("?" for _ in paths)
+    try:
+        conn = ctx.members_conn()
+        names = {
+            str(row[0])
+            for table in ("name_keys", "name_refs")
+            for row in conn.execute(
+                f"SELECT DISTINCT fold_key FROM {table} WHERE path IN ({marks})", paths
+            )
+        }
+        tags = {
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT DISTINCT fold_key FROM term_uses WHERE path IN ({marks})", paths
+            )
+        }
+    except (sqlite3.Error, dreamer_families.Deferred):
+        return set()
+    return {dreamer_families.alias_id(key) for key in names} | {
+        dreamer_store.candidate_id(dreamer_families.TAG_KIND, "", key) for key in tags
+    }

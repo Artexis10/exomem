@@ -112,7 +112,7 @@ def test_the_carrier_records_the_served_fingerprint(tmp_path: Path, clock: _Cloc
 
 def test_a_dismissed_item_is_not_delivered(tmp_path: Path, clock: _Clock) -> None:
     vault = _ready(tmp_path)
-    ref = upkeep.upkeep_ref(dreamer_store.candidate_id("anchor.alias", fx.ENTITY, fx.VARIANT_KEY))
+    ref = upkeep.upkeep_ref(dreamer_store.candidate_id("anchor.alias", "", fx.VARIANT_KEY))
     commands.op_triage_memory(vault, ref=ref, action="dismiss", why="handled: a nickname")
     delivered = []
     for session in ("one", "two", "three"):
@@ -120,3 +120,40 @@ def test_a_dismissed_item_is_not_delivered(tmp_path: Path, clock: _Clock) -> Non
         clock.advance(11 * MINUTE)
     assert ref not in delivered
     assert len(delivered) == 2
+
+
+def test_nothing_is_delivered_while_the_family_membership_is_incomplete(
+    tmp_path: Path, clock: _Clock
+) -> None:
+    """A reseed or the size cap leaves membership partial: no global item rides."""
+    vault = _ready(tmp_path)
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        health = store.health(conn)
+        health["evidence_complete"] = {
+            **health.get("evidence_complete", {}),
+            dreamer_families.ALIAS_FAMILY: False,
+            dreamer_families.CONVENTION_FAMILY: False,
+        }
+        with store.write(conn):
+            store.set_health(conn, health)
+    finally:
+        store.close(conn)
+    dreamer_store.clear_reader_memo()
+    delivered = []
+    for session in ("one", "two", "three"):
+        delivered.extend(_carry(vault, session))
+        clock.advance(11 * MINUTE)
+    assert delivered == []
+
+
+def test_global_rows_escape_the_row_caps(tmp_path: Path, monkeypatch) -> None:
+    """Whether an alias or convention row survives never depends on other rows."""
+    monkeypatch.setattr(dreamer_store, "MAX_OPEN_PER_FAMILY", 1)
+    monkeypatch.setattr(dreamer_store, "MAX_ROWS", 1)
+    vault = _ready(tmp_path)
+    kinds = sorted(
+        row["kind"] for row in dreamer_store.read_view(vault).candidates if row["state"] == "open"
+    )
+    assert kinds == ["anchor.alias", "convention.category", "convention.tag"]

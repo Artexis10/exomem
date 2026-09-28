@@ -42,11 +42,15 @@ SIDECAR_NAME = "dreamer.sqlite"
 
 #: Past this size the global-count families disable themselves (`capacity`)
 #: and the page-local families continue. Prevents an unbounded state file.
+#: It is the global families' one bound: they are exempt from the row caps.
 SIZE_CAP_BYTES = 64 * 1024 * 1024
 
-#: Open candidates per family, and rows in total including resolved history.
-#: Prevents an ignored backlog accumulating in the store; the lowest-evidence
-#: candidate is evicted first and comes back when its evidence grows.
+#: Open candidates per family, and rows in total including resolved history,
+#: for the page-local families. Prevents an ignored backlog accumulating in the
+#: store; the lowest-evidence candidate is evicted first and comes back when its
+#: evidence grows. The global families are exempt: whether one of their rows
+#: survives must not depend on rows a caller may not see, so only the size cap
+#: bounds them.
 MAX_OPEN_PER_FAMILY = 64
 MAX_ROWS = 512
 
@@ -67,12 +71,14 @@ GLOBAL_FAMILIES = frozenset({"upkeep_alias", "upkeep_convention"})
 MEMBER_BOUND = 32
 
 #: The page-contribution tables of the global families: each page replaces its
-#: own rows. The second column is the name's source (`name_keys`) or the
-#: authored spelling (`name_refs`, `term_uses`).
-CONTRIBUTION_TABLES: dict[str, str] = {
-    "name_keys": "source",
-    "name_refs": "raw",
-    "term_uses": "raw",
+#: own rows. After `fold_key` and `path`, their columns: a name's source and its
+#: casefolded spelling (`name_keys`); a link's authored spelling and that
+#: spelling casefolded (`name_refs`); a tag's authored spelling (`term_uses`).
+#: Spellings are compared on the stored casefolded columns only.
+CONTRIBUTION_TABLES: dict[str, tuple[str, ...]] = {
+    "name_keys": ("source", "spelling"),
+    "name_refs": ("raw", "raw_cf"),
+    "term_uses": ("raw",),
 }
 
 #: SQLite page cache for the worker's connection: 1 MiB.
@@ -114,23 +120,28 @@ _TABLES = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS deliveries_id ON deliveries(id, fingerprint)",
+    # A row with a `fold_key` marks a possible name ambiguity: its category and
+    # paths are recomputed per request from the pages that caller may see.
     """
     CREATE TABLE IF NOT EXISTS integrity (
         category TEXT NOT NULL, path_set TEXT NOT NULL, observed_at REAL NOT NULL,
         fold_key TEXT NOT NULL DEFAULT '',
-        PRIMARY KEY (category, path_set)
+        PRIMARY KEY (category, path_set, fold_key)
     )
     """,
     "CREATE INDEX IF NOT EXISTS integrity_fold_key ON integrity(fold_key)",
     *(
         statement
-        for table, second in CONTRIBUTION_TABLES.items()
+        for table, columns in CONTRIBUTION_TABLES.items()
         for statement in (
             f"CREATE TABLE IF NOT EXISTS {table} (fold_key TEXT NOT NULL, path TEXT NOT NULL, "
-            f"{second} TEXT NOT NULL, PRIMARY KEY (fold_key, path, {second}))",
+            + "".join(f"{column} TEXT NOT NULL, " for column in columns)
+            + f"PRIMARY KEY (fold_key, path, {', '.join(columns)}))",
             f"CREATE INDEX IF NOT EXISTS {table}_path ON {table}(path)",
         )
     ),
+    "CREATE INDEX IF NOT EXISTS name_keys_spelling ON name_keys(fold_key, spelling, path)",
+    "CREATE INDEX IF NOT EXISTS name_refs_spelling ON name_refs(fold_key, raw_cf, path)",
     "CREATE INDEX IF NOT EXISTS term_uses_raw ON term_uses(fold_key, raw, path)",
 )
 _DATA_TABLES = (
@@ -723,6 +734,8 @@ class DreamerStore:
         proposal. Among eligible rows the weakest evidence goes first, then the
         OLDEST, so a newcomer is never starved by rows that were there first.
         """
+        if family in GLOBAL_FAMILIES:
+            return False
         rows = conn.execute(
             "SELECT id, fingerprint, evidence_count, created_at FROM candidates "
             "WHERE family=? AND state='open'",
@@ -750,12 +763,22 @@ class DreamerStore:
             "DELETE FROM candidates WHERE state<>'open' AND resolved_at < ?",
             (now - RESOLVED_RETENTION_SECONDS,),
         )
-        excess = int(conn.execute("SELECT count(*) FROM candidates").fetchone()[0]) - MAX_ROWS
+        exempt = sorted(GLOBAL_FAMILIES)
+        marks = ",".join("?" for _ in exempt)
+        excess = (
+            int(
+                conn.execute(
+                    f"SELECT count(*) FROM candidates WHERE family NOT IN ({marks})", exempt
+                ).fetchone()[0]
+            )
+            - MAX_ROWS
+        )
         if excess <= 0:
             return
         rows = conn.execute(
             "SELECT id, fingerprint, state, resolved_at, evidence_count, created_at, "
-            "subject_path, measures_json FROM candidates"
+            f"subject_path, measures_json FROM candidates WHERE family NOT IN ({marks})",
+            exempt,
         ).fetchall()
         held = {
             str(row[0])
@@ -852,6 +875,15 @@ class DreamerStore:
         conn.execute("DELETE FROM integrity WHERE fold_key=? AND fold_key<>''", (fold_key,))
 
     @staticmethod
+    def note_ambiguity(conn: sqlite3.Connection, fold_key: str, now: float) -> None:
+        """Mark a fold key whose name ambiguity is judged per request."""
+        conn.execute(
+            "INSERT OR REPLACE INTO integrity(category, path_set, observed_at, fold_key) "
+            "VALUES ('', '[]', ?, ?)",
+            (now, fold_key),
+        )
+
+    @staticmethod
     def clear_integrity_for(conn: sqlite3.Connection, category: str, paths: Iterable[str]) -> None:
         conn.execute(
             "DELETE FROM integrity WHERE category=? AND path_set=?",
@@ -873,15 +905,17 @@ class DreamerStore:
 
     @staticmethod
     def replace_contributions(
-        conn: sqlite3.Connection, table: str, path: str, rows: Iterable[tuple[str, str]]
+        conn: sqlite3.Connection, table: str, path: str, rows: Iterable[tuple[str, ...]]
     ) -> None:
-        """Replace `path`'s rows in `table` with `(fold_key, value)` pairs."""
+        """Replace `path`'s rows in `table` with `(fold_key, *columns)` tuples."""
         _check_table(table)
-        second = CONTRIBUTION_TABLES[table]
+        columns = CONTRIBUTION_TABLES[table]
+        marks = ", ".join("?" for _ in columns)
         conn.execute(f"DELETE FROM {table} WHERE path=?", (path,))
         conn.executemany(
-            f"INSERT OR IGNORE INTO {table}(fold_key, path, {second}) VALUES (?, ?, ?)",
-            ((key, path, value) for key, value in rows if key),
+            f"INSERT OR IGNORE INTO {table}(fold_key, path, {', '.join(columns)}) "
+            f"VALUES (?, ?, {marks})",
+            ((row[0], path, *row[1:]) for row in rows if row[0]),
         )
 
     @staticmethod
@@ -891,43 +925,36 @@ class DreamerStore:
         fold_key: str,
         *,
         keep: Callable[[str], bool] | None = None,
-        pages: int = MEMBER_BOUND + 1,
-        skip_path: str = "",
-        skip_lower: Iterable[str] = (),
-    ) -> list[tuple[str, str]]:
-        """`(path, value)` rows for one fold key, from at most `pages` pages.
+        pages: int | None = MEMBER_BOUND + 1,
+    ) -> list[tuple[str, ...]]:
+        """`(path, *columns)` rows for one fold key, from at most `pages` pages.
 
         Pages come in path order. Under a release predicate a withheld page's
         rows are skipped and never counted, so the answer is exactly what it
         would be on a vault where that page did not exist; only the number of
-        rows read grows with the withheld pages it passes. `skip_path` and
-        `skip_lower` (lower-cased values) leave rows out before they count, so
-        a worker looking for a variant is not stopped by rows it would drop.
+        rows read grows with the withheld pages it passes. `pages=None` reads
+        every page the predicate admits.
         """
         _check_table(table)
-        second = CONTRIBUTION_TABLES[table]
-        skipped = sorted(set(skip_lower))
-        clause = (
-            f" AND lower({second}) NOT IN ({','.join('?' for _ in skipped)})" if skipped else ""
-        )
+        columns = CONTRIBUTION_TABLES[table]
         cursor = conn.execute(
-            f"SELECT path, {second} FROM {table} WHERE fold_key=? AND path<>?{clause} "
-            f"ORDER BY path, {second}",
-            (fold_key, skip_path, *skipped),
+            f"SELECT path, {', '.join(columns)} FROM {table} WHERE fold_key=? "
+            f"ORDER BY path, {', '.join(columns)}",
+            (fold_key,),
         )
-        out: list[tuple[str, str]] = []
+        out: list[tuple[str, ...]] = []
         verdicts: dict[str, bool] = {}
         taken: set[str] = set()
-        for path, value in cursor:
-            path = str(path)
+        for row in cursor:
+            path = str(row[0])
             if path not in verdicts:
                 verdicts[path] = keep is None or bool(keep(path))
                 if verdicts[path]:
-                    if len(taken) >= pages:
+                    if pages is not None and len(taken) >= pages:
                         break
                     taken.add(path)
             if verdicts[path]:
-                out.append((path, str(value)))
+                out.append((path, *(str(value) for value in row[1:])))
         cursor.close()
         return out
 
@@ -1043,7 +1070,8 @@ class StoreView:
     candidates: tuple[dict[str, Any], ...]
     health: dict[str, Any]
     deliveries: tuple[tuple[str, str, str, float], ...]
-    integrity: tuple[tuple[str, tuple[str, ...]], ...]
+    #: `(category, paths, fold_key)`; a fold key is judged per request.
+    integrity: tuple[tuple[str, tuple[str, ...], str], ...]
 
 
 _MEMO_LOCK = threading.Lock()
@@ -1105,9 +1133,10 @@ def read_view(vault_root: Path) -> StoreView | None:
             )
         )
         integrity = tuple(
-            (str(category), tuple(json.loads(path_set or "[]")))
-            for category, path_set in conn.execute(
-                "SELECT category, path_set FROM integrity ORDER BY category, path_set"
+            (str(category), tuple(json.loads(path_set or "[]")), str(fold_key or ""))
+            for category, path_set, fold_key in conn.execute(
+                "SELECT category, path_set, fold_key FROM integrity "
+                "ORDER BY category, path_set, fold_key"
             )
         )
         try:

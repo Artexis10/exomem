@@ -20,7 +20,7 @@ import pytest
 from exomem import dreamer, dreamer_families, dreamer_store, freshness, upkeep
 
 LATER = time.time() + 3 * 3600
-ALIAS_ID = dreamer_store.candidate_id("anchor.alias", fx.ENTITY, fx.VARIANT_KEY)
+ALIAS_ID = dreamer_store.candidate_id("anchor.alias", "", fx.VARIANT_KEY)
 
 
 @pytest.fixture(autouse=True)

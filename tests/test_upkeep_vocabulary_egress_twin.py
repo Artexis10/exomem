@@ -32,11 +32,12 @@ LATER = time.time() + 3 * 3600
 RESTRICTED = f"{fx.KB}/Notes/A-Restricted"
 
 
-def _alias_ref(subject: str, key: str) -> str:
-    return upkeep.upkeep_ref(dreamer_store.candidate_id("anchor.alias", subject, key))
+def _alias_ref(key: str) -> str:
+    """An alias item's ref: its fold key alone, whichever page it is served on."""
+    return upkeep.upkeep_ref(dreamer_store.candidate_id("anchor.alias", "", key))
 
 
-ALIAS_REF = _alias_ref(fx.ENTITY, fx.VARIANT_KEY)
+ALIAS_REF = _alias_ref(fx.VARIANT_KEY)
 TAG_REF = upkeep.upkeep_ref(dreamer_store.candidate_id("convention.tag", "", fx.TAG_KEY))
 REFS = {"alias": ALIAS_REF, "tag": TAG_REF}
 
@@ -345,7 +346,7 @@ def test_a_non_ascii_crowd_of_resolving_links_hides_nothing(
     }
     withheld = _build(tmp_path / "withheld", extra={**shared, **crowd}, globs=GLOBS)
     absent = _build(tmp_path / "absent", extra=shared, globs=GLOBS)
-    ref = _alias_ref(OLFILTER, "ölfilter")
+    ref = _alias_ref("ölfilter")
 
     def observe(vault: Path) -> dict[str, object]:
         freshness.clear()
@@ -362,4 +363,6 @@ def test_a_non_ascii_crowd_of_resolving_links_hides_nothing(
     left, right = observe(withheld), observe(absent)
     assert left == right
     assert right["item"][0] == "ok", right["item"]
-    assert "Ölfilters" in right["item"][1]
+    served = json.loads(right["item"][1])["item"]
+    assert served["subject"]["title"] == "Ölfilter"
+    assert {entry["spelling"] for entry in served["evidence"]} == {"Ölfilters"}

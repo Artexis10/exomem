@@ -650,8 +650,11 @@ def _record_tick(
         # with nothing pending has drained.
         reseeding = bool(store.get_meta(conn, "reseeding")) and pending > 0
         health["reseed_remaining"] = pending if reseeding else 0
+        # A global family's membership is incomplete while a reseed drains and
+        # once the size cap stops it recording; nothing of it is delivered then.
+        partial = reseeding or store.capacity_exceeded()
         health["evidence_complete"] = {
-            family.name: not (family.global_counts and reseeding)
+            family.name: not (family.global_counts and partial)
             for family in dreamer_families.REGISTRY
         }
         with store.write(conn):
