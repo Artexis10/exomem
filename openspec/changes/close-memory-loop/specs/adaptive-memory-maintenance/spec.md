@@ -175,6 +175,53 @@ The background worker SHALL write only its own disposable sidecar. It SHALL NOT 
 - **WHEN** a family meets an identity ambiguity
 - **THEN** it proposes nothing for it and reports the ambiguity under the existing audit category that owns the defect
 
+### Requirement: Alias and convention upkeep are corpus-derived and audience-exact
+
+The alias/anchor family SHALL propose adding a spelling to a page's `aliases` only when other pages refer to that page by an unresolved link whose shared `vocabulary_fold.fold_term` equals one of its names, and SHALL name `edit_memory` as the route. Its proposal SHALL be identified by the fold key alone and served on the one page carrying the name that the caller may see. The convention/category family SHALL propose a tag spelling choice only for a fold-equal cluster of two or more authored spellings, without the server declaring a canonical spelling. It SHALL propose a category label change only against the semantic-language registry, meaning a label that folds to exactly one registered category or reviewed alias, or one whose definition names `replaced_by`. Both families SHALL derive their evidence from page contributions held in the dreamer's own sidecar, the published graph and the parse cache. They SHALL NOT use a model, turn text, the activation miss counter, a vault write or a walk, and SHALL stay within the tick's page and CPU budgets with at most 16 names, targets, tags or labels per page. A fold key carried by more than 32 pages a caller may see SHALL NOT be served to that caller, and pages withheld from that caller SHALL NOT count toward that bound. A fold key that reaches two or more pages' names is an identity ambiguity and SHALL NOT be proposed over. Under a governed policy every served field, count, fingerprint, liveness check, settle time, order and integrity count of these items SHALL be computed from released members only, so that a withheld page is indistinguishable from an absent one. No row cap SHALL evict their rows. Past the sidecar's size cap, which SHALL scale with the pages indexed, they SHALL record and deliver nothing until the file is back under it, and SHALL then reseed. They have two residuals, both the same for every caller: that size cap, and the timing of a request, whose cost may grow with withheld rows while its output does not. Candidate identity SHALL be independent of the producer, so that a later correction producer can support the same proposal.
+
+#### Scenario: Other notes name a page by a variant spelling
+
+- **WHEN** two notes link a name that folds to a page's title but does not resolve, and no other page carries that fold
+- **THEN** one alias proposal names the page, the referring notes and their spelling, and routes to `edit_memory` on the page's `aliases`
+- **AND** the proposal's reference does not depend on any page's path
+- **AND** when the page gains the alias, or a second page gains that name, the proposal resolves or is withheld as an ambiguity
+
+#### Scenario: A learned name confirmed by the corpus is offered for promotion
+
+- **WHEN** a variant spelling other notes link is already one of the page's `learned_aliases`
+- **THEN** the proposal's reason is `learned_alias_referenced` and it proposes the link-resolving `aliases` field
+
+#### Scenario: Tag spellings drift across notes
+
+- **WHEN** notes carry fold-equal tags in two spellings
+- **THEN** one proposal per cluster is served on a note carrying the minority spelling, with the released count of each spelling, and the agent chooses the spelling
+- **AND** the proposal's reference does not depend on any member page's path
+
+#### Scenario: A category label is a variant of a registered one
+
+- **WHEN** a unit's category label is unregistered but folds to exactly one registered category, or names a definition with `replaced_by`
+- **THEN** a proposal for that page names the registered label and routes to `edit_memory`, and a registry change moves its fingerprint
+
+#### Scenario: A withheld member equals an absent one
+
+- **WHEN** the subject, a competing-name page or the majority-spelling pages are withheld from a caller
+- **THEN** item, context, triage and the carrier return exactly what they return on a vault where those pages do not exist, including the served fingerprint and every count
+
+#### Scenario: Withheld pages do not count toward the member bound
+
+- **WHEN** more than 32 pages carry a fold key but no more than 32 of them are released to a caller
+- **THEN** item, context, triage and the carrier return exactly what they return on a vault where the withheld pages do not exist
+
+#### Scenario: A withheld member's activity is invisible
+
+- **WHEN** only a withheld member page changes, or withheld pages make a name ambiguous for the owner
+- **THEN** the caller's items, their order, their delivery time and the integrity counts are those of a vault where the withheld pages do not exist
+
+#### Scenario: A reseed does not deliver half-counted clusters
+
+- **WHEN** the sidecar is reseeding
+- **THEN** no alias or convention item is deliverable until the reseed drains
+
 ### Requirement: Upkeep rides the activation packet as an optional bounded block
 
 A caller-session-start activation packet MAY carry an `upkeep` block holding at most one proposal. The item SHALL be counted in the packet's `used_chars`, SHALL pass the same egress release decision as any unit so that a withheld page never appears in it nor in any count, SHALL be omitted whole rather than truncated, and SHALL be served only while every evidence signature equals the live one. The block SHALL NOT be `due_state` and SHALL NOT read or advance the due-state emission ledger. It SHALL be skipped when the request budget is spent, when structural suggestions are off, when the caller cannot be keyed, and on any error. A vault SHALL receive at most one item per 10 minutes across callers, a caller at most 3 per day, and one item at most two deliveries, the second at least a week after the first and to another caller.
