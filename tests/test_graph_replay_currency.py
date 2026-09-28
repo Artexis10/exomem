@@ -230,3 +230,28 @@ def test_a_replayed_stale_page_clears_its_own_receipts(
     assert whole_vault_passes == []
     assert deferred_index.snapshot_graph(root) == [], "left receipts for a duplicate drain"
     _assert_matches_a_fresh_rebuild(root)
+
+
+def test_the_oracle_sees_a_replay_drain_that_does_not_widen(
+    vault: Path, whole_vault_passes: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control: the stale-page test must be able to see missing widening.
+
+    The retitle drops one linker's edge and gives the other one; a drain that
+    re-derives only the retitled page leaves both linkers as they were, and the
+    comparison with a fresh rebuild has to say so.
+    """
+    root = _built(vault, whole_vault_passes)
+    _publish_past_a_stale_row(root)
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_topology_affected_sources",
+        lambda self, conn, rels, *, resolver: set(),
+        raising=True,
+    )
+
+    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+
+    assert whole_vault_passes == [], "a rebuild healed what the control must expose"
+    with pytest.raises(AssertionError):
+        _assert_matches_a_fresh_rebuild(root)
