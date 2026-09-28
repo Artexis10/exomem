@@ -441,10 +441,10 @@ def test_a_standalone_replay_that_rebuilds_does_not_report_incremental_completio
     assert result.whole_vault_attempted, result
 
 
-def _terminal_graph_state(
+def _terminal_graph_diagnostic(
     monkeypatch: pytest.MonkeyPatch, result: epistemic_graph.GraphDispatchResult
-) -> str:
-    """What the request terminal says about derived custody for this dispatch."""
+) -> dict[str, object]:
+    """The graph's entry in the request terminal's component diagnostics."""
     from exomem import writer_lease
 
     captured: dict[str, object] = {}
@@ -463,7 +463,12 @@ def _terminal_graph_state(
     writer_lease._with_post_terminal_fanout_acknowledgement(
         {"state": "committed"}, [report], drain_failed=False
     )
-    return str(captured["derived_sync"])
+    (graph,) = [
+        entry
+        for entry in captured["component_diagnostics"]
+        if entry["component"] == "epistemic_graph"
+    ]
+    return dict(graph)
 
 
 @pytest.mark.parametrize("marker", [False, True], ids=["epoch", "marker"])
@@ -513,6 +518,10 @@ def test_a_request_replay_deferral_under_an_acknowledged_checkpoint_reports_pend
     assert (result.outcome, result.code) == ("deferred", "graph_repair_queued"), result
     assert result.code in index_sync._GRAPH_COVERAGE_CODES
     assert not result.whole_vault_attempted
-    assert _terminal_graph_state(monkeypatch, result) == "pending"
+    assert _terminal_graph_diagnostic(monkeypatch, result) == {
+        "component": "epistemic_graph",
+        "state": "deferred",
+        "code": "graph_repair_queued",
+    }
     assert EpistemicGraphIndex(root).available() is False
     _assert_the_daemon_drains_it_once(root)
