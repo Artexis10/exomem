@@ -847,3 +847,48 @@ def test_rows_an_unpublished_drain_landed_carry_their_topology(
     adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
     assert adoption.adopted is True, adoption.reason
     assert adoption.residue == ()
+
+
+@pytest.mark.parametrize("withheld", [True, False], ids=["withheld", "published"])
+def test_a_drain_does_not_record_topology_it_did_not_widen(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, withheld: bool
+) -> None:
+    """M2 review: the fingerprint describes rows, so it moves only with the rows it covers.
+
+    A retitled page outside the indexed corpus has no graph rows, can never be
+    residue, and re-targets a link on an indexed page. A drain of an unrelated
+    page must not stamp the resolver's topology over it, or the next adoption
+    matches, promotion retires the whole-vault marker that was the only repair,
+    and the `linker -> outsider` edge a rebuild derives is gone for good.
+    """
+    outsider = "Outside/outsider.md"
+    root = _build_small(
+        vault,
+        {
+            outsider: "---\ntitle: Outsider Title\n---\n\nbody\n",
+            LINKER: _note(500, []) + "\nSee [[Renamed Outsider]].\n",
+        },
+    )
+    (root / outsider).write_text("---\ntitle: Renamed Outsider\n---\n\nbody\n", encoding="utf-8")
+    edited = root / GENERATED / "generated-note-0002.md"
+    edited.write_text(edited.read_text(encoding="utf-8") + "\n- edit\n", encoding="utf-8")
+    freshness.rebaseline(root)
+    real_identity = epistemic_graph._incremental_projection_identity
+    calls = iter(range(1_000_000))
+
+    def moving(vault_root):
+        identity = real_identity(vault_root)
+        return (identity, next(calls)) if withheld else identity
+
+    monkeypatch.setattr(epistemic_graph, "_incremental_projection_identity", moving, raising=True)
+    report = EpistemicGraphIndex(root).drain_paths([edited])
+    monkeypatch.setattr(
+        epistemic_graph, "_incremental_projection_identity", real_identity, raising=True
+    )
+    assert report["published"] is (not withheld)
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+    if adoption.adopted:
+        _assert_matches_a_fresh_rebuild(root)
+    assert adoption.adopted is False
+    assert adoption.reason == "resolver_topology_mismatch"
