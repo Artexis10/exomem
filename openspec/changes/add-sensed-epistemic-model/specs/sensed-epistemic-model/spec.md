@@ -121,7 +121,7 @@ Model inference SHALL run only in a disposable child process supervised from the
 
 The dreamer SHALL propose pairs for sensing from stored data only, and SHALL NOT encode text. A proposal predicate SHALL depend only on the two units and their own pages. The predicates are:
 
-- a cosine of at least a fixed threshold between stored unit vectors of the ranked encoder, whose source text hash equals the unit's current hash;
+- a cosine of at least a fixed threshold, keyed by the exact encoder fingerprint, between stored unit vectors of the ranked encoder whose source text hash equals the unit's current hash. An uncalibrated fingerprint SHALL propose nothing;
 - a graph edge between the two pages;
 - at least two shared authored link targets between two pages with different knowledge dates.
 
@@ -157,7 +157,7 @@ Directional asymmetry, abstention and disagreement between active instruments SH
 
 ### Requirement: Sensed findings are delivered pull-first at the point of use
 
-When a page is read, or is resolved as an activation anchor, the response SHALL carry an `epistemic_status` for that page when at least one of its counts is non-zero. The status SHALL contain:
+When a page is read, or is resolved as an activation anchor, the response SHALL carry an `epistemic_status` for that page when at least one of its counts is non-zero. When every count is zero but an edge to a released partner was dropped as not live, the status SHALL carry only the two zero counts and `evidence_complete: false`. Otherwise the status SHALL contain:
 
 - a status line;
 - `refined_by_later`: the distinct released pages with a later knowledge date whose unit refines one of this page's units;
@@ -179,7 +179,7 @@ Tensions on active or recent work SHALL reach the agent only through the existin
 
 #### Scenario: Nothing sensed means nothing added
 
-- **WHEN** a page has no current edge with a non-zero count
+- **WHEN** a page has no current edge with a non-zero count, and no edge to a released partner was dropped as not live
 - **THEN** its read and activation responses carry no `epistemic_status` field
 
 ### Requirement: Sensed items are released per caller
@@ -204,6 +204,11 @@ At request time, an edge SHALL be dropped when either page's live signature diff
 
 - **WHEN** a withheld page's pairs push a visible page past its proposal cap
 - **THEN** a restricted caller's read of the visible page is byte-identical to the same read in the absent twin
+
+#### Scenario: Every edge dropped still reports incomplete evidence
+
+- **WHEN** every edge of a page is dropped at request time, because its partner moved or its instrument key is no longer active
+- **THEN** the status carries zero counts and `evidence_complete: false`, and no items
 
 #### Scenario: A stale projection is not served as complete
 
