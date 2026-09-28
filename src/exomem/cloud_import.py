@@ -16,7 +16,15 @@ is written. It refuses the whole import on:
 - more members or bytes than the caller allows, or more bytes than the volume
   can take while keeping a reserve.
 
+It also refuses an archive it cannot prove complete: every member must
+start where the previous one ended, the end-of-archive block must follow the
+last member directly, and only zero padding may come after it. Python's
+streaming `tarfile` otherwise reads a stream cut between members, or a
+member it could not parse, as a clean and shorter archive.
+
 A refusal removes the staging directory, so a failed import leaves nothing.
+The `verify` mode runs every check and writes nothing, so an archive can be
+proven before a cell is stopped.
 Moving the finished staging directory into place is the caller's single
 `rename` (D6), which is atomic because staging sits on the same filesystem.
 
@@ -101,7 +109,7 @@ def free_bytes(path: Path) -> int:
 
 def unpack_stream(
     stream: BinaryIO,
-    staging: Path,
+    staging: Path | None,
     *,
     max_bytes: int,
     max_members: int = DEFAULT_MAX_MEMBERS,
@@ -112,21 +120,29 @@ def unpack_stream(
 ) -> UnpackResult:
     """Unpack a tar stream into `staging`, which must not exist yet.
 
-    Success means the archive's end-of-archive block was read, the counts
-    match any the sender declared, and the input was consumed to EOF. The
-    caller still commits the staging directory only if its decryptor also
-    exited cleanly: age authenticates its final chunk only at EOF.
+    With `staging=None` nothing is written: every member is read and checked
+    exactly as an unpack would, so an archive can be proven before anything
+    is stopped or changed.
+
+    Success means every member followed the previous one with no gap, the
+    end-of-archive block came right after the last member, only zero padding
+    followed it, the counts match any the sender declared, and the input was
+    consumed to EOF. The caller still commits the staging directory only if
+    its decryptor also exited cleanly: age authenticates its final chunk only
+    at EOF.
 
     On any refusal or error the staging directory is removed and the
     exception propagates; a directory this call did not create is never
     touched.
     """
 
-    staging = Path(staging)
-    try:
-        os.mkdir(staging, 0o700)
-    except OSError:
-        raise ArchiveRefused(IMPORT_STAGING_UNAVAILABLE, "staging") from None
+    if staging is not None:
+        staging = Path(staging)
+        try:
+            os.mkdir(staging, 0o700)
+            os.chmod(staging, 0o700)
+        except OSError:
+            raise ArchiveRefused(IMPORT_STAGING_UNAVAILABLE, "staging") from None
     try:
         result = _unpack_into(
             stream,
@@ -140,18 +156,24 @@ def unpack_stream(
             raise ArchiveRefused(ARCHIVE_UNREADABLE, "count", result.members)
         if expect_bytes is not None and result.bytes != expect_bytes:
             raise ArchiveRefused(ARCHIVE_UNREADABLE, "count", result.members)
-        # The caller commits with a rename and then deletes the ciphertext, so
-        # the files must be on disk before success is reported.
-        os.sync()
+        if staging is not None:
+            # The caller commits with a rename and then deletes the
+            # ciphertext, so the files must be on disk before success.
+            os.sync()
         return result
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
         raise
+
+
+def _blocks(size: int) -> int:
+    return -(-size // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE
 
 
 def _unpack_into(
     stream: BinaryIO,
-    staging: Path,
+    staging: Path | None,
     *,
     max_bytes: int,
     max_members: int,
@@ -160,26 +182,36 @@ def _unpack_into(
 ) -> UnpackResult:
     kinds: dict[tuple[str, ...], bool] = {(): True}  # path -> is a directory
     directory_times: list[tuple[tuple[str, ...], float]] = []
-    total = files = directories = members = 0
+    total = files = members = 0
+    expected_offset = 0
     header = _end_tracking_header()
     try:
         archive = tarfile.open(fileobj=stream, mode="r|*", tarinfo=header)
-    except (tarfile.TarError, EOFError, OSError):
+    except Exception:  # noqa: BLE001 -- any parser failure is an unreadable archive
         raise ArchiveRefused(ARCHIVE_UNREADABLE, "format", 0) from None
     with archive:
         while True:
             try:
                 member = archive.next()
-            except (tarfile.TarError, EOFError, OSError, UnicodeError):
+            except Exception:  # noqa: BLE001 -- the message may quote archive content
                 raise ArchiveRefused(ARCHIVE_UNREADABLE, "format", members + 1) from None
             if member is None:
                 break
             members += 1
             if members > max_members:
                 raise ArchiveRefused(ARCHIVE_TOO_LARGE, "members", members)
+            # A member that does not start where the previous one ended means
+            # tarfile skipped something it could not parse.
+            if member.offset != expected_offset or member.size < 0:
+                raise ArchiveRefused(ARCHIVE_UNREADABLE, "format", members)
+            expected_offset = member.offset_data + _blocks(member.size)
             if member.type in _LINK_TYPES:
                 raise ArchiveRefused(ARCHIVE_MEMBER_REFUSED, "link", members)
             if member.type != tarfile.DIRTYPE and member.type not in _FILE_TYPES:
+                raise ArchiveRefused(ARCHIVE_MEMBER_REFUSED, "special", members)
+            if member.sparse is not None or any(
+                key.startswith("GNU.sparse.") for key in member.pax_headers
+            ):
                 raise ArchiveRefused(ARCHIVE_MEMBER_REFUSED, "special", members)
             parts = _relative_parts(member.name, members)
 
@@ -195,55 +227,66 @@ def _unpack_into(
 
             if not parts or parts in kinds:
                 raise ArchiveRefused(ARCHIVE_MEMBER_REFUSED, "duplicate", members)
-            if member.size < 0:
-                raise ArchiveRefused(ARCHIVE_UNREADABLE, "format", members)
             total += member.size
             if total > max_bytes:
                 raise ArchiveRefused(ARCHIVE_TOO_LARGE, "bytes", members)
             with _filesystem_errors(members):
                 _ensure_directory(staging, parts[:-1], kinds, members)
-                if member.size > free_space(staging) - reserve_bytes:
+                if staging is not None and member.size > free_space(staging) - reserve_bytes:
                     raise ArchiveRefused(STORAGE_ALLOWANCE_EXCEEDED, "space", members)
                 source = archive.extractfile(member)
                 if source is None:
                     raise ArchiveRefused(ARCHIVE_UNREADABLE, "format", members)
-                target = staging.joinpath(*parts)
+                target = None if staging is None else staging.joinpath(*parts)
                 _write_file(source, target, member.size, members)
-            _set_mtime(target, member.mtime)
+            if target is not None:
+                _set_mtime(target, member.mtime)
             kinds[parts] = False
             files += 1
 
-    if not header.end_seen:
-        # `tarfile` reads a stream that stops between members as a clean
-        # end; only the all-zero end-of-archive block proves nothing is
-        # missing.
-        raise ArchiveRefused(ARCHIVE_UNREADABLE, "truncated", members)
+        if not header.end_seen or header.end_offset != expected_offset:
+            # `tarfile` reads a stream that stops between members as a clean
+            # end; only an end-of-archive block right after the last member
+            # proves nothing is missing.
+            raise ArchiveRefused(ARCHIVE_UNREADABLE, "truncated", members)
+        try:
+            while chunk := archive.fileobj.read(_CHUNK):
+                if chunk.strip(tarfile.NUL):
+                    raise ArchiveRefused(ARCHIVE_UNREADABLE, "trailing", members)
+        except ArchiveRefused:
+            raise
+        except Exception:  # noqa: BLE001 -- a bad trailer is an unreadable archive
+            raise ArchiveRefused(ARCHIVE_UNREADABLE, "truncated", members) from None
     try:
         while stream.read(_CHUNK):
-            pass  # padding after the end block; the decryptor must reach EOF
+            pass  # a compressed stream's trailer; the decryptor must reach EOF
     except OSError:
         raise ArchiveRefused(ARCHIVE_UNREADABLE, "truncated", members) from None
-    for parts, mtime in sorted(directory_times, key=lambda item: len(item[0]), reverse=True):
-        _set_mtime(staging.joinpath(*parts), mtime)
+    if staging is not None:
+        for parts, mtime in sorted(directory_times, key=lambda item: len(item[0]), reverse=True):
+            _set_mtime(staging.joinpath(*parts), mtime)
     directories = sum(1 for path, is_dir in kinds.items() if is_dir and path)
     return UnpackResult(members=members, files=files, directories=directories, bytes=total)
 
 
 def _end_tracking_header() -> type[tarfile.TarInfo]:
-    """A `TarInfo` class that records whether the end-of-archive block arrived."""
+    """A `TarInfo` class that records where the end-of-archive block arrived."""
 
     class _Header(tarfile.TarInfo):
         end_seen = False
+        end_offset = -1
 
         @classmethod
         def fromtarfile(cls, source: tarfile.TarFile) -> tarfile.TarInfo:
             # An all-zero header block raises EOFHeaderError; a stream that
             # simply stops raises EmptyHeaderError. `TarFile.next` returns
             # None for both, so this is the only place they differ.
+            position = source.fileobj.tell()
             try:
                 return super().fromtarfile(source)
             except tarfile.EOFHeaderError:
                 cls.end_seen = True
+                cls.end_offset = position
                 raise
 
     return _Header
@@ -291,7 +334,10 @@ def _relative_parts(name: str, index: int) -> tuple[str, ...]:
 
 
 def _ensure_directory(
-    staging: Path, parts: tuple[str, ...], kinds: dict[tuple[str, ...], bool], index: int
+    staging: Path | None,
+    parts: tuple[str, ...],
+    kinds: dict[tuple[str, ...], bool],
+    index: int,
 ) -> None:
     for depth in range(1, len(parts) + 1):
         prefix = parts[:depth]
@@ -300,20 +346,35 @@ def _ensure_directory(
             continue
         if known is False:
             raise ArchiveRefused(ARCHIVE_MEMBER_REFUSED, "not_directory", index)
-        os.mkdir(staging.joinpath(*prefix), 0o700)
+        if staging is not None:
+            directory = staging.joinpath(*prefix)
+            os.mkdir(directory, 0o700)
+            # A Kubernetes fsGroup volume root is setgid, and mkdir inherits it.
+            os.chmod(directory, 0o700)
         kinds[prefix] = True
 
 
-def _write_file(source: BinaryIO, target: Path, size: int, index: int) -> None:
-    descriptor = os.open(target, _FILE_FLAGS, 0o600)
-    with os.fdopen(descriptor, "wb") as sink:
+def _write_file(source: BinaryIO, target: Path | None, size: int, index: int) -> None:
+    """Copy exactly `size` bytes, or read and discard them when `target` is None."""
+
+    sink: BinaryIO | None = None
+    if target is not None:
+        sink = os.fdopen(os.open(target, _FILE_FLAGS, 0o600), "wb")
+    try:
         remaining = size
         while remaining:
-            chunk = source.read(min(_CHUNK, remaining))
+            try:
+                chunk = source.read(min(_CHUNK, remaining))
+            except Exception:  # noqa: BLE001 -- the message may quote archive content
+                raise ArchiveRefused(ARCHIVE_UNREADABLE, "truncated", index) from None
             if not chunk:
                 raise ArchiveRefused(ARCHIVE_UNREADABLE, "truncated", index)
-            sink.write(chunk)
+            if sink is not None:
+                sink.write(chunk)
             remaining -= len(chunk)
+    finally:
+        if sink is not None:
+            sink.close()
 
 
 def _set_mtime(path: Path, mtime: float) -> None:
@@ -331,28 +392,34 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     unpack = commands.add_parser("unpack", help="unpack a tar stream into a new staging dir")
     unpack.add_argument("--staging", required=True, type=Path)
-    unpack.add_argument("--max-bytes", required=True, type=int)
-    unpack.add_argument("--max-members", type=int, default=DEFAULT_MAX_MEMBERS)
     unpack.add_argument("--reserve-bytes", type=int, default=DEFAULT_RESERVE_BYTES)
-    unpack.add_argument("--expect-files", type=int, default=None)
-    unpack.add_argument("--expect-bytes", type=int, default=None)
+    verify = commands.add_parser("verify", help="check a tar stream without writing anything")
+    for command in (unpack, verify):
+        command.add_argument("--max-bytes", required=True, type=int)
+        command.add_argument("--max-members", type=int, default=DEFAULT_MAX_MEMBERS)
+        command.add_argument("--expect-files", type=int, default=None)
+        command.add_argument("--expect-bytes", type=int, default=None)
     args = parser.parse_args(argv)
 
-    if not args.staging.is_absolute():
+    staging = args.staging if args.command == "unpack" else None
+    if staging is not None and not staging.is_absolute():
         print(json.dumps(ArchiveRefused(IMPORT_STAGING_UNAVAILABLE, "staging").as_dict()))
         return 1
     try:
         result = unpack_stream(
             sys.stdin.buffer,
-            args.staging,
+            staging,
             max_bytes=args.max_bytes,
             max_members=args.max_members,
-            reserve_bytes=args.reserve_bytes,
+            reserve_bytes=getattr(args, "reserve_bytes", 0),
             expect_files=args.expect_files,
             expect_bytes=args.expect_bytes,
         )
     except ArchiveRefused as refused:
         print(json.dumps(refused.as_dict()))
+        return 1
+    except Exception:  # noqa: BLE001 -- never print a traceback that may quote content
+        print(json.dumps(ArchiveRefused(ARCHIVE_UNREADABLE, "internal").as_dict()))
         return 1
     print(json.dumps({"ok": True, **asdict(result)}))
     return 0

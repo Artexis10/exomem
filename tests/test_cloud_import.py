@@ -448,3 +448,116 @@ def test_success_is_flushed_to_disk_before_it_is_reported(
 
     _refusal(_archive(_typed("l", tarfile.SYMTYPE, linkname="/")), tmp_path / "refused")
     assert synced == [True]
+
+
+def _pax_member(name: str, data: bytes, pax: dict[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        info.pax_headers = pax
+        archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def test_a_leading_zero_block_does_not_hide_the_archive(tmp_path: Path) -> None:
+    refused = _refusal(bytes(512) + _archive(_file("a.md")), tmp_path / "staging")
+
+    assert refused.code == ARCHIVE_UNREADABLE
+
+
+def test_a_zero_block_mid_archive_does_not_end_it_early(tmp_path: Path) -> None:
+    first = _archive(_file("a.md", b"a"))[:1024]  # a.md's header and data, no end
+    rest = _archive(_file("b.md", b"b"))
+
+    refused = _refusal(first + bytes(512) + rest, tmp_path / "staging")
+
+    assert (refused.code, refused.reason) == (ARCHIVE_UNREADABLE, "trailing")
+
+
+def test_bytes_after_the_end_block_are_refused(tmp_path: Path) -> None:
+    refused = _refusal(_archive(_file("a.md")) + b"not padding", tmp_path / "staging")
+
+    assert (refused.code, refused.reason) == (ARCHIVE_UNREADABLE, "trailing")
+
+
+def _raw_members(*members: tuple, pax: dict[str, str] | None = None) -> bytes:
+    """Member blocks only: no end-of-archive block, no record padding."""
+
+    buffer = io.BytesIO()
+    archive = tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT)
+    for index, (info, data) in enumerate(members):
+        if pax and index == 0:
+            info.pax_headers = pax
+        archive.addfile(info, io.BytesIO(data) if data is not None else None)
+    raw = buffer.getvalue()
+    archive.fileobj = io.BytesIO()  # let close() pad somewhere harmless
+    archive.close()
+    return raw
+
+
+def test_a_member_tarfile_skips_is_not_silently_lost(tmp_path: Path) -> None:
+    """A first member tarfile cannot parse is skipped, and the next one read."""
+
+    skipped = _raw_members(_file("a.md", b"a"), pax={"size": "-5"})
+    payload = skipped + _raw_members(_file("b.md", b"b")) + bytes(1024)
+
+    refused = _refusal(payload, tmp_path / "staging")
+
+    assert (refused.code, refused.reason) == (ARCHIVE_UNREADABLE, "format")
+
+
+def test_sparse_members_are_refused(tmp_path: Path) -> None:
+    payload = _pax_member("a.md", b"ab", {"GNU.sparse.map": "0,2", "GNU.sparse.size": "10"})
+
+    refused = _refusal(payload, tmp_path / "staging")
+
+    assert refused.code in (ARCHIVE_MEMBER_REFUSED, ARCHIVE_UNREADABLE)
+
+
+def test_a_parser_error_prints_no_content(tmp_path: Path) -> None:
+    payload = _pax_member("a.md", b"ab", {"GNU.sparse.map": f"{CANARY},1", "GNU.sparse.size": "10"})
+
+    completed = _run_standalone(payload, "--staging", str(tmp_path / "s"), "--max-bytes", "99")
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["error"] == ARCHIVE_UNREADABLE
+    assert CANARY.encode() not in completed.stdout + completed.stderr
+    assert b"Traceback" not in completed.stderr
+
+
+def test_verify_writes_nothing_and_reports_the_same_counts(tmp_path: Path) -> None:
+    payload = _archive(_dir("notes"), _file("notes/a.md", b"abc"), _file("b.md", b"de"))
+
+    result = unpack_stream(io.BytesIO(payload), None, max_bytes=GiB)
+
+    assert (result.files, result.directories, result.bytes) == (2, 1, 5)
+    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(ArchiveRefused):
+        unpack_stream(
+            io.BytesIO(_archive(_typed("l", tarfile.SYMTYPE, linkname="/"))), None, max_bytes=GiB
+        )
+
+
+def test_verify_runs_standalone() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-I", str(MODULE), "verify", "--max-bytes", "9", "--expect-files", "1"],
+        input=_archive(_file("a.md", b"abc")),
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout
+    assert json.loads(completed.stdout)["files"] == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="setgid is a POSIX-only directory semantic")
+def test_directories_do_not_inherit_a_setgid_volume_root(tmp_path: Path) -> None:
+    root = tmp_path / "volume"
+    root.mkdir()
+    os.chmod(root, 0o2770)
+
+    _unpack(_archive(_file("notes/a.md")), root / "staging")
+
+    for directory in (root / "staging", root / "staging" / "notes"):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700

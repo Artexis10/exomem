@@ -21,7 +21,9 @@ Three machines take part:
 - **Operator machine:** reaches the source and the node over SSH. It only ever carries ciphertext.
 - **Node:** holds the one-time key in `/dev/shm` and the ciphertext on disk, decrypts, and runs `kubectl` as break-glass.
 
-The cell is down from step 5 to step 7, which takes minutes for a vault of a few gigabytes.
+The cell is down from step 5 to step 7, which takes minutes for a vault of a few gigabytes. Everything that can refuse the archive runs before step 5, so a refusal never costs downtime. Run the node steps in an interactive shell **without** `set -e`: a failed gate must leave the shell and its variables in place so that [recovery](#if-a-step-fails-after-step-5) can run. Don't start between 02:00 and 05:00 UTC, when cellctl runs backups.
+
+The unpacker is the reviewed commit's `src/exomem/cloud_import.py`. It uses only the standard library. Copy it to the source machine and to the node before starting, and record its SHA-256 on both.
 
 ## What the cell's volume holds
 
@@ -42,7 +44,7 @@ The derived-state key is a hash of the vault's path, and the path stays `/data/v
 On the source machine. Nothing here prints note names or content.
 
 ```bash
-set -euo pipefail
+set -o pipefail
 : "${VAULT:?absolute path of the source vault}"
 test -d "$VAULT/Knowledge Base"
 exomem --version
@@ -55,18 +57,26 @@ Decide what stays out. `.git` history and a sync tool's trash are not notes. Att
 
 ```bash
 PRUNE=(-path ./.git -prune -o -path ./.trash -prune -o)
-cd "$VAULT"
+cd "$VAULT" || return
 find . "${PRUNE[@]}" \( -type l -o ! -type f ! -type d \) -printf '%y\n' | sort | uniq -c
 EXPECT_FILES=$(find . "${PRUNE[@]}" -type f -printf '.' | wc -c)
 EXPECT_BYTES=$(find . "${PRUNE[@]}" -type f -printf '%s\n' | awk '{s += $1} END {print s + 0}')
 echo "files=$EXPECT_FILES bytes=$EXPECT_BYTES"
 ```
 
-The first command must print nothing. A link, device or FIFO refuses the whole import, so resolve each one on the source first; list them yourself with `find . -type l`, and keep the names out of any shared record. Keep `EXPECT_FILES` and `EXPECT_BYTES` for step 6.
+The first command must print nothing. A link, device or FIFO refuses the whole import, so resolve each one on the source first; list them yourself with `find . -type l`, and keep the names out of any shared record. Then run the archive through the unpacker's `verify` mode on the source itself. It reads every member exactly as the restore will and writes nothing, so a hardlink, a name the cell cannot hold or a count mismatch shows up here:
+
+```bash
+: "${UNPACKER:?path of cloud_import.py on the source}"
+tar -C "$VAULT" --exclude=./.git --exclude=./.trash -cf - . \
+  | python3 -I "$UNPACKER" verify --max-bytes "$EXPECT_BYTES" --expect-files "$EXPECT_FILES" --expect-bytes "$EXPECT_BYTES"
+```
+
+It must print `"ok": true`. The source keeps running, so a note written between this check and step 4 changes the counts; step 4's node check catches that, and you recount here. Keep `EXPECT_FILES` and `EXPECT_BYTES` for step 4.
 
 ## 2. Size the cell
 
-The cell's volume holds the new vault and the prior one until step 9, plus rebuilt indexes. It needs at least twice `EXPECT_BYTES` plus 2 GiB free space. If the cell's `storage_gib` is smaller, raise it as the control database owner:
+The cell's volume holds the new vault and the prior one until step 9, plus rebuilt indexes. It needs `EXPECT_BYTES`, plus what the current vault and its indexes use, plus 2 GiB free space. If the cell's `storage_gib` is smaller, raise it as the control database owner:
 
 ```sql
 UPDATE exomem_cloud_cells SET storage_gib = :new_gib WHERE cell_id = :'cell_id';
@@ -83,10 +93,10 @@ kubectl -n "exo-cell-$CELL_ID" get pvc cell-data -o jsonpath='{.status.capacity.
 On the node, as root. The identity never leaves memory-backed storage. Only the public recipient is printed.
 
 ```bash
-set -euo pipefail
 umask 077
+set -o pipefail
 : "${CELL_ID:?the owner cell ID}"
-[[ "$CELL_ID" =~ ^[a-z2-7]{16}$ ]] || exit 1
+[[ "$CELL_ID" =~ ^[a-z2-7]{16}$ ]] || echo 'not a cell ID; stop' >&2
 IMPORT_ID=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
 KEY_DIR="/dev/shm/exomem-import-$IMPORT_ID"
 WORK="/var/lib/exomem-import/$IMPORT_ID"
@@ -97,28 +107,41 @@ age-keygen -y "$KEY_DIR/identity"
 echo "import_id=$IMPORT_ID"
 ```
 
-`age` comes from the node's base packages. Keep this shell open for steps 5 to 9.
+`age` comes from the node's base packages; on a node not yet converged, `apt-get install age` first. Keep this shell open for steps 4 to 9.
 
 ## 4. Stream the ciphertext
 
 On the operator machine. The source archives and encrypts, and the node stores the ciphertext. The operator machine sees only ciphertext.
 
 ```bash
-set -euo pipefail
+set -o pipefail
 : "${SOURCE:?ssh destination of the source machine}"
 : "${NODE:?ssh destination of the node, as root}"
 : "${VAULT:?absolute path of the source vault on the source machine}"
 : "${RECIPIENT:?the recipient step 3 printed}"
 : "${IMPORT_ID:?the import_id step 3 printed}"
-[[ "$RECIPIENT" =~ ^age1[02-9ac-hj-np-z]{58}$ ]] || exit 1
-[[ "$IMPORT_ID" =~ ^[0-9a-f]{8}$ ]] || exit 1
+[[ "$RECIPIENT" =~ ^age1[02-9ac-hj-np-z]{58}$ ]] || echo 'not an age recipient; stop' >&2
+[[ "$IMPORT_ID" =~ ^[0-9a-f]{8}$ ]] || echo 'not an import ID; stop' >&2
 # Both commands are built here on purpose (SC2029): every value in them was checked above.
 # shellcheck disable=SC2029
-ssh "$SOURCE" "set -o pipefail; tar -C $(printf '%q' "$VAULT") --exclude=./.git --exclude=./.trash -cf - . | age -r $RECIPIENT" \
+ssh "$SOURCE" "bash -o pipefail -c 'tar -C $(printf '%q' "$VAULT") --exclude=./.git --exclude=./.trash -cf - . | age -r $RECIPIENT | tee >(sha256sum >&2)'" \
   | ssh "$NODE" "cat > /var/lib/exomem-import/$IMPORT_ID/vault.tar.age && sha256sum /var/lib/exomem-import/$IMPORT_ID/vault.tar.age && stat -c '%s bytes' /var/lib/exomem-import/$IMPORT_ID/vault.tar.age"
 ```
 
-A failed or interrupted stream leaves a short file. Step 6 refuses it, because age authenticates its final chunk only at the end. Rerun this step to replace it. Record the digest and size.
+The source prints the ciphertext's SHA-256 on stderr, and the node prints its own. They must match. A failed or interrupted stream leaves a short file; rerun this step to replace it.
+
+Back on the node, prove the ciphertext before anything stops. This decrypts into the unpacker's `verify` mode, so the plaintext only passes through a pipe:
+
+```bash
+: "${EXPECT_FILES:?from step 1}"
+: "${EXPECT_BYTES:?from step 1}"
+test -s "$WORK/cloud_import.py" && sha256sum "$WORK/cloud_import.py"
+age -d -i "$KEY_DIR/identity" "$WORK/vault.tar.age" \
+  | python3 -I "$WORK/cloud_import.py" verify --max-bytes "$EXPECT_BYTES" --expect-files "$EXPECT_FILES" --expect-bytes "$EXPECT_BYTES"
+echo "decrypt and verify exit: ${PIPESTATUS[*]}"
+```
+
+Both exit codes must be 0 and the line must say `"ok": true`. Anything else is fixed here, with the cell still serving.
 
 ## 5. Stop the cell
 
@@ -138,7 +161,7 @@ kubectl auth whoami | grep -qF 'exomem:break-glass'
 NS="exo-cell-$CELL_ID"
 test "$(kubectl get namespace "$NS" -o jsonpath='{.metadata.labels.exomem\.io/cloud-cell}')" = "$CELL_ID"
 IMAGE=$(kubectl -n "$NS" get statefulset cell -o jsonpath='{.spec.template.spec.containers[0].image}')
-[[ "$IMAGE" =~ @sha256:[a-f0-9]{64}$ ]] || exit 1
+[[ "$IMAGE" =~ @sha256:[a-f0-9]{64}$ ]] || echo 'image is not pinned by digest; stop' >&2
 echo "image=$IMAGE"
 no_runtime_pod() {
   test -z "$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=exomem-cell -o name)"
@@ -154,7 +177,14 @@ wait_gone() {
 }
 ```
 
-A `desired_state` write would not hold: Substrate recomputes it from the entitlement, and cellctl would then start the runtime in the middle of the swap. Pause cellctl instead, then stop the runtime:
+A `desired_state` write would not hold: Substrate recomputes it from the entitlement, and cellctl would then start the runtime in the middle of the swap. Pause cellctl instead, then stop the runtime. First make sure the cell is not in the middle of a backup, upgrade or restore:
+
+```bash
+kubectl -n "$NS" get jobs --no-headers | grep -v ' Complete ' || echo 'no running jobs'
+kubectl -n "$NS" get statefulset cell -o jsonpath='{.metadata.annotations}{"\n"}' | grep -o '"[^"]*hold[^"]*":"[^"]*"' || echo 'no hold'
+```
+
+Both must print their "no" line. Then:
 
 ```bash
 kubectl -n exomem-cloud scale deployment cellctl --replicas=0
@@ -168,11 +198,9 @@ While cellctl is paused, no cell reconciles, backs up or upgrades. Keep the paus
 
 ## 6. Unpack and swap
 
-The helper pod runs the cell image with the cell's volume mounted. It has no API token, and no job-egress label, so the namespace's default-deny policy leaves it no network. The unpacker is the reviewed commit's `src/exomem/cloud_import.py`. Copy it to the node first, as `$WORK/cloud_import.py`, and record its SHA-256.
+The helper pod runs the cell image with the cell's volume mounted. It has no API token, and no job-egress label, so the namespace's default-deny policy leaves it no network.
 
 ```bash
-test -s "$WORK/cloud_import.py"
-sha256sum "$WORK/cloud_import.py"
 no_runtime_pod
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -226,14 +254,14 @@ The free space printed must exceed `EXPECT_BYTES` plus 2 GiB. Now decrypt on the
 STAGING="/data/.import-$IMPORT_ID"
 no_runtime_pod
 set -o pipefail
-if ! age -d -i "$KEY_DIR/identity" "$WORK/vault.tar.age" \
+if age -d -i "$KEY_DIR/identity" "$WORK/vault.tar.age" \
   | helper python3 -I /tmp/cloud_import.py unpack --staging "$STAGING" \
       --max-bytes "$EXPECT_BYTES" --expect-files "$EXPECT_FILES" --expect-bytes "$EXPECT_BYTES"; then
+  helper test -d "$STAGING/Knowledge Base" && echo 'unpacked; continue'
+else
   helper rm -rf -- "$STAGING"
-  echo 'decryption or unpacking failed; the vault is unchanged' >&2
-  exit 1
+  echo 'decryption or unpacking failed; the vault is unchanged; go to recovery' >&2
 fi
-helper test -d "$STAGING/Knowledge Base"
 ```
 
 Before the swap, compare the Knowledge Base notes. The count of notes that only the current Cloud vault holds is printed. Their names go to a memory-only file on the node, for the owner to read before anything is deleted:
@@ -304,6 +332,20 @@ unset BREAK_GLASS_KUBECONFIG
 Then end the break-glass session as the access runbook describes.
 
 Delete the prior directory only after cellctl's next scheduled backup of the cell succeeds. It runs in the 02:00–05:00 UTC window; `last_backup_at` on the cell's row moves past the swap time. Check that backup's duration against the backup Job's 900-second deadline. The owner's cell is the rollout canary, so a backup that cannot finish would stall every upgrade. Then, under a fresh break-glass identity and with the runtime stopped as in step 5, run the helper pod again and remove `/data/.restore-prior-$IMPORT_ID`.
+
+## If a step fails after step 5
+
+A failed gate prints why and leaves the shell as it was. Until the swap has run, the vault is unchanged, and recovery just brings everything back:
+
+```bash
+kubectl -n "$NS" delete pod owner-restore --ignore-not-found --wait=true
+kubectl -n "$NS" scale statefulset cell --replicas=1
+kubectl -n "$NS" rollout status statefulset/cell --timeout=900s
+kubectl -n exomem-cloud scale deployment cellctl --replicas=1
+kubectl -n exomem-cloud rollout status deployment/cellctl --timeout=300s
+```
+
+If the helper pod is still there, remove any `/data/.import-$IMPORT_ID` through it before deleting it. If the swap has already run, use the rollback below instead, then these commands.
 
 ## Rollback
 
