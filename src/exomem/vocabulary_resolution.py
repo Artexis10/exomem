@@ -332,11 +332,30 @@ def _strict_taxonomy(root: Path) -> tuple[source_taxonomy.SourceTaxonomy, vault.
         ) from error
     try:
         raw, guard = vault.read_guarded_text(root, path)
-        data = yaml.load(raw, Loader=_StrictTaxonomyLoader)
     except (OSError, UnicodeError, vault.PathGuardError) as error:
         raise VocabularyResolutionError(
             "INVALID_DOMAIN_TAXONOMY", "domain taxonomy is unreadable"
         ) from error
+    taxonomy, snapshot = _strict_registry_text(raw)
+    return taxonomy, guard, snapshot
+
+
+def registry_text_snapshot(text: str | None) -> str | None:
+    """The strict snapshot of registry bytes read elsewhere; None if malformed.
+
+    `text` None means no registry file, as `_strict_taxonomy` reads a missing one.
+    """
+    if text is None:
+        return _snapshot({"registry": "missing"})
+    try:
+        return _strict_registry_text(text)[1]
+    except VocabularyResolutionError:
+        return None
+
+
+def _strict_registry_text(raw: str) -> tuple[source_taxonomy.SourceTaxonomy, str]:
+    try:
+        data = yaml.load(raw, Loader=_StrictTaxonomyLoader)
     except yaml.YAMLError as error:
         raise VocabularyResolutionError(
             "INVALID_DOMAIN_TAXONOMY", "domain taxonomy is malformed"
@@ -349,7 +368,7 @@ def _strict_taxonomy(root: Path) -> tuple[source_taxonomy.SourceTaxonomy, vault.
             "INVALID_DOMAIN_TAXONOMY", "domain taxonomy is malformed", {"findings": list(taxonomy.findings)}
         )
     _reject_equivalent_owners(taxonomy)
-    return taxonomy, guard, _snapshot({"registry": raw, "domains": _domain_snapshot(taxonomy)})
+    return taxonomy, _snapshot({"registry": raw, "domains": _domain_snapshot(taxonomy)})
 
 
 def _validate_strict_domain_registry(data: object) -> None:

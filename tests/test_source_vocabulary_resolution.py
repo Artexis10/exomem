@@ -399,3 +399,33 @@ def test_a_reclassify_that_supplies_a_domain_names_the_malformed_registry(
 
     assert refused.value.code == "INVALID_DOMAIN_TAXONOMY"
     assert "(Knowledge Base/_Schema/source-taxonomy.yaml)" in str(refused.value)
+
+
+def test_a_registry_edit_before_a_registration_is_planned_refuses_the_capture(
+    vault: Path, source_schema: schema_module.SourceSchema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registration plan re-reads the registry; it must be the resolved one.
+
+    An edit between the two reads that makes the new key an alias of an
+    existing domain would otherwise append a second owner, and the strict
+    registry would then refuse every later domain capture.
+    """
+    _registry(vault, "domains:\n  health:\n    aliases: [wellness]\n")
+    resolve = vocabulary_resolution.resolve_source_domain
+
+    def resolve_then_alias(*args: object, **kwargs: object):  # noqa: ANN202
+        binding = resolve(*args, **kwargs)
+        _registry(vault, "domains:\n  health:\n    aliases: [wellness, marine-biology]\n")
+        return binding
+
+    monkeypatch.setattr(vocabulary_resolution, "resolve_source_domain", resolve_then_alias)
+
+    with pytest.raises(ValueError) as refused:
+        _capture(vault, source_schema, title="Kelp survey", domain="marine-biology")
+
+    assert str(refused.value).startswith("STALE_VOCABULARY_BINDING")
+    registry = vault / "Knowledge Base" / "_Schema" / "source-taxonomy.yaml"
+    assert registry.read_text(encoding="utf-8") == (
+        "domains:\n  health:\n    aliases: [wellness, marine-biology]\n"
+    )
+    assert not (vault / SOURCES / "Articles" / "Marine Biology").exists()

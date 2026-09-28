@@ -367,6 +367,20 @@ def add(
     taxonomy_plan = source_taxonomy.plan_registrations(
         vault_root, kind=kind, domain=domain_resolution
     )
+    if (
+        domain_binding is not None
+        and taxonomy_plan.writes
+        and vocabulary_resolution.registry_text_snapshot(taxonomy_plan.source_text)
+        != domain_binding.snapshot
+    ):
+        # The registration re-read the registry and guards only that read. A
+        # registry edited since the domain resolved could make this append a
+        # second owner, so the capture is refused as stale instead.
+        raise AddError(
+            code="STALE_VOCABULARY_BINDING",
+            missing=["domain"],
+            reason="domain vocabulary changed while the capture resolved it; retry the capture",
+        )
     project_keys_clean = list(dict.fromkeys(projects or ()))
     project_plan = project_keys.plan_project_keys(vault_root, project_keys_clean)
 
