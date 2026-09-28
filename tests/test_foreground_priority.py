@@ -259,3 +259,39 @@ def test_every_whole_vault_phase_yields_and_never_under_a_boundary(
     epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
     assert {"_recall_membership", "_source_versions_current", "_resolver_source_versions"} <= callers
     assert held_while_yielding == []
+
+
+def test_the_lexical_repair_rebuild_yields_and_never_under_a_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The background lexical repair rebuilds the whole catalogue in the
+    serving process: two corpus walks, a tokenizing insert per page, and a
+    second pair of walks for the source proof. Like the graph pass, it pauses
+    for an in-flight activation, and never under its publication lock or a
+    mutation boundary, where writers would wait out the request too."""
+    import traceback
+
+    from exomem import lexstore, mutation_lock, vault
+
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    for index in range(5):
+        (notes / f"page-{index}.md").write_text(
+            f"---\ntype: note\n---\n\n# Page {index}\n\nharbour lantern {index}\n",
+            encoding="utf-8",
+        )
+    callers: set[str] = set()
+    held_while_yielding: list[str] = []
+    real_holds = mutation_lock.current_thread_holds_boundary
+
+    def spy(*, max_wait: float = foreground_priority.MAX_YIELD_SECONDS) -> float:
+        frames = [frame.name for frame in traceback.extract_stack(limit=12)]
+        callers.update(frames)
+        if real_holds() or getattr(vault._HELD_LOCKS, "keys", None):
+            held_while_yielding.append(frames[-2])
+        return 0.0
+
+    monkeypatch.setattr(foreground_priority, "yield_to_foreground", spy)
+    assert lexstore.get_store(tmp_path).rebuild_atomic() is True
+    assert {"_walk_entries", "_materialize_catalog"} <= callers
+    assert held_while_yielding == []

@@ -74,7 +74,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Generic, TypeVar
 
-from . import call_spans, reserved_paths
+from . import call_spans, foreground_priority, reserved_paths
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -4562,12 +4562,12 @@ class LexicalStore:
                 raise _DetachedBuildCancelled
 
         if kb.is_dir():
-            for p in find_module._walk_md(kb):
+            for p in foreground_priority.yielding_in_bulk(find_module._walk_md(kb)):
                 check()
                 if not recall_policy.is_recall_candidate(self.vault_root, p):
                     continue
                 members.setdefault(p, [False, False])[0] = True
-        for p in walk_vault_md(self.vault_root):
+        for p in foreground_priority.yielding_in_bulk(walk_vault_md(self.vault_root)):
             check()
             if not recall_policy.is_recall_candidate(self.vault_root, p):
                 continue
@@ -5712,12 +5712,16 @@ class LexicalStore:
             return self._decline_rebuild("transient_failure")
         try:
             try:
-                published = self._build_and_publish(
-                    temp_path,
-                    start_identity,
-                    start_checkpoints,
-                    start_live_guard,
-                )
+                # A foreground bulk pass: its corpus walks and page inserts
+                # pause while an activation is in flight, never under the
+                # publication lock or a boundary (`foreground_priority`).
+                with foreground_priority.bulk():
+                    published = self._build_and_publish(
+                        temp_path,
+                        start_identity,
+                        start_checkpoints,
+                        start_live_guard,
+                    )
             except sqlite3.Error as e:
                 if classify_sqlite_error(e) == "transient":
                     # A passing lock/interrupt fails only this attempt; the next
@@ -5925,7 +5929,11 @@ class LexicalStore:
         try:
             self._ensure_schema(conn)
             with conn:
-                for path, (in_kb, in_vault) in members.items():
+                # Only the temp family is open here: a pause holds no live
+                # file, lock or boundary.
+                for path, (in_kb, in_vault) in foreground_priority.yielding_in_bulk(
+                    members.items()
+                ):
                     if cancel is not None and cancel.is_set():
                         raise _DetachedBuildCancelled
                     self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
