@@ -663,13 +663,17 @@ def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:
 #: it will run (`seamless-managed-worker-handoff` D12).
 VOCABULARY_DRAIN_WAIT_SECONDS = 120.0
 VOCABULARY_DRAIN_PASSES = 256
-#: How long a publication-triggered drain waits for the published snapshot to
-#: become readable. The signal fires after the commit or swap, but a snapshot
-#: can still be refused or slow to prove readable, so a wait that times out with
-#: work queued re-arms the watcher, up to `VOCABULARY_REDRAIN_RETRIES` times in
-#: a row; after that only the next publication wakes it.
+#: How long a publication-triggered drain waits for the projection to report
+#: current once the published snapshot is readable.
 VOCABULARY_REDRAIN_READY_SECONDS = 10.0
-VOCABULARY_REDRAIN_RETRIES = 30
+#: The signal fires after the commit or swap, but a snapshot can still be slow
+#: to prove readable. Each readiness probe can walk the vault, so one
+#: publication probes at most `VOCABULARY_REDRAIN_MAX_POLLS` times, backing off
+#: from one second, doubling to a one-minute cap: about two minutes, eight
+#: probes. After that only the next publication wakes the watcher.
+VOCABULARY_REDRAIN_MAX_POLLS = 8
+VOCABULARY_REDRAIN_FIRST_BACKOFF_SECONDS = 1.0
+VOCABULARY_REDRAIN_MAX_BACKOFF_SECONDS = 60.0
 #: How long shutdown waits for the watcher. It polls its stop event every
 #: quarter second, so this bounds only a recovery pass already in flight.
 VOCABULARY_WATCHER_JOIN_SECONDS = 5.0
@@ -725,28 +729,49 @@ def drain_vocabulary_recovery(
     return drained
 
 
+def redrain_backoffs(
+    *,
+    first_backoff: float = VOCABULARY_REDRAIN_FIRST_BACKOFF_SECONDS,
+    max_backoff: float = VOCABULARY_REDRAIN_MAX_BACKOFF_SECONDS,
+    max_polls: int = VOCABULARY_REDRAIN_MAX_POLLS,
+) -> tuple[float, ...]:
+    """The waits between one publication's readiness probes."""
+    delays: list[float] = []
+    delay = first_backoff
+    for _ in range(max(0, max_polls - 1)):
+        delays.append(min(delay, max_backoff))
+        delay *= 2
+    return tuple(delays)
+
+
 def redrain_after_publish(
     vault_root: Path,
     shutdown: threading.Event,
     *,
     ready_seconds: float = VOCABULARY_REDRAIN_READY_SECONDS,
-    retry: threading.Event | None = None,
+    wake: threading.Event | None = None,
+    first_backoff: float = VOCABULARY_REDRAIN_FIRST_BACKOFF_SECONDS,
+    max_backoff: float = VOCABULARY_REDRAIN_MAX_BACKOFF_SECONDS,
+    max_polls: int = VOCABULARY_REDRAIN_MAX_POLLS,
 ) -> int | None:
     """Drain once after a graph publication, when there is work and it can land.
 
-    Returns None when nothing is queued. Otherwise waits, bounded, for the read
-    snapshot the publication made, then runs the same bounded drain activation
-    runs. Claims are compare-and-set, so this never repeats a job the activation
-    drain or an explicit review already completed. When the wait times out with
-    work still queued, `retry` (the watcher's wake-up) is set so the job is not
-    stranded until an unrelated later publication.
+    Returns None when nothing is queued. Otherwise probes, with backoff and a
+    bounded count, for the read snapshot the publication made, then runs the
+    same bounded drain activation runs. A later publication (`wake`) ends the
+    current backoff and restarts the schedule, since it is a new snapshot to
+    wait for. Claims are compare-and-set, so this never repeats a job the
+    activation drain or an explicit review already completed.
     """
     from . import epistemic_graph
 
     if not vocabulary_recovery.page(vault_root, limit=1):
         return None
     graph = epistemic_graph.EpistemicGraphIndex(vault_root)
-    deadline = time.monotonic() + ready_seconds
+    schedule = redrain_backoffs(
+        first_backoff=first_backoff, max_backoff=max_backoff, max_polls=max_polls
+    )
+    step = 0
     while not shutdown.is_set():
         try:
             readable = graph.available()
@@ -754,12 +779,29 @@ def redrain_after_publish(
             readable = False
         if readable:
             return drain_vocabulary_recovery(vault_root, shutdown, wait_seconds=ready_seconds)
-        if time.monotonic() >= deadline:
-            if retry is not None and vocabulary_recovery.page(vault_root, limit=1):
-                retry.set()
+        if step >= len(schedule):
             return 0
-        shutdown.wait(0.25)
+        if _wait_for_backoff(schedule[step], shutdown, wake):
+            step = 0
+        else:
+            step += 1
     return 0
+
+
+def _wait_for_backoff(
+    seconds: float, shutdown: threading.Event, wake: threading.Event | None
+) -> bool:
+    """Wait out one backoff; True when a new publication ended it early."""
+    deadline = time.monotonic() + seconds
+    while not shutdown.is_set():
+        if wake is not None and wake.is_set():
+            wake.clear()
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        shutdown.wait(min(0.25, remaining))
+    return False
 
 
 def watch_vocabulary_recovery(vault_root: Path, shutdown: threading.Event) -> None:
@@ -770,19 +812,16 @@ def watch_vocabulary_recovery(vault_root: Path, shutdown: threading.Event) -> No
     only set an event, so many coalesce into one drain and none waits for it.
     """
     published = vocabulary_recovery.publication_signal(vault_root)
-    retries = 0
     try:
         drain_vocabulary_recovery(vault_root, shutdown)
         while not shutdown.is_set():
             if not published.wait(timeout=0.5):
                 continue
             published.clear()
-            retry = published if retries < VOCABULARY_REDRAIN_RETRIES else None
             try:
-                redrain_after_publish(vault_root, shutdown, retry=retry)
+                redrain_after_publish(vault_root, shutdown, wake=published)
             except Exception:  # noqa: BLE001 - the next publication retries
                 log.warning("vocabulary recovery redrain failed", exc_info=True)
-            retries = retries + 1 if published.is_set() else 0
     finally:
         vocabulary_recovery.release_publication_signal(vault_root, published)
 

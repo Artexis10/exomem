@@ -230,7 +230,12 @@ def test_a_publish_that_never_becomes_readable_leaves_the_job_queued(tmp_path, m
         vocabulary_delivery, "recover", lambda *a, **k: pytest.fail("an unreadable graph must not drain")
     )
 
-    assert server_runtime.redrain_after_publish(tmp_path, threading.Event(), ready_seconds=0.05) == 0
+    assert (
+        server_runtime.redrain_after_publish(
+            tmp_path, threading.Event(), first_backoff=0.001, max_backoff=0.002
+        )
+        == 0
+    )
     with library_scope():
         assert len(vocabulary_recovery.page(tmp_path, limit=4)) == 1
 
@@ -313,3 +318,63 @@ def test_the_publication_signal_fires_only_once_the_publish_is_readable(tmp_path
 
     assert readable_when_signalled
     assert all(readable_when_signalled), readable_when_signalled
+
+
+def test_an_unreadable_publish_probes_readability_with_backoff(tmp_path, monkeypatch):
+    """Each readiness probe can walk the vault, so a long unreadable window
+    must cost a few backed-off probes, not a steady four per second."""
+    import threading
+    import time
+
+    from exomem import epistemic_graph, graph_sync, server_runtime
+
+    with library_scope():
+        vocabulary_recovery.enqueue(tmp_path, "0", "Knowledge Base/Notes/0.md")
+    polls = []
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex, "available", lambda self: polls.append(1) and False
+    )
+    monkeypatch.setattr(graph_sync, "status", lambda root: {"state": "stale"})
+    monkeypatch.setattr(
+        vocabulary_delivery, "recover", lambda *a, **k: pytest.fail("an unreadable graph must not drain")
+    )
+    monkeypatch.setitem(server_runtime.drain_vocabulary_recovery.__kwdefaults__, "wait_seconds", 0.0)
+    shutdown = threading.Event()
+    watcher = threading.Thread(
+        target=server_runtime.watch_vocabulary_recovery, args=(tmp_path, shutdown), daemon=True
+    )
+    watcher.start()
+    try:
+        assert _wait_for(lambda: vocabulary_recovery.publication_waiting(tmp_path))
+        time.sleep(0.3)
+        vocabulary_recovery.note_graph_published(tmp_path)
+        time.sleep(2.5)
+        # Probes at 0 s and 1 s; the next is not due until 3 s.
+        assert len(polls) <= 2, len(polls)
+    finally:
+        shutdown.set()
+        watcher.join(timeout=10)
+    assert not watcher.is_alive()
+
+
+def test_one_publication_polls_readability_a_bounded_number_of_times(tmp_path, monkeypatch):
+    import threading
+
+    from exomem import epistemic_graph, server_runtime
+
+    with library_scope():
+        vocabulary_recovery.enqueue(tmp_path, "0", "Knowledge Base/Notes/0.md")
+    polls = []
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex, "available", lambda self: polls.append(1) and False
+    )
+    wake = threading.Event()
+
+    result = server_runtime.redrain_after_publish(
+        tmp_path, threading.Event(), wake=wake, first_backoff=0.001, max_backoff=0.004
+    )
+
+    assert result == 0
+    assert len(polls) == server_runtime.VOCABULARY_REDRAIN_MAX_POLLS
+    assert not wake.is_set(), "an exhausted wait must not re-arm itself"
+    assert server_runtime.redrain_backoffs() == (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0)
