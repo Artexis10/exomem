@@ -80,3 +80,50 @@ A cleaner option is to pass the caller's `keep` into `_binding_blockers`, so a w
 **(d) Prepare-then-seal TOCTOU**
 - No new authority window. Bindings freeze hashes, so later changes are stale at execution, and authorization is re-checked per caller at resume.
 - Residual (Low): orphans remain possible if `seal_proposal` fails for leaf k>1 (for example, `create_forward` re-runs `_require_plan_relocation_history`), or if `session.transitions` raises `EPISODE_REVISION_CONFLICT` after sealing. Such plans are inert and their run ids are never returned. A follow-up could sweep unbound runs; not blocking.
+
+## Recheck 2 (head 7fef2f14)
+
+This round's commit is 7fef2f1. It touched `curation.py`, `episode_workflow.py`, `tests/test_episode_coverage.py`, `design.md` and `tasks.md`. I reviewed all five.
+
+### N1: FIXED
+
+- `curation.preview` takes the caller's release filter as `keep`. `_bound_hash` (`curation.py:1615`) reads every hash-bound path and then discards the hash when `keep` withholds the path. A withheld page and a deleted page therefore produce the same blocker list, the same order, the same I/O (one read attempt per bound path) and the same timing class.
+- An expected absence is still decided on disk. A withheld file there is "not absent", exactly as a visible file there would be.
+- `_blockers` (`episode_workflow.py:382`) passes the resuming caller's filter.
+- `_execute` now always runs the preview (`:785`). A refused leaf only falls back to `CURATION_BINDING_STALE` when the preview finds nothing.
+- Records leaves: both withheld and deleted collections are refused, and the first code comes from the same preview. Only the first code leaves the process.
+
+### Regression test: present and red on the old head
+
+`test_a_relation_source_withheld_before_its_attempt_resumes_like_a_deleted_one` is now parametrized as `as-sealed` and `registry-changed`. The `registry-changed` case writes `_Schema/contracts/extra.yaml`. It pins the ordered preview blockers and the byte-identical resume outcome. Both cases give `CURATION_REGISTRY_CHANGED` and pending, attempts=0.
+
+I ran it against 47331d2 source. The preview assertion was removed there, because that source has no `keep` argument. The `registry-changed` case then fails with the original N1 codes (`CURATION_BINDING_STALE` vs `CURATION_REGISTRY_CHANGED`). On 7fef2f14 both cases pass.
+
+### Orphan sweep follow-up: recorded
+
+Task 3.11 in `tasks.md` covers retiring unbound episode-sealed runs once no journal binds them, and verifies that a bound or in-flight run is never swept. `design.md` names the residual and points to 3.11. 5.5 is unticked and says it awaits this recheck.
+
+### Byte-identity sweep, withheld vs deleted (scratch tests, not committed)
+
+| Leaf | Prepare | Disposition | Resume, unattempted | Resume, uncertain | Committed elsewhere | Postcommit |
+|------|---------|-------------|---------------------|-------------------|---------------------|------------|
+| Records | identical (`COLLECTION_NOT_FOUND`) | identical | identical, with and without a registry change (`REGISTRY_CHANGED` / `BINDING_STALE`) | identical (uncertain) | identical (refused → `diverged`/`EPISODE_OUTCOME_UNCERTAIN`) | identical |
+| Page | identical (`EPISODE_DESTINATION_UNAVAILABLE`) | identical | identical, with and without a registry change | identical | identical, with and without a registry change: `diverged`/`EPISODE_OUTCOME_UNCERTAIN`, and the following postcommit also matches | identical |
+
+An unchanged withheld page and the same page deleted give equal `preview(keep=…)` blocker lists, path included.
+
+### Nit (not blocking)
+
+At `episode_workflow.py:775`, a refused leaf swallows any `EpisodeError` from the committed-elsewhere trial. A non-refused deleted page re-raises it. The errors that can escape are state-only (from `mark_attempt_started`, such as the attempt ceiling, or `EPISODE_BINDING_INVALID`), not vault-dependent. The one path where withheld and deleted differ needs a leaf at `MAX_ATTEMPTS` whose plan committed elsewhere, which I consider unreachable in practice. A cleaner version re-raises for both and keeps only the code override.
+
+### Runs on 7fef2f14
+
+- Pytest (umask 022, temporary `XDG_STATE_HOME`): `tests/test_episode_*.py tests/test_curation*.py`, 397 passed.
+- `ruff --select F`: clean.
+- `generate-capabilities --check`: current.
+- `openspec validate --all --strict`: 217 passed.
+- Privacy gate: clean.
+
+### Verdict: APPROVE
+
+M1, L1, I1, I2 and N1 are resolved with repeatable tests. The 5.5 security gate may be ticked, citing this recheck.
