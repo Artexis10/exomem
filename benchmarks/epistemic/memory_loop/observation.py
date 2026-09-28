@@ -37,7 +37,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import Field, model_validator
@@ -365,8 +365,10 @@ class NoNudgeObservation(StrictModel):
 class Frozen:
     """What a fixture pinned before any run, and what a record must bind to.
 
-    ``shipped_prompt_sha256`` holds the digests of the prompt texts the
-    installed product ships (see :func:`shipped_prompt_sha256`). A public
+    ``shipped_prompts`` maps each product prompt kind to the digests the
+    installed product ships under that kind (see :func:`shipped_prompts`); a
+    digest is admitted only under its own kind, and a hook script's digest
+    only under a hook kind. A public
     synthetic fixture leaves the private digests unset; an exact private
     replay, run and kept locally, sets both.
 
@@ -382,7 +384,7 @@ class Frozen:
     evaluator_sha256: str
     turns_sha256: str
     later_turn_sha256: str | None = None
-    shipped_prompt_sha256: frozenset[str] = frozenset()
+    shipped_prompts: Mapping[str, frozenset[str]] = field(default_factory=dict)
     candidates: tuple[tuple[str, tuple[str, ...]], ...] = ()
     private_input_sha256: str | None = None
     private_snapshot_sha256: str | None = None
@@ -401,14 +403,18 @@ def text_sha256(text: str) -> str:
 #: placeholder before digesting, so every genuine delivery of a template
 #: shares the template's digest and any other edit does not.
 PROMPT_SLOTS: dict[str, str] = {"key": r"ep-[0-9a-f]{32}"}
-#: The hook scripts a lifecycle client runs. Their output is live (an
-#: activation packet, a checkpoint), so a record binds the script that
-#: produced it, never the packet text.
-HOOK_SCRIPTS: tuple[str, ...] = (
-    "exomem_retrieve_nudge.py",
-    "exomem_continuation_checkpoint.py",
-    "exomem_capture_nudge.py",
-)
+#: The hook scripts a lifecycle client runs, under the only hook kind each
+#: may bind. Their output is live (an activation packet, a checkpoint), so a
+#: record binds the script that produced it, never the packet text.
+HOOK_SCRIPT_KINDS: dict[str, tuple[str, ...]] = {
+    "activation_hook": ("exomem_retrieve_nudge.py", "exomem_continuation_checkpoint.py"),
+    "stop_hook_checkpoint": ("exomem_capture_nudge.py",),
+}
+HOOK_SCRIPTS: tuple[str, ...] = tuple(name for names in HOOK_SCRIPT_KINDS.values() for name in names)
+#: Product kinds whose shipped texts may also arrive as a standing
+#: instruction (an installed skill, pasted server guidance). Hook kinds never:
+#: a hook script is not an instruction the agent carries.
+_STANDING_SOURCE_KINDS: tuple[str, ...] = ("server_instructions", "bootstrap", "skill_guidance", "episode_due_advisory")
 
 
 def product_prompt_templates() -> tuple[str, ...]:
@@ -456,18 +462,42 @@ def hook_script_sha256(name: str) -> str:
     return hashlib.sha256(files("exomem._hooks").joinpath(name).read_bytes()).hexdigest()
 
 
-def shipped_prompt_sha256(extra_texts: Iterable[str] = ()) -> frozenset[str]:
-    """Digests of every product-shipped prompt this checkout carries: each
-    template in :func:`product_prompt_templates` and each hook script, plus
-    any texts a run harness reads from the installed version it exercises."""
+def _kind_texts() -> dict[str, tuple[str, ...]]:
+    """The fixed and templated texts this checkout ships, by the prompt kind
+    that delivers each. ``bootstrap`` output is live and ships no fixed text."""
 
-    return frozenset(
-        {
-            *(text_sha256(text) for text in product_prompt_templates()),
-            *(hook_script_sha256(name) for name in HOOK_SCRIPTS),
-            *(text_sha256(text) for text in extra_texts),
-        }
-    )
+    server_instructions, reminder, episode_ask, episode_rule, skill = product_prompt_templates()
+    return {
+        "server_instructions": (server_instructions,),
+        "bootstrap": (),
+        "skill_guidance": (skill,),
+        "episode_due_advisory": (episode_rule,),
+        "activation_hook": (),
+        "stop_hook_checkpoint": (reminder, episode_ask),
+    }
+
+
+def shipped_prompts(extra_texts: Mapping[str, Iterable[str]] | None = None) -> dict[str, frozenset[str]]:
+    """Digests of every product-shipped prompt this checkout carries, by kind:
+    each kind's texts from :func:`_kind_texts`, each hook script under its hook
+    kind only, plus texts a run harness reads from the installed version it
+    exercises, under the kind that delivers them."""
+
+    extra = dict(extra_texts or {})
+    unknown = set(extra) - set(PRODUCT_PROMPT_KINDS)
+    if unknown:
+        raise ValueError(f"unknown product prompt kinds: {sorted(unknown)}")
+    texts = _kind_texts()
+    return {
+        kind: frozenset(
+            {
+                *(text_sha256(text) for text in texts[kind]),
+                *(hook_script_sha256(name) for name in HOOK_SCRIPT_KINDS.get(kind, ())),
+                *(text_sha256(text) for text in extra.get(kind, ())),
+            }
+        )
+        for kind in PRODUCT_PROMPT_KINDS
+    }
 
 
 def standing_instruction(kind: str, text: str) -> dict[str, Any]:
@@ -579,12 +609,13 @@ def _initiation(record: NoNudgeObservation, frozen: Frozen) -> Verdict:
     reasons.extend(
         f"product prompt {prompt.kind} is not a shipped product prompt; it counts as a harness instruction"
         for prompt in host.product_prompts
-        if prompt.sha256 not in frozen.shipped_prompt_sha256
+        if prompt.sha256 not in frozen.shipped_prompts.get(prompt.kind, frozenset())
     )
     reasons.extend(
         f"standing instruction {item.kind} asks for memory use and is not product-shipped"
         for item in host.standing_instructions
-        if item.asks_for_memory and item.sha256 not in frozen.shipped_prompt_sha256
+        if item.asks_for_memory
+        and not any(item.sha256 in frozen.shipped_prompts.get(kind, frozenset()) for kind in _STANDING_SOURCE_KINDS)
     )
     for decision in record.agent_decisions:
         if decision.initiator in {"harness", "user"}:
@@ -734,6 +765,8 @@ def gate_semantics() -> dict[str, Any]:
         "semantic_phases": sorted(module._SEMANTIC_PHASES),
         "prompt_slots": dict(module.PROMPT_SLOTS),
         "hook_scripts": list(module.HOOK_SCRIPTS),
+        "hook_script_kinds": {kind: list(names) for kind, names in module.HOOK_SCRIPT_KINDS.items()},
+        "standing_source_kinds": list(module._STANDING_SOURCE_KINDS),
     }
 
 

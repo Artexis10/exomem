@@ -895,7 +895,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
 # the tests refuse the module until these are deliberately re-pinned.
 # --------------------------------------------------------------------------- #
 
-FIXTURE_SET_SHA256 = "97d7c0796cfe76be66e0dbbd4e611f0f6063ed6f0130925436cd001b28705b94"
+FIXTURE_SET_SHA256 = "725d9ce448c954f550d9d4c9849d8a3671369455b5508a8d50518f1482b8a60b"
 ACTOR_SHA256: dict[str, str] = {
     "org-and-site": "135e9bf0556b3ef2d817d6f3477d96770c34352cb54b01b8477b554b5804235e",
     "multi-role": "2c03c998b675d80fd6e3ac1ddc92a75e7cd3b994f2461f0a5b87a2388331f42c",
@@ -905,12 +905,12 @@ ACTOR_SHA256: dict[str, str] = {
     "brand": "958f06142f148e58e923996de78a106ef3bbb00da56af85a6c4deffdba76c01c",
 }
 EVALUATOR_SHA256: dict[str, str] = {
-    "org-and-site": "56262d755c0f573b1b1f11cae2b7fc46940a18e9c12b8e04b340ab81b4a9045d",
-    "multi-role": "68af4cc9c83aea946c60642726ef8182a654cf045b301f2487a3a4334ca1e493",
-    "shared-name": "7c2c8a918bcc5c041315080d299b3b5e4c87c4d90bd156341ec4d718ade5a787",
-    "mixed-purchase": "5ef532dfb27a59c34d5c36f4285f4d28fecf815f427338e0918714d7b02f62d1",
-    "operator-succession": "8fc977b4e8fec58706e463c7b4db935f15bef677a2de7792de496538233991af",
-    "brand": "c5e8f59efa9b1957787bcc877471415adc4363ef707306a6bd00feca505e16ac",
+    "org-and-site": "390b47737ed62199ef14595a8287c386ff539717c1fb79f15798f4d123b88491",
+    "multi-role": "7f959b070be673bf1b1459b95cbcbf17e5ed80abc9353ff16d9260b380348054",
+    "shared-name": "28abd8f9b72fc8f833e04b6cd7c7bb657e71a2e22fa5be2879cba805f5ff96f2",
+    "mixed-purchase": "7d8aeee36622681fd70f6b16ad9a23dafe9c216afc7beaad513b67c8b16a26c5",
+    "operator-succession": "922918e2133131d97397c3976bbedfd6113906d1c7c2f4bc2cf4f9c329efb05b",
+    "brand": "f186700e4e49807805b0d89daa5295cc788dbc84d97f3d7c112f4f4a2cf7801c",
 }
 PRE_CAPTURE_SHA256: dict[str, str] = {
     "org-and-site": "47a43d1f62175c6696516cfe4c3e822ec2e424d1180dc42dcd81dc4137449f55",
@@ -984,7 +984,7 @@ def frozen(episode_id: str) -> obs.Frozen:
         evaluator_sha256=EVALUATOR_SHA256[episode_id],
         turns_sha256=obs.turns_sha256(item.turns),
         later_turn_sha256=obs.text_sha256(item.later_turn),
-        shipped_prompt_sha256=obs.shipped_prompt_sha256(),
+        shipped_prompts=obs.shipped_prompts(),
         candidates=DECLARED_CANDIDATES.get(episode_id, ()),
     )
 

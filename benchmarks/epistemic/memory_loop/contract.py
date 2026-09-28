@@ -837,7 +837,7 @@ def read_state(root: Path) -> VaultState:
 
 #: Bump when any predicate's code changes meaning; it is part of every
 #: evaluator digest, so a semantic change voids runs bound to the old one.
-SEMANTICS_VERSION = 6
+SEMANTICS_VERSION = 7
 
 #: Core relations that record that two things are connected without saying
 #: how. They are honest when nothing more precise is supported, and never

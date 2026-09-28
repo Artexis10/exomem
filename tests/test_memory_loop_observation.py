@@ -31,7 +31,7 @@ FROZEN = obs.Frozen(
     evaluator_sha256=DIGEST,
     turns_sha256=TURNS_SHA,
     later_turn_sha256=DIGEST,
-    shipped_prompt_sha256=frozenset(obs.text_sha256(text) for text in PROMPTS.values()),
+    shipped_prompts={kind: frozenset({obs.text_sha256(text)}) for kind, text in PROMPTS.items()},
     candidates=(("rye", ("rye",)),),
 )
 
@@ -530,7 +530,7 @@ def test_a_product_prompt_the_product_does_not_ship_fails_initiation() -> None:
 def test_the_shipped_prompt_digests_include_the_server_instructions() -> None:
     from exomem import server
 
-    assert obs.text_sha256(server.SERVER_INSTRUCTIONS) in obs.shipped_prompt_sha256()
+    assert obs.text_sha256(server.SERVER_INSTRUCTIONS) in obs.shipped_prompts()["server_instructions"]
 
 
 def test_a_standing_instruction_asking_for_memory_fails_initiation() -> None:
@@ -552,7 +552,7 @@ def test_a_standing_instruction_that_asks_nothing_of_memory_is_ordinary() -> Non
 
 def test_a_shipped_skill_asking_for_memory_is_product_guidance() -> None:
     text = "Save durable conclusions with the capture workflow."
-    frozen = obs.Frozen(**{**FROZEN.__dict__, "shipped_prompt_sha256": FROZEN.shipped_prompt_sha256 | {obs.text_sha256(text)}})
+    frozen = obs.Frozen(**{**FROZEN.__dict__, "shipped_prompts": {**FROZEN.shipped_prompts, "skill_guidance": frozenset({obs.text_sha256(text)})}})
     record = _with_initiation(standing_instructions=[obs.standing_instruction("installed_skill", text)])
 
     assert obs.evaluate(obs.load_observation(record), frozen).ordinary_initiation.outcome == "pass"
@@ -717,3 +717,52 @@ def test_an_activation_hook_binds_by_its_script_digest_not_its_live_packet() -> 
 
     assert obs.evaluate(_hooked(frozen, product_prompts=[by_script]), frozen).ordinary_initiation.outcome == "pass"
     assert obs.evaluate(_hooked(frozen, product_prompts=[by_packet]), frozen).ordinary_initiation.outcome == "fail"
+
+
+# --------------------------------------------------------------------------- #
+# A digest is admitted only under the prompt kind that ships it
+# --------------------------------------------------------------------------- #
+
+
+def _best_effort(frozen: obs.Frozen, prompt: dict) -> obs.NoNudgeObservation:
+    from exomem import server
+
+    shipped = _delivered("server_instructions", server.SERVER_INSTRUCTIONS)
+    return obs.load_observation(
+        _with_initiation(delivered_turns_sha256=frozen.turns_sha256, product_prompts=[shipped, prompt])
+    )
+
+
+@pytest.mark.parametrize("kind", ["bootstrap", "skill_guidance", "episode_due_advisory", "server_instructions"])
+@pytest.mark.parametrize("script", obs.HOOK_SCRIPTS)
+def test_probe_r4_a_hook_script_digest_outside_a_hook_kind_fails(kind: str, script: str) -> None:
+    frozen = _fixture_frozen()["rich_episode"]
+    prompt = {"kind": kind, "detail": "relabelled hook", "sha256": obs.hook_script_sha256(script)}
+
+    report = obs.evaluate(_best_effort(frozen, prompt), frozen)
+
+    assert report.ordinary_initiation.outcome == "fail"
+    assert any(f"product prompt {kind} is not a shipped" in reason for reason in report.ordinary_initiation.reasons)
+
+
+@pytest.mark.parametrize("kind", ["activation_hook", "stop_hook_checkpoint"])
+def test_probe_r4_server_instructions_labelled_as_a_hook_fail(kind: str) -> None:
+    from exomem import server
+
+    frozen = _fixture_frozen()["rich_episode"]
+    record = _hooked(frozen, product_prompts=[_delivered(kind, server.SERVER_INSTRUCTIONS)])
+
+    report = obs.evaluate(record, frozen)
+
+    assert report.ordinary_initiation.outcome == "fail"
+    assert any(f"product prompt {kind} is not a shipped" in reason for reason in report.ordinary_initiation.reasons)
+
+
+def test_the_capture_hook_script_binds_under_the_stop_checkpoint_not_activation() -> None:
+    frozen = _fixture_frozen()["rich_episode"]
+    script = obs.hook_script_sha256("exomem_capture_nudge.py")
+    stop = {"kind": "stop_hook_checkpoint", "detail": "installed hook", "sha256": script}
+    activation = {"kind": "activation_hook", "detail": "installed hook", "sha256": script}
+
+    assert obs.evaluate(_hooked(frozen, product_prompts=[stop]), frozen).ordinary_initiation.outcome == "pass"
+    assert obs.evaluate(_hooked(frozen, product_prompts=[activation]), frozen).ordinary_initiation.outcome == "fail"

@@ -354,14 +354,14 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
 # Frozen pins (re-pinned deliberately; the tests refuse drift)
 # --------------------------------------------------------------------------- #
 
-FIXTURE_SET_SHA256 = "0752b0924f5a478c0627482ce4a7d2103807379c7be545a527ba67c494dfcfda"
+FIXTURE_SET_SHA256 = "01022a51888f1a43f7585ba67747cc2dd7a6aebdc0602003459d2aade0e59aef"
 ACTOR_SHA256: dict[str, str] = {
     "synthesis": "50c776148b7dfd7ca3a0a517ed190bd7bb54208cf0e5fdf8fafeb7ddd95fb007",
     "refinement": "5fbcfa6f5c51314b623643ea95ff53bae666eab07080c61c9114842883efb230",
 }
 EVALUATOR_SHA256: dict[str, str] = {
-    "synthesis": "d7c4ba254a5097b8e707963090a66f903b634057a46dde1ca753c7b01c7fbf89",
-    "refinement": "77e646b8958691285d913b5595eea7d0dda9dbbf41e79b6e4e92fc7d39906b50",
+    "synthesis": "b05f9060a9e4f8995612a06c412560087f59546e503b9a3b572892ac9b730bbb",
+    "refinement": "6d6c619fa83725d18b10eb3abc68828e270be97280b22763e2e459eeb7b7b478",
 }
 PRE_CAPTURE_SHA256 = "80e33a8646d7bd509563be44f442fbfe31aa61f05c14fc42c18cf01e6a3ba41d"
 
@@ -424,7 +424,7 @@ def frozen(episode_id: str) -> obs.Frozen:
         evaluator_sha256=EVALUATOR_SHA256[episode_id],
         turns_sha256=obs.turns_sha256(item.turns),
         later_turn_sha256=obs.text_sha256(item.later_turn),
-        shipped_prompt_sha256=obs.shipped_prompt_sha256(),
+        shipped_prompts=obs.shipped_prompts(),
     )
 
 

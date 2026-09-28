@@ -453,9 +453,9 @@ LATER_USE = LaterUse(
 # Frozen pins (re-pinned deliberately; the tests refuse drift)
 # --------------------------------------------------------------------------- #
 
-FIXTURE_SHA256 = "6d7d785aae1a47294e662c3f121e6a727b13797e4633dadf79335bf246f9da8f"
+FIXTURE_SHA256 = "92514ae48de65fc74044dcedae3147146ed1ac86f3504e8678dfb836e6c30239"
 ACTOR_SHA256 = "5d231888bf6d0dea5fcc4fc91f6522e1147d52540f0e4040394716a49da9ab53"
-EVALUATOR_SHA256 = "8c5ea795fc409add3219f524a71e6d2a14ba982c49743fc853b14ccb4d36a1e3"
+EVALUATOR_SHA256 = "64f6432573aa888a2cf16ac62619479acea76be6348f47ae8c0bcf0500368426"
 PRE_CAPTURE_SHA256 = "49186c3596cc46383672e7e2d507b455e61c8da9f9dbcfd750b577d0d8dfd0ce"
 
 # --------------------------------------------------------------------------- #
@@ -505,7 +505,7 @@ def frozen() -> obs.Frozen:
         evaluator_sha256=EVALUATOR_SHA256,
         turns_sha256=obs.turns_sha256(TURNS),
         later_turn_sha256=obs.text_sha256(LATER_TURN),
-        shipped_prompt_sha256=obs.shipped_prompt_sha256(),
+        shipped_prompts=obs.shipped_prompts(),
         candidates=tuple(IDENTIFIERS.items()),
     )
 
