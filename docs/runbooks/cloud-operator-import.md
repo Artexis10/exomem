@@ -23,6 +23,20 @@ Three machines take part:
 
 The cell is down from step 5 to step 7, which takes minutes for a vault of a few gigabytes.
 
+## What the cell's volume holds
+
+Measured on the cell image by running `cell-init` and the server on an empty volume, then writing and recalling a note. `/data/host` is the runtime's home directory.
+
+| Path | What it is | In a restore |
+|---|---|---|
+| `/data/vault` | the vault | replaced |
+| `/data/host/.local/state/exomem/state/` | derived state per vault: search indexes, graph, receipts, due state | set aside with the prior vault; rebuilt on start |
+| `/data/host/.cache/exomem/` | locks, idempotency records, generation counters | set aside with the prior vault; recreated on start |
+| `/data/host/.local/state/exomem/standalone-host-control-v1/` | standalone custody, present only once a vault enrols in it | left in place |
+| `/data/host/.cache/Microsoft/` | the ONNX runtime's own telemetry ID | left in place |
+
+The derived-state key is a hash of the vault's path, and the path stays `/data/vault`. A restore that left the old derived state in place would serve the replaced vault's indexes for the new notes. Setting it aside is what stops that.
+
 ## 1. Check the source
 
 On the source machine. Nothing here prints note names or content.
