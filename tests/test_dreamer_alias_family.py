@@ -303,3 +303,36 @@ def test_an_older_sidecar_is_wiped_and_reseeded(tmp_path: Path) -> None:
     assert dreamer_store.read_view(vault) is None
     _quiet(vault)
     assert _open(vault) is not None
+
+
+def test_ambiguity_is_bounded_and_reads_no_page(tmp_path: Path, monkeypatch) -> None:
+    """Titles come from the name rows, and past 32 released members nothing counts."""
+    vault = fx.build_vocabulary(tmp_path, with_graph=False)
+    rival = f"{fx.KB}/Notes/Insights/orbit-pump-copy.md"
+    fx.write(vault, rival, fx.note("Orbit Pump"))
+    freshness.clear()
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    _quiet(vault)
+    ctx = dreamer_families.Context(vault_root=vault, store=None, conn=None, now=time.time())
+    parsed: list[str] = []
+    real_page = dreamer_families.Context.page
+    monkeypatch.setattr(
+        dreamer_families.Context,
+        "page",
+        lambda self, rel: parsed.append(rel) or real_page(self, rel),
+    )
+    try:
+        assert dreamer_families.ambiguity(ctx, fx.VARIANT_KEY, None) == "forward_reference"
+    finally:
+        ctx.close()
+    assert parsed == []
+    monkeypatch.setattr(dreamer_families.Context, "page", real_page)
+    for index in range(31):
+        fx.write(vault, f"{fx.KB}/Notes/Insights/orbit-pump-{index:02d}.md", fx.note("Orbit Pump"))
+    freshness.clear()
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    _quiet(vault)
+    dreamer_store.clear_reader_memo()
+    assert upkeep.review(vault)["integrity"] == {}

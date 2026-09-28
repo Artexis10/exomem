@@ -12,6 +12,7 @@ One proposal per page and label, anchored on the registry's content hash.
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from pathlib import Path
 
@@ -310,3 +311,54 @@ def test_a_registered_category_outside_the_page_scope_is_never_named(tmp_path: P
     )
     _quiet(vault)
     assert _open(vault, CATEGORY_ID)["measures"]["target"] == "field_trial"
+
+
+def test_the_global_families_resume_once_there_is_room_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the size cap they stop and report incomplete; with room they reseed."""
+    floor, per_page = dreamer_store.SIZE_CAP_FLOOR_BYTES, dreamer_store.BYTES_PER_PAGE
+    monkeypatch.setattr(dreamer_store, "SIZE_CAP_FLOOR_BYTES", 1)
+    monkeypatch.setattr(dreamer_store, "BYTES_PER_PAGE", 1)
+    vault = fx.build_vocabulary(tmp_path)
+    _quiet(vault)
+    assert _open(vault, TAG_ID) is None
+    dreamer_store.clear_reader_memo()
+    complete = upkeep.review(vault)["evidence_complete"]
+    assert complete[dreamer_families.CONVENTION_FAMILY] is False
+    assert complete[dreamer_families.LINK_FAMILY] is True
+    monkeypatch.setattr(dreamer_store, "SIZE_CAP_FLOOR_BYTES", floor)
+    monkeypatch.setattr(dreamer_store, "BYTES_PER_PAGE", per_page)
+    _quiet(vault)
+    assert _open(vault, TAG_ID) is not None
+    assert _open(vault, CATEGORY_ID) is not None
+    dreamer_store.clear_reader_memo()
+    complete = upkeep.review(vault)["evidence_complete"]
+    assert complete[dreamer_families.CONVENTION_FAMILY] is True
+    assert complete[dreamer_families.ALIAS_FAMILY] is True
+
+
+def test_freed_pages_are_returned_to_the_filesystem(tmp_path: Path) -> None:
+    vault = fx.build_vocabulary(tmp_path, with_graph=False)
+    crowd = [f"{fx.KB}/Notes/Insights/care-{index:02d}.md" for index in range(60)]
+    tags = tuple(f"care-topic-{k}" for k in range(16))
+    links = " ".join(f"[[Care Target {k}]]" for k in range(16))
+    for rel in crowd:
+        fx.write(vault, rel, fx.note(rel.rsplit("/", 1)[-1], tags=tags, links=links))
+    freshness.clear()
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    _quiet(vault)
+    path = dreamer_store.sidecar_path(vault)
+    store = dreamer_store.DreamerStore(vault)
+    grown = store.size_bytes()
+    for rel in crowd:
+        fx.remove(vault, rel, graph=False)
+    fx.publish_graph(vault)
+    _quiet(vault)
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA freelist_count").fetchone()[0] == 0
+    finally:
+        conn.close()
+    assert store.size_bytes() < grown
