@@ -145,14 +145,22 @@ the anchor SHALL report its home as before.
 
 ### Requirement: Retired revisions do not make a page's name ordinary
 The retrieval carry SHALL measure how distinctive a turn's word is without counting
-pages whose own status retires them (the statuses the carry already refuses to serve),
-so a page revised several times stays nameable by the words its retired revisions
-share. Current pages SHALL still count, and the corpus page total SHALL be unchanged.
+retired pages, by the same test the carry applies to its own candidates: a page whose
+own status retires it, or whose `superseded_by` names its replacement. A page revised
+several times thus stays nameable by the words its retired revisions share. The
+`superseded_by` test MAY be applied only to a word counted at most one carry window
+above the distinctiveness cap, since no other word can become distinctive. Current pages
+SHALL still count, and the corpus page total SHALL be unchanged.
 
 #### Scenario: A page revised three times is still carried
 - **WHEN** a turn names a page by a phrase that its three superseded revisions also
   carry, and no other current page carries it
 - **THEN** the carry admits the current page alone
+
+#### Scenario: A revision retired only by its successor pointer is not counted
+- **WHEN** the three revisions keep `status: active` but each names the current page in
+  `superseded_by`
+- **THEN** the carry still admits the current page alone
 
 #### Scenario: Current namesakes still make a phrase ordinary
 - **WHEN** four current pages carry the same phrase

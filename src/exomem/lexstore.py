@@ -2242,6 +2242,44 @@ def term_document_frequencies(
     )
 
 
+def term_document_paths(
+    vault_root: Path,
+    terms: Iterable[str],
+    *,
+    limit: int,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+    allow_delta: bool = True,
+    recall_checkpoint: Any | None = None,
+    exclude_navigation: bool = False,
+    exclude_raw_material: bool = False,
+    exclude_statuses: Iterable[str] = (),
+) -> CatalogQueryResult[dict[str, tuple[str, ...]]]:
+    """`{stem: up to `limit` page paths carrying it}`, over exactly the rows
+    `term_document_frequencies` counts with the same arguments.
+
+    For a caller that must judge the pages behind a count one by one, which
+    the catalogue cannot (a `superseded_by` pointer is not a catalogue
+    column). One indexed lookup per stem, bounded by `limit`, ordered by path.
+    """
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    wanted = [str(term) for term in terms if str(term).strip()]
+    if not wanted or limit <= 0:
+        return CatalogQueryResult({}, CatalogReadiness("available", True, backend()))
+    return get_store(vault_root).term_document_paths(
+        wanted,
+        scope,
+        freshness,
+        limit=int(limit),
+        allow_delta=allow_delta,
+        recall_checkpoint=recall_checkpoint,
+        exclude_navigation=exclude_navigation,
+        exclude_raw_material=exclude_raw_material,
+        exclude_statuses=tuple(sorted({str(status) for status in exclude_statuses})),
+    )
+
+
 def _excluded_rows_clause(
     *, navigation: bool, raw_material: bool, statuses: tuple[str, ...] = ()
 ) -> tuple[str, list[object]]:
@@ -6762,6 +6800,45 @@ class LexicalStore:
                 exclude_statuses=exclude_statuses,
             ),
             "lexical sidecar document-frequency query failed (%s)",
+            allow_delta=allow_delta,
+            recall_checkpoint=recall_checkpoint,
+        )
+
+    def term_document_paths(
+        self,
+        stemmed_tokens: list[str],
+        scope: str,
+        freshness: tuple | None,
+        *,
+        limit: int,
+        allow_delta: bool = True,
+        recall_checkpoint: Any | None = None,
+        exclude_navigation: bool = False,
+        exclude_raw_material: bool = False,
+        exclude_statuses: tuple[str, ...] = (),
+    ) -> CatalogQueryResult[dict[str, tuple[str, ...]]]:
+        def query(conn: sqlite3.Connection) -> dict[str, tuple[str, ...]]:
+            col = "in_vault" if scope == "vault" else "in_kb"
+            clause, params = _excluded_rows_clause(
+                navigation=exclude_navigation,
+                raw_material=exclude_raw_material,
+                statuses=exclude_statuses,
+            )
+            out: dict[str, tuple[str, ...]] = {}
+            for token in dict.fromkeys(stemmed_tokens):
+                rows = conn.execute(
+                    "SELECT p.path FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                    f"WHERE fts MATCH ? AND p.{col} = 1" + clause + " ORDER BY p.path LIMIT ?",
+                    (f'"{token}"', *params, limit),
+                ).fetchall()
+                out[token] = tuple(str(row[0]) for row in rows)
+            return out
+
+        return self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            query,
+            "lexical sidecar document-path query failed (%s)",
             allow_delta=allow_delta,
             recall_checkpoint=recall_checkpoint,
         )

@@ -5,8 +5,9 @@ counts distinctiveness as the number of pages a word occurs on. A page revised
 three times is the same subject written four times: its retired revisions carry
 its name words too, so the words stop counting as distinctive and the current
 page can no longer be named by them, however plainly the turn says them.
-Retired revisions are not counted, exactly as the carry already never serves
-them. Invented names only.
+Retired revisions, by a retiring status or by a `superseded_by` pointer, are
+not counted, exactly as the carry already never serves them
+(`working_set._is_current_page`). Invented names only.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ def _revision(name: str, *, status: str, body: str, successor: str | None) -> st
     )
 
 
-def _seed(vault: Path, *, retired: int) -> None:
+def _seed(vault: Path, *, retired: int, retired_status: str = "superseded") -> None:
     _seed_structure(vault)
     _seed_planning(vault)
     kb = vault / "Knowledge Base"
@@ -46,7 +47,7 @@ def _seed(vault: Path, *, retired: int) -> None:
             kb / "Notes" / "Research" / f"brask-ferry-timetable-v{index + 1}.md",
             _revision(
                 f"v{index + 1}",
-                status="superseded",
+                status=retired_status,
                 body=f"ran every {index + 2} hours from the south pier.",
                 successor=CURRENT,
             ),
@@ -68,6 +69,18 @@ def test_a_page_revised_three_times_is_still_carried_by_its_name(vault: Path) ->
     assert state == "available"
     assert [path for path, _score in hits] == [CURRENT]
     assert working_set.dominant_carry(hits) is not None
+
+
+def test_revisions_retired_only_by_superseded_by_do_not_block_the_carry(vault: Path) -> None:
+    """Review probe: three `status: active` revisions that each name their
+    successor in `superseded_by` are as retired as a `superseded` status."""
+
+    _seed(vault, retired=3, retired_status="active")
+
+    hits, state = working_set_runtime.carry_candidates(vault, TURN)
+
+    assert state == "available"
+    assert [path for path, _score in hits] == [CURRENT]
 
 
 def test_retired_revisions_do_not_count_toward_a_words_rarity(vault: Path) -> None:

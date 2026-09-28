@@ -1308,6 +1308,35 @@ def _eligible_agent_page(vault_root: Path, ref: str) -> str | None:
     return path
 
 
+def discount_superseded_pages(
+    vault_root: Path,
+    frequencies: Mapping[str, int],
+    paths_for: Callable[[Sequence[str], int], Mapping[str, Sequence[str]]],
+    *,
+    cap: int,
+) -> dict[str, int]:
+    """`frequencies` with pages `_is_current_page` retires taken back out.
+
+    The catalogue already leaves out a retiring STATUS (`RETIRED_PAGE_STATUSES`);
+    a `superseded_by` pointer on an otherwise active page is not a catalogue
+    column, so it is judged here, page by page, the way the carry judges its
+    own candidates. Only for a stem that could still turn out distinctive —
+    counted above `cap` by at most `RETRIEVAL_CARRY_FETCH` pages — so the
+    reads stay bounded by the same window the carry reads its hits through.
+    `paths_for(stems, limit)` lists the pages behind each count.
+    """
+    out = {stem: int(count) for stem, count in frequencies.items()}
+    near = [stem for stem, count in out.items() if cap < count <= cap + RETRIEVAL_CARRY_FETCH]
+    if not near:
+        return out
+    limit = cap + RETRIEVAL_CARRY_FETCH
+    listed = paths_for(near, limit)
+    for stem in near:
+        retired = sum(1 for path in listed.get(stem, ()) if not _is_current_page(vault_root, path))
+        out[stem] = max(0, out[stem] - retired)
+    return out
+
+
 def rare_document_cap(corpus_pages: int) -> int:
     """The document frequency at or below which a stem counts as DISTINCTIVE
     in a corpus of `corpus_pages` indexed pages.
