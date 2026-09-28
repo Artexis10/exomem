@@ -76,3 +76,40 @@ as a scratch test file that was never committed.
 
 **REQUEST_CHANGES.** Concern 1 reopens B with one declared key and lets a wrong-answer
 capture pass. Concerns 2 and 3 are small; fix them in the same round.
+
+## Recheck 2 (head 22eb74ff)
+
+Scope: `0f6a911..22eb74f`, three commits, ten files. Tests: `tests/test_memory_loop_*.py`,
+295 passed in 170s. The probes ran as a scratch test file that was never committed.
+The test lines this round removed were all renames (`shipped_prompt_sha256` →
+`shipped_prompts`, the widened fingerprint pin and parametrize list); no assertion was
+weakened.
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| Concern 1: declared family | FIXED | `_core_family` (contract.py:759) judges by the parent's core family. My probe now fails both `current-operator-on-site` and `no-new-ownership`, and on brand (`owns` declared as `association`) both `*-sells-under`. It is a red test (`test_probe_r4_…`), and product task 5.12 is recorded in tasks.md. |
+| Concern 2: kind and client binding | FIXED | `shipped_prompts` is keyed by kind. The real ask passes as `stop_hook_checkpoint` but not as `skill_guidance`. The capture script's digest is refused as `bootstrap` and as `activation_hook`. A hook-script digest is not admitted as a standing instruction. A hook kind on a best-effort client is still a validation error. Unknown extra kinds raise. |
+| Concern 3: fingerprint coverage | FIXED | Patching the source of `_publication`, `_later`, `prompt_sha256`, `_template_pattern`, `accept` or `void_reasons` moves `semantics_fingerprint()`. `_has_marker` is in it; see minor b. |
+| SEMANTICS_VERSION and pins | FIXED | The version goes 5 → 6 (e18a32c), → 7 (2035de0), → 8 (22eb74f), one per meaning change. Every evaluator, fixture and fingerprint pin moved; actor and pre-capture pins did not, which is correct. |
+
+**Re-run: do-nothing and wrong-answer probes.**
+- An untouched world still passes only shared-name, where abstaining is the correct
+  answer, and only with a disposition that names the hearsay.
+- Slot injection, an uppercase key and a reworded ask still fail.
+- The `owns`-parent laundering is closed.
+
+**Minor, not blocking**
+- (a) The fix trusts the parent and ignores the declared family in the other direction
+  too. An extension parented on `relates_to` that declares `family: ownership` is
+  classified by the registry as ownership, yet it passes brand cleanly (failed = []).
+  - The same edge without a declared family also passes, so this adds no new
+    wrong-answer path. It is the model-free limit: an extension's name is not read.
+  - Suggest taking the stricter of the two families: fail when either the parent's
+    core family or the declared family is in `NON_GOVERNED_FAMILIES`. Also declare the
+    limit next to D.
+  - Task 5.12 closes the product side.
+- (b) `_fold`, which `_has_marker` calls, is not in `contract_functions`. Like the other
+  contract predicates, it relies on the manual `SEMANTICS_VERSION` bump.
+
+**APPROVE.** Concerns 1–3 are fixed with red tests and consistent pins. (a) and (b) can
+go into a later round.
