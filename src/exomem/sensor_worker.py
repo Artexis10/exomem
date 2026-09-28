@@ -63,6 +63,7 @@ EXIT_REFUSED = 78
 
 SPEND_FILE = "spend.json"
 STATUS_FILE = "worker-status.json"
+ADMISSION_FILE = "admission.json"
 
 def _state_file(vault_root: Path, name: str) -> Path:
     return sensing_ledger.ledger_path(vault_root).with_name(name)
@@ -389,7 +390,9 @@ def run_child(
         from . import sensing_nli
 
         try:
-            instrument = (admit or sensing_nli.admit)()
+            instrument = (admit or (lambda: sensing_nli.admit(
+                evidence_path=_state_file(vault_root, ADMISSION_FILE)
+            )))()
         except sensing_nli.Refused as refused:
             _write_json(
                 _state_file(vault_root, STATUS_FILE),

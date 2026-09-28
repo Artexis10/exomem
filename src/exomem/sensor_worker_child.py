@@ -12,6 +12,12 @@ from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
+    import os
+
+    # CPU only (owner ruling R5), before anything can import torch: a visible
+    # device can be initialised by the forward pass even with `device="cpu"`.
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
     from .runtime_resources import bootstrap
 
     bootstrap()

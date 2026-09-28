@@ -133,7 +133,9 @@ class NliInstrument:
             runnable.append(index)
             batch.extend(((first, second), (second, first)))
         if batch:
-            logits = self._model.predict(batch, apply_softmax=False, convert_to_numpy=True)
+            logits = self._model.predict(
+                batch, apply_softmax=False, convert_to_numpy=True, show_progress_bar=False
+            )
             rows = _softmax_rows(logits)
             if rows is None:
                 raise ValueError("non-finite or misshapen logits; no reading is recorded")
@@ -187,13 +189,62 @@ def judge_fixtures(instrument: Any, fixture_set: str) -> tuple[bool, str, list[d
 
 
 _ADMITTED: dict[tuple[str, str], tuple[bool, str]] = {}
+_LOADED: dict[str, NliInstrument] = {}
 _LOCK = threading.Lock()
 
 
-def admit() -> NliInstrument:
+def _fixture_digest(ident: sensing.InstrumentIdentity) -> str:
+    """What a green verdict was earned against: the fixtures and the label map."""
+    import dataclasses
+    import hashlib
+    import json
+
+    payload = json.dumps(
+        [
+            [dataclasses.asdict(item) for item in sensing.RELATION_FIXTURES.get(ident.fixture_set, ())],
+            dataclasses.asdict(sensing.label_map(ident.label_map_version)),
+        ],
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _recorded_green(evidence_path: Path | None, key: str) -> bool:
+    if evidence_path is None:
+        return False
+    import json
+
+    try:
+        return json.loads(evidence_path.read_text(encoding="utf-8")).get(key) is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _record_green(evidence_path: Path | None, key: str) -> None:
+    if evidence_path is None:
+        return
+    import json
+    import os
+
+    try:
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = evidence_path.with_name(evidence_path.name + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({key: True}), encoding="utf-8")
+        os.replace(tmp, evidence_path)
+    except OSError:
+        log.debug("sensing: admission evidence not recorded", exc_info=True)
+
+
+def admit(evidence_path: Path | None = None) -> NliInstrument:
     """Load and admit the pinned instrument on CPU, or raise `Refused`.
 
-    Only the sensor worker child calls this.
+    Only the sensor worker child calls this. The fixture run is the costly half
+    of admission (about 20 CPU-seconds on one thread), so a green verdict is
+    recorded at `evidence_path`, keyed by the instrument id (model, revision,
+    verified weights digest, runtime and template) and a digest of the fixture
+    set and label map. A later child with that exact identity reuses it. The
+    weights digest itself is re-verified on every admission.
     """
     pin = claims._active_pin()
     if pin is None:
@@ -210,6 +261,11 @@ def admit() -> NliInstrument:
         raise Refused("weights-missing", detail)
     if digest != pin.weights_sha256:
         raise Refused("digest-mismatch", f"resolved {digest}, pinned {pin.weights_sha256}")
+    with _LOCK:
+        loaded = _LOADED.get(ident.instrument_id)
+        verdict = _ADMITTED.get((ident.instrument_id, ident.fixture_set))
+    if loaded is not None and verdict is not None and verdict[0]:
+        return loaded
     try:
         import torch
         from sentence_transformers import CrossEncoder
@@ -227,12 +283,20 @@ def admit() -> NliInstrument:
             raise Refused("label-map-unknown", f"head declares {declared}, map needs {_COLUMNS}")
     instrument = NliInstrument(ident, model)
     key = (ident.instrument_id, ident.fixture_set)
+    evidence_key = f"{ident.instrument_id}:{_fixture_digest(ident)}"
     with _LOCK:
         verdict = _ADMITTED.get(key)
+        if verdict is None and _recorded_green(evidence_path, evidence_key):
+            verdict = (True, "fixtures green (recorded for this exact identity)")
+            _ADMITTED[key] = verdict
         if verdict is None:
             green, fixture_detail, _results = judge_fixtures(instrument, ident.fixture_set)
             verdict = (green, fixture_detail)
             _ADMITTED[key] = verdict
+            if green:
+                _record_green(evidence_path, evidence_key)
     if not verdict[0]:
         raise Refused("fixtures-failed", verdict[1])
+    with _LOCK:
+        _LOADED[ident.instrument_id] = instrument
     return instrument

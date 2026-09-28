@@ -47,7 +47,7 @@ A reading SHALL record:
 
 The reading id SHALL be the hash of the question type, the instrument id and the ordered input text hashes. The instrument id SHALL cover the fields that determine the vectors (model, revision, weights, runtime, runtime version, template version) and SHALL exclude the label-map and fixture-set versions.
 
-The ledger SHALL NOT store vault text. Wiping the dreamer sidecar SHALL NOT touch it. The ledger SHALL be named in the state-root backup guidance, and SHALL be a portable-derived member of hosted export and restore once cells sense.
+The ledger SHALL NOT store vault text. Wiping the dreamer sidecar or the sensed projection SHALL NOT touch it. The ledger SHALL be named in the state-root backup guidance, and SHALL be a portable-derived member of hosted export and restore once cells sense.
 
 #### Scenario: The ledger refuses rewriting history
 
@@ -61,7 +61,7 @@ The ledger SHALL NOT store vault text. Wiping the dreamer sidecar SHALL NOT touc
 
 #### Scenario: A sidecar wipe keeps the evidence
 
-- **WHEN** the dreamer sidecar is wiped and reseeded
+- **WHEN** the dreamer sidecar or the sensed projection is wiped and reseeded
 - **THEN** every reading remains in the ledger and is consumed again without re-sensing
 
 ### Requirement: Readings invalidate by input content and migrate lazily across instruments
@@ -123,7 +123,7 @@ The dreamer SHALL propose pairs for sensing from stored data only, and SHALL NOT
 
 - a cosine of at least a fixed threshold between stored unit vectors of the ranked encoder, whose source text hash equals the unit's current hash;
 - a graph edge between the two pages;
-- a shared authored link target between two pages with different knowledge dates.
+- at least two shared authored link targets between two pages with different knowledge dates.
 
 Selection SHALL NOT be top-k or corpus-relative. Only pairs across two pages SHALL be proposed, and identical texts SHALL NOT be paired. A page SHALL propose at most 128 pairs in a fixed deterministic order. A page whose candidates exceed that cap SHALL be marked capped.
 
@@ -147,7 +147,7 @@ Directional asymmetry, abstention and disagreement between active instruments SH
 
 #### Scenario: Replay is byte-identical
 
-- **WHEN** the ledger is replayed into a fresh dreamer sidecar over the same pages and graph
+- **WHEN** the ledger is replayed into a fresh projection over the same pages and graph
 - **THEN** the projected edges, their fingerprints and every served status are byte-identical to the original
 
 #### Scenario: Instruments that disagree stay disagreeing

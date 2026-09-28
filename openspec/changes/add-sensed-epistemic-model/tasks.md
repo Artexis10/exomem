@@ -41,22 +41,22 @@
 
 ## 6. Pair proposers and projections (slice 1)
 
-- [ ] 6.1 Dreamer sidecar schema 5 adds:
-  - `sense_units`: each page's in-scope units with text, hash, kind and knowledge date;
-  - `sense_pairs`: proposed pairs with proposer, priority and whether they need a reading;
-  - `sense_edges`: the projection;
-  - `sense_pages`: capped flag and completeness.
+- [ ] 6.1 A disposable projection file, `<vault state dir>/sensing/projection.sqlite`, kept apart from `dreamer.sqlite` so sensed rows never count against its size cap. It holds:
+  - `pages`: the seen signature, knowledge date, lifecycle, supersession partners, candidate count and capped flag;
+  - `units`: each page's in-scope units with text, hash and stored vector;
+  - `links`: each page's normalised authored link targets;
+  - `pairs`: every proposed pair with proposer, order key, state, verdict, priority, selection and queue flags.
 
-  Each page replaces its own rows.
+  The projection follows the dreamer's `seen` map, and each page replaces its own rows.
 - [ ] 6.2 Proposers:
   - structural (a graph edge either way);
-  - temporal same-subject (a shared authored link fold key and different knowledge dates);
+  - temporal same-subject (at least two shared authored link targets, and different knowledge dates);
   - cosine (stored vectors of the ranked encoder whose source hash matches, θ = 0.72, the matrix bounded at 16,384 units per tick).
 
   Pairs are cross-page only, with no identical texts, capped at 128 per page in a fixed order, and a binding cap marks the page capped. Test per-pair monotonicity: a third page never adds or removes a pair.
 - [ ] 6.3 Projection per pair: consumed readings become edges (state, verdict, direction, `p`, instrument, reading id, fingerprint over the inputs and verdict); `instruments_disagree` across active instruments; stale and migrating pairs are queued. Readings the worker appended between ticks are ingested at tick start.
 - [ ] 6.4 Per-request projections over released edges: contradiction components (bounded at 32 pages) and refinement and supersession chains in time order (bounded at 8).
-- [ ] 6.5 Replay test: rebuilding a fresh sidecar from the same ledger yields byte-identical edges, fingerprints and served statuses, independent of append order and `sensed_at`.
+- [ ] 6.5 Replay test: rebuilding a fresh projection from the same ledger yields byte-identical edges, fingerprints and served statuses, independent of append order and `sensed_at`.
 
 ## 7. Point-of-use status line (slice 1)
 
@@ -67,7 +67,7 @@
 
   Nothing else in the read changes, and the field is absent when there is nothing to say.
 - [ ] 7.2 `activate_context` attaches the same status to resolved anchor pages after the packet is built, outside the packet cache, charged to the packet budget, and never raising.
-- [ ] 7.3 Regenerate the derived artifacts the tool text change touches (tool schemas and plugin contract, packaged skills, hosted renders, capabilities).
+- [ ] 7.3 Describe `epistemic_status` in the `read_memory` and `activate_context` tool text, and regenerate the derived artifacts (tool schemas and plugin contract, packaged skills, hosted renders, capabilities). Deferred to slice 3: slice 1 changes no tool text, the field exists only when the owner turns sensing on, and its line is self-describing.
 
 ## 8. Egress (slice 1)
 

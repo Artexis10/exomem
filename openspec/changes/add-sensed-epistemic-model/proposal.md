@@ -33,7 +33,7 @@ The owner's rulings of 2026-09-28 settle the direction. The dreamer stays Exomem
   - convergence across independent origins;
   - emerging connections to recent work.
 
-  Replaying the ledger into a fresh sidecar yields byte-identical results.
+  They live in their own disposable projection file, so they can never move the dreamer sidecar's size cap or touch a structural family. Replaying the ledger into a fresh projection yields byte-identical results.
 - **Never collapse uncertainty.** Directional asymmetry, abstention and disagreement between instruments are each kept as their own state. Every served item names its verdict, probability, instrument and fixture precision.
 - **Deliver pull-first.**
   - A point-of-use status line on activation and read, such as "refined by 2 later notes; 1 open contradiction". It never ranks and counts released pages only.
@@ -66,8 +66,8 @@ The owner's rulings of 2026-09-28 settle the direction. The dreamer stays Exomem
 
 - **Code:**
   - new: `sensing`, `sensing_ledger`, `sensing_nli`, `sensor_worker`, `sensor_worker_child`, `sensed_model`;
-  - `dreamer` (supervision and sensed projection per page), `dreamer_store` (schema 5), `commands` (read and activation status line), `claims` (shared pin admission).
-- **State:** a new durable file, `<vault state dir>/sensing/readings.sqlite`. The dreamer sidecar moves to schema 5; that is a reseed, and it resets the delivery ledger as documented.
+  - `dreamer` (sensed projection inside the tick's budgets, and supervision in the loop), `commands` (read and activation status line). The stance verifier's pin and loader in `claims` are reused unchanged.
+- **State:** a new durable file, `<vault state dir>/sensing/readings.sqlite`, and a new disposable projection, `<vault state dir>/sensing/projection.sqlite`. The dreamer sidecar's schema and delivery ledger are untouched.
 - **Runtime:**
   - Sensing is default-off, and gated by `EXOMEM_SENSING` or the config key `sensing` (only with the dreamer on).
   - It soft-fails to byte-identical silence when the `nli` extra, the pin or its fixtures are unavailable.

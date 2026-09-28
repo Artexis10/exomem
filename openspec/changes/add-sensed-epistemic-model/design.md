@@ -38,7 +38,7 @@ LLMs are welcome as instruments. The matrix's deterministic measurements keep th
 |---|---|---|
 | Instrument | A pinned model answering one closed question | readings, appended to the ledger |
 | Sensor worker | A disposable child process that runs instruments under budgets | the ledger (append only) |
-| Dreamer | A deterministic modeller over readings, graph and pages | its disposable sidecar |
+| Dreamer | A deterministic modeller over readings, graph and pages | its disposable sidecar, and the disposable sensed projection |
 | Carrier + S6 | Pull-first delivery: status lines, and the existing upkeep block for tensions | nothing canonical |
 | Agent | The sole decider | canon, through existing governed writers |
 
@@ -87,7 +87,7 @@ Registry, in build order:
 
 ### D2. The reading record and the ledger
 
-The ledger is `<vault state dir>/sensing/readings.sqlite` (WAL). It is resolved through the single state-root seam, and it is created only when sensing is on. Its tables:
+The ledger is `<vault state dir>/sensing/readings.sqlite` (WAL). The dreamer's projection of it is a separate disposable file beside it, `sensing/projection.sqlite` (D6). It is resolved through the single state-root seam, and it is created only when sensing is on. Its tables:
 
 - `instruments(instrument_id PRIMARY KEY, identity_json)`;
 - `readings(reading_id PRIMARY KEY, seq UNIQUE, question_type, instrument_id, input_key, inputs_json, output_json, verdict, label_map_version, fixture_set, sensed_at, placement)`;
@@ -144,9 +144,9 @@ Inference runs only in a supervised, disposable child process: `python -m exomem
   - 600 judgements per rolling hour.
   - The child runs one inference thread on CPU (R5), at the lowest OS priority (`runtime_resources.lower_background_priority`).
   - It exits after 60 seconds without work.
-  - It reports its spend after every judgement to a small spend file beside the ledger, and the supervisor charges that spend to its rolling window.
-  - A child that dies without reporting is charged its whole allotment.
-- **What the child reads.** Only the dreamer sidecar's sense queue (read-only, non-waiting) and the ledger. It never reads or writes the vault, takes no lease and schedules no index work.
+  - It reports its spend after every batch to a small spend file beside the ledger, and the supervisor charges that spend to its rolling window.
+  - A child the supervisor terminates is charged its last report plus the wall time since, which bounds a one-thread child's CPU. A child that dies without reporting is charged its whole allotment.
+- **What the child reads.** Only the projection's sense queue (read-only, non-waiting) and the ledger. It never reads or writes the vault, takes no lease and schedules no index work.
 - **Soft failure.** A child that cannot admit its instrument exits with a named refusal, and the supervisor reports it without relaunching until the setting or the pin changes. Refusal causes: gate off, no pin, weights missing, digest mismatch, dependency missing, fixtures failed. Sensing off is byte-identical to a build without sensing.
 
 ### D5. Pair proposers
@@ -155,8 +155,8 @@ The proposers read stored data only; the dreamer never encodes. Each predicate i
 
 - **Cosine.** The stored unit vectors of the ranked encoder, where the vector's source text hash equals the unit's current text hash. A pair is proposed when its cosine is at least `θ = 0.72`: a fixed per-pair threshold, never top-k and never corpus-relative. θ is bound to the encoder fingerprint, and vectors of another encoder propose nothing.
 - **Structural co-occurrence.** Units on two pages joined by a graph edge in either direction.
-- **Temporal same-subject.** Units on two pages that both link the same target spelling (the shared fold key over each page's own authored link targets) and carry different knowledge dates.
-- **Bounds.** Only pairs across two pages are proposed, and identical texts are never paired. Each page proposes at most 128 pairs, chosen in a fixed order: structural, then temporal, then cosine by descending similarity, then pair key. A page whose candidates exceed the cap is `capped`, and its sensed items are served only to owner-bound principals (D8). The cosine matrix is loaded once per tick, bounded at 16,384 in-scope units. Past that bound the cosine proposer stands down and reports it, and the result is the same for every caller.
+- **Temporal same-subject.** Units on two pages that share at least two authored link targets (normalised from each page's own raw targets) and carry different knowledge dates. One shared target is not enough: every note that links a hub would pair with every other, and a second shared subject is what marks the same subject.
+- **Bounds.** Only pairs across two pages are proposed, and identical texts are never paired. Every pair whose predicate holds is recorded, so recording never depends on order. A page sends at most 128 pairs to sensing, chosen in a fixed order: structural, then temporal, then cosine by descending similarity, then pair key. A pair is sensed only when both of its pages select it. A page whose candidates exceed the cap is `capped`, and its sensed items are served only to owner-bound principals (D8). The cosine matrix holds at most 16,384 in-scope units and is cached per process against the projection's unit generation. Past that bound the cosine proposer stands down, and the result is the same for every caller.
 
 ### D6. Deterministic projections
 
@@ -178,7 +178,7 @@ Every projection is a pure function of (ledger snapshot, graph, pages):
 
 - Fingerprints bind to `(question_type, ordered text hashes, verdict, direction)` and never to the reading id.
 - The projection never reads `seq` or `sensed_at`.
-- Replaying the ledger into a fresh sidecar therefore yields byte-identical edges and fingerprints. A test pins that.
+- Replaying the ledger into a fresh projection therefore yields byte-identical edges and fingerprints. A test pins that, and a second test rebuilds the ledger in reverse order with other timestamps.
 
 ### D7. Delivery: pull-first
 
@@ -192,7 +192,7 @@ Every projection is a pure function of (ledger snapshot, graph, pages):
      - `refined_by_later`: distinct released pages whose unit refines one of this page's units and whose knowledge date is later;
      - `open_contradictions`: distinct released pages with a current `contradicts` edge where neither page is superseded or archived, and no authored supersession joins them.
    - It never ranks, reorders or filters anything, and it counts released pages only. It is absent when every count is zero, so a page with nothing sensed is byte-identical.
-   - On activation it is attached after the packet is built, outside the packet cache, like the upkeep block. Its characters are charged to the packet budget.
+   - On activation it is attached to resolved and retrieval-carried anchors, after the packet is built and outside the packet cache, like the upkeep block. Its line is charged to the packet budget.
 2. **Tensions on active or recent work** (slice 3) ride the existing upkeep block: its caps, its delivery ledger and its S6 session-start rule. Sensed families use their own `upkeep_sensed_*` family names, never alter a structural family's rows, order or caps, and route to the existing relation writer. That writer cites the reading id in its `why` evidence. Nothing new pushes.
 
 ### D8. Egress
@@ -245,14 +245,23 @@ Every projection is a pure function of (ledger snapshot, graph, pages):
 ## Risks and trade-offs
 
 - **A capped page is owner-only for restricted callers.** That is the price of a bound that ranks candidates across pages (D8). The cap is set well above an ordinary page's pairs.
-- **The dreamer sidecar moves to schema 5.** That is a reseed, and it resets the delivery ledger as close-memory-loop already accepts.
+- **A second disposable file.** The projection lives in `sensing/projection.sqlite`, beside the ledger, not in `dreamer.sqlite`. Sensed rows can be large, and inside the dreamer sidecar they would count against its size cap, which stops the alias and convention families: sensing would then suppress structural families, which R2 forbids. A separate file also leaves the sidecar's schema and delivery ledger untouched. The cost is one more file to reason about, and it is disposable.
 - **Model load cost on relaunch.** Terminating the child on every closed gate costs a model load at the next idle window. The CPU budget counts that load, so a chatty day senses less rather than costing more.
 - **CPU only.** Sensing a vault's backlog on CPU is slow, and deliberately so: the owner games on this machine (R5). The migration drain states `evidence_complete: false` rather than rushing.
 
 ## Measured
 
-Filled from the real-pin probe run in the `nli` lane (task 10.5).
+Measured on 2026-09-28 against the exact pin (`b5113eb3…`, weights `b1dbf445…`). The host was WSL2 on CPU only, with one inference thread, in the `nli` extra environment.
+
+- **Admission.** 20 of 20 `relation-v1-multilingual` fixtures are green, including the four negative twins. Every `refines` pair names the correct refining side. The stance verifier's own real-byte test stays green.
+- **Cost.**
+  - A judgement (one pair, both directions) takes 1.07–1.10 CPU-seconds and about 1.0 s of wall time.
+  - A cold model load takes 15.6 CPU-s (27 s wall). The first fixture run takes about 20 CPU-s, and is then recorded per exact identity and skipped by later children.
+  - At 300 CPU-s per hour, the CPU budget binds before the 600-judgement budget: about 250 judgements per hour after the load.
+- **Child process.** Peak RSS was 1,362 MiB (VmHWM). Terminating it on `quiet_mode` returned it in 0.21 s, and the supervisor charged the 33.4 CPU-s it had reported plus the wall time since.
+- **End to end.** A real supervised child on the sensing fixture vault produced "refined by 1 later note; 1 open contradiction" for the base note.
+- **CUDA hazard.** On this host, a visible CUDA device segfaulted the forward pass inside `torch.cuda.graphs.is_current`, even with `device="cpu"`. The child therefore hides CUDA (`CUDA_VISIBLE_DEVICES=""`) before anything imports torch, and so does the real-pin CI job.
 
 ## Known misses
 
-None recorded yet (task 10.4).
+None. Every fixture, twins included, passes at the exact pin. Twins that fail in future must be recorded here and never enter the admission gate.

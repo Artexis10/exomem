@@ -163,3 +163,27 @@ def test_fixture_set_covers_every_decisive_label_with_a_twin() -> None:
     shapes = {item.language_shape for item in fixtures}
     assert "en/en" in shapes and any("/" in s and s.split("/")[0] != s.split("/")[1] for s in shapes)
     assert sensing.fixture_precision("relation-v1-multilingual", "contradicts")["total"] >= 3
+
+
+def test_admission_evidence_is_keyed_by_the_fixtures_and_label_map(monkeypatch) -> None:
+    from exomem import sensing_nli
+
+    identity = _identity()
+    before = sensing_nli._fixture_digest(identity)
+    fixtures = sensing.RELATION_FIXTURES["relation-v1-multilingual"]
+    monkeypatch.setitem(sensing.RELATION_FIXTURES, "relation-v1-multilingual", fixtures[:-1])
+    assert sensing_nli._fixture_digest(identity) != before
+
+
+def test_the_nli_identity_needs_no_model_import() -> None:
+    import sys
+
+    from exomem import sensing_nli
+
+    loaded = set(sys.modules)
+    identity = sensing_nli.identity()
+    assert "sentence_transformers" not in set(sys.modules) - loaded
+    assert "torch" not in set(sys.modules) - loaded
+    if identity is not None:
+        assert identity.placement == "local-cpu"
+        assert identity.template_version == "nli-pair-v1"
