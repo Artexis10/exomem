@@ -109,7 +109,7 @@ Round diff: `git diff f8e494a aa053fe`. It touches `foreground_priority`, `readi
 - **`test_read_after_write_visibility.py`:** only the setup changed. `_publication_barrier_held_elsewhere` produces real contention on the publication barrier, and `deferred == [[page]]` plus the during-repair read are unchanged. The old route (`VAULT_LOCK_NESTED`) is the bug that item 7 removed.
 - **`test_membench_trackd` j3:** the test is untouched. The source fix above restores the graph rebuild registration, and two new red→green tests pin it end to end (`asserted_pairs` returns the pair).
 - **Windows timeout:** no test or source change. The PR cites main run 36413687175 failing the same way at a docs-only commit, and the job passed at `aa053fe`.
-- **Test lines:** the round's test diffs add 314 lines and delete none.
+- **Test lines:** the round's test diffs add 313 lines and delete 1. The deleted line is the `_governed_transition` call, re-indented under the barrier; no assertion was removed.
 
 ### CI (PR #1435 check runs, head `aa053fe`)
 
