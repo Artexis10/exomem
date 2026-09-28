@@ -213,7 +213,6 @@ def _note_quiet_hold(
         if not logger.isEnabledFor(logging.INFO):
             return
         summary = _HOLD_SUMMARY
-        now = time.monotonic()
         with summary.lock:
             key = _safe_label(operation, fallback="unknown")
             entry = summary.operations.get(key)
@@ -229,8 +228,23 @@ def _note_quiet_hold(
             entry["hold_ms_total"] = round(entry["hold_ms_total"] + hold_ms, 2)
             entry["hold_ms_max"] = max(entry["hold_ms_max"], hold_ms)
             entry["wait_ms_max"] = max(entry["wait_ms_max"], float(wait_ms))
+        flush_hold_summary()
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        pass
+
+
+def flush_hold_summary() -> None:
+    """Emit the hold summary window if it is due and holds anything.
+
+    Called after every demoted hold and on every metrics snapshotter tick, so
+    the last window before holds stop is logged too.
+    """
+    try:
+        summary = _HOLD_SUMMARY
+        now = time.monotonic()
+        with summary.lock:
             window_s = now - summary.started_at
-            if window_s < _HOLD_SUMMARY_INTERVAL_SECONDS:
+            if not summary.operations or window_s < _HOLD_SUMMARY_INTERVAL_SECONDS:
                 return
             operations = summary.operations
             summary.operations = {}
@@ -252,6 +266,18 @@ def _note_quiet_hold(
         )
     except Exception:  # noqa: BLE001 - observability must never break a mutation
         pass
+
+
+def _register_hold_summary_flush() -> None:
+    try:
+        from . import metrics
+
+        metrics.register_flush_hook(flush_hold_summary)
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        pass
+
+
+_register_hold_summary_flush()
 
 
 def _bump_boundary_metric(name: str, labels: dict[str, str] | None = None) -> None:

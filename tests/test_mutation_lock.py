@@ -2513,3 +2513,35 @@ def test_unknown_and_control_holder_kinds_keep_their_audit_rows(
         logging.INFO,
         logging.INFO,
     ]
+
+
+def test_the_metrics_snapshotter_flushes_a_due_hold_summary(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review L4: a window was emitted only by the next quiet hold, so the last
+    window before holds stopped was never logged. The snapshotter's tick flushes
+    a window that is due."""
+    from exomem import metrics
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 3600.0)
+    mutation_lock_module._reset_hold_summary()
+    with caplog.at_level(logging.INFO, logger="exomem.mutation_lock"):
+        for _ in range(3):
+            with _background_hold(coordinator):
+                pass
+        assert _events(caplog, "mutation_lock_hold_summary") == []
+        # The window is now due, and no further hold will arrive.
+        monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 0.0)
+        metrics.stop_snapshotter()
+        metrics.start_snapshotter(tmp_path / "metrics", 0.05)
+        try:
+            deadline = time.monotonic() + 3.0
+            while not _events(caplog, "mutation_lock_hold_summary") and time.monotonic() < deadline:
+                time.sleep(0.02)
+        finally:
+            metrics.stop_snapshotter()
+    [summary] = _events(caplog, "mutation_lock_hold_summary")[:1]
+    assert summary.fields["holds"] == 3
