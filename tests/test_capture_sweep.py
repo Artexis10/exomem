@@ -540,7 +540,7 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
 
     `test_personal_baseline_contract.py` caps every copyable instruction block at
     1,500 bytes, because that is the custom-instruction field they are pasted
-    into. The prominent blocks sit at 1,484 and 1,495 — 16 and 5 bytes of
+    into. The prominent blocks sit at 1,483 and 1,494 — 17 and 6 bytes of
     headroom — so no wording of this clause fits, and the only way to make one
     fit is to shorten a capture class that is already there. That is precisely
     the move a KB failure note records as having silently dropped the
@@ -564,7 +564,10 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
         sizes[name] = len(block.rstrip().encode("utf-8"))
         assert "Never save transcripts." in block, name
 
-    assert sizes == {"maximal": 1484, "balanced": 1495}, sizes
+    assert sizes == {"maximal": 1483, "balanced": 1494}, sizes
+    # The maximal block keeps real headroom under the cap: the additive
+    # entity-creation wording (ruling R1) was folded in, not appended.
+    assert 1500 - sizes["maximal"] >= 16, sizes
     assert all(1500 - size < 100 for size in sizes.values()), sizes
 
 
