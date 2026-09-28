@@ -308,6 +308,43 @@ def build_session_authority(*, base_url: str) -> SessionAuthority:
     )
 
 
+def build_local_session_authority() -> SessionAuthority:
+    """The local-ingress session authority: the same store, a separate audience.
+
+    Same signing root, storage and allowed account as the public authority, so
+    `exomem auth sessions`, `revoke <id>` and `revoke --all` cover local
+    sessions too. Only the issuer and audience differ, which is what makes each
+    authority refuse the other's sessions.
+    """
+    from .local_ingress import LOCAL_AUDIENCE, LOCAL_ISSUER
+
+    signing_root = _required_signing_root()
+    allowed_github_user_id = _allowed_github_user_id()
+    shared = _shared_storage_settings()
+    if shared is not None:
+        storage_url, namespace, storage_token, timeout = shared
+        return SessionAuthority.remote(
+            url=storage_url,
+            namespace=namespace,
+            storage_token=storage_token,
+            signing_root=signing_root,
+            issuer=LOCAL_ISSUER,
+            audience=LOCAL_AUDIENCE,
+            timeout=timeout,
+            allowed_github_user_id=allowed_github_user_id,
+        )
+
+    from fastmcp import settings
+
+    return SessionAuthority.local(
+        directory=settings.home / "oauth-sessions",
+        signing_root=signing_root,
+        issuer=LOCAL_ISSUER,
+        audience=LOCAL_AUDIENCE,
+        allowed_github_user_id=allowed_github_user_id,
+    )
+
+
 def _oauth_storage_encryption_key(signing_root: str) -> bytes:
     signing_key = derive_jwt_key(
         low_entropy_material=signing_root,
@@ -366,8 +403,14 @@ def _build_oauth_client_storage(*, signing_root: str) -> Any | None:
     )
 
 
-def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
-    """Return the durable GitHub-bootstrap OAuth proxy, or None for stdio."""
+def build_oauth(
+    *, require_auth: bool, base_url: str, local_ingress: bool = False
+) -> OAuthProxy | None:
+    """Return the durable GitHub-bootstrap OAuth proxy, or None for stdio.
+
+    ``local_ingress`` arms the local-ingress gate in front of authentication;
+    only a supervisor-owned worker asks for it.
+    """
     if not require_auth:
         return None
 
@@ -422,6 +465,11 @@ def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
         allowed_login=gh_username,
         allowed_user_id=github_user_id,
     )
+    local_verifier = None
+    if local_ingress:
+        from .local_ingress import LocalCredentialVerifier
+
+        local_verifier = LocalCredentialVerifier()
     return ExomemSessionOAuthProxy(
         session_authority=authority,
         upstream_authorization_endpoint="https://github.com/login/oauth/authorize",
@@ -434,4 +482,5 @@ def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
         jwt_signing_key=signing_root,
         client_storage=client_storage,
         valid_scopes=list(OAUTH_AUTHORIZATION_SCOPES),
+        local_verifier=local_verifier,
     )

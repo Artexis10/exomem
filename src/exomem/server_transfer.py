@@ -16,7 +16,7 @@ from starlette.formparsers import MultiPartException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
-from . import cf_access, reserved_paths, upload_tokens
+from . import cf_access, local_ingress, reserved_paths, upload_tokens
 from .governance import egress
 from .governance import principal as principal_module
 from .vault import VaultPathError, resolve_under_vault
@@ -217,8 +217,11 @@ def register_transfer_routes(
         Read off the token rather than the form, so the destination is whatever
         was fixed at mint time. A shared static secret or a Cloudflare Access
         identity carries no lane and falls back to evidence, which is where
-        every upload landed before lanes existed.
+        every upload landed before lanes existed. A local client token is not
+        a lane capability either.
         """
+        if local_ingress.current_grant() is not None:
+            return "evidence"
         if config.upload_token is not None:
             header = request.headers.get("authorization", "")
             if header.startswith("Bearer "):
@@ -230,11 +233,16 @@ def register_transfer_routes(
         return "evidence"
 
     def _authorized(request: Request, *, scope: str = "upload") -> bool:
+        if scope == "upload" and local_ingress.current_grant() is not None:
+            # Local ingress: the gate in front of this route verified this
+            # request's local client token, the only credential it accepts.
+            return True
         if config.upload_token is not None:
             header = request.headers.get("authorization", "")
             if header.startswith("Bearer "):
                 presented = header[len("Bearer ") :].strip()
                 if secrets.compare_digest(presented.encode(), config.upload_token.encode()):
+                    local_ingress.note_owner_credential("upload_token", request.headers)
                     return True
                 if scope == "download":
                     # Only a capability naming its minting principal opens
@@ -260,7 +268,7 @@ def register_transfer_routes(
 
     @mcp_app.custom_route("/upload", methods=["POST"])
     async def _upload(request: Request) -> JSONResponse:
-        if not config.enabled:
+        if not config.enabled and local_ingress.current_grant() is None:
             return JSONResponse(
                 {
                     "code": "UPLOAD_DISABLED",
