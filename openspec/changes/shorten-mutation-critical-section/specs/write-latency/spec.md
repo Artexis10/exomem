@@ -135,3 +135,30 @@ rows, reject newly observed external events during preparation or publication, a
 - **WHEN** recall checkpoint state changes during resolver preparation
 - **THEN** the drain does not use that resolver to publish graph rows or availability
 - **AND** repair demand remains queued for a later attempt
+
+### Requirement: Index Fan-Out Runs Outside The Creation Namespace
+
+A governed batch committed while its writer holds a vault creation namespace
+SHALL run its post-commit index fan-out after that namespace is released, on
+the writer's own thread and context and still inside the writer's mutation
+boundary. The lexical upsert MUST NOT be refused as a nested creation lock for
+a batch the writer itself just committed, so an ordinary governed write MUST
+NOT defer its lexical rows, mint a durable full-index receipt, or revoke
+retrieval admission on that account. A fan-out failure after release SHALL
+surface to the writer as it did inside the namespace, and MUST NOT mask an
+error already raised by the locked body. The batch's index report SHALL still
+reach the command's response.
+
+#### Scenario: An existing-page write lands its lexical rows inline
+
+- **WHEN** `observe_memory` or `edit_memory` commits a page under the
+  semantic-creation namespace
+- **THEN** the lexical component of its index report completes inline
+- **AND** no lexical repair is scheduled and no full-index receipt is minted
+
+#### Scenario: A body failure after commit still fans out the committed batch
+
+- **WHEN** the locked body raises after its batch committed
+- **THEN** the batch fans out as the namespace is released
+- **AND** the body's own error is the one the writer receives
+
