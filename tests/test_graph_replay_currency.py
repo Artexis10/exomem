@@ -337,3 +337,105 @@ def test_a_current_created_path_outside_the_delta_does_not_rebuild_the_vault(
     assert whole_vault_passes == [], "a current created page outside the delta rebuilt the vault"
     assert EpistemicGraphIndex(root).available() is True
     _assert_matches_a_fresh_rebuild(root)
+
+
+@pytest.fixture
+def caller_whole_vault_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Whole-vault work started while a mutation request is the caller."""
+    from exomem import writer_lease
+
+    calls: list[str] = []
+
+    def spied(name: str, owner, attr: str) -> None:
+        real = getattr(owner, attr)
+
+        def spy(*args, **kwargs):
+            if writer_lease.active_mutation_request_id() is not None:
+                calls.append(name)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(owner, attr, spy, raising=True)
+
+    spied("converge_full_graph_marker", epistemic_graph, "converge_full_graph_marker")
+    spied("rebuild_all", EpistemicGraphIndex, "rebuild_all")
+    spied("rebuild_all_off_boundary", EpistemicGraphIndex, "_rebuild_all_off_boundary")
+    return calls
+
+
+def _replay_under_a_mutation_request(root: Path) -> epistemic_graph.GraphDispatchResult:
+    from exomem import writer_lease
+
+    trace = writer_lease._ACTIVE_MUTATION_TRACE.set(("request", "command", "receipt"))
+    try:
+        return epistemic_graph.upsert_after_write(root, [root / RETITLED])
+    finally:
+        writer_lease._ACTIVE_MUTATION_TRACE.reset(trace)
+
+
+def _assert_the_daemon_drains_it_once(root: Path) -> None:
+    queued = {entry.rel_path for entry in deferred_index.snapshot_graph(root)}
+    assert RETITLED in queued, "the replay's receipt was not left for the daemon"
+    assert index_sync.drain_graph_work(root) >= 1
+    assert deferred_index.snapshot_graph(root) == []
+    assert index_sync.drain_graph_work(root) == 0, "the receipt drained twice"
+    assert EpistemicGraphIndex(root).available() is True
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_request_replay_leaves_a_standing_full_marker_to_the_daemon(
+    vault: Path, whole_vault_passes: list[str], caller_whole_vault_calls: list[str]
+) -> None:
+    """A caller that can report pending does not pay the marker's debt inline."""
+    root = _built(vault, whole_vault_passes)
+    _publish_past_a_stale_row(root)
+    deferred_index.advance_graph_full_rebuild(root)
+    EpistemicGraphIndex(root)._mark_unavailable()
+
+    result = _replay_under_a_mutation_request(root)
+
+    assert caller_whole_vault_calls == [], "a whole-vault pass ran on the request's thread"
+    assert result.code != "incremental_completed", result
+    assert deferred_index.graph_full_rebuild_pending(root) is not None
+    assert EpistemicGraphIndex(root).available() is False
+    _assert_the_daemon_drains_it_once(root)
+
+
+def test_a_request_replay_leaves_an_unsettled_epoch_to_the_daemon(
+    vault: Path,
+    whole_vault_passes: list[str],
+    caller_whole_vault_calls: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The epoch refuses per-path repair; the request does not rebuild instead."""
+    root = _built(vault, whole_vault_passes)
+    _publish_past_a_stale_row(root)
+    with monkeypatch.context() as unsettled:
+        unsettled.setattr(
+            EpistemicGraphIndex,
+            "epoch_admits_incremental_repair",
+            lambda self: False,
+            raising=True,
+        )
+        result = _replay_under_a_mutation_request(root)
+
+    assert caller_whole_vault_calls == [], "a whole-vault pass ran on the request's thread"
+    assert result.code != "incremental_completed", result
+    assert EpistemicGraphIndex(root).available() is False
+    _assert_the_daemon_drains_it_once(root)
+
+
+def test_a_standalone_replay_that_rebuilds_does_not_report_incremental_completion(
+    vault: Path, whole_vault_passes: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that must converge still pays inline, and says it did."""
+    root = _built(vault, whole_vault_passes)
+    _publish_past_a_stale_row(root)
+    monkeypatch.setattr(
+        EpistemicGraphIndex, "epoch_admits_incremental_repair", lambda self: False, raising=True
+    )
+
+    result = epistemic_graph.upsert_after_write(root, [root / RETITLED])
+
+    assert whole_vault_passes, "a standalone caller must still converge"
+    assert result.code != "incremental_completed", result
+    assert result.whole_vault_attempted, result
