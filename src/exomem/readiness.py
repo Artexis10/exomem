@@ -51,6 +51,11 @@ _events: dict[str, threading.Event] = {c: threading.Event() for c in COMPONENTS}
 _deferred: dict[str, list] = {c: [] for c in COMPONENTS}
 _warm_active = False
 _warm_finished = False
+#: The warm's required stages (catalogue, graph handoff, semantic corpus,
+#: lexical caches) are done; only optional model preloads may still run. From
+#: here a revoked catalogue is re-proved exactly as after the whole warm: an
+#: optional preload held the 0.96.0 promotion `not_ready` for 53 s.
+_required_finished = False
 _runtime_managed = False
 _started_at: float | None = None
 _retrieval_generation = 0
@@ -98,12 +103,14 @@ def admit_retrieval_proof(generation: int) -> bool:
 def begin_warm() -> None:
     """Mark a warm in-flight. Resets per-component events and deferred items."""
     global _retrieval_generation, _warm_active, _warm_finished, _started_at
+    global _required_finished
     with _lock:
         for c in COMPONENTS:
             _events[c].clear()
             _deferred[c].clear()
         _warm_active = True
         _warm_finished = False
+        _required_finished = False
         _started_at = time.monotonic()
         _retrieval_generation += 1
 
@@ -118,6 +125,25 @@ def finish_warm() -> None:
     with _lock:
         _warm_finished = True
         _retrieval_generation += 1
+
+
+def finish_required_warm() -> None:
+    """The warm's required stages are done; optional preloads may continue.
+
+    Retrieval admission lost during the rest of the warm is re-proved from
+    here, as it is once the whole warm has finished, rather than waiting on a
+    model load nothing in recall admission depends on.
+    """
+    global _retrieval_generation, _required_finished
+    with _lock:
+        _required_finished = True
+        _retrieval_generation += 1
+
+
+def required_warm_finished() -> bool:
+    """Whether this warm's required stages are done (always, once it finished)."""
+    with _lock:
+        return _required_finished or _warm_finished
 
 
 def mark_ready(component: str) -> list:
@@ -202,7 +228,7 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
             admission = {"state": "warming", "admitted": False}
         else:
             admission = {"state": "unverified", "admitted": False}
-        managed_recovery = _runtime_managed and _warm_finished
+        managed_recovery = _runtime_managed and (_warm_finished or _required_finished)
         proof_generation = _retrieval_generation
     if vault_root is None or not (admission["admitted"] or managed_recovery):
         return admission
@@ -227,7 +253,7 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
             # after this proof began.  Its newer decision wins.
             return _retrieval_admission_locked()
         if proof_current and not admission["admitted"]:
-            if not (_runtime_managed and _warm_finished):
+            if not (_runtime_managed and (_warm_finished or _required_finished)):
                 return _retrieval_admission_locked()
             # Retrieval has no deferred payload queue: its event is pure
             # admission.  Publish the exact proof only if no newer invalidation
@@ -324,12 +350,14 @@ def snapshot() -> dict:
 def reset() -> None:
     """Test hook: return to the never-warmed state (mirrors find.clear_cache)."""
     global _retrieval_generation, _runtime_managed, _warm_active, _warm_finished, _started_at
+    global _required_finished
     with _lock:
         for c in COMPONENTS:
             _events[c].clear()
             _deferred[c].clear()
         _warm_active = False
         _warm_finished = False
+        _required_finished = False
         _runtime_managed = False
         _started_at = None
         _retrieval_generation += 1

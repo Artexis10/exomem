@@ -1241,7 +1241,10 @@ def find(
     # where a reader would look for it.
     with _span(timings, "recall_projection", source=find_types.SOURCE_INDEX):
         admission = readiness.retrieval_admission()
-        if managed_runtime and admission["state"] == "unavailable":
+        if managed_runtime and (
+            admission["state"] == "unavailable"
+            or (not admission["admitted"] and readiness.required_warm_finished())
+        ):
             # A background repair may have published the exact catalog after its
             # one promotion callback lost a race.  Re-prove once before scheduling
             # another whole-corpus rebuild; normal ready requests keep one proof.

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
 
+import anyio
 import mcp.types
 from fastmcp import FastMCP
 from starlette.background import BackgroundTask
@@ -104,6 +106,15 @@ def register_health_routes(
     if traffic_monitor is None:
         traffic_monitor = runtime_readiness_module.get_silent_traffic_monitor()
 
+    # Two readiness proofs at a time, apart from the request thread pool.
+    # Created on first use, inside the serving event loop.
+    readiness_limiter: list[anyio.CapacityLimiter] = []
+
+    def _readiness_limiter() -> anyio.CapacityLimiter:
+        if not readiness_limiter:
+            readiness_limiter.append(anyio.CapacityLimiter(2))
+        return readiness_limiter[0]
+
     def _record_health_probe() -> dict:
         try:
             return traffic_monitor.record_health_probe()
@@ -164,9 +175,17 @@ def register_health_routes(
                 mcp_app._exomem_tool_surface_sha256 = digest
             except Exception:  # noqa: BLE001 - readiness must stay structured
                 digest = None
-        snapshot = runtime_readiness_module.runtime_readiness(
-            mcp_tool_surface_sha256=digest,
-            traffic=traffic,
+        # Off the event loop: the retrieval proof and coordination status take
+        # reserved-state locks, and one probe held the loop 5.8 s on one at the
+        # 0.96.0 promotion, timing out the liveness polls queued behind it. A
+        # limiter of its own keeps probes from queueing behind request work.
+        snapshot = await anyio.to_thread.run_sync(
+            functools.partial(
+                runtime_readiness_module.runtime_readiness,
+                mcp_tool_surface_sha256=digest,
+                traffic=traffic,
+            ),
+            limiter=_readiness_limiter(),
         )
         status_code = 200 if snapshot["status"] == "ready" else 503
         return JSONResponse(
