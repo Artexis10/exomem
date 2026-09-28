@@ -132,7 +132,7 @@ Consumption is by content, never by reading age. For a proposed pair, the dreame
 
 Inference runs only in a supervised, disposable child process: `python -m exomem.sensor_worker_child`, on the `media_worker` pattern (`src/exomem/media_worker.py:1-12`). The dreamer thread and request threads never import a model runtime, so the dreamer's "never loads or runs a model" stays literally true, and its spy test keeps passing.
 
-- **Supervision.** The dreamer loop drives the supervisor once per poll. While a child is alive, the loop re-evaluates at least every 2 seconds.
+- **Supervision.** The dreamer loop drives the supervisor once per poll. While a child is alive, the loop re-reads the gate every 2 seconds between ticks, without running a tick, so the dreamer's own schedule and CPU budget are unchanged.
 - **Launch.** The supervisor launches a child only when all of these hold:
   - the sensing setting is `on`;
   - the dreamer's gate would run a tick (`dreamer_policy.decide`: setting, standby, quiet mode, pressure, foreground idle, freshness, settle, graph debt, index backlog, the dreamer's own budget and backoff);
@@ -147,7 +147,7 @@ Inference runs only in a supervised, disposable child process: `python -m exomem
   - It reports its spend after every batch to a small spend file beside the ledger, and the supervisor charges that spend to its rolling window.
   - A child the supervisor terminates is charged its last report plus the wall time since, which bounds a one-thread child's CPU. A child that dies without reporting is charged its whole allotment.
 - **What the child reads.** Only the projection's sense queue (read-only, non-waiting) and the ledger. It never reads or writes the vault, takes no lease and schedules no index work.
-- **Soft failure.** A child that cannot admit its instrument exits with a named refusal, and the supervisor reports it without relaunching until the setting or the pin changes. Refusal causes: gate off, no pin, weights missing, digest mismatch, dependency missing, fixtures failed. Sensing off is byte-identical to a build without sensing.
+- **Soft failure.** A child that cannot admit its instrument exits with a named refusal, and the supervisor reports it without relaunching until the setting or the pin changes. Refusal causes: no pin, label map unknown, weights missing, digest mismatch, dependency missing, fixtures failed, and a ledger this build cannot use. A batch with non-finite output records no reading and the child carries on. Sensing off is byte-identical to a build without sensing.
 
 ### D5. Pair proposers
 

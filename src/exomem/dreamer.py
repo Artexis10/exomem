@@ -288,14 +288,40 @@ def _run(vault_root: Path, stop_event: threading.Event) -> None:
         except Exception:  # noqa: BLE001 - the worker must outlive any one loop
             log.warning("dreamer: loop failed", exc_info=True)
             sleep = policy.POLL_SECONDS
-        if sensor_worker.alive(vault_root):
-            # A living sensor child is re-gated often: a foreground request or
-            # quiet mode must stop it promptly.
-            sleep = min(sleep, sensor_worker.POLL_WHILE_ALIVE_SECONDS)
-        if stop_event.wait(sleep):
+        if _wait(vault_root, clock, stop_event, sleep):
             break
     # What this process delivered since the last write outlives the thread.
     _flush_deliveries(vault_root)
+
+
+def _wait(vault_root: Path, clock: Clock, stop_event: threading.Event, sleep: float) -> bool:
+    """Sleep until the next loop. True when the worker was told to stop.
+
+    While a sensor child lives, its gate is re-read every
+    `POLL_WHILE_ALIVE_SECONDS` without running a tick, so a foreground request
+    or quiet mode stops the child promptly and the dreamer's own schedule and
+    CPU budget are unchanged.
+    """
+    deadline = _time.monotonic() + max(0.0, sleep)
+    while True:
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            return stop_event.is_set()
+        if not sensor_worker.alive(vault_root):
+            return stop_event.wait(remaining)
+        if stop_event.wait(min(remaining, sensor_worker.POLL_WHILE_ALIVE_SECONDS)):
+            return True
+        _regate_sensor(vault_root, clock)
+
+
+def _regate_sensor(vault_root: Path, clock: Clock) -> None:
+    """Probe the gate and supervise the sensor child, running no tick. Never raises."""
+    try:
+        decision = policy.decide(gather_signals(vault_root, clock))
+    except Exception:  # noqa: BLE001 - an unreadable gate is re-probed next poll
+        log.debug("dreamer: sensor gate probe failed", exc_info=True)
+        return
+    sensor_worker.supervise(vault_root, gate_run=decision.run, gate_reason=decision.reason)
 
 
 def _loop_once(vault_root: Path, clock: Clock, stop_event: threading.Event | None = None) -> float:

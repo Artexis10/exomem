@@ -261,3 +261,50 @@ def test_stored_unit_vectors_never_create_the_embeddings_sidecar(tmp_path: Path)
     assert sensed_model.stored_unit_vectors(vault, "Knowledge Base/x.md") == (None, {})
     assert not index_paths.sidecar_path(vault).exists()
     assert os.environ.get("EXOMEM_SENSING") in {None, "", "off"}
+
+
+def test_a_living_child_is_re_gated_between_ticks_without_a_tick(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import threading
+
+    vault = tmp_path / "vault"
+    calls: list[tuple[bool, str]] = []
+    ticks: list[int] = []
+    stop = threading.Event()
+    monkeypatch.setattr(sensor_worker, "POLL_WHILE_ALIVE_SECONDS", 0.01)
+    monkeypatch.setattr(sensor_worker, "alive", lambda root: True)
+    monkeypatch.setattr(dreamer, "run_once", lambda *a, **k: ticks.append(1))
+
+    def supervise(root, *, gate_run, gate_reason):
+        calls.append((gate_run, gate_reason))
+        if len(calls) >= 3:
+            stop.set()
+        return "gate"
+
+    monkeypatch.setattr(sensor_worker, "supervise", supervise)
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    assert dreamer._wait(vault, dreamer.Clock(), stop, 30.0) is True
+    assert calls[:3] == [(False, "quiet_mode")] * 3
+    assert ticks == []
+
+
+def test_unusable_output_refuses_that_batch_and_the_child_goes_on(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+
+    class Broken(sf.StubInstrument):
+        def judge(self, pairs):
+            self.calls.extend(pairs)
+            raise ValueError("non-finite logits")
+
+    broken = Broken()
+    assert sf.sense(vault, broken) == sensor_worker.EXIT_IDLE
+    assert broken.calls, "the child tried"
+    assert not sensing_ledger.ledger_path(vault).exists() or sensing_ledger.max_seq(
+        sensing_ledger.open_readonly(vault)
+    ) == 0

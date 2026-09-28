@@ -401,9 +401,17 @@ def run_child(
             report(True)
             return EXIT_REFUSED
     identity: sensing.InstrumentIdentity = instrument.identity
-    _write_json(_state_file(vault_root, STATUS_FILE), {"refused": None, "pid": pid})
     ledger = sensing_ledger.Ledger(vault_root)
-    lconn = ledger.connect()
+    try:
+        lconn = ledger.connect()
+    except sensing_ledger.LedgerUnavailable as error:
+        _write_json(
+            _state_file(vault_root, STATUS_FILE),
+            {"refused": "ledger-unavailable", "detail": str(error)[:500], "pid": pid},
+        )
+        report(True)
+        return EXIT_REFUSED
+    _write_json(_state_file(vault_root, STATUS_FILE), {"refused": None, "pid": pid})
     done: set[str] = set()
     last_work = clock()
     try:
@@ -421,7 +429,16 @@ def run_child(
                 sleep(min(1.0, idle_seconds))
                 continue
             last_work = clock()
-            results = instrument.judge([pair.texts for pair in batch])
+            try:
+                results = instrument.judge([pair.texts for pair in batch])
+            except ValueError:
+                # Non-finite or misshapen output refuses that output: no reading,
+                # and the batch is not retried by this child.
+                log.warning("sensor worker: a batch produced unusable output", exc_info=True)
+                done.update(pair.pair_key for pair in batch)
+                judgements += len(batch)
+                report(False)
+                continue
             readings = []
             for pair, (ab, ba, reason) in zip(batch, results, strict=True):
                 done.add(pair.pair_key)

@@ -1,16 +1,16 @@
 ## 1. Specification and rulings (slice 1)
 
-- [ ] 1.1 Write this change: the proposal, the design with the owner's rulings R1–R7, the delta specs (`sensed-epistemic-model`, `frozen-verifiers`, `contradiction-queue`) and these tasks. Validate with `openspec validate --all --strict`.
-- [ ] 1.2 Amend `close-memory-loop` in place:
+- [x] 1.1 Write this change: the proposal, the design with the owner's rulings R1–R7, the delta specs (`sensed-epistemic-model`, `frozen-verifiers`, `contradiction-queue`) and these tasks. Validate with `openspec validate --all --strict`.
+- [x] 1.2 Amend `close-memory-loop` in place:
   - `design.md:208`: the Cloud reversal points here.
   - `design.md:212`: drop condition 4.
   - Replace the scenario "Verifier labels do not reach upkeep" with the R2 rule.
   - Close task 8.4 as "admitted, re-laned to add-sensed-epistemic-model".
-- [ ] 1.3 Update the pure-substrate paragraph of `openspec/config.yaml` for R1, R2 and R7. Rewrite the thresholds of `docs/hosted-inference-boundary.md` as acceptance measures (R4), keeping the recorded quantized-candidate evidence.
+- [x] 1.3 Update the pure-substrate paragraph of `openspec/config.yaml` for R1, R2 and R7. Rewrite the thresholds of `docs/hosted-inference-boundary.md` as acceptance measures (R4), keeping the recorded quantized-candidate evidence.
 
 ## 2. Question registry and reading record (slice 1)
 
-- [ ] 2.1 Add `sensing.py`, pure code with no model import:
+- [x] 2.1 Add `sensing.py`, pure code with no model import:
   - the setting (`EXOMEM_SENSING`, then the config key `sensing`, default `off`);
   - the `pair.relation` registry entry: template `nli-pair-v1`, label map `relation-v1`, unit scope `units-v1`, fixture set `relation-v1-multilingual`;
   - `InstrumentIdentity` and `instrument_id`;
@@ -18,61 +18,61 @@
   - the `unit-text-v1` extractor.
 
   Unit tests come first: label-map rules in order (including one-way contradiction → `abstain: directional_asymmetry`, and the refining side's direction), id stability, and label-map and fixture versions outside `instrument_id`.
-- [ ] 2.2 Add `sensing_ledger.py`: `<vault state dir>/sensing/readings.sqlite`, append-only by `BEFORE UPDATE/DELETE` triggers, idempotent append by reading id, and lookup by `input_key`. Test the refused update and delete, the idempotent re-append, lookup by content across instruments, the state-root placement, and that no vault text is stored.
+- [x] 2.2 Add `sensing_ledger.py`: `<vault state dir>/sensing/readings.sqlite`, append-only by `BEFORE UPDATE/DELETE` triggers, idempotent append by reading id, and lookup by `input_key`. Test the refused update and delete, the idempotent re-append, lookup by content across instruments, the state-root placement, and that no vault text is stored.
 
 ## 3. Invalidation and migration (slice 1)
 
-- [ ] 3.1 Consume by current text hash (`current`, `stale`, `pending`, `migrating`). Re-derive verdicts under the active label map from stored vectors. Keep but never consume an old instrument's readings. Report `evidence_complete: false` until the page's pairs drain. Order the re-sense with previously served pairs first. Test an unrelated edit that re-senses nothing, the stale unit, a label-map change with no sensing, and pin migration.
+- [x] 3.1 Consume by current text hash (`current`, `stale`, `pending`, `migrating`). Re-derive verdicts under the active label map from stored vectors. Keep but never consume an old instrument's readings. Report `evidence_complete: false` until the page's pairs drain. Order the re-sense with previously served pairs first. Test an unrelated edit that re-senses nothing, the stale unit, a label-map change with no sensing, and pin migration.
 
 ## 4. Sensor worker (slice 1)
 
-- [ ] 4.1 Add `sensor_worker.py` (supervisor, child loop, spend accounting) and the `sensor_worker_child.py` entry point: vault lock, lowest priority, CPU only, one thread, 60-second idle exit.
+- [x] 4.1 Add `sensor_worker.py` (supervisor, child loop, spend accounting) and the `sensor_worker_child.py` entry point: vault lock, lowest priority, CPU only, one thread, 60-second idle exit.
   - The supervisor inherits `dreamer_policy.decide` and adds 300 CPU-s and 600 judgements per rolling hour.
   - It terminates the child when any gate closes and kills it in quiet mode, under pressure and in standby.
   - It charges an unreported death the whole allotment.
   - It suspends relaunch after a named refusal until the setting or pin changes.
-- [ ] 4.2 Drive the supervisor from the dreamer loop, re-evaluating at least every 2 seconds while a child lives. Keep `tests/test_dreamer_no_side_effects.py` green: the dreamer thread imports no model runtime.
-- [ ] 4.3 Tests with a fake launcher and a real no-weights child cover: launch only with every gate open; kill on quiet, pressure, standby, foreground and setting off; budgets across launches; the refusal backoff; and the child's exit when its parent dies.
+- [x] 4.2 Drive the supervisor from the dreamer loop, re-evaluating at least every 2 seconds while a child lives. Keep `tests/test_dreamer_no_side_effects.py` green: the dreamer thread imports no model runtime.
+- [x] 4.3 Tests with a fake launcher and a real no-weights child cover: launch only with every gate open; kill on quiet, pressure, standby, foreground and setting off; budgets across launches; the refusal backoff; and the child's exit when its parent dies.
 
 ## 5. The `pair.relation` instrument on the admitted NLI pin (slice 1)
 
-- [ ] 5.1 Add `sensing_nli.py`: admission through the stance verifier's pin, resident digest and loader (`claims`), forced to CPU. The `nli-pair-v1` template scores both orders in one batch. `input_too_long` abstains instead of truncating. Non-finite logits refuse. Vectors are rounded to six decimals.
-- [ ] 5.2 Fixture set `relation-v1-multilingual`: the stance set's pairs under `relation-v1` labels with direction, plus a negative twin per label. Run it through `_verify_fixtures`-style memoised admission. Add a real-pin test under `pytest.mark.nli` and `EXOMEM_RUN_REAL_NLI=1`, and extend `.github/workflows/frozen-verifier.yml` to run it.
+- [x] 5.1 Add `sensing_nli.py`: admission through the stance verifier's pin, resident digest and loader (`claims`), forced to CPU. The `nli-pair-v1` template scores both orders in one batch. `input_too_long` abstains instead of truncating. Non-finite logits refuse. Vectors are rounded to six decimals.
+- [x] 5.2 Fixture set `relation-v1-multilingual`: the stance set's pairs under `relation-v1` labels with direction, plus a negative twin per label. Run it through `_verify_fixtures`-style memoised admission. Add a real-pin test under `pytest.mark.nli` and `EXOMEM_RUN_REAL_NLI=1`, and extend `.github/workflows/frozen-verifier.yml` to run it.
 
 ## 6. Pair proposers and projections (slice 1)
 
-- [ ] 6.1 A disposable projection file, `<vault state dir>/sensing/projection.sqlite`, kept apart from `dreamer.sqlite` so sensed rows never count against its size cap. It holds:
+- [x] 6.1 A disposable projection file, `<vault state dir>/sensing/projection.sqlite`, kept apart from `dreamer.sqlite` so sensed rows never count against its size cap. It holds:
   - `pages`: the seen signature, knowledge date, lifecycle, supersession partners, candidate count and capped flag;
   - `units`: each page's in-scope units with text, hash and stored vector;
   - `links`: each page's normalised authored link targets;
   - `pairs`: every proposed pair with proposer, order key, state, verdict, priority, selection and queue flags.
 
   The projection follows the dreamer's `seen` map, and each page replaces its own rows.
-- [ ] 6.2 Proposers:
+- [x] 6.2 Proposers:
   - structural (a graph edge either way);
   - temporal same-subject (at least two shared authored link targets, and different knowledge dates);
   - cosine (stored vectors of the ranked encoder whose source hash matches, θ = 0.72, the matrix bounded at 16,384 units per tick).
 
   Pairs are cross-page only, with no identical texts, capped at 128 per page in a fixed order, and a binding cap marks the page capped. Test per-pair monotonicity: a third page never adds or removes a pair.
-- [ ] 6.3 Projection per pair: consumed readings become edges (state, verdict, direction, `p`, instrument, reading id, fingerprint over the inputs and verdict); `instruments_disagree` across active instruments; stale and migrating pairs are queued. Readings the worker appended between ticks are ingested at tick start.
-- [ ] 6.4 Per-request projections over released edges: contradiction components (bounded at 32 pages) and refinement and supersession chains in time order (bounded at 8).
-- [ ] 6.5 Replay test: rebuilding a fresh projection from the same ledger yields byte-identical edges, fingerprints and served statuses, independent of append order and `sensed_at`.
+- [x] 6.3 Projection per pair: consumed readings become edges (state, verdict, direction, `p`, instrument, reading id, fingerprint over the inputs and verdict); `instruments_disagree` across active instruments; stale and migrating pairs are queued. Readings the worker appended between ticks are ingested at tick start.
+- [x] 6.4 Per-request projections over released edges: contradiction components (bounded at 32 pages) and refinement and supersession chains in time order (bounded at 8).
+- [x] 6.5 Replay test: rebuilding a fresh projection from the same ledger yields byte-identical edges, fingerprints and served statuses, independent of append order and `sensed_at`.
 
 ## 7. Point-of-use status line (slice 1)
 
-- [ ] 7.1 `read_memory` attaches `epistemic_status` for a released page with a non-zero count:
+- [x] 7.1 `read_memory` attaches `epistemic_status` for a released page with a non-zero count:
   - a line such as `refined by 2 later notes; 1 open contradiction`;
   - `refined_by_later`, `open_contradictions` and their released items (verdict, `p`, instrument, fixture precision, reading id);
   - the chain, the component size and `evidence_complete`.
 
   Nothing else in the read changes, and the field is absent when there is nothing to say.
-- [ ] 7.2 `activate_context` attaches the same status to resolved anchor pages after the packet is built, outside the packet cache, charged to the packet budget, and never raising.
+- [x] 7.2 `activate_context` attaches the same status to resolved anchor pages after the packet is built, outside the packet cache, charged to the packet budget, and never raising.
 - [ ] 7.3 Describe `epistemic_status` in the `read_memory` and `activate_context` tool text, and regenerate the derived artifacts (tool schemas and plugin contract, packaged skills, hosted renders, capabilities). Deferred to slice 3: slice 1 changes no tool text, the field exists only when the owner turns sensing on, and its line is self-describing.
 
 ## 8. Egress (slice 1)
 
-- [ ] 8.1 Twin tests under a governed policy with a restricted principal. A withheld contradicting page, a withheld refining page, a withheld page bridging a contradiction component and a withheld chain member each give byte-identical read and activation output to the absent twin.
-- [ ] 8.2 A capped page's sensed items are owner-only, in its own status and in its partners' counts. An owner sees them and a restricted caller does not.
+- [x] 8.1 Twin tests under a governed policy with a restricted principal. A withheld contradicting page, a withheld refining page, a withheld page bridging a contradiction component and a withheld chain member each give byte-identical read and activation output to the absent twin.
+- [x] 8.2 A capped page's sensed items are owner-only, in its own status and in its partners' counts. An owner sees them and a restricted caller does not.
 
 ## 9. Later slices (specified here, built later)
 
@@ -93,5 +93,5 @@
 - [ ] 10.1 Scoped suites green: dreamer, upkeep, claims, audit, egress twins and the new sensing tests.
 - [ ] 10.2 `uvx ruff check --select F src tests`, `validate-public-artifacts --repository` and `openspec validate --all --strict` pass.
 - [ ] 10.3 An independent review of the slice-1 diff.
-- [ ] 10.4 Record known misses in `design.md` from the real-pin fixture run.
-- [ ] 10.5 Record measured sensor cost (CPU-s per judgement, child peak RSS, kill-to-exit time) in `design.md` from the real-pin probe.
+- [x] 10.4 Record known misses in `design.md` from the real-pin fixture run.
+- [x] 10.5 Record measured sensor cost (CPU-s per judgement, child peak RSS, kill-to-exit time) in `design.md` from the real-pin probe.
