@@ -1,0 +1,157 @@
+"""A replayed path outside the recall delta is proved against the graph first.
+
+On the live 0.96.0 worker the periodic reconcile replayed deferred full-index
+receipts through the graph's standalone refresh. Every replayed page had changed
+long before the graph's stored checkpoint, so it lay outside the recall delta, the
+refresh fell back with `caller_path_outside_delta`, and a standalone caller paid an
+in-process whole-vault rebuild -- 59-101 s each, one per isolated receipt, with
+concurrent requests at 4-5 s p95.
+
+These tests pin the proof that replaces that fallback: a page the registry records
+exactly as the disk has it is either already reflected by its stored row (a no-op)
+or stale work the drain repairs incrementally; only a page the registry does not
+vouch for still rebuilds the vault. Every case is compared edge for edge with a
+fresh whole-vault rebuild.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import pytest
+from test_graph_handoff_convergence import (
+    GENERATED,
+    LINKER,
+    _assert_matches_a_fresh_rebuild,
+    _build_small,
+    _graph_rows,
+    _note,
+    _titled,
+)
+
+from exomem import deferred_index, epistemic_graph, freshness, index_sync
+from exomem.epistemic_graph import EpistemicGraphIndex
+
+REPLAYED = f"{GENERATED}/generated-note-0003.md"
+RETITLED = f"{GENERATED}/retitled.md"
+
+
+@pytest.fixture
+def whole_vault_passes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Count every whole-vault pass, whichever caller starts it."""
+    passes: list[str] = []
+    real = EpistemicGraphIndex._rebuild_all_off_boundary
+
+    def counted(self, **kwargs):
+        passes.append("pass")
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_off_boundary", counted, raising=True)
+    return passes
+
+
+def _built(vault: Path, whole_vault_passes: list[str]) -> Path:
+    root = _build_small(
+        vault,
+        {
+            LINKER: _note(500, []) + "\nSee [[Old Title]] and [[New Title]].\n",
+            RETITLED: _titled("Old Title", ""),
+        },
+    )
+    whole_vault_passes.clear()
+    return root
+
+
+def _publish_past_a_stale_row(root: Path) -> None:
+    """Leave `retitled.md` with a stale row under a checkpoint that already includes it.
+
+    The 7.6 shape: the registry records the retitle, and a drain of another page
+    publishes the marker at the registry's checkpoint, so the retitle is behind
+    the stored checkpoint -- outside the recall delta -- while its own receipt
+    has not drained.
+    """
+    (root / RETITLED).write_text(_titled("New Title", ""), encoding="utf-8")
+    other = root / GENERATED / "generated-note-0007.md"
+    other.write_text(other.read_text(encoding="utf-8") + "\n- edit\n", encoding="utf-8")
+    freshness.rebaseline(root)
+    report = EpistemicGraphIndex(root).drain_paths([other])
+    assert report["published"] is True
+
+
+def test_a_replayed_path_the_graph_already_reflects_rebuilds_nothing(
+    vault: Path, whole_vault_passes: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    root = _built(vault, whole_vault_passes)
+    before = _graph_rows(root)
+    caplog.set_level(logging.INFO, logger="exomem.epistemic_graph")
+
+    result = epistemic_graph.upsert_after_write(root, [root / REPLAYED])
+
+    assert whole_vault_passes == [], "a replay the graph already reflects rebuilt the vault"
+    assert "caller_path_outside_delta" not in caplog.text
+    assert result.outcome in {"completed", "not_required"}, result
+    assert _graph_rows(root) == before
+    assert EpistemicGraphIndex(root).available() is True
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_replayed_full_index_receipt_the_graph_reflects_rebuilds_nothing(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """The live path: a deferred full-index receipt replayed by the drain."""
+    root = _built(vault, whole_vault_passes)
+    deferred_index.add_full_receipts(root, [REPLAYED])
+
+    assert index_sync.drain_deferred_work(root, paths=[root / REPLAYED]) == 1
+
+    assert deferred_index.snapshot_full(root) == []
+    assert whole_vault_passes == []
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_current_replayed_path_does_not_hold_back_the_delta(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    root = _built(vault, whole_vault_passes)
+    created = root / GENERATED / "created-in-the-delta.md"
+    created.write_text(_note(700, ["generated-note-0001"]), encoding="utf-8")
+    freshness.rebaseline(root)
+
+    epistemic_graph.upsert_after_write(root, [root / REPLAYED, created])
+
+    assert whole_vault_passes == []
+    assert EpistemicGraphIndex(root).available() is True
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_replayed_stale_page_is_drained_incrementally(
+    vault: Path, whole_vault_passes: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    root = _built(vault, whole_vault_passes)
+    _publish_past_a_stale_row(root)
+    caplog.set_level(logging.INFO, logger="exomem.epistemic_graph")
+
+    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+
+    assert whole_vault_passes == [], "a stale page the registry vouches for rebuilt the vault"
+    assert "caller_path_outside_delta" not in caplog.text
+    assert EpistemicGraphIndex(root).available() is True
+    # The retitle re-targets the linker's links; the drain widens to it.
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_replayed_page_the_registry_does_not_vouch_for_still_rebuilds(
+    vault: Path, whole_vault_passes: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    root = _built(vault, whole_vault_passes)
+    _publish_past_a_stale_row(root)
+    # Changed again behind the registry's back: its record no longer matches disk.
+    (root / RETITLED).write_text(_titled("Newer Title", "moved again"), encoding="utf-8")
+    caplog.set_level(logging.INFO, logger="exomem.epistemic_graph")
+
+    epistemic_graph.upsert_after_write(root, [root / RETITLED])
+
+    assert "reason=caller_path_outside_delta" in caplog.text
+    assert len(whole_vault_passes) == 1
+    _assert_matches_a_fresh_rebuild(root)
