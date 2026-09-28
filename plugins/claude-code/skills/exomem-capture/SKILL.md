@@ -70,6 +70,11 @@ carry transient progress; capture reusable decisions and verified milestones.
    then call `connect_memory(operation="resolve-entity", name=...)` before writing.
 7. When one active entity matches, use `edit_memory` for a small stable-fact
    correction or the canonical relation workflow for a new connection.
+   A stable, uniquely attributable identity or contact fact about a resolved
+   person, including the vault owner's own entity (for example a phone number
+   or address read from a screenshot), is an entity-level fact: route it to
+   that entity or its linked personal-details node under `proactive_capture`,
+   not just in the reply that used it.
 8. Only when no entity matches and the identity is stable, recurring, central,
    and useful beyond this source, use `connect_memory(operation="create-entity")`.
 

@@ -152,7 +152,9 @@ COVERAGE_ASK = (
     'does not cover it. Read episode_memory action="candidates" and continue: '
     'decide each candidate, resume the routed ones, or make the final pass '
     '(action="coverage", then resume with postcommit=true). Deferred work may '
-    "stay deferred."
+    "stay deferred. If the final pass shows one page received several distinct "
+    "topic clusters, give each cluster a disposition: an existing canonical page, "
+    "entity, Planning or Records item, a justified new page, or no_capture."
 )
 _WORKFLOW_ACTIONS = frozenset({"prepare", "disposition", "resume"})
 _EPISODE_KEY_RE = re.compile(r"^ep-[0-9a-f]{32}$")

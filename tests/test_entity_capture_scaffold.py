@@ -47,3 +47,18 @@ def test_people_pages_document_aliases_and_about_entity() -> None:
     people = page_types.split("### People", 1)[1].split("### ", 1)[0]
     assert "aliases" in people
     assert "about_entity" in people
+
+
+def test_capture_workflow_routes_stable_person_and_self_facts_to_the_entity() -> None:
+    text = " ".join(
+        (SCHEMA / "workflow-skills" / "exomem-capture" / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+
+    assert "identity or contact fact" in text
+    assert "vault owner" in text
+    assert "personal-details" in text
+    assert "proactive_capture" in text
+    # A fact used in the reply is not yet captured: it is written when learned.
+    assert "not just in the reply" in text

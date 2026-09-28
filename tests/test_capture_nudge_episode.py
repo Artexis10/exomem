@@ -1059,3 +1059,9 @@ def test_the_checkpoint_reads_the_real_ledger_through_the_rest_door(
             journal_digest=executed["journal_digest"],
         )
     assert _stop(monkeypatch, capsys, _prepared(tmp_path, "after.jsonl")) is None
+
+
+def test_coverage_ask_names_the_per_cluster_disposition_for_a_sink() -> None:
+    ask = " ".join(hook.COVERAGE_ASK.split())
+    assert "several distinct topic clusters" in ask
+    assert "no_capture" in ask
