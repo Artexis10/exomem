@@ -476,11 +476,14 @@ def test_a_two_letter_ascii_term_is_still_refused() -> None:
 # anchor whose name is a contiguous substring of such a run earns `rare_term`,
 # the weak worded kind, which resolves only with a second, independent contact.
 # A Japanese name that is the whole stretch between two particles is spelled as
-# a word, though, and earns `exact_alias` (task 6.3): `_SPELLED_TURN` below.
+# a word, though, and earns `exact_alias` (task 6.3): `_SPELLED_TURN` below. A
+# hiragana run is a word edge only when the whole run is a declared particle or
+# filler word, so `の白樺をまた` (を and また glued) leaves the name contained.
 
 _HUT = "白樺"
 _TURN = "来月の合宿、山小屋白樺をまた借りられるか確認してくれる？"
-_SPELLED_TURN = "来月の合宿、山小屋の白樺をまた借りられるか確認してくれる？"
+_SPELLED_TURN = "来月の合宿、山小屋の白樺を借りられるか確認してくれる？"
+_GLUED_TURN = "来月の合宿、山小屋の白樺をまた借りられるか確認してくれる？"
 _COMPOUND_TURN = "駅前の白樺並木、今年は紅葉がきれいだったね。"
 
 
@@ -518,6 +521,13 @@ def test_a_japanese_name_between_particles_is_spelled_as_a_word() -> None:
         "hut.md": frozenset({"exact_alias", "rare_term"})
     }
     assert resolve_module.resolve(candidates, turn_tokens=analysis.tokens).anchors[0].status == "resolved"
+
+
+def test_a_hiragana_run_that_is_not_wholly_a_particle_is_not_a_word_edge() -> None:
+    """をまた is a particle glued to an adverb: not a declared edge, so the
+    name before it stays contained. The price of never handing a name written
+    partly in hiragana (ねこやなぎ銀行) to its kanji tail."""
+    assert _evidence(_GLUED_TURN, [_row("hut.md", _HUT)]) == {"hut.md": frozenset({"rare_term"})}
 
 
 def test_containment_resolves_only_with_a_second_contact() -> None:

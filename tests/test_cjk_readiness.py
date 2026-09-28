@@ -607,23 +607,26 @@ def test_an_alias_only_a_withheld_page_answers_to_reads_as_absent(ja_vault: Path
 def test_one_create_walks_the_entities_once_however_many_aliases(
     ja_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Each walk of Entities/ parses 青木陽介's page once, so its count is the
+    number of walks: the same for one alias as for eight."""
     from exomem import entity_candidates
 
-    reads: list[str] = []
+    walks: list[int] = []
     original = entity_candidates.parse_frontmatter
 
     def counting(source: str):
-        reads.append(source)
+        if "# 青木陽介" in source:
+            walks.append(1)
         return original(source)
 
     monkeypatch.setattr(entity_candidates, "parse_frontmatter", counting)
     _create_entity(ja_vault, "Corvane Motors", "One alias.", aliases=["コルヴェイン"])
-    one = len(reads)
-    reads.clear()
+    one = len(walks)
+    walks.clear()
     _create_entity(
         ja_vault, "Tessary Works", "Eight aliases.", aliases=[f"テッサリー{n}" for n in range(8)]
     )
-    assert len(reads) == one, (one, len(reads))
+    assert len(walks) == one <= 2, (one, len(walks))
 
 
 def test_edit_memory_refuses_an_alias_another_page_answers_to(ja_vault: Path) -> None:

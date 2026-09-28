@@ -35,7 +35,8 @@ reverse), add a native-script alias: the user's own spelling.
 
 Use only a spelling the user wrote or the source states; never a
 transliteration or translation you made up. An alias is a name the page
-answers to, so one another active entity already answers to is refused.
+answers to, so one any other page already answers to (a note's title included)
+is refused, at capture and on edit.
 
 ## Vocabulary consideration
 

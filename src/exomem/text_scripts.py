@@ -112,6 +112,22 @@ def is_hiragana(character: str) -> bool:
     return HIRAGANA_BLOCK[0] <= ord(character) <= HIRAGANA_BLOCK[1]
 
 
+#: Japanese particles and copulas, a closed grammatical set: a hiragana run of
+#: a Japanese turn is a word edge only when the WHOLE run is one of these (or a
+#: declared filler word), so a name that is itself written partly in hiragana
+#: (`ねこやなぎ銀行`) keeps its own edge instead of handing it to its kanji tail.
+JAPANESE_PARTICLES = frozenset(
+    {
+        "の", "を", "に", "は", "が", "で", "と", "へ", "も", "や", "か",
+        "から", "まで", "より", "など", "だけ", "しか", "って", "けど", "ので", "のに",
+        "では", "には", "とは", "での", "への", "との", "からの", "までの",
+        "にも", "でも", "とも", "へは", "のは", "のが", "のを", "のも",
+        "について", "として", "にとって", "による", "によって", "のため",
+        "だ", "です", "でした", "だった",
+    }
+)
+
+
 def vocabulary_words(text: str) -> list[str]:
     """The words of normalised, non-ASCII `text` for vocabulary comparisons.
 

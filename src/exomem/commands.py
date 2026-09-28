@@ -4256,6 +4256,8 @@ def op_edit(
                 relation_review_reason=relation_review_reason,
             )
         elif field is not None:
+            if field == "aliases":
+                _refuse_claimed_aliases(vault_root, path, value)
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root,
                 path=path,
@@ -4589,7 +4591,7 @@ def op_link(
             its `aliases`. Give the native-script spelling of a name written
             in another script (a Japanese name for an English-titled page) so
             a turn in that script reaches it. At most 8, one line and 64
-            characters each; one another active entity answers to refuses.
+            characters each; one any other page already answers to refuses.
 
     Returns:
         {path, warnings}.
@@ -7216,6 +7218,27 @@ def op_remember(
         vocabulary_decision=vocabulary_decision,
     )
 
+
+
+def _refuse_claimed_aliases(vault_root: Path, path: str, value: object) -> None:
+    """Refuse an `aliases` patch naming what another page already answers to.
+
+    The same guard `create-entity` runs (`entity_candidates.claimed_names`):
+    an alias another page holds would make a turn naming it resolve both. The
+    page's own title and current aliases are never a collision.
+    """
+    names = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    aliases = [str(item).strip() for item in names if isinstance(item, str) and str(item).strip()]
+    if not aliases:
+        return
+    rel = path if path.endswith(".md") else f"{path}.md"
+    claimed = entity_candidates_module.claimed_names(vault_root, aliases, exclude_path=rel)
+    if claimed:
+        alias, paths = next(iter(claimed.items()))
+        raise ValueError(
+            f"ENTITY_EXISTS: another page already answers to the alias {alias!r} "
+            f"({', '.join(paths)}); pick a name only this page answers to"
+        )
 
 def op_edit_memory(
     vault_root: Path,

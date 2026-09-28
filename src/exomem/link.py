@@ -579,13 +579,16 @@ def _clean_aliases(name: str, aliases: list[str] | None) -> list[str]:
     Another spelling of the name, in any script: a Japanese user's name for a
     page titled in English is what lets a Japanese turn reach it. Each is
     stripped; a repeat, or the name itself, by identity key (NFKC, casefold,
-    collapsed spaces) is dropped. An empty one, one spanning lines, one over
-    `MAX_ALIAS_CHARS`, or more than `MAX_ALIASES` refuses the whole write.
+    collapsed spaces) or by the activation index's `normalize` is dropped. An
+    empty one, one spanning lines, one over `MAX_ALIAS_CHARS`, or more than
+    `MAX_ALIASES` refuses the whole write.
     """
     if not aliases:
         return []
+    from .working_set_index import normalize
+
     out: list[str] = []
-    seen = {entity_candidates.identity_key(name)}
+    seen = {entity_candidates.identity_key(name), normalize(name)}
     for raw in aliases:
         alias = str(raw).strip()
         if not alias or "\n" in alias or "\r" in alias or len(alias) > MAX_ALIAS_CHARS:
@@ -594,10 +597,10 @@ def _clean_aliases(name: str, aliases: list[str] | None) -> list[str]:
                 ["aliases"],
                 f"alias {raw!r} must be one line of 1-{MAX_ALIAS_CHARS} characters",
             )
-        key = entity_candidates.identity_key(alias)
-        if key in seen:
+        keys = {entity_candidates.identity_key(alias), normalize(alias)}
+        if keys & seen:
             continue
-        seen.add(key)
+        seen |= keys
         out.append(alias)
     if len(out) > MAX_ALIASES:
         raise LinkError(
@@ -749,17 +752,18 @@ def link(
             list(identity_resolution["candidates"]),
         )
     aliases_clean = _clean_aliases(display_name, aliases)
-    for alias in aliases_clean:
-        # An alias is a name the page answers to: one another active entity
-        # already answers to would make both ambiguous.
-        claimed = entity_candidates.resolve_entity_candidate(vault_root, name=alias)
-        if claimed["status"] != "no_match":
-            raise LinkError(
-                "ENTITY_EXISTS",
-                ["aliases"],
-                f"an active entity already has the title or alias {alias!r}",
-                list(claimed["candidates"]),
-            )
+    # An alias is a name the page answers to: one any other page already
+    # answers to would make a turn naming it resolve both. One lookup for all
+    # of them, read as the resolver reads names (`claimed_names`).
+    claimed = entity_candidates.claimed_names(vault_root, aliases_clean) if aliases_clean else {}
+    if claimed:
+        alias = next(iter(claimed))
+        raise LinkError(
+            "ENTITY_EXISTS",
+            ["aliases"],
+            f"another page already answers to the alias {alias!r}",
+            [{"alias": name, "path": path} for name, found in claimed.items() for path in found],
+        )
     folder = kb_root(vault_root) / "Entities" / definition.folder
     entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
     # Re-spell the destination to the real on-disk casing *before* it is bound

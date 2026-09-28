@@ -112,7 +112,12 @@ The system SHALL resolve and enrich existing entities before creating duplicates
 - **THEN** the page records it in its owner `aliases`, stripped, deduplicated
   and never repeating the title
 - **AND** an empty, multi-line or over-long alias, more than eight, or one
-  another active entity already answers to, refuses the whole creation
+  any other visible page already answers to (its title, stem or alias, read
+  with the resolver's apostrophe, hyphen and soft-hyphen folds), refuses the
+  whole creation
+- **AND** an `edit_memory` write of the `aliases` field is refused the same
+  way, the page's own names excepted, and a page the caller may not see reads
+  as absent
 
 #### Scenario: A useful reusable relationship is missing
 
@@ -330,11 +335,12 @@ In a script written without spaces, an anchor name of at least two characters,
 wholly in the script of the turn's unspaced run, contained in that run and rare
 by the anchor-name yardstick MAY grant rare-term evidence, never exact-alias
 evidence; a name whose every occurrence lies inside a longer contained name
-SHALL be consumed by it. A Japanese run's stretch of at least two characters
-between hiragana, and a word of another script glued to an unspaced run, SHALL
-be read as a word of the turn, so a name equal to it grants exact-alias
-evidence as a spaced token does; a name inside a longer stretch stays
-contained. Because the band is an aggregate over the whole anchor
+SHALL be consumed by it. A Japanese run's stretch holding at least two
+characters besides hiragana, between hiragana runs that are each wholly a
+declared particle or filler word, and a word of another script glued to an
+unspaced run, SHALL be read as a word of the turn, so a name equal to it grants
+exact-alias evidence as a spaced token does; any other hiragana belongs to the
+stretch around it, and a name inside a longer stretch stays contained. Because the band is an aggregate over the whole anchor
 catalogue, withheld anchors included, under a non-empty governed policy it SHALL
 run only for owner-bound principals: every other principal SHALL receive
 semantic evidence `audience_restricted` and no `vector_band` contact, decided
@@ -495,9 +501,11 @@ fast abstention or compiler-only timing.
 #### Scenario: A Japanese turn spells an anchor's name between particles
 
 - **WHEN** a Japanese turn holds an anchor's name as the whole stretch between
-  two particles (`山小屋の白樺をまた借りられるか`), or glues a Latin anchor
+  two particles (`山小屋の白樺を借りられるか`), or glues a Latin anchor
   name to a Japanese phrase (`Exomemのレイテンシ`)
 - **THEN** the anchor earns `exact_alias` and resolves without a band
+- **AND** a name written partly in hiragana (`ねこやなぎ銀行の口座`) keeps its
+  own edge: a shorter anchor named by its kanji tail (`銀行`) is only contained
 - **AND** a pointing-back Japanese turn made only of a declared cue and filler
   (`続けてください`) is referential, while one that also says something of its
   own (`続きを読んで`) is not

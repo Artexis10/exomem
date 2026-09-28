@@ -123,3 +123,81 @@ def resolve_entity_candidate(
         "omitted_candidate_count": max(0, len(matches) - len(candidates)),
         "scope": f"{kb_prefix()}Entities",
     }
+
+
+def claimed_names(
+    vault_root: Path,
+    names: list[str] | tuple[str, ...],
+    *,
+    exclude_path: str | None = None,
+) -> dict[str, tuple[str, ...]]:
+    """`{name: paths}` for each of `names` another visible page already answers to.
+
+    An alias is a name the page answers to, and activation, wikilinks and the
+    egress name map match EVERY indexed page's title, stem and aliases through
+    `working_set_index.normalize`, which also folds typographic apostrophes and
+    hyphens and drops soft hyphens. So the lookup is that index's own
+    `resolve_names`, plus one pass over the Entities tree for an entity the
+    index has not caught up with yet (compared by `identity_key` and
+    `normalize` both). `exclude_path` (a page rewriting its own aliases) is
+    never a collision. For a caller other than the owner, a page it may not
+    see is filtered out first, so it reads exactly as absent.
+    """
+    from . import working_set_index
+    from .governance import egress
+
+    wanted: dict[str, str] = {}
+    for name in names:
+        for key in (working_set_index.normalize(name), identity_key(name)):
+            if key:
+                wanted.setdefault(key, name)
+    if not wanted:
+        return {}
+    found: dict[str, set[str]] = {}
+    try:
+        resolved = working_set_index.WorkingSetIndex(vault_root).resolve_names(list(names))
+    except working_set_index.WorkingSetIndexUnavailable:
+        # Integrity, not disclosure: the Entities pass below still answers.
+        resolved = {}
+    for key, paths in resolved.items():
+        if key in wanted:
+            found.setdefault(wanted[key], set()).update(paths)
+
+    registry = load_entity_types(vault_root)
+    entities_root = kb_root(vault_root) / "Entities"
+    for definition in registry.active_definitions:
+        folder = entities_root / definition.folder
+        if not folder.is_dir():
+            continue
+        for path in folder.glob("*.md"):
+            if path.name.casefold() == "index.md":
+                continue
+            try:
+                source, _guard = read_guarded_text(vault_root, path)
+                frontmatter, _body, _raw = parse_frontmatter(
+                    source.replace("\r\n", "\n").replace("\r", "\n")
+                )
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if str(frontmatter.get("type") or "").casefold() != "entity":
+                continue
+            rel_path = path.relative_to(vault_root).as_posix()
+            for spelling in (
+                str(frontmatter.get("title") or path.stem),
+                *_aliases(frontmatter.get("aliases")),
+            ):
+                for key in (working_set_index.normalize(spelling), identity_key(spelling)):
+                    if key in wanted:
+                        found.setdefault(wanted[key], set()).add(rel_path)
+
+    visible = egress.restricted_release_filter(vault_root)
+    out: dict[str, tuple[str, ...]] = {}
+    for name, paths in found.items():
+        kept = sorted(
+            path
+            for path in paths
+            if path != exclude_path and (visible is None or visible(path))
+        )
+        if kept:
+            out[name] = tuple(kept)
+    return out

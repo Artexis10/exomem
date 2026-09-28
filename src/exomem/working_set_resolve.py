@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .ranking_config import DEFAULT_RANKING, RankingConfig
-from .text_scripts import is_hiragana
+from .text_scripts import JAPANESE_PARTICLES, is_hiragana
 from .working_set_index import (
     RARE_TERM_MAX_ANCHORS,
     STOPWORDS,
@@ -603,22 +603,30 @@ def _contained_names(
     return frozenset(contained)
 
 
-def embedded_words(tokens: Sequence[str]) -> tuple[str, ...]:
+def embedded_words(
+    tokens: Sequence[str], boundaries: frozenset[str] = JAPANESE_PARTICLES
+) -> tuple[str, ...]:
     """The words the turn's tokens hold without a space around them.
 
     Japanese marks its word boundaries with script, not spaces. A Latin word
     glued to a Japanese phrase (`exomemのレイテンシ`) ends where the Japanese
-    begins, and inside a Japanese run the particles and inflections are
-    written in hiragana, so the stretch between two of them (`の白樺を` holds
-    `白樺`) is a word, or a compound of words, never the fragment of a longer
-    one. Such a word is spelled exactly as a spaced token would be, so a name
-    equal to it is `exact_alias`; a name inside a longer stretch (`白樺並木`)
-    is still only contained (`_contained_names`).
+    begins, and inside a Japanese run the particles are written in hiragana,
+    so the stretch between two of them (`の白樺を` holds `白樺`) is a word, or
+    a compound of words, never the fragment of a longer one. Such a word is
+    spelled exactly as a spaced token would be, so a name equal to it is
+    `exact_alias`; a name inside a longer stretch (`白樺並木`) is still only
+    contained (`_contained_names`).
 
-    A stretch counts only when it is at least two code points and not the
-    whole token: one Han character is as often a verb stem as a word, the
-    same floor containment has. Hiragana stretches are never words here, and
-    a run with no hiragana (Chinese, Thai) splits only from a glued Latin word.
+    A hiragana run is an edge only when the WHOLE run is one of `boundaries`
+    (the declared particles, plus the vocabulary's filler words from
+    `analyze_turn`). Any other hiragana is part of the stretch around it: a
+    name written partly in hiragana (`ねこやなぎ銀行`) keeps its own edge, and
+    its kanji tail (`銀行`) is only contained, as in `ハヤブサ号線`.
+
+    A stretch counts only when it holds at least two code points besides
+    hiragana and is not the whole token: one Han character is as often a verb
+    stem as a word (`借りた`), the same floor containment has. A run with no hiragana
+    (Chinese, Thai) splits only from a glued Latin word.
     """
     words: list[str] = []
     for token in tokens:
@@ -635,13 +643,13 @@ def embedded_words(tokens: Sequence[str]) -> tuple[str, ...]:
                 pieces.append(run)
                 continue
             stretch = ""
-            for char in run:
-                if is_hiragana(char):
+            for kana, part in _hiragana_segments(run):
+                if kana and part in boundaries:
                     if stretch:
                         pieces.append(stretch)
                     stretch = ""
                 else:
-                    stretch += char
+                    stretch += part
             if stretch:
                 pieces.append(stretch)
         if cursor < len(token):
@@ -649,13 +657,33 @@ def embedded_words(tokens: Sequence[str]) -> tuple[str, ...]:
         for piece in pieces:
             word = piece.strip("'-")
             if (
-                len(word) >= 2
+                sum(1 for char in word if not is_hiragana(char)) >= 2
                 and word != token
                 and any(char.isalpha() for char in word)
                 and word not in words
             ):
                 words.append(word)
     return tuple(words)
+
+
+def _hiragana_segments(run: str) -> list[tuple[bool, str]]:
+    """`run` as alternating (is hiragana, text) segments."""
+    segments: list[tuple[bool, str]] = []
+    for char in run:
+        kana = is_hiragana(char)
+        if segments and segments[-1][0] == kana:
+            segments[-1] = (kana, segments[-1][1] + char)
+        else:
+            segments.append((kana, char))
+    return segments
+
+
+@functools.lru_cache(maxsize=16)
+def _word_edges(vocabulary: ReferentialVocabulary) -> frozenset[str]:
+    """The declared particles plus the vocabulary's hiragana filler words."""
+    return JAPANESE_PARTICLES | frozenset(
+        word for word in vocabulary.filler if word and all(is_hiragana(char) for char in word)
+    )
 
 
 @functools.lru_cache(maxsize=16)
@@ -848,7 +876,7 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         follow_up=is_follow_up(
             tokens, referential_cue=referential_cue, filler=vocabulary.filler
         ),
-        words=embedded_words(tokens),
+        words=embedded_words(tokens, _word_edges(vocabulary)),
     )
 
 
