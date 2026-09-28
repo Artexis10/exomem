@@ -395,6 +395,9 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   missed. The adoption proof fails closed on it (the drain gate counts only queued
   pages), but the serving graph can carry the stale edge. Keep an affected page's stored
   title until its own receipt drains, or widen on it when the pass changes it.
+  Since 9.2, a replayed page whose rows such a drain already rewrote proves current and
+  is dropped, so the whole-vault replay no longer heals its old-title dependants by
+  accident.
 - [ ] 8.10 **Open, not fixed here.** The carry's exactness check counts a Knowledge Base
   page that is on disk with no row (or a differing row) and not queued as explained, so a
   drain can derive an edge to it. If that page is deleted, or retitled and back, before
