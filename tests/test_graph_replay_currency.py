@@ -22,7 +22,6 @@ from pathlib import Path
 import pytest
 from test_graph_handoff_convergence import (
     GENERATED,
-    LINKER,
     _assert_matches_a_fresh_rebuild,
     _build_small,
     _graph_rows,
@@ -35,6 +34,10 @@ from exomem.epistemic_graph import EpistemicGraphIndex
 
 REPLAYED = f"{GENERATED}/generated-note-0003.md"
 RETITLED = f"{GENERATED}/retitled.md"
+# One page per title, so the retitle drops one edge and adds the other: a drain
+# that does not widen to the retitle's dependants leaves both visibly wrong.
+OLD_LINKER = f"{GENERATED}/old-linker.md"
+NEW_LINKER = f"{GENERATED}/new-linker.md"
 
 
 @pytest.fixture
@@ -55,7 +58,8 @@ def _built(vault: Path, whole_vault_passes: list[str]) -> Path:
     root = _build_small(
         vault,
         {
-            LINKER: _note(500, []) + "\nSee [[Old Title]] and [[New Title]].\n",
+            OLD_LINKER: _note(500, []) + "\nSee [[Old Title]].\n",
+            NEW_LINKER: _note(501, []) + "\nSee [[New Title]].\n",
             RETITLED: _titled("Old Title", ""),
         },
     )
@@ -144,7 +148,7 @@ def test_a_replayed_stale_page_is_drained_incrementally(
     assert whole_vault_passes == [], "a stale page the registry vouches for rebuilt the vault"
     assert "caller_path_outside_delta" not in caplog.text
     assert EpistemicGraphIndex(root).available() is True
-    # The retitle re-targets the linker's links; the drain widens to it.
+    # The retitle moves an edge from one linker to the other; the drain widens to both.
     _assert_matches_a_fresh_rebuild(root)
 
 
