@@ -187,3 +187,80 @@ covered as pending, but task 9.4 should say so.
 - ruff F is clean, and `openspec validate --all --strict` gives 217 passed.
 
 **Recheck 2 verdict: REQUEST_CHANGES** (NEW CONCERN 2).
+
+## Recheck 3 (head `41a103b`)
+
+Reviewed `99aae8b..41a103b`: `epistemic_graph.py` (+10), `tests/test_graph_replay_currency.py`
+(+86) and task 9.4 (+8).
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| NEW CONCERN 2 | **FIXED** | The new guard (`epistemic_graph.py:9174-9183`) runs before the old checkpoint-deferred block and matches the Recheck 2 prototype. In the acknowledged-checkpoint repro, marker and epoch both now give `deferred/graph_repair_queued`, `whole_vault_attempted=False`, and a code in `_GRAPH_COVERAGE_CODES`. |
+| `index_sync` coverage | **FIXED** | The code is a coverage code, so the result is treated as covered by durable per-path receipts. |
+| Request terminal | **PARTIAL** | The graph diagnostic reads `deferred/graph_repair_queued`. **Correction to Recheck 2:** the graph is not a `derived_sync` component (`mutation_terminal.py:112`). The terminal's `graph_sync` field comes from `writer_lease._durable_graph_outcome`, which returns `completed` whenever the acknowledgement covers the checkpoint (`writer_lease.py:1204`). In this repro it returns `completed` while the graph is unavailable and the receipt is queued. That is pre-existing: the external-pending door produces the same state. It is also narrow: a request that writes Knowledge Base markdown advances the checkpoint and takes the correct checkpoint door (`graph_sync.py:1600-1633`). Follow-up rather than blocker, but the new test's name claims "reports pending", while it asserts only the diagnostic. |
+| Task 9.4 | **Accurate for this round** | Its evidence lists omit the regressions below. |
+
+**Thread-spy repros**, rerun on the head:
+- Mutation-request trace, all four variants (marker/epoch × no checkpoint/acknowledged
+  checkpoint): zero whole-vault calls on the caller thread. Each receipt drains exactly
+  once, by the daemon (second drain returns 0), and the graph matches a fresh rebuild.
+- Standalone callers keep their join: `graph_rebuild_completed`,
+  `whole_vault_attempted=True`, and the graph ends available.
+
+## BLOCKER: CI is red on `41a103b`, with regressions from `a52b2a6` onward
+
+The PR's check runs show 6 failed jobs: `lint + targeted types` and core shards 1, 4, 5,
+9 and 10. I reproduced both of the following locally. Every test named here passes on
+`origin/main` and with the base `53ac15a` source.
+
+**1. mypy** (`lint + targeted types`):
+- `epistemic_graph.py:5236`: `set(drain_scope)`, where `drain_scope` is typed `int`.
+- `epistemic_graph.py:5587`: `"_drain_after_release": sorted(...)` inside a
+  `dict[str, int]`.
+
+Fix: give the refresh report a `dict[str, Any]` or TypedDict, or pass the scope outside
+the report.
+
+**2. NEW CONCERN 3: the proof skips reconcile's reprojection.**
+`_replayed_path_currency` proves a page current from the file row's `source_hash`
+alone. Reconcile deliberately calls a refresh on *unchanged* markdown to reproject
+derived rows. The log shows `proved replayed paths current count=1 delta_paths=0`, and
+nothing is repaired. Failures:
+- `test_semantic_unit_reconcile.py::test_reconcile_repairs_unit_drift_without_markdown_changes_and_is_idempotent`
+  (`'degraded' == 'repaired'`)
+- `...::test_hierarchy_reconcile_refreshes_derived_state_without_rewriting_markdown`
+- `...::test_explicit_upgrade_reconcile_reprojects_unchanged_rich_units_everywhere`
+  (graph unit rows stay `stale-generation`)
+
+This is a correctness regression: unit drift and parser upgrades no longer repair.
+Minimal fix: make the proof also compare the page's stored unit/projection generation,
+or give reconcile and explicit repair a way to bypass the proof. Keep the no-op only
+for replayed receipts.
+
+**3. Tests that relied on refreshing an unchanged page.** The new no-op now
+short-circuits them before they exercise their property:
+- `test_epistemic_graph_freshness.py::test_refresh_batch_reuses_one_snapshot_and_separate_calls_reacquire`
+  (no resolver acquisition)
+- `...::test_incremental_refresh_retries_when_path_changes_during_indexing`
+  (`raced is False`)
+- `test_freshness_liveness_contract.py::test_publication_failure_records_graph_recovery_state_not_vault_freshness`
+  (no publication attempt, so no fence)
+
+Update each one so its page is actually changed and in the delta, which keeps the
+intent. Don't skip them.
+
+Bisect: the two freshness tests fail at `a52b2a6`, `0d69219`, `5f68cf9`, `544662f` and
+`99aae8b`, and pass at `53ac15a`. My earlier rounds' scoped suites didn't include these
+files, and neither did the PR's evidence.
+
+## Verification
+
+- A sweep of the 66 graph, index_sync, deferred, freshness, reconcile, move, trash,
+  media-worker and durable-closure files: **6 failed**, 1627 passed, 18 skipped. The 6
+  failures are all listed above.
+- `test_graph_replay_currency.py` passes, `openspec validate --all --strict` gives 217
+  passed, and ruff F is clean. mypy on `epistemic_graph.py` fails with 2 errors (clean
+  on main).
+
+**Recheck 3 verdict: REQUEST_CHANGES** (red CI: mypy, the reconcile regression in
+NEW CONCERN 3, and three obsolete test setups).
