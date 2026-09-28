@@ -223,8 +223,6 @@ RETRIEVAL_CARRY_RARE_WINDOW = 4
 #: the turn named apart, because a packet is a bounded budget, not an index.
 RETRIEVAL_CARRY_MAX_PHRASES = 4
 RETRIEVAL_CARRY_MAX_DOMAINS = 3
-#: How many of a carried page's units are read to learn which categories it holds.
-CARRIED_CATEGORY_PROBE = 24
 #: There is deliberately no "N distinctive stems anywhere" path. One
 #: existed — three of a page's distinctive words, wherever they sat, named
 #: it — on the reasoning that a turn does not land on three by accident.
@@ -1662,40 +1660,18 @@ def _page_unit_categories(
     """The categories a page's own semantic units are filed under, or `None`
     when they cannot be read (the caller then keeps the unfiltered lenses).
 
-    One bounded catalogue read of that page's units, the same call the units
-    lane makes, with no category constraint."""
+    One indexed read of the maintained catalogue, never a unit query: the
+    answer only chooses which lenses to read the page through."""
     try:
-        from . import find as find_module
-        from . import ranking_config, structured_filters
+        from . import lexstore
 
-        snapshot = freshness_snapshot or find_module.FreshnessSnapshot(Path(vault_root))
-        plan = structured_filters.compile_filter(
-            None, shortcuts=structured_filters.FilterShortcuts()
-        )
-        hits = find_module._find_semantic_units(
-            Path(vault_root),
-            query="",
-            limit=CARRIED_CATEGORY_PROBE + 1,
-            scope="kb",
-            plan=plan,
-            snapshot=snapshot,
-            prefer_active=True,
-            config=ranking_config.DEFAULT_RANKING,
-            mode="keyword",
-            degraded_out=None,
-            failed_out=None,
-            allowed_parent_paths={path},
-            recall_checkpoint=snapshot.recall_checkpoint("kb"),
-            repair=False,
-            max_catalog_candidates=CARRIED_CATEGORY_PROBE + 1,
-            truncated_out=[],
-        )
+        found = lexstore.get_store(Path(vault_root)).unit_categories_of((path,))
     except Exception:  # noqa: BLE001 - a probe that fails keeps the unfiltered lenses
         log.debug("activation carried page category probe failed for %s", path, exc_info=True)
         return None
-    found = {str(getattr(hit, "category", "") or "") for hit in hits}
-    found.discard("")
-    return frozenset(found) or None
+    if not found:
+        return None
+    return found.get(path) or None
 
 
 def _carried_packet(
@@ -1855,11 +1831,12 @@ def _carried_material(
     states: list[Mapping[str, Any]] = []
     used_roles: dict[str, dict[str, str]] = {}
     for path in paths:
-        roles = _carry_roles(
-            registry,
-            analysis,
-            _page_unit_categories(vault_root, path, freshness_snapshot=freshness_snapshot),
-        )
+        with _span(timings, "working_set.carry_lenses"):
+            roles = _carry_roles(
+                registry,
+                analysis,
+                _page_unit_categories(vault_root, path, freshness_snapshot=freshness_snapshot),
+            )
         carried = working_set_resolve.ResolvedAnchor(
             anchor_id=path,
             path=path,
