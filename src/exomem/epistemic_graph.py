@@ -5521,7 +5521,14 @@ class EpistemicGraphIndex:
         # reflected (a no-op) or recorded work the drain repairs. Only a path
         # the registry does not vouch for still rebuilds from disk.
         delta_paths = set(delta.changed | delta.deleted)
-        outside = [Path(path) for path in paths if str(path) not in delta_paths]
+        created_paths = list(created_paths)
+        # A fan-out names its batch's created pages beside the written ones; a
+        # created page outside the delta is replayed too, and proved the same way.
+        outside = list(
+            dict.fromkeys(
+                Path(path) for path in (*paths, *created_paths) if str(path) not in delta_paths
+            )
+        )
         if outside:
             # Proved before the resolver is needed: a replay the rows already
             # reflect owes nothing, whether or not a resolver is resident.
@@ -5571,6 +5578,9 @@ class EpistemicGraphIndex:
                 # pages are already what the rows say: the replay owes nothing.
                 return {"indexed_files": 0, "nodes": 0, "edges": 0}
             paths = [path for path in paths if str(path) in delta_paths]
+            # Proved current, so neither a created page outside the delta: left
+            # in, it is a created path without a delta row to vouch for it.
+            created_paths = [path for path in created_paths if str(path) in delta_paths]
             snapshot = self._open_read_snapshot(require_current_projection=False)
             if snapshot is None:
                 return fallback("graph_snapshot_unavailable")
@@ -5795,6 +5805,10 @@ class EpistemicGraphIndex:
                 rel = _vault_rel(self.vault_root, path)
                 if rel is None:
                     return None
+                # Judged under the vault's own spelling: recall policy, the
+                # registry and the corpus walk all key on it, and a caller's
+                # alias spelling would make a stale page read as a non-page.
+                path = self.vault_root / rel
                 exists = os.path.lexists(path)
                 admitted = exists and recall_policy.is_recall_candidate(self.vault_root, path)
                 if exists and not admitted:
@@ -5802,7 +5816,7 @@ class EpistemicGraphIndex:
                     # the graph holds no rows for one.
                     recorded_matches = True
                 else:
-                    recorded = entries.get(str(path), entries.get(str(self.vault_root / rel)))
+                    recorded = entries.get(str(path))
                     try:
                         on_disk = freshness.stat_signature(path) if exists else None
                     except OSError:
