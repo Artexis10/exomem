@@ -98,11 +98,17 @@ def test_health_does_not_block_the_loop_on_provenance_or_state_reads(
     monkeypatch.setattr(deploy_provenance, "provenance", holds[0])
     monkeypatch.setattr(state_migration, "migration_status", holds[1])
     monkeypatch.setattr(vault_module, "resolve_vault", holds[2])
-    try:
-        elapsed, worst_gap = asyncio.run(_measure(app, "/health"))
-    finally:
-        for hold in holds:
-            hold.release.set()
+
+    async def scenario() -> tuple[float, float]:
+        try:
+            return await _measure(app, "/health")
+        finally:
+            # Release inside the loop: asyncio.run() joins its executor threads
+            # on exit, and a refresh thread still held would stall it.
+            for hold in holds:
+                hold.release.set()
+
+    elapsed, worst_gap = asyncio.run(scenario())
     assert elapsed < ANSWER_BUDGET_SECONDS, f"/health took {elapsed:.2f}s"
     assert worst_gap < ANSWER_BUDGET_SECONDS, f"loop stalled {worst_gap:.2f}s"
 
@@ -114,9 +120,12 @@ def test_health_keeps_answering_while_readiness_measurement_is_blocked(
     hold = _Hold({"status": "ready"})
     monkeypatch.setattr(runtime_readiness_module, "runtime_readiness", hold)
 
-    try:
-        elapsed, worst_gap = asyncio.run(_measure(app, "/health", alongside="/health/ready"))
-    finally:
-        hold.release.set()
+    async def scenario() -> tuple[float, float]:
+        try:
+            return await _measure(app, "/health", alongside="/health/ready")
+        finally:
+            hold.release.set()
+
+    elapsed, worst_gap = asyncio.run(scenario())
     assert elapsed < ANSWER_BUDGET_SECONDS, f"/health took {elapsed:.2f}s behind readiness"
     assert worst_gap < ANSWER_BUDGET_SECONDS, f"loop stalled {worst_gap:.2f}s"
