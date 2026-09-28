@@ -11,6 +11,8 @@ live cell volume; it exports no `/data/host`, OAuth state, Kubernetes Secret or
 credential. No runtime HTTP service is required. Only the tenant can read the
 archive: it is encrypted to recipients the tenant supplies, and the operator
 never holds a key that decrypts it or sees its plaintext.
+The opposite direction, bringing the owner's own vault into their cell, is
+[cloud owner vault restore](cloud-operator-import.md).
 
 The procedure reads the source cell's Secret and execs into the scratch
 namespace, which the everyday operator identity cannot do and cell admission
