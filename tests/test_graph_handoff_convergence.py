@@ -940,3 +940,154 @@ def test_a_drain_does_not_own_an_affected_page_s_own_retitle(
         _assert_matches_a_fresh_rebuild(root)
     assert adoption.adopted is False
     assert adoption.reason == "resolver_topology_mismatch"
+
+
+_CARRY_KEY = "recall_resolver_topology_carry"
+
+
+def _meta(root: Path, key: str) -> str | None:
+    connection = sqlite3.connect(epistemic_graph.sidecar_path(root))
+    try:
+        row = connection.execute("SELECT value FROM graph_meta WHERE key = ?", (key,)).fetchone()
+    finally:
+        connection.close()
+    return None if row is None else str(row[0])
+
+
+def _fingerprint(root: Path) -> str | None:
+    return _meta(root, "recall_resolver_topology")
+
+
+def _drain_as(root: Path, monkeypatch: pytest.MonkeyPatch, paths: list[Path], withheld: bool):
+    real_identity = epistemic_graph._incremental_projection_identity
+    calls = iter(range(1_000_000))
+
+    def moving(vault_root):
+        identity = real_identity(vault_root)
+        return (identity, next(calls)) if withheld else identity
+
+    monkeypatch.setattr(epistemic_graph, "_incremental_projection_identity", moving, raising=True)
+    try:
+        return EpistemicGraphIndex(root).drain_paths(paths)
+    finally:
+        monkeypatch.setattr(
+            epistemic_graph, "_incremental_projection_identity", real_identity, raising=True
+        )
+
+
+def _created_pair(vault: Path, names: tuple[str, ...] = ("fresh-a", "fresh-b")) -> tuple[Path, list[Path]]:
+    links = " and ".join(f"[[{name}]]" for name in names)
+    root = _build_small(vault, {LINKER: _note(500, []) + f"\nSee {links}.\n"})
+    pages = []
+    for offset, name in enumerate(names):
+        page = root / GENERATED / f"{name}.md"
+        page.write_text(_note(501 + offset, []), encoding="utf-8")
+        pages.append(page)
+    freshness.rebaseline(root)
+    return root, pages
+
+
+@pytest.mark.parametrize("withheld", [True, False], ids=["withheld", "published"])
+def test_a_split_pair_of_created_pages_records_topology_after_the_second_drain(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, withheld: bool
+) -> None:
+    """Carry-forward: `[a]` cannot explain `b`, but `[b]` plus `a`'s carried entry can.
+
+    Without the carry, `a`'s row holds its new entry once `[a]` lands, so `[b]`'s
+    revert never reproduces the stored fingerprint, which stays stuck until a
+    whole-vault publication: the livelock again, with edges that already equal a
+    rebuild.
+    """
+    root, (a, b) = _created_pair(vault)
+    stored = _fingerprint(root)
+
+    _drain_as(root, monkeypatch, [a], withheld)
+    assert _fingerprint(root) == stored, "[a] cannot explain b"
+    assert _meta(root, _CARRY_KEY) is not None, "[a]'s pre-pass entry must be carried"
+
+    _drain_as(root, monkeypatch, [b], withheld)
+    assert _fingerprint(root) != stored, "[b] plus the carry explains every change"
+    assert _meta(root, _CARRY_KEY) is None, "a recorded fingerprint clears the carry"
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+    assert adoption.adopted is True, adoption.reason
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_an_adoption_between_split_drains_uses_the_carry(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standby proving between `[a]` and `[b]` explains `a` from the carry, `b` as residue."""
+    root, (a, b) = _created_pair(vault)
+    _drain_as(root, monkeypatch, [a], True)
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot()
+    assert adoption.adopted is True, adoption.reason
+    assert list(adoption.residue) == [f"{GENERATED}/fresh-b.md"]
+    _drain_to_empty(root)
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_requeued_page_keeps_its_first_carried_entry(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, (a, b) = _created_pair(vault)
+    _drain_as(root, monkeypatch, [a], True)
+    first = _meta(root, _CARRY_KEY)
+    a.write_text(_titled("Fresh A Retitled", ""), encoding="utf-8")
+    freshness.rebaseline(root)
+    _drain_as(root, monkeypatch, [a], True)
+    assert _meta(root, _CARRY_KEY) == first, "a re-queue must not overwrite the first entry"
+
+    _drain_as(root, monkeypatch, [b], True)
+    assert _meta(root, _CARRY_KEY) is None
+    assert EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False).adopted
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_the_topology_carry_clears_on_a_whole_vault_publication(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, (a, _b) = _created_pair(vault)
+    _drain_as(root, monkeypatch, [a], True)
+    assert _meta(root, _CARRY_KEY) is not None
+    EpistemicGraphIndex(root).rebuild_all()
+    assert _meta(root, _CARRY_KEY) is None
+
+
+def test_an_overflowing_topology_carry_falls_back_to_the_whole_vault_path(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(epistemic_graph, "TOPOLOGY_CARRY_LIMIT", 1, raising=True)
+    root, (a, b, c) = _created_pair(vault, ("fresh-a", "fresh-b", "fresh-c"))
+    stored = _fingerprint(root)
+    _drain_as(root, monkeypatch, [a], True)
+    assert _meta(root, _CARRY_KEY) is not None
+    _drain_as(root, monkeypatch, [b], True)
+    assert _meta(root, _CARRY_KEY) is None, "past the bound the record is dropped"
+    _drain_as(root, monkeypatch, [c], True)
+    # Without a and b's entries nothing can explain them: the fingerprint stays,
+    # the proof fails closed, and a whole-vault pass is the repair, as before.
+    assert _fingerprint(root) == stored
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+    assert adoption.adopted is False
+    assert adoption.reason == "resolver_topology_mismatch"
+
+
+def test_a_topology_carry_survives_a_restart(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import find as find_module
+
+    root, (a, b) = _created_pair(vault)
+    stored = _fingerprint(root)
+    _drain_as(root, monkeypatch, [a], True)
+    # A new process: nothing process-local survives, only the sidecar.
+    find_module.evict_resolver_caches(root)
+    epistemic_graph.clear_publication_memos()
+    freshness.rebaseline(root)
+
+    _drain_as(root, monkeypatch, [b], False)
+    assert _fingerprint(root) != stored
+    assert EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False).adopted
+    _assert_matches_a_fresh_rebuild(root)
