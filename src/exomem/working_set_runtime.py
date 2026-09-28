@@ -1083,6 +1083,7 @@ def adjacent_rare_pairs(
     rare_terms: Sequence[str],
     *,
     window: int | None = None,
+    partners: Sequence[str] = (),
 ) -> tuple[tuple[str, str], ...]:
     """Pairs of distinctive stems the turn said close enough together to be
     reading as one name, measured on the turn's OWN token positions.
@@ -1119,12 +1120,18 @@ def adjacent_rare_pairs(
 
     Each pair is returned once, sorted, so the caller's query sees a stable
     set.
+
+    `partners` widens a pair to one distinctive stem and any of these other
+    stems said beside it; a pair of two partners is never returned. It exists
+    for `carry_title_groups`, where the page's own TITLE, checked by the
+    caller, is what makes an ordinary word part of a name.
     """
     from . import bm25 as bm25_module
 
     span = working_set.RETRIEVAL_CARRY_RARE_WINDOW if window is None else int(window)
-    wanted = {str(term) for term in rare_terms}
-    if len(wanted) < 2:
+    distinctive = {str(term) for term in rare_terms}
+    wanted = distinctive | {str(term) for term in partners}
+    if len(wanted) < 2 or not distinctive:
         return ()
     pairs: set[tuple[str, str]] = set()
     # Split the RAW text: `normalize` folds case and width but keeps the
@@ -1148,7 +1155,11 @@ def adjacent_rare_pairs(
             for right_at, right_unit, right in placed[position + 1 :]:
                 if right_at - left_at > span:
                     break
-                if left != right and left_unit != right_unit:
+                if (
+                    left != right
+                    and left_unit != right_unit
+                    and (left in distinctive or right in distinctive)
+                ):
                     first, second = sorted((left, right))
                     pairs.add((first, second))
     return tuple(sorted(pairs))
@@ -1269,12 +1280,14 @@ def carry_named_groups(
             return (), state
         if corpus_pages < working_set.RETRIEVAL_CARRY_MIN_PAGES:
             return (), "available"
-        if len(rare) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
+        if not rare:
             return (), "available"
-        pairs = adjacent_rare_pairs(turn, rare)
-        if not pairs:
-            return (), "available"
-        components = phrase_components(pairs)
+        pairs = (
+            adjacent_rare_pairs(turn, rare)
+            if len(rare) >= working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS
+            else ()
+        )
+        components = phrase_components(pairs) if pairs else ()
         if len(components) > working_set.RETRIEVAL_CARRY_MAX_PHRASES:
             # A turn saying that many separate things names a list, not a
             # set of domains: one query over every pair, one group.
@@ -1305,10 +1318,90 @@ def carry_named_groups(
             )
             if hits:
                 groups.append(hits)
+        if not groups:
+            groups = _carry_title_groups(
+                vault_root,
+                turn,
+                rare=rare,
+                stems=stems,
+                pairs=pairs,
+                corpus_pages=corpus_pages,
+                limit=limit,
+                freshness=freshness,
+                recall_checkpoint=recall_checkpoint,
+            )
         return tuple(groups), "available"
     except Exception:  # noqa: BLE001 - the carry is additive; it abstains, never raises
         log.debug("activation carry recall unavailable", exc_info=True)
         return (), "unavailable"
+
+
+def _carry_title_groups(
+    vault_root: Path,
+    turn: str,
+    *,
+    rare: Sequence[str],
+    stems: Sequence[str],
+    pairs: Sequence[tuple[str, str]],
+    corpus_pages: int,
+    limit: int | None,
+    freshness,
+    recall_checkpoint,
+) -> list[tuple[tuple[str, float], ...]]:
+    """Pages a turn names by TITLE when no two distinctive words name them.
+
+    A page called "Support rota current" is named by "the support rota" even
+    though "support" is an ordinary word: one distinctive word (`rota`) beside
+    an ordinary one, and the page's own title carries both. The ordinary word
+    is a name word only because the title says so, so the title is checked
+    here, on the pages the ranked query admits, and nowhere else. A turn whose
+    distinctive word and neighbour do not both sit in some current page's
+    title names nothing, exactly as before; a title made only of ordinary
+    words never qualifies, because at least one word of the pair is distinctive.
+    Runs only when the strict phrase rule found no page.
+    """
+    from . import lexstore
+
+    loose = tuple(
+        pair
+        for pair in adjacent_rare_pairs(turn, rare, partners=stems)
+        if pair not in set(pairs)
+    )
+    if not loose:
+        return []
+    result = lexstore.search_bm25_result(
+        vault_root,
+        content_words(turn),
+        working_set.carry_fetch_size(corpus_pages) if limit is None else limit,
+        scope="kb",
+        freshness=freshness,
+        allow_delta=False,
+        corroboration_tokens=list(rare),
+        corroboration_groups=[list(pair) for pair in loose],
+        recall_checkpoint=recall_checkpoint,
+        exclude_navigation=True,
+        exclude_raw_material=True,
+    )
+    if not result.readiness.complete:
+        return []
+    components = phrase_components(loose)
+    by_component: list[list[tuple[str, float]]] = [[] for _ in components]
+    for path, score in result.value or ():
+        path = str(path)
+        if (
+            _is_raw_material(path)
+            or _is_navigation_page(path)
+            or not working_set._is_current_page(vault_root, path)
+        ):
+            continue
+        title = working_set._page_title(vault_root, path)
+        if not title:
+            continue
+        title_stems = frozenset(pairable_stems(title))
+        for index, component in enumerate(components):
+            if any(set(pair) <= title_stems for pair in component):
+                by_component[index].append((path, float(score)))
+    return [tuple(group) for group in by_component if group]
 
 
 def carry_candidates(
