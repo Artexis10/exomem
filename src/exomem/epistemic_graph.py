@@ -209,6 +209,17 @@ _REPUBLISH_BACKOFF_LOCK = threading.Lock()
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
 _RESOLVER_TOPOLOGY_KEY = "recall_resolver_topology"
+#: The carry-forward record: for each indexed page a drain rewrote without being
+#: able to record the topology, the resolver entry (present, title) it had before
+#: the first such drain. A later drain, or an adoption, reverts these with its own
+#: pages, so a change split across drains -- `DRAIN_LIMIT` truncation, or a page
+#: landing between the queue snapshot and the drain -- is still explained once the
+#: last part drains. Cleared whenever a fingerprint is recorded.
+_TOPOLOGY_CARRY_KEY = "recall_resolver_topology_carry"
+#: The most pages the carry-forward record holds. Past it the record is dropped
+#: and the stale fingerprint keeps repair on the whole-vault path, as it was
+#: before the record existed.
+TOPOLOGY_CARRY_LIMIT = 256
 _READ_BARRIER_KEY = "read_barrier"
 _GRAPH_SYNC_CHECKPOINT_KEY = "graph_sync_checkpoint"
 
@@ -2648,12 +2659,14 @@ class EpistemicGraphIndex:
                 self.vault_root,
                 resolver_entries,
             )
+            carry = self._read_topology_carry(conn)
             topology_matches = resolver_fingerprint is not None and (
                 _resolver_topology_fingerprint(resolver) == resolver_fingerprint
                 or bool(
-                    residue
+                    carry is not None
+                    and (residue or carry)
                     and self._residue_explains_topology(
-                        conn, resolver, residue, resolver_fingerprint
+                        conn, resolver, residue, resolver_fingerprint, carry=carry
                     )
                 )
             )
@@ -2684,14 +2697,17 @@ class EpistemicGraphIndex:
         conn: sqlite3.Connection,
         resolver: vault_module.WikilinkResolver,
         batch_rels: set[str],
+        carry: dict[str, tuple[bool, str | None]] | None,
     ) -> bool:
         """Whether a drain whose queued pages are `batch_rels` may record `resolver`'s topology.
 
         True when the stored fingerprint already matches, or when reverting the
-        queued pages' resolver entries to their stored rows reproduces it: then
-        every topology change is a queued page, whose rows the pass rewrites and
-        whose link dependants it widened to. Pages the pass rewrites only as
-        affected are not passed: nothing widened from their own keys.
+        queued pages' resolver entries to their stored rows, and the carried
+        pages' to their carried entries, reproduces it: then every topology
+        change is a page some drain queued, whose rows it rewrote and whose link
+        dependants it widened to. Pages a pass rewrites only as affected are not
+        passed: nothing widened from their own keys. An unreadable carry record
+        proves nothing.
         """
         row = conn.execute(
             "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
@@ -2699,9 +2715,94 @@ class EpistemicGraphIndex:
         if row is None or row[0] is None:
             return False
         stored = str(row[0])
-        return _resolver_topology_fingerprint(resolver) == stored or bool(
-            batch_rels and self._residue_explains_topology(conn, resolver, batch_rels, stored)
+        if _resolver_topology_fingerprint(resolver) == stored:
+            return True
+        return carry is not None and bool(
+            (batch_rels or carry)
+            and self._residue_explains_topology(conn, resolver, batch_rels, stored, carry=carry)
         )
+
+    @staticmethod
+    def _stored_resolver_entry(conn: sqlite3.Connection, rel: str) -> tuple[bool, str | None]:
+        """A page's resolver entry as its stored file row records it."""
+        row = conn.execute(
+            "SELECT title FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
+            (_file_key(rel),),
+        ).fetchone()
+        if row is None:
+            return False, None
+        title = str(row[0]).strip().lower() if row[0] is not None else ""
+        return True, title or None
+
+    @staticmethod
+    def _read_topology_carry(
+        conn: sqlite3.Connection,
+    ) -> dict[str, tuple[bool, str | None]] | None:
+        """The carry-forward record, `{}` when there is none, None when unreadable."""
+        row = conn.execute(
+            "SELECT value FROM graph_meta WHERE key = ?", (_TOPOLOGY_CARRY_KEY,)
+        ).fetchone()
+        if row is None:
+            return {}
+        try:
+            raw = json.loads(str(row[0]))
+            carry = {
+                str(rel): (bool(entry[0]), None if entry[1] is None else str(entry[1]))
+                for rel, entry in raw.items()
+            }
+        except (TypeError, ValueError, AttributeError, IndexError, KeyError):
+            return None
+        return carry if len(carry) <= TOPOLOGY_CARRY_LIMIT else None
+
+    def _carry_after_unowned_drain(
+        self,
+        conn: sqlite3.Connection,
+        batch_rels: set[str],
+        carry: dict[str, tuple[bool, str | None]] | None,
+    ) -> dict[str, tuple[bool, str | None]] | None:
+        """The record after a drain of `batch_rels` that may not record the topology.
+
+        Read from the pre-pass rows. The first entry per page wins: a page queued
+        again has rows the earlier drain already rewrote. Only queued, indexed
+        pages enter -- affected pages were never widened from their own keys and
+        a page outside the indexed corpus has no row to revert to -- so neither
+        can ever be explained by the record. None means the bound was passed and
+        the record is dropped.
+        """
+        merged = dict(carry or {})
+        for rel in sorted(batch_rels):
+            if rel in merged or not rel.startswith(kb_prefix()):
+                continue
+            merged[rel] = self._stored_resolver_entry(conn, rel)
+        return merged if len(merged) <= TOPOLOGY_CARRY_LIMIT else None
+
+    @staticmethod
+    def _write_topology_carry(
+        conn: sqlite3.Connection, carry: dict[str, tuple[bool, str | None]] | None
+    ) -> None:
+        if not carry:
+            conn.execute("DELETE FROM graph_meta WHERE key = ?", (_TOPOLOGY_CARRY_KEY,))
+            return
+        conn.execute(
+            "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+            (
+                _TOPOLOGY_CARRY_KEY,
+                json.dumps(
+                    {rel: list(entry) for rel, entry in sorted(carry.items())},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _write_resolver_topology(conn: sqlite3.Connection, fingerprint: str) -> None:
+        """Record a fingerprint the rows now embody; the carry it subsumes goes."""
+        conn.execute(
+            "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+            (_RESOLVER_TOPOLOGY_KEY, fingerprint),
+        )
+        conn.execute("DELETE FROM graph_meta WHERE key = ?", (_TOPOLOGY_CARRY_KEY,))
 
     def _residue_explains_topology(
         self,
@@ -2709,6 +2810,8 @@ class EpistemicGraphIndex:
         resolver: vault_module.WikilinkResolver,
         residue: set[str],
         stored_fingerprint: str,
+        *,
+        carry: dict[str, tuple[bool, str | None]] | None = None,
     ) -> bool:
         """Whether reverting the residue's resolver entries reproduces the stored topology.
 
@@ -2719,19 +2822,22 @@ class EpistemicGraphIndex:
         which the drain widens to the pages whose links it re-targets. A page
         outside the indexed corpus has no stored title to put back, so any
         change to one still declines.
+
+        Carried pages revert to their carried entry, which is what the stored
+        fingerprint saw before a drain rewrote their rows. A carried page outside
+        `residue` whose row no longer matches the resolver moved again after that
+        drain, and that move was never widened, so it explains nothing.
         """
-        present: list[tuple[str, str | None]] = []
-        absent: list[str] = []
-        for rel in sorted(residue):
-            row = conn.execute(
-                "SELECT title FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
-                (_file_key(rel),),
-            ).fetchone()
-            if row is None:
-                absent.append(rel)
-                continue
-            title = str(row[0]).strip().lower() if row[0] is not None else ""
-            present.append((rel, title or None))
+        entries = {rel: self._stored_resolver_entry(conn, rel) for rel in residue}
+        for rel, entry in (carry or {}).items():
+            if rel not in residue and self._stored_resolver_entry(conn, rel) != (
+                rel.removesuffix(".md") in resolver.full_paths,
+                resolver.title_key_for_path(rel),
+            ):
+                return False
+            entries[rel] = entry
+        present = [(rel, title) for rel, (exists, title) in sorted(entries.items()) if exists]
+        absent = [rel for rel, (exists, _title) in sorted(entries.items()) if not exists]
         before = resolver.fork()
         before.on_entries_changed(present, absent)
         return _resolver_topology_fingerprint(before) == stored_fingerprint
@@ -3982,10 +4088,7 @@ class EpistemicGraphIndex:
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("indexed_scope", "kb"),
                 )
-                conn.execute(
-                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                    (_RESOLVER_TOPOLOGY_KEY, _resolver_topology_fingerprint(resolver)),
-                )
+                self._write_resolver_topology(conn, _resolver_topology_fingerprint(resolver))
                 policy_version, access_fingerprint = recall_policy.recall_policy_identity(
                     self.vault_root
                 )
@@ -4282,10 +4385,7 @@ class EpistemicGraphIndex:
             (_AVAILABILITY_FRESHNESS_KEY, _availability_freshness_value(identity)),
         )
         if topology is not None:
-            conn.execute(
-                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                (_RESOLVER_TOPOLOGY_KEY, topology),
-            )
+            self._write_resolver_topology(conn, topology)
         conn.execute(
             "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
@@ -5554,10 +5654,7 @@ class EpistemicGraphIndex:
                     ):
                         indexed += 1
                 if resolver_fingerprint is not None:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                        (_RESOLVER_TOPOLOGY_KEY, resolver_fingerprint),
-                    )
+                    self._write_resolver_topology(conn, resolver_fingerprint)
                 if before_commit is not None:
                     before_commit(conn)
                 n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
@@ -5731,8 +5828,14 @@ class EpistemicGraphIndex:
                 # new ones, and reverting to them would prove nothing. Only the
                 # queued pages explain topology: widening follows their keys,
                 # so an affected page's own retitle was never widened.
+                carry = self._read_topology_carry(probe)
                 owns_topology = affected is not None and self._drain_owns_topology(
-                    probe, resolver, queued_rels
+                    probe, resolver, queued_rels, carry
+                )
+                carry_after = (
+                    None
+                    if owns_topology or affected is None
+                    else self._carry_after_unowned_drain(probe, queued_rels, carry)
                 )
             finally:
                 probe.close()
@@ -5780,11 +5883,16 @@ class EpistemicGraphIndex:
                     # under the same condition: only when this batch's rows
                     # account for every topology change in the resolver.
                     if owns_topology:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                            (_RESOLVER_TOPOLOGY_KEY, _resolver_topology_fingerprint(resolver)),
+                        self._write_resolver_topology(
+                            conn, _resolver_topology_fingerprint(resolver)
                         )
+                    else:
+                        # Carried forward so a later drain can explain it; past
+                        # the bound, dropped (the whole-vault path, as before).
+                        self._write_topology_carry(conn, carry_after)
                     return
+                if not owns_topology:
+                    self._write_topology_carry(conn, carry_after)
                 self._publish_available_marker_in_transaction(
                     conn,
                     before,
