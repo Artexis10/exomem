@@ -1091,3 +1091,45 @@ def test_a_topology_carry_survives_a_restart(
     assert _fingerprint(root) != stored
     assert EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False).adopted
     _assert_matches_a_fresh_rebuild(root)
+
+
+@pytest.mark.parametrize("withheld", [True, False], ids=["withheld", "published"])
+def test_a_carry_is_not_recorded_over_an_unexplained_non_kb_change(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, withheld: bool
+) -> None:
+    """A carry may only stand for indexed work that will itself be drained.
+
+    `[fresh-a]` is drained while a page outside the indexed corpus is retitled, so
+    the affected `linker` is rewritten with a `linker -> outsider` edge through
+    the new title. The retitle is then reverted. Had `[fresh-a]` recorded a
+    carry, the next adoption would match with no residue, and the next drain
+    would stamp the fingerprint, over an edge a full rebuild drops.
+    """
+    outsider = "Outside/outsider.md"
+    root = _build_small(
+        vault,
+        {
+            outsider: "---\ntitle: Outsider Title\n---\n\nbody\n",
+            LINKER: _note(500, []) + "\nSee [[fresh-a]] and [[Renamed Outsider]].\n",
+        },
+    )
+    stored = _fingerprint(root)
+    created = root / GENERATED / "fresh-a.md"
+    created.write_text(_note(501, []), encoding="utf-8")
+    (root / outsider).write_text("---\ntitle: Renamed Outsider\n---\n\nbody\n", encoding="utf-8")
+    freshness.rebaseline(root)
+    _drain_as(root, monkeypatch, [created], withheld)
+    assert _meta(root, _CARRY_KEY) is None, "an unexplained non-KB change drops the carry"
+
+    (root / outsider).write_text("---\ntitle: Outsider Title\n---\n\nbody\n", encoding="utf-8")
+    edited = root / GENERATED / "generated-note-0002.md"
+    edited.write_text(edited.read_text(encoding="utf-8") + "\n- edit\n", encoding="utf-8")
+    freshness.rebaseline(root)
+    _drain_as(root, monkeypatch, [edited], withheld)
+    assert _fingerprint(root) == stored, "no drain may stamp the fingerprint over the stale edge"
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+    if adoption.adopted:
+        _assert_matches_a_fresh_rebuild(root)
+    assert adoption.adopted is False
+    assert adoption.reason == "resolver_topology_mismatch"
