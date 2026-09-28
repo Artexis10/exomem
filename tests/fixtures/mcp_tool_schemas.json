@@ -4519,7 +4519,7 @@
     }
   },
   "preserve_artifacts": {
-    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\nfile handles: a chat client's attachments, or the handle `exomem attach`\nprints on a local client. When a shared file is evidence, preserve the\noriginal first and put any transcription in `transcriptions`, never\ninstead. Exomem retrieves each handle server-side and returns one terminal\nstate per file — `stored`, `already_stored`, or\n`failed`. `already_stored` means those exact bytes are already under that\ndestination, so nothing was written and the outcome names the existing path\nand ref; retrying a lost response with the same identity replays the batch\nrather than duplicating it. No binary data is passed as base64 through\nmodel-visible arguments. Clients without file handles keep using\n`transfer_artifact(operation=\"upload\")` followed by `/upload`.",
+    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\nfile handles: a chat client's attachments, or the handle `exomem attach`\nprints on a local client (single use: storing its file spends it, while a\nrefused or failed file leaves it redeemable until it expires). When a\nshared file is evidence, preserve the original first and put any\ntranscription in `transcriptions`, never instead. Exomem retrieves each handle server-side and returns one terminal\nstate per file — `stored`, `already_stored`, or\n`failed`. `already_stored` means those exact bytes are already under that\ndestination, so nothing was written and the outcome names the existing path\nand ref; retrying a lost response with the same identity replays the batch\nrather than duplicating it. No binary data is passed as base64 through\nmodel-visible arguments. Clients without file handles keep using\n`transfer_artifact(operation=\"upload\")` followed by `/upload`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -4599,7 +4599,7 @@
         },
         "transcriptions": {
           "default": [],
-          "description": "Optional transcriptions of supplied originals, each {file_id, text}. Each is saved on its original's Evidence page, bound to the original's bytes, and only when that original is stored.",
+          "description": "Optional transcriptions of supplied originals, each {file_id, text}. Each is saved on its original's Evidence page, bound to the original's bytes, and only when that original is stored. Files must have unique file_id values when transcriptions are supplied.",
           "items": {
             "description": "A transcription an AI client derived from one supplied original.",
             "properties": {
