@@ -5827,7 +5827,11 @@ class EpistemicGraphIndex:
                 self.vault_root, path, source=raw.decode("utf-8")
             )
             expected = {
-                (_unit_node(page, unit, state).node_key, state.parent_generation, state.parser_version)
+                (
+                    _unit_node(page, unit, state).node_key,
+                    state.parent_generation,
+                    state.parser_version,
+                )
                 for unit in state.document.units
                 if unit.unit_ref is not None
             }
