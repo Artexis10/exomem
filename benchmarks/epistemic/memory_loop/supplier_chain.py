@@ -64,6 +64,7 @@ from .contract import (
     VaultState,
     build_world,
     check_expectations,
+    selects_of,
     sha256_json,
 )
 
@@ -870,17 +871,6 @@ def check_capture(
     )
 
 
-def _selects(expectation: Any) -> tuple[Select, ...]:
-    found: list[Select] = []
-    for name in ("select", "first", "second", "source", "target"):
-        value = getattr(expectation, name, None)
-        if isinstance(value, Select):
-            found.append(value)
-    for option in getattr(expectation, "options", ()):
-        found.extend(_selects(option))
-    return tuple(found)
-
-
 def assert_manifest_consistent() -> None:
     ids = [item.episode_id for item in EPISODES]
     if ids != [item.episode_id for item in MANIFEST] or len(set(ids)) != len(ids):
@@ -900,7 +890,7 @@ def assert_manifest_consistent() -> None:
                 value = getattr(expectation, name, None)
                 if value is not None and value not in world_keys:
                     raise FixtureError(f"{expectation.key} names {value}, absent from its world")
-            for select in _selects(expectation):
+            for select in selects_of(expectation):
                 if select.key is not None and select.key not in world_keys:
                     raise FixtureError(f"{expectation.key} selects {select.key}, absent from its world")
         edge_keys = {evidence.expectation for evidence in item.edge_evidence}

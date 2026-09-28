@@ -36,8 +36,8 @@ pytestmark = pytest.mark.timeout(600)
 
 #: Frozen digests. Editing an episode, a world or an expectation moves one of
 #: these; re-pinning is a deliberate act that voids earlier capture runs.
-FIXTURE_SET_SHA256 = "56b3e722b19c5e4082952254c492cce2e54ee60d21126fd73e73be8b62e92136"
-EVALUATOR_SHA256 = "f07ca72b91ac03ead8745052865af7a1c913ff078ed83789be433c9f9bd4411f"
+FIXTURE_SET_SHA256 = "c4b0ac656094b274c20cf9450feeb464ee5ea71d9ad78ad688a6d8dec8c98778"
+EVALUATOR_SHA256 = "db5a274cef22e1a3f761558af3f350d86c3a39fe37b43d83d991051cda8bca6a"
 MODULE = Path(sc.__file__)
 
 

@@ -33,7 +33,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from dataclasses import MISSING, asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -52,9 +52,28 @@ class FixtureError(ValueError):
 # --------------------------------------------------------------------------- #
 
 
+def _is_default(item: Any, value: Any) -> bool:
+    if item.default is not MISSING:
+        return value == item.default
+    if item.default_factory is not MISSING:
+        return value == item.default_factory()
+    return False
+
+
 def _plain(value: Any) -> Any:
+    """A digestable form. Fields still at their declared default are omitted,
+    so adding an optional field to a contract type never moves a frozen digest;
+    changing any value a fixture actually sets always does."""
+
     if is_dataclass(value) and not isinstance(value, type):
-        return {"__kind__": type(value).__name__, **{f.name: _plain(getattr(value, f.name)) for f in fields(value)}}
+        return {
+            "__kind__": type(value).__name__,
+            **{
+                f.name: _plain(getattr(value, f.name))
+                for f in fields(value)
+                if not _is_default(f, getattr(value, f.name))
+            },
+        }
     if isinstance(value, Mapping):
         return {str(key): _plain(item) for key, item in sorted(value.items())}
     if isinstance(value, (list, tuple)):
@@ -589,6 +608,7 @@ class PageView:
     aliases: tuple[str, ...]
     body: str
     relations: tuple[tuple[str, str], ...]
+    frontmatter: dict[str, Any] = field(default_factory=dict, compare=False)
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -615,6 +635,8 @@ class VaultState:
         )
 
     def resolve_link(self, target: str) -> PageView | None:
+        """The one active page a wikilink target names; ambiguous or absent is None."""
+
         folded = target.strip().casefold()
         matches = [
             page
@@ -675,6 +697,7 @@ def read_state(root: Path) -> VaultState:
             aliases=_as_tuple(frontmatter.get("aliases")),
             body=body,
             relations=tuple(relations),
+            frontmatter=frontmatter,
         )
     relation_ids: frozenset[str] = frozenset()
     try:
@@ -707,23 +730,44 @@ def _has_marker(text: str, marker: str) -> bool:
     return re.search(r"(?<![a-z0-9])" + re.escape(_fold(marker)), _fold(text)) is not None
 
 
+def _new_lines(before: VaultState, page: PageView) -> tuple[str, ...]:
+    """Lines of ``page`` that its pre-capture version did not have."""
+
+    old = before.pages.get(page.path)
+    previous = set(old.body.splitlines()) if old is not None else set()
+    return tuple(line for line in page.body.splitlines() if line.strip() and line not in previous)
+
+
 @dataclass(frozen=True)
 class Select:
-    """A pre-capture entity by key, or active entities by type and name tokens."""
+    """Which pages an expectation reads.
+
+    ``key`` names one pre-capture page. Otherwise ``kind`` chooses active
+    entities (optionally of ``entity_type``) or any active page, whose names
+    carry every token; ``created_only`` keeps pages the capture created.
+    """
 
     key: str | None = None
     entity_type: str | None = None
     tokens: tuple[str, ...] = ()
+    kind: Literal["entity", "page"] = "entity"
+    created_only: bool = False
 
-    def matches(self, world: Mapping[str, str], state: VaultState) -> tuple[PageView, ...]:
+    def matches(
+        self, world: Mapping[str, str], state: VaultState, before: VaultState | None = None
+    ) -> tuple[PageView, ...]:
         if self.key is not None:
             page = state.pages.get(world.get(self.key, ""))
             return (page,) if page is not None and page.status == "active" else ()
+        pool = state.entities() if self.kind == "entity" else tuple(
+            page for page in state.pages.values() if page.status == "active"
+        )
         return tuple(
             page
-            for page in state.entities()
+            for page in pool
             if (self.entity_type is None or page.entity_type == self.entity_type)
             and all(any(_has_marker(name, token) for name in page.names) for token in self.tokens)
+            and not (self.created_only and before is not None and page.path in before.pages)
         )
 
 
@@ -735,9 +779,13 @@ class Result:
     detail: str
 
 
+def _result(key: str, polarity: str, ok: bool, detail: str) -> Result:
+    return Result(key, polarity, "pass" if ok else "fail", detail)  # type: ignore[arg-type]
+
+
 @dataclass(frozen=True)
 class EntityCount:
-    """Exactly ``exactly`` active entities match (identity creation and no duplication)."""
+    """Exactly ``exactly`` pages match (identity creation and no duplication)."""
 
     key: str
     polarity: Literal["positive", "negative"]
@@ -746,9 +794,8 @@ class EntityCount:
     reason: str
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
-        found = self.select.matches(world, after)
-        ok = len(found) == self.exactly
-        return Result(self.key, self.polarity, "pass" if ok else "fail", f"{len(found)} match: {[p.path for p in found]}")
+        found = self.select.matches(world, after, before)
+        return _result(self.key, self.polarity, len(found) == self.exactly, f"{len(found)} match: {[p.path for p in found]}")
 
 
 @dataclass(frozen=True)
@@ -764,9 +811,9 @@ class EntityIntact:
         path = world.get(self.entity, "")
         old, new = before.pages.get(path), after.pages.get(path)
         if old is None:
-            return Result(self.key, self.polarity, "fail", f"{self.entity} was not in the pre-capture world")
+            return _result(self.key, self.polarity, False, f"{self.entity} was not in the pre-capture world")
         if new is None or new.status != "active":
-            return Result(self.key, self.polarity, "fail", f"{path} is gone or inactive")
+            return _result(self.key, self.polarity, False, f"{path} is gone or inactive")
         changes = [
             name
             for name, a, b in (
@@ -776,12 +823,12 @@ class EntityIntact:
             )
             if a != b
         ]
-        return Result(self.key, self.polarity, "fail" if changes else "pass", f"changed: {changes}")
+        return _result(self.key, self.polarity, not changes, f"changed: {changes}")
 
 
 @dataclass(frozen=True)
 class Distinct:
-    """Two selections each resolve to one active entity, and not the same one."""
+    """Two selections each resolve to one active page, and not the same one."""
 
     key: str
     polarity: Literal["positive", "negative"]
@@ -790,14 +837,14 @@ class Distinct:
     reason: str
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
-        a, b = self.first.matches(world, after), self.second.matches(world, after)
+        a, b = self.first.matches(world, after, before), self.second.matches(world, after, before)
         ok = len(a) == 1 and len(b) == 1 and a[0].path != b[0].path
-        return Result(self.key, self.polarity, "pass" if ok else "fail", f"{[p.path for p in a]} vs {[p.path for p in b]}")
+        return _result(self.key, self.polarity, ok, f"{[p.path for p in a]} vs {[p.path for p in b]}")
 
 
 @dataclass(frozen=True)
 class Mentions:
-    """The selected entity's page carries at least one marker of every group."""
+    """Exactly one selected page carries at least one marker of every group."""
 
     key: str
     polarity: Literal["positive", "negative"]
@@ -806,17 +853,17 @@ class Mentions:
     reason: str
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
-        found = self.select.matches(world, after)
+        found = self.select.matches(world, after, before)
         if len(found) != 1:
-            return Result(self.key, self.polarity, "fail", f"{len(found)} pages selected")
+            return _result(self.key, self.polarity, False, f"{len(found)} pages selected")
         body = found[0].body
         missing = [group for group in self.groups if not any(_has_marker(body, marker) for marker in group)]
-        return Result(self.key, self.polarity, "fail" if missing else "pass", f"missing: {missing}")
+        return _result(self.key, self.polarity, not missing, f"{found[0].path} missing: {missing}")
 
 
 @dataclass(frozen=True)
 class NoNewMention:
-    """No page gained text carrying any marker that its pre-capture text lacked."""
+    """No selected page gained a line carrying any of ``markers``."""
 
     key: str
     polarity: Literal["positive", "negative"]
@@ -825,23 +872,88 @@ class NoNewMention:
     select: Select | None = None
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
-        pages = self.select.matches(world, after) if self.select is not None else tuple(after.pages.values())
-        hits = []
-        for page in pages:
-            old = before.pages.get(page.path)
-            for marker in self.markers:
-                if _has_marker(page.body, marker) and not (old and _has_marker(old.body, marker)):
-                    hits.append(f"{page.path}: {marker}")
-        return Result(self.key, self.polarity, "fail" if hits else "pass", f"new mentions: {hits}")
+        pages = (
+            self.select.matches(world, after, before)
+            if self.select is not None
+            else tuple(after.pages.values())
+        )
+        hits = [
+            f"{page.path}: {marker}"
+            for page in pages
+            for line in _new_lines(before, page)
+            for marker in self.markers
+            if _has_marker(line, marker)
+        ]
+        return _result(self.key, self.polarity, not hits, f"new mentions: {hits}")
+
+
+@dataclass(frozen=True)
+class AttributedLines:
+    """A reported or attributed claim keeps its source and its hedge.
+
+    At least one new line carries a claim marker, and every new line that
+    does also names its source and a reporting or uncertainty marker, so the
+    claim is never restated as a direct fact anywhere in the capture.
+    """
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    claim: tuple[str, ...]
+    source: tuple[str, ...]
+    hedge: tuple[str, ...]
+    reason: str
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        lines = [
+            (page.path, line)
+            for page in after.pages.values()
+            for line in _new_lines(before, page)
+            if any(_has_marker(line, marker) for marker in self.claim)
+        ]
+        bare = [
+            f"{path}: {line.strip()}"
+            for path, line in lines
+            if not (
+                any(_has_marker(line, marker) for marker in self.source)
+                and any(_has_marker(line, marker) for marker in self.hedge)
+            )
+        ]
+        ok = bool(lines) and not bare
+        return _result(self.key, self.polarity, ok, f"{len(lines)} claim lines; unattributed: {bare}")
+
+
+@dataclass(frozen=True)
+class HedgedLines:
+    """New lines about ``subject`` that assert a cause keep their uncertainty."""
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    subject: tuple[str, ...]
+    causal: tuple[str, ...]
+    hedge: tuple[str, ...]
+    reason: str
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        bad = [
+            f"{page.path}: {line.strip()}"
+            for page in after.pages.values()
+            for line in _new_lines(before, page)
+            if any(_has_marker(line, marker) for marker in self.subject)
+            and any(_has_marker(line, marker) for marker in self.causal)
+            and not any(_has_marker(line, marker) for marker in self.hedge)
+        ]
+        return _result(self.key, self.polarity, not bad, f"unhedged causal lines: {bad}")
 
 
 @dataclass(frozen=True)
 class TypedEdge:
-    """A specific, registered ``## Relations`` edge connects two selected entities.
+    """A specific, registered ``## Relations`` edge connects two selections.
 
     ``either_direction`` accepts the bullet on either page (a relation and its
     inverse carry the same meaning). A generic relation, a rejected relation
-    or an id the registry does not define never satisfies it.
+    or an id the registry does not define never satisfies a positive. A
+    negative fails on any rejected relation between them, or on any edge at
+    all when ``rejected`` is empty.
     """
 
     key: str
@@ -852,12 +964,15 @@ class TypedEdge:
     either_direction: bool = True
     rejected: tuple[str, ...] = ()
 
-    def _edges(self, world: Mapping[str, str], state: VaultState) -> list[tuple[str, str, str]]:
-        sources, targets = self.source.matches(world, state), self.target.matches(world, state)
-        found = []
+    def _edges(
+        self, world: Mapping[str, str], state: VaultState, before: VaultState
+    ) -> list[tuple[str, str, str]]:
+        sources = self.source.matches(world, state, before)
+        targets = self.target.matches(world, state, before)
         pairs = [(s, t) for s in sources for t in targets]
         if self.either_direction:
             pairs += [(t, s) for s, t in pairs]
+        found = []
         for origin, destination in pairs:
             for relation, link_target in origin.relations:
                 resolved = state.resolve_link(link_target)
@@ -866,7 +981,10 @@ class TypedEdge:
         return found
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
-        edges = self._edges(world, after)
+        edges = self._edges(world, after, before)
+        if self.polarity == "negative":
+            bad = [edge for edge in edges if not self.rejected or edge[1] in self.rejected]
+            return _result(self.key, self.polarity, not bad, f"edges: {bad}")
         good = [
             edge
             for edge in edges
@@ -874,15 +992,62 @@ class TypedEdge:
             and edge[1] not in self.rejected
             and edge[1] in after.relation_ids
         ]
-        if self.polarity == "negative":
-            bad = [edge for edge in edges if not self.rejected or edge[1] in self.rejected]
-            return Result(self.key, self.polarity, "fail" if bad else "pass", f"edges: {bad}")
-        return Result(self.key, self.polarity, "pass" if good else "fail", f"edges: {edges}")
+        return _result(self.key, self.polarity, bool(good), f"edges: {edges}")
+
+
+@dataclass(frozen=True)
+class NoNewEdge:
+    """No page gained a relation of ``relations`` (or any relation) to ``target``."""
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    reason: str
+    relations: tuple[str, ...] = ()
+    target: Select | None = None
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        targets = {page.path for page in self.target.matches(world, after, before)} if self.target else None
+        added = []
+        for page in after.pages.values():
+            old = before.pages.get(page.path)
+            previous = set(old.relations) if old is not None else set()
+            for relation, link_target in page.relations:
+                if (relation, link_target) in previous:
+                    continue
+                if self.relations and relation not in self.relations:
+                    continue
+                resolved = after.resolve_link(link_target)
+                if targets is not None and (resolved is None or resolved.path not in targets):
+                    continue
+                added.append(f"{page.path} {relation} {link_target}")
+        return _result(self.key, self.polarity, not added, f"new edges: {added}")
+
+
+@dataclass(frozen=True)
+class NoNewPlanning:
+    """No Planning collection or item appears: a possibility is not a commitment."""
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    reason: str
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        created = [
+            page.path
+            for page in after.pages.values()
+            if page.path not in before.pages
+            and (
+                "plan_id" in page.frontmatter
+                or page.frontmatter.get("semantic_profile") == "planning"
+                or page.path.startswith(f"{KB}/Planning/")
+            )
+        ]
+        return _result(self.key, self.polarity, not created, f"new planning pages: {created}")
 
 
 @dataclass(frozen=True)
 class FieldIs:
-    """A Records field matcher: exact values (casefold) or all name tokens."""
+    """A Records field matcher: exact values, all tokens, any marker, or honestly empty."""
 
     equals: tuple[str, ...] = ()
     tokens: tuple[str, ...] = ()
@@ -906,6 +1071,16 @@ class FieldIs:
 _EMPTY_VALUES = frozenset({"", "unknown", "none", "null", "n/a", "-", "not known", "unattributed"})
 
 
+def _records(world: Mapping[str, str], state: VaultState, collection: str, where) -> list[RecordView]:
+    path = world.get(collection, collection)
+    return [
+        item
+        for item in state.records
+        if item.collection == path
+        and all(matcher.matches(item.fields.get(name, "")) for name, matcher in where)
+    ]
+
+
 @dataclass(frozen=True)
 class RecordItem:
     """Exactly one item of a Records collection matches ``where`` and every ``expect``."""
@@ -918,21 +1093,15 @@ class RecordItem:
     reason: str
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
-        path = world.get(self.collection, self.collection)
-        items = [
-            item
-            for item in after.records
-            if item.collection == path
-            and all(matcher.matches(item.fields.get(name, "")) for name, matcher in self.where)
-        ]
+        items = _records(world, after, self.collection, self.where)
         if len(items) != 1:
-            return Result(self.key, self.polarity, "fail", f"{len(items)} items match {self.where}")
+            return _result(self.key, self.polarity, False, f"{len(items)} items match {self.where}")
         wrong = [
             (name, items[0].fields.get(name, ""))
             for name, matcher in self.expect
             if not matcher.matches(items[0].fields.get(name, ""))
         ]
-        return Result(self.key, self.polarity, "fail" if wrong else "pass", f"wrong: {wrong}")
+        return _result(self.key, self.polarity, not wrong, f"wrong: {wrong}")
 
 
 @dataclass(frozen=True)
@@ -949,7 +1118,7 @@ class RecordsKept:
         old = {item.item_key: item.fields for item in before.records if item.collection == path}
         new = {item.item_key: item.fields for item in after.records if item.collection == path}
         lost = [key for key, values in old.items() if new.get(key) != values]
-        return Result(self.key, self.polarity, "fail" if lost else "pass", f"changed or lost: {lost}")
+        return _result(self.key, self.polarity, not lost, f"changed or lost: {lost}")
 
 
 @dataclass(frozen=True)
@@ -965,22 +1134,16 @@ class LatestRecord:
     reason: str
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
-        path = world.get(self.collection, self.collection)
-        items = [
-            item
-            for item in after.records
-            if item.collection == path
-            and all(matcher.matches(item.fields.get(name, "")) for name, matcher in self.where)
-        ]
+        items = _records(world, after, self.collection, self.where)
         if not items:
-            return Result(self.key, self.polarity, "fail", "no matching item")
+            return _result(self.key, self.polarity, False, "no matching item")
         latest = max(items, key=lambda item: item.fields.get(self.order_field, ""))
         wrong = [
             (name, latest.fields.get(name, ""))
             for name, matcher in self.expect
             if not matcher.matches(latest.fields.get(name, ""))
         ]
-        return Result(self.key, self.polarity, "fail" if wrong else "pass", f"latest {latest.item_key}: {wrong}")
+        return _result(self.key, self.polarity, not wrong, f"latest {latest.item_key}: {wrong}")
 
 
 @dataclass(frozen=True)
@@ -995,9 +1158,7 @@ class AnyOf:
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
         results = [option.evaluate(world, before, after) for option in self.options]
         ok = any(result.outcome == "pass" for result in results)
-        return Result(
-            self.key, self.polarity, "pass" if ok else "fail", "; ".join(r.detail for r in results)
-        )
+        return _result(self.key, self.polarity, ok, "; ".join(r.detail for r in results))
 
 
 Expectation = (
@@ -1006,7 +1167,11 @@ Expectation = (
     | Distinct
     | Mentions
     | NoNewMention
+    | AttributedLines
+    | HedgedLines
     | TypedEdge
+    | NoNewEdge
+    | NoNewPlanning
     | RecordItem
     | RecordsKept
     | LatestRecord
@@ -1037,3 +1202,111 @@ def check_expectations(
     after: VaultState,
 ) -> CaptureCheck:
     return CaptureCheck(tuple(item.evaluate(world, before, after) for item in expectations))
+
+
+def selects_of(expectation: Any) -> tuple[Select, ...]:
+    """Every selection an expectation reads, through ``AnyOf`` options too."""
+
+    found: list[Select] = []
+    for name in ("select", "first", "second", "source", "target"):
+        value = getattr(expectation, name, None)
+        if isinstance(value, Select):
+            found.append(value)
+    for option in getattr(expectation, "options", ()):
+        found.extend(selects_of(option))
+    return tuple(found)
+
+
+# --------------------------------------------------------------------------- #
+# Candidate destinations and provenance, frozen before any write
+# --------------------------------------------------------------------------- #
+
+PROVENANCE: tuple[str, ...] = (
+    "direct",
+    "reported",
+    "comparison",
+    "inference",
+    "attributed",
+    "event",
+    "preference",
+    "baseline",
+    "none",
+)
+
+
+@dataclass(frozen=True)
+class Partition:
+    """The four axes a decomposition separates before any destination is chosen."""
+
+    retrieval_question: str
+    subject: str
+    temporal_episode: str
+    epistemic_role: str
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One durable change the episode supports, and where it belongs.
+
+    ``homes`` lists the admissible canonical homes, preferred first:
+    ``existing:<world key>``, ``new:<home id>`` or ``none``. ``routes`` are
+    the admissible episode routes (``episode_model`` route names).
+    ``same_home_as`` names candidates that must share this one's home.
+    ``checked_by`` names the expectations that enforce this destination and
+    provenance in the vault a capture leaves.
+    """
+
+    key: str
+    statement: str
+    homes: tuple[str, ...]
+    routes: tuple[str, ...]
+    dispositions: tuple[str, ...]
+    provenance: str
+    checked_by: tuple[str, ...]
+    attributed_to: str | None = None
+    uncertain: bool = False
+    same_home_as: tuple[str, ...] = ()
+    partition: Partition | None = None
+
+
+def validate_candidates(
+    candidates: Iterable[Candidate],
+    *,
+    world_keys: Iterable[str],
+    expectation_keys: Iterable[str],
+) -> None:
+    """Refuse a destination spec that names routes, homes or checks that do not exist."""
+
+    from exomem import episode_model
+
+    routes = set(episode_model._ROUTES)  # noqa: SLF001 - the product's own route vocabulary
+    dispositions = set(episode_model._DISPOSITIONS)  # noqa: SLF001
+    world = set(world_keys)
+    checks = set(expectation_keys)
+    items = tuple(candidates)
+    keys = [item.key for item in items]
+    if len(keys) != len(set(keys)):
+        raise FixtureError("candidate keys must be unique")
+    for item in items:
+        if not item.homes or not item.routes or not item.dispositions:
+            raise FixtureError(f"{item.key}: homes, routes and dispositions are required")
+        if set(item.routes) - routes:
+            raise FixtureError(f"{item.key}: unknown route {sorted(set(item.routes) - routes)}")
+        if set(item.dispositions) - dispositions:
+            raise FixtureError(f"{item.key}: unknown disposition")
+        if item.provenance not in PROVENANCE:
+            raise FixtureError(f"{item.key}: unknown provenance {item.provenance}")
+        if item.provenance in {"reported", "attributed"} and not item.attributed_to:
+            raise FixtureError(f"{item.key}: a {item.provenance} claim names its source")
+        for home in item.homes:
+            kind, _, name = home.partition(":")
+            if kind == "existing" and name not in world:
+                raise FixtureError(f"{item.key}: existing home {name} is not in the world")
+            if kind not in {"existing", "new", "none"} or (kind != "none" and not name):
+                raise FixtureError(f"{item.key}: malformed home {home}")
+        if ("none" in item.homes) != ("routed" not in item.dispositions):
+            raise FixtureError(f"{item.key}: a home of none pairs with a non-routed disposition")
+        if not item.checked_by or set(item.checked_by) - checks:
+            raise FixtureError(f"{item.key}: every candidate is enforced by named expectations")
+        if set(item.same_home_as) - set(keys):
+            raise FixtureError(f"{item.key}: same_home_as names an unknown candidate")
