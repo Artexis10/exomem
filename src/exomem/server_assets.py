@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import mcp.types
 from fastmcp import FastMCP
 from starlette.background import BackgroundTask
-from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
@@ -95,6 +96,14 @@ def server_icons() -> list[mcp.types.Icon]:
 
 # How long a liveness snapshot is served before a worker thread re-reads it.
 HEALTH_SNAPSHOT_TTL_SECONDS = 5.0
+# A refresh in flight longer than this means a read is wedged (a hung
+# filesystem): /health then answers 503 instead of serving a stale 200.
+HEALTH_REFRESH_WEDGED_SECONDS = 120.0
+
+# Readiness measurements get their own workers. anyio's default limiter is
+# shared with every synchronous tool call, so slow calls would queue readiness
+# behind them and make a busy cell look NotReady.
+_READINESS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="exomem-readiness")
 
 
 def _read_liveness_facts() -> dict[str, object]:
@@ -138,25 +147,33 @@ class _LivenessSnapshot:
         self._read_at = time.monotonic()
         self._lock = threading.Lock()
         self._refreshing = False
+        self._refresh_started = 0.0
 
-    def current(self) -> tuple[dict[str, object], bool]:
-        """The served facts, and whether the caller should start a refresh."""
+    def current(self) -> tuple[dict[str, object], bool, bool]:
+        """The served facts, whether to start a refresh, and whether one is wedged."""
         with self._lock:
-            stale = time.monotonic() - self._read_at >= HEALTH_SNAPSHOT_TTL_SECONDS
+            now = time.monotonic()
+            stale = now - self._read_at >= HEALTH_SNAPSHOT_TTL_SECONDS
             start = stale and not self._refreshing
             if start:
                 self._refreshing = True
-            return dict(self._facts), start
+                self._refresh_started = now
+            wedged = (
+                self._refreshing and now - self._refresh_started >= HEALTH_REFRESH_WEDGED_SECONDS
+            )
+            return dict(self._facts), start, wedged
 
     def refresh(self) -> None:
         try:
             facts = _read_liveness_facts()
-        finally:
+        except BaseException:
             with self._lock:
                 self._refreshing = False
+            raise
         with self._lock:
             self._facts = facts
             self._read_at = time.monotonic()
+            self._refreshing = False
 
 
 def register_health_routes(
@@ -202,14 +219,18 @@ def register_health_routes(
         gets the pod killed mid index build."""
         _record_health_probe()
         payload: dict[str, object] = {"status": "ok", "service": "exomem"}
-        facts, refresh = liveness.current()
+        facts, refresh, wedged = liveness.current()
         payload.update(facts)
         if refresh:
-            # Hand the read to the executor without waiting for it: starting a
-            # thread here would block the loop until that thread wins the GIL.
+            # Queue the read without waiting for it. Only the executor's first
+            # use spawns a worker thread; the handler never joins one, and a
+            # thread start would block the loop until it wins the GIL.
             asyncio.get_running_loop().run_in_executor(None, liveness.refresh)
+        if wedged:
+            payload["status"] = "degraded"
         return JSONResponse(
             payload,
+            status_code=503 if wedged else 200,
             headers={"Cache-Control": "no-store"},
             background=(BackgroundTask(on_liveness) if on_liveness is not None else None),
         )
@@ -228,10 +249,13 @@ def register_health_routes(
                 digest = None
         # The measurement reads the filesystem and sqlite catalog and can wait
         # on the coordination probe; it must not run on the event loop.
-        snapshot = await run_in_threadpool(
-            runtime_readiness_module.runtime_readiness,
-            mcp_tool_surface_sha256=digest,
-            traffic=traffic,
+        snapshot = await asyncio.get_running_loop().run_in_executor(
+            _READINESS_EXECUTOR,
+            functools.partial(
+                runtime_readiness_module.runtime_readiness,
+                mcp_tool_surface_sha256=digest,
+                traffic=traffic,
+            ),
         )
         status_code = 200 if snapshot["status"] == "ready" else 503
         return JSONResponse(

@@ -44,7 +44,9 @@ class _Hold:
         return self.result
 
 
-async def _measure(app, request_path: str, *, alongside: str | None = None) -> tuple[float, float]:
+async def _measure(
+    app, request_path: str, *, alongside: str | None = None, release=None
+) -> tuple[float, float]:
     """Return (seconds `request_path` took, worst event-loop stall) while it ran.
 
     With `alongside`, that route is requested first and concurrently, so the
@@ -75,6 +77,8 @@ async def _measure(app, request_path: str, *, alongside: str | None = None) -> t
         response = measured.result()
         stop.set()
         await tick
+        if release is not None:
+            release()
         if other is not None:
             await asyncio.wait_for(other, HOLD_CAP_SECONDS + 5)
     assert response.status_code == 200, response.text
@@ -122,10 +126,117 @@ def test_health_keeps_answering_while_readiness_measurement_is_blocked(
 
     async def scenario() -> tuple[float, float]:
         try:
-            return await _measure(app, "/health", alongside="/health/ready")
+            return await _measure(
+                app, "/health", alongside="/health/ready", release=hold.release.set
+            )
         finally:
             hold.release.set()
 
     elapsed, worst_gap = asyncio.run(scenario())
     assert elapsed < ANSWER_BUDGET_SECONDS, f"/health took {elapsed:.2f}s behind readiness"
     assert worst_gap < ANSWER_BUDGET_SECONDS, f"loop stalled {worst_gap:.2f}s"
+
+
+def _get(app, path: str, *, delay: float = 0.0):
+    async def run() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://cell.local"
+        ) as client:
+            await asyncio.sleep(delay)
+            return await client.get(path)
+
+    return run()
+
+
+def test_readiness_answers_while_the_default_worker_limiter_is_saturated(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slow tool calls fill anyio's default thread limiter; readiness must not queue behind them."""
+    import anyio.to_thread
+
+    app = _app()
+    monkeypatch.setattr(
+        runtime_readiness_module, "runtime_readiness", lambda **_kw: {"status": "ready"}
+    )
+    hold = threading.Event()
+
+    async def scenario() -> tuple[float, int]:
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        jobs = [
+            asyncio.create_task(anyio.to_thread.run_sync(lambda: hold.wait(HOLD_CAP_SECONDS)))
+            for _ in range(int(limiter.total_tokens))
+        ]
+        try:
+            await asyncio.sleep(0.2)
+            started = time.perf_counter()
+            response = await asyncio.wait_for(_get(app, "/health/ready"), HOLD_CAP_SECONDS + 2)
+            return time.perf_counter() - started, response.status_code
+        finally:
+            hold.set()
+            await asyncio.gather(*jobs)
+
+    elapsed, status = asyncio.run(scenario())
+    assert status == 200
+    assert elapsed < ANSWER_BUDGET_SECONDS, f"/health/ready took {elapsed:.2f}s behind tool calls"
+
+
+def test_health_fails_once_a_refresh_has_been_wedged_past_the_bound(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung filesystem must still be detectable: a stuck refresh turns /health 503."""
+    app = _app()
+    monkeypatch.setattr(server_assets, "HEALTH_SNAPSHOT_TTL_SECONDS", 0.0)
+    monkeypatch.setattr(server_assets, "HEALTH_REFRESH_WEDGED_SECONDS", 0.3, raising=False)
+    hold = _Hold()
+    monkeypatch.setattr(deploy_provenance, "provenance", hold)
+
+    async def scenario() -> tuple[int, int, int]:
+        first = await _get(app, "/health")  # starts the refresh, which blocks
+        await asyncio.sleep(0.05)
+        early = await _get(app, "/health")  # in flight, but within the bound
+        await asyncio.sleep(0.4)
+        wedged = await _get(app, "/health")
+        hold.release.set()
+        await asyncio.sleep(0.2)
+        recovered = await _get(app, "/health")
+        assert first.status_code == 200 and recovered.status_code == 200
+        return early.status_code, wedged.status_code, recovered.status_code
+
+    early, wedged, _ = asyncio.run(scenario())
+    assert early == 200
+    assert wedged == 503
+
+
+def test_snapshot_refreshes_after_the_ttl_with_one_refresh_in_flight(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_versions = iter(range(1, 1000))
+    in_flight = 0
+    max_in_flight = 0
+    lock = threading.Lock()
+
+    def provenance(**_kwargs):
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.05)
+        with lock:
+            in_flight -= 1
+        return {"version": f"v{next(app_versions)}"}
+
+    monkeypatch.setattr(deploy_provenance, "provenance", provenance)
+    app = _app()  # registration reads v1
+    monkeypatch.setattr(server_assets, "HEALTH_SNAPSHOT_TTL_SECONDS", 0.1)
+
+    async def scenario() -> list[str]:
+        seen = []
+        for _ in range(40):
+            seen.append((await _get(app, "/health")).json()["version"])
+            await asyncio.sleep(0.02)
+        return seen
+
+    seen = asyncio.run(scenario())
+    assert seen[0] == "v1"
+    assert seen[-1] != "v1", "a later probe must serve the refreshed value"
+    assert max_in_flight == 1
