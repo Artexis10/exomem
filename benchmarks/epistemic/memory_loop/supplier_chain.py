@@ -39,8 +39,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import observation as obs
 from .contract import (
+    EXTENSION,
+    Admissible,
     AnyOf,
+    AttributedLines,
     BuiltWorld,
     CaptureCheck,
     Distinct,
@@ -51,21 +55,25 @@ from .contract import (
     Expectation,
     FieldIs,
     FixtureError,
-    LatestRecord,
     LaterUse,
+    LatestRecord,
     Mentions,
+    NoEdgeBetween,
     NoNewMention,
     NoteSeed,
     PreCapture,
     RecordItem,
     RecordsKept,
     RecordsSeed,
+    RelationSeed,
+    RelationTypeSeed,
     Select,
     TypedEdge,
     VaultState,
     build_world,
     check_expectations,
     selects_of,
+    semantics_fingerprint,
     sha256_json,
 )
 
@@ -235,6 +243,14 @@ OPERATORS = RecordsSeed(
     description="Who runs each site, from when; the newest assignment is the current one.",
 )
 
+#: The governed meaning "runs a site day to day", registered in the
+#: succession world so the predecessor's edge exists before capture.
+OPERATES = RelationTypeSeed(
+    relation="vault.operates",
+    parent="relates_to",
+    description="Runs a site day to day.",
+)
+
 #: A same-name site beside its organization. Building this world through the
 #: public entity writer is the acceptance that a justified distinct identity
 #: stays expressible despite an overlapping surface name.
@@ -317,7 +333,13 @@ EPISODES: tuple[Episode, ...] = (
     ),
     Episode(
         episode_id="operator-succession",
-        world=PreCapture(types=TYPES, entities=(ORG_MERROW, SITE_MERROW), records=(OPERATORS,)),
+        world=PreCapture(
+            types=TYPES,
+            entities=(ORG_MERROW, SITE_MERROW),
+            records=(OPERATORS,),
+            relation_types=(OPERATES,),
+            relations=(RelationSeed(source="org_merrow", relation="vault.operates", target="site_merrow"),),
+        ),
         turns=(
             "Had a chat at the Merrow Farm stall today, Wednesday 24 September. Since the "
             "first of September the orchard on the north slope has been run by Callow Cider "
@@ -354,7 +376,34 @@ _MERROW = FieldIs(tokens=("merrow",))
 _PELLOW = FieldIs(tokens=("pellow",))
 #: Relations that would misstate a seller, a user or a mark as an owner or a
 #: component of the thing it relates to.
-_NOT_OWNERSHIP_OR_PARTS = ("owns", "part_of", "contains", "duplicates", "supersedes")
+_CALLOW = Select(entity_type="organization", tokens=("callow",))
+#: Operating a site and selling under a mark are reusable meanings the core
+#: registry lacks, so the truthful edge is a governed extension in either
+#: direction; no core relation says either.
+_GOVERNED_MEANING = (Admissible(relation=EXTENSION, direction="either"),)
+_HEARSAY_HEDGES = (
+    "reckoned",
+    "reckons",
+    "reckon",
+    "said",
+    "says",
+    "heard",
+    "rumour",
+    "rumor",
+    "unconfirmed",
+    "unverified",
+    "hearsay",
+    "claimed",
+    "claims",
+    "according",
+    "might",
+    "may",
+    "possibly",
+    "reportedly",
+    "apparently",
+    "per",
+    "likely",
+)
 _CHANGE_OF_HANDS = (
     "changing hands",
     "change hands",
@@ -471,8 +520,8 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                         polarity="positive",
                         source=_ORG_MERROW,
                         target=_SITE_MERROW_KEY,
-                        rejected=_NOT_OWNERSHIP_OR_PARTS,
-                        reason="The operator role as a specific relation to the site it runs.",
+                        admissible=_GOVERNED_MEANING,
+                        reason="The operator role as a governed relation to the site it runs.",
                     ),
                 ),
                 reason="Operating the orchard is a role of the one organization, as a facet or a relation.",
@@ -535,6 +584,15 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                 select=_SITE_MERROW_KEY,
                 markers=_CHANGE_OF_HANDS,
                 reason="Nothing separates the company from its orchard, so neither receives the claim.",
+            ),
+            AttributedLines(
+                key="shared-name/hearsay-stays-attributed",
+                polarity="negative",
+                claim=_CHANGE_OF_HANDS,
+                source=("someone", "queue", "market", "heard", "rumour", "rumor", "gossip"),
+                hedge=_HEARSAY_HEDGES,
+                allow_none=True,
+                reason="Queue gossip may go unwritten; written anywhere, it keeps its source and its doubt.",
             ),
             EntityIntact(
                 key="shared-name/organization-intact",
@@ -682,7 +740,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                 key="operator-succession/distinct-operators",
                 polarity="positive",
                 first=_ORG_MERROW,
-                second=Select(entity_type="organization", tokens=("callow",)),
+                second=_CALLOW,
                 reason="Old and new operators are different identities.",
             ),
             RecordsKept(
@@ -708,13 +766,47 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                 expect=(("operator", FieldIs(tokens=("callow",))),),
                 reason="The newest assignment is the current operator.",
             ),
-            TypedEdge(
+            NoEdgeBetween(
                 key="operator-succession/no-new-ownership",
                 polarity="negative",
-                source=Select(entity_type="organization", tokens=("callow",)),
-                target=_SITE_MERROW_KEY,
-                rejected=("owns",),
+                first=_CALLOW,
+                second=_SITE_MERROW_KEY,
+                forbidden=("owns",),
                 reason="Merrow still own the land; running it is not owning it.",
+            ),
+            NoEdgeBetween(
+                key="operator-succession/predecessor-not-current",
+                polarity="negative",
+                first=_ORG_MERROW,
+                second=_SITE_MERROW_KEY,
+                tolerated=("owns", "relates_to", "links_to", "mentions"),
+                reason=(
+                    "Ruling: after the handover no edge presents Merrow Farm as running the site; the "
+                    "Records history is the only place the predecessor survives. Ownership and generic "
+                    "links stay truthful."
+                ),
+            ),
+            AnyOf(
+                key="operator-succession/current-operator-on-site",
+                polarity="positive",
+                options=(
+                    TypedEdge(
+                        key="operator-succession/current-operator-on-site/edge",
+                        polarity="positive",
+                        source=_CALLOW,
+                        target=_SITE_MERROW_KEY,
+                        admissible=_GOVERNED_MEANING,
+                        reason="The new operator relates to the site by a governed, non-ownership meaning.",
+                    ),
+                    Mentions(
+                        key="operator-succession/current-operator-on-site/facet",
+                        polarity="positive",
+                        select=_SITE_MERROW_KEY,
+                        groups=(("callow",),),
+                        reason="Or the site's current-operator facet names the new operator.",
+                    ),
+                ),
+                reason="The site's projection reflects the supported current operator.",
             ),
         ),
         edge_evidence=(),
@@ -758,16 +850,16 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                 polarity="positive",
                 source=_ORG_MERROW,
                 target=Select(entity_type="brand", tokens=("tarrow", "crown")),
-                rejected=_NOT_OWNERSHIP_OR_PARTS,
-                reason="Merrow Farm sells under the mark; it does not own it.",
+                admissible=_GOVERNED_MEANING,
+                reason="Merrow Farm sells under the mark: a governed meaning the core registry lacks, never ownership.",
             ),
             TypedEdge(
                 key="brand/pellow-sells-under",
                 polarity="positive",
                 source=Select(key="org_pellow"),
                 target=Select(entity_type="brand", tokens=("tarrow", "crown")),
-                rejected=_NOT_OWNERSHIP_OR_PARTS,
-                reason="Pellow Orchards sells under the mark; it does not own it.",
+                admissible=_GOVERNED_MEANING,
+                reason="Pellow Orchards sells under the mark: a governed meaning the core registry lacks, never ownership.",
             ),
         ),
         edge_evidence=(
@@ -788,6 +880,38 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
         ),
     ),
 )
+
+# --------------------------------------------------------------------------- #
+# Frozen pins: what a run binds to before any effect. Editing an episode, a
+# world, an expectation or the shared predicate semantics moves a digest, and
+# the tests refuse the module until these are deliberately re-pinned.
+# --------------------------------------------------------------------------- #
+
+FIXTURE_SET_SHA256 = "2408fecb687f2ff5344f6566becaf0a415e20b289b97d9d9cf1e09f29747a00c"
+ACTOR_SHA256: dict[str, str] = {
+    "org-and-site": "135e9bf0556b3ef2d817d6f3477d96770c34352cb54b01b8477b554b5804235e",
+    "multi-role": "2c03c998b675d80fd6e3ac1ddc92a75e7cd3b994f2461f0a5b87a2388331f42c",
+    "shared-name": "2855858646bbec95e7e1df766863ae1b2b452ed6003aefbce0fa60f1e36dc406",
+    "mixed-purchase": "d9e6eb14d61eee77ea21080b624ba19219d2631ba2db3e6f167653bc01ca4129",
+    "operator-succession": "82fec4ab317834cb76802ca391bca30ce9304da97376687b1169bccc9294d975",
+    "brand": "958f06142f148e58e923996de78a106ef3bbb00da56af85a6c4deffdba76c01c",
+}
+EVALUATOR_SHA256: dict[str, str] = {
+    "org-and-site": "9421f23d41979012cc919e5969e8c0e17a5e7959e2b5d01bd5a9a6c9e373cd67",
+    "multi-role": "a848e37af16e93fad02f50a5616ca09c45265213cc1979c1d261c33643fac630",
+    "shared-name": "6758cf896c0c59be8926125fb11a9ece13da926ede61af9df9d17fc01ebc81b7",
+    "mixed-purchase": "d9a916d5ba88bcc9d05bc47f3edcd7864837dce616717dd86ec09e79921f633d",
+    "operator-succession": "5672a72001c60a99b699a8b081a9834d72cc69a55985d7aa3b76e3069a8793db",
+    "brand": "7042a1f8933a23d6f8a94ada6a63a24557c3db8a100bb7ffda4891e9426a7a9a",
+}
+PRE_CAPTURE_SHA256: dict[str, str] = {
+    "org-and-site": "47a43d1f62175c6696516cfe4c3e822ec2e424d1180dc42dcd81dc4137449f55",
+    "multi-role": "44bfb580f7a1a240c997733e2157b1d6471defcec2026d820e17c71f4922eec1",
+    "shared-name": "3f75e7b405d8a2949c96c9273c44965611e82c5d4fcc7e750f44d292c47a95f9",
+    "mixed-purchase": "bec5a11f232f269fa19c5ac390dbd4fb87b83b5a7e906ea245fc9b4400b44bb2",
+    "operator-succession": "61e800f3540a1b094cbaab9d28014b9901ad7ea923af6a88def26a37a6087a57",
+    "brand": "6351c8385040c7edca049d7bb7a77513ec5a30a7071d043186dd3804beecfe23",
+}
 
 # --------------------------------------------------------------------------- #
 # The API
@@ -824,9 +948,8 @@ def pre_capture_spec_sha256(episode_id: str) -> str:
 
 
 def evaluator_sha256(episode_id: str | None = None) -> str:
-    if episode_id is None:
-        return sha256_json(MANIFEST)
-    return sha256_json(expectations_for(episode_id))
+    evaluator = MANIFEST if episode_id is None else expectations_for(episode_id)
+    return sha256_json({"semantics": semantics_fingerprint(), "evaluator": evaluator})
 
 
 def fixture_set_sha256() -> str:
@@ -835,9 +958,29 @@ def fixture_set_sha256() -> str:
             "fixture_set": FIXTURE_SET_ID,
             "actor": [actor_view(item.episode_id) for item in EPISODES],
             "worlds": [item.world for item in EPISODES],
-            "evaluator": MANIFEST,
+            "evaluator": evaluator_sha256(),
         }
     )
+
+
+def frozen(episode_id: str) -> obs.Frozen:
+    """The pins a run of one episode binds to: the module's frozen digests,
+    never digests recomputed from the current source."""
+
+    item = episode(episode_id)
+    return obs.Frozen(
+        fixture_id=f"{FIXTURE_SET_ID}/{episode_id}",
+        actor_sha256=ACTOR_SHA256[episode_id],
+        pre_capture_sha256=PRE_CAPTURE_SHA256[episode_id],
+        evaluator_sha256=EVALUATOR_SHA256[episode_id],
+        turns_sha256=obs.turns_sha256(item.turns),
+        later_turn_sha256=obs.text_sha256(item.later_turn),
+        shipped_prompt_sha256=obs.shipped_prompt_sha256(),
+    )
+
+
+def void_reasons(record: obs.NoNudgeObservation, episode_id: str) -> tuple[str, ...]:
+    return obs.void_reasons(record, frozen(episode_id))
 
 
 def build_pre_capture(root: Path, episode_id: str) -> BuiltWorld:

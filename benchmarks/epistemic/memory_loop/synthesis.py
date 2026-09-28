@@ -28,10 +28,11 @@ from typing import Any
 
 from . import observation as obs
 from .contract import (
-    AnyOf,
+    Admissible,
     BuiltWorld,
     Candidate,
     CaptureCheck,
+    EdgeCount,
     EntityIntact,
     Expectation,
     FixtureError,
@@ -44,11 +45,11 @@ from .contract import (
     PreCapture,
     Result,
     Select,
-    TypedEdge,
     VaultState,
     build_world,
     check_expectations,
     selects_of,
+    semantics_fingerprint,
     sha256_json,
     validate_candidates,
 )
@@ -161,19 +162,25 @@ EPISODES: tuple[Episode, ...] = (
 
 _THESIS = Select(kind="page", tokens=("custody",), created_only=True)
 #: Relations no synthesis bears to the decisions it explains.
-_UNTRUTHFUL_SYNTHESIS_LINKS = ("supersedes", "duplicates", "contradicts", "causes", "caused_by")
+_UNTRUTHFUL_SYNTHESIS_LINKS = ("supersedes", "duplicates", "contradicts", "causes", "caused_by", "blocks")
 _THESIS_MARKERS = ("custody", "custodian", "guest")
-
-
-def _antecedent_edge(key: str) -> TypedEdge:
-    return TypedEdge(
-        key=f"synthesis/linked-{key}",
-        polarity="positive",
-        source=_THESIS,
-        target=Select(key=key),
-        rejected=_UNTRUTHFUL_SYNTHESIS_LINKS,
-        reason="The thesis relates to the decision it explains by a specific registered relation.",
-    )
+#: The truthful typed links between a synthesis and the decisions it explains,
+#: by direction: the thesis is derived from or evidenced by each decision, and
+#: each decision supports, implements, refines or specializes the thesis.
+SYNTHESIS_LINKS = (
+    Admissible(relation="derived_from", direction="forward"),
+    Admissible(relation="evidenced_by", direction="forward"),
+    Admissible(relation="supports", direction="reverse"),
+    Admissible(relation="implements", direction="reverse"),
+    Admissible(relation="refines", direction="reverse"),
+    Admissible(relation="extends", direction="reverse"),
+)
+#: Every antecedent is named in the discussion; a tolerance of one missed
+#: link is allowed, declared here rather than hidden in a threshold.
+LINKED_AT_LEAST = 4
+#: The recurring product may be promoted to an entity during either episode;
+#: that is not fragmentation of the thesis or of the refinement.
+_TOLERATED_NEW_TITLES = ("Tallyloom",)
 
 
 @dataclass(frozen=True)
@@ -196,7 +203,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                     "justify it openly."
                 ),
                 homes=("new:owner-custody",),
-                routes=("focused_note",),
+                routes=("focused_note", "entity"),
                 dispositions=("routed",),
                 provenance="direct",
                 checked_by=(
@@ -214,7 +221,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                 routes=("focused_note", "relation_only"),
                 dispositions=("routed",),
                 provenance="direct",
-                checked_by=("synthesis/linked-to-an-antecedent", "synthesis/no-untruthful-link"),
+                checked_by=("synthesis/linked-to-the-antecedents", "synthesis/no-untruthful-link"),
             ),
         ),
         expectations=(
@@ -222,10 +229,10 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                 key="synthesis/only-the-thesis-is-new",
                 polarity="positive",
                 exactly=1,
-                exclude_types=("entity",),
+                tolerate=_TOLERATED_NEW_TITLES,
                 reason=(
-                    "The thesis is one focused home, not split across pages. Promoting the "
-                    "recurring product to an entity is not thesis fragmentation and is not counted."
+                    "The thesis is one focused home (a note or a concept entity), not split across "
+                    "pages. Promoting the recurring product to an entity is not counted."
                 ),
             ),
             Mentions(
@@ -242,10 +249,13 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                 groups=(("guest", "custodian", "custody"), ("justify", "justification", "justified")),
                 reason="The home carries the thesis and the test it sets for features.",
             ),
-            AnyOf(
-                key="synthesis/linked-to-an-antecedent",
+            EdgeCount(
+                key="synthesis/linked-to-the-antecedents",
                 polarity="positive",
-                options=tuple(_antecedent_edge(key) for key in ANTECEDENT_KEYS),
+                source=_THESIS,
+                targets=tuple(Select(key=key) for key in ANTECEDENT_KEYS),
+                admissible=SYNTHESIS_LINKS,
+                at_least=LINKED_AT_LEAST,
                 reason="Truthful typed links connect the thesis to the decisions it explains.",
             ),
             NoNewEdge(
@@ -314,7 +324,8 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                 key="refinement/no-new-page",
                 polarity="negative",
                 exactly=0,
-                reason="A coined label for an in-scope detail does not manufacture a page.",
+                tolerate=_TOLERATED_NEW_TITLES,
+                reason="A coined label for an in-scope detail does not manufacture a page or an entity.",
             ),
             EntityIntact(
                 key="refinement/antecedent-intact",
@@ -338,6 +349,21 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
         ),
     ),
 )
+
+# --------------------------------------------------------------------------- #
+# Frozen pins (re-pinned deliberately; the tests refuse drift)
+# --------------------------------------------------------------------------- #
+
+FIXTURE_SET_SHA256 = "84f410d2224d74d5676eb5f9c1201ff6e403aa840d7fe4871ab8f3f023f58c7c"
+ACTOR_SHA256: dict[str, str] = {
+    "synthesis": "50c776148b7dfd7ca3a0a517ed190bd7bb54208cf0e5fdf8fafeb7ddd95fb007",
+    "refinement": "5fbcfa6f5c51314b623643ea95ff53bae666eab07080c61c9114842883efb230",
+}
+EVALUATOR_SHA256: dict[str, str] = {
+    "synthesis": "67dc691e5a1028b8cc3db157be9a768c2b398d3c44dd82a4737d431c55605b1d",
+    "refinement": "c81fbd4796663b76753881e0adc7f4693e3b2e15530c9e373d4d239ed61387d9",
+}
+PRE_CAPTURE_SHA256 = "80e33a8646d7bd509563be44f442fbfe31aa61f05c14fc42c18cf01e6a3ba41d"
 
 # --------------------------------------------------------------------------- #
 # The API
@@ -371,8 +397,9 @@ def pre_capture_spec_sha256() -> str:
     return sha256_json(WORLD)
 
 
-def evaluator_sha256(episode_id: str) -> str:
-    return sha256_json(expectations_for(episode_id))
+def evaluator_sha256(episode_id: str | None = None) -> str:
+    evaluator = MANIFEST if episode_id is None else expectations_for(episode_id)
+    return sha256_json({"semantics": semantics_fingerprint(), "evaluator": evaluator})
 
 
 def fixture_set_sha256() -> str:
@@ -381,8 +408,23 @@ def fixture_set_sha256() -> str:
             "fixture_set": FIXTURE_SET_ID,
             "actor": [actor_view(item.episode_id) for item in EPISODES],
             "world": WORLD,
-            "evaluator": MANIFEST,
+            "evaluator": evaluator_sha256(),
         }
+    )
+
+
+def frozen(episode_id: str) -> obs.Frozen:
+    """The module's pins for one episode, which a run binds to before any effect."""
+
+    item = episode(episode_id)
+    return obs.Frozen(
+        fixture_id=f"{FIXTURE_SET_ID}/{episode_id}",
+        actor_sha256=ACTOR_SHA256[episode_id],
+        pre_capture_sha256=PRE_CAPTURE_SHA256,
+        evaluator_sha256=EVALUATOR_SHA256[episode_id],
+        turns_sha256=obs.turns_sha256(item.turns),
+        later_turn_sha256=obs.text_sha256(item.later_turn),
+        shipped_prompt_sha256=obs.shipped_prompt_sha256(),
     )
 
 
@@ -398,25 +440,12 @@ def check_capture(episode_id: str, world: BuiltWorld, before: VaultState, after:
     )
 
 
-def void_reasons(
-    record: obs.NoNudgeObservation, *, episode_id: str, pre_capture_sha256: str
-) -> tuple[str, ...]:
-    """Why a record cannot be scored against this public synthetic pair."""
+def void_reasons(record: obs.NoNudgeObservation, *, episode_id: str) -> tuple[str, ...]:
+    """Why a record cannot be scored against this public synthetic pair; an
+    exact private replay binds its own original input and snapshot and stays
+    local."""
 
-    reasons = list(
-        obs.void_reasons(
-            record,
-            actor_sha256=actor_sha256(episode_id),
-            pre_capture_sha256=pre_capture_sha256,
-            evaluator_sha256=evaluator_sha256(episode_id),
-        )
-    )
-    if record.host_initiation.input_origin != "synthetic_fixture":
-        reasons.append(
-            "only a synthetic-fixture run is scored here; an exact private replay binds its own "
-            "original input and snapshot and stays local"
-        )
-    return tuple(reasons)
+    return obs.void_reasons(record, frozen(episode_id))
 
 
 def first_pass_focus(record: obs.NoNudgeObservation, world: BuiltWorld) -> Result:

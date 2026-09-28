@@ -48,6 +48,7 @@ from .contract import (
     LinesCarry,
     Mentions,
     NewPages,
+    NoMixedLines,
     NoNewMention,
     NoteSeed,
     Partition,
@@ -57,6 +58,7 @@ from .contract import (
     build_world,
     check_expectations,
     selects_of,
+    semantics_fingerprint,
     sha256_json,
     validate_candidates,
 )
@@ -160,13 +162,48 @@ _OPEN = Select(key="note_tea_prefs")
 _CREATED = Select(kind="page", created_only=True)
 _ANY_CREATED_ENTITY = Select(entity_type=None, tokens=("lowfield",), created_only=True)
 
+#: The three perception clusters. No new statement fuses two of them.
+_THIS_WEEK = ("monday", "wednesday", "thursday", "overnight", "three mornings")
+_SPRING_2024 = ("2024", "filter jug", "moved flats")
+_BASELINE = ("nine times", "9 times", "nine out of ten", "9 out of 10", "90%", "steep blind")
+
 EXPECTATIONS: tuple[Expectation, ...] = (
-    Mentions(
+    LinesCarry(
         key="decomposition/preference-on-its-page",
         polarity="positive",
         select=_OPEN,
-        groups=(("lowfield",), ("settled", "chose", "picked", "decided", "favour", "favor")),
-        reason="The settled preference belongs to the preferences page the user has open.",
+        claim=(
+            "preference",
+            "settled",
+            "chose",
+            "chosen",
+            "picked",
+            "decided",
+            "prefer",
+            "prefers",
+            "preferred",
+            "favour",
+            "favourite",
+            "favor",
+            "favorite",
+            "over the brightwater",
+        ),
+        groups=(("lowfield",),),
+        reason="Every new statement of the choice on the open page names the tea chosen: Lowfield.",
+    ),
+    NoNewMention(
+        key="decomposition/preference-not-reversed",
+        polarity="negative",
+        select=_OPEN,
+        markers=(
+            "over the lowfield",
+            "over lowfield",
+            "settled on the brightwater",
+            "settled on brightwater",
+            "prefer the brightwater",
+            "prefer brightwater",
+        ),
+        reason="The capture keeps the direction of the choice.",
     ),
     AnyOf(
         key="decomposition/product-observations-in-scope",
@@ -177,6 +214,7 @@ EXPECTATIONS: tuple[Expectation, ...] = (
                 polarity="positive",
                 select=_OPEN,
                 groups=(("tin",), ("second steep", "second infusion")),
+                new_lines=True,
                 reason="Product observations sit with the preference they support.",
             ),
             Mentions(
@@ -184,15 +222,23 @@ EXPECTATIONS: tuple[Expectation, ...] = (
                 polarity="positive",
                 select=_ANY_CREATED_ENTITY,
                 groups=(("tin",), ("second steep", "second infusion")),
+                new_lines=True,
                 reason="Or as facets of the product, if the agent promotes it to an entity.",
             ),
         ),
         reason="The tin and the second steep are in-scope product details, not a page of their own.",
     ),
+    NoMixedLines(
+        key="decomposition/no-mixed-clusters-in-a-line",
+        polarity="negative",
+        groups=(_THIS_WEEK, _SPRING_2024, _BASELINE),
+        reason="This week's observations, the 2024 episode and the baseline are never fused into one statement.",
+    ),
     NoNewMention(
         key="decomposition/open-page-holds-only-its-cluster",
         polarity="negative",
         select=_OPEN,
+        ignore_links=True,
         markers=(
             "flat",
             "2024",
@@ -312,6 +358,7 @@ CANDIDATES: tuple[Candidate, ...] = (
         partition=PARTITIONS["preference"],
         checked_by=(
             "decomposition/preference-on-its-page",
+            "decomposition/preference-not-reversed",
             "decomposition/open-page-intact",
             "decomposition/open-page-holds-only-its-cluster",
         ),
@@ -337,7 +384,11 @@ CANDIDATES: tuple[Candidate, ...] = (
         dispositions=("routed",),
         provenance="direct",
         partition=PARTITIONS["flat-week"],
-        checked_by=("decomposition/this-week-has-one-home", "decomposition/no-detail-fragmentation"),
+        checked_by=(
+            "decomposition/this-week-has-one-home",
+            "decomposition/no-detail-fragmentation",
+            "decomposition/no-mixed-clusters-in-a-line",
+        ),
     ),
     Candidate(
         key="spring-2024",
@@ -393,6 +444,15 @@ LATER_USE = LaterUse(
 )
 
 # --------------------------------------------------------------------------- #
+# Frozen pins (re-pinned deliberately; the tests refuse drift)
+# --------------------------------------------------------------------------- #
+
+FIXTURE_SHA256 = "efecb31b150740457ec1b237a1077868465ae2454e986600011e4a9d13ce5388"
+ACTOR_SHA256 = "5d231888bf6d0dea5fcc4fc91f6522e1147d52540f0e4040394716a49da9ab53"
+EVALUATOR_SHA256 = "cb3d6cc3c9fee4a684fcdfef1ad96b324b758f6e0f46e932023447594a07faa9"
+PRE_CAPTURE_SHA256 = "49186c3596cc46383672e7e2d507b455e61c8da9f9dbcfd750b577d0d8dfd0ce"
+
+# --------------------------------------------------------------------------- #
 # The API
 # --------------------------------------------------------------------------- #
 
@@ -412,6 +472,7 @@ def pre_capture_spec_sha256() -> str:
 def evaluator_sha256() -> str:
     return sha256_json(
         {
+            "semantics": semantics_fingerprint(),
             "partitions": PARTITIONS,
             "identifiers": IDENTIFIERS,
             "candidates": CANDIDATES,
@@ -426,6 +487,24 @@ def fixture_sha256() -> str:
     return sha256_json(
         {"fixture": FIXTURE_ID, "actor": actor_view(), "world": WORLD, "evaluator": evaluator_sha256()}
     )
+
+
+def frozen() -> obs.Frozen:
+    """The module's pins, which a run binds to before any effect."""
+
+    return obs.Frozen(
+        fixture_id=FIXTURE_ID,
+        actor_sha256=ACTOR_SHA256,
+        pre_capture_sha256=PRE_CAPTURE_SHA256,
+        evaluator_sha256=EVALUATOR_SHA256,
+        turns_sha256=obs.turns_sha256(TURNS),
+        later_turn_sha256=obs.text_sha256(LATER_TURN),
+        shipped_prompt_sha256=obs.shipped_prompt_sha256(),
+    )
+
+
+def void_reasons(record: obs.NoNudgeObservation) -> tuple[str, ...]:
+    return obs.void_reasons(record, frozen())
 
 
 def build_pre_capture(root: Path) -> BuiltWorld:

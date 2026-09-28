@@ -30,10 +30,6 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 pytestmark = pytest.mark.timeout(600)
 
-FIXTURE_SHA256 = "894a2edea59de1e92444d176c1bea27d2c832e1c2946f42e0ae6d623f88194cb"
-EVALUATOR_SHA256 = "b854cdc410425f4a59a56f7f1757c3810351c34c43b0f459d5817cf5e015bcad"
-ACTOR_SHA256 = "b871a3e8f38fb59115bb96744b5392a1348866f4a4d3efb144961d7f20590e45"
-PRE_CAPTURE_SHA256 = "1b6ecad6bf192e1768b27bf3bd8d85bc1bf179542e8795e2b73fd8b2e79c53aa"
 
 
 # --------------------------------------------------------------------------- #
@@ -45,10 +41,10 @@ def test_the_destination_and_provenance_spec_is_consistent() -> None:
     fx.assert_manifest_consistent()
 
 
-def test_the_digests_are_frozen() -> None:
-    assert fx.fixture_sha256() == FIXTURE_SHA256
-    assert fx.evaluator_sha256() == EVALUATOR_SHA256
-    assert fx.actor_sha256() == ACTOR_SHA256
+def test_the_module_pins_match_the_digests() -> None:
+    assert fx.fixture_sha256() == fx.FIXTURE_SHA256
+    assert fx.evaluator_sha256() == fx.EVALUATOR_SHA256
+    assert fx.actor_sha256() == fx.ACTOR_SHA256
 
 
 def test_every_candidate_names_its_home_route_disposition_and_provenance() -> None:
@@ -122,34 +118,44 @@ def test_the_actor_view_withholds_the_destination_spec() -> None:
         assert expectation.key not in text and expectation.reason not in text
 
 
+def _run_record(**overrides) -> obs.NoNudgeObservation:
+    record = {
+        "artifact_type": obs.ARTIFACT_TYPE,
+        "schema_version": 1,
+        "fixture_id": fx.FIXTURE_ID,
+        "actor_sha256": fx.ACTOR_SHA256,
+        "pre_capture_sha256": fx.PRE_CAPTURE_SHA256,
+        "evaluator_sha256": fx.EVALUATOR_SHA256,
+        "host_initiation": {
+            "client": {"client": "generic-mcp", "adapter_version": "0", "lifecycle": "best_effort"},
+            "input_origin": "synthetic_fixture",
+            "delivered_turns_sha256": obs.turns_sha256(fx.TURNS),
+        },
+        "agent_decisions": [],
+        "leaf_effects": [],
+        "publication": {"status": "not_observed"},
+    }
+    host = overrides.pop("host", {})
+    record["host_initiation"].update(host)
+    record.update(overrides)
+    return obs.load_observation(record)
+
+
+def test_a_run_bound_to_the_module_pins_is_not_void() -> None:
+    assert fx.void_reasons(_run_record()) == ()
+
+
 def test_a_run_bound_to_an_edited_evaluator_is_void() -> None:
-    record = obs.load_observation(
-        {
-            "artifact_type": obs.ARTIFACT_TYPE,
-            "schema_version": 1,
-            "fixture_id": fx.FIXTURE_ID,
-            "actor_sha256": ACTOR_SHA256,
-            "pre_capture_sha256": "d" * 64,
-            "evaluator_sha256": "e" * 64,
-            "host_initiation": {
-                "client": {"client": "generic-mcp", "adapter_version": "0", "lifecycle": "best_effort"},
-                "input_origin": "synthetic_fixture",
-                "delivered_turns_sha256": obs.turns_sha256(fx.TURNS),
-            },
-            "agent_decisions": [],
-            "leaf_effects": [],
-            "publication": {"status": "not_observed"},
-        }
+    assert fx.void_reasons(_run_record(evaluator_sha256="e" * 64)) == (
+        "evaluator_sha256 differs from the fixture's frozen digest",
     )
 
-    reasons = obs.void_reasons(
-        record,
-        actor_sha256=fx.actor_sha256(),
-        pre_capture_sha256="d" * 64,
-        evaluator_sha256=fx.evaluator_sha256(),
-    )
 
-    assert reasons == ("evaluator_sha256 differs from the fixture's frozen digest",)
+@pytest.mark.parametrize("origin", ["original_private", "reconstructed"])
+def test_a_private_or_reconstructed_run_is_refused_by_the_public_fixture(origin: str) -> None:
+    reasons = fx.void_reasons(_run_record(host={"input_origin": origin}))
+
+    assert len(reasons) == 1 and "public synthetic fixture" in reasons[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -209,7 +215,7 @@ def _copy(built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def test_the_pre_capture_state_is_frozen(built) -> None:
     _root, world = built
-    assert world.logical_sha256 == PRE_CAPTURE_SHA256
+    assert world.logical_sha256 == fx.PRE_CAPTURE_SHA256
     assert world.spec_sha256 == fx.pre_capture_spec_sha256()
 
 
@@ -491,7 +497,10 @@ def test_resolving_the_ambiguous_owner_fails(built, tmp_path: Path, monkeypatch:
         "Baker who shares the community kitchen. Has lent out a proofing cabinet.",
     )
 
-    assert fx.check_capture(world, before, read_state(root)).failed() == ("rich-episode/owner-not-on-person",)
+    assert set(fx.check_capture(world, before, read_state(root)).failed()) == {
+        "rich-episode/owner-not-on-person",
+        "rich-episode/owner-unresolved-everywhere",
+    }
 
 
 def test_a_duplicate_supplier_fails_hydration(built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -534,3 +543,114 @@ def test_a_product_home_titled_for_the_flour_is_still_the_product_home(
     _scripted_capture(root, world, rye_title="Wrenfold stoneground flour")
 
     assert fx.check_capture(world, before, read_state(root)).accepted
+
+
+# --------------------------------------------------------------------------- #
+# Critic probes (round 2)
+# --------------------------------------------------------------------------- #
+
+
+def _recap(root: Path, **fields) -> dict:
+    """An ``episode_memory`` recap: retained input, never a destination."""
+
+    from exomem import commands
+    from exomem import schema as schema_module
+    from exomem.governance.principal import owner_principal, request_scope
+
+    with request_scope(owner_principal(surface="mcp")):
+        return commands.op_episode_memory(
+            root, schema_module.load_source_schema(root), action="record", episode="ep-" + "b2" * 16, **fields
+        )
+
+
+def test_probe_p5_a_correct_capture_with_an_episode_recap_passes(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(root, world)
+    _recap(
+        root,
+        subject="Bread week",
+        summary="New Tessel oven; the Wrenfold rye sack says 12.5% protein, milled July 2026.",
+        worked_on=["Logged the 78% test loaf"],
+        said=["their miller told me it's a blend from two harvests"],
+    )
+
+    check = fx.check_capture(world, before, read_state(root))
+    assert check.accepted, [result for result in check.results if result.outcome == "fail"]
+
+
+def test_probe_p6_an_owner_resolved_on_a_new_page_fails(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import link
+
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(root, world)
+    link.link(root, entity_type="equipment", name="Proofing cabinet", summary="On loan from Corran Hale.", today=TODAY)
+
+    assert fx.check_capture(world, before, read_state(root)).failed() == ("rich-episode/owner-unresolved-everywhere",)
+
+
+def test_an_unresolved_owner_name_on_the_cabinet_is_not_a_resolution(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import link
+
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(root, world)
+    link.link(root, entity_type="equipment", name="Proofing cabinet", summary="On loan from 'Corran'; which Corran is unclear.", today=TODAY)
+
+    assert fx.check_capture(world, before, read_state(root)).accepted
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "- [assumption] Per the miller, the rye is a blend of two harvests.",
+        "- [assumption] Likely a blend of two harvests, according to Wrenfold.",
+    ],
+)
+def test_per_likely_and_the_supplier_name_attribute_the_blend(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line: str
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(
+        root,
+        world,
+        rye_body=f"## Observations\n\n- [finding] The sack label says milled July 2026, 12.5% protein.\n{line}\n",
+    )
+
+    assert fx.check_capture(world, before, read_state(root)).accepted
+
+
+def test_a_possibility_recorded_as_a_future_record_is_planning(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands
+
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(root, world)
+    collection = fx.BAKE_LOG.manifest_path
+    snapshot = commands.op_record_memory(root, action="inspect", collection=collection)["snapshot"]
+    commands.op_record_memory(
+        root,
+        action="append",
+        collection=collection,
+        item={"baked_on": "2026-10-15", "loaf": "rye trial", "flour": "Lowmere rye", "note": "try next month"},
+        item_key="30000000-0000-4000-8000-000000000013",
+        expected_container_hash=snapshot,
+        why="scripted wrong capture",
+    )
+
+    assert fx.check_capture(world, before, read_state(root)).failed() == ("rich-episode/no-planning",)
+
+
+def test_the_trial_bake_has_only_the_route_its_check_can_see() -> None:
+    trial = next(candidate for candidate in fx.CANDIDATES if candidate.key == "trial-bake")
+    assert trial.routes == ("records",)

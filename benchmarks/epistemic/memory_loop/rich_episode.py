@@ -27,13 +27,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from . import observation as obs
 from .contract import (
+    EXTENSION,
+    Admissible,
     AnyOf,
     AttributedLines,
     BuiltWorld,
     Candidate,
     CaptureCheck,
     CoLocated,
+    CoMention,
     EntityCount,
     EntityIntact,
     EntitySeed,
@@ -58,6 +62,7 @@ from .contract import (
     build_world,
     check_expectations,
     selects_of,
+    semantics_fingerprint,
     sha256_json,
     validate_candidates,
 )
@@ -212,9 +217,13 @@ _OVEN = Select(entity_type="equipment", tokens=("tessel",))
 _SUPPLIER = Select(key="org_wrenfold")
 _RYE_PAGE = Select(kind="page", any_tokens=("rye", "flour", "stoneground"), created_only=True)
 _CORRAN = Select(tokens=("corran",))
-_PRODUCT_MARKERS = ("12.5", "two harvests", "blend", "78%", "denser", "tessel")
-#: Relations that would misstate a product and its supplier.
-_UNTRUTHFUL_PRODUCT_LINKS = ("supersedes", "duplicates", "contradicts", "causes", "caused_by", "part_of", "contains")
+_PRODUCT_MARKERS = ("12.5", "two harvests", "blend", "blended", "78%", "denser", "tessel")
+#: A focused product page is about its supplier (core ``about_entity``, page
+#: to supplier), or relates to it by a governed "supplied by" meaning.
+_PRODUCT_TO_SUPPLIER = (
+    Admissible(relation="about_entity", direction="forward"),
+    Admissible(relation=EXTENSION, direction="either"),
+)
 
 EXPECTATIONS: tuple[Expectation, ...] = (
     EntityCount(
@@ -254,7 +263,7 @@ EXPECTATIONS: tuple[Expectation, ...] = (
     CoLocated(
         key="rich-episode/rye-facts-one-home",
         polarity="positive",
-        groups=(("12.5",), ("july",), ("two harvests", "blend")),
+        groups=(("12.5",), ("july",), ("two harvests", "blend", "blended")),
         homes=(_SUPPLIER, _RYE_PAGE),
         reason=(
             "The label and the reported blend describe one product: they share a home, which is "
@@ -264,9 +273,11 @@ EXPECTATIONS: tuple[Expectation, ...] = (
     AttributedLines(
         key="rich-episode/blend-attributed",
         polarity="positive",
-        claim=("two harvests", "blend"),
-        source=("miller",),
+        claim=("two harvests", "blend", "blended"),
+        source=("miller", "wrenfold"),
         hedge=(
+            "per",
+            "likely",
             "said",
             "says",
             "told",
@@ -299,8 +310,8 @@ EXPECTATIONS: tuple[Expectation, ...] = (
                 polarity="positive",
                 source=_RYE_PAGE,
                 target=_SUPPLIER,
-                rejected=_UNTRUTHFUL_PRODUCT_LINKS,
-                reason="A focused product page relates to its supplier by a specific relation.",
+                admissible=_PRODUCT_TO_SUPPLIER,
+                reason="A focused product page relates to its supplier by a truthful typed relation.",
             ),
         ),
         reason="The product connects to its existing supplier instead of standing alone.",
@@ -400,7 +411,15 @@ EXPECTATIONS: tuple[Expectation, ...] = (
     NoNewPlanning(
         key="rich-episode/no-planning",
         polarity="negative",
-        reason="'I might try' is a possibility, not an expressed intent.",
+        markers=("lowmere",),
+        reason="'I might try' is a possibility, not an expressed intent, in Planning or in Records.",
+    ),
+    CoMention(
+        key="rich-episode/owner-unresolved-everywhere",
+        polarity="negative",
+        first=("proofing", "cabinet"),
+        second=("corran hale", "corran street kitchen", "corran street"),
+        reason="No page, new or old, resolves the cabinet's ambiguous owner to either identity.",
     ),
     EntityCount(
         key="rich-episode/one-lowmere",
@@ -479,7 +498,7 @@ CANDIDATES: tuple[Candidate, ...] = (
             "(flour or oven) unknown."
         ),
         homes=("existing:records_bakes",),
-        routes=("records", "experiment"),
+        routes=("records",),
         dispositions=("routed",),
         provenance="event",
         uncertain=True,
@@ -501,6 +520,7 @@ CANDIDATES: tuple[Candidate, ...] = (
             "rich-episode/owner-not-on-person",
             "rich-episode/owner-not-on-kitchen",
             "rich-episode/no-edge-to-either-owner",
+            "rich-episode/owner-unresolved-everywhere",
             "rich-episode/person-intact",
             "rich-episode/kitchen-intact",
         ),
@@ -531,6 +551,15 @@ LATER_USE = LaterUse(
 )
 
 # --------------------------------------------------------------------------- #
+# Frozen pins (re-pinned deliberately; the tests refuse drift)
+# --------------------------------------------------------------------------- #
+
+FIXTURE_SHA256 = "d7a67f5d65934ae4351f3a9d9d45ccd3ff85fc6a35b9b654fd901a8764aede13"
+ACTOR_SHA256 = "b871a3e8f38fb59115bb96744b5392a1348866f4a4d3efb144961d7f20590e45"
+EVALUATOR_SHA256 = "9527022cb3959d987381b98b7a4f10eea24fa1dbbd736de7ca8b1bf807d447e0"
+PRE_CAPTURE_SHA256 = "1b6ecad6bf192e1768b27bf3bd8d85bc1bf179542e8795e2b73fd8b2e79c53aa"
+
+# --------------------------------------------------------------------------- #
 # The API
 # --------------------------------------------------------------------------- #
 
@@ -548,13 +577,38 @@ def pre_capture_spec_sha256() -> str:
 
 
 def evaluator_sha256() -> str:
-    return sha256_json({"candidates": CANDIDATES, "expectations": EXPECTATIONS, "later_use": LATER_USE})
+    return sha256_json(
+        {
+            "semantics": semantics_fingerprint(),
+            "candidates": CANDIDATES,
+            "expectations": EXPECTATIONS,
+            "later_use": LATER_USE,
+        }
+    )
 
 
 def fixture_sha256() -> str:
     return sha256_json(
         {"fixture": FIXTURE_ID, "actor": actor_view(), "world": WORLD, "evaluator": evaluator_sha256()}
     )
+
+
+def frozen() -> obs.Frozen:
+    """The module's pins, which a run binds to before any effect."""
+
+    return obs.Frozen(
+        fixture_id=FIXTURE_ID,
+        actor_sha256=ACTOR_SHA256,
+        pre_capture_sha256=PRE_CAPTURE_SHA256,
+        evaluator_sha256=EVALUATOR_SHA256,
+        turns_sha256=obs.turns_sha256(TURNS),
+        later_turn_sha256=obs.text_sha256(LATER_TURN),
+        shipped_prompt_sha256=obs.shipped_prompt_sha256(),
+    )
+
+
+def void_reasons(record: obs.NoNudgeObservation) -> tuple[str, ...]:
+    return obs.void_reasons(record, frozen())
 
 
 def build_pre_capture(root: Path) -> BuiltWorld:

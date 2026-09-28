@@ -36,10 +36,6 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 pytestmark = pytest.mark.timeout(600)
 
-FIXTURE_SHA256 = "f7b5381f145cf9f2c7042ab5a3c34919a5e1d9bebefe5b16d2947c89ed516fe9"
-EVALUATOR_SHA256 = "f58ffe3392e90988ff84b9caff5878222aa4c6f83623c6d6136b8aa9488ca49f"
-ACTOR_SHA256 = "5d231888bf6d0dea5fcc4fc91f6522e1147d52540f0e4040394716a49da9ab53"
-PRE_CAPTURE_SHA256 = "49186c3596cc46383672e7e2d507b455e61c8da9f9dbcfd750b577d0d8dfd0ce"
 
 
 # --------------------------------------------------------------------------- #
@@ -51,10 +47,20 @@ def test_the_fixture_is_consistent() -> None:
     fx.assert_manifest_consistent()
 
 
-def test_the_digests_are_frozen() -> None:
-    assert fx.fixture_sha256() == FIXTURE_SHA256
-    assert fx.evaluator_sha256() == EVALUATOR_SHA256
-    assert fx.actor_sha256() == ACTOR_SHA256
+def test_the_module_pins_match_the_digests() -> None:
+    assert fx.fixture_sha256() == fx.FIXTURE_SHA256
+    assert fx.evaluator_sha256() == fx.EVALUATOR_SHA256
+    assert fx.actor_sha256() == fx.ACTOR_SHA256
+
+
+@pytest.mark.parametrize("origin", ["original_private", "reconstructed"])
+def test_a_private_or_reconstructed_run_is_refused_by_the_public_fixture(origin: str) -> None:
+    record = _record()
+    refused = record.model_copy(
+        update={"host_initiation": record.host_initiation.model_copy(update={"input_origin": origin})}
+    )
+
+    assert any("public synthetic fixture" in reason for reason in fx.void_reasons(refused))
 
 
 def test_the_five_objects_the_task_names_are_distinct_partitions() -> None:
@@ -285,7 +291,7 @@ def _copy(built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def test_the_pre_capture_state_is_frozen(built) -> None:
     root, world = built
-    assert world.logical_sha256 == PRE_CAPTURE_SHA256
+    assert world.logical_sha256 == fx.PRE_CAPTURE_SHA256
     bodies = " ".join(page.body for page in read_state(root).pages.values()).casefold()
     for marker in ("flat", "2024", "filter jug", "limescale", "tin keeps", "nine times", "settled", "chose", "decided"):
         assert marker not in bodies
@@ -517,3 +523,98 @@ def test_more_pages_than_clusters_fails_the_ceiling(
     _note(root, "Lowfield tin", "lowfield-tin", "## Observations\n\n- [finding] The tin keeps the tea fresher.\n")
 
     assert _failed(root, world, before) == {"decomposition/no-detail-fragmentation"}
+
+
+# --------------------------------------------------------------------------- #
+# Critic probes (round 2)
+# --------------------------------------------------------------------------- #
+
+
+def _recap(root: Path, **fields) -> dict:
+    """An ``episode_memory`` recap: retained input, never a cluster home."""
+
+    from exomem import commands
+    from exomem import schema as schema_module
+    from exomem.governance.principal import owner_principal, request_scope
+
+    with request_scope(owner_principal(surface="mcp")):
+        return commands.op_episode_memory(
+            root, schema_module.load_source_schema(root), action="record", episode="ep-" + "b2" * 16, **fields
+        )
+
+
+def test_probe_p4_a_wrong_preference_and_a_one_line_dump_fail(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _append(
+        root,
+        world.key_to_path["note_tea_prefs"],
+        "- [preference] Settled on the Brightwater house blend.\n"
+        "- [finding] The Lowfield tin keeps it fresher and the second steep holds up.",
+    )
+    _note(
+        root,
+        "Tea notes",
+        "tea-notes",
+        "## Observations\n\n- [finding] Tea tasted flat Monday, Wednesday and Thursday after an overnight "
+        "kettle, like spring 2024 when it came back once I used the filter jug; normally I tell steeps "
+        "apart blind nine times out of ten; Fenn thinks it is limescale but has not checked.\n",
+    )
+
+    failed = _failed(root, world, before)
+    assert {"decomposition/preference-on-its-page", "decomposition/no-mixed-clusters-in-a-line"} <= failed
+
+
+def test_probe_p10_a_backlink_on_the_open_page_keeps_its_cluster(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _capture(root, world)
+    _append(root, world.key_to_path["note_tea_prefs"], "See also [[Flat-tasting mornings, September 2026]].")
+
+    assert _failed(root, world, before) == set()
+
+
+def test_probe_p12_a_recap_is_not_a_home_for_the_perception_clusters(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _append(root, world.key_to_path["note_tea_prefs"], PREFERENCE)
+    _recap(
+        root,
+        subject="Tea rundown",
+        summary="Settled on the Lowfield oolong; tea tasted flat on Monday, Wednesday and Thursday after an overnight kettle.",
+        worked_on=[
+            "Spring 2024: flat for a month, came back with the filter jug",
+            "Normally tell steeps apart blind nine times out of ten",
+        ],
+        said=["My brother Fenn thinks it's limescale in the new kettle, but he hasn't actually looked at it."],
+    )
+    _note(root, "Kettle", "kettle", "## Observations\n\n- [finding] The kettle is new.\n")
+
+    failed = _failed(root, world, before)
+    assert {
+        "decomposition/this-week-has-one-home",
+        "decomposition/old-episode-has-a-home",
+        "decomposition/baseline-has-a-home",
+    } <= failed
+
+
+def test_probe_p13_a_correct_capture_with_an_episode_recap_passes(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _capture(root, world)
+    _recap(
+        root,
+        subject="Tea rundown",
+        summary="Tea tasted flat on Monday, Wednesday and Thursday after an overnight kettle.",
+        worked_on=["Filed this week's flat mornings, the spring 2024 episode and the tasting baseline"],
+    )
+
+    assert _failed(root, world, before) == set()

@@ -60,7 +60,7 @@ Phase = Literal[
 Disposition = Literal[
     "routed", "no_capture", "uncertain", "rejected", "deferred", "awaiting_authority"
 ]
-Outcome = Literal["pass", "fail", "unmeasured", "not_applicable"]
+Outcome = Literal["pass", "fail", "unmeasured", "not_applicable", "void"]
 
 #: Every way a benchmark harness can reach a correct end state without the
 #: agent choosing to: a tool call it mandated, a packet it injected, a write it
@@ -132,6 +132,23 @@ class ProductPrompt(StrictModel):
         "stop_hook_checkpoint",
     ]
     detail: str = Field(min_length=1, max_length=500)
+    #: Digest of the prompt text exactly as delivered. It must be one the
+    #: installed product ships; anything else is a harness instruction wearing
+    #: a product label.
+    sha256: str = Field(pattern=_SHA256)
+
+
+class StandingInstruction(StrictModel):
+    """Instructions the agent carried into the session before any turn:
+    project or user instruction files, custom instructions, native memory,
+    installed skills. ``asks_for_memory`` records whether the text asks to
+    save, recall, route or create pages (see :func:`standing_instruction`)."""
+
+    kind: Literal[
+        "project_instructions", "user_instructions", "custom_instructions", "native_memory", "installed_skill"
+    ]
+    sha256: str = Field(pattern=_SHA256)
+    asks_for_memory: bool
 
 
 class HarnessIntervention(StrictModel):
@@ -148,9 +165,10 @@ class HostInitiation(StrictModel):
     user_reminders: tuple[str, ...] = ()
     product_prompts: tuple[ProductPrompt, ...] = ()
     harness_interventions: tuple[HarnessIntervention, ...] = ()
+    standing_instructions: tuple[StandingInstruction, ...] = ()
 
     @model_validator(mode="after")
-    def _hooks_need_a_lifecycle(self) -> "HostInitiation":
+    def _hooks_need_a_lifecycle(self) -> HostInitiation:
         if self.client.lifecycle != "lifecycle_enforced" and any(
             prompt.kind in _HOOK_PROMPTS for prompt in self.product_prompts
         ):
@@ -187,7 +205,7 @@ class AgentDecision(StrictModel):
     alternatives: tuple[str, ...] = Field(default=(), max_length=8)
 
     @model_validator(mode="after")
-    def _phase_fields(self) -> "AgentDecision":
+    def _phase_fields(self) -> AgentDecision:
         candidate_phases = {"decomposition", "destination", "disposition"}
         if self.phase in candidate_phases and self.candidate_key is None:
             raise ValueError(f"{self.phase} decision needs a candidate_key")
@@ -272,7 +290,7 @@ class Publication(StrictModel):
     seq: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
-    def _observed_has_seq(self) -> "Publication":
+    def _observed_has_seq(self) -> Publication:
         if (self.status == "not_observed") != (self.seq is None):
             raise ValueError("an observed publication status carries its seq; not_observed has none")
         return self
@@ -289,10 +307,15 @@ class LaterResponse(StrictModel):
     grader: Literal["blind_rubric", "owner", "none"]
 
     @model_validator(mode="after")
-    def _grade_has_grader(self) -> "LaterResponse":
+    def _grade_has_grader(self) -> LaterResponse:
         if (self.usefulness_grade == "ungraded") != (self.grader == "none"):
             raise ValueError("a usefulness grade needs a grader; ungraded has none")
         return self
+
+
+class PrivateBinding(StrictModel):
+    original_input_sha256: str = Field(pattern=_SHA256)
+    snapshot_sha256: str = Field(pattern=_SHA256)
 
 
 class NoNudgeObservation(StrictModel):
@@ -308,9 +331,12 @@ class NoNudgeObservation(StrictModel):
     leaf_effects: tuple[LeafEffect, ...]
     publication: Publication
     later_response: LaterResponse | None = None
+    #: For an exact private replay only: the original input and snapshot the
+    #: run bound before any effect. Never present on a public fixture run.
+    private_binding: PrivateBinding | None = None
 
     @model_validator(mode="after")
-    def _ordering(self) -> "NoNudgeObservation":
+    def _ordering(self) -> NoNudgeObservation:
         seqs = [item.seq for item in self.agent_decisions] + [item.seq for item in self.leaf_effects]
         if self.publication.seq is not None:
             seqs.append(self.publication.seq)
@@ -332,28 +358,80 @@ class NoNudgeObservation(StrictModel):
         return self
 
 
-def void_reasons(
-    record: NoNudgeObservation,
-    *,
-    actor_sha256: str,
-    pre_capture_sha256: str,
-    evaluator_sha256: str,
-) -> tuple[str, ...]:
-    """Why a record cannot be scored against the fixture's frozen digests.
+@dataclass(frozen=True)
+class Frozen:
+    """What a fixture pinned before any run, and what a record must bind to.
 
-    A record bound to another actor input, another pre-capture state or
-    another evaluator revision is void: an expectation edited after a run
-    never rescores that run.
+    ``shipped_prompt_sha256`` holds the digests of the prompt texts the
+    installed product ships (see :func:`shipped_prompt_sha256`). A public
+    synthetic fixture leaves the private digests unset; an exact private
+    replay, run and kept locally, sets both.
+    """
+
+    fixture_id: str
+    actor_sha256: str
+    pre_capture_sha256: str
+    evaluator_sha256: str
+    turns_sha256: str
+    later_turn_sha256: str | None = None
+    shipped_prompt_sha256: frozenset[str] = frozenset()
+    private_input_sha256: str | None = None
+    private_snapshot_sha256: str | None = None
+
+    @property
+    def private(self) -> bool:
+        return self.private_input_sha256 is not None
+
+
+def text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def shipped_prompt_sha256(extra_texts: Iterable[str] = ()) -> frozenset[str]:
+    """Digests of product-shipped prompt texts: the MCP server instructions this
+    checkout ships, plus the hook, advisory and skill texts a run harness reads
+    from the installed version it exercises."""
+
+    from exomem import server
+
+    return frozenset({text_sha256(server.SERVER_INSTRUCTIONS), *(text_sha256(text) for text in extra_texts)})
+
+
+def standing_instruction(kind: str, text: str) -> dict[str, Any]:
+    """A standing-instruction entry for a record, from its text."""
+
+    from .contract import find_nudges
+
+    return {"kind": kind, "sha256": text_sha256(text), "asks_for_memory": bool(find_nudges(text))}
+
+
+def void_reasons(record: NoNudgeObservation, frozen: Frozen) -> tuple[str, ...]:
+    """Why a record cannot be scored against a fixture's frozen digests.
+
+    A record bound to another fixture, actor input, pre-capture state,
+    evaluator revision or later turn is void: an expectation edited after a
+    run never rescores that run. A public synthetic fixture scores only
+    synthetic-fixture runs; an exact private replay binds its own original
+    input and snapshot and is never scored against a public fixture.
     """
 
     reasons = []
-    for name, frozen in (
-        ("actor_sha256", actor_sha256),
-        ("pre_capture_sha256", pre_capture_sha256),
-        ("evaluator_sha256", evaluator_sha256),
-    ):
-        if getattr(record, name) != frozen:
+    if record.fixture_id != frozen.fixture_id:
+        reasons.append("fixture_id differs from the fixture being scored")
+    for name in ("actor_sha256", "pre_capture_sha256", "evaluator_sha256"):
+        if getattr(record, name) != getattr(frozen, name):
             reasons.append(f"{name} differs from the fixture's frozen digest")
+    later = record.later_response
+    if later is not None and later.turn_sha256 != frozen.later_turn_sha256:
+        reasons.append("the later turn differs from the fixture's frozen later turn")
+    origin = record.host_initiation.input_origin
+    if not frozen.private and origin != "synthetic_fixture":
+        reasons.append(
+            f"a {origin} run is not scored against a public synthetic fixture; an exact private "
+            "replay binds its own original input and snapshot and stays local"
+        )
+    if frozen.private and origin != "original_private":
+        reasons.append("an exact private replay needs the original private input")
     return tuple(reasons)
 
 
@@ -416,14 +494,24 @@ def _decision_trace(record: NoNudgeObservation) -> list[str]:
     return reasons
 
 
-def _initiation(record: NoNudgeObservation, expected_turns_sha256: str) -> Verdict:
+def _initiation(record: NoNudgeObservation, frozen: Frozen) -> Verdict:
     host = record.host_initiation
     reasons: list[str] = []
-    if host.delivered_turns_sha256 != expected_turns_sha256:
+    if host.delivered_turns_sha256 != frozen.turns_sha256:
         reasons.append("delivered turns differ from the fixture's declared actor input")
     reasons.extend(f"user reminder: {turn!r}" for turn in host.user_reminders)
     reasons.extend(
         f"harness intervention {item.kind}: {item.detail}" for item in host.harness_interventions
+    )
+    reasons.extend(
+        f"product prompt {prompt.kind} is not a shipped product prompt; it counts as a harness instruction"
+        for prompt in host.product_prompts
+        if prompt.sha256 not in frozen.shipped_prompt_sha256
+    )
+    reasons.extend(
+        f"standing instruction {item.kind} asks for memory use and is not product-shipped"
+        for item in host.standing_instructions
+        if item.asks_for_memory and item.sha256 not in frozen.shipped_prompt_sha256
     )
     for decision in record.agent_decisions:
         if decision.initiator in {"harness", "user"}:
@@ -441,11 +529,31 @@ def _initiation(record: NoNudgeObservation, expected_turns_sha256: str) -> Verdi
 
 
 def _effects(record: NoNudgeObservation) -> Verdict:
-    """Transport: every observed effect committed or replayed from its receipt."""
+    """Transport: every observed effect committed or replayed from its receipt,
+    and every candidate the agent routed has one.
 
+    With no effect at all, a record whose agent dispositions are all
+    non-routed is a correct abstention and passes; a routed candidate without
+    an effect fails; a record with no disposition is unmeasured.
+    """
+
+    dispositions = [
+        decision
+        for decision in record.agent_decisions
+        if decision.phase == "disposition" and decision.initiator == "agent"
+    ]
+    routed = {decision.candidate_key for decision in dispositions if decision.disposition == "routed"}
     if not record.leaf_effects:
-        return Verdict("unmeasured", ("no leaf effect was observed",))
-    reasons = [
+        if routed:
+            return Verdict("fail", tuple(f"routed candidate {key!r} has no effect" for key in sorted(routed)))
+        if dispositions:
+            return Verdict("pass", ("every candidate was disposed of without an effect",))
+        return Verdict("unmeasured", ("no leaf effect and no disposition were observed",))
+    landed = {
+        effect.candidate_key for effect in record.leaf_effects if effect.outcome in {"committed", "replayed"}
+    }
+    reasons = [f"routed candidate {key!r} has no committed effect" for key in sorted(routed - landed)]
+    reasons += [
         f"effect {effect.seq} ({effect.candidate_key}) is {effect.outcome}"
         for effect in record.leaf_effects
         if effect.outcome not in {"committed", "replayed"}
@@ -486,7 +594,7 @@ def _later(record: NoNudgeObservation) -> Verdict:
     return Verdict("pass")
 
 
-def _exact_replay(record: NoNudgeObservation) -> Verdict:
+def _exact_replay(record: NoNudgeObservation, frozen: Frozen) -> Verdict:
     origin = record.host_initiation.input_origin
     if origin == "synthetic_fixture":
         return Verdict("not_applicable", ("a synthetic fixture is not a private replay",))
@@ -495,13 +603,25 @@ def _exact_replay(record: NoNudgeObservation) -> Verdict:
             "unmeasured",
             ("a reconstructed input cannot establish exact replay of the original episode",),
         )
+    binding = record.private_binding
+    if (
+        binding is None
+        or not frozen.private
+        or binding.original_input_sha256 != frozen.private_input_sha256
+        or binding.snapshot_sha256 != frozen.private_snapshot_sha256
+    ):
+        return Verdict(
+            "unmeasured",
+            ("an exact replay needs the original private input and snapshot digests bound before the run",),
+        )
     return Verdict("pass")
 
 
-def evaluate(record: NoNudgeObservation, *, expected_turns_sha256: str) -> ObservationReport:
-    """One verdict per part of the record, and the conjunctive acceptance gate."""
+def evaluate(record: NoNudgeObservation, frozen: Frozen) -> ObservationReport:
+    """One verdict per part of the record, and the conjunctive acceptance gate
+    over the record alone. :func:`accept` adds the vault check and binding."""
 
-    initiation = _initiation(record, expected_turns_sha256)
+    initiation = _initiation(record, frozen)
     decisions = _verdict(_decision_trace(record))
     effects = _effects(record)
     publication = _publication(record)
@@ -527,9 +647,34 @@ def evaluate(record: NoNudgeObservation, *, expected_turns_sha256: str) -> Obser
         leaf_effects=effects,
         publication=publication,
         later_usefulness=later,
-        exact_private_replay=_exact_replay(record),
+        exact_private_replay=_exact_replay(record, frozen),
         ordinary_agent_acceptance=acceptance,
     )
+
+
+def accept(record: NoNudgeObservation, capture_check: Any, frozen: Frozen) -> Verdict:
+    """Ordinary-agent acceptance of one run of one fixture.
+
+    Void when the record is bound to anything but the fixture's frozen
+    digests; otherwise it passes only when the vault the capture left passes
+    every frozen expectation (``capture_check.accepted``) and the record's own
+    acceptance gate passes. Nothing else can stand in for either.
+    """
+
+    void = void_reasons(record, frozen)
+    if void:
+        return Verdict("void", void)
+    report = evaluate(record, frozen)
+    reasons = []
+    if not getattr(capture_check, "accepted", False):
+        failed = capture_check.failed() if hasattr(capture_check, "failed") else ()
+        reasons.append(f"the vault check did not pass: {list(failed)}")
+    gate = report.ordinary_agent_acceptance
+    if reasons or gate.outcome == "fail":
+        return Verdict("fail", tuple(reasons) + gate.reasons)
+    if gate.outcome != "pass":
+        return Verdict("unmeasured", gate.reasons)
+    return Verdict("pass")
 
 
 def report_to_dict(report: ObservationReport) -> dict[str, Any]:

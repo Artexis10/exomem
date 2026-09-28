@@ -33,16 +33,6 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 pytestmark = pytest.mark.timeout(600)
 
-FIXTURE_SET_SHA256 = "9b6e9962ba1a6490dc740dea6063b0a61456f1c7707bcd7594263c54986658ea"
-EVALUATOR_SHA256 = {
-    "synthesis": "84cc9523cfc8a4fbde18904d7573999c22fcd848b43dabef215e66041db51372",
-    "refinement": "260399f2307d1622d27d0ad094243b290ed7a7d37239fb322247e67325d62f27",
-}
-ACTOR_SHA256 = {
-    "synthesis": "50c776148b7dfd7ca3a0a517ed190bd7bb54208cf0e5fdf8fafeb7ddd95fb007",
-    "refinement": "5fbcfa6f5c51314b623643ea95ff53bae666eab07080c61c9114842883efb230",
-}
-PRE_CAPTURE_SHA256 = "80e33a8646d7bd509563be44f442fbfe31aa61f05c14fc42c18cf01e6a3ba41d"
 
 
 # --------------------------------------------------------------------------- #
@@ -55,11 +45,11 @@ def test_the_pair_is_consistent_and_its_world_is_five_antecedents() -> None:
     assert len(fx.WORLD.notes) == 5 and not fx.WORLD.entities and not fx.WORLD.records
 
 
-def test_the_digests_are_frozen() -> None:
-    assert fx.fixture_set_sha256() == FIXTURE_SET_SHA256
+def test_the_module_pins_match_the_digests() -> None:
+    assert fx.fixture_set_sha256() == fx.FIXTURE_SET_SHA256
     for episode_id in ("synthesis", "refinement"):
-        assert fx.evaluator_sha256(episode_id) == EVALUATOR_SHA256[episode_id]
-        assert fx.actor_sha256(episode_id) == ACTOR_SHA256[episode_id]
+        assert fx.evaluator_sha256(episode_id) == fx.EVALUATOR_SHA256[episode_id]
+        assert fx.actor_sha256(episode_id) == fx.ACTOR_SHA256[episode_id]
 
 
 def test_the_actor_view_withholds_destinations_links_and_scope_rules() -> None:
@@ -79,7 +69,7 @@ def test_the_actor_view_withholds_destinations_links_and_scope_rules() -> None:
 def test_the_pair_is_matched_one_new_home_against_none() -> None:
     synthesis = fx.expectations_for("synthesis").candidates[0]
     refinement = fx.expectations_for("refinement").candidates[0]
-    assert synthesis.homes == ("new:owner-custody",) and synthesis.routes == ("focused_note",)
+    assert synthesis.homes == ("new:owner-custody",) and synthesis.routes == ("focused_note", "entity")
     assert refinement.homes == ("existing:ant_offline",)
     assert set(refinement.routes) == {"existing_page", "semantic_unit"}
     # The refinement also coins a label; the label is not a page.
@@ -104,10 +94,10 @@ def _record(origin: str, episode_id: str = "synthesis", **decisions) -> obs.NoNu
         {
             "artifact_type": obs.ARTIFACT_TYPE,
             "schema_version": 1,
-            "fixture_id": fx.FIXTURE_SET_ID,
-            "actor_sha256": fx.actor_sha256(episode_id),
-            "pre_capture_sha256": "f" * 64,
-            "evaluator_sha256": fx.evaluator_sha256(episode_id),
+            "fixture_id": f"{fx.FIXTURE_SET_ID}/{episode_id}",
+            "actor_sha256": fx.ACTOR_SHA256[episode_id],
+            "pre_capture_sha256": fx.PRE_CAPTURE_SHA256,
+            "evaluator_sha256": fx.EVALUATOR_SHA256[episode_id],
             "host_initiation": {
                 "client": {"client": "generic-mcp", "adapter_version": "0", "lifecycle": "best_effort"},
                 "input_origin": origin,
@@ -121,12 +111,12 @@ def _record(origin: str, episode_id: str = "synthesis", **decisions) -> obs.NoNu
 
 
 def test_a_synthetic_run_binds_to_the_pair() -> None:
-    assert fx.void_reasons(_record("synthetic_fixture"), episode_id="synthesis", pre_capture_sha256="f" * 64) == ()
+    assert fx.void_reasons(_record("synthetic_fixture"), episode_id="synthesis") == ()
 
 
 @pytest.mark.parametrize("origin", ["original_private", "reconstructed"])
 def test_a_private_or_reconstructed_replay_is_never_scored_against_the_public_pair(origin: str) -> None:
-    reasons = fx.void_reasons(_record(origin), episode_id="synthesis", pre_capture_sha256="f" * 64)
+    reasons = fx.void_reasons(_record(origin), episode_id="synthesis")
 
     assert len(reasons) == 1 and "exact private replay" in reasons[0]
     assert "local" in fx.EXACT_PRIVATE_REPLAY
@@ -195,7 +185,7 @@ def test_first_pass_focus_fails_without_inspecting_any_antecedent(built) -> None
 
 def test_the_pre_capture_state_is_frozen(built) -> None:
     root, world = built
-    assert world.logical_sha256 == PRE_CAPTURE_SHA256
+    assert world.logical_sha256 == fx.PRE_CAPTURE_SHA256
     assert set(world.key_to_path) == set(fx.ANTECEDENT_KEYS)
     bodies = " ".join(page.body for page in read_state(root).pages.values()).casefold()
     for marker in ("custody", "guest", "30 days", "thirty"):
@@ -213,7 +203,7 @@ def test_current_runtime_an_untouched_world_fails_both_positives(built) -> None:
         "synthesis/only-the-thesis-is-new",
         "synthesis/focused-home",
         "synthesis/thesis-on-home",
-        "synthesis/linked-to-an-antecedent",
+        "synthesis/linked-to-the-antecedents",
     }
     assert refinement == {"refinement/on-its-existing-home"}
 
@@ -269,7 +259,8 @@ def _note(root: Path, title: str, slug: str, body: str) -> str:
 
 
 def _replace_body(root: Path, path: str, new_body: str) -> None:
-    """A reviewed body replacement, through the same handshake an agent uses."""
+    """A body replacement through the same handshake an agent uses: a
+    reviewed-none disposition is sent only when the product asks for one."""
 
     from exomem import commands
     from exomem.vault import content_hash
@@ -282,19 +273,28 @@ def _replace_body(root: Path, path: str, new_body: str) -> None:
     preview = commands.op_edit_memory(
         root, path=path, why="scripted capture", operation={**operation, "validate_only": True}
     )["semantic"]
-    review = {}
-    if preview.get("relation_review_hash"):
-        review = {
-            "relation_disposition": "reviewed_none",
-            "relation_review_hash": preview["relation_review_hash"],
-            "relation_review_reason": "The scripted capture adds no relation here.",
-        }
-    commands.op_edit_memory(
-        root,
-        path=path,
-        why="scripted capture",
-        operation={**operation, "transition_token": preview["transition_token"], **review},
-    )
+    try:
+        commands.op_edit_memory(
+            root,
+            path=path,
+            why="scripted capture",
+            operation={**operation, "transition_token": preview["transition_token"]},
+        )
+    except ValueError as error:
+        if "RELATION_DISPOSITION" not in str(error):
+            raise
+        commands.op_edit_memory(
+            root,
+            path=path,
+            why="scripted capture",
+            operation={
+                **operation,
+                "transition_token": preview["transition_token"],
+                "relation_disposition": "reviewed_none",
+                "relation_review_hash": preview["relation_review_hash"],
+                "relation_review_reason": "The scripted capture adds no relation here.",
+            },
+        )
 
 
 def _append(root: Path, path: str, extra: str) -> None:
@@ -361,7 +361,7 @@ def test_a_thesis_appended_to_the_nearest_page_fails_home_and_scope(
         "synthesis/only-the-thesis-is-new",
         "synthesis/focused-home",
         "synthesis/thesis-on-home",
-        "synthesis/linked-to-an-antecedent",
+        "synthesis/linked-to-the-antecedents",
         "synthesis/ant_offline-keeps-scope",
     }
 
@@ -372,7 +372,7 @@ def test_an_untruthful_supersession_link_fails(built, tmp_path: Path, monkeypatc
     _thesis(root, world, relation="supersedes")
 
     failed = set(_check("synthesis", root, world, before).failed())
-    assert failed == {"synthesis/linked-to-an-antecedent", "synthesis/no-untruthful-link"}
+    assert failed == {"synthesis/linked-to-the-antecedents", "synthesis/no-untruthful-link"}
 
 
 def test_generic_links_alone_are_not_truthful_typed_links(
@@ -382,7 +382,7 @@ def test_generic_links_alone_are_not_truthful_typed_links(
     before = read_state(root)
     _thesis(root, world, relation="relates_to")
 
-    assert _check("synthesis", root, world, before).failed() == ("synthesis/linked-to-an-antecedent",)
+    assert _check("synthesis", root, world, before).failed() == ("synthesis/linked-to-the-antecedents",)
 
 
 def test_a_backlink_on_an_antecedent_keeps_its_scope(
@@ -417,3 +417,141 @@ def test_a_scripted_refinement_on_its_home_passes_and_a_label_page_fails(
         "## Observations\n\n- [design] Offline changes queue for up to 30 days.\n",
     )
     assert _check("refinement", root, world, before).failed() == ("refinement/no-new-page",)
+
+
+# --------------------------------------------------------------------------- #
+# Critic probes (round 2)
+# --------------------------------------------------------------------------- #
+
+
+def _thesis_linked(root: Path, world, keys, relation: str = "derived_from") -> str:
+    path = _note(root, "Owner-custody principle", "owner-custody-principle", THESIS_BODY)
+    bullets = "\n".join(f"- {relation} [[{Path(world.key_to_path[key]).stem}]]" for key in keys)
+    _append(root, path, f"## Relations\n\n{bullets}")
+    return path
+
+
+def test_probe_p3_a_thesis_with_one_untruthful_edge_fails(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _thesis_linked(root, world, ("ant_offline",), relation="blocks")
+
+    assert "synthesis/linked-to-the-antecedents" in _check("synthesis", root, world, before).failed()
+
+
+def test_probe_p3b_a_frontmatter_supersession_of_the_antecedents_fails(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    path = _thesis_linked(root, world, fx.ANTECEDENT_KEYS)
+    contract._edit_frontmatter(
+        root,
+        path,
+        "supersedes",
+        [f"[[{Path(world.key_to_path[key]).stem}]]" for key in fx.ANTECEDENT_KEYS],
+        "scripted wrong capture",
+    )
+
+    assert "synthesis/no-untruthful-link" in _check("synthesis", root, world, before).failed()
+
+
+def test_three_of_five_antecedent_links_fail_and_four_pass(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _thesis_linked(root, world, fx.ANTECEDENT_KEYS[:3])
+    assert _check("synthesis", root, world, before).failed() == ("synthesis/linked-to-the-antecedents",)
+
+    root, world = _copy(built, tmp_path / "four", monkeypatch)
+    before = read_state(root)
+    _thesis_linked(root, world, fx.ANTECEDENT_KEYS[:4])
+    assert _check("synthesis", root, world, before).accepted
+
+
+def test_a_link_in_the_wrong_direction_is_not_truthful(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``derived_from`` runs from the thesis to its antecedents, not back."""
+
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _note(root, "Owner-custody principle", "owner-custody-principle", THESIS_BODY)
+    for key in fx.ANTECEDENT_KEYS:
+        _append(root, world.key_to_path[key], "## Relations\n\n- derived_from [[owner-custody-principle]]")
+
+    assert "synthesis/linked-to-the-antecedents" in _check("synthesis", root, world, before).failed()
+
+
+def test_antecedents_that_implement_the_thesis_link_it_truthfully(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _note(root, "Owner-custody principle", "owner-custody-principle", THESIS_BODY)
+    for key in fx.ANTECEDENT_KEYS:
+        _append(root, world.key_to_path[key], "## Relations\n\n- implements [[owner-custody-principle]]")
+
+    check = _check("synthesis", root, world, before)
+    assert check.accepted, [result for result in check.results if result.outcome == "fail"]
+
+
+def test_probe_p9_a_refinement_beside_the_recurring_product_entity_passes(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import link
+
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _append(
+        root,
+        world.key_to_path["ant_offline"],
+        "- [design] Queued changes wait up to 30 days before the sync-overdue warning (the thirty-day queue).",
+    )
+    link.link(root, entity_type="concept", name="Tallyloom", summary="A local-first notes app.", today=TODAY)
+
+    assert _check("refinement", root, world, before).accepted
+
+
+def test_a_label_promoted_to_a_concept_entity_still_fragments(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import link
+
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _append(
+        root,
+        world.key_to_path["ant_offline"],
+        "- [design] Queued changes wait up to 30 days before the sync-overdue warning (the thirty-day queue).",
+    )
+    link.link(root, entity_type="concept", name="Thirty-day queue", summary="Offline changes queue for 30 days.", today=TODAY)
+
+    assert _check("refinement", root, world, before).failed() == ("refinement/no-new-page",)
+
+
+def test_probe_p11_a_concept_entity_thesis_is_a_focused_home(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import link
+
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    path = link.link(
+        root,
+        entity_type="concept",
+        name="Owner-custody principle",
+        summary=(
+            "The owner keeps custody of their notes at every step; the app is only a guest. "
+            "A feature that moves notes out of custody must justify it openly."
+        ),
+        today=TODAY,
+    ).path
+    bullets = "\n".join(f"- derived_from [[{Path(world.key_to_path[key]).stem}]]" for key in fx.ANTECEDENT_KEYS)
+    _append(root, path, f"## Relations\n\n{bullets}")
+
+    check = _check("synthesis", root, world, before)
+    assert check.accepted, [result for result in check.results if result.outcome == "fail"]
