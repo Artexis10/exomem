@@ -380,6 +380,11 @@ class CandidateFacts:
     #: second competing sense, and telling the two apart needs the actual
     #: matched phrase text, not just the fact that `exact_alias` fired.
     exact_alias_phrases: frozenset[str] = frozenset()
+    #: The anchor's own authored name terms the turn shared, when that shared
+    #: set is what earned its `lexical_overlap` or `rare_term`. Never
+    #: serialised into a packet; `resolve` reads it to tell a qualifier that
+    #: narrows two senses from a bare name two senses share.
+    name_contact: frozenset[str] = frozenset()
 
     @property
     def deciding_kinds(self) -> frozenset[str]:
@@ -406,6 +411,9 @@ class ResolvedAnchor:
     #: fields explicitly and does not list this one, so it never reaches a
     #: served packet.
     exact_alias_phrases: frozenset[str] = frozenset()
+    #: Carried over from `CandidateFacts` for `resolve`'s own use, and, like
+    #: `exact_alias_phrases`, never serialised.
+    name_contact: frozenset[str] = frozenset()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -982,8 +990,10 @@ def candidates_for(
         )
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
+        name_contact: frozenset[str] = frozenset()
         if len(shared_broad) >= min_terms and len(shared_name) >= 2:
             evidence.add("lexical_overlap")
+            name_contact = shared_name
         elif len(shared_name) == 1:
             (only_shared_name_term,) = shared_name
             count = term_counts.get(only_shared_name_term)
@@ -1014,6 +1024,7 @@ def candidates_for(
                 )
                 if not consumed:
                     evidence.add("rare_term")
+                    name_contact = shared_name
         # An unspaced script writes a name inside a run of words, never as a
         # token of its own: containment is its `rare_term` (design §6.3),
         # never `exact_alias`, and like any `rare_term` it needs a second,
@@ -1062,6 +1073,7 @@ def candidates_for(
                 anchor_neighbourhood=row.anchor_neighbourhood,
                 evidence=frozenset(evidence),
                 exact_alias_phrases=matched_phrases,
+                name_contact=name_contact,
             )
         )
     out.sort(key=_candidate_order)
@@ -1726,6 +1738,7 @@ def resolve(
                 neighbourhood=candidate.neighbourhood,
                 anchor_neighbourhood=candidate.anchor_neighbourhood,
                 exact_alias_phrases=candidate.exact_alias_phrases,
+                name_contact=candidate.name_contact,
             )
         )
     if recency_resolves:
@@ -1737,6 +1750,7 @@ def resolve(
         anchors.sort(key=lambda item: 0 if item.status == "resolved" else 1)
     anchors = anchors[:MAX_ANCHORS]
     anchors = _demote_subsumed_same_kind_aliases(anchors, turn_tokens)
+    anchors = _narrowed_by_qualifier(anchors)
     resolved = [anchor for anchor in anchors if anchor.status == "resolved"]
     groups = _competing_groups(resolved)
     # R3 (fix/activation-competing-senses): a named anchor carries the
@@ -1772,7 +1786,108 @@ def resolve(
         return Resolution(status="ambiguous", anchors=tuple(anchors), ambiguity=tuple(ambiguity))
     if resolved:
         return Resolution(status="resolved", anchors=tuple(anchors))
+    bare = [
+        entry
+        for kind, group in _bare_name_groups(anchors)
+        for entry in _ambiguity_dicts(kind, group)
+    ]
+    if bare:
+        return Resolution(status="ambiguous", anchors=tuple(anchors), ambiguity=tuple(bare))
     return Resolution(status="unresolved", anchors=tuple(anchors))
+
+
+def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedAnchor, ...]:
+    """A qualifier narrows competing senses (close-memory-loop, activation
+    quality).
+
+    Two same-kind anchors both resolved, and the authored name words the turn
+    reached on one are a strict subset of those it reached on the other: the
+    turn said the shared words AND a word only the second one's name carries.
+    "The tide model rollout" named the rollout hub, not the research hub that
+    "the tide model" alone would leave open. The narrower sense is not a
+    sense the turn meant, so it is not listed at all; and, for that kind,
+    neither is a `partial` anchor the turn reached only through words of the
+    chosen name, which is a free rider on that mention exactly as R2's
+    consumed `rare_term` is.
+
+    Only where a narrowing actually happened. With no strict subset among the
+    resolved senses the turn is left as it was, and an ambiguous turn keeps
+    every sense its words touched as the agent's menu. A sense the turn
+    spelled by name (`exact_alias`, `agent_choice`) is never narrowed out:
+    R1 already decides between spelled names. Cross-kind anchors are
+    complementary and never narrow one another.
+    """
+    resolved = [
+        anchor
+        for anchor in anchors
+        if anchor.status == "resolved" and anchor.name_contact
+    ]
+    narrowed: dict[str, set[str]] = {}
+    chosen: dict[str, list[ResolvedAnchor]] = {}
+    for anchor in resolved:
+        if DECIDING_ALONE_KINDS & set(anchor.evidence):
+            continue
+        wider = [
+            other
+            for other in resolved
+            if other.kind == anchor.kind and anchor.name_contact < other.name_contact
+        ]
+        if wider:
+            narrowed.setdefault(anchor.kind, set()).add(anchor.anchor_id)
+            chosen.setdefault(anchor.kind, []).extend(wider)
+    if not narrowed:
+        return tuple(anchors)
+
+    def dropped(anchor: ResolvedAnchor) -> bool:
+        excluded = narrowed.get(anchor.kind)
+        if not excluded:
+            return False
+        if anchor.anchor_id in excluded:
+            return True
+        return (
+            anchor.status == "partial"
+            and bool(anchor.name_contact)
+            and not set(anchor.evidence) & (CONTACT_KINDS - {"rare_term", "lexical_overlap"})
+            and any(anchor.name_contact < wide.name_contact for wide in chosen[anchor.kind])
+        )
+
+    return tuple(anchor for anchor in anchors if not dropped(anchor))
+
+
+#: Anchor kinds a bare name can refer to. A person's or an organisation's
+#: given name is how it is spoken of; a word two hub or resource titles share
+#: is an ordinary noun, and saying it names neither.
+BARE_NAME_KINDS: frozenset[str] = frozenset({"entity"})
+
+
+def _bare_name_groups(
+    anchors: Sequence[ResolvedAnchor],
+) -> tuple[tuple[str, tuple[ResolvedAnchor, ...]], ...]:
+    """Unlinked entities one bare shared name reached, when nothing resolved.
+
+    Each member is `partial` on that one name word alone (`rare_term`, plus
+    qualifiers at most): the turn said "Alex" and two people are called
+    Alex. That is the question competing senses exist to ask, so the turn is
+    `ambiguous` between them, formed by the same connectivity rule every
+    competing group uses: two people who link each other are one
+    neighbourhood, not two senses. One entity alone stays a `partial` lead.
+    """
+    by_name: dict[tuple[str, str], list[ResolvedAnchor]] = {}
+    for anchor in anchors:
+        if (
+            anchor.status != "partial"
+            or anchor.kind not in BARE_NAME_KINDS
+            or len(anchor.name_contact) != 1
+            or set(anchor.evidence) & CONTACT_KINDS != {"rare_term"}
+        ):
+            continue
+        (term,) = anchor.name_contact
+        by_name.setdefault((anchor.kind, term), []).append(anchor)
+    groups: list[tuple[str, tuple[ResolvedAnchor, ...]]] = []
+    for (_kind, _term), members in sorted(by_name.items()):
+        if len(members) >= 2:
+            groups.extend(_competing_groups(members))
+    return tuple(groups)
 
 
 def _competing_groups(

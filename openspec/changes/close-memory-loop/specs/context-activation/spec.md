@@ -57,3 +57,40 @@ within that interval.
 - **WHEN** an activation is logged
 - **THEN** its row carries neither the turn text nor the raw session value
 - **AND** a content-private packet's row carries no anchor identifiers
+
+## ADDED Requirements
+
+### Requirement: Competing senses decided by the turn's own words
+Resolution SHALL let the turn's own words decide between same-kind senses in two cases
+beyond the resolved-anchor ambiguity rule. First, a bare shared name: when no anchor
+resolves and two or more entity anchors are `partial` on one and the same authored name
+word alone (`rare_term`, with qualifiers at most), the turn SHALL be `ambiguous` between
+those entities, formed by the same anchor-neighbourhood connectivity rule as any
+competing group, and the retrieval carry SHALL NOT be asked; a single such entity SHALL
+stay a `partial` lead, and a shared word in the names of two anchors of any other kind
+SHALL NOT form this ambiguity. Second, a qualifier: when two same-kind anchors resolve
+without a deciding-alone kind and the authored name words the turn reached on one are a
+strict subset of those it reached on the other, the narrower anchor SHALL NOT be listed,
+and neither SHALL a same-kind `partial` anchor reached only through a strict subset of
+the chosen anchor's name words; where no such subset exists every sense the turn reached
+SHALL stay listed. Neither rule SHALL compare anchors of different kinds.
+
+#### Scenario: A bare first name two people share is a question
+- **WHEN** a turn says only a first name that two unlinked person entities share, and
+  nothing in the turn resolves
+- **THEN** the packet is `ambiguous`, lists both people under `ambiguity`, and carries
+  no retrieved page
+
+#### Scenario: One person with that name stays a lead
+- **WHEN** the same turn reaches a single person entity on that name word
+- **THEN** the packet abstains `unresolved` with that entity as a `partial` anchor
+
+#### Scenario: A qualifier names one sense
+- **WHEN** a turn resolves two same-kind hubs on their shared name words and also says
+  a word only one hub's name carries
+- **THEN** that hub resolves alone, the other hub is not listed, and a same-kind
+  partial hub reached only through words of the chosen hub's name is not listed
+
+#### Scenario: The shared words alone stay ambiguous
+- **WHEN** a turn says only the words both hub names share
+- **THEN** the packet is `ambiguous` and every hub the turn reached stays listed
