@@ -5224,6 +5224,24 @@ class EpistemicGraphIndex:
                 created_paths=created_paths,
                 graph_checkpoint=graph_checkpoint,
             )
+        drain_scope = report.pop("_drain_after_release", None)
+        if drain_scope:
+            # Proved stale replayed pages, queued with the delta: repair them the
+            # way the drain does, O(changed), now that the hold is released.
+            drained = self.drain_paths([self.vault_root / rel for rel in drain_scope])
+            if not (drained.get("requires_rebuild") or drained.get("moved")):
+                return {
+                    "indexed_files": int(drained.get("indexed_files", 0)),
+                    "nodes": int(drained.get("nodes", 0)),
+                    "edges": int(drained.get("edges", 0)),
+                }
+            log.info(
+                "graph replay drain did not converge requires_rebuild=%s moved=%s",
+                bool(drained.get("requires_rebuild")),
+                bool(drained.get("moved")),
+            )
+            report["_rebuild_after_release"] = 1
+            report["_durable_before_rebuild"] = 1
         if report.pop("_rebuild_after_release", False):
             durable_before_rebuild = bool(report.pop("_durable_before_rebuild", False))
             if _parent_receipted_graph_handoff_active(
@@ -5492,6 +5510,68 @@ class EpistemicGraphIndex:
             snapshot.close()
             self._mark_unavailable()
             return fallback("delta_target_moved")
+        # Caller paths outside the exact retained suffix mean publication was
+        # skipped, failed, or this is a duplicate callback -- most often a
+        # deferred full-index receipt replayed long after its change landed.
+        # Prove each one against the stored rows before paying for the vault:
+        # a path the registry records as the disk has it is either already
+        # reflected (a no-op) or recorded work the drain repairs. Only a path
+        # the registry does not vouch for still rebuilds from disk.
+        delta_paths = set(delta.changed | delta.deleted)
+        outside = [Path(path) for path in paths if str(path) not in delta_paths]
+        if outside:
+            # Proved before the resolver is needed: a replay the rows already
+            # reflect owes nothing, whether or not a resolver is resident.
+            snapshot.close()
+            currency = self._replayed_path_currency(outside)
+            if currency is None:
+                self._mark_unavailable()
+                return fallback("caller_path_outside_delta")
+            current, stale = currency
+            if stale:
+                deferred_scope.update(stale)
+                deferred_scope.update(
+                    rel
+                    for candidate in delta_paths
+                    if (rel := _vault_rel(self.vault_root, Path(candidate))) is not None
+                )
+                log.info(
+                    "graph incremental refresh proved replayed paths stale; draining them "
+                    "current=%d stale=%d graph_checkpoint=%s",
+                    len(current),
+                    len(stale),
+                    graph_checkpoint.checkpoint_sha256 if graph_checkpoint is not None else None,
+                )
+                if graph_checkpoint is not None:
+                    # A checkpoint caller already gets the queued deferral.
+                    self._mark_unavailable()
+                    return fallback("caller_path_outside_delta")
+                self._mark_unavailable()
+                if not self._queue_graph_repair(
+                    deferred_scope, reason="replayed_path_stale", graph_checkpoint=None
+                ):
+                    return fallback("caller_path_outside_delta")
+                return {
+                    "indexed_files": 0,
+                    "nodes": 0,
+                    "edges": 0,
+                    "_drain_after_release": sorted(deferred_scope),
+                }
+            log.info(
+                "graph incremental refresh proved replayed paths current count=%d "
+                "delta_paths=%d",
+                len(current),
+                len(delta_paths),
+            )
+            if not delta_paths:
+                # Nothing moved since the stored checkpoint and the caller's
+                # pages are already what the rows say: the replay owes nothing.
+                return {"indexed_files": 0, "nodes": 0, "edges": 0}
+            paths = [path for path in paths if str(path) in delta_paths]
+            snapshot = self._open_read_snapshot(require_current_projection=False)
+            if snapshot is None:
+                return fallback("graph_snapshot_unavailable")
+
         created_rels = {
             rel
             for path in created_paths
@@ -5572,14 +5652,6 @@ class EpistemicGraphIndex:
             for candidate in delta_paths
             if (rel := _vault_rel(self.vault_root, Path(candidate))) is not None
         )
-        # Caller paths outside the exact retained suffix mean publication was
-        # skipped, failed, or this is a duplicate callback whose global safety
-        # cannot be proved path-locally. Rebuild from disk instead of blessing
-        # the event checkpoint.
-        if any(str(path) not in delta_paths for path in paths):
-            self._mark_unavailable()
-            return fallback("caller_path_outside_delta")
-
         refresh_paths = set(delta_paths)
         topology_versions: dict[str, GraphSourceSignature] = {}
         resolver_versions: dict[str, GraphSourceSignature] = {}
@@ -5689,6 +5761,84 @@ class EpistemicGraphIndex:
             if pass_started and not stable:
                 self._mark_unavailable()
         return fallback("unreachable")
+
+    def _replayed_path_currency(
+        self, paths: list[Path]
+    ) -> tuple[list[str], list[str]] | None:
+        """Split caller paths outside the recall delta into current and stale, or None.
+
+        None when any one cannot be proved: the registry is not live, or does not
+        record the path exactly as the disk has it (the registry may be behind,
+        and the refresh's topology proof covers only the delta), or the page has
+        rows it should not have. Otherwise a page is current when its stored file
+        row carries the source hash of its current bytes, or when it has no row
+        and is not an indexed page; stale when its row is missing, different, or
+        belongs to a page that is gone -- recorded work the drain repairs.
+        """
+        from . import find_corpus
+
+        entries = freshness.live_recall_entries(self.vault_root, "vault")
+        if entries is None:
+            return None
+        conn = self._open_read_snapshot(require_current_projection=False)
+        if conn is None:
+            return None
+        kb = self.vault_root / kb_dirname()
+        listings: dict[Path, frozenset[str] | None] = {}
+        current: list[str] = []
+        stale: list[str] = []
+        try:
+            for path in paths:
+                rel = _vault_rel(self.vault_root, path)
+                if rel is None:
+                    return None
+                exists = os.path.lexists(path)
+                admitted = exists and recall_policy.is_recall_candidate(self.vault_root, path)
+                if exists and not admitted:
+                    # The registry never lists a page recall does not admit, and
+                    # the graph holds no rows for one.
+                    recorded_matches = True
+                else:
+                    recorded = entries.get(str(path), entries.get(str(self.vault_root / rel)))
+                    try:
+                        on_disk = freshness.stat_signature(path) if exists else None
+                    except OSError:
+                        return None
+                    recorded_matches = recorded == on_disk
+                if not recorded_matches:
+                    return None
+                row = conn.execute(
+                    "SELECT source_hash FROM graph_nodes WHERE path = ? AND kind = 'file'",
+                    (rel,),
+                ).fetchone()
+                indexed = (
+                    admitted
+                    and rel.startswith(kb_prefix())
+                    and find_corpus.walk_md_admits(kb, path, listings)
+                )
+                if indexed:
+                    try:
+                        raw = vault_module.read_bytes_without_pinning(path)
+                    except OSError:
+                        return None
+                    page = find_module._parse_page(
+                        path, 0.0, self.vault_root, content=raw, resolved_relative=rel
+                    )
+                    if page is None:
+                        return None
+                    if row is not None and str(row[0]) == page.snapshot_hash:
+                        current.append(rel)
+                    else:
+                        stale.append(rel)
+                elif row is None:
+                    current.append(rel)
+                elif not exists:
+                    stale.append(rel)
+                else:
+                    return None
+        finally:
+            conn.close()
+        return current, stale
 
     def _refresh_paths_pass(
         self,

@@ -114,11 +114,18 @@ def test_a_current_replayed_path_does_not_hold_back_the_delta(
     vault: Path, whole_vault_passes: list[str]
 ) -> None:
     root = _built(vault, whole_vault_passes)
-    created = root / GENERATED / "created-in-the-delta.md"
-    created.write_text(_note(700, ["generated-note-0001"]), encoding="utf-8")
-    freshness.rebaseline(root)
+    edited = root / GENERATED / "generated-note-0010.md"
+    edited.write_text(edited.read_text(encoding="utf-8") + "\n- edited\n", encoding="utf-8")
+    # Recorded as an event, so the edited page is in the recall delta while the
+    # replayed page is not; the refresh must still derive the delta.
+    freshness.on_files_changed(root, changed=[edited])
+    # A serving worker holds its recall resolver resident; a cold one is a
+    # separate, queued deferral this test is not about.
+    from exomem import find as find_module
 
-    epistemic_graph.upsert_after_write(root, [root / REPLAYED, created])
+    find_module.recall_resolver_snapshot(root)
+
+    epistemic_graph.upsert_after_write(root, [root / REPLAYED, edited])
 
     assert whole_vault_passes == []
     assert EpistemicGraphIndex(root).available() is True
