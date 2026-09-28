@@ -281,6 +281,22 @@ def resolve_source_domain(vault_root: Path, *, kind: object, domain: object) -> 
     )
 
 
+def capture_refusal_reason(vault_root: Path, error: VocabularyResolutionError) -> str:
+    """Say what is wrong and that the capture itself need not wait for it.
+
+    A registry fault names the registry file, so the owner can repair it; every
+    refusal says the material can be preserved now by omitting the domain.
+    """
+    where = ""
+    if error.code == "INVALID_DOMAIN_TAXONOMY":
+        registry = source_taxonomy.registry_path(Path(vault_root)).relative_to(Path(vault_root))
+        where = f" ({registry.as_posix()})"
+    return (
+        f"{error.reason}{where}. Domain is optional: capture without `domain` "
+        "to preserve the material now"
+    )
+
+
 def _projection_folder(taxonomy: source_taxonomy.SourceTaxonomy, canonical: str, parent: Path) -> str:
     """The registry path label, or the one existing equivalent spelling under `parent`."""
     definition = taxonomy.domains.get(canonical)

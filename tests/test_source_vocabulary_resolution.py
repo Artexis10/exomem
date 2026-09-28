@@ -84,8 +84,13 @@ def test_source_capture_refuses_alias_owner_chosen_by_entry_order(
         "  beta:\n    aliases: [shared]\n",
     )
 
-    with pytest.raises(ValueError, match="INVALID_DOMAIN_TAXONOMY"):
+    with pytest.raises(ValueError) as refused:
         _capture(vault, source_schema, title="Shared subject", domain="shared")
+
+    message = str(refused.value)
+    assert message.startswith("INVALID_DOMAIN_TAXONOMY: duplicate domain alias owner")
+    assert "(Knowledge Base/_Schema/source-taxonomy.yaml)" in message
+    assert "capture without `domain`" in message
 
     assert not (vault / SOURCES / "Articles" / "Beta").exists()
 
@@ -95,8 +100,12 @@ def test_malformed_registry_refuses_a_domain_but_not_a_domainless_capture(
 ) -> None:
     _registry(vault, "domains:\n  health:\n    aliases: 123\n")
 
-    with pytest.raises(ValueError, match="INVALID_DOMAIN_TAXONOMY.*without `domain`"):
+    with pytest.raises(ValueError) as refused:
         _capture(vault, source_schema, title="Sleep trial", domain="health")
+    message = str(refused.value)
+    assert message.startswith("INVALID_DOMAIN_TAXONOMY: domain taxonomy is malformed")
+    assert "(Knowledge Base/_Schema/source-taxonomy.yaml)" in message
+    assert "capture without `domain` to preserve the material now" in message
     assert not (vault / SOURCES / "Articles" / "Health").exists()
 
     captured = _capture(vault, source_schema, title="Sleep trial")
@@ -285,6 +294,7 @@ def test_adoption_refuses_an_ambiguous_domain_before_fetch(
     )
 
     assert result["files"][0]["code"] == "AMBIGUOUS_DOMAIN_DESTINATION"
+    assert "capture without `domain`" in result["files"][0]["reason"]
 
 
 def test_reclassify_keeps_a_source_in_its_legacy_domain_spelling(

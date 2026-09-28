@@ -290,8 +290,7 @@ def add(
         raise AddError(
             code=e.code,
             missing=["domain"],
-            reason=f"{e.reason}. Domain is optional: capture without `domain` "
-            "to preserve the material now",
+            reason=vocabulary_resolution.capture_refusal_reason(vault_root, e),
         ) from e
 
     episode_lines = _episode_frontmatter_lines(kind.key, extra_frontmatter, supersede)

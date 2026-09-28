@@ -688,7 +688,9 @@ def _source_destination(
     except source_taxonomy.TaxonomyError as error:
         raise SafeFetchError("INVALID_SOURCE", str(error)) from error
     except vocabulary_resolution.VocabularyResolutionError as error:
-        raise SafeFetchError(error.code, error.reason) from error
+        raise SafeFetchError(
+            error.code, vocabulary_resolution.capture_refusal_reason(vault_root, error)
+        ) from error
     return _destination(vault_root, *source_taxonomy.source_segments(kind))
 
 
