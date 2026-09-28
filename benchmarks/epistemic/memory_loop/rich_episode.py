@@ -50,6 +50,7 @@ from .contract import (
     Mentions,
     NoNewEdge,
     NoNewMention,
+    NoFutureRecords,
     NoNewPlanning,
     NoteSeed,
     PreCapture,
@@ -207,6 +208,9 @@ TURNS: tuple[str, ...] = (
     "than usual; I honestly can't tell yet whether that's the flour or the oven. Corran's "
     "proofing cabinet is still on loan to me, which helps. I might try Lowmere's rye next month.",
 )
+#: The day the actor's turn was said. A Records row dated after it records
+#: intent, not an observed outcome.
+TURN_DATE = "2026-09-24"
 LATER_TURN = "Baking rye again this weekend. Anything I should bear in mind about the flour and the new oven?"
 
 # --------------------------------------------------------------------------- #
@@ -414,6 +418,12 @@ EXPECTATIONS: tuple[Expectation, ...] = (
         markers=("lowmere",),
         reason="'I might try' is a possibility, not an expressed intent: no plan holds it; a bake-log line may note it.",
     ),
+    NoFutureRecords(
+        key="rich-episode/no-future-records",
+        polarity="negative",
+        turn_date=TURN_DATE,
+        reason="Records hold observed outcomes: a row dated after the turn is intent misrouted from Planning.",
+    ),
     CoMention(
         key="rich-episode/owner-unresolved-everywhere",
         polarity="negative",
@@ -532,7 +542,7 @@ CANDIDATES: tuple[Candidate, ...] = (
         routes=("no_capture",),
         dispositions=("no_capture",),
         provenance="direct",
-        checked_by=("rich-episode/no-planning", "rich-episode/one-lowmere"),
+        checked_by=("rich-episode/no-planning", "rich-episode/no-future-records", "rich-episode/one-lowmere"),
     ),
 )
 
@@ -554,9 +564,9 @@ LATER_USE = LaterUse(
 # Frozen pins (re-pinned deliberately; the tests refuse drift)
 # --------------------------------------------------------------------------- #
 
-FIXTURE_SHA256 = "c9040e8a247940a95776580861db56cfa9ba2fb5952fe71277706d44e53d648f"
+FIXTURE_SHA256 = "3d8c3355efa982bc557ee987699655c1bc7bb01f3c34de603b6e5a9a855143a2"
 ACTOR_SHA256 = "b871a3e8f38fb59115bb96744b5392a1348866f4a4d3efb144961d7f20590e45"
-EVALUATOR_SHA256 = "684c481245dffb40461402446639a8e811413cd9755794881e3a662a2d6e2ac8"
+EVALUATOR_SHA256 = "51eff448d5690d497863bc15fdc8eed5a5ede9a7ef5b76d54e84feab05b81683"
 PRE_CAPTURE_SHA256 = "1b6ecad6bf192e1768b27bf3bd8d85bc1bf179542e8795e2b73fd8b2e79c53aa"
 
 # --------------------------------------------------------------------------- #

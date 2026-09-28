@@ -18,6 +18,7 @@ from epistemic.memory_loop.contract import (
     EdgeView,
     NewPages,
     NoEdgeBetween,
+    NoFutureRecords,
     NoNewPlanning,
     PageView,
     RecordView,
@@ -26,7 +27,7 @@ from epistemic.memory_loop.contract import (
     VaultState,
 )
 
-SEMANTICS_FINGERPRINT = "562e25a872079ebc92289c8ede87b1f83c1e2fa53606549645cb40e16ff80e18"
+SEMANTICS_FINGERPRINT = "287f80dfffe5d0e635b7d5c310f3de6c8e32ecf63a245495a7d4a3e6e87199fc"
 
 #: Every declared default of every contract type. A changed default changes
 #: meaning without moving any fixture digest on its own, so it is pinned here
@@ -288,6 +289,32 @@ def test_an_item_in_a_new_plan_titled_collection_naming_the_possibility_is_plann
 
     after = _planning_state(plans, records=(item,))
     assert _NO_PLANNING.evaluate({}, _planning_state(plans), after).outcome == "fail"
+
+
+_NO_FUTURE = NoFutureRecords(key="k", polarity="negative", turn_date="2026-09-24", reason="r")
+
+
+@pytest.mark.parametrize(
+    "value, outcome",
+    [
+        ("2026-10-15", "fail"),
+        ("2026-09-25T08:00:00", "fail"),
+        ("2026-09-24", "pass"),
+        ("2026-09-23", "pass"),
+        ("might try it on 2026-10-15", "pass"),
+    ],
+)
+def test_a_new_records_item_dated_after_the_turn_is_misrouted_intent(value: str, outcome: str) -> None:
+    item = RecordView(collection=BAKES, item_key="r1", fields={"baked_on": value, "loaf": "rye"})
+
+    assert _NO_FUTURE.evaluate({}, _planning_state(), _planning_state(records=(item,))).outcome == outcome
+
+
+def test_a_future_date_in_a_prose_line_or_an_existing_item_is_not_a_new_future_record() -> None:
+    old = RecordView(collection=BAKES, item_key="r0", fields={"baked_on": "2026-12-01"})
+    page = _page(A, "A", body="- [assumption] Might try Lowmere rye on 2026-10-15.")
+
+    assert _NO_FUTURE.evaluate({}, _planning_state(records=(old,)), _planning_state(page, records=(old,))).outcome == "pass"
 
 
 def test_a_planning_item_naming_the_possibility_is_planning() -> None:

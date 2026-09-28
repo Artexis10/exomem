@@ -822,7 +822,7 @@ def read_state(root: Path) -> VaultState:
 
 #: Bump when any predicate's code changes meaning; it is part of every
 #: evaluator digest, so a semantic change voids runs bound to the old one.
-SEMANTICS_VERSION = 4
+SEMANTICS_VERSION = 5
 
 #: Core relations that record that two things are connected without saying
 #: how. They are honest when nothing more precise is supported, and never
@@ -1464,6 +1464,38 @@ def _page_text(page: PageView) -> str:
     return f"{page.title}\n{values}\n{page.body}"
 
 
+#: A Records field value that is a date (optionally with a time), and nothing else.
+_RECORD_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})(?:[T ][0-9:.+Z-]*)?")
+
+
+@dataclass(frozen=True)
+class NoFutureRecords:
+    """No new Records item is dated after the turn.
+
+    Records hold observed outcomes, so a structured row whose date field is
+    later than ``turn_date`` (ISO ``YYYY-MM-DD``) is stated intent misrouted
+    into Records; intent belongs in Planning. Only field values that are a
+    date are read: a prose line, a date inside free text and an item the world
+    already had stay quiet, as do items dated on or before the turn.
+    """
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    turn_date: str
+    reason: str
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        old_items = {(item.collection, item.item_key) for item in before.records}
+        future = [
+            f"{item.collection}#{item.item_key} {name}={value}"
+            for item in after.records
+            if (item.collection, item.item_key) not in old_items
+            for name, value in item.fields.items()
+            if (match := _RECORD_DATE.fullmatch(value.strip())) is not None and match.group(1) > self.turn_date
+        ]
+        return _result(self.key, self.polarity, not future, f"future-dated new records: {future}")
+
+
 @dataclass(frozen=True)
 class FieldIs:
     """A Records field matcher: exact values, all tokens, any marker, or honestly empty."""
@@ -1807,6 +1839,7 @@ def semantics_fingerprint() -> str:
             "empty_values": sorted(_EMPTY_VALUES),
             "provenance": list(PROVENANCE),
             "planning_title": _PLANNING_TITLE.pattern,
+            "record_date": _RECORD_DATE.pattern,
             "defaults": _declared_defaults(),
             "observation_gate": observation.gate_semantics(),
         }

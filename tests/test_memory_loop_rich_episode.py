@@ -705,6 +705,32 @@ def test_probe_r3e_a_bake_log_line_noting_the_possibility_is_not_planning(
     assert check.accepted, [result for result in check.results if result.outcome == "fail"]
 
 
+def test_a_possibility_recorded_as_a_future_record_is_misrouted(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Records hold observed outcomes: a structured row dated after the turn is
+    intent misrouted into Records, while a line noting it stays quiet."""
+
+    from exomem import commands
+
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(root, world)
+    collection = fx.BAKE_LOG.manifest_path
+    snapshot = commands.op_record_memory(root, action="inspect", collection=collection)["snapshot"]
+    commands.op_record_memory(
+        root,
+        action="append",
+        collection=collection,
+        item={"baked_on": "2026-10-15", "loaf": "rye trial", "flour": "Lowmere rye", "note": "try next month"},
+        item_key="30000000-0000-4000-8000-000000000013",
+        expected_container_hash=snapshot,
+        why="scripted wrong capture",
+    )
+
+    assert fx.check_capture(world, before, read_state(root)).failed() == ("rich-episode/no-future-records",)
+
+
 def test_the_trial_bake_has_only_the_route_its_check_can_see() -> None:
     trial = next(candidate for candidate in fx.CANDIDATES if candidate.key == "trial-bake")
     assert trial.routes == ("records",)
