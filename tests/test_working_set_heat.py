@@ -9,6 +9,8 @@ S5-1), the digest, and how external changes are classified.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from exomem import working_set_heat as heat
