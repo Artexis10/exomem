@@ -258,7 +258,8 @@ def test_stored_unit_vectors_never_create_the_embeddings_sidecar(tmp_path: Path)
 
     vault = tmp_path / "vault"
     vault.mkdir()
-    assert sensed_model.stored_unit_vectors(vault, "Knowledge Base/x.md") == (None, {})
+    assert sensed_model.encoder_fingerprint(vault) is None
+    assert sensed_model.stored_unit_vectors(vault, "Knowledge Base/x.md", "any|cls|l2") == {}
     assert not index_paths.sidecar_path(vault).exists()
     assert os.environ.get("EXOMEM_SENSING") in {None, "", "off"}
 
