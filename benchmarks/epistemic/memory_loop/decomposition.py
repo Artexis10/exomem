@@ -22,6 +22,12 @@ older episode and the baseline land on new pages (together with this week's
 home or apart; that grouping is the agent's), no detail fragments into its
 own page, and the attribution and the old episode's time survive.
 
+Declared limit: ``decomposition/preference-not-reversed`` is a phrase
+blacklist. It fails only the reversals it lists ("over the Lowfield",
+"settled on the Brightwater" and their short forms); a reversal worded any
+other way is not caught by it, and no model-free predicate here judges the
+direction of a choice in general.
+
 Content is deliberately ordinary perception about tea: no clinical words,
 no private names, no source paths. The capture failure that motivated this
 fixture is evidence of the need only; none of its content is here.
