@@ -18,9 +18,10 @@ variable the pinned Substrate gateway requires at startup, the platform stage
 fails naming them: the chart is under test and is not patched.
 
 The chart's Traefik and cert-manager dependencies are replaced by one
-Traefik stand-in in `exomem-platform`, carrying the `exomem.io/ingress:
-traefik` label the gateway NetworkPolicy admits, terminating TLS for the MCP
-hostname with the run's CA on NodePort 30443.
+Traefik stand-in in the edge namespace `exomem-edge`, carrying the
+`exomem.io/ingress: traefik` label the gateway NetworkPolicy admits from that
+namespace only, terminating TLS for the MCP hostname with the run's CA on
+NodePort 30443.
 """
 
 from __future__ import annotations
@@ -41,6 +42,8 @@ from .shell import run, wait_for
 PLATFORM_CHART = images.REPO_ROOT / "infra/helm/platform"
 CLOUD_NAMESPACE = "exomem-cloud"
 PLATFORM_NAMESPACE = "exomem-platform"
+# The chart's Traefik namespaceOverride: the gateway admits ingress only from here.
+EDGE_NAMESPACE = "exomem-edge"
 INGRESS_NODE_PORT = 30443
 TRUSTED_INGRESS_HEADER = "x-exomem-ingress-source"
 
@@ -258,11 +261,11 @@ def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: st
     documents = [
         {
             "apiVersion": "v1", "kind": "Namespace",
-            "metadata": {"name": PLATFORM_NAMESPACE, "labels": {"pod-security.kubernetes.io/enforce": "restricted"}},
+            "metadata": {"name": EDGE_NAMESPACE, "labels": {"pod-security.kubernetes.io/enforce": "restricted"}},
         },
         {
             "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls",
-            "metadata": {"name": "mcp-tls", "namespace": PLATFORM_NAMESPACE},
+            "metadata": {"name": "mcp-tls", "namespace": EDGE_NAMESPACE},
             "data": {
                 "tls.crt": base64.b64encode(leaf.cert_pem.encode()).decode(),
                 "tls.key": base64.b64encode(leaf.key_pem.encode()).decode(),
@@ -272,12 +275,12 @@ def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: st
             # A Secret, not a ConfigMap: the routing carries the trusted
             # ingress header's value.
             "apiVersion": "v1", "kind": "Secret",
-            "metadata": {"name": "rehearsal-traefik", "namespace": PLATFORM_NAMESPACE},
+            "metadata": {"name": "rehearsal-traefik", "namespace": EDGE_NAMESPACE},
             "stringData": {"dynamic.json": json.dumps(dynamic)},
         },
         {
             "apiVersion": "apps/v1", "kind": "Deployment",
-            "metadata": {"name": "rehearsal-traefik", "namespace": PLATFORM_NAMESPACE, "labels": labels},
+            "metadata": {"name": "rehearsal-traefik", "namespace": EDGE_NAMESPACE, "labels": labels},
             "spec": {
                 "replicas": 1,
                 "selector": {"matchLabels": labels},
@@ -318,7 +321,7 @@ def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: st
         },
         {
             "apiVersion": "v1", "kind": "Service",
-            "metadata": {"name": "rehearsal-traefik", "namespace": PLATFORM_NAMESPACE},
+            "metadata": {"name": "rehearsal-traefik", "namespace": EDGE_NAMESPACE},
             "spec": {
                 "type": "NodePort",
                 "externalTrafficPolicy": "Local",

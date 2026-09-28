@@ -1,0 +1,90 @@
+# harden-exomem-cloud-operator-access D4: the everyday operator identity, a
+# client certificate in group exomem:operators issued through the CSR API
+# (docs/runbooks/cloud-operator-access.md). It reads workload status, events
+# and the content-free logs cells and controllers emit (D8). It reads no
+# Secret and holds no exec, attach, port-forward, proxy or ephemeral
+# container subresource. pods/log is cluster-wide because RBAC cannot
+# exclude cell namespaces created at runtime.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: exomem-operator-read
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "namespaces", "persistentvolumeclaims", "services", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: exomem-operator-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: exomem-operator-read
+subjects:
+  - kind: Group
+    name: exomem:operators
+    apiGroup: rbac.authorization.k8s.io
+---
+# D4: break-glass. No standing credential carries this group; a one-hour
+# client certificate minted on demand through an audited, approved CSR does.
+# Client certificates cannot be revoked, so short expiry is the control.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: exomem-break-glass
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: Group
+    name: exomem:break-glass
+    apiGroup: rbac.authorization.k8s.io
+---
+# D5: exec, attach, port-forward and ephemeral containers in a cell namespace,
+# or in an export scratch namespace (exo-scratch-<cell id>-<8 hex>, which
+# holds a restored plaintext vault), are admitted only for the break-glass
+# group. Admission applies to
+# system:masters too, so the deploy identity cannot open a shell in a cell by
+# accident. Masters can still delete this policy or approve their own
+# break-glass CSR, so it guards against accidents, not intent; the audit log
+# records either. The live-K3s suite proved the API server enforces this
+# policy type on these CONNECT operations before it shipped. pods/proxy is
+# not here: RBAC keeps it from the everyday identity (D4).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-cell-connect-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CONNECT"]
+        resources: ["pods/exec", "pods/attach", "pods/portforward"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["pods/ephemeralcontainers"]
+  validations:
+    - expression: >-
+        !request.namespace.matches('^exo-(cell-[a-z2-7]{16}|scratch-[a-z2-7]{16}-[0-9a-f]{8})$') ||
+        (has(request.userInfo.groups) && 'exomem:break-glass' in request.userInfo.groups)
+      message: exec, attach, port-forward and ephemeral containers in a cell or export scratch namespace need the break-glass identity (docs/runbooks/cloud-operator-access.md).
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-cell-connect-guard
+spec:
+  policyName: exomem-cell-connect-guard
+  validationActions: [Deny]
