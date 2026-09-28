@@ -4069,10 +4069,13 @@ def op_get(
         out["body_chars"] = len(str(out.get("body", "")))
     if "body" in out and not frontmatter_only:
         # Pull-first sensing (default off): what released later notes did to
-        # this page. Absent when there is nothing to say; never ranks anything.
+        # this page. Absent when there is nothing to say, or when the snapshot
+        # read is not the one the projection modelled; never ranks anything.
         from . import sensed_model
 
-        status = sensed_model.status_for(vault_root, str(out["path"]))
+        status = sensed_model.status_for(
+            vault_root, str(out["path"]), content_hash=result.content_hash
+        )
         if status is not None:
             out["epistemic_status"] = status
     return _attach_memory_ref(vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref)

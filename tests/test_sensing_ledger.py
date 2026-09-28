@@ -110,3 +110,53 @@ def test_a_foreign_schema_is_refused_and_left_untouched(tmp_path: Path) -> None:
         ledger.connect()
     assert sensing_ledger.open_readonly(tmp_path / "vault") is None
     assert ledger.path.exists()
+
+
+def test_insert_or_replace_cannot_rewrite_a_reading(tmp_path: Path) -> None:
+    ledger = sensing_ledger.Ledger(tmp_path / "vault")
+    conn = ledger.connect()
+    ledger.append(conn, [reading("A holds.", "A does not hold.")])
+    row = conn.execute("SELECT * FROM readings").fetchone()
+    forged = list(row)
+    forged[7] = "neutral"
+    conn.execute(f"INSERT OR REPLACE INTO readings VALUES ({','.join('?' * len(forged))})", forged)
+    assert conn.execute("SELECT * FROM readings").fetchall() == [row]
+    other = list(row)
+    other[0] = "f" * 64
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(f"INSERT OR REPLACE INTO readings VALUES ({','.join('?' * len(other))})", other)
+    assert conn.execute("SELECT * FROM readings").fetchall() == [row]
+    identity = conn.execute("SELECT * FROM instruments").fetchone()
+    conn.execute("INSERT OR REPLACE INTO instruments VALUES (?, '{}')", (identity[0],))
+    assert conn.execute("SELECT * FROM instruments").fetchone() == identity
+    genesis = sensing_ledger.genesis(conn)
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('genesis', 'forged')")
+    assert sensing_ledger.genesis(conn) == genesis
+    conn.close()
+
+
+def test_the_ledger_has_a_stable_identity_and_a_replacement_a_new_one(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    ledger = sensing_ledger.Ledger(vault)
+    conn = ledger.connect()
+    first = sensing_ledger.genesis(conn)
+    conn.close()
+    conn = ledger.connect()
+    assert sensing_ledger.genesis(conn) == first and first
+    conn.close()
+    reader = sensing_ledger.open_readonly(vault)
+    assert sensing_ledger.genesis(reader) == first
+    reader.close()
+    for suffix in ("", "-wal", "-shm"):
+        ledger.path.with_name(ledger.path.name + suffix).unlink(missing_ok=True)
+    conn = ledger.connect()
+    assert sensing_ledger.genesis(conn) not in {None, first}
+    conn.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
+def test_the_ledger_and_its_directory_are_private(tmp_path: Path) -> None:
+    ledger = sensing_ledger.Ledger(tmp_path / "vault")
+    ledger.connect().close()
+    assert ledger.path.stat().st_mode & 0o777 == 0o600
+    assert ledger.path.parent.stat().st_mode & 0o777 == 0o700

@@ -19,6 +19,8 @@ import hashlib
 import json
 import os
 import re
+import threading
+import time
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -57,10 +59,34 @@ def resolve_setting(env_value: str | None, config: Mapping[str, Any] | None) -> 
     return DEFAULT_SETTING
 
 
+#: How long a config-file reading of the setting is trusted. The status check
+#: sits on every page read, so sensing off must add no per-read I/O; a changed
+#: config file takes effect within this long (the env var takes effect at once).
+CONFIG_MEMO_SECONDS = 5.0
+_CONFIG_MEMO: list[tuple[float, str]] = []
+_CONFIG_LOCK = threading.Lock()
+
+
+def clear_memo() -> None:
+    with _CONFIG_LOCK:
+        _CONFIG_MEMO.clear()
+
+
 def setting() -> str:
+    """`EXOMEM_SENSING`, else the memoised config key `sensing`, else `off`."""
+    env_value = str(os.environ.get(ENV) or "").strip().lower()
+    if env_value in SETTINGS:
+        return env_value
+    now = time.monotonic()
+    with _CONFIG_LOCK:
+        if _CONFIG_MEMO and now - _CONFIG_MEMO[0][0] < CONFIG_MEMO_SECONDS:
+            return _CONFIG_MEMO[0][1]
     from . import mode
 
-    return resolve_setting(os.environ.get(ENV), mode.read_config())
+    value = resolve_setting(None, mode.read_config())
+    with _CONFIG_LOCK:
+        _CONFIG_MEMO[:] = [(now, value)]
+    return value
 
 
 def enabled() -> bool:

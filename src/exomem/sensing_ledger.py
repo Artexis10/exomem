@@ -19,14 +19,16 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sqlite3
+import uuid
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import sensing
-from .state_paths import vault_state_dir
+from .state_paths import ensure_vault_state_dir, vault_state_dir
 
 SCHEMA_VERSION = 1
 DIRNAME = "sensing"
@@ -60,6 +62,29 @@ _TABLES = (
         for table in ("readings", "instruments")
         for verb in ("UPDATE", "DELETE")
     ),
+    # `INSERT OR REPLACE` resolves a conflict by deleting the old row, and that
+    # delete fires no DELETE trigger: without these, REPLACE would rewrite a
+    # reading. An existing id is ignored; a new id on a taken seq is refused.
+    "CREATE TRIGGER IF NOT EXISTS readings_append_only_replace BEFORE INSERT ON readings "
+    "WHEN EXISTS (SELECT 1 FROM readings WHERE reading_id = NEW.reading_id) "
+    "BEGIN SELECT RAISE(IGNORE); END",
+    "CREATE TRIGGER IF NOT EXISTS readings_append_only_seq BEFORE INSERT ON readings "
+    "WHEN EXISTS (SELECT 1 FROM readings WHERE seq = NEW.seq) "
+    "AND NOT EXISTS (SELECT 1 FROM readings WHERE reading_id = NEW.reading_id) "
+    "BEGIN SELECT RAISE(ABORT, 'the readings ledger is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS instruments_append_only_replace BEFORE INSERT ON instruments "
+    "WHEN EXISTS (SELECT 1 FROM instruments WHERE instrument_id = NEW.instrument_id) "
+    "BEGIN SELECT RAISE(IGNORE); END",
+    # The ledger's identity (`genesis`) is written once and never changes.
+    "CREATE TRIGGER IF NOT EXISTS meta_genesis_replace BEFORE INSERT ON meta "
+    "WHEN NEW.key = 'genesis' AND EXISTS (SELECT 1 FROM meta WHERE key = 'genesis') "
+    "BEGIN SELECT RAISE(IGNORE); END",
+    *(
+        f"CREATE TRIGGER IF NOT EXISTS meta_genesis_{verb.lower()} BEFORE {verb} ON meta "
+        "WHEN OLD.key = 'genesis' "
+        "BEGIN SELECT RAISE(ABORT, 'the readings ledger identity is fixed'); END"
+        for verb in ("UPDATE", "DELETE")
+    ),
 )
 
 
@@ -69,6 +94,29 @@ class LedgerUnavailable(RuntimeError):
 
 def ledger_path(vault_root: Path) -> Path:
     return vault_state_dir(Path(vault_root)) / DIRNAME / FILENAME
+
+
+def private_dir(vault_root: Path) -> Path:
+    """The `sensing/` directory, created with the state root's private posture."""
+    base = ensure_vault_state_dir(Path(vault_root))
+    directory = base / DIRNAME
+    directory.mkdir(mode=0o700, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(directory, 0o700)
+    return directory
+
+
+def private_file(path: Path) -> None:
+    """Create `path` owner-only (0600) if it does not exist yet.
+
+    SQLite gives its WAL and shared-memory files the database file's mode, so
+    creating the database this way keeps all three private.
+    """
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return
+    os.close(fd)
 
 
 def exists(vault_root: Path) -> bool:
@@ -143,7 +191,8 @@ class Ledger:
 
     def connect(self, *, busy_ms: int = 2000) -> sqlite3.Connection:
         """A read-write connection, creating the ledger. Refuses a foreign schema."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        private_dir(self.vault_root)
+        private_file(self.path)
         conn = sqlite3.connect(str(self.path), timeout=busy_ms / 1000.0, isolation_level=None)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -162,6 +211,10 @@ class Ledger:
                 raise LedgerUnavailable(
                     f"readings ledger schema {stored[0]!r} is not {SCHEMA_VERSION}; left untouched"
                 )
+            conn.execute(
+                "INSERT OR IGNORE INTO meta(key, value) VALUES ('genesis', ?)",
+                (uuid.uuid4().hex,),
+            )
             conn.execute("COMMIT")
         except BaseException:
             conn.close()
@@ -252,6 +305,19 @@ def since(conn: sqlite3.Connection, seq: int, *, limit: int = 512) -> list[Store
 def iter_all(conn: sqlite3.Connection) -> Iterator[StoredReading]:
     for row in conn.execute(f"SELECT {_COLUMNS} FROM readings ORDER BY reading_id"):
         yield _row(row)
+
+
+def genesis(conn: sqlite3.Connection) -> str | None:
+    """The ledger's identity: a random id written when the file was created.
+
+    A restored, replaced or recreated ledger has another one, which is how the
+    projection knows to reproject rather than trust its ingestion cursor.
+    """
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key='genesis'").fetchone()
+    except sqlite3.Error:
+        return None
+    return None if row is None else str(row[0])
 
 
 def has_reading(conn: sqlite3.Connection, rid: str) -> bool:

@@ -350,3 +350,144 @@ def test_the_ledger_survives_a_projection_wipe(tmp_path: Path, monkeypatch) -> N
     assert _ledger_rows(vault) == rows
     with pytest.raises(sqlite3.IntegrityError):
         sensing_ledger.Ledger(vault).connect().execute("DELETE FROM readings")
+
+
+def test_a_partner_edited_since_the_last_tick_is_not_served_as_complete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MEDIUM 2, the reviewer's repro: DENIAL stops contradicting; SEAL is read
+    before any tick. The stale edge is dropped and the evidence is incomplete."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    fx.edit(
+        vault,
+        sf.DENIAL,
+        sf.note("Seal wear denial", "2026-05-02", "Seal wear is worth measuring.",
+                links="Disputes [[Notes/Insights/seal-wear]]."),
+    )
+    status = sensed_model.status_for(vault, sf.SEAL)
+    assert status is not None and status["open_contradictions"] == 0
+    assert status["evidence_complete"] is False
+    assert status["line"] == "refined by 1 later note"
+
+
+def test_a_changed_instrument_is_not_served_before_the_projection_follows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MEDIUM 2: edges projected under another active instrument set are dropped."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    sf.enable(monkeypatch, sf.with_identity(revision="2"))
+    assert sensed_model.status_for(vault, sf.SEAL) is None
+
+
+def test_theta_is_keyed_by_the_encoder_fingerprint() -> None:
+    """LOW 8: a threshold belongs to an encoder's vector space, not its name."""
+    assert sensed_model.theta_for(sf.ENCODER) == 0.72
+    assert sensed_model.theta_for("BAAI/bge-m3|cls|l2") == 0.72
+    assert sensed_model.theta_for("BAAI/bge-m3") is None
+    assert sensed_model.theta_for("BAAI/bge-m3|mean|l2|0123") is None
+    assert sensed_model.theta_for(None) is None
+
+
+def _cosine_vault(tmp_path: Path, count: int = 4):
+    vault = tmp_path / "vault"
+    paths = [f"{sf.KB}/Notes/Insights/c{i}.md" for i in range(count)]
+    for i, path in enumerate(paths):
+        fx.write(vault, path, sf.note(f"C{i}", f"2026-0{i + 1}-01", f"Alpha variant {i}."))
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    return vault, paths
+
+
+def _vector_table(vault: Path, paths: list[str], vectors: list) -> dict:
+    out = {}
+    conn = fx.epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    for path, vec in zip(paths, vectors, strict=True):
+        ref, text = conn.execute(
+            "SELECT unit_ref, text FROM graph_nodes WHERE path=? AND unit_ref IS NOT NULL", (path,)
+        ).fetchone()
+        out[path] = {ref: (sensing.text_sha256(sensing.extract_text(text)), vec)}
+    conn.close()
+    return out
+
+
+def test_the_cosine_predicate_compares_the_rounded_cosine(tmp_path: Path, monkeypatch) -> None:
+    """LOW 8: the recorded cosine and the predicate agree exactly."""
+    vault, paths = _cosine_vault(tmp_path, 2)
+    theta = 0.72
+    # A raw cosine of 0.71999976 rounds to 0.72 at six decimals.
+    angle = np.arccos(np.float64(0.71999976))
+    base = np.array([1.0, 0.0], dtype=np.float32)
+    turned = np.array([np.cos(angle), np.sin(angle)], dtype=np.float32)
+    raw = float(base @ turned)
+    assert raw < theta and round(raw, 6) == theta
+    sf.enable(monkeypatch, vectors=_vector_table(vault, paths, [base, turned]))
+    sf.settle(vault)
+    rows = sensed_model.open_readonly(vault).execute("SELECT proposer, cosine FROM pairs").fetchall()
+    assert rows == [("cosine", 0.72)]
+
+
+def test_cosine_proposals_do_not_depend_on_processing_history(tmp_path: Path, monkeypatch) -> None:
+    """The in-scope vector bound is judged on the current state: over it, no page
+    keeps cosine pairs; back under it, every page has them again."""
+    vault, paths = _cosine_vault(tmp_path, 4)
+    same = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    table = _vector_table(vault, paths, [same, same, same, same])
+    sf.enable(monkeypatch, vectors=table)
+    monkeypatch.setattr(sensed_model, "MAX_COSINE_UNITS", 3)
+    sf.settle(vault)
+    over = {row[0] for row in sf.edges(vault)}
+    assert over == set(), "four vectors exceed a bound of three: no cosine pair survives"
+    fx.remove(vault, paths[3])
+    sf.settle(vault)
+    found = {frozenset((row[1], row[3])) for row in sf.edges(vault)}
+    assert found == {frozenset(pair) for pair in ((paths[0], paths[1]), (paths[0], paths[2]),
+                                                  (paths[1], paths[2]))}
+
+
+def test_a_new_encoder_fingerprint_re_proposes_cosine_pairs(tmp_path: Path, monkeypatch) -> None:
+    vault, paths = _cosine_vault(tmp_path, 2)
+    same = np.array([1.0, 0.0], dtype=np.float32)
+    sf.enable(monkeypatch, vectors=_vector_table(vault, paths, [same, same]))
+    sf.settle(vault)
+    assert len(sf.edges(vault)) == 1
+    monkeypatch.setattr(sensed_model, "encoder_fingerprint", lambda _v: "BAAI/bge-m3|cls|l2|ffff")
+    monkeypatch.setattr(sensed_model, "stored_unit_vectors", lambda _v, _r, _fp: {})
+    sf.settle(vault)
+    assert sf.edges(vault) == [], "vectors of another encoder propose nothing"
+
+
+def test_a_replaced_ledger_is_reprojected(tmp_path: Path, monkeypatch) -> None:
+    """LOW 9: the projection follows the ledger's identity, not only its length."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    stub = sf.StubInstrument(sf.default_table())
+    sf.converge(vault, stub)
+    path = sensing_ledger.ledger_path(vault)
+    for suffix in ("", "-wal", "-shm"):
+        path.with_name(path.name + suffix).unlink(missing_ok=True)
+    fresh = sensing_ledger.Ledger(vault)
+    conn = fresh.connect()
+    # The same number of rows as before, but none of them about these pairs.
+    other = sf.StubInstrument(identity=sf.with_identity(model="stub/other"))
+    for index in range(6):
+        texts = sorted([f"x{index}", f"y{index}"], key=sensing.text_sha256)
+        fresh.append(conn, [sensing.make_reading(
+            sensing.PAIR_RELATION, other.identity,
+            [sensing.InputUnit(f"u{t}", "p.md", sensing.text_sha256(t)) for t in texts],
+            ab=sf.NEUTRAL, ba=sf.NEUTRAL, abstain_reason=None, sensed_at="t")])
+    conn.close()
+    sf.settle(vault)
+    assert {row[5] for row in sf.edges(vault)} == {"pending"}
+    assert sensed_model.status_for(vault, sf.SEAL) is None
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX modes")
+def test_the_projection_is_private(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    assert sensed_model.projection_path(vault).stat().st_mode & 0o777 == 0o600

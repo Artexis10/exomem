@@ -187,3 +187,22 @@ def test_the_nli_identity_needs_no_model_import() -> None:
     if identity is not None:
         assert identity.placement == "local-cpu"
         assert identity.template_version == "nli-pair-v1"
+
+
+def test_sensing_off_adds_no_per_read_config_io(monkeypatch) -> None:
+    """The env var wins without touching the config file, and the config read is memoised."""
+    from exomem import mode
+
+    reads: list[int] = []
+    real = mode.read_config
+    monkeypatch.setattr(mode, "read_config", lambda: reads.append(1) or real())
+    monkeypatch.setenv("EXOMEM_SENSING", "off")
+    sensing.clear_memo()
+    for _ in range(50):
+        assert sensing.enabled() is False
+    assert reads == []
+    monkeypatch.delenv("EXOMEM_SENSING")
+    sensing.clear_memo()
+    for _ in range(50):
+        assert sensing.enabled() is False
+    assert len(reads) == 1

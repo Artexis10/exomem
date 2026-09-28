@@ -43,6 +43,9 @@ STUB = sensing.InstrumentIdentity(
     fixture_set="relation-v1-multilingual",
 )
 
+#: A served-encoder fingerprint in the shape `EncoderProfile.fingerprint()` writes.
+ENCODER = "BAAI/bge-m3|cls|l2|0123456789abcdef"
+
 CONTRA = [0.01, 0.02, 0.97]
 ENTAIL = [0.97, 0.02, 0.01]
 WEAK = [0.30, 0.60, 0.10]
@@ -132,11 +135,12 @@ def enable(monkeypatch, *identities: sensing.InstrumentIdentity, vectors=None) -
     monkeypatch.setattr(sensed_model, "active_instruments", lambda: dict(active))
     table = vectors or {}
     monkeypatch.setattr(
+        sensed_model, "encoder_fingerprint", lambda vault_root: ENCODER if table else None
+    )
+    monkeypatch.setattr(
         sensed_model,
         "stored_unit_vectors",
-        lambda vault_root, rel: (
-            ("BAAI/bge-m3", table.get(rel, {})) if table else (None, {})
-        ),
+        lambda vault_root, rel, fingerprint: dict(table.get(rel, {})) if fingerprint else {},
     )
 
 

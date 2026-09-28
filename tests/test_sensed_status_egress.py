@@ -114,10 +114,10 @@ def test_a_withheld_contradicting_page_is_absent(tmp_path: Path, monkeypatch) ->
                        withheld=sf.DENIAL, instrument=stub)
     withheld = _status_as(real, sf.SEAL, _external())
     absent = _status_as(twin, sf.SEAL, _external())
-    assert withheld == absent
-    assert json.loads(withheld)["open_contradictions"] == 0
+    assert withheld == absent == "null", "governed: sensed items are owner-only"
     # The owner still sees it.
     assert json.loads(_status_as(real, sf.SEAL, owner_principal()))["open_contradictions"] == 1
+    assert json.loads(_status_as(twin, sf.SEAL, owner_principal()))["open_contradictions"] == 0
     with request_scope(_external()):
         real_read = _read(real, sf.SEAL)
         twin_read = _read(twin, sf.SEAL)
@@ -131,8 +131,9 @@ def test_a_withheld_refining_page_is_absent(tmp_path: Path, monkeypatch) -> None
     real, twin = _pair(tmp_path, "winter", build=_seal_vault(drop="winter"),
                        withheld=sf.WINTER, instrument=stub)
     withheld = _status_as(real, sf.SEAL, _external())
-    assert withheld == _status_as(twin, sf.SEAL, _external())
-    status = json.loads(withheld)
+    assert withheld == _status_as(twin, sf.SEAL, _external()) == "null"
+    assert json.loads(_status_as(real, sf.SEAL, owner_principal()))["refined_by_later"] == 1
+    status = json.loads(_status_as(twin, sf.SEAL, owner_principal()))
     assert status["refined_by_later"] == 0 and "chain" not in status
 
 
@@ -167,8 +168,8 @@ def test_a_withheld_page_breaks_a_contradiction_component(tmp_path: Path, monkey
                        instrument=stub)
     a = f"{sf.KB}/Notes/Insights/a.md"
     withheld = _status_as(real, a, _external())
-    assert withheld == _status_as(twin, a, _external())
-    assert json.loads(withheld)["contradiction_component"] == 2
+    assert withheld == _status_as(twin, a, _external()) == "null"
+    assert json.loads(_status_as(twin, a, owner_principal()))["contradiction_component"] == 2
     assert json.loads(_status_as(real, a, owner_principal()))["contradiction_component"] == 4
 
 
@@ -229,3 +230,50 @@ def test_activation_is_unchanged_with_sensing_off(tmp_path: Path, monkeypatch) -
     assert json.dumps(packet, sort_keys=True) == before
     live = commands.op_activate_context(vault, turn="what about seal wear")
     assert all("epistemic_status" not in anchor for anchor in live.get("anchors") or [])
+
+
+def _hub_vault(root: Path, *, with_page: bool) -> Path:
+    """The reviewer's twin: a 12-unit hub, a 10-unit later note linking it, and a
+    1-unit page (withheld in the real vault) whose pairs push the hub past the cap."""
+    vault = root / "vault"
+    hub_units = "".join(f"- [finding] Hub fact {i} holds.\n" for i in range(1, 12))
+    fx.write(vault, f"{sf.KB}/Notes/Insights/hub.md",
+             sf.note("Hub", "2026-01-01", "Hub fact 0 holds.", extra=hub_units))
+    later_units = "".join(f"- [finding] Later point {i} stands.\n" for i in range(1, 10))
+    fx.write(vault, f"{sf.KB}/Notes/Insights/later.md",
+             sf.note("Later", "2026-02-01", "Hub fact 0 holds, most of all in winter.",
+                     links="[[Notes/Insights/hub]]", extra=later_units))
+    if with_page:
+        fx.write(vault, f"{sf.KB}/Notes/Insights/w.md",
+                 sf.note("W", "2026-03-01", "A withheld aside.", links="[[Notes/Insights/hub]]"))
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    return vault
+
+
+def test_a_withheld_page_cannot_decide_a_visible_pages_cap(tmp_path: Path, monkeypatch) -> None:
+    """HIGH 1: under a governed policy sensed items are owner-only, so a withheld
+    page pushing a visible hub over PAGE_CAP cannot change a restricted view."""
+    sf.enable(monkeypatch)
+    stub = sf.StubInstrument({("Hub fact 0 holds, most of all in winter.", "Hub fact 0 holds."): "refines"})
+    hub = f"{sf.KB}/Notes/Insights/hub.md"
+    real, twin = _pair(tmp_path, "hub", build=_hub_vault,
+                       withheld=f"{sf.KB}/Notes/Insights/w.md", instrument=stub)
+    conn = sensed_model.open_readonly(real)
+    assert dict(conn.execute("SELECT path, candidates FROM pages").fetchall())[hub] == 132
+    conn.close()
+    assert _status_as(real, hub, _external()) == _status_as(twin, hub, _external()) == "null"
+    assert json.loads(_status_as(twin, hub, owner_principal()))["line"] == "refined by 1 later note"
+
+
+def test_a_read_of_another_snapshot_carries_no_status(tmp_path: Path, monkeypatch) -> None:
+    """MEDIUM 2: the status describes the snapshot the projection modelled, only."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    assert "epistemic_status" in _read(vault, sf.SEAL)
+    # The file moves on without the watcher, the graph or a tick seeing it.
+    path = vault / sf.SEAL
+    path.write_text(path.read_text(encoding="utf-8") + "\nA new paragraph.\n", encoding="utf-8")
+    fx.find_module.clear_cache()
+    assert "epistemic_status" not in _read(vault, sf.SEAL)

@@ -308,3 +308,36 @@ def test_unusable_output_refuses_that_batch_and_the_child_goes_on(
     assert not sensing_ledger.ledger_path(vault).exists() or sensing_ledger.max_seq(
         sensing_ledger.open_readonly(vault)
     ) == 0
+
+
+def test_the_child_gets_an_allowlisted_environment(tmp_path: Path, monkeypatch) -> None:
+    captured: dict = {}
+
+    class Popen:
+        def __init__(self, args, env=None, **kwargs):
+            captured["args"], captured["env"] = args, env
+
+    monkeypatch.setattr(sensor_worker.subprocess, "Popen", Popen)
+    for name in (
+        "EXOMEM_INTERNAL_INGRESS_KEY",
+        "GITHUB_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+        "OPENAI_API_KEY",
+        "HF_TOKEN",
+        "EXOMEM_OAUTH_CLIENT_SECRET",
+        "SOME_PASSWORD",
+        "UNRELATED_SETTING",
+    ):
+        monkeypatch.setenv(name, "must-not-leak")
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    sensor_worker._launch_child(tmp_path / "vault", 10.0, 5)
+    env = captured["env"]
+    assert "must-not-leak" not in env.values()
+    assert not [key for key in env if any(word in key for word in ("SECRET", "PASSWORD"))]
+    assert env["HF_HUB_OFFLINE"] == "1" and env["TRANSFORMERS_OFFLINE"] == "1"
+    assert env["CUDA_VISIBLE_DEVICES"] == "" and env["OMP_NUM_THREADS"] == "1"
+    assert env["HF_HUB_CACHE"] == str(tmp_path / "hub")
+    assert env["LC_ALL"] == "C.UTF-8"
+    assert env["EXOMEM_STATE_ROOT"] == os.environ["EXOMEM_STATE_ROOT"]
+    assert env.get("PATH") == os.environ.get("PATH")

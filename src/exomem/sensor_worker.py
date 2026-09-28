@@ -32,7 +32,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,9 +70,11 @@ def _state_file(vault_root: Path, name: str) -> Path:
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, sort_keys=True))
     os.replace(tmp, path)
 
 
@@ -260,12 +262,50 @@ def _refusal_key() -> str:
     return json.dumps([sensing.setting(), sorted(sensed_model.active_instruments())])
 
 
+#: The only variables the child inherits: where state, logs and the model
+#: cache live, the platform basics, and the locale. The child runs model code on
+#: vault text, so it gets no credential, token or service secret.
+_CHILD_ENV_ALLOW = frozenset(
+    {
+        "PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ",
+        "TMPDIR", "TMP", "TEMP", "PYTHONPATH", "VIRTUAL_ENV",
+        "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT",
+        "HOMEDRIVE", "HOMEPATH", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+        "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+        "HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE",
+        "SENTENCE_TRANSFORMERS_HOME", "TORCH_HOME",
+        "EXOMEM_STATE_ROOT", "EXOMEM_HOSTED_STATE_ROOT", "EXOMEM_HOSTED_CELL",
+        "EXOMEM_KB_DIRNAME", "EXOMEM_LOG_DIR", "EXOMEM_LOG_LEVEL", "EXOMEM_LOG_MAX_MB",
+        "EXOMEM_LOG_BACKUPS", "EXOMEM_MODEL_OFFLINE", "EXOMEM_CPU_THREADS",
+    }
+)
+_CHILD_ENV_DENY = ("TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "CREDENTIAL", "COOKIE", "AUTH")
+#: Set in the child whatever the parent has: offline, CPU only (owner ruling R5)
+#: and one inference thread.
+_CHILD_ENV_FORCED = {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "CUDA_VISIBLE_DEVICES": "",
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+}
+
+
+def child_env(parent: Mapping[str, str]) -> dict[str, str]:
+    """The sensor child's environment: an allowlist, never a copy of the parent's."""
+    env = {
+        name: value
+        for name, value in parent.items()
+        if (name.upper() in _CHILD_ENV_ALLOW or name.upper().startswith("LC_"))
+        and not any(word in name.upper() for word in _CHILD_ENV_DENY)
+    }
+    env.update(_CHILD_ENV_FORCED)
+    return env
+
+
 def _launch_child(vault_root: Path, cpu_allotment: float, judgement_allotment: int) -> Any:
-    env = dict(os.environ)
-    # CPU only until co-tenant GPU pressure detection ships (owner ruling R5).
-    env["CUDA_VISIBLE_DEVICES"] = ""
-    env["OMP_NUM_THREADS"] = "1"
-    env["TOKENIZERS_PARALLELISM"] = "false"
+    env = child_env(os.environ)
     args = [
         sys.executable,
         "-m",

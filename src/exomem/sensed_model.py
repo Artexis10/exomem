@@ -44,20 +44,28 @@ from .state_paths import vault_state_dir
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+#: 2 added each page's content hash and each pair's instrument key, so a request
+#: can tell a projection that no longer describes the live page.
+SCHEMA_VERSION = 2
 FILENAME = "projection.sqlite"
 
-#: Pairs a page may send to sensing. Past it, the page is `capped`: its first
-#: PAGE_CAP pairs in the fixed order are sensed, and its sensed items are
-#: served to owner-bound principals only (the cap ranks candidates that may
-#: include withheld pages).
+#: Pairs a page may send to sensing. Past it, the page is `capped`: only its
+#: first PAGE_CAP pairs in the fixed order are sensed. The cap counts every
+#: partner, withheld ones included, which is one reason sensed items are served
+#: to owner-bound principals only under a governed policy (`_audience_allowed`).
 PAGE_CAP = 128
-#: In-scope units whose stored vectors the cosine proposer compares. Past it the
-#: cosine proposer stands down, which is the same for every caller.
+#: In-scope units whose stored vectors the cosine proposer compares. Judged at
+#: each tick on the current count: over it, no page keeps a cosine pair; back
+#: under it, every page with units is proposed again (`_follow_cosine`).
 MAX_COSINE_UNITS = 16384
-#: The cosine threshold per encoder. It is fixed per pair, never top-k and
-#: never corpus-relative, and an encoder that is not listed proposes nothing.
-COSINE_THETA: dict[str, float] = {"BAAI/bge-m3": 0.72}
+#: The cosine threshold per encoder vector space, keyed by the fingerprint's
+#: space family (`model|pooling|l2`, `EncoderProfile.fingerprint()` without its
+#: artefact digest). It is fixed per pair, never top-k and never
+#: corpus-relative; an unlisted or unknown space proposes nothing, and a
+#: changed exact fingerprint re-reads every vector (`_follow_cosine`).
+COSINE_THETA: dict[str, float] = {"BAAI/bge-m3|cls|l2": 0.72}
+#: The cosine is compared, and recorded, at this precision.
+COSINE_DECIMALS = 6
 #: Authored link targets two pages must share to be a temporal same-subject pair.
 TEMPORAL_SHARED_TARGETS = 2
 #: Bounds on the per-request projections.
@@ -80,7 +88,8 @@ _TABLES = (
     CREATE TABLE IF NOT EXISTS pages (
         path TEXT PRIMARY KEY, sig TEXT, knowledge_date TEXT NOT NULL,
         lifecycle TEXT NOT NULL, supersession_json TEXT NOT NULL,
-        capped INTEGER NOT NULL DEFAULT 0, candidates INTEGER NOT NULL DEFAULT 0
+        capped INTEGER NOT NULL DEFAULT 0, candidates INTEGER NOT NULL DEFAULT 0,
+        content_hash TEXT
     )
     """,
     """
@@ -101,7 +110,7 @@ _TABLES = (
         selected INTEGER NOT NULL DEFAULT 1, queued INTEGER NOT NULL DEFAULT 0,
         verdict TEXT, direction TEXT, p REAL, reading_id TEXT, instrument_json TEXT,
         verdicts_json TEXT, fingerprint TEXT, consumed_hashes TEXT,
-        missing INTEGER NOT NULL DEFAULT 0
+        missing INTEGER NOT NULL DEFAULT 0, instrument_key TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS pairs_a ON pairs(path_a)",
@@ -158,7 +167,8 @@ class ProjectionStore:
         self.path = projection_path(self.vault_root)
 
     def connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        sensing_ledger.private_dir(self.vault_root)
+        sensing_ledger.private_file(self.path)
         conn = self._open()
         try:
             row = None
@@ -167,6 +177,7 @@ class ProjectionStore:
             if row is not None and row[0] != str(SCHEMA_VERSION):
                 conn.close()
                 self.wipe()
+                sensing_ledger.private_file(self.path)
                 conn = self._open()
             conn.execute("BEGIN IMMEDIATE")
             for statement in _TABLES:
@@ -179,6 +190,7 @@ class ProjectionStore:
         except sqlite3.DatabaseError:
             conn.close()
             self.wipe()
+            sensing_ledger.private_file(self.path)
             conn = self._open()
             for statement in _TABLES:
                 conn.execute(statement)
@@ -267,6 +279,8 @@ class PageFacts:
     path: str
     knowledge_date: str
     lifecycle: str
+    #: The graph's hash of the raw page it read: what `read_memory` hashes too.
+    content_hash: str | None
     units: tuple[Unit, ...]
     #: Pages joined to this one by a graph edge, either direction.
     neighbours: frozenset[str]
@@ -287,7 +301,7 @@ def _link_key(raw: str) -> str:
 def page_facts(graph: sqlite3.Connection, rel_path: str) -> PageFacts | None:
     """What the projection needs from one page, from the graph alone. None when absent."""
     node = graph.execute(
-        "SELECT origin_date, updated_date, lifecycle_status FROM graph_nodes "
+        "SELECT origin_date, updated_date, lifecycle_status, source_hash FROM graph_nodes "
         "WHERE path=? AND kind='file'",
         (rel_path,),
     ).fetchone()
@@ -345,6 +359,7 @@ def page_facts(graph: sqlite3.Connection, rel_path: str) -> PageFacts | None:
         path=rel_path,
         knowledge_date=knowledge_date,
         lifecycle=lifecycle,
+        content_hash=None if node[3] is None else str(node[3]),
         units=tuple(units[key] for key in sorted(units)),
         neighbours=frozenset(neighbours),
         supersession=frozenset(supersession),
@@ -374,41 +389,93 @@ class _VectorCache:
 _VECTORS = _VectorCache()
 
 
-def stored_unit_vectors(
-    vault_root: Path, rel_path: str
-) -> tuple[str | None, dict[str, tuple[str, Any]]]:
-    """`(encoder model, {unit_ref: (source text hash, normalised vector)})` for one page.
+def theta_for(fingerprint: str | None) -> float | None:
+    """The cosine threshold for an encoder fingerprint, or None (no proposals)."""
+    if not fingerprint:
+        return None
+    parts = str(fingerprint).split("|")
+    if len(parts) < 3:
+        return None
+    return COSINE_THETA.get("|".join(parts[:3]))
 
-    Read from the embeddings sidecar through a read-only, non-waiting
-    connection: never encoded, and never a connection that could migrate or
-    repair that sidecar. A seam: tests supply vectors.
+
+def _embeddings_readonly(vault_root: Path) -> sqlite3.Connection | None:
+    """The embeddings sidecar, read-only and non-waiting, or None.
+
+    Never a connection that could migrate or repair that sidecar.
     """
-    conn: sqlite3.Connection | None = None
+    from . import embedding_index, index_paths
+
+    path = index_paths.sidecar_path(Path(vault_root))
+    if not path.is_file():
+        return None
+    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=0, isolation_level=None)
     try:
-        import numpy as np
-
-        from . import embedding_index, index_paths, recall_space
-
-        path = index_paths.sidecar_path(Path(vault_root))
-        if not path.is_file():
-            return None, {}
-        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=0, isolation_level=None)
         conn.execute("PRAGMA query_only=ON")
         schema = conn.execute(
             "SELECT value FROM meta WHERE key = 'semantic_unit_schema_version'"
         ).fetchone()
-        if schema is None or str(schema[0]) != str(embedding_index.SEMANTIC_UNIT_SCHEMA_VERSION):
-            return None, {}
+    except sqlite3.Error:
+        conn.close()
+        return None
+    if schema is None or str(schema[0]) != str(embedding_index.SEMANTIC_UNIT_SCHEMA_VERSION):
+        conn.close()
+        return None
+    return conn
+
+
+def encoder_fingerprint(vault_root: Path) -> str | None:
+    """The exact fingerprint of the vector space the embeddings sidecar holds.
+
+    None when there is no sidecar, no recorded fingerprint (a legacy or
+    substitute space), or it cannot be read. A seam: tests supply one.
+    """
+    conn: sqlite3.Connection | None = None
+    try:
+        from . import recall_space
+
+        conn = _embeddings_readonly(vault_root)
+        if conn is None:
+            return None
         identity = recall_space.read_identity(conn, tables=("chunks", "semantic_unit_vectors"))
-        if identity is None or identity.dim <= 0:
-            return None, {}
+    except Exception:  # noqa: BLE001 - an unreadable space proposes nothing
+        log.debug("sensed model: encoder identity unavailable", exc_info=True)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+    return None if identity is None else identity.fingerprint
+
+
+def stored_unit_vectors(
+    vault_root: Path, rel_path: str, fingerprint: str | None
+) -> dict[str, tuple[str, Any]]:
+    """`{unit_ref: (source text hash, normalised vector)}` for one page.
+
+    Only when the sidecar still holds exactly `fingerprint`'s space. Read, never
+    encoded. A seam: tests supply vectors.
+    """
+    if not fingerprint:
+        return {}
+    conn: sqlite3.Connection | None = None
+    try:
+        import numpy as np
+
+        from . import recall_space
+
+        conn = _embeddings_readonly(vault_root)
+        if conn is None:
+            return {}
+        identity = recall_space.read_identity(conn, tables=("chunks", "semantic_unit_vectors"))
+        if identity is None or identity.fingerprint != fingerprint or identity.dim <= 0:
+            return {}
         rows = conn.execute(
             "SELECT unit_ref, content, vector FROM semantic_unit_vectors WHERE parent_path = ?",
             (rel_path,),
         ).fetchall()
     except Exception:  # noqa: BLE001 - absent or unreadable vectors propose nothing
         log.debug("sensed model: unit vectors unavailable", exc_info=True)
-        return None, {}
+        return {}
     finally:
         if conn is not None:
             conn.close()
@@ -427,17 +494,19 @@ def stored_unit_vectors(
             sensing.text_sha256(sensing.extract_text(content)),
             (vector / norm).astype(np.float32),
         )
-    return identity.model, out
+    return out
 
 
 def _cosine_matrix(
     conn: sqlite3.Connection, store_key: str
 ) -> tuple[list[str], list[str], Any] | None:
-    """Every stored in-scope vector: (unit refs, paths, matrix), or None past the bound.
+    """Every stored in-scope vector: (unit refs, paths, matrix), or None when empty.
 
-    Cached per process against the projection's unit generation; this process's
-    own writes update the cache in place (`_cache_page`), so a reseed does not
-    reload the whole matrix per page.
+    Whether the cosine proposer runs at all is decided once per tick on the
+    current state (`_follow_cosine`), never here mid-tick. Cached per process
+    against the projection's unit generation; this process's own writes update
+    the cache in place (`_bump_units`), so a reseed does not reload the matrix
+    per page.
     """
     import numpy as np
 
@@ -451,7 +520,7 @@ def _cosine_matrix(
                 vectors[str(unit_ref)] = (str(path), np.frombuffer(blob, dtype=np.float32))
             _VECTORS.vectors, _VECTORS.generation, _VECTORS.path = vectors, generation, store_key
         vectors = _VECTORS.vectors
-    if not vectors or len(vectors) > MAX_COSINE_UNITS:
+    if not vectors:
         return None
     refs = sorted(vectors)
     matrix = np.stack([vectors[ref][1] for ref in refs])
@@ -568,7 +637,11 @@ def propose(
                 unit = by_ref.get(mine_ref)
                 if unit is None:
                     continue
-                scores = stacked @ np.asarray(vectors[mine_ref], dtype=np.float32)
+                # Rounded first: the recorded cosine and the predicate agree exactly.
+                scores = np.round(
+                    (stacked @ np.asarray(vectors[mine_ref], dtype=np.float32)).astype(np.float64),
+                    COSINE_DECIMALS,
+                )
                 for index in np.nonzero(scores >= theta)[0]:
                     other_ref, other_path = refs[int(index)], paths[int(index)]
                     if other_path == facts.path:
@@ -586,7 +659,7 @@ def propose(
                             (facts.path, unit),
                             (other_path, other_units[other_ref]),
                             "cosine",
-                            round(float(scores[int(index)]), 6),
+                            float(scores[int(index)]),
                         )
                     )
     return found
@@ -676,10 +749,14 @@ def _instrument_view(identity: sensing.InstrumentIdentity) -> dict[str, Any]:
     }
 
 
-def _write_projection(conn: sqlite3.Connection, key: str, projected: Projected, priority: int) -> None:
+def _write_projection(
+    conn: sqlite3.Connection, key: str, projected: Projected, priority: int, instrument_key: str
+) -> None:
+    """Store one pair's projection, stamped with the active instrument key it
+    was made under: a request serves it only while that key is still active."""
     conn.execute(
         "UPDATE pairs SET state=?, priority=?, verdict=?, direction=?, p=?, reading_id=?, "
-        "instrument_json=?, verdicts_json=?, fingerprint=?, missing=?, "
+        "instrument_json=?, verdicts_json=?, fingerprint=?, missing=?, instrument_key=?, "
         "consumed_hashes=CASE WHEN ? THEN hash_a || ':' || hash_b ELSE consumed_hashes END "
         "WHERE pair_key=?",
         (
@@ -693,6 +770,7 @@ def _write_projection(conn: sqlite3.Connection, key: str, projected: Projected, 
             _dumps(list(projected.verdicts)) if projected.verdicts else None,
             projected.fingerprint,
             projected.missing,
+            instrument_key,
             1 if projected.state in _SERVED_STATES else 0,
             key,
         ),
@@ -789,9 +867,14 @@ def run_tick(
         ledger = sensing_ledger.open_readonly(vault_root)
         active = active_instruments()
         label_map_version = sensing.QUESTIONS[sensing.PAIR_RELATION].label_map_version
+        _follow_ledger(store, conn, ledger)
         _follow_active(store, conn, ledger, active, label_map_version, report, halt)
         _ingest(store, conn, ledger, active, label_map_version, report, halt)
-        _follow_pages(vault_root, store, conn, ledger, active, label_map_version, seen, report, halt, now)
+        cosine = _follow_cosine(vault_root, store, conn)
+        _follow_pages(
+            vault_root, store, conn, ledger, active, label_map_version, seen, report, halt, now,
+            cosine,
+        )
     except Exception:  # noqa: BLE001 - sensing never fails a dreamer tick
         log.warning("sensed model: tick failed", exc_info=True)
         report.stop = "error"
@@ -801,6 +884,74 @@ def run_tick(
         if conn is not None:
             conn.close()
     return report
+
+
+def _follow_ledger(store, conn, ledger) -> None:
+    """Reproject everything when the ledger is replaced, restored or removed.
+
+    The ingestion cursor is a position in ONE ledger; a ledger with another
+    identity (`sensing_ledger.genesis`) invalidates every consumed verdict, even
+    when it is as long as the old one.
+    """
+    genesis = None if ledger is None else sensing_ledger.genesis(ledger)
+    if _get_meta(conn, "ledger_genesis") == genesis:
+        return
+    with store.write(conn):
+        _set_meta(conn, "ledger_genesis", genesis)
+        # The full reprojection reads the whole new ledger, so ingestion resumes
+        # after the rows it has seen.
+        _set_meta(conn, "ledger_seq", 0 if ledger is None else sensing_ledger.max_seq(ledger))
+        _set_meta(conn, "reproject_after", "")
+
+
+def _follow_cosine(vault_root: Path, store, conn) -> tuple[str | None, float | None]:
+    """Decide the cosine proposer for this tick from the current state alone.
+
+    Returns `(fingerprint, theta)`, theta None when it stands down. Proposals
+    never depend on processing history:
+
+    * a changed encoder fingerprint discards every stored vector and cosine
+      pair, and every page with units is proposed again under the new space;
+    * past `MAX_COSINE_UNITS` stored vectors no page keeps a cosine pair, and
+      back under it every page with units is proposed again.
+    """
+    fingerprint = encoder_fingerprint(vault_root)
+    theta = theta_for(fingerprint)
+    stored_fp = _get_meta(conn, "cosine_encoder")
+    if stored_fp != fingerprint:
+        with store.write(conn):
+            conn.execute("UPDATE units SET vector=NULL WHERE vector IS NOT NULL")
+            _drop_cosine_pairs(conn)
+            _requeue_pages_with_units(conn)
+            _set_meta(conn, "cosine_encoder", fingerprint)
+            _set_meta(conn, "generation_units", int(_get_meta(conn, "generation_units") or 0) + 1)
+        _VECTORS.clear()
+    count = int(conn.execute("SELECT count(*) FROM units WHERE vector IS NOT NULL").fetchone()[0])
+    active = theta is not None and count <= MAX_COSINE_UNITS
+    if bool(_get_meta(conn, "cosine_active")) != active:
+        with store.write(conn):
+            if active:
+                _requeue_pages_with_units(conn)
+            else:
+                _drop_cosine_pairs(conn)
+            _set_meta(conn, "cosine_active", active)
+    return fingerprint, (theta if active else None)
+
+
+def _drop_cosine_pairs(conn: sqlite3.Connection) -> None:
+    paths = {
+        str(path)
+        for row in conn.execute("SELECT path_a, path_b FROM pairs WHERE proposer='cosine'")
+        for path in row
+    }
+    conn.execute("DELETE FROM pairs WHERE proposer='cosine'")
+    touched = _refresh_caps(conn, paths)
+    _refresh_selection(conn, touched)
+
+
+def _requeue_pages_with_units(conn: sqlite3.Connection) -> None:
+    """Make `_follow_pages` propose every page with units again."""
+    conn.execute("UPDATE pages SET sig=NULL WHERE path IN (SELECT DISTINCT path FROM units)")
 
 
 def _follow_active(store, conn, ledger, active, label_map_version, report, halt) -> None:
@@ -838,7 +989,7 @@ def _reproject(conn, ledger, pair, active, label_map_version) -> None:
     projected = project(ledger, input_key, (hash_a, hash_b), active, label_map_version, stale=stale)
     # Pairs that carried a served edge (open work) re-sense first.
     priority = 0 if (served_before or stale or projected.state == "migrating") else 1
-    _write_projection(conn, key, projected, priority)
+    _write_projection(conn, key, projected, priority, _active_key(active, label_map_version))
 
 
 def _ingest(store, conn, ledger, active, label_map_version, report, halt) -> None:
@@ -869,7 +1020,10 @@ def _ingest(store, conn, ledger, active, label_map_version, report, halt) -> Non
             _refresh_selection(conn, paths)
 
 
-def _follow_pages(vault_root, store, conn, ledger, active, label_map_version, seen, report, halt, now) -> None:
+def _follow_pages(
+    vault_root, store, conn, ledger, active, label_map_version, seen, report, halt, now, cosine
+) -> None:
+    fingerprint, theta = cosine
     known = {str(path): (None if sig is None else str(sig)) for path, sig in conn.execute("SELECT path, sig FROM pages")}
     changed = sorted(path for path, sig in seen.items() if known.get(path, "\0") != sig)
     removed = sorted(path for path in known if path not in seen)
@@ -899,10 +1053,9 @@ def _follow_pages(vault_root, store, conn, ledger, active, label_map_version, se
                 report.stop = "graph_unavailable"
                 return
             facts = page_facts(graph, rel)
-            model, vectors = (
-                stored_unit_vectors(vault_root, rel) if facts and facts.units else (None, {})
+            vectors = (
+                stored_unit_vectors(vault_root, rel, fingerprint) if facts and facts.units else {}
             )
-            theta = COSINE_THETA.get(model) if model else None
             with store.write(conn):
                 if facts is None:
                     _drop_page(conn, rel, store_key)
@@ -994,10 +1147,18 @@ def _apply_page(
     )
     conn.execute(
         "INSERT OR REPLACE INTO pages(path, sig, knowledge_date, lifecycle, supersession_json, "
-        "capped, candidates) VALUES (?, ?, ?, ?, ?, 0, 0)",
-        (rel, sig, facts.knowledge_date, facts.lifecycle, _dumps(sorted(facts.supersession))),
+        "capped, candidates, content_hash) VALUES (?, ?, ?, ?, ?, 0, 0, ?)",
+        (
+            rel,
+            sig,
+            facts.knowledge_date,
+            facts.lifecycle,
+            _dumps(sorted(facts.supersession)),
+            facts.content_hash,
+        ),
     )
     _bump_units(conn, store_key, rel, own_vectors)
+    instrument_key = _active_key(active, label_map_version)
     candidates = propose(conn, facts, own_vectors, theta, store_key)
     for key in sorted(candidates):
         candidate = candidates[key]
@@ -1035,7 +1196,7 @@ def _apply_page(
         )
         served_before = prior is not None and prior[0] in _SERVED_STATES
         priority = 0 if (served_before or stale or projected.state == "migrating") else 1
-        _write_projection(conn, key, projected, priority)
+        _write_projection(conn, key, projected, priority, instrument_key)
     partners = {c.a[0] for c in candidates.values()} | {c.b[0] for c in candidates.values()}
     touched = _refresh_caps(conn, partners | old_partners | {rel})
     _refresh_selection(conn, touched)
@@ -1095,7 +1256,16 @@ def queue_depth(vault_root: Path) -> int:
 # ----------------------------------------------------------------------
 
 
-def _owner_allowed(vault_root: Path) -> bool:
+def _audience_allowed(vault_root: Path) -> bool:
+    """Whether this request's principal may have sensed items at all.
+
+    Under a non-empty governed policy only an owner-bound principal does, the
+    rule `working_set.band_audience_allowed` applies to the vector band. The
+    proposal cap and the cosine bound both count withheld pages, so for any
+    other caller a withheld page could change what is served (review of slice
+    1, 2026-09-28). An ungoverned vault serves everyone, as an owner. Per-caller
+    serving returns with a cap that keeps the two-page property (task 8.3).
+    """
     from . import working_set
 
     return working_set.band_audience_allowed(Path(vault_root))
@@ -1105,6 +1275,12 @@ def _keep(vault_root: Path):
     from .governance import egress
 
     return egress.release_walk_filter(Path(vault_root))
+
+
+def _current_key() -> str:
+    return _active_key(
+        active_instruments(), sensing.QUESTIONS[sensing.PAIR_RELATION].label_map_version
+    )
 
 
 @dataclass(frozen=True)
@@ -1125,51 +1301,83 @@ class _Edge:
 
 
 class _View:
-    """One caller's released view of the projection, built once per request."""
+    """One caller's view of the projection, built once per request.
 
-    def __init__(self, conn: sqlite3.Connection, keep, owner: bool) -> None:
+    An edge is served only while the projection still describes both of its
+    pages as they are now (their live signature equals the one the projection
+    processed) and it was projected under the instruments active now. Anything
+    else is dropped and makes that page's evidence incomplete: the projection is
+    as of the last tick, and a request must not serve it as current.
+    """
+
+    def __init__(self, vault_root: Path, conn: sqlite3.Connection, keep, instrument_key: str) -> None:
+        self.vault_root = Path(vault_root)
         self.conn = conn
         self.keep = keep
-        self.owner = owner
-        self._pages: dict[str, tuple[str, str, frozenset[str], bool] | None] = {}
+        self.instrument_key = instrument_key
+        self._pages: dict[str, tuple[str, str, frozenset[str], str | None, str | None] | None] = {}
+        self._live: dict[str, bool] = {}
         self._edges: dict[str, list[_Edge]] = {}
+        self._dropped: dict[str, int] = {}
 
     def visible(self, path: str) -> bool:
         return self.keep is None or bool(self.keep(path))
 
-    def page(self, path: str) -> tuple[str, str, frozenset[str], bool] | None:
+    def page(self, path: str) -> tuple[str, str, frozenset[str], str | None, str | None] | None:
+        """`(knowledge date, lifecycle, supersession partners, sig, content hash)`."""
         if path not in self._pages:
             row = self.conn.execute(
-                "SELECT knowledge_date, lifecycle, supersession_json, capped FROM pages WHERE path=?",
+                "SELECT knowledge_date, lifecycle, supersession_json, sig, content_hash "
+                "FROM pages WHERE path=?",
                 (path,),
             ).fetchone()
             self._pages[path] = (
                 None
                 if row is None
-                else (str(row[0]), str(row[1]), frozenset(json.loads(row[2] or "[]")), bool(row[3]))
+                else (
+                    str(row[0]),
+                    str(row[1]),
+                    frozenset(json.loads(row[2] or "[]")),
+                    None if row[3] is None else str(row[3]),
+                    None if row[4] is None else str(row[4]),
+                )
             )
         return self._pages[path]
+
+    def live(self, path: str) -> bool:
+        """True when the projection processed `path` at the signature it has now."""
+        if path not in self._live:
+            page = self.page(path)
+            self._live[path] = page is not None and page[3] is not None and page[3] == _live_sig(
+                self.vault_root, path
+            )
+        return self._live[path]
 
     def edges(self, path: str) -> list[_Edge]:
         """This page's served edges to released pages, as this caller may see them."""
         if path in self._edges:
             return self._edges[path]
-        mine_page = self.page(path)
         out: list[_Edge] = []
-        if mine_page is not None and (self.owner or not mine_page[3]):
+        dropped = 0
+        if self.page(path) is not None:
             for row in self.conn.execute(
                 "SELECT pair_key, path_a, unit_a, path_b, unit_b, state, verdict, direction, p, "
-                "reading_id, instrument_json, verdicts_json FROM pairs "
+                "reading_id, instrument_json, verdicts_json, instrument_key FROM pairs "
                 "WHERE (path_a=? OR path_b=?) AND selected=1 AND state IN (?, ?) ORDER BY pair_key",
                 (path, path, *_SERVED_STATES),
             ):
-                key, path_a, unit_a, path_b, unit_b, state, verdict, direction, p, reading, inst, verdicts = row
+                (key, path_a, unit_a, path_b, unit_b, state, verdict, direction, p, reading, inst,
+                 verdicts, instrument_key) = row
                 mine_is_a = path_a == path
                 other = str(path_b if mine_is_a else path_a)
-                if not self.visible(other):
+                if not self.visible(other) or self.page(other) is None:
                     continue
-                other_page = self.page(other)
-                if other_page is None or (other_page[3] and not self.owner):
+                if (
+                    instrument_key != self.instrument_key
+                    or not self.live(path)
+                    or not self.live(other)
+                ):
+                    dropped += 1
                     continue
                 other_refines = verdict == "refines" and (
                     (direction == "ab" and not mine_is_a) or (direction == "ba" and mine_is_a)
@@ -1191,6 +1399,7 @@ class _View:
                     )
                 )
         self._edges[path] = out
+        self._dropped[path] = dropped
         return out
 
     def open_contradiction(self, edge: _Edge) -> bool:
@@ -1208,21 +1417,38 @@ class _View:
         return a is not None and b is not None and a[0] > b[0]
 
     def complete(self, path: str) -> bool:
-        page = self.page(path)
-        if page is None:
-            return True
-        if page[3] and not self.owner:
-            return True
+        """No edge of `path` was dropped as stale and none still needs a reading."""
+        self.edges(path)
+        if self._dropped.get(path):
+            return False
         for path_a, path_b in self.conn.execute(
             "SELECT path_a, path_b FROM pairs WHERE (path_a=? OR path_b=?) AND selected=1 "
             "AND (state IN (?, ?, ?) OR missing > 0)",
             (path, path, *_OPEN_STATES),
         ):
             other = str(path_b if path_a == path else path_a)
-            other_page = self.page(other)
-            if self.visible(other) and other_page is not None and (self.owner or not other_page[3]):
+            if self.visible(other) and self.page(other) is not None:
                 return False
         return True
+
+
+def _live_sig(vault_root: Path, rel: str) -> str | None:
+    """A page's live signature, encoded as the dreamer's `seen` map encodes it.
+
+    From the freshness registry when it is live (no I/O), else one stat.
+    """
+    from . import dreamer_delta, dreamer_store, freshness
+
+    path = Path(vault_root) / rel
+    found = freshness.live_signatures(Path(vault_root), dreamer_delta.SCOPE, [path])
+    if found is not None:
+        signature = found[0]
+    else:
+        try:
+            signature = freshness.stat_signature(path)
+        except OSError:
+            signature = None
+    return dreamer_store.encode_sig(signature)
 
 
 def _component(view: _View, start: str) -> int:
@@ -1325,21 +1551,38 @@ def _status(view: _View, path: str) -> dict[str, Any] | None:
     return status
 
 
-def status_for(vault_root: Path, path: str) -> dict[str, Any] | None:
+def _open_view(vault_root: Path) -> tuple[sqlite3.Connection, _View] | None:
+    """The caller's view, or None when sensing is off, the caller may not have
+    sensed items, or there is no projection. Sensing off reads no file."""
+    if not sensing.enabled():
+        return None
+    if not _audience_allowed(Path(vault_root)):
+        return None
+    conn = open_readonly(Path(vault_root))
+    if conn is None:
+        return None
+    return conn, _View(Path(vault_root), conn, _keep(Path(vault_root)), _current_key())
+
+
+def status_for(
+    vault_root: Path, path: str, *, content_hash: str | None = None
+) -> dict[str, Any] | None:
     """The point-of-use status for one released page, or None. Never raises.
 
-    Read-only and non-waiting. Counts released pages only, and ranks,
-    reorders and gates nothing.
+    Read-only and non-waiting. Counts released pages only, and ranks, reorders
+    and gates nothing. `content_hash` names the snapshot a read returned: the
+    status is attached only when the projection modelled exactly that snapshot.
     """
     try:
-        if not sensing.enabled():
+        opened = _open_view(Path(vault_root))
+        if opened is None:
             return None
-        conn = open_readonly(Path(vault_root))
-        if conn is None:
-            return None
+        conn, view = opened
         try:
-            view = _View(conn, _keep(Path(vault_root)), _owner_allowed(Path(vault_root)))
             if not view.visible(path):
+                return None
+            page = view.page(path)
+            if content_hash is not None and (page is None or page[4] != content_hash):
                 return None
             return _status(view, path)
         finally:
@@ -1350,24 +1593,21 @@ def status_for(vault_root: Path, path: str) -> dict[str, Any] | None:
 
 
 def for_packet(vault_root: Path, packet: dict[str, Any]) -> None:
-    """Attach a compact status to each resolved anchor page. Never raises.
+    """Attach a compact status to each activated anchor page. Never raises.
 
     After the packet is built, outside the packet cache. The line is charged
     to the packet's budget. Nothing is reordered.
     """
     try:
-        if not sensing.enabled() or packet.get("abstained"):
+        if packet.get("abstained") or not packet.get("anchors"):
             return
-        anchors = packet.get("anchors") or []
-        if not anchors:
+        opened = _open_view(Path(vault_root))
+        if opened is None:
             return
-        conn = open_readonly(Path(vault_root))
-        if conn is None:
-            return
+        conn, view = opened
         try:
-            view = _View(conn, _keep(Path(vault_root)), _owner_allowed(Path(vault_root)))
             budget = packet.setdefault("budget", {})
-            for anchor in anchors:
+            for anchor in packet.get("anchors") or []:
                 if anchor.get("status") not in _ACTIVATED:
                     continue
                 path = _anchor_path(anchor)
