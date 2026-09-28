@@ -66,8 +66,10 @@ class ResourceSettings:
 
 
 # limits.memory of one backup/restore/init Job pod (`_job_pod_spec` and the
-# cell-init container). The quota counts every non-terminal pod, so it must fit
-# a Job next to the serving pod's own limit.
+# cell-init container). The quota counts every non-terminal pod, so limits.memory
+# carries this much headroom over the serving pod's own limit. Only that key has
+# it: requests.cpu, requests.memory and limits.cpu still equal the serving pod's
+# values, so a Job next to the serving pod is bounded by those.
 JOB_MEMORY_LIMIT_MIB = 1024
 
 
@@ -190,8 +192,8 @@ def render_resource_quota(spec: CellManifestSpec) -> dict:
             "hard": {
                 "persistentvolumeclaims": "1",
                 "requests.storage": f"{spec.storage_gib}Gi",
-                # One serving pod, plus headroom for a backup/restore Job that
-                # briefly overlaps it during a hold transition.
+                # One serving pod, plus a second pod slot for a backup/restore Job
+                # that briefly overlaps it during a hold transition.
                 "pods": "2",
                 "requests.cpu": r.cpu_request,
                 "requests.memory": r.memory_request,

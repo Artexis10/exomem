@@ -359,9 +359,10 @@ def test_default_cell_memory_limit_is_3gi_with_a_1gi_request() -> None:
     assert resources["requests"]["memory"] == "1Gi"
 
 
-def test_quota_admits_the_serving_pod_plus_a_job_pod_under_a_hold() -> None:
-    """The quota counts every non-terminal pod, so its memory ceiling must cover
-    the serving pod's limit and a backup/restore Job's limit at the same time."""
+def test_quota_memory_limit_has_headroom_for_a_job_pod_beside_the_serving_pod() -> None:
+    """The quota counts every non-terminal pod, so limits.memory must cover the
+    serving pod's limit and a backup/restore Job's limit at the same time. This
+    pins the memory limit only; the CPU and request keys are not widened."""
     from cellctl.manifests import render_backup_job, render_restore_job
 
     spec = _spec()
