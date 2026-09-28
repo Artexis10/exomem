@@ -223,6 +223,8 @@ RETRIEVAL_CARRY_RARE_WINDOW = 4
 #: the turn named apart, because a packet is a bounded budget, not an index.
 RETRIEVAL_CARRY_MAX_PHRASES = 4
 RETRIEVAL_CARRY_MAX_DOMAINS = 3
+#: How many of a carried page's units are read to learn which categories it holds.
+CARRIED_CATEGORY_PROBE = 24
 #: There is deliberately no "N distinctive stems anywhere" path. One
 #: existed — three of a page's distinctive words, wherever they sat, named
 #: it — on the reasoning that a turn does not land on three by accident.
@@ -1612,7 +1614,9 @@ def _indexed_title(index: working_set_index.WorkingSetIndex | None, path: str) -
 
 
 def _carry_roles(
-    registry: context_roles.RoleRegistry, analysis: Any
+    registry: context_roles.RoleRegistry,
+    analysis: Any,
+    categories: frozenset[str] | None = None,
 ) -> tuple[dict[str, str], ...]:
     """The lenses a carried page is read through.
 
@@ -1624,11 +1628,20 @@ def _carry_roles(
     carried page is none of those. The turn's own cues order first so a turn
     asking about constraints gets constraints ahead of preferences, and the
     same `MAX_SELECTED_ROLES` ceiling an ordinary packet has applies here.
+
+    `categories` is what the page's own units are filed under, when the caller
+    knows it. A page holding a `current state` observation is read through the
+    lens that selects it, not through the first six lenses by priority that
+    happen to select nothing the page holds: the ceiling applies to lenses
+    that can answer, so a carried conclusion is never lost to a lens the page
+    has no material for.
     """
     text = str(getattr(analysis, "text", "") or "")
     cued: list[tuple[int, Any]] = []
     for role in registry.roles.values():
         if role.lane != "units":
+            continue
+        if categories is not None and not (set(role.categories) & categories):
             continue
         matched = bool(role.cues) and any(cue in text for cue in role.cues)
         cued.append((0 if matched else 1, role))
@@ -1641,6 +1654,48 @@ def _carry_roles(
         }
         for rank, role in cued[: context_roles.MAX_SELECTED_ROLES]
     )
+
+
+def _page_unit_categories(
+    vault_root: Path, path: str, *, freshness_snapshot: Any = None
+) -> frozenset[str] | None:
+    """The categories a page's own semantic units are filed under, or `None`
+    when they cannot be read (the caller then keeps the unfiltered lenses).
+
+    One bounded catalogue read of that page's units, the same call the units
+    lane makes, with no category constraint."""
+    try:
+        from . import find as find_module
+        from . import ranking_config, structured_filters
+
+        snapshot = freshness_snapshot or find_module.FreshnessSnapshot(Path(vault_root))
+        plan = structured_filters.compile_filter(
+            None, shortcuts=structured_filters.FilterShortcuts()
+        )
+        hits = find_module._find_semantic_units(
+            Path(vault_root),
+            query="",
+            limit=CARRIED_CATEGORY_PROBE + 1,
+            scope="kb",
+            plan=plan,
+            snapshot=snapshot,
+            prefer_active=True,
+            config=ranking_config.DEFAULT_RANKING,
+            mode="keyword",
+            degraded_out=None,
+            failed_out=None,
+            allowed_parent_paths={path},
+            recall_checkpoint=snapshot.recall_checkpoint("kb"),
+            repair=False,
+            max_catalog_candidates=CARRIED_CATEGORY_PROBE + 1,
+            truncated_out=[],
+        )
+    except Exception:  # noqa: BLE001 - a probe that fails keeps the unfiltered lenses
+        log.debug("activation carried page category probe failed for %s", path, exc_info=True)
+        return None
+    found = {str(getattr(hit, "category", "") or "") for hit in hits}
+    found.discard("")
+    return frozenset(found) or None
 
 
 def _carried_packet(
@@ -1724,11 +1779,10 @@ def _carried_packet(
     block.
     """
     paths = tuple(dict.fromkeys(str(item[0]) for item in (pages or (page,))))
-    roles = _carry_roles(registry, analysis)
-    carried_anchors, items, missing, current_state = _carried_material(
+    carried_anchors, items, missing, current_state, roles = _carried_material(
         vault_root,
         paths=paths,
-        roles=roles,
+        analysis=analysis,
         registry=registry,
         purpose=purpose,
         timings=timings,
@@ -1770,7 +1824,7 @@ def _carried_material(
     vault_root: Path,
     *,
     paths: Sequence[str],
-    roles: Sequence[Mapping[str, str]],
+    analysis: Any,
     registry: context_roles.RoleRegistry,
     purpose: str | None,
     timings: Any,
@@ -1784,6 +1838,7 @@ def _carried_material(
     tuple[LaneItem, ...],
     tuple[dict[str, Any], ...],
     tuple[Mapping[str, Any], ...],
+    tuple[dict[str, str], ...],
 ]:
     """The anchor entries and lane material for each page in `paths`.
 
@@ -1798,7 +1853,13 @@ def _carried_material(
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
     states: list[Mapping[str, Any]] = []
+    used_roles: dict[str, dict[str, str]] = {}
     for path in paths:
+        roles = _carry_roles(
+            registry,
+            analysis,
+            _page_unit_categories(vault_root, path, freshness_snapshot=freshness_snapshot),
+        )
         carried = working_set_resolve.ResolvedAnchor(
             anchor_id=path,
             path=path,
@@ -1852,8 +1913,10 @@ def _carried_material(
         anchors.append(carried)
         items.extend(got)
         states.extend(current_state)
+        for role in roles:
+            used_roles.setdefault(role["id"], dict(role))
         missing.extend(gap for gap in gaps if gap not in missing)
-    return tuple(anchors), tuple(items), tuple(missing), tuple(states)
+    return tuple(anchors), tuple(items), tuple(missing), tuple(states), tuple(used_roles.values())
 
 
 def _follow_up_packet(
@@ -2646,10 +2709,10 @@ def _named_beside(
     if not domains:
         return (), (), ()
     try:
-        carried, items, missing, _state = _carried_material(
+        carried, items, missing, _state, _roles = _carried_material(
             vault_root,
             paths=tuple(path for path, _score in domains),
-            roles=_carry_roles(registry, analysis),
+            analysis=analysis,
             registry=registry,
             purpose=purpose,
             timings=timings,

@@ -205,3 +205,16 @@ as such, never presented as current.
 - **WHEN** a turn names an organisation entity and a decision note links to that entity
 - **THEN** the packet serves the decision unit with `provenance.category: "decision"`
   and its parent page, and serves no decision note that does not link to the entity
+
+### Requirement: A carried page is read through the lenses its own units answer
+The retrieval carry SHALL read each carried page through the `units` lenses that select
+a category the page's own units are filed under, ordered by the turn's cues and then by
+priority and bounded by the same lens ceiling as any packet, so a page whose material
+sits under a category only a later lens selects is not read as empty. Where the page's
+categories cannot be read, every `units` lens applies as before.
+
+#### Scenario: A named page holding only a late lens's category is served
+- **WHEN** a turn names a current ordinary page by a distinctive phrase, and the page's
+  only units are filed under a category selected by a lens beyond the first six by
+  priority
+- **THEN** the packet carries the page with those units instead of abstaining
