@@ -77,6 +77,7 @@ from . import evolution as evolution_module
 from . import find as find_module
 from . import (
     find_types,
+    foreground_priority,
     query_log,
     retrieval_models,
     semantic_census,
@@ -6282,7 +6283,11 @@ def op_activate_context(
     # all. `session` has one other reader, the upkeep carrier below, where it
     # names the caller whose session start may carry one upkeep item.
     started = time.perf_counter()
-    with state_paths_module.resolution_scope():
+    # A foreground request: in-process bulk passes (a whole-vault graph
+    # rebuild) pause at their next unit while this runs, instead of taking the
+    # GIL back after every SQLite call the request makes (5-15x per stage,
+    # measured). Activation is read-only and never waits on bulk work.
+    with state_paths_module.resolution_scope(), foreground_priority.foreground():
         bound_token = None
         if readiness_module.runtime_managed() and request_budget_module.current() is None:
             bound_token = request_budget_module.set_current(

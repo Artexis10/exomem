@@ -29,6 +29,7 @@ from . import (
     access,
     call_spans,
     deferred_index,
+    foreground_priority,
     freshness,
     graph_sync,
     markdown_relations,
@@ -1543,9 +1544,16 @@ def _disk_vault_freshness(vault_root: Path) -> tuple[int, int, str]:
     Admission precedes the freshness stat, so this preserves the same no-read
     boundary as every other ordinary recall ingress while retaining the direct
     filesystem proof needed when watcher events are missed.
+
+    Inside the off-boundary whole-vault pass (`foreground_priority.bulk()`)
+    the walk yields to foreground requests; its two walks are a fifth of the
+    pass. Everywhere else, under a mutation boundary included, it never does.
     """
     return find_module._walk_freshness_key(
-        recall_policy.iter_recall_markdown(vault_root, vault_module.walk_vault_md(vault_root))
+        recall_policy.iter_recall_markdown(
+            vault_root,
+            foreground_priority.yielding_in_bulk(vault_module.walk_vault_md(vault_root)),
+        )
     )
 
 
@@ -3790,7 +3798,8 @@ class EpistemicGraphIndex:
                 attempts += 1
                 retarget = False
                 attempt_started = time.monotonic()
-                before_disk = _disk_vault_freshness(self.vault_root)
+                with foreground_priority.bulk():
+                    before_disk = _disk_vault_freshness(self.vault_root)
                 before = _recall_projection_identity(self.vault_root, disk_freshness=before_disk)
                 resolver = find_module.recall_resolver_snapshot(
                     self.vault_root, freshness=before_disk
@@ -3824,7 +3833,8 @@ class EpistemicGraphIndex:
                     continue
                 pass_started = True
                 report = self._rebuild_all_pass(resolver)
-                after_disk = _disk_vault_freshness(self.vault_root)
+                with foreground_priority.bulk():
+                    after_disk = _disk_vault_freshness(self.vault_root)
                 _note_whole_vault_pass(self.vault_root, time.monotonic() - attempt_started)
                 # Bound to names so the `else` below can say *which* of the three
                 # conditions moved without re-running either O(vault) proof.  The
@@ -4168,6 +4178,10 @@ class EpistemicGraphIndex:
             with conn:
                 if kb.is_dir():
                     for md in find_module._walk_md(kb):
+                        # The pass writes only its private sidecar, so a
+                        # pause here holds no reader; it holds only the
+                        # rebuild-owner claim a joining writer already waits on.
+                        foreground_priority.yield_to_foreground()
                         if self._index_path(
                             conn, md, resolver=resolver, commit=False
                         ):
