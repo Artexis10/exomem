@@ -90,8 +90,8 @@
 
 ## 10. Verification and closure
 
-- [ ] 10.1 Scoped suites green: dreamer, upkeep, claims, audit, egress twins and the new sensing tests.
-- [ ] 10.2 `uvx ruff check --select F src tests`, `validate-public-artifacts --repository` and `openspec validate --all --strict` pass.
+- [x] 10.1 Scoped suites green: dreamer, upkeep, claims, audit, egress twins and the new sensing tests.
+- [x] 10.2 `uvx ruff check --select F src tests`, `validate-public-artifacts --repository` and `openspec validate --all --strict` pass.
 - [ ] 10.3 An independent review of the slice-1 diff.
 - [x] 10.4 Record known misses in `design.md` from the real-pin fixture run.
 - [x] 10.5 Record measured sensor cost (CPU-s per judgement, child peak RSS, kill-to-exit time) in `design.md` from the real-pin probe.
