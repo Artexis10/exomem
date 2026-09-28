@@ -1192,3 +1192,47 @@ def test_an_incomplete_delta_reports_behind_and_schedules_one_reconcile(
     profile = heat.profile(vault)
     assert profile.state == "current"
     assert [item.path for item in profile.events if item.origin == "external"] == [PATTERN]
+
+
+def test_every_heat_connection_commits_without_a_full_fsync(tmp_path: Path) -> None:
+    """`synchronous` is per connection, not stored in the file.
+
+    Setting NORMAL only where the schema is created left every later
+    connection at FULL: each session mark written by an activation fsynced
+    its WAL, measured at ~50 ms per turn on WSL.
+    """
+    from exomem import working_set_heat as heat
+
+    first = heat._connect(tmp_path)
+    assert first is not None
+    first.close()
+    again = heat._connect(tmp_path)
+    assert again is not None
+    try:
+        assert again.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert again.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL
+    finally:
+        again.close()
+
+
+def test_a_repeated_abstention_mark_does_not_rewrite_the_sidecar(sidecar_vault) -> None:
+    """Every activation with a session wrote its mark, and each write moved the
+    sidecar token, so the next turn re-read and re-aggregated the whole ring
+    (~50 ms write + ~20 ms reload a turn, measured on a 4096-event ring). A
+    mark that changes nothing but its seen time inside the refresh window is
+    already what the sidecar says."""
+    heat.note_session(sidecar_vault, heat.SessionMark("s1", "w1", "codex", (SLED,), T0, T0))
+    token = heat.load(sidecar_vault).token
+    assert heat.note_session(sidecar_vault, heat.SessionMark("s1", "w1", "codex", (), 0, T0 + S))
+    assert heat.load(sidecar_vault).token == token
+    # Past the window the seen time is refreshed.
+    later = T0 + heat.SESSION_SEEN_REFRESH_NS + S
+    assert heat.note_session(sidecar_vault, heat.SessionMark("s1", "w1", "codex", (), 0, later))
+    assert heat.load(sidecar_vault).sessions["s1"].seen_ns == later
+    # A moved workspace, or a served thread, is always written.
+    assert heat.note_session(sidecar_vault, heat.SessionMark("s1", "w2", "codex", (), 0, later + S))
+    assert heat.load(sidecar_vault).sessions["s1"].workspace == "w2"
+    assert heat.note_session(
+        sidecar_vault, heat.SessionMark("s1", "w2", "codex", (SLED,), later + 2 * S, later + 2 * S)
+    )
+    assert heat.load(sidecar_vault).sessions["s1"].minted_ns == later + 2 * S
