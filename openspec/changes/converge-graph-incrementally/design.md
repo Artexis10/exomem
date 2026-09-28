@@ -384,7 +384,12 @@ revert those entries too, and a carried page whose row no longer matches the res
 explains nothing. Recording a fingerprint clears the record, and a whole-vault
 publication starts without one. Past the bound the record is dropped and repair takes
 the whole-vault path, as before. Affected pages and pages outside the indexed corpus
-never enter it. Otherwise the stored
+never enter it. A drain records or extends the record only when reverting its batch,
+the record, and every indexed page whose stored row disagrees with the resolver
+reproduces the stored fingerprint. Otherwise its resolver holds a change outside the
+indexed corpus under which it rewrote affected pages; if that change were later
+reverted, a kept record would explain the fingerprint again over those rows. The
+record is dropped instead, and the whole-vault path stays in charge. Otherwise the stored
 fingerprint stays, the proof keeps failing closed, and the whole-vault marker stays the
 repair. Nothing in the publication or availability contract moves.
 
