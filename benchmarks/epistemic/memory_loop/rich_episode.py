@@ -210,7 +210,7 @@ LATER_TURN = "Baking rye again this weekend. Anything I should bear in mind abou
 
 _OVEN = Select(entity_type="equipment", tokens=("tessel",))
 _SUPPLIER = Select(key="org_wrenfold")
-_RYE_PAGE = Select(kind="page", tokens=("rye",), created_only=True)
+_RYE_PAGE = Select(kind="page", any_tokens=("rye", "flour", "stoneground"), created_only=True)
 _CORRAN = Select(tokens=("corran",))
 _PRODUCT_MARKERS = ("12.5", "two harvests", "blend", "78%", "denser", "tessel")
 #: Relations that would misstate a product and its supplier.

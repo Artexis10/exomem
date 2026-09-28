@@ -36,8 +36,8 @@ pytestmark = pytest.mark.timeout(600)
 
 #: Frozen digests. Editing an episode, a world or an expectation moves one of
 #: these; re-pinning is a deliberate act that voids earlier capture runs.
-FIXTURE_SET_SHA256 = "c4b0ac656094b274c20cf9450feeb464ee5ea71d9ad78ad688a6d8dec8c98778"
-EVALUATOR_SHA256 = "db5a274cef22e1a3f761558af3f350d86c3a39fe37b43d83d991051cda8bca6a"
+FIXTURE_SET_SHA256 = "0e1470e28450f11799cbe1b15df15cf877292a1bcde5ded02b1a475ac2cb1bb7"
+EVALUATOR_SHA256 = "1f07c92812374a2f118d01402fb7369b72b3e2fb1928289635c70b3cdc722656"
 MODULE = Path(sc.__file__)
 
 
@@ -334,6 +334,16 @@ def test_scripted_org_and_site_capture_passes_and_a_misrouted_facet_fails(
 
     _edit(root, site, {"kind": "replace_string", "old_string": "valley.", "new_string": "valley, by Mill Street."})
     assert _check("org-and-site", root, world, before).failed() == ("org-and-site/office-not-on-site",)
+
+
+def test_a_site_named_without_the_shared_name_is_still_the_site(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(worlds, "org-and-site", tmp_path, monkeypatch)
+    before = read_state(root)
+    _entity(root, "site", "North Slope Orchard", "About forty acres on the north slope of Tarrow valley.")
+
+    assert _check("org-and-site", root, world, before).accepted
 
 
 def test_a_duplicate_organization_fails_the_org_and_site_episode(

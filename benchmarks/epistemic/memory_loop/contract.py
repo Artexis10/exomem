@@ -761,7 +761,8 @@ class Select:
 
     ``key`` names one pre-capture page. Otherwise ``kind`` chooses active
     entities (optionally of ``entity_type``) or any active page, whose names
-    carry every token; ``created_only`` keeps pages the capture created.
+    carry every token and, when given, one of ``any_tokens``;
+    ``created_only`` keeps pages the capture created.
     """
 
     key: str | None = None
@@ -769,6 +770,8 @@ class Select:
     tokens: tuple[str, ...] = ()
     kind: Literal["entity", "page"] = "entity"
     created_only: bool = False
+    #: At least one of these must appear in a name (beside every ``tokens``).
+    any_tokens: tuple[str, ...] = ()
 
     def matches(
         self, world: Mapping[str, str], state: VaultState, before: VaultState | None = None
@@ -784,6 +787,10 @@ class Select:
             for page in pool
             if (self.entity_type is None or page.entity_type == self.entity_type)
             and all(any(_has_marker(name, token) for name in page.names) for token in self.tokens)
+            and (
+                not self.any_tokens
+                or any(_has_marker(name, token) for name in page.names for token in self.any_tokens)
+            )
             and not (self.created_only and before is not None and page.path in before.pages)
         )
 

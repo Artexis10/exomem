@@ -345,7 +345,10 @@ EPISODES: tuple[Episode, ...] = (
 
 _ORG_MERROW = Select(key="org_merrow")
 _SITE_MERROW_KEY = Select(key="site_merrow")
-_ANY_MERROW_SITE = Select(entity_type="site", tokens=("merrow",))
+#: Every world holds at most one site before capture, so counting all sites
+#: is exact: a second site under any name is a duplicate, and a new site is
+#: found whatever the agent names it.
+_ANY_SITE = Select(entity_type="site")
 _ANY_MERROW_ORG = Select(entity_type="organization", tokens=("merrow",))
 _MERROW = FieldIs(tokens=("merrow",))
 _PELLOW = FieldIs(tokens=("pellow",))
@@ -390,7 +393,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
             EntityCount(
                 key="org-and-site/site-identity",
                 polarity="positive",
-                select=_ANY_MERROW_SITE,
+                select=_ANY_SITE,
                 exactly=1,
                 reason="The orchard is a physical place with durable use (the own-label lots come off it).",
             ),
@@ -411,20 +414,20 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
                 key="org-and-site/distinct-identities",
                 polarity="positive",
                 first=_ORG_MERROW,
-                second=_ANY_MERROW_SITE,
+                second=_ANY_SITE,
                 reason="The company and its orchard are separate referents.",
             ),
             Mentions(
                 key="org-and-site/site-facets",
                 polarity="positive",
-                select=_ANY_MERROW_SITE,
+                select=_ANY_SITE,
                 groups=(("north slope",), ("forty acres", "40 acres", "forty-acre", "40-acre")),
                 reason="The acreage and slope describe the place.",
             ),
             NoNewMention(
                 key="org-and-site/office-not-on-site",
                 polarity="negative",
-                select=_ANY_MERROW_SITE,
+                select=_ANY_SITE,
                 markers=("mill street",),
                 reason="The office belongs to the company, not the orchard.",
             ),
@@ -484,7 +487,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
             EntityCount(
                 key="multi-role/one-site",
                 polarity="positive",
-                select=_ANY_MERROW_SITE,
+                select=_ANY_SITE,
                 exactly=1,
                 reason="The orchard is the existing site.",
             ),
@@ -555,7 +558,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
             EntityCount(
                 key="shared-name/one-site",
                 polarity="positive",
-                select=_ANY_MERROW_SITE,
+                select=_ANY_SITE,
                 exactly=1,
                 reason="No identity is created to hold the claim.",
             ),
@@ -665,7 +668,7 @@ MANIFEST: tuple[EpisodeExpectations, ...] = (
             EntityCount(
                 key="operator-succession/one-site",
                 polarity="positive",
-                select=_ANY_MERROW_SITE,
+                select=_ANY_SITE,
                 exactly=1,
                 reason="No second site appears for the new operator.",
             ),

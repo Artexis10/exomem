@@ -30,8 +30,8 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 pytestmark = pytest.mark.timeout(600)
 
-FIXTURE_SHA256 = "e56cf8b151c48cb36cc82b6a0ef30a9eefe6de729db4b827ae905d95de379078"
-EVALUATOR_SHA256 = "07bfff402ec9e9eb80b80837dc26425ae8c846bb9385bd9fdeab11a71f3eb27f"
+FIXTURE_SHA256 = "894a2edea59de1e92444d176c1bea27d2c832e1c2946f42e0ae6d623f88194cb"
+EVALUATOR_SHA256 = "b854cdc410425f4a59a56f7f1757c3810351c34c43b0f459d5817cf5e015bcad"
 ACTOR_SHA256 = "b871a3e8f38fb59115bb96744b5392a1348866f4a4d3efb144961d7f20590e45"
 PRE_CAPTURE_SHA256 = "1b6ecad6bf192e1768b27bf3bd8d85bc1bf179542e8795e2b73fd8b2e79c53aa"
 
@@ -382,7 +382,14 @@ RYE_BODY = (
 )
 
 
-def _scripted_capture(root: Path, world, *, rye_body: str = RYE_BODY, outcome: str = "denser crumb, cause unclear") -> None:
+def _scripted_capture(
+    root: Path,
+    world,
+    *,
+    rye_body: str = RYE_BODY,
+    outcome: str = "denser crumb, cause unclear",
+    rye_title: str = "Wrenfold stoneground rye",
+) -> None:
     from exomem import commands, link
 
     link.link(
@@ -393,7 +400,7 @@ def _scripted_capture(root: Path, world, *, rye_body: str = RYE_BODY, outcome: s
         today=TODAY,
     )
     _edit(root, world.key_to_path["org_wrenfold"], "Stone mill in the next county.", "Stone mill in the next county. Delivers rye on Thursdays.")
-    rye = _note(root, "Wrenfold stoneground rye", "wrenfold-stoneground-rye", rye_body)
+    rye = _note(root, rye_title, rye_title.casefold().replace(" ", "-"), rye_body)
     _append_body(root, rye, "## Relations\n\n- about_entity [[Wrenfold Mill]]")
     collection = fx.BAKE_LOG.manifest_path
     snapshot = commands.op_record_memory(root, action="inspect", collection=collection)["snapshot"]
@@ -515,5 +522,15 @@ def test_a_blend_attributed_by_its_section_heading_keeps_its_source(
             "- [assumption] A blend of two harvests.\n"
         ),
     )
+
+    assert fx.check_capture(world, before, read_state(root)).accepted
+
+
+def test_a_product_home_titled_for_the_flour_is_still_the_product_home(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(root, world, rye_title="Wrenfold stoneground flour")
 
     assert fx.check_capture(world, before, read_state(root)).accepted
