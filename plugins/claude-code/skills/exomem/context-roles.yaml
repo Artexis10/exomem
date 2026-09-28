@@ -130,7 +130,7 @@ roles:
     description: What was decided or learned the last time this came up.
     lane: units
     categories: [decision, insight, finding]
-    anchor_defaults: [hub, project]
+    anchor_defaults: [hub, project, entity]
     cues: ["last time", "before", "previously", "we already"]
     evidence_cues: ["last time", "before", "previously"]
     evidence_categories: [decision, insight]

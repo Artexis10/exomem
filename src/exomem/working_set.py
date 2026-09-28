@@ -216,6 +216,13 @@ RETRIEVAL_CARRY_MIN_RARE_TERMS = 2
 #: is a phrase — "kelvane throughput ceiling", "quillon vantry window" —
 #: with room for the article or preposition a phrase carries.
 RETRIEVAL_CARRY_RARE_WINDOW = 4
+#: How many separate phrases a turn may name before it is read as a list
+#: rather than as several domains, and how many named pages a packet carries.
+#: A turn naming more phrases than this is one query over every pair, exactly
+#: the carry it always was; a packet carries the best-scored few of the pages
+#: the turn named apart, because a packet is a bounded budget, not an index.
+RETRIEVAL_CARRY_MAX_PHRASES = 4
+RETRIEVAL_CARRY_MAX_DOMAINS = 3
 #: There is deliberately no "N distinctive stems anywhere" path. One
 #: existed — three of a page's distinctive words, wherever they sat, named
 #: it — on the reasoning that a turn does not land on three by accident.
@@ -1423,6 +1430,84 @@ def _carry_by_retrieval(
     return hits[: working_set_resolve.MAX_ANCHORS]
 
 
+def _carry_groups_by_retrieval(
+    vault_root: Path,
+    *,
+    turn: str,
+    timings: Any = None,
+    freshness_snapshot: Any = None,
+    lexical_seconds: float = 0.0,
+    skip_terms: str = "",
+) -> tuple[tuple[tuple[str, float], ...], ...]:
+    """`_carry_by_retrieval`, one group of pages per phrase the turn named.
+
+    Same refusals, same budget rule, same bounded catalogue. `skip_terms` is
+    the words a resolved anchor already consumed, so a turn that resolved one
+    thing only asks about what else it said.
+    """
+    if budget_exhausted(
+        "working_set.carry", reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
+    ):
+        return ()
+    freshness = None
+    recall_checkpoint = None
+    if freshness_snapshot is not None:
+        try:
+            freshness = freshness_snapshot.for_scope("kb")
+            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+        except Exception:  # noqa: BLE001 - an unreadable snapshot carries nothing
+            log.debug("activation carry freshness unavailable", exc_info=True)
+            return ()
+    with _span(timings, "working_set.carry"):
+        from . import working_set_runtime
+
+        groups, state = working_set_runtime.carry_named_groups(
+            vault_root,
+            turn,
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
+            skip_terms=skip_terms,
+        )
+    if state != "available":
+        return ()
+    return groups
+
+
+def named_domains(
+    groups: Sequence[Sequence[tuple[str, float]]],
+    *,
+    exclude: frozenset[str] = frozenset(),
+) -> tuple[tuple[tuple[str, float], ...], tuple[tuple[str, float], ...]]:
+    """`(domains, contested)` from the pages each phrase of a turn named.
+
+    A phrase that names ONE page is a domain the turn named in its own right,
+    and every such page is a candidate: the number served follows what the
+    turn named, bounded by `RETRIEVAL_CARRY_MAX_DOMAINS` and ordered by score.
+    A phrase two or more pages answer to is contested: choosing between them
+    is the guess the compiler exists not to make, so none of them is a
+    domain, and the caller lists them if it has nothing else to serve.
+    `exclude` is pages already served by another route. A page named by one
+    phrase alone is a domain even if another phrase also reaches it.
+    """
+    domains: dict[str, float] = {}
+    contested: dict[str, float] = {}
+    for group in groups:
+        live = [(path, score) for path, score in group if path not in exclude]
+        if len(live) == 1 and live[0][1] > RETRIEVAL_CARRY_MIN_SCORE:
+            path, score = live[0]
+            domains[path] = max(score, domains.get(path, score))
+        else:
+            for path, score in live:
+                contested[path] = max(score, contested.get(path, score))
+    for path in domains:
+        contested.pop(path, None)
+    ordered = sorted(domains.items(), key=lambda item: (-item[1], item[0]))
+    return (
+        tuple(ordered[:RETRIEVAL_CARRY_MAX_DOMAINS]),
+        tuple(sorted(contested.items(), key=lambda item: (-item[1], item[0]))),
+    )
+
+
 def _page_lifecycle(vault_root: Path, rel_path: str) -> str:
     """A page's own normalised status, or `"active"` when it declares none.
 
@@ -1575,8 +1660,15 @@ def _carried_packet(
     status: str = working_set_resolve.RETRIEVAL_CARRIED_STATUS,
     evidence: tuple[str, ...] = ("retrieval",),
     carried_by: str = "retrieval",
+    pages: Sequence[tuple[str, float]] = (),
 ) -> dict[str, Any] | None:
     """One packet compiled from a single dominant page, marked as carried.
+
+    `pages`, when given, replaces `page` with the several pages a turn named
+    apart (`named_domains`): each is its own anchor entry of the same kind and
+    status, read on its own, and the packet is the same carried packet with
+    more than one anchor. A withheld page is removed by the egress guard like
+    any other, and the others survive it.
 
     `status`/`evidence`/`carried_by` default to the retrieval carry's own
     spelling (design D3): the page is reported as ONE anchor entry of kind
@@ -1612,14 +1704,16 @@ def _carried_packet(
     did before the carry existed and what the hook can still render a menu
     for.
 
-    The carried page is the packet's ONLY anchor, and that is load-bearing
+    The carried pages are the packet's ONLY anchors, and that is load-bearing
     rather than incidental. An `unresolved` abstention lists the turn's
     `partial` candidates in `anchors[]` so the agent can choose one; carrying
     them here as well would break the egress rule that makes a withheld
     carried page safe — `guard_working_set` turns a packet into a `withheld`
     abstention only when EVERY anchor was withheld, so surviving partials
-    would leave the packet claiming it resolved something after the one page
-    it was built from was removed. The cost is that a carried turn no longer
+    would leave the packet claiming it resolved something after the page
+    it was built from was removed. Several pages the turn named apart are each
+    built from their own units, so one of them surviving another's removal is
+    honest. The cost is that a carried turn no longer
     shows that menu; the material it shows instead is the trade.
 
     `recent_context` is passed straight through to `build_packet`, so a
@@ -1629,58 +1723,23 @@ def _carried_packet(
     even branched on, and every exit from `compile_packet` carries the same
     block.
     """
-    path, _score = page
+    paths = tuple(dict.fromkeys(str(item[0]) for item in (pages or (page,))))
     roles = _carry_roles(registry, analysis)
-    carried = working_set_resolve.ResolvedAnchor(
-        anchor_id=path,
-        path=path,
-        ref=None,
-        title=_indexed_title(index, path) or path,
-        kind="page",
-        lifecycle=_page_lifecycle(vault_root, path),
-        status=status,
-        evidence=evidence,
-        categories=(),
-        neighbourhood=frozenset({path}),
-    )
-
-    if budget_exhausted("working_set.current_state"):
-        raise BudgetExhausted("working_set.current_state")
-    with _span(timings, "working_set.current_state"):
-        # `page` is not a stateful kind, so this resolves to nothing today.
-        # Called anyway rather than skipped: the packet's `current_state[]`
-        # block is the one place a stateful carried page would have to
-        # appear, and a silent omission here would be the kind of gap that
-        # only shows up once `STATEFUL_KINDS` grows.
-        current_state = working_set_state.current_state_for(
-            vault_root,
-            anchors=(carried,),
-            purpose=purpose,
-            index_generation=index_token[1],
-            index_token=index_token,
-        )
-    items, missing = run_lanes(
+    carried_anchors, items, missing, current_state = _carried_material(
         vault_root,
-        anchors=(carried,),
+        paths=paths,
         roles=roles,
         registry=registry,
-        current_state=current_state,
+        purpose=purpose,
         timings=timings,
+        index=index,
+        index_token=index_token,
         freshness_snapshot=freshness_snapshot,
-        neighbourhood=frozenset({path}),
+        status=status,
+        evidence=evidence,
     )
     if not items:
         return None
-    for item in items:
-        if item.path == path:
-            # The lane's own reading first, the index's second, the path
-            # last: a lane that knew no title must not overwrite one the
-            # catalogue already holds. The LIFECYCLE is not taken from the
-            # lane at all — a lane item's lifecycle describes the UNIT, and
-            # the page's own status is already on the anchor, so letting it
-            # through here would report a draft page as active.
-            carried = replace(carried, title=item.title or carried.title or path)
-            break
 
     generation = {**generation, "carried_by": carried_by}
     if budget_exhausted("working_set.budget"):
@@ -1695,7 +1754,7 @@ def _carried_packet(
         # an agent-picked page) and in `generation.carried_by`.
         return build_packet(
             items=items,
-            anchors=(carried.as_dict(),),
+            anchors=tuple(anchor.as_dict() for anchor in carried_anchors),
             roles=roles,
             current_state=current_state,
             ambiguity=(),
@@ -1705,6 +1764,96 @@ def _carried_packet(
             status="resolved",
             recent_context=recent_context,
         )
+
+
+def _carried_material(
+    vault_root: Path,
+    *,
+    paths: Sequence[str],
+    roles: Sequence[Mapping[str, str]],
+    registry: context_roles.RoleRegistry,
+    purpose: str | None,
+    timings: Any,
+    index: working_set_index.WorkingSetIndex | None,
+    index_token: tuple[int, int, int],
+    freshness_snapshot: Any,
+    status: str = working_set_resolve.RETRIEVAL_CARRIED_STATUS,
+    evidence: tuple[str, ...] = ("retrieval",),
+) -> tuple[
+    tuple[working_set_resolve.ResolvedAnchor, ...],
+    tuple[LaneItem, ...],
+    tuple[dict[str, Any], ...],
+    tuple[Mapping[str, Any], ...],
+]:
+    """The anchor entries and lane material for each page in `paths`.
+
+    Each page is read on its own through the unit lanes, so one page's units
+    cannot crowd another's out of a shared per-role cap, and a page the lanes
+    read nothing off is left out rather than reported as an anchor with no
+    material (`_carried_packet`'s rule, applied per page). Empty items means
+    none of them read anything. Titles and lifecycles are taken as
+    `_carried_packet` documents.
+    """
+    anchors: list[working_set_resolve.ResolvedAnchor] = []
+    items: list[LaneItem] = []
+    missing: list[dict[str, Any]] = []
+    states: list[Mapping[str, Any]] = []
+    for path in paths:
+        carried = working_set_resolve.ResolvedAnchor(
+            anchor_id=path,
+            path=path,
+            ref=None,
+            title=_indexed_title(index, path) or path,
+            kind="page",
+            lifecycle=_page_lifecycle(vault_root, path),
+            status=status,
+            evidence=evidence,
+            categories=(),
+            neighbourhood=frozenset({path}),
+        )
+
+        if budget_exhausted("working_set.current_state"):
+            raise BudgetExhausted("working_set.current_state")
+        with _span(timings, "working_set.current_state"):
+            # `page` is not a stateful kind, so this resolves to nothing today.
+            # Called anyway rather than skipped: the packet's `current_state[]`
+            # block is the one place a stateful carried page would have to
+            # appear, and a silent omission here would be the kind of gap that
+            # only shows up once `STATEFUL_KINDS` grows.
+            current_state = working_set_state.current_state_for(
+                vault_root,
+                anchors=(carried,),
+                purpose=purpose,
+                index_generation=index_token[1],
+                index_token=index_token,
+            )
+        got, gaps = run_lanes(
+            vault_root,
+            anchors=(carried,),
+            roles=roles,
+            registry=registry,
+            current_state=current_state,
+            timings=timings,
+            freshness_snapshot=freshness_snapshot,
+            neighbourhood=frozenset({path}),
+        )
+        if not got:
+            continue
+        for item in got:
+            if item.path == path:
+                # The lane's own reading first, the index's second, the path
+                # last: a lane that knew no title must not overwrite one the
+                # catalogue already holds. The LIFECYCLE is not taken from the
+                # lane at all — a lane item's lifecycle describes the UNIT, and
+                # the page's own status is already on the anchor, so letting it
+                # through here would report a draft page as active.
+                carried = replace(carried, title=item.title or carried.title or path)
+                break
+        anchors.append(carried)
+        items.extend(got)
+        states.extend(current_state)
+        missing.extend(gap for gap in gaps if gap not in missing)
+    return tuple(anchors), tuple(items), tuple(missing), tuple(states)
 
 
 def _follow_up_packet(
@@ -2201,16 +2350,24 @@ def compile_packet(
             )
 
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
-        named = _carry_by_retrieval(
+        groups = _carry_groups_by_retrieval(
             root,
             turn=turn,
             timings=timings,
             freshness_snapshot=freshness_snapshot,
             lexical_seconds=lexical_seconds,
         )
-        carried = dominant_carry(named)
-        if carried is None and named:
-            # The turn named several pages. Nothing is carried, but an
+        domains, _contested = named_domains(groups)
+        every: dict[str, float] = {}
+        for group in groups:
+            for path, score in group:
+                every[path] = max(score, every.get(path, score))
+        named = tuple(
+            sorted(every.items(), key=lambda item: (-item[1], item[0]))
+        )[: working_set_resolve.MAX_ANCHORS]
+        if not domains and named:
+            # The turn named several pages by one phrase, or one by a phrase
+            # too weakly ranked to carry. Nothing is carried, but an
             # abstention that says nothing at all leaves the client with an
             # empty packet and no way to know a question would help. The
             # named pages are listed at `retrieval_named` so it can ask for
@@ -2223,15 +2380,18 @@ def compile_packet(
                 ambiguity=resolution.ambiguity,
                 recent_context=recent,
             )
-        if carried is not None:
-            # `None` back means the lanes read nothing off that page, so it
+        if domains:
+            # Every phrase that named exactly one page is a domain the turn
+            # named in its own right, so each is carried (`named_domains`).
+            # `None` back means the lanes read nothing off any of them, so it
             # falls through to the ordinary `unresolved` abstention below —
             # with the resolution's OWN anchors, the partial candidates the
             # hook renders as a menu, because this turn ended up exactly
             # where it would have without the carry.
             packet = _carried_packet(
                 root,
-                page=carried,
+                page=domains[0],
+                pages=domains,
                 analysis=analysis,
                 registry=registry,
                 limit=limit,
@@ -2245,6 +2405,73 @@ def compile_packet(
             )
             if packet is not None:
                 return packet
+
+    # Same-thread pages are candidate anchors for a turn that says what it is
+    # about (activation recall breadth). The short follow-up above asks the
+    # caller's own session tier only when the turn names nothing at all; a
+    # turn that names something in the page's own words, too far apart to read
+    # as a phrase the retrieval carry can pair, used to reach nothing and
+    # abstain. The same tier is asked here, and a page is a candidate only
+    # where the turn overlaps its own name (`thread_overlap`). Carried the
+    # follow-up's way: `partial`, marked `follow_up`, never resolved.
+    if (
+        not anchor
+        and not analysis.referential
+        and not analysis.follow_up
+        and resolution.status == "unresolved"
+        and attribution is not None
+        and attribution.session
+        and not any(
+            set(item.evidence) & working_set_resolve.WORDED_CONTACT_KINDS
+            for item in resolution.anchors
+        )
+    ):
+        thread_pages, from_token = follow_up_referents(
+            root,
+            rows=rows,
+            continuity_refs=continuity_refs,
+            continuity_minted_ns=continuity_minted_ns,
+            continuity_passed=passed,
+            profile=heat,
+            attribution=attribution,
+            marks=marks,
+        )
+        overlapping = tuple(
+            page
+            for page in thread_pages
+            if thread_overlap(
+                root, page, rows=rows, tokens=analysis.tokens, filler=conventions.referential.filler
+            )
+        )
+        if len(overlapping) == 1:
+            return _follow_up_packet(
+                root,
+                page=overlapping[0],
+                rows=rows,
+                evidence=("continuity",) if from_token else ("recency",),
+                analysis=analysis,
+                registry=registry,
+                conventions=conventions,
+                limit=limit,
+                purpose=purpose,
+                timings=timings,
+                generation=(
+                    {**generation, "continuity": "applied"} if from_token else generation
+                ),
+                index_token=index_token,
+                freshness_snapshot=freshness_snapshot,
+                index=index,
+                recent_context=recent,
+            )
+        if overlapping:
+            return abstained_packet(
+                reason="ambiguous",
+                max_chars=limit,
+                generation=generation,
+                anchors=(),
+                ambiguity=_hot_ambiguity(root, HotSet(members=frozenset(overlapping)), rows),
+                recent_context=recent,
+            )
 
     # The agent-pick fallback: `anchor` named no row in the activation index
     # (`override_candidates` above found nothing, so `resolution.status`
@@ -2329,13 +2556,35 @@ def compile_packet(
         timings=timings,
         freshness_snapshot=freshness_snapshot,
     )
+    # Concurrent contexts: pages the turn named beside what it resolved. An
+    # additive read that soft-fails; the resolved anchors' own packet is
+    # already complete without it.
+    beside_anchors: tuple[dict[str, Any], ...] = ()
+    if not anchor and not analysis.referential:
+        beside_anchors, beside_items, beside_missing = _named_beside(
+            root,
+            turn=turn,
+            resolved=lane_anchors,
+            analysis=analysis,
+            registry=registry,
+            purpose=purpose,
+            timings=timings,
+            index=index,
+            index_token=index_token,
+            freshness_snapshot=freshness_snapshot,
+            lexical_seconds=lexical_seconds,
+        )
+        if beside_anchors:
+            items = (*items, *beside_items)
+            missing = (*missing, *(gap for gap in beside_missing if gap not in missing))
+            generation = {**generation, "also_carried": "retrieval"}
 
     if budget_exhausted("working_set.budget"):
         raise BudgetExhausted("working_set.budget")
     with _span(timings, "working_set.budget"):
         packet = build_packet(
             items=items,
-            anchors=tuple(anchor.as_dict() for anchor in resolution.anchors),
+            anchors=(*(anchor.as_dict() for anchor in resolution.anchors), *beside_anchors),
             roles=roles,
             current_state=current_state,
             ambiguity=resolution.ambiguity,
@@ -2346,6 +2595,71 @@ def compile_packet(
             recent_context=recent,
         )
     return packet
+
+
+def _named_beside(
+    vault_root: Path,
+    *,
+    turn: str,
+    resolved: Sequence[Any],
+    analysis: Any,
+    registry: context_roles.RoleRegistry,
+    purpose: str | None,
+    timings: Any,
+    index: working_set_index.WorkingSetIndex | None,
+    index_token: tuple[int, int, int],
+    freshness_snapshot: Any,
+    lexical_seconds: float,
+) -> tuple[tuple[dict[str, Any], ...], tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
+    """The ordinary pages a turn named BESIDE the anchors it resolved.
+
+    "Should I book the autumn trip given the course schedule?" resolved the
+    trip and served only that, because the retrieval carry ran for a turn
+    that resolved nothing. A domain the turn also named, with a page of its
+    own, is a candidate in its own right (design D3 unchanged: it is carried,
+    never resolved, and marked so). The words a resolved anchor already
+    consumed are not asked about again, and neither are the anchor's own page
+    and neighbourhood, so a turn that names only what it resolved reads
+    nothing extra and asks no query at all.
+
+    Soft: an exhausted budget or a page the lanes read nothing off leaves the
+    resolved packet exactly as it was.
+    """
+    consumed: set[str] = set()
+    exclude: set[str] = set()
+    for anchor in resolved:
+        consumed.update(getattr(anchor, "name_contact", ()) or ())
+        for phrase in getattr(anchor, "exact_alias_phrases", ()) or ():
+            consumed.update(str(phrase).split())
+        for path in (getattr(anchor, "path", ""), *(getattr(anchor, "neighbourhood", ()) or ())):
+            if path:
+                exclude.add(str(path))
+    groups = _carry_groups_by_retrieval(
+        vault_root,
+        turn=turn,
+        timings=timings,
+        freshness_snapshot=freshness_snapshot,
+        lexical_seconds=lexical_seconds,
+        skip_terms=" ".join(sorted(consumed)),
+    )
+    domains, _contested = named_domains(groups, exclude=frozenset(exclude))
+    if not domains:
+        return (), (), ()
+    try:
+        carried, items, missing, _state = _carried_material(
+            vault_root,
+            paths=tuple(path for path, _score in domains),
+            roles=_carry_roles(registry, analysis),
+            registry=registry,
+            purpose=purpose,
+            timings=timings,
+            index=index,
+            index_token=index_token,
+            freshness_snapshot=freshness_snapshot,
+        )
+    except BudgetExhausted:
+        return (), (), ()
+    return tuple(anchor.as_dict() for anchor in carried), items, missing
 
 
 def _routing_targets(
@@ -2592,6 +2906,74 @@ def follow_up_referents(
     )
     from_token = bool(continuity_passed and pages and frozenset(pages) <= token_paths)
     return pages, from_token
+
+
+#: How many of a page's own name words (title, aliases, tags) a turn must
+#: share for the page to be about the turn: two, or every one when the name is
+#: shorter. And how many words of its body when the name alone is not enough.
+THREAD_OVERLAP_NAME = 2
+THREAD_OVERLAP_BODY = 3
+_THREAD_BODY_CHARS = 6000
+
+
+def _overlap_terms(text: str, ignored: frozenset[str]) -> frozenset[str]:
+    """The content words of `text`, folded the way the resolver folds a name."""
+    out: set[str] = set()
+    for token in working_set_index.tokens_of(working_set_index.normalize(text)):
+        term = working_set_index.fold_plural(working_set_index.fold_possessive(token))
+        if len(term) >= 3 and term not in ignored:
+            out.add(term)
+    return frozenset(out)
+
+
+def thread_overlap(
+    vault_root: Path,
+    path: str,
+    *,
+    rows: Sequence[Any],
+    tokens: Sequence[str],
+    filler: frozenset[str] = frozenset(),
+) -> bool:
+    """Does a turn overlap a same-thread page enough to be about it?
+
+    The page's NAME is its title, aliases and tags; a turn sharing two of
+    those words (or all of them, for a shorter name) is about it, and so is a
+    turn sharing three words of its body. Function words and the vault's
+    referential filler never count on either side. A bounded read of one page
+    the thread already holds (a cached parse, at most `HOT_PROFILE_K` of
+    them), never a search, so a page the turn merely resembles in general
+    vocabulary is not a candidate: the thread only makes a page ASKED, and
+    overlap decides whether it is the answer.
+    """
+    ignored = working_set_resolve._STOPWORDS | filler
+    turn_terms = _overlap_terms(" ".join(tokens), ignored)
+    if not turn_terms:
+        return False
+    row = next((item for item in rows if getattr(item, "path", "") == path), None)
+    name_parts: list[str] = []
+    body = ""
+    if row is not None:
+        name_parts.append(str(getattr(row, "title", "") or ""))
+        name_parts.extend(str(alias) for alias in getattr(row, "aliases", ()) or ())
+    try:
+        from . import find_corpus
+
+        root = Path(vault_root)
+        page = find_corpus.CACHE.get(root / path, root)
+    except Exception:  # noqa: BLE001 - an unreadable page is simply not a candidate
+        page = None
+    if page is not None:
+        frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
+        name_parts.append(str(frontmatter.get("title") or getattr(page, "title", "") or ""))
+        for key in ("aliases", "tags"):
+            value = frontmatter.get(key)
+            if isinstance(value, (list, tuple)):
+                name_parts.extend(str(item) for item in value)
+        body = str(getattr(page, "body", "") or "")[:_THREAD_BODY_CHARS]
+    name_terms = _overlap_terms(" ".join(name_parts), ignored)
+    if name_terms and len(turn_terms & name_terms) >= min(THREAD_OVERLAP_NAME, len(name_terms)):
+        return True
+    return len(turn_terms & _overlap_terms(body, ignored)) >= THREAD_OVERLAP_BODY
 
 
 def _hot_ambiguity(

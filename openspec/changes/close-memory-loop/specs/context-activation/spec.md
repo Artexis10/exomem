@@ -157,3 +157,51 @@ through a shared spelled word SHALL still compete exactly as before.
 #### Scenario: One shared name two hubs carry is still a question
 - **WHEN** a turn says only the words two same-kind hubs share
 - **THEN** the turn is `ambiguous` between them, as before
+
+#### Scenario: A domain that is an ordinary page is served beside the resolved anchor
+- **WHEN** a turn resolves an anchor and also names, by a distinctive phrase of its own,
+  a current ordinary page that is none of that anchor's neighbourhood
+- **THEN** the packet also carries that page as an anchor of kind `page` at status
+  `retrieval_carried`, marked `generation.also_carried = "retrieval"`, with its units;
+  the resolved anchor is unchanged and the page is never reported `resolved`
+- **AND** a turn that names nothing beyond what it resolved carries nothing extra
+
+#### Scenario: Several pages named apart are each carried
+- **WHEN** a turn that resolved no anchor names two pages by two phrases, each phrase
+  answering to exactly one page
+- **THEN** both pages are carried, bounded at three by score, and a phrase two pages
+  answer to is not carried and is never guessed between
+
+### Requirement: Same-thread pages are candidate anchors for an overlapping turn
+For a caller with its own session or thread, a turn that resolved no anchor and is not
+answered by the retrieval carry SHALL treat the pages that conversation's own tier holds
+(the pages listed in its `recent_context`) as candidates, gated by overlap with the
+turn: the turn shares at least two words of the page's own name (title, aliases, tags),
+or all of a shorter name, or at least three words of its body. A qualifying page SHALL
+be served as a `partial` anchor with its units, marked `generation.carried_by =
+"follow_up"`; two or more qualifying pages SHALL abstain `ambiguous`, listing them. A
+turn sharing nothing with the page is not about it, another conversation's work and a
+keyless caller's vault-wide heat are never asked, and nothing is ever resolved this way.
+
+#### Scenario: A follow-up in the page's own words is served the page
+- **WHEN** a keyed conversation worked on an ordinary page, and its next turn shares
+  two words of that page's title but names no anchor and forms no carry phrase
+- **THEN** the packet serves that page as a `partial` anchor with `carried_by:
+  "follow_up"` instead of abstaining `unresolved`
+
+#### Scenario: An unrelated follow-up is not served the thread
+- **WHEN** the same conversation's next turn shares nothing of the page's name or body
+- **THEN** the page is not served
+
+### Requirement: A resolved entity is served the conclusions linked to it
+An entity anchor SHALL be read through the precedents lens by default, so that the
+`decision`, `insight` and `finding` units of the pages typed-linked to the entity are
+served with their own provenance (category, parent page, supersession), inside the
+existing per-lane and packet budgets. A conclusion note that is not linked to the
+entity SHALL NOT be served on its account, and a superseded conclusion SHALL be marked
+as such, never presented as current.
+
+#### Scenario: A settled decision about an organisation is served with the entity
+- **WHEN** a turn names an organisation entity and a decision note links to that entity
+- **THEN** the packet serves the decision unit with `provenance.category: "decision"`
+  and its parent page, and serves no decision note that does not link to the entity
