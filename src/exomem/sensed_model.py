@@ -22,8 +22,9 @@ family. Deleting the file costs a reprojection from the ledger, and the
 reprojection is byte-identical.
 
 The request side (`status_for`, `for_packet`) recomputes everything it serves
-from released edges only. A withheld page equals an absent one. The sensed items
-of a page whose proposal cap binds are served to owner-bound principals only.
+from released edges only. A withheld page equals an absent one. Under a
+governed policy, sensed items are served to owner-bound principals only, because
+the proposal cap and the cosine bound count withheld pages (`_audience_allowed`).
 """
 
 from __future__ import annotations

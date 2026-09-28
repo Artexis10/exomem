@@ -72,7 +72,10 @@
 ## 8. Egress (slice 1)
 
 - [x] 8.1 Twin tests under a governed policy with a restricted principal. A withheld contradicting page, a withheld refining page, a withheld page bridging a contradiction component and a withheld chain member each give byte-identical read and activation output to the absent twin.
-- [x] 8.2 A capped page's sensed items are owner-only, in its own status and in its partners' counts. An owner sees them and a restricted caller does not.
+- [x] 8.2 Under a non-empty governed policy, sensed items are served to owner-bound principals only (`working_set.band_audience_allowed`), because the per-page cap and the cosine bound count withheld pages. A restricted caller gets no sensed field, and an owner gets its items. Pinned by the review twin, in which a withheld page pushes a visible hub over the cap and a restricted caller's read is byte-identical to the absent twin. A capped page's items still reach an owner. At request time, an edge whose page signature or instrument key is not live is dropped with `evidence_complete: false`, and a read of a snapshot the projection did not model carries no status.
+- [ ] 8.3 Before slice 5: replace the per-page cap with a per-page-pair cap, whose selection depends only on the pair's own two pages, and bound the cosine proposer without counting withheld units. That restores D5's two-page property for selection. Then serve sensed items per caller again, and turn the owner-only twins into per-caller twins.
+- [ ] 8.4 Slice 3: close-memory-loop `design.md:212` condition (a). Build a fixture on the sensed family's real pairs showing the label improves disposition at a false-positive rate no worse than the family's structural evidence.
+- [x] 8.5 Close-memory-loop `design.md:212` condition (b): no read regression in the write-burst probes. `tests/test_sensed_write_burst_probe.py` measures `read_memory` and `activate_context` on a synthetic vault under a write burst, with sensing off and on, interleaved. The numbers are recorded under "Measured" in `design.md`.
 
 ## 9. Later slices (specified here, built later)
 
@@ -92,6 +95,6 @@
 
 - [x] 10.1 Scoped suites green: dreamer, upkeep, claims, audit, egress twins and the new sensing tests.
 - [x] 10.2 `uvx ruff check --select F src tests`, `validate-public-artifacts --repository` and `openspec validate --all --strict` pass.
-- [ ] 10.3 An independent review of the slice-1 diff.
+- [ ] 10.3 An independent review of the slice-1 diff. The first round's findings (H1, M2, M3, L4–L9) are corrected on this branch, and its informational items are recorded under "Open items" in `design.md`. A re-review closes this task.
 - [x] 10.4 Record known misses in `design.md` from the real-pin fixture run.
 - [x] 10.5 Record measured sensor cost (CPU-s per judgement, child peak RSS, kill-to-exit time) in `design.md` from the real-pin probe.

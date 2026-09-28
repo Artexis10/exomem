@@ -156,12 +156,12 @@ Inference runs only in a supervised, disposable child process: `python -m exomem
 
 ### D5. Pair proposers
 
-The proposers read stored data only; the dreamer never encodes. Each predicate is a function of the two units and their own pages, so a pair's selection never depends on a third page. That is the property egress needs (D8).
+The proposers read stored data only; the dreamer never encodes. Each predicate is a function of the two units and their own pages, so whether a pair is proposed never depends on a third page. That is the property per-caller egress needs (D8). The bounds below break it for selection, and that is why slice 1 serves sensed items to owner-bound principals only under a governed policy.
 
 - **Cosine.** The stored unit vectors of the ranked encoder, where the vector's source text hash equals the unit's current text hash. A pair is proposed when its cosine is at least `θ = 0.72`: a fixed per-pair threshold, never top-k and never corpus-relative. θ is bound to the encoder fingerprint, and vectors of another encoder propose nothing.
 - **Structural co-occurrence.** Units on two pages joined by a graph edge in either direction.
 - **Temporal same-subject.** Units on two pages that share at least two authored link targets (normalised from each page's own raw targets) and carry different knowledge dates. One shared target is not enough: every note that links a hub would pair with every other, and a second shared subject is what marks the same subject.
-- **Bounds.** Only pairs across two pages are proposed, and identical texts are never paired. Every pair whose predicate holds is recorded, so recording never depends on order. A page sends at most 128 pairs to sensing, chosen in a fixed order: structural, then temporal, then cosine by descending similarity, then pair key. A pair is sensed only when both of its pages select it. A page whose candidates exceed the cap is `capped`, and its sensed items are served only to owner-bound principals (D8). The cosine matrix holds at most 16,384 in-scope units and is cached per process against the projection's unit generation. Past that bound the cosine proposer stands down, and the result is the same for every caller.
+- **Bounds.** Only pairs across two pages are proposed, and identical texts are never paired. Every pair whose predicate holds is recorded, so recording never depends on order. A page sends at most 128 pairs to sensing, chosen in a fixed order: structural, then temporal, then cosine by descending similarity, then pair key. A pair is sensed only when both of its pages select it. A page whose candidates exceed the cap is `capped`. The cap counts every partner, withheld pages included, so a pair's selection can turn on a third page. That breaks the two-page property above for the cap, and it is why sensed items are owner-only under a governed policy (D8) until a per-page-pair cap restores it (task 8.3). The cosine matrix holds at most 16,384 in-scope units and is cached per process against the projection's unit generation. Whether the bound holds is judged at each tick on the current unit count, never on processing history. Over it, no page keeps a cosine pair; back under it, every page with units is proposed again. The selection is therefore a function of (ledger, vault, pins). The count includes withheld pages' units, which is the same residual as the cap.
 
 ### D6. Deterministic projections
 
@@ -202,9 +202,13 @@ Every projection is a pure function of (ledger snapshot, graph, pages):
 
 ### D8. Egress
 
-- **Consumability.** A reading is consumable for a caller only when every input unit's page is released to that caller. Items, counts, components and chains are recomputed per request from released edges only.
-- **Parity.** A withheld page equals an absent one in the status line, its counts, its chain and its component. This holds because each pair's selection depends only on its own two pages (D5), and a reading is keyed by its inputs alone.
-- **Capped pages are owner-only.** A capped page's cap ranks candidates that may include withheld pages. Serving what survived it to a restricted caller would let a withheld page change that caller's view, so its sensed edges (in its own status and in the counts of pages paired with it) are served only to owner-bound principals, using the rule `working_set.band_audience_allowed` applies. This is the accepted residual: for a restricted caller, a capped page's items are absent whatever the withheld pages are.
+What slice 1 serves (review of slice 1, 2026-09-28):
+
+- **Audience.** Under a non-empty governed policy, sensed items are served to owner-bound principals only. That is the rule `working_set.band_audience_allowed` applies to the vector band, and a policy that cannot be read counts as governed. Every other principal receives no `epistemic_status` at all, on read or activation, whatever the page. An ungoverned vault serves everyone, as an owner.
+  - Why: the proposal cap (D5) and the cosine bound both count withheld pages. A withheld page could push a visible hub past `PAGE_CAP` and remove that hub's status for a restricted caller, while the absent twin still showed it. The review twin had a hub with 12 units, a later page with 10 units and a withheld one-unit page linking the hub: that gave 132 candidate pairs against 120. The real vault served nothing while the twin served "refined by 1 later note". The twin is now a test.
+- **Consumability.** For a principal that is served, a reading is consumable only when every input unit's page is released to it (`egress.release_walk_filter`). Items, counts, components and chains are recomputed per request from released edges only.
+- **Parity.** A restricted caller under a governed policy gets byte-identical output with or without the withheld page, because it gets no sensed field in either vault. The twin tests (task 8.1) pin that. Parity that still serves a restricted caller its visible items needs every pair's selection to depend only on its own two pages. That in turn needs a per-page-pair cap in place of the per-page cap, and a cosine bound that ignores withheld units. Task 8.3 builds it before slice 5; per-caller serving returns with it.
+- **Currency at request time.** A served edge must describe the live pages under the active instrument. A request drops an edge when either page's live signature differs from the signature the projection processed, or when the edge's instrument key is not the active key. A dropped edge contributes no item or count, and the page then reports `evidence_complete: false` (D3). `read_memory` attaches a status only when the snapshot it returned has the content hash the projection modelled for that page. Any other snapshot carries none, a historical one included.
 - **Timing residual.** Budget ordering is the accepted timing residual: when a pair is sensed can depend on the whole queue, withheld pages included. What is served never depends on it, and nothing is served for a pair without a current reading.
 
 ### D9. Placements (R4, R7)
@@ -249,7 +253,7 @@ Every projection is a pure function of (ledger snapshot, graph, pages):
 
 ## Risks and trade-offs
 
-- **A capped page is owner-only for restricted callers.** That is the price of a bound that ranks candidates across pages (D8). The cap is set well above an ordinary page's pairs.
+- **Sensed items are owner-only under governance.** The per-page cap and the cosine bound rank or count across pages, withheld ones included, so slice 1 serves no sensed item to a non-owner principal on a governed vault (D8). None exist on personal hosts today. Task 8.3 lifts this with a per-page-pair cap.
 - **A second disposable file.** The projection lives in `sensing/projection.sqlite`, beside the ledger, not in `dreamer.sqlite`. Sensed rows can be large, and inside the dreamer sidecar they would count against its size cap, which stops the alias and convention families: sensing would then suppress structural families, which R2 forbids. A separate file also leaves the sidecar's schema and delivery ledger untouched. The cost is one more file to reason about, and it is disposable.
 - **Model load cost on relaunch.** Terminating the child on every closed gate costs a model load at the next idle window. The CPU budget counts that load, so a chatty day senses less rather than costing more.
 - **CPU only.** Sensing a vault's backlog on CPU is slow, and deliberately so: the owner games on this machine (R5). The migration drain states `evidence_complete: false` rather than rushing.
@@ -265,8 +269,31 @@ Measured on 2026-09-28 against the exact pin (`b5113eb3…`, weights `b1dbf445�
   - At 300 CPU-s per hour, the CPU budget binds before the 600-judgement budget: about 250 judgements per hour after the load.
 - **Child process.** Peak RSS was 1,362 MiB (VmHWM). Terminating it on `quiet_mode` returned it in 0.21 s, and the supervisor charged the 33.4 CPU-s it had reported plus the wall time since.
 - **End to end.** A real supervised child on the sensing fixture vault produced "refined by 1 later note; 1 open contradiction" for the base note.
+- **Read latency under a write burst** (close-memory-loop `design.md:212`: no read regression in the write-burst probes; `tests/test_sensed_write_burst_probe.py`). The setup:
+  - A synthetic vault of 200 notes and 20 entity pages, each note with an in-scope finding and a link to an entity. A stub instrument senses it to completion, giving over 100 `current` pairs.
+  - The graph drain runs, three writers commit a revision every second, and one reader alternates `read_memory` and `activate_context`.
+  - Arms run interleaved (off, on, off, on) for 6 s each. The dreamer is off in both arms, because its gate is closed while writes land.
+  - The guard: p95 with sensing on stays within twice the control's plus 0.25 s.
+
+  Measured on 2026-09-28 in a 4-vCPU Linux container, three runs:
+
+  | Run | `read_memory` p50 / p95, off → on | `activate_context` p50 / p95, off → on | Statuses attached (on) |
+  |---|---|---|---|
+  | 1 | 57 / 399 ms → 157 / 363 ms | 720 / 2,235 ms → 1,444 / 3,391 ms | 8 |
+  | 2 | 84 / 276 ms → 56 / 245 ms | 977 / 2,685 ms → 596 / 1,839 ms | 13 |
+  | 3 | 56 / 327 ms → 65 / 185 ms | 1,283 / 1,832 ms → 533 / 1,373 ms | 16 |
+
+  Each arm had 7–18 samples per door, and the burst's contention dominates: the on arm was slower in run 1 and faster in runs 2 and 3. Without writers, `status_for` and `for_packet` cost 4–5 ms per call on the same vault. That was measured over 40 calls per arm: 169–200 ms in total with sensing on, and under 1 ms with it off. That is the whole per-read cost sensing adds. Every run passed the guard.
 - **CUDA hazard.** On this host, a visible CUDA device segfaulted the forward pass inside `torch.cuda.graphs.is_current`, even with `device="cpu"`. The child therefore hides CUDA (`CUDA_VISIBLE_DEVICES=""`) before anything imports torch, and so does the real-pin CI job.
 
 ## Known misses
 
 None. Every fixture, twins included, passes at the exact pin. Twins that fail in future must be recorded here and never enter the admission gate.
+
+## Open items
+
+Recorded from the slice-1 review. Nothing here is built yet.
+
+- **Guessable input hashes.** `text_sha256` and the `#unit-<sha256>` refs are unsalted hashes of the exact unit text. For a short unit, someone holding the ledger (or a served reading id) can confirm a guessed text. Revisit before the ledger leaves the machine in the task 9.3 export: salt per vault, or keep the hashes out of the exported family.
+- **Adopt-state wipes the ledger.** The operator's offline `--adopt-state vault` keeps the in-vault state copy and discards the external state root. The ledger ("durable", R3) lives only in the external root, so it goes too. Losing the ledger costs re-sensing, never correctness (D2). Handle it with the task 9.3 export and restore registration, which gives the ledger a portable-derived descriptor that adopt-state and restore carry over.
+- **Selection counts withheld pages.** The per-page cap and the cosine bound count withheld pages (D5, D8). Until task 8.3, sensed items are owner-only under a governed policy.

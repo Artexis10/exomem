@@ -184,9 +184,11 @@ Tensions on active or recent work SHALL reach the agent only through the existin
 
 ### Requirement: Sensed items are released per caller
 
-A reading SHALL be consumable for a caller only when every input unit's page is released to that caller. Items, counts, chains and components SHALL be recomputed per request from released edges. Under a governed policy, a withheld page SHALL be indistinguishable from an absent one in every sensed field, count, chain and component a restricted caller receives.
+Under a non-empty governed policy, or one that cannot be read, sensed items SHALL be served only to owner-bound principals. That is the audience rule the working-set vector band uses. Every other principal SHALL receive no sensed field on read or activation. An ungoverned vault SHALL serve every caller as an owner.
 
-The sensed items of a capped page, in its own status and in the counts of pages paired with it, SHALL be served only to owner-bound principals. The time at which a pair is sensed MAY depend on the whole queue; what is served SHALL NOT.
+For a principal that is served, a reading SHALL be consumable only when every input unit's page is released to that principal. Items, counts, chains and components SHALL be recomputed per request from released edges. Under a governed policy, a restricted caller's read and activation SHALL be byte-identical to the same request in a vault where the withheld page does not exist.
+
+At request time, an edge SHALL be dropped when either page's live signature differs from the one the projection processed, or when its instrument key is not the active key. A page that lost an edge this way SHALL report `evidence_complete: false`. A read SHALL carry a status only when the snapshot it returned is the one the projection modelled. The time at which a pair is sensed MAY depend on the whole queue; what is served SHALL NOT.
 
 #### Scenario: A withheld contradicting page is absent
 
@@ -196,12 +198,17 @@ The sensed items of a capped page, in its own status and in the counts of pages 
 #### Scenario: A withheld page breaks a component
 
 - **WHEN** a withheld page links two released pages in a contradiction component
-- **THEN** a restricted caller sees the two released pages in separate components, exactly as in the absent twin
+- **THEN** a restricted caller's read of either page is byte-identical to the same read in the absent twin
 
-#### Scenario: A capped page is owner-only
+#### Scenario: A withheld page cannot decide a visible page's cap
 
-- **WHEN** a page's proposal cap binds
-- **THEN** its sensed items are served to the owner and absent for every restricted caller
+- **WHEN** a withheld page's pairs push a visible page past its proposal cap
+- **THEN** a restricted caller's read of the visible page is byte-identical to the same read in the absent twin
+
+#### Scenario: A stale projection is not served as complete
+
+- **WHEN** the page that contradicted this page is edited so that it no longer contradicts, and this page is read before the next tick
+- **THEN** the open contradiction is not served, and the status reports `evidence_complete: false`
 
 ### Requirement: Instrument placement is local by default and opt-in elsewhere
 
