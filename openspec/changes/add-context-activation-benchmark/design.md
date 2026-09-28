@@ -150,6 +150,25 @@ in its place, and the recorded report carries both columns.
   referents, is pre-registered with a pinned digest before its first run, and
   reported whatever it shows. It is not one of the eighteen and does not
   enter their verdict.
+- **A7 — Ambiguity candidates in precision (2026-09-28).** The raw scorer
+  leaves ambiguity candidates out of precision, so a positive case can list a
+  wrong page as a candidate beside its gold and still pass (C7). Disclosed,
+  and the raw scorer stays frozen. The opt-in amendment puts every ambiguity
+  candidate of a non-twin case into the precision denominator, like a served
+  anchor. It is reported in its own column beside the raw and A2+A4 scores.
+  Twins are unchanged: a candidate outside a twin's gold is already a false
+  activation.
+- **A8 — A carried gold page counts (2026-09-28).** On a positive case, a gold
+  page served `retrieval_carried` with at least one of its own units
+  satisfies the expected `resolved` status, and every `#unit-` fragment of a
+  bound gold page is credited to that page in precision as well as recall
+  (extending A2, which amended recall only). The product labels carried
+  context honestly, and what the user needs is the right page and fact.
+  Reported in its own column beside the raw, A2+A4 and A7 scores.
+- **R3 and R4 — Reds kept (2026-09-28).** C2 and C9 stay red: a shared tag is
+  not corroboration on a real vault, and semantic corroboration is future
+  sensed-model work. C3 stays red: it relies on workspace context a cold run
+  lacks, and its keyed variant belongs in the continuity group.
 
 ## Risks / Trade-offs
 

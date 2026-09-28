@@ -12,11 +12,17 @@ this module's own source are digested by :func:`continuity_digest`; the digest
 is pinned in a commit before the group's first run, and the results are
 reported whatever they show.
 
-Version 2 (after the integrity review; v1's result is kept as history). Every
-served anchor, whatever its status, and every ambiguity candidate must be one
-of the case's referents, so the right page plus a wrong one fails; a keyless
-turn (K3) must serve nothing at all, partial anchors and ambiguity included.
-The cases and their gold are v1's. Each case is
+Version 3 (after the integrity recheck; v1's and v2's results are kept as
+history). Everything the packet serves must belong to one of the case's
+referent pages: every anchor, whatever its status, every ambiguity candidate,
+every unit, every pointer and every current-state entry. A unit or state
+entry of a referent page is fine; one of any other page fails. A keyless turn
+(K3) must serve nothing at all. Refs are compared on canonical page
+identity, read back from the vault before the fresh turn: a memory ref, a
+path, a path without the knowledge-base prefix and a ``#fragment`` of any of
+them all name the same page. So a page listed by path in a hot-page
+ambiguity is the same page as its anchor's memory ref. The cases and their
+gold are v1's. Each case is
 grounded in a scenario of the close-memory-loop ``memory-loop`` spec:
 
 * K1 -- "A fresh session continues its workspace's thread";
@@ -52,11 +58,14 @@ from epistemic.corpora.context_activation import BASE_DISTRACTOR_COUNT, CORPUS_I
 
 from membench.utility import context_activation_product as product
 
-GROUP_ID = "context-activation-continuity-v2"
+GROUP_ID = "context-activation-continuity-v3"
 
 #: A ``RecentEntry.page`` naming the recap page the case's own episode record
 #: returned, whose path is minted by the writer.
 RECAP = "$recap"
+
+#: The knowledge-base root every canonical page path starts with.
+KB_PREFIX = "Knowledge Base/"
 
 #: An ordinary Notes page of corpus v4, named by path: it is not a fixture key.
 ORDINARY_NOTE = "Knowledge Base/Notes/Kitchen/sourdough-starter-feeding.md"
@@ -227,6 +236,19 @@ class Identities:
     refs: Mapping[str, str]
     #: page -> its knowledge-base path, as the block lists it.
     paths: Mapping[str, str]
+    #: Every spelling of every page -> its knowledge-base path, read back
+    #: from canonical frontmatter before the fresh turn (a memory ref, the
+    #: path itself). Empty means paths only.
+    canonical: Mapping[str, str] = dataclasses.field(default_factory=dict)
+
+    def page(self, ref: str) -> str:
+        """The canonical page a ref names: its fragment dropped, a memory ref
+        or a prefix-less path resolved to the knowledge-base path."""
+        base = str(ref).partition("#")[0]
+        for spelling in (base, f"{KB_PREFIX}{base}"):
+            if spelling in self.canonical:
+                return self.canonical[spelling]
+        return base
 
 
 @dataclass(frozen=True)
@@ -235,6 +257,8 @@ class ContinuityScore:
     observed_status: str
     carried_by: str | None
     resolved: tuple[str, ...]
+    #: Every canonical page the packet serves (v3).
+    served: tuple[str, ...]
     recent: tuple[tuple[str, str], ...]
     #: check -> passed, for every check in :data:`CHECKS`.
     checks: tuple[tuple[str, bool], ...]
@@ -262,12 +286,37 @@ def score(
     resolved = {
         str(item.get("ref")): item for item in anchors if item.get("status") == "resolved"
     }
-    # Every page the packet names as a candidate: anchors of every status and
-    # ambiguity entries (v2, review F2/F3).
-    named_refs = {str(item.get("ref")) for item in anchors} | {
-        str(item.get("ref") if isinstance(item, Mapping) else item)
-        for item in packet.get("ambiguity") or ()
-    }
+    # Every page the packet serves, on canonical identity (v3): anchors of
+    # every status, ambiguity candidates, units, pointers and current-state
+    # entries. A unit whose own ref names no known page is placed by its
+    # provenance path.
+    def unit_page(unit: Mapping[str, Any]) -> str:
+        page = identities.page(str(unit.get("ref") or ""))
+        if page in identities.canonical.values():
+            return page
+        provenance = unit.get("provenance") or {}
+        path = provenance.get("path") if isinstance(provenance, Mapping) else None
+        return identities.page(str(path)) if path else page
+
+    def entries(key: str) -> list[Any]:
+        return [item for item in packet.get(key) or () if item is not None]
+
+    served_pages = (
+        {identities.page(str(item.get("ref"))) for item in anchors}
+        | {
+            identities.page(str(item.get("ref") if isinstance(item, Mapping) else item))
+            for item in entries("ambiguity")
+        }
+        | {unit_page(item) for item in entries("units") if isinstance(item, Mapping)}
+        | {
+            identities.page(str(item.get("ref") if isinstance(item, Mapping) else item))
+            for item in entries("pointers")
+        }
+        | {
+            identities.page(str(item.get("anchor") if isinstance(item, Mapping) else item))
+            for item in entries("current_state")
+        }
+    )
     generation = packet.get("generation") or {}
     carried_by = generation.get("carried_by")
     recent = tuple(
@@ -280,7 +329,6 @@ def score(
         return (identities.paths[entry.page], entry.why)
 
     names = {path: page for page, path in identities.paths.items()}
-    ref_names = {ref: page for page, ref in identities.refs.items()}
 
     def named(entries: tuple[tuple[str, str], ...]) -> list[tuple[str, str]]:
         return [(names.get(path, path), why) for path, why in entries]
@@ -292,10 +340,16 @@ def score(
     if not checks["status"]:
         reasons.append(f"expected status {case.expected_status!r}, observed {status!r}")
 
+    resolved_pages: dict[str, Mapping[str, Any]] = {}
+    for ref, item in resolved.items():
+        resolved_pages.setdefault(identities.page(ref), item)
     missing = [
         page
         for page in case.referents
-        if "recency" not in (resolved.get(identities.refs[page]) or {}).get("evidence", ())
+        if "recency"
+        not in (resolved_pages.get(identities.page(identities.refs[page])) or {}).get(
+            "evidence", ()
+        )
     ]
     checks["referents"] = not missing
     if missing:
@@ -305,28 +359,27 @@ def score(
     if not checks["carried_by"]:
         reasons.append(f"expected carried_by {case.carried_by!r}, observed {carried_by!r}")
 
-    wrong = [page for page in case.must_not_resolve if identities.refs[page] in named_refs]
+    wrong = [
+        page
+        for page in case.must_not_resolve
+        if identities.page(identities.refs[page]) in served_pages
+    ]
     checks["must_not_resolve"] = not wrong
     if wrong:
         reasons.append(f"served another thread's page(s): {wrong}")
 
-    allowed = {identities.refs[page] for page in case.referents}
+    allowed = {identities.page(identities.refs[page]) for page in case.referents}
     # Named portably: a fixture key or a path, never a writer-minted ref.
-    anchor_paths = {str(item.get("ref")): str(item.get("path") or "") for item in anchors}
+    page_names = {identities.page(ref): page for page, ref in identities.refs.items()}
     extra = sorted(
-        ref_names.get(ref) or anchor_paths.get(ref) or ("<memory ref>" if "://" in ref else ref)
-        for ref in named_refs - allowed
+        page_names.get(page) or ("<memory ref>" if "://" in page else page)
+        for page in served_pages - allowed
     )
     checks["served_subset"] = not extra
     if extra:
         reasons.append(f"served page(s) outside the referents: {extra}")
 
-    material = bool(
-        named_refs
-        or packet.get("units")
-        or packet.get("pointers")
-        or packet.get("current_state")
-    )
+    material = bool(served_pages)
     checks["serves_nothing"] = not (case.serves_nothing and material)
     if not checks["serves_nothing"]:
         reasons.append("a keyless turn served material")
@@ -354,6 +407,7 @@ def score(
         observed_status=status,
         carried_by=carried_by,
         resolved=tuple(sorted(resolved)),
+        served=tuple(sorted(served_pages)),
         recent=recent,
         checks=tuple((name, checks[name]) for name in CHECKS),
         failure_reasons=tuple(reasons),
@@ -363,6 +417,28 @@ def score(
 # --------------------------------------------------------------------------
 # The product run.
 # --------------------------------------------------------------------------
+
+
+def canonical_spellings(root: Path) -> dict[str, str]:
+    """Every knowledge-base page's spellings -> its path, read back from
+    canonical frontmatter: the path itself and, where the page has one, its
+    memory ref."""
+
+    from exomem import memory_refs, vault
+
+    out: dict[str, str] = {}
+    kb = Path(root) / KB_PREFIX.rstrip("/")
+    for page in sorted(kb.rglob("*.md")):
+        rel = page.relative_to(root).as_posix()
+        out[rel] = rel
+        try:
+            frontmatter, _body, _marker = vault.parse_frontmatter(page.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        exomem_id = str((frontmatter or {}).get("exomem_id") or "").strip()
+        if exomem_id:
+            out.setdefault(memory_refs.memory_ref(exomem_id), rel)
+    return out
 
 
 def _identities(tree: product.Tree, case: ContinuityCase) -> Identities:
@@ -460,6 +536,7 @@ def run_case(workdir: Path, case: ContinuityCase) -> CaseRun:
             if act.kind == "episode":
                 recap_path = str(result["source"]["path"])
         product.publish(tree.root)
+        canonical = canonical_spellings(tree.root)
         working_set_runtime.reset_caches_for_tests()
         packet = commands.op_activate_context(
             tree.root, turn=case.turn, session=case.session, workspace=case.workspace
@@ -469,6 +546,7 @@ def run_case(workdir: Path, case: ContinuityCase) -> CaseRun:
             refs={**identities.refs, RECAP: recap_path},
             paths={**identities.paths, RECAP: recap_path},
         )
+    identities = dataclasses.replace(identities, canonical=canonical)
     return CaseRun(case, identities, recap_path, packet, score(packet, case, identities))
 
 
@@ -500,6 +578,7 @@ def recorded_group(runs: tuple[CaseRun, ...]) -> dict[str, Any]:
                 "observed_status": run.score.observed_status,
                 "carried_by": run.score.carried_by,
                 "resolved": sorted(portable(ref, run) for ref in run.score.resolved),
+                "served": sorted(portable(page, run) for page in run.score.served),
                 "recent_head": [
                     [portable(path, run), why] for path, why in run.score.recent[:3]
                 ],
@@ -529,4 +608,5 @@ __all__ = [
     "run_group",
     "score",
     "scorer_source_digest",
+    "canonical_spellings",
 ]

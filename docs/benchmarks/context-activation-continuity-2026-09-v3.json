@@ -1,0 +1,158 @@
+{
+  "continuity_digest": "8c6eb8140e5929f59ed2ff7bd701f85b7dded2fc0c24e0e8c277a406b0a7624a",
+  "corpus_id": "context-activation-corpus-v4",
+  "group_id": "context-activation-continuity-v3",
+  "passed": 4,
+  "per_case": [
+    {
+      "carried_by": null,
+      "case_id": "K1",
+      "checks": {
+        "carried_by": true,
+        "must_not_resolve": true,
+        "recent_includes": true,
+        "recent_lead": true,
+        "referents": true,
+        "served_subset": true,
+        "serves_nothing": true,
+        "status": true
+      },
+      "failure_reasons": [],
+      "observed_status": "resolved",
+      "passed": true,
+      "recent_head": [
+        [
+          "c5_resource_profile",
+          "activated"
+        ],
+        [
+          "t5_available_resource",
+          "activated"
+        ],
+        [
+          "Knowledge Base/Planning/Other Workstream/_collection.md",
+          "planning"
+        ]
+      ],
+      "resolved": [
+        "c5_resource_profile"
+      ],
+      "scenario": "A fresh session continues its workspace's thread",
+      "served": [
+        "c5_resource_profile"
+      ]
+    },
+    {
+      "carried_by": null,
+      "case_id": "K2",
+      "checks": {
+        "carried_by": true,
+        "must_not_resolve": true,
+        "recent_includes": true,
+        "recent_lead": true,
+        "referents": true,
+        "served_subset": true,
+        "serves_nothing": true,
+        "status": true
+      },
+      "failure_reasons": [],
+      "observed_status": "resolved",
+      "passed": true,
+      "recent_head": [
+        [
+          "$recap",
+          "episode"
+        ],
+        [
+          "Knowledge Base/Planning/Other Workstream/_collection.md",
+          "planning"
+        ],
+        [
+          "Knowledge Base/Planning/Roadmap/_collection.md",
+          "planning"
+        ]
+      ],
+      "resolved": [
+        "c4_entity_profile"
+      ],
+      "scenario": "A recorded episode's page leads until newer work",
+      "served": [
+        "c4_entity_profile"
+      ]
+    },
+    {
+      "carried_by": null,
+      "case_id": "K3",
+      "checks": {
+        "carried_by": true,
+        "must_not_resolve": true,
+        "recent_includes": true,
+        "recent_lead": true,
+        "referents": true,
+        "served_subset": true,
+        "serves_nothing": true,
+        "status": true
+      },
+      "failure_reasons": [],
+      "observed_status": "unresolved",
+      "passed": true,
+      "recent_head": [
+        [
+          "c5_resource_profile",
+          "activated"
+        ],
+        [
+          "Knowledge Base/Planning/Other Workstream/_collection.md",
+          "planning"
+        ],
+        [
+          "Knowledge Base/Planning/Roadmap/_collection.md",
+          "planning"
+        ]
+      ],
+      "resolved": [],
+      "scenario": "A keyless turn never resolves another conversation's topic",
+      "served": []
+    },
+    {
+      "carried_by": "recency",
+      "case_id": "K4",
+      "checks": {
+        "carried_by": true,
+        "must_not_resolve": true,
+        "recent_includes": true,
+        "recent_lead": true,
+        "referents": true,
+        "served_subset": true,
+        "serves_nothing": true,
+        "status": true
+      },
+      "failure_reasons": [],
+      "observed_status": "resolved",
+      "passed": true,
+      "recent_head": [
+        [
+          "Knowledge Base/Notes/Kitchen/sourdough-starter-feeding.md",
+          "edited"
+        ],
+        [
+          "Knowledge Base/Planning/Other Workstream/_collection.md",
+          "planning"
+        ],
+        [
+          "Knowledge Base/Planning/Roadmap/_collection.md",
+          "planning"
+        ]
+      ],
+      "resolved": [
+        "Knowledge Base/Notes/Kitchen/sourdough-starter-feeding.md"
+      ],
+      "scenario": "A hot page that is not an anchor is carried on recency",
+      "served": [
+        "Knowledge Base/Notes/Kitchen/sourdough-starter-feeding.md"
+      ]
+    }
+  ],
+  "scorer_source_sha256": "1086854df0318f5138ab0849cac2ef8a839ddb00b5b8b1c55088645589882da8",
+  "total": 4
+}
