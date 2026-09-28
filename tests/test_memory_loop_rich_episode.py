@@ -5,9 +5,8 @@ specified before any write, and nothing in the fixture needs a private name.
 Both are pinned here, along with the fixture's two other obligations:
 
 **Expected red on the current runtime.** An untouched world fails every
-capture positive, and the public episode surface refuses the trial bake as a
-``records`` route ``append-record`` leaf, so it cannot run as an episode leaf
-today.
+capture positive. The trial bake itself runs through the public episode
+surface as a ``records`` route ``append-record`` leaf.
 
 **Not vacuous.** A scripted capture through the product's own writers
 (plumbing, not ordinary-agent evidence) satisfies every expectation, and each
@@ -262,6 +261,11 @@ def test_current_runtime_an_untouched_world_fails_every_capture_positive(built) 
     assert not failed & negatives
 
 
+# --------------------------------------------------------------------------- #
+# The trial bake as an episode Records leaf
+# --------------------------------------------------------------------------- #
+
+
 def _trial_bake_leaf(root: Path) -> dict:
     """The trial bake as an ``append-record`` episode leaf, in the shape the
     episode Records leaf takes."""
@@ -290,21 +294,22 @@ def _trial_bake_leaf(root: Path) -> dict:
     }
 
 
-def test_current_runtime_the_episode_surface_refuses_the_trial_bake_as_a_records_leaf(
+def test_the_episode_surface_runs_the_trial_bake_as_a_records_leaf(
     built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Expected red for the trial bake through ``episode_memory``: preparing
-    the trial bake on the ``records`` route with its ``append-record`` leaf is
-    refused, so only a direct ``record_memory`` write outside the episode can
-    land it. When the episode Records leaf is integrated this preparation is
-    accepted and this test fails: retire it and let the trial bake run as an
-    episode leaf."""
+    """The trial bake runs through ``episode_memory`` as a ``records`` route
+    ``append-record`` leaf: preparation accepts it, resume appends it through
+    the Records writer, and the fixture's own Records expectations hold. This
+    was the fixture's expected red until the episode Records leaf landed
+    (close-memory-loop 3.5)."""
 
-    from exomem import commands, episode_model
+    from exomem import commands, episode_workflow
     from exomem import schema as schema_module
     from exomem.governance.principal import owner_principal, request_scope
 
-    root, _world = _copy(built, tmp_path, monkeypatch)
+    root, world = _copy(built, tmp_path, monkeypatch)
+    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
+    before = read_state(root)
     _recap(
         root,
         subject="Bread week",
@@ -312,26 +317,40 @@ def test_current_runtime_the_episode_surface_refuses_the_trial_bake_as_a_records
         worked_on=["Baked the 78% rye test loaf"],
     )
     leaf = _trial_bake_leaf(root)
+    episode = "ep-" + "b2" * 16
 
-    with request_scope(owner_principal(surface="mcp")), pytest.raises(episode_model.EpisodeError) as refused:
-        commands.op_episode_memory(
-            root,
-            schema_module.load_source_schema(root),
-            action="prepare",
-            episode="ep-" + "b2" * 16,
-            candidate="trial-bake",
-            proposal={
-                "route": "records",
-                "title": "Rye test loaf",
-                "alternatives": [],
-                "evidence": "complete",
-                "reason": "A bake the episode observed.",
-                "leaves": [leaf],
-            },
-        )
+    def _episode(**kwargs: object) -> dict:
+        with request_scope(owner_principal(surface="mcp")):
+            return commands.op_episode_memory(
+                root, schema_module.load_source_schema(root), episode=episode, **kwargs
+            )
 
-    assert refused.value.code == "EPISODE_PROPOSAL_INVALID"
-    assert "no integrated curation leaf" in refused.value.reason
+    prepared = _episode(
+        action="prepare",
+        candidate="trial-bake",
+        proposal={
+            "route": "records",
+            "title": "Rye test loaf",
+            "alternatives": [],
+            "evidence": "complete",
+            "reason": "A bake the episode observed.",
+            "leaves": [leaf],
+        },
+    )
+    (candidate,) = prepared["candidates"]
+    assert [item["kind"] for item in candidate["leaves"]] == ["append-record"]
+    reviewed = _episode(action="disposition", candidate="trial-bake", disposition="routed", reason="Observed.")
+    resumed = _episode(
+        action="resume",
+        input_revision=reviewed["input_revision"],
+        journal_digest=reviewed["journal_digest"],
+    )
+
+    assert resumed["status"] == "ok", (resumed.get("blocked"), resumed.get("stale"))
+    check = fx.check_capture(world, before, read_state(root))
+    assert "rich-episode/trial-recorded" not in check.failed()
+    assert "rich-episode/bake-history-kept" not in check.failed()
+    assert "rich-episode/no-future-records" not in check.failed()
 
 
 # --------------------------------------------------------------------------- #
