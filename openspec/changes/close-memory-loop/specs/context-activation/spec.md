@@ -107,3 +107,36 @@ on any other page, SHALL be kept.
   lane also selects as a unit of that page
 - **THEN** the packet carries the lede once, by the page's ref, and no unit fragment of
   that page repeating it
+
+### Requirement: A Planning item anchor reports its item page
+Each active Planning item's `plan` anchor SHALL report the item's own canonical page as
+its ref, and the active-plans lane SHALL spell the item by that ref, so a turn that
+resolves to one intended item is served that item rather than the collection manifest
+it is filed under or an internal item id. The collection SHALL remain the anchor's home:
+items filed in one collection SHALL stay complementary, and an agent choice naming the
+collection SHALL still select every item in it. When the item's page cannot be read,
+the anchor SHALL report its home as before.
+
+#### Scenario: A turn about one item is served that item
+- **WHEN** a turn names one active item of a Planning collection that holds several
+- **THEN** the resolved `plan` anchor's ref and the active-plans unit are the item's
+  own page, and neither names the collection manifest
+
+#### Scenario: Items filed together stay complementary
+- **WHEN** a turn resolves two items of one Planning collection
+- **THEN** the turn is not `ambiguous` between them
+
+### Requirement: Retired revisions do not make a page's name ordinary
+The retrieval carry SHALL measure how distinctive a turn's word is without counting
+pages whose own status retires them (the statuses the carry already refuses to serve),
+so a page revised several times stays nameable by the words its retired revisions
+share. Current pages SHALL still count, and the corpus page total SHALL be unchanged.
+
+#### Scenario: A page revised three times is still carried
+- **WHEN** a turn names a page by a phrase that its three superseded revisions also
+  carry, and no other current page carries it
+- **THEN** the carry admits the current page alone
+
+#### Scenario: Current namesakes still make a phrase ordinary
+- **WHEN** four current pages carry the same phrase
+- **THEN** the phrase is not distinctive and no single page is carried

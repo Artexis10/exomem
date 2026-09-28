@@ -906,6 +906,8 @@ def _planning_lane(
             LaneItem(
                 role=role.id,
                 level="page",
+                # The item's own page where the index knows it (task 6.12),
+                # the internal item id otherwise.
                 ref=str(getattr(anchor, "ref", None) or getattr(anchor, "anchor_id", "")),
                 path=str(getattr(anchor, "path", "") or ""),
                 title=str(getattr(anchor, "title", "") or ""),

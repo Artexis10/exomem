@@ -1257,6 +1257,7 @@ def _planning_candidates(vault_root: Path, manifest: Any, rel: str) -> list[_Can
     rows = result.get("rows") if isinstance(result, Mapping) else None
     if not isinstance(rows, list):
         return []
+    item_pages = _planning_item_pages(vault_root, manifest)
     signature = _source_signature(Path(vault_root) / rel)
     out: list[_Candidate] = []
     for row in rows:
@@ -1267,13 +1268,19 @@ def _planning_candidates(vault_root: Path, manifest: Any, rel: str) -> list[_Can
         if not title:
             continue
         item_path = str(row.get("path") or "") if isinstance(row, Mapping) else ""
+        # The item's own page is what the anchor REPORTS (task 6.12): a turn
+        # about one intended item is served that item, never the manifest it
+        # is filed under. The collection stays the anchor's `path`, its home:
+        # items filed together are complementary, and naming the collection
+        # still selects every item in it.
+        item_page = item_pages.get(str(values.get("plan_id") or "")) or None
         kind_field = str(values.get("kind") or "").strip()
         tags = _strings(values.get("tags"))
         out.append(
             _Candidate(
                 anchor_id=f"plan:{rel}#{normalize(title)}",
                 path=item_path or rel,
-                ref=None,
+                ref=item_page,
                 title=title,
                 kind="plan",
                 lifecycle=normalize(values.get("lifecycle") or "active") or "active",
@@ -1285,6 +1292,32 @@ def _planning_candidates(vault_root: Path, manifest: Any, rel: str) -> list[_Can
             )
         )
     return out
+
+
+def _planning_item_pages(vault_root: Path, manifest: Any) -> dict[str, str]:
+    """`plan_id` -> the item's own canonical page, for one Planning collection.
+
+    Read through the same governed adapter and full-release gate the planning
+    query uses, so a page is named only where its row was served. Empty when
+    the collection cannot be read: the anchor then reports its home, as it
+    did before.
+    """
+    from . import record_formats, record_governance
+
+    try:
+        snapshot = record_formats.load_adapter(
+            Path(vault_root),
+            manifest,
+            authorize_path=record_governance.full_release_filter(Path(vault_root)),
+        ).read()
+    except Exception:  # noqa: BLE001 - an unreadable collection costs the item refs only
+        log.debug("activation index: planning item pages unavailable", exc_info=True)
+        return {}
+    return {
+        str(record.identity.key): str(record.source.path)
+        for record in snapshot.records
+        if record.identity.key and record.source.path
+    }
 
 
 #: Bounds a project anchor's own member-page neighbourhood — the number of
