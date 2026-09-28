@@ -57,7 +57,7 @@ Decide what stays out. `.git` history and a sync tool's trash are not notes. Att
 
 ```bash
 PRUNE=(-path ./.git -prune -o -path ./.trash -prune -o)
-cd "$VAULT" || return
+cd "$VAULT" || echo 'no such vault; stop before counting' >&2
 find . "${PRUNE[@]}" \( -type l -o ! -type f ! -type d \) -printf '%y\n' | sort | uniq -c
 EXPECT_FILES=$(find . "${PRUNE[@]}" -type f -printf '.' | wc -c)
 EXPECT_BYTES=$(find . "${PRUNE[@]}" -type f -printf '%s\n' | awk '{s += $1} END {print s + 0}')
@@ -123,8 +123,9 @@ set -o pipefail
 [[ "$RECIPIENT" =~ ^age1[02-9ac-hj-np-z]{58}$ ]] || echo 'not an age recipient; stop' >&2
 [[ "$IMPORT_ID" =~ ^[0-9a-f]{8}$ ]] || echo 'not an import ID; stop' >&2
 # Both commands are built here on purpose (SC2029): every value in them was checked above.
+inner="tar -C $(printf '%q' "$VAULT") --exclude=./.git --exclude=./.trash -cf - . | age -r $RECIPIENT | tee >(sha256sum >&2)"
 # shellcheck disable=SC2029
-ssh "$SOURCE" "bash -o pipefail -c 'tar -C $(printf '%q' "$VAULT") --exclude=./.git --exclude=./.trash -cf - . | age -r $RECIPIENT | tee >(sha256sum >&2)'" \
+ssh "$SOURCE" "bash -o pipefail -c $(printf '%q' "$inner")" \
   | ssh "$NODE" "cat > /var/lib/exomem-import/$IMPORT_ID/vault.tar.age && sha256sum /var/lib/exomem-import/$IMPORT_ID/vault.tar.age && stat -c '%s bytes' /var/lib/exomem-import/$IMPORT_ID/vault.tar.age"
 ```
 
@@ -163,15 +164,17 @@ test "$(kubectl get namespace "$NS" -o jsonpath='{.metadata.labels.exomem\.io/cl
 IMAGE=$(kubectl -n "$NS" get statefulset cell -o jsonpath='{.spec.template.spec.containers[0].image}')
 [[ "$IMAGE" =~ @sha256:[a-f0-9]{64}$ ]] || echo 'image is not pinned by digest; stop' >&2
 echo "image=$IMAGE"
+# Gates print why they fail, and every change below runs only when its gate passes.
 no_runtime_pod() {
-  test -z "$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=exomem-cell -o name)"
+  test -z "$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=exomem-cell -o name)" \
+    || { echo 'a runtime pod exists; stop' >&2; return 1; }
 }
 # wait_gone NAMESPACE SELECTOR: until no pod matches, for up to five minutes.
 wait_gone() {
   local tries=0
   while [ -n "$(kubectl -n "$1" get pods -l "$2" -o name)" ]; do
     tries=$((tries + 1))
-    [ "$tries" -le 60 ] || return 1
+    [ "$tries" -le 60 ] || { echo "pods matching $2 are still running; stop" >&2; return 1; }
     sleep 5
   done
 }
@@ -187,12 +190,14 @@ kubectl -n "$NS" get statefulset cell -o jsonpath='{.metadata.annotations}{"\n"}
 Both must print their "no" line. Then:
 
 ```bash
-kubectl -n exomem-cloud scale deployment cellctl --replicas=0
-wait_gone exomem-cloud app.kubernetes.io/name=cellctl
-kubectl -n "$NS" scale statefulset cell --replicas=0
-wait_gone "$NS" app.kubernetes.io/name=exomem-cell
-no_runtime_pod
+kubectl -n exomem-cloud scale deployment cellctl --replicas=0 \
+  && wait_gone exomem-cloud app.kubernetes.io/name=cellctl \
+  && kubectl -n "$NS" scale statefulset cell --replicas=0 \
+  && wait_gone "$NS" app.kubernetes.io/name=exomem-cell \
+  && no_runtime_pod && echo 'stopped; continue'
 ```
+
+Go on only after `stopped; continue`; otherwise follow [recovery](#if-a-step-fails-after-step-5).
 
 While cellctl is paused, no cell reconciles, backs up or upgrades. Keep the pause to this procedure. Only a deploy of the platform chart would bring cellctl back early, so run no platform deploy until step 7.
 
@@ -201,8 +206,7 @@ While cellctl is paused, no cell reconciles, backs up or upgrades. Keep the paus
 The helper pod runs the cell image with the cell's volume mounted. It has no API token, and no job-egress label, so the namespace's default-deny policy leaves it no network.
 
 ```bash
-no_runtime_pod
-cat <<EOF | kubectl apply -f -
+if no_runtime_pod; then kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -240,6 +244,7 @@ spec:
     - name: tmp
       emptyDir: {medium: Memory, sizeLimit: 64Mi}
 EOF
+fi
 kubectl -n "$NS" wait --for=condition=Ready pod/owner-restore --timeout=180s
 helper() { kubectl -n "$NS" exec -i owner-restore -- "$@"; }
 helper sh -c 'cat > /tmp/cloud_import.py' < "$WORK/cloud_import.py"
@@ -252,9 +257,8 @@ The free space printed must exceed `EXPECT_BYTES` plus 2 GiB. Now decrypt on the
 : "${EXPECT_FILES:?from step 1}"
 : "${EXPECT_BYTES:?from step 1}"
 STAGING="/data/.import-$IMPORT_ID"
-no_runtime_pod
 set -o pipefail
-if age -d -i "$KEY_DIR/identity" "$WORK/vault.tar.age" \
+if no_runtime_pod && age -d -i "$KEY_DIR/identity" "$WORK/vault.tar.age" \
   | helper python3 -I /tmp/cloud_import.py unpack --staging "$STAGING" \
       --max-bytes "$EXPECT_BYTES" --expect-files "$EXPECT_FILES" --expect-bytes "$EXPECT_BYTES"; then
   helper test -d "$STAGING/Knowledge Base" && echo 'unpacked; continue'
@@ -281,19 +285,20 @@ echo "notes only in the current Cloud vault: $(wc -l < "$KEY_DIR/only-in-prior.t
 Then swap. The prior vault and its derived state move into one directory; the custody directory beside the derived state stays where it is. The cell rebuilds its indexes on start.
 
 ```bash
-no_runtime_pod
-# The script runs in the pod; $1 is the import ID passed after it.
+# The script runs in the pod; $1 is the import ID passed after it. It checks
+# its own preconditions, so a paste after a failed unpack changes nothing.
 # shellcheck disable=SC2016
-helper sh -euc '
+no_runtime_pod && helper sh -euc '
   prior=/data/.restore-prior-$1
+  [ -d "/data/.import-$1/Knowledge Base" ] || { echo "no unpacked import; nothing moved" >&2; exit 1; }
+  [ -d /data/vault ] && [ ! -e "$prior" ] || { echo "vault missing or swap already run; nothing moved" >&2; exit 1; }
   mkdir -m 700 "$prior"
   mv /data/vault "$prior/vault"
   if [ -d /data/host/.local/state/exomem/state ]; then mv /data/host/.local/state/exomem/state "$prior/state"; fi
   if [ -d /data/host/.cache/exomem ]; then mv /data/host/.cache/exomem "$prior/cache"; fi
   mv "/data/.import-$1" /data/vault
   ls -A /data /data/host/.local/state/exomem
-' swap "$IMPORT_ID"
-kubectl -n "$NS" delete pod owner-restore --wait=true
+' swap "$IMPORT_ID" && kubectl -n "$NS" delete pod owner-restore --wait=true
 ```
 
 ## 7. Start the cell
@@ -335,7 +340,7 @@ Delete the prior directory only after cellctl's next scheduled backup of the cel
 
 ## If a step fails after step 5
 
-A failed gate prints why and leaves the shell as it was. Until the swap has run, the vault is unchanged, and recovery just brings everything back:
+A failed gate prints why and leaves the shell as it was. While `/data/.restore-prior-$IMPORT_ID` does not exist, the swap has not run and the vault is unchanged; recovery just brings everything back. If it does exist, run the [rollback](#rollback) first.
 
 ```bash
 kubectl -n "$NS" delete pod owner-restore --ignore-not-found --wait=true
@@ -345,19 +350,19 @@ kubectl -n exomem-cloud scale deployment cellctl --replicas=1
 kubectl -n exomem-cloud rollout status deployment/cellctl --timeout=300s
 ```
 
-If the helper pod is still there, remove any `/data/.import-$IMPORT_ID` through it before deleting it. If the swap has already run, use the rollback below instead, then these commands.
+If the helper pod is still there, check with `helper test ! -e "/data/.restore-prior-$IMPORT_ID"` and remove any `/data/.import-$IMPORT_ID` through it before deleting it.
 
 ## Rollback
 
 Before step 9, a restore that does not start or does not answer is reversed with the same stop and the same helper pod. Once the restored cell has started, it has written its own derived state, so that is removed before the prior vault and state move back:
 
 ```bash
-no_runtime_pod
 # The script runs in the pod; $1 is the import ID passed after it.
 # shellcheck disable=SC2016
-helper sh -euc '
+no_runtime_pod && helper sh -euc '
   prior=/data/.restore-prior-$1
-  mv /data/vault "/data/.rejected-$1"
+  [ -d "$prior/vault" ] || { echo "no prior vault to restore; nothing moved" >&2; exit 1; }
+  if [ -e /data/vault ]; then mv /data/vault "/data/.rejected-$1"; fi
   mv "$prior/vault" /data/vault
   rm -rf /data/host/.local/state/exomem/state /data/host/.cache/exomem
   if [ -d "$prior/state" ]; then mv "$prior/state" /data/host/.local/state/exomem/state; fi
