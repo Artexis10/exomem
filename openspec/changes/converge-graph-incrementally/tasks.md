@@ -404,11 +404,17 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
 
 ## 9. Replayed paths outside the recall delta (0.96.0 live latency)
 
-- [ ] 9.1 Red tests: a replayed receipt whose bytes match the stored row rebuilds
+- [x] 9.1 Red tests: a replayed receipt whose bytes match the stored row rebuilds
   nothing; a replayed stale page is drained incrementally; a replayed page the registry
   does not vouch for still falls back; every case is compared edge for edge with a fresh
   rebuild.
-- [ ] 9.2 Prove caller paths outside the delta against the stored rows and the live
+- [x] 9.2 Prove caller paths outside the delta against the stored rows and the live
   registry before `caller_path_outside_delta`; drop current paths, queue and drain stale
   ones for a standalone caller, and fall back only when unprovable.
-- [ ] 9.3 Scoped suites and gates green.
+- [x] 9.3 Scoped suites and gates green.
+  Evidence: `tests/test_graph_replay_currency.py` (5 tests; 4 red on 53ac15a2, the
+  unprovable-case guard green on both). Scoped graph, standby, index_sync and drain
+  suites: 774 passed, 13 skipped, 2 failed, both reproduced on 53ac15a2 on this host
+  (a latency median under load, and the rebuild-lock test that fails in this tmp dir).
+  `tests/test_graph_value_benchmark.py` hit the 60 s thread timeout in the scoped run
+  at load 37 and passes alone (163 passed).
