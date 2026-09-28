@@ -112,7 +112,10 @@ log = logging.getLogger(__name__)
 #: v10 (close-memory-loop step 5) reads a page's `learned_aliases` into its
 #: activation aliases and stores `learned_alias_rejected` in `index_meta`: an
 #: older sidecar holds no learned names and must rebuild once to read them.
-SCHEMA_VERSION = 10
+#: v11 (close-memory-loop, activation quality) stores an entity page's own
+#: `entity_type` in `anchor_entity_types`, the index field the context-activation
+#: spec names: the resolver asks whether a bare shared name belongs to people.
+SCHEMA_VERSION = 11
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -639,6 +642,8 @@ class AnchorRow:
     #: boilerplate note two hubs both link — reached by an alias or otherwise —
     #: makes them neither complementary nor related.
     anchor_neighbourhood: frozenset[str] = frozenset()
+    #: An entity page's own `entity_type`, normalised; empty otherwise.
+    entity_type: str = ""
 
     @property
     def neighbourhood(self) -> frozenset[str]:
@@ -664,6 +669,7 @@ class _Candidate:
     #: `learned_aliases` entries the index skipped on this page (see
     #: `learned_alias_verdicts`), summed into `index_meta` at write time.
     learned_rejected: int = 0
+    entity_type: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -998,6 +1004,9 @@ def _walk_page_entries(
                 "body": page.body,
                 "source_signature": _source_signature(path),
                 "learned_rejected": len(learned_rejected),
+                "entity_type": normalize(frontmatter.get("entity_type") or "")
+                if kind == "entity"
+                else "",
             }
         )
     return raw, outbound, names, project_members
@@ -1137,6 +1146,7 @@ def _finalize_anchor_aliases(
                 categories=_categories(sections, tags, semantic_registry=semantic_registry),
                 source_signature=entry["source_signature"],
                 learned_rejected=int(entry.get("learned_rejected") or 0),
+                entity_type=str(entry.get("entity_type") or ""),
             )
         )
     return candidates, term_owners
@@ -1826,6 +1836,10 @@ class WorkingSetIndex:
             "(anchor_id TEXT NOT NULL, category TEXT NOT NULL, PRIMARY KEY (anchor_id, category))"
         )
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS anchor_entity_types "
+            "(anchor_id TEXT PRIMARY KEY, entity_type TEXT NOT NULL)"
+        )
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS anchor_links ("
             "anchor_id TEXT NOT NULL, other_path TEXT NOT NULL, "
             "relation_type TEXT NOT NULL, direction TEXT NOT NULL, "
@@ -1949,6 +1963,7 @@ class WorkingSetIndex:
             "anchors",
             "anchor_aliases",
             "anchor_categories",
+            "anchor_entity_types",
             "anchor_links",
             "anchor_vectors",
             "anchor_term_rows",
@@ -2085,6 +2100,9 @@ class WorkingSetIndex:
             "SELECT anchor_id, category FROM anchor_categories ORDER BY anchor_id, category"
         ):
             categories.setdefault(anchor_id, []).append(category)
+        entity_types = dict(
+            conn.execute("SELECT anchor_id, entity_type FROM anchor_entity_types").fetchall()
+        )
         terms: dict[str, list[str]] = {}
         for anchor_id, term in conn.execute(
             "SELECT anchor_id, term FROM anchor_term_rows ORDER BY anchor_id, term"
@@ -2121,6 +2139,7 @@ class WorkingSetIndex:
                         other for other, _relation, _direction in links.get(anchor_id, ())
                     )
                     & anchor_paths,
+                    entity_type=str(entity_types.get(anchor_id) or ""),
                 )
             )
         return tuple(out)
@@ -2320,6 +2339,7 @@ class WorkingSetIndex:
                 "anchors",
                 "anchor_aliases",
                 "anchor_categories",
+                "anchor_entity_types",
                 "anchor_links",
                 "anchor_term_rows",
                 "page_names",
@@ -2355,6 +2375,12 @@ class WorkingSetIndex:
                     "INSERT OR IGNORE INTO anchor_categories (anchor_id, category) VALUES (?, ?)",
                     [(candidate.anchor_id, category) for category in candidate.categories],
                 )
+                if candidate.entity_type:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO anchor_entity_types (anchor_id, entity_type) "
+                        "VALUES (?, ?)",
+                        (candidate.anchor_id, candidate.entity_type),
+                    )
                 conn.executemany(
                     "INSERT OR IGNORE INTO anchor_term_rows (anchor_id, term) VALUES (?, ?)",
                     [(candidate.anchor_id, term) for term in candidate.terms],
