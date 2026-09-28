@@ -7,9 +7,16 @@ fresh session's first turn after earlier work, with gold for the
 recent-context block and for the referent the turn resolves. It is not one of
 the eighteen and never enters their verdict.
 
-Pre-registered. The cases, their gold and the scorer's checks are digested by
-:func:`continuity_digest`; the digest is pinned in a commit before the group's
-first run, and the results are reported whatever they show. Each case is
+Pre-registered. The cases, their gold, the scorer's checks and a sha256 of
+this module's own source are digested by :func:`continuity_digest`; the digest
+is pinned in a commit before the group's first run, and the results are
+reported whatever they show.
+
+Version 2 (after the integrity review; v1's result is kept as history). Every
+served anchor, whatever its status, and every ambiguity candidate must be one
+of the case's referents, so the right page plus a wrong one fails; a keyless
+turn (K3) must serve nothing at all, partial anchors and ambiguity included.
+The cases and their gold are v1's. Each case is
 grounded in a scenario of the close-memory-loop ``memory-loop`` spec:
 
 * K1 -- "A fresh session continues its workspace's thread";
@@ -45,7 +52,7 @@ from epistemic.corpora.context_activation import BASE_DISTRACTOR_COUNT, CORPUS_I
 
 from membench.utility import context_activation_product as product
 
-GROUP_ID = "context-activation-continuity-v1"
+GROUP_ID = "context-activation-continuity-v2"
 
 #: A ``RecentEntry.page`` naming the recap page the case's own episode record
 #: returned, whose path is minted by the writer.
@@ -177,20 +184,31 @@ CHECKS: tuple[str, ...] = (
     "referents",
     "carried_by",
     "must_not_resolve",
+    "served_subset",
     "serves_nothing",
     "recent_lead",
     "recent_includes",
 )
 
 
+def scorer_source_digest() -> str:
+    """sha256 of this module's source, line endings normalised: the checks'
+    logic, the runner and the prior acts' payloads, not only their names."""
+
+    source = Path(__file__).read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(source).hexdigest()
+
+
 def continuity_digest() -> str:
-    """The pre-registered identity of the group: cases, gold and checks."""
+    """The pre-registered identity of the group: cases, gold, checks and the
+    scorer's own source."""
 
     payload = {
         "group_id": GROUP_ID,
         "corpus_id": CORPUS_ID,
         "checks": list(CHECKS),
         "cases": [dataclasses.asdict(case) for case in CASES],
+        "scorer_source_sha256": scorer_source_digest(),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -241,12 +259,15 @@ def score(
 
     status = _status(packet)
     anchors = [item for item in packet.get("anchors") or () if isinstance(item, Mapping)]
-    served = {
-        str(item.get("ref")): item
-        for item in anchors
-        if item.get("status") in ("resolved", "retrieval_carried")
+    resolved = {
+        str(item.get("ref")): item for item in anchors if item.get("status") == "resolved"
     }
-    resolved = {ref: item for ref, item in served.items() if item.get("status") == "resolved"}
+    # Every page the packet names as a candidate: anchors of every status and
+    # ambiguity entries (v2, review F2/F3).
+    named_refs = {str(item.get("ref")) for item in anchors} | {
+        str(item.get("ref") if isinstance(item, Mapping) else item)
+        for item in packet.get("ambiguity") or ()
+    }
     generation = packet.get("generation") or {}
     carried_by = generation.get("carried_by")
     recent = tuple(
@@ -259,6 +280,7 @@ def score(
         return (identities.paths[entry.page], entry.why)
 
     names = {path: page for page, path in identities.paths.items()}
+    ref_names = {ref: page for page, ref in identities.refs.items()}
 
     def named(entries: tuple[tuple[str, str], ...]) -> list[tuple[str, str]]:
         return [(names.get(path, path), why) for path, why in entries]
@@ -283,13 +305,27 @@ def score(
     if not checks["carried_by"]:
         reasons.append(f"expected carried_by {case.carried_by!r}, observed {carried_by!r}")
 
-    wrong = [page for page in case.must_not_resolve if identities.refs[page] in served]
+    wrong = [page for page in case.must_not_resolve if identities.refs[page] in named_refs]
     checks["must_not_resolve"] = not wrong
     if wrong:
         reasons.append(f"served another thread's page(s): {wrong}")
 
+    allowed = {identities.refs[page] for page in case.referents}
+    # Named portably: a fixture key or a path, never a writer-minted ref.
+    anchor_paths = {str(item.get("ref")): str(item.get("path") or "") for item in anchors}
+    extra = sorted(
+        ref_names.get(ref) or anchor_paths.get(ref) or ("<memory ref>" if "://" in ref else ref)
+        for ref in named_refs - allowed
+    )
+    checks["served_subset"] = not extra
+    if extra:
+        reasons.append(f"served page(s) outside the referents: {extra}")
+
     material = bool(
-        served or packet.get("units") or packet.get("pointers") or packet.get("current_state")
+        named_refs
+        or packet.get("units")
+        or packet.get("pointers")
+        or packet.get("current_state")
     )
     checks["serves_nothing"] = not (case.serves_nothing and material)
     if not checks["serves_nothing"]:
@@ -453,6 +489,7 @@ def recorded_group(runs: tuple[CaseRun, ...]) -> dict[str, Any]:
         "group_id": GROUP_ID,
         "corpus_id": CORPUS_ID,
         "continuity_digest": continuity_digest(),
+        "scorer_source_sha256": scorer_source_digest(),
         "passed": sum(1 for run in runs if run.score.passed),
         "total": len(runs),
         "per_case": [
@@ -491,4 +528,5 @@ __all__ = [
     "run_case",
     "run_group",
     "score",
+    "scorer_source_digest",
 ]
