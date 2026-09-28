@@ -449,6 +449,15 @@ WORKING_SET_P95_MS_CEILING = 2500
 #: End-to-end padded-tree precision floor for C9 (N1).
 PADDING_PRECISION_FLOOR = 0.80
 
+#: Scoring amendments (design.md "Amendments"), each opt-in and reported
+#: beside the raw pre-registered score, never in its place. A2: a served unit
+#: whose ref is a fragment of a bound parent page recalls that page, for
+#: recall only. A4: on a twin, a poison anchor served ``partial`` beside a
+#: ``partial`` anchor from the twin's own gold is a hedge, not poison.
+UNIT_PARENT_RECALL = "unit_parent_recall"
+HEDGED_POISON = "hedged_poison"
+AMENDMENTS: frozenset[str] = frozenset({UNIT_PARENT_RECALL, HEDGED_POISON})
+
 
 def _resolved_refs(packet: ActivationPacket) -> set[str]:
     return {anchor.ref for anchor in packet.anchors if anchor.status == "resolved"}
@@ -558,6 +567,8 @@ def score_case(
     *,
     key_to_ref: dict[str, str] | None = None,
     reference_binding: ReferenceBinding | None = None,
+    amendments: Iterable[str] = (),
+    unit_parents: Mapping[str, str] | None = None,
 ) -> CaseScore:
     """Score one packet against its pre-registered fixture.
 
@@ -569,7 +580,19 @@ def score_case(
     ``reference_binding`` additionally permits only projections frozen from
     canonical source bytes before activation; its map supersedes an equivalent
     ``key_to_ref`` argument.
+
+    ``amendments`` names scoring amendments to apply (:data:`AMENDMENTS`);
+    none by default, which is the raw pre-registered score. ``unit_parents``
+    maps a page's ref spellings to its canonical gold ref, frozen from
+    canonical readback before activation; :data:`UNIT_PARENT_RECALL` needs it.
     """
+
+    applied = frozenset(amendments)
+    unknown_amendments = sorted(applied - AMENDMENTS)
+    if unknown_amendments:
+        raise ValueError(f"unknown amendment(s) {unknown_amendments}")
+    if UNIT_PARENT_RECALL in applied and unit_parents is None:
+        raise ValueError(f"{UNIT_PARENT_RECALL} needs a frozen unit_parents map")
 
     binding_map: dict[str, str] | None = None
     valid_projections: dict[str, str] = {}
@@ -606,32 +629,54 @@ def score_case(
         identity_mentions.update(packet.ambiguity)
         identity_mentions.update(valid_projections.values())
 
-    gold_hit = sum(1 for ref in gold_refs if ref in identity_mentions)
-    poison_hit = sum(
-        1
-        for ref in poison_refs
-        if (ref in mentioned and ref not in credited)
-        or any(
+    # A2: recall only. The unit keeps its own ref in every other channel.
+    recall_mentions = set(identity_mentions)
+    if UNIT_PARENT_RECALL in applied and unit_parents is not None:
+        for unit in packet.units:
+            parent, separator, fragment = unit.ref.partition("#")
+            if separator and fragment.startswith("unit-") and parent in unit_parents:
+                recall_mentions.add(unit_parents[parent])
+
+    own_gold = set(gold_refs)
+    # A4: a twin's poison served only as a `partial` anchor, beside a
+    # `partial` anchor from the twin's own gold, is a hedge. Served resolved,
+    # through any other channel, or alone, it stays poison.
+    hedged_poison: set[str] = set()
+    if HEDGED_POISON in applied and fixture.case_id.startswith("T"):
+        partial_refs = {anchor.ref for anchor in packet.anchors if anchor.status == "partial"}
+        if partial_refs & own_gold:
+            other_channels = set(false_activation_candidates) | set(all_bound_projections)
+            hedged_poison = {
+                ref
+                for ref in poison_refs
+                if ref in partial_refs
+                and ref not in other_channels
+                and not any(
+                    projection_ref in mentioned and canonical_ref == ref
+                    for projection_ref, canonical_ref in all_bound_projections.items()
+                )
+            }
+
+    def is_poison_hit(ref: str) -> bool:
+        if ref in hedged_poison:
+            return False
+        return (ref in mentioned and ref not in credited) or any(
             projection_ref in mentioned and canonical_ref == ref
             for projection_ref, canonical_ref in all_bound_projections.items()
         )
-    )
+
+    gold_hit = sum(1 for ref in gold_refs if ref in recall_mentions)
+    poison_hit = sum(1 for ref in poison_refs if is_poison_hit(ref))
 
     tallies: dict[str, list[int]] = {}
     for key, ref in zip(fixture.gold, gold_refs, strict=True):
         tally = tallies.setdefault(anchor_kind_for(key), [0, 0, 0, 0])
         tally[0] += 1
-        tally[1] += int(ref in identity_mentions)
+        tally[1] += int(ref in recall_mentions)
     for key, ref in zip(fixture.poison, poison_refs, strict=True):
         tally = tallies.setdefault(anchor_kind_for(key), [0, 0, 0, 0])
         tally[2] += 1
-        tally[3] += int(
-            (ref in mentioned and ref not in credited)
-            or any(
-                projection_ref in mentioned and canonical_ref == ref
-                for projection_ref, canonical_ref in all_bound_projections.items()
-            )
-        )
+        tally[3] += int(is_poison_hit(ref))
     by_anchor_kind = tuple(
         AnchorKindTally(kind=kind, gold_total=g_t, gold_hit=g_h, poison_total=p_t, poison_hit=p_h)
         for kind, (g_t, g_h, p_t, p_h) in sorted(tallies.items())
@@ -642,7 +687,6 @@ def score_case(
 
     # Twin false activation (B1): a ref outside the twin's own gold, found via
     # a resolved anchor or any unit/pointer/current-state/ambiguity channel.
-    own_gold = set(gold_refs)
     twin_false_activation = bool(
         fixture.case_id.startswith("T")
         and any(
@@ -670,7 +714,7 @@ def score_case(
         and not packet.pointers
         and not packet.current_state
         and not packet.ambiguity
-    )
+    ) or bool(hedged_poison)
 
     # Precision (M1, spec: "computed over every ref the packet surfaces as a
     # resolved anchor, unit or pointer and excluding superseded ancestors the
@@ -987,6 +1031,8 @@ def run_audit(
     key_to_ref: dict[str, str] | None = None,
     reference_binding: ReferenceBinding | None = None,
     fixtures: tuple[FixtureCase, ...] = FIXTURES,
+    amendments: Iterable[str] = (),
+    unit_parents: Mapping[str, str] | None = None,
 ) -> AuditReport:
     """Score every fixture against its supplied packet, or mark it blocked.
 
@@ -1025,6 +1071,8 @@ def run_audit(
             fixture,
             key_to_ref=key_to_ref,
             reference_binding=reference_binding,
+            amendments=amendments,
+            unit_parents=unit_parents,
         )
         if fixture.case_id in packets
         else _blocked_score(fixture)
@@ -1209,8 +1257,10 @@ def write_report(report: AuditReport, path: Path) -> Path:
 
 
 __all__ = [
+    "AMENDMENTS",
     "DISABLED_PACKET",
     "GOLD_RECALL_FLOOR",
+    "HEDGED_POISON",
     "HEDGED_TWINS_CEILING",
     "IDENTITY_ONLY_MECHANISMS",
     "PADDING_PRECISION_FLOOR",
@@ -1220,6 +1270,7 @@ __all__ = [
     "TOKEN_HARD_CAP",
     "TOKEN_P50_CEILING",
     "TOKEN_P95_CEILING",
+    "UNIT_PARENT_RECALL",
     "WORKING_SET_P50_MS_CEILING",
     "WORKING_SET_P95_MS_CEILING",
     "ActivationPacket",
