@@ -247,7 +247,34 @@ fresh run. After a deliberate product or corpus change, re-record it:
 CONTEXT_ACTIVATION_RECORD_REPORT=docs/benchmarks/context-activation-product-2026-09-v4.json uv run pytest tests/test_context_activation_real_compiler.py -k recorded_report
 ```
 
-### Round 2 on corpus v4 (2026-09-28): red
+### Round 3 on corpus v4 (2026-09-28): red, 9/18
+
+The activation-quality round (close-memory-loop, context-activation ADDED
+requirements) changes the product, never the fixtures, thresholds or scorer.
+T3, T4, T5 and T7 now pass, raw and amended:
+
+| Case | Raw | What changed |
+|------|-----|--------------|
+| T3 | pass | A plan anchor reports its item's own page; the collection stays its home (task 6.12) |
+| T4 | pass | A bare first name two unlinked people share is `ambiguous`, and the carry is not asked |
+| T5 | pass | A unit the anchor's own lede already says is not served again as a fragment |
+| T7 | pass | The qualifier "feature implementation" narrows the two AI-search senses to one |
+| C3 | red | The item ref is served, and the turn's words reach the other workstream's item (now a partial poison anchor) |
+
+The other red cases keep their round-2 reasons. C8's carry now names the
+current head alone (retired revisions no longer count toward a word's rarity),
+but no units-lane role reads a `current state` observation off a carried page.
+A carried page is `retrieval_carried`, never `resolved` (design D3), and its
+units are fragments (D9), so no positive case whose gold is an ordinary note
+can pass through the carry. That is recorded for a ruling rather than worked
+around.
+
+Mechanism removal: the `competing_senses` removal also takes out the bare-name
+and qualifier rules, and T4 and T7 fail under it; T3 and T5 fail without the
+resolver. The negative controls C6, T2 and T9 still pass and still fail with
+the naming gate removed.
+
+### Round 2 on corpus v4 (2026-09-28, history): red
 
 Corpus v4 (design amendment A1) registers the corpus vault's own observation
 categories and routes them to roles through the schema writers, and adds 110
