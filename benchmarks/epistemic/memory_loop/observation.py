@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -132,9 +133,11 @@ class ProductPrompt(StrictModel):
         "stop_hook_checkpoint",
     ]
     detail: str = Field(min_length=1, max_length=500)
-    #: Digest of the prompt text exactly as delivered. It must be one the
-    #: installed product ships; anything else is a harness instruction wearing
-    #: a product label.
+    #: Digest of the prompt as delivered, from :func:`prompt_sha256` (dynamic
+    #: slots normalised) or, for a hook whose output is live, the hook
+    #: script's :func:`hook_script_sha256`. It must be one the installed
+    #: product ships; anything else is a harness instruction wearing a
+    #: product label.
     sha256: str = Field(pattern=_SHA256)
 
 
@@ -387,14 +390,78 @@ def text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+#: The dynamic slots product prompt templates carry, and the only values a
+#: delivered prompt may put in them. A slot is normalised back to its
+#: placeholder before digesting, so every genuine delivery of a template
+#: shares the template's digest and any other edit does not.
+PROMPT_SLOTS: dict[str, str] = {"key": r"ep-[0-9a-f]{32}"}
+#: The hook scripts a lifecycle client runs. Their output is live (an
+#: activation packet, a checkpoint), so a record binds the script that
+#: produced it, never the packet text.
+HOOK_SCRIPTS: tuple[str, ...] = (
+    "exomem_retrieve_nudge.py",
+    "exomem_continuation_checkpoint.py",
+    "exomem_capture_nudge.py",
+)
+
+
+def product_prompt_templates() -> tuple[str, ...]:
+    """The fixed and templated prompt texts this checkout ships: the MCP
+    server instructions, the Stop hook's capture reminder and episode ask,
+    the activation packet's episode_due sentence and the scaffold skill."""
+
+    from importlib.resources import files
+
+    from exomem import episode_nudge, server
+    from exomem._hooks import exomem_capture_nudge as nudge
+
+    skill = files("exomem._scaffold").joinpath("_Schema", "SKILL.md").read_text(encoding="utf-8")
+    return (server.SERVER_INSTRUCTIONS, nudge.REMINDER, nudge.EPISODE_ASK, episode_nudge.EPISODE_RULE, skill)
+
+
+def _template_pattern(template: str) -> re.Pattern[str] | None:
+    parts = re.split(r"\{(" + "|".join(PROMPT_SLOTS) + r")\}", template)
+    if len(parts) == 1:
+        return None
+    pattern = "".join(re.escape(part) if index % 2 == 0 else f"(?:{PROMPT_SLOTS[part]})" for index, part in enumerate(parts))
+    return re.compile(pattern)
+
+
+def prompt_sha256(text: str) -> str:
+    """Digest of a product prompt as delivered, with its dynamic slots
+    normalised: a delivery that fills a shipped template's slots with
+    well-formed values digests to the template; anything else digests to
+    its own bytes."""
+
+    for template in product_prompt_templates():
+        pattern = _template_pattern(template)
+        if pattern is not None and pattern.fullmatch(text):
+            return text_sha256(template)
+    return text_sha256(text)
+
+
+def hook_script_sha256(name: str) -> str:
+    """Digest of one shipped hook script's bytes."""
+
+    if name not in HOOK_SCRIPTS:
+        raise ValueError(f"{name!r} is not a shipped hook script")
+    from importlib.resources import files
+
+    return hashlib.sha256(files("exomem._hooks").joinpath(name).read_bytes()).hexdigest()
+
+
 def shipped_prompt_sha256(extra_texts: Iterable[str] = ()) -> frozenset[str]:
-    """Digests of product-shipped prompt texts: the MCP server instructions this
-    checkout ships, plus the hook, advisory and skill texts a run harness reads
-    from the installed version it exercises."""
+    """Digests of every product-shipped prompt this checkout carries: each
+    template in :func:`product_prompt_templates` and each hook script, plus
+    any texts a run harness reads from the installed version it exercises."""
 
-    from exomem import server
-
-    return frozenset({text_sha256(server.SERVER_INSTRUCTIONS), *(text_sha256(text) for text in extra_texts)})
+    return frozenset(
+        {
+            *(text_sha256(text) for text in product_prompt_templates()),
+            *(hook_script_sha256(name) for name in HOOK_SCRIPTS),
+            *(text_sha256(text) for text in extra_texts),
+        }
+    )
 
 
 def standing_instruction(kind: str, text: str) -> dict[str, Any]:

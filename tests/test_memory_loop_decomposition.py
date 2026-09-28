@@ -249,25 +249,57 @@ def test_a_text_that_mentions_another_object_is_not_counted_as_it() -> None:
     assert fx.identify("tasting notes, continued") is None
 
 
+#: A proposal the ledger accepts today, so the partition field is the only
+#: thing its expected-red twin adds.
+_FLAT_MORNINGS = {
+    "route": "focused_note",
+    "title": "Flat mornings",
+    "alternatives": [],
+    "evidence": "complete",
+    "reason": "A distinct cluster.",
+    "leaves": [
+        {
+            "leaf_key": "flat-mornings-note",
+            "effect_revision": 1,
+            "kind": "create-note",
+            "args": {
+                "title": "Flat mornings",
+                "content": "## Observations\n\n- [finding] Tea tasted flat on Monday after an overnight kettle.\n",
+            },
+        }
+    ],
+}
+
+
+def _declared_candidate():
+    from exomem import episode_model
+
+    state = episode_model.declare_candidate(
+        episode_model.start_episode("turn-partition", {"excerpt": "Tea tasted flat on Monday."}), "flat-mornings"
+    )
+    return episode_model, state, state["candidates"][0]["candidate_id"]
+
+
+def test_the_partition_twin_proposal_is_accepted_without_its_partition() -> None:
+    episode_model, state, candidate = _declared_candidate()
+
+    revised = episode_model.revise_proposal(state, candidate, _FLAT_MORNINGS)
+
+    assert revised["candidates"][0]["proposal"]["route"] == "focused_note"
+
+
 def test_current_runtime_the_episode_ledger_cannot_record_a_partition() -> None:
     """Expected red. The candidate proposal has no partition field, so an
     observation adapted from the ledger alone has nothing for
     ``partition_verdict`` to read, and partitioning stays unmeasured until
-    the pre-destination decomposition carrier (task 3.4) lands."""
+    the pre-destination decomposition carrier (task 3.4) lands. The same
+    proposal without its partition is accepted, so this is the only gap."""
 
-    from exomem import episode_model
+    episode_model, state, candidate = _declared_candidate()
+    partitioned = {**_FLAT_MORNINGS, "partition": {"retrieval_question": "When has my tea tasted flat?"}}
 
-    proposal = {
-        "route": "focused_note",
-        "title": "Flat mornings",
-        "alternatives": [],
-        "evidence": "complete",
-        "reason": "A distinct cluster.",
-        "leaves": [],
-        "partition": {"retrieval_question": "When has my tea tasted flat?"},
-    }
-    with pytest.raises(episode_model.EpisodeError, match="EPISODE_PROPOSAL_INVALID"):
-        episode_model._proposal(proposal, "c")  # noqa: SLF001
+    with pytest.raises(episode_model.EpisodeError, match="EPISODE_PROPOSAL_INVALID: proposal is invalid"):
+        episode_model.revise_proposal(state, candidate, partitioned)
 
 
 # --------------------------------------------------------------------------- #
