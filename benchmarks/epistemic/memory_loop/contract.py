@@ -227,11 +227,32 @@ class RecordsSeed:
 
 
 @dataclass(frozen=True)
+class RelationTypeSeed:
+    """A governed relation extension the world registers before any edge uses it."""
+
+    relation: str
+    parent: str
+    description: str
+    direction: str = "directed"
+
+
+@dataclass(frozen=True)
+class RelationSeed:
+    """A ``## Relations`` edge on ``source``'s page to ``target``'s page (world keys)."""
+
+    source: str
+    relation: str
+    target: str
+
+
+@dataclass(frozen=True)
 class PreCapture:
     types: tuple[EntityTypeSeed, ...] = ()
     entities: tuple[EntitySeed, ...] = ()
     notes: tuple[NoteSeed, ...] = ()
     records: tuple[RecordsSeed, ...] = ()
+    relation_types: tuple[RelationTypeSeed, ...] = ()
+    relations: tuple[RelationSeed, ...] = ()
 
     def keys(self) -> tuple[str, ...]:
         return tuple(
@@ -263,6 +284,8 @@ def _spec_from_plain(data: Mapping[str, Any]) -> PreCapture:
             )
             for item in data["records"]
         ),
+        relation_types=tuple(RelationTypeSeed(**item) for item in data.get("relation_types", ())),
+        relations=tuple(RelationSeed(**item) for item in data.get("relations", ())),
     )
 
 
@@ -438,7 +461,55 @@ def build_world_in_process(root: Path, spec: PreCapture) -> dict[str, str]:
                 why="seed one prior observed item",
             )
         key_to_path[seed.key] = seed.manifest_path
+    if spec.relation_types:
+        from exomem import relation_registry
+
+        commands.op_schema_memory(
+            root,
+            subject="relations",
+            operation="save-relations",
+            proposal={
+                "upsert": {
+                    seed.relation: {
+                        "parent": seed.parent,
+                        "description": seed.description,
+                        "direction": seed.direction,
+                        "aliases": [],
+                    }
+                    for seed in spec.relation_types
+                }
+            },
+            expected_hash=relation_registry.load_registry(root).extension_hash,
+            why="register the fixture's governed relation meanings",
+        )
+    for seed in spec.relations:
+        _add_relation(root, key_to_path[seed.source], seed.relation, Path(key_to_path[seed.target]).stem)
     return key_to_path
+
+
+def _add_relation(root: Path, path: str, relation: str, target: str) -> None:
+    """Add one ``## Relations`` bullet through the reviewed body edit."""
+
+    from exomem import commands
+    from exomem.vault import content_hash
+
+    text = (root / path).read_text(encoding="utf-8")
+    body = text.split("\n---\n", 1)[1].rstrip()
+    bullet = f"- {relation} [[{target}]]"
+    if "\n## Relations\n" in f"\n{body}\n":
+        body = body.replace("## Relations\n", f"## Relations\n\n{bullet}", 1)
+    else:
+        body = f"{body}\n\n## Relations\n\n{bullet}"
+    operation = {"kind": "replace_body", "new_body": body + "\n", "expected_hash": content_hash(text)}
+    preview = commands.op_edit_memory(
+        root, path=path, why="seed the fixture's relation", operation={**operation, "validate_only": True}
+    )["semantic"]
+    commands.op_edit_memory(
+        root,
+        path=path,
+        why="seed the fixture's relation",
+        operation={**operation, "transition_token": preview["transition_token"]},
+    )
 
 
 _VOLATILE_LINES = (
@@ -595,9 +666,6 @@ def build_world(root: Path, spec: PreCapture, *, world_id: str) -> BuiltWorld:
 # Canonical readback
 # --------------------------------------------------------------------------- #
 
-_RELATION_BULLET = re.compile(r"^\s*[-*+]\s+(?P<rel>[a-z][a-z0-9_.-]{1,80})[ \t]+\[\[(?P<target>[^\[\]|#\n]+)")
-
-
 def _split_page(text: str) -> tuple[dict[str, Any], str]:
     if not text.startswith("---\n"):
         return {}, text
@@ -619,6 +687,17 @@ def _as_tuple(value: Any) -> tuple[str, ...]:
     return (str(value),)
 
 
+#: Folders that retain input rather than hold compiled knowledge: Sources
+#: (episode recaps included) and Evidence. They are never a cluster home and
+#: never count toward co-location or fragmentation; attribution and hedging
+#: checks still read them.
+RETAINED_INPUT_ROOTS: tuple[str, ...] = (f"{KB}/Sources/", f"{KB}/Evidence/")
+
+
+def is_retained_input(path: str) -> bool:
+    return path.startswith(RETAINED_INPUT_ROOTS)
+
+
 @dataclass(frozen=True)
 class PageView:
     path: str
@@ -628,13 +707,38 @@ class PageView:
     entity_type: str
     aliases: tuple[str, ...]
     body: str
-    relations: tuple[tuple[str, str], ...]
     frontmatter: dict[str, Any] = field(default_factory=dict, compare=False)
 
     @property
     def names(self) -> tuple[str, ...]:
         stem = Path(self.path).stem
         return tuple(dict.fromkeys((self.title, stem, *self.aliases)))
+
+
+@dataclass(frozen=True)
+class EdgeView:
+    """One relation fact as the product derives it: Markdown relation sections,
+    semantic-unit relations and frontmatter relations (``sources``,
+    ``supersedes``, ``superseded_by`` and the rest), with the product's own
+    wikilink resolution (path, stem, then title; never aliases)."""
+
+    source: str
+    relation: str
+    target: str
+    origin: str
+    status: str
+    #: The core family: a core relation's own, an extension's parent's core
+    #: family. Never a family the extension's proposal declares, which the
+    #: registry does not tie to its parent.
+    family: str = ""
+
+    @property
+    def active(self) -> bool:
+        return self.status in {"core", "extension", "alias"}
+
+    @property
+    def extension(self) -> bool:
+        return self.active and self.relation not in _core_relations()
 
 
 @dataclass(frozen=True)
@@ -648,31 +752,68 @@ class RecordView:
 class VaultState:
     pages: dict[str, PageView]
     records: tuple[RecordView, ...]
-    relation_ids: frozenset[str] = field(default_factory=frozenset)
+    edges: tuple[EdgeView, ...] = ()
 
     def entities(self) -> tuple[PageView, ...]:
         return tuple(
             page for page in self.pages.values() if page.page_type == "entity" and page.status == "active"
         )
 
-    def resolve_link(self, target: str) -> PageView | None:
-        """The one active page a wikilink target names; ambiguous or absent is None."""
 
-        folded = target.strip().casefold()
-        matches = [
-            page
-            for page in self.pages.values()
-            if page.status == "active"
-            and (
-                page.path.removesuffix(".md").casefold() == folded
-                or any(name.casefold() == folded for name in page.names)
+def _core_relations() -> frozenset[str]:
+    from exomem import relation_registry
+
+    return frozenset(relation_registry.core_registry().keys)
+
+
+def _families(relations: Iterable[str]) -> frozenset[str]:
+    """The core registry families of ``relations``."""
+
+    from exomem import relation_registry
+
+    registry = relation_registry.core_registry()
+    return frozenset(
+        definition.family for relation in relations if (definition := registry.definition(relation)) is not None
+    )
+
+
+def _core_family(relation: str, registry: Any, core: Any) -> str:
+    """``relation``'s core family, or its parent's when it is an extension."""
+
+    if relation in core.core:
+        return core.core[relation].family
+    definition = registry.definition(relation)
+    parent = definition.parent if definition is not None else None
+    return core.core[parent].family if parent in core.core else ""
+
+
+def _product_edges(root: Path) -> tuple[EdgeView, ...]:
+    from exomem import relation_registry, semantic_contract
+
+    semantic_contract.reset_corpus_context_cache()
+    context = semantic_contract.build_corpus_context(root)
+    registry = relation_registry.load_registry(root)
+    core = relation_registry.core_registry()
+    edges = []
+    for fact in context.relation_facts:
+        if fact.target_status != "resolved" or fact.origin == "wikilink":
+            continue
+        relation = fact.canonical_relation or fact.raw_relation
+        edges.append(
+            EdgeView(
+                source=fact.logical_source_path,
+                relation=relation,
+                target=fact.logical_target_path,
+                origin=fact.origin,
+                status=fact.registry_status,
+                family=_core_family(relation, registry, core),
             )
-        ]
-        return matches[0] if len(matches) == 1 else None
+        )
+    return tuple(sorted(set(edges), key=lambda edge: (edge.source, edge.relation, edge.target, edge.origin)))
 
 
 def read_state(root: Path) -> VaultState:
-    """Read canonical pages, typed relations and Records items under ``root``."""
+    """Read canonical pages, the product's relation facts and Records items."""
 
     root = Path(root)
     kb = root / KB
@@ -698,17 +839,6 @@ def read_state(root: Path) -> VaultState:
                 )
             )
             continue
-        relations: list[tuple[str, str]] = []
-        in_relations = False
-        for line in body.splitlines():
-            heading = re.match(r"^(#{1,6})\s+(.*?)\s*$", line)
-            if heading:
-                in_relations = heading.group(2).strip().casefold() == "relations"
-                continue
-            if in_relations:
-                match = _RELATION_BULLET.match(line)
-                if match:
-                    relations.append((match.group("rel"), match.group("target").strip()))
         pages[relative] = PageView(
             path=relative,
             page_type=page_type,
@@ -717,30 +847,36 @@ def read_state(root: Path) -> VaultState:
             entity_type=str(frontmatter.get("entity_type") or ""),
             aliases=_as_tuple(frontmatter.get("aliases")),
             body=body,
-            relations=tuple(relations),
             frontmatter=frontmatter,
         )
-    relation_ids: frozenset[str] = frozenset()
-    try:
-        from exomem import relation_registry
-
-        registry = relation_registry.load_registry(root)
-        relation_ids = frozenset(registry.core) | frozenset(
-            key for key, value in registry.extensions.items() if getattr(value, "status", "active") == "active"
-        )
-    except Exception:  # noqa: BLE001 - an unreadable registry leaves every edge unverified
-        relation_ids = frozenset()
-    return VaultState(pages=pages, records=tuple(records), relation_ids=relation_ids)
+    return VaultState(pages=pages, records=tuple(records), edges=_product_edges(root))
 
 
 # --------------------------------------------------------------------------- #
 # Expectations
 # --------------------------------------------------------------------------- #
 
+#: Bump when any predicate's code changes meaning; it is part of every
+#: evaluator digest, so a semantic change voids runs bound to the old one.
+SEMANTICS_VERSION = 8
+
 #: Core relations that record that two things are connected without saying
 #: how. They are honest when nothing more precise is supported, and never
 #: satisfy an expectation for a specific supported meaning.
 GENERIC_RELATIONS: frozenset[str] = frozenset({"relates_to", "links_to", "mentions"})
+
+#: The sentinel for "any active governed extension relation": the route for a
+#: reusable meaning the core registry lacks. Its semantics are reviewed where
+#: it is registered; a fixture can only require that one is used.
+EXTENSION = "extension"
+
+#: Parent families an extension may not carry to satisfy :data:`EXTENSION`.
+#: An extension inherits its parent's family, so one parented on ``owns`` or
+#: ``supersedes`` says ownership or supersession under a new name, not a
+#: governed meaning the core registry lacks.
+NON_GOVERNED_FAMILIES: frozenset[str] = frozenset(
+    {"ownership", "composition", "supersession", "duplication", "contradiction", "causality"}
+)
 
 
 def _fold(text: str) -> str:
@@ -748,7 +884,14 @@ def _fold(text: str) -> str:
 
 
 def _has_marker(text: str, marker: str) -> bool:
-    return re.search(r"(?<![a-z0-9])" + re.escape(_fold(marker)), _fold(text)) is not None
+    """``marker`` as a whole word or phrase: bounded on both sides."""
+
+    pattern = r"(?<![a-z0-9])" + re.escape(_fold(marker)) + r"(?![a-z0-9])"
+    return re.search(pattern, _fold(text)) is not None
+
+
+def _any(text: str, markers: Iterable[str]) -> bool:
+    return any(_has_marker(text, marker) for marker in markers)
 
 
 def _new_lines(before: VaultState, page: PageView) -> tuple[str, ...]:
@@ -759,13 +902,39 @@ def _new_lines(before: VaultState, page: PageView) -> tuple[str, ...]:
     return tuple(line for line in page.body.splitlines() if line.strip() and line not in previous)
 
 
+def _new_lines_in_context(before: VaultState, page: PageView) -> tuple[tuple[str, str], ...]:
+    """Each new line with the context a reader sees it in: the page title and
+    the nearest heading above it. A source or a date carried by a section
+    heading ("## The miller's report") qualifies the bullets beneath it."""
+
+    old = before.pages.get(page.path)
+    previous = set(old.body.splitlines()) if old is not None else set()
+    heading = ""
+    found = []
+    for line in page.body.splitlines():
+        if re.match(r"^#{1,6}\s", line):
+            heading = line
+        if line.strip() and line not in previous:
+            found.append((line, f"{page.title}\n{heading}\n{line}"))
+    return tuple(found)
+
+
+def _knowledge_pages(state: VaultState) -> tuple[PageView, ...]:
+    """Active pages that can be a home: retained input excluded."""
+
+    return tuple(
+        page for page in state.pages.values() if page.status == "active" and not is_retained_input(page.path)
+    )
+
+
 @dataclass(frozen=True)
 class Select:
     """Which pages an expectation reads.
 
     ``key`` names one pre-capture page. Otherwise ``kind`` chooses active
-    entities (optionally of ``entity_type``) or any active page, whose names
-    carry every token; ``created_only`` keeps pages the capture created.
+    entities (optionally of ``entity_type``) or any active knowledge page
+    (retained input excluded), whose names carry every token and, when given,
+    one of ``any_tokens``; ``created_only`` keeps pages the capture created.
     """
 
     key: str | None = None
@@ -773,6 +942,7 @@ class Select:
     tokens: tuple[str, ...] = ()
     kind: Literal["entity", "page"] = "entity"
     created_only: bool = False
+    any_tokens: tuple[str, ...] = ()
 
     def matches(
         self, world: Mapping[str, str], state: VaultState, before: VaultState | None = None
@@ -780,14 +950,16 @@ class Select:
         if self.key is not None:
             page = state.pages.get(world.get(self.key, ""))
             return (page,) if page is not None and page.status == "active" else ()
-        pool = state.entities() if self.kind == "entity" else tuple(
-            page for page in state.pages.values() if page.status == "active"
-        )
+        pool = state.entities() if self.kind == "entity" else _knowledge_pages(state)
         return tuple(
             page
             for page in pool
             if (self.entity_type is None or page.entity_type == self.entity_type)
             and all(any(_has_marker(name, token) for name in page.names) for token in self.tokens)
+            and (
+                not self.any_tokens
+                or any(_has_marker(name, token) for name in page.names for token in self.any_tokens)
+            )
             and not (self.created_only and before is not None and page.path in before.pages)
         )
 
@@ -821,7 +993,7 @@ class EntityCount:
 
 @dataclass(frozen=True)
 class EntityIntact:
-    """A pre-capture entity keeps its path, type, title and alias set."""
+    """A pre-capture page keeps its path, status, type, title and alias set."""
 
     key: str
     polarity: Literal["positive", "negative"]
@@ -865,56 +1037,144 @@ class Distinct:
 
 @dataclass(frozen=True)
 class Mentions:
-    """Exactly one selected page carries at least one marker of every group."""
+    """Exactly one selected page carries at least one marker of every group.
+
+    With ``new_lines`` only lines the capture added count, so text the page
+    already had cannot satisfy it.
+    """
 
     key: str
     polarity: Literal["positive", "negative"]
     select: Select
     groups: tuple[tuple[str, ...], ...]
     reason: str
+    new_lines: bool = False
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
         found = self.select.matches(world, after, before)
         if len(found) != 1:
             return _result(self.key, self.polarity, False, f"{len(found)} pages selected")
-        body = found[0].body
-        missing = [group for group in self.groups if not any(_has_marker(body, marker) for marker in group)]
+        text = "\n".join(_new_lines(before, found[0])) if self.new_lines else found[0].body
+        missing = [group for group in self.groups if not _any(text, group)]
         return _result(self.key, self.polarity, not missing, f"{found[0].path} missing: {missing}")
+
+
+_WIKILINK = re.compile(r"\[\[[^\[\]\n]*\]\]")
 
 
 @dataclass(frozen=True)
 class NoNewMention:
-    """No selected page gained a line carrying any of ``markers``."""
+    """No selected knowledge page gained a line carrying any of ``markers``.
+
+    With ``ignore_links`` a marker that appears only inside a wikilink does
+    not count: a backlink to a new home is a scope-owned navigation update,
+    while restating that home's content on the page is not.
+    """
 
     key: str
     polarity: Literal["positive", "negative"]
     markers: tuple[str, ...]
     reason: str
     select: Select | None = None
+    ignore_links: bool = False
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
-        pages = (
-            self.select.matches(world, after, before)
-            if self.select is not None
-            else tuple(after.pages.values())
-        )
+        pages = self.select.matches(world, after, before) if self.select is not None else _knowledge_pages(after)
         hits = [
             f"{page.path}: {marker}"
             for page in pages
             for line in _new_lines(before, page)
             for marker in self.markers
-            if _has_marker(line, marker)
+            if _has_marker(_WIKILINK.sub(" ", line) if self.ignore_links else line, marker)
         ]
         return _result(self.key, self.polarity, not hits, f"new mentions: {hits}")
+
+
+@dataclass(frozen=True)
+class NoMixedLines:
+    """No new line of a knowledge page carries markers of two of ``groups``.
+
+    Objects the decomposition keeps apart are never fused into one statement,
+    whatever page that statement sits on.
+    """
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    groups: tuple[tuple[str, ...], ...]
+    reason: str
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        mixed = [
+            f"{page.path}: {line.strip()}"
+            for page in _knowledge_pages(after)
+            for line in _new_lines(before, page)
+            if sum(1 for group in self.groups if _any(line, group)) > 1
+        ]
+        return _result(self.key, self.polarity, not mixed, f"mixed lines: {mixed}")
+
+
+@dataclass(frozen=True)
+class CoMention:
+    """No new line of a knowledge page, read with its title and heading, names
+    both a ``first`` and a ``second`` marker (e.g. an item and a resolved owner)."""
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    first: tuple[str, ...]
+    second: tuple[str, ...]
+    reason: str
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        hits = [
+            f"{page.path}: {line.strip()}"
+            for page in _knowledge_pages(after)
+            for line, context in _new_lines_in_context(before, page)
+            if _any(context, self.first) and _any(context, self.second)
+        ]
+        return _result(self.key, self.polarity, not hits, f"co-mentions: {hits}")
+
+
+@dataclass(frozen=True)
+class NewPages:
+    """Exactly ``exactly`` knowledge pages were created (retained input excluded).
+
+    ``tolerate`` names exact titles a capture may also create without counting
+    (a recurring product promoted to an entity is not fragmentation);
+    ``exclude_types`` drops whole page types from the count.
+    """
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    exactly: int
+    reason: str
+    exclude: tuple[str, ...] = ()
+    exclude_types: tuple[str, ...] = ()
+    tolerate: tuple[str, ...] = ()
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        tolerated = {_fold(title) for title in self.tolerate}
+        created = sorted(
+            page.path
+            for page in _knowledge_pages(after)
+            if page.path not in before.pages
+            and page.page_type != "collection"
+            and page.page_type not in self.exclude_types
+            and not page.path.startswith(self.exclude)
+            and _fold(page.title) not in tolerated
+        )
+        return _result(self.key, self.polarity, len(created) == self.exactly, f"new pages: {created}")
 
 
 @dataclass(frozen=True)
 class AttributedLines:
     """A reported or attributed claim keeps its source and its hedge.
 
-    At least one new line carries a claim marker, and every new line that
-    does also names its source and a reporting or uncertainty marker, so the
-    claim is never restated as a direct fact anywhere in the capture.
+    Every new line anywhere in the vault (retained input included) that
+    carries a claim marker, read with its title and heading, also names its
+    source and a reporting or uncertainty marker, so the claim is never
+    restated as a direct fact. Unless ``allow_none``, at least one such line
+    must exist (the claim was captured); with it, the check guards hearsay
+    that may rightly go unwritten.
     """
 
     key: str
@@ -923,29 +1183,59 @@ class AttributedLines:
     source: tuple[str, ...]
     hedge: tuple[str, ...]
     reason: str
+    allow_none: bool = False
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
         lines = [
-            (page.path, line)
+            (page.path, line, context)
             for page in after.pages.values()
-            for line in _new_lines(before, page)
-            if any(_has_marker(line, marker) for marker in self.claim)
+            for line, context in _new_lines_in_context(before, page)
+            if _any(line, self.claim)
         ]
         bare = [
             f"{path}: {line.strip()}"
-            for path, line in lines
-            if not (
-                any(_has_marker(line, marker) for marker in self.source)
-                and any(_has_marker(line, marker) for marker in self.hedge)
-            )
+            for path, line, context in lines
+            if not (_any(context, self.source) and _any(context, self.hedge))
         ]
-        ok = bool(lines) and not bare
+        ok = (bool(lines) or self.allow_none) and not bare
         return _result(self.key, self.polarity, ok, f"{len(lines)} claim lines; unattributed: {bare}")
 
 
 @dataclass(frozen=True)
+class LinesCarry:
+    """At least one new knowledge line carries a claim marker, and every such
+    line, read with its title and heading, carries a marker from every group
+    (an old event keeps its own time; a choice names what was chosen).
+    ``select`` narrows the pages read."""
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    claim: tuple[str, ...]
+    groups: tuple[tuple[str, ...], ...]
+    reason: str
+    select: Select | None = None
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        pages = self.select.matches(world, after, before) if self.select is not None else _knowledge_pages(after)
+        lines = [
+            (page.path, line, context)
+            for page in pages
+            for line, context in _new_lines_in_context(before, page)
+            if _any(line, self.claim)
+        ]
+        bare = [
+            f"{path}: {line.strip()}"
+            for path, line, context in lines
+            if not all(_any(context, group) for group in self.groups)
+        ]
+        ok = bool(lines) and not bare
+        return _result(self.key, self.polarity, ok, f"{len(lines)} claim lines; unqualified: {bare}")
+
+
+@dataclass(frozen=True)
 class HedgedLines:
-    """New lines about ``subject`` that assert a cause keep their uncertainty."""
+    """New lines and Records values about ``subject`` that assert a cause keep
+    their uncertainty, everywhere in the vault."""
 
     key: str
     polarity: Literal["positive", "negative"]
@@ -955,70 +1245,186 @@ class HedgedLines:
     reason: str
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        lines = [(page.path, line) for page in after.pages.values() for line in _new_lines(before, page)]
+        old_items = {(item.collection, item.item_key): item.fields for item in before.records}
+        lines += [
+            (item.collection, value)
+            for item in after.records
+            if old_items.get((item.collection, item.item_key)) != item.fields
+            for value in item.fields.values()
+        ]
         bad = [
-            f"{page.path}: {line.strip()}"
-            for page in after.pages.values()
-            for line in _new_lines(before, page)
-            if any(_has_marker(line, marker) for marker in self.subject)
-            and any(_has_marker(line, marker) for marker in self.causal)
-            and not any(_has_marker(line, marker) for marker in self.hedge)
+            f"{where}: {line.strip()}"
+            for where, line in lines
+            if _any(line, self.subject) and _any(line, self.causal) and not _any(line, self.hedge)
         ]
         return _result(self.key, self.polarity, not bad, f"unhedged causal lines: {bad}")
 
 
 @dataclass(frozen=True)
-class TypedEdge:
-    """A specific, registered ``## Relations`` edge connects two selections.
+class CoLocated:
+    """The new knowledge lines carrying each marker group all sit on one page,
+    an admissible home.
 
-    ``either_direction`` accepts the bullet on either page (a relation and its
-    inverse carry the same meaning). A generic relation, a rejected relation
-    or an id the registry does not define never satisfies a positive. A
-    negative fails on any rejected relation between them, or on any edge at
-    all when ``rejected`` is empty.
+    A line is read with its page title and nearest heading, as a reader sees
+    it. Facts that belong together (a label and a reported formulation of the
+    same product) land in one canonical home rather than being spread or
+    copied, and that home is one of ``homes`` rather than a related page
+    whose scope does not own them. Retained input is never a home.
+    """
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    groups: tuple[tuple[str, ...], ...]
+    homes: tuple[Select, ...]
+    reason: str
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        holders: list[set[str]] = []
+        for group in self.groups:
+            holders.append(
+                {
+                    page.path
+                    for page in _knowledge_pages(after)
+                    for _line, context in _new_lines_in_context(before, page)
+                    if _any(context, group)
+                }
+            )
+        pages = set().union(*holders) if holders else set()
+        admissible = {page.path for select in self.homes for page in select.matches(world, after, before)}
+        ok = len(pages) == 1 and all(holder == pages for holder in holders) and pages <= admissible
+        return _result(self.key, self.polarity, ok, f"holders {[sorted(h) for h in holders]}; admissible {sorted(admissible)}")
+
+
+@dataclass(frozen=True)
+class Admissible:
+    """One truthful way an expected edge may be written.
+
+    ``relation`` is a relation id (core or alias canonical) or
+    :data:`EXTENSION` for any active governed extension. ``direction`` is
+    ``forward`` (from the expectation's source to its target), ``reverse``
+    or ``either``.
+    """
+
+    relation: str
+    direction: Literal["forward", "reverse", "either"]
+
+
+def _edge_admissible(edge: EdgeView, admissible: tuple[Admissible, ...], forward: bool) -> bool:
+    if not edge.active or edge.relation in GENERIC_RELATIONS:
+        return False
+    for option in admissible:
+        if option.direction != "either" and (option.direction == "forward") != forward:
+            continue
+        if option.relation == EXTENSION and edge.extension and edge.family not in NON_GOVERNED_FAMILIES:
+            return True
+        if option.relation == edge.relation:
+            return True
+    return False
+
+
+def _edges_between(
+    state: VaultState, sources: Iterable[PageView], targets: Iterable[PageView]
+) -> list[tuple[EdgeView, bool]]:
+    """Edges between the two page sets, each with whether it runs source to target."""
+
+    source_paths = {page.path for page in sources}
+    target_paths = {page.path for page in targets}
+    found = []
+    for edge in state.edges:
+        if edge.source in source_paths and edge.target in target_paths:
+            found.append((edge, True))
+        elif edge.source in target_paths and edge.target in source_paths:
+            found.append((edge, False))
+    return found
+
+
+@dataclass(frozen=True)
+class TypedEdge:
+    """A truthful typed edge connects the two selections.
+
+    Only an active relation listed in ``admissible``, in its listed direction,
+    satisfies it; a generic relation never does.
     """
 
     key: str
     polarity: Literal["positive", "negative"]
     source: Select
     target: Select
+    admissible: tuple[Admissible, ...]
     reason: str
-    either_direction: bool = True
-    rejected: tuple[str, ...] = ()
-
-    def _edges(
-        self, world: Mapping[str, str], state: VaultState, before: VaultState
-    ) -> list[tuple[str, str, str]]:
-        sources = self.source.matches(world, state, before)
-        targets = self.target.matches(world, state, before)
-        pairs = [(s, t) for s in sources for t in targets]
-        if self.either_direction:
-            pairs += [(t, s) for s, t in pairs]
-        found = []
-        for origin, destination in pairs:
-            for relation, link_target in origin.relations:
-                resolved = state.resolve_link(link_target)
-                if resolved is not None and resolved.path == destination.path:
-                    found.append((origin.path, relation, destination.path))
-        return found
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
-        edges = self._edges(world, after, before)
-        if self.polarity == "negative":
-            bad = [edge for edge in edges if not self.rejected or edge[1] in self.rejected]
-            return _result(self.key, self.polarity, not bad, f"edges: {bad}")
-        good = [
-            edge
-            for edge in edges
-            if edge[1] not in GENERIC_RELATIONS
-            and edge[1] not in self.rejected
-            and edge[1] in after.relation_ids
+        found = _edges_between(
+            after, self.source.matches(world, after, before), self.target.matches(world, after, before)
+        )
+        good = [edge for edge, forward in found if _edge_admissible(edge, self.admissible, forward)]
+        return _result(self.key, self.polarity, bool(good), f"edges: {[(e.relation, f) for e, f in found]}")
+
+
+@dataclass(frozen=True)
+class EdgeCount:
+    """At least ``at_least`` of ``targets`` have a truthful typed edge with ``source``."""
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    source: Select
+    targets: tuple[Select, ...]
+    admissible: tuple[Admissible, ...]
+    at_least: int
+    reason: str
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        sources = self.source.matches(world, after, before)
+        linked = [
+            target
+            for target in self.targets
+            if any(
+                _edge_admissible(edge, self.admissible, forward)
+                for edge, forward in _edges_between(after, sources, target.matches(world, after, before))
+            )
         ]
-        return _result(self.key, self.polarity, bool(good), f"edges: {edges}")
+        return _result(
+            self.key, self.polarity, len(linked) >= self.at_least, f"{len(linked)}/{len(self.targets)} linked"
+        )
+
+
+@dataclass(frozen=True)
+class NoEdgeBetween:
+    """No edge (either direction) between the selections carries a forbidden
+    meaning: a relation in ``forbidden``, or any relation of a forbidden
+    relation's family (an extension inherits its parent's), when it is given;
+    otherwise any relation not in ``tolerated``. It reads the whole vault after
+    capture, so an edge the world already had must be retired too."""
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    first: Select
+    second: Select
+    reason: str
+    forbidden: tuple[str, ...] = ()
+    tolerated: tuple[str, ...] = ()
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        found = _edges_between(
+            after, self.first.matches(world, after, before), self.second.matches(world, after, before)
+        )
+        families = _families(self.forbidden)
+        bad = [
+            (edge.source, edge.relation, edge.target)
+            for edge, _forward in found
+            if (
+                edge.relation in self.forbidden or edge.family in families
+                if self.forbidden
+                else edge.relation not in self.tolerated
+            )
+        ]
+        return _result(self.key, self.polarity, not bad, f"edges: {bad}")
 
 
 @dataclass(frozen=True)
 class NoNewEdge:
-    """No page gained a relation of ``relations`` (or any relation) to ``target``."""
+    """No new edge of ``relations`` (or of any relation) reaches ``target``."""
 
     key: str
     polarity: Literal["positive", "negative"]
@@ -1027,43 +1433,103 @@ class NoNewEdge:
     target: Select | None = None
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
-        targets = {page.path for page in self.target.matches(world, after, before)} if self.target else None
-        added = []
-        for page in after.pages.values():
-            old = before.pages.get(page.path)
-            previous = set(old.relations) if old is not None else set()
-            for relation, link_target in page.relations:
-                if (relation, link_target) in previous:
-                    continue
-                if self.relations and relation not in self.relations:
-                    continue
-                resolved = after.resolve_link(link_target)
-                if targets is not None and (resolved is None or resolved.path not in targets):
-                    continue
-                added.append(f"{page.path} {relation} {link_target}")
+        targets = (
+            {page.path for page in self.target.matches(world, after, before)} if self.target else None
+        )
+        previous = set(before.edges)
+        added = [
+            f"{edge.source} {edge.relation} {edge.target}"
+            for edge in after.edges
+            if edge not in previous
+            and (not self.relations or edge.relation in self.relations)
+            and (targets is None or edge.target in targets or edge.source in targets)
+        ]
         return _result(self.key, self.polarity, not added, f"new edges: {added}")
+
+
+_PLANNING_TITLE = re.compile(r"(?i)\b(?:plan|plans|planning|todo|to-do|intentions?)\b")
 
 
 @dataclass(frozen=True)
 class NoNewPlanning:
-    """No Planning collection or item appears: a possibility is not a commitment."""
+    """No commitment appears for a mentioned possibility.
+
+    Judged only where commitments live: a new page in the Planning tree, a
+    Planning item (``plan_id`` or the planning profile) or a new collection
+    titled as a plan, or a new item in such a collection. With ``markers`` it
+    fails only on one that names a marker, so an unrelated plan is not this
+    possibility. Records outside a planning collection are never read: a
+    Records line that notes the possibility is tentative intent kept as
+    history, and stays quiet.
+    """
 
     key: str
     polarity: Literal["positive", "negative"]
     reason: str
+    markers: tuple[str, ...] = ()
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        planning = {path for path, page in after.pages.items() if _is_planning(page)}
         created = [
-            page.path
-            for page in after.pages.values()
-            if page.path not in before.pages
-            and (
-                "plan_id" in page.frontmatter
-                or page.frontmatter.get("semantic_profile") == "planning"
-                or page.path.startswith(f"{KB}/Planning/")
-            )
+            path
+            for path in sorted(planning - set(before.pages))
+            if not self.markers or _any(_page_text(after.pages[path]), self.markers)
         ]
-        return _result(self.key, self.polarity, not created, f"new planning pages: {created}")
+        old_items = {(item.collection, item.item_key) for item in before.records}
+        created += [
+            f"{item.collection}#{item.item_key}"
+            for item in after.records
+            if item.collection in planning
+            and (item.collection, item.item_key) not in old_items
+            and (not self.markers or any(_any(value, self.markers) for value in item.fields.values()))
+        ]
+        return _result(self.key, self.polarity, not created, f"new planning: {created}")
+
+
+def _is_planning(page: PageView) -> bool:
+    return (
+        "plan_id" in page.frontmatter
+        or page.frontmatter.get("semantic_profile") == "planning"
+        or page.path.startswith(f"{KB}/Planning/")
+        or (page.page_type == "collection" and _PLANNING_TITLE.search(page.title) is not None)
+    )
+
+
+def _page_text(page: PageView) -> str:
+    values = " ".join(str(value) for value in page.frontmatter.values())
+    return f"{page.title}\n{values}\n{page.body}"
+
+
+#: A Records field value that is a date (optionally with a time), and nothing else.
+_RECORD_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})(?:[T ][0-9:.+Z-]*)?")
+
+
+@dataclass(frozen=True)
+class NoFutureRecords:
+    """No new Records item is dated after the turn.
+
+    Records hold observed outcomes, so a structured row whose date field is
+    later than ``turn_date`` (ISO ``YYYY-MM-DD``) is stated intent misrouted
+    into Records; intent belongs in Planning. Only field values that are a
+    date are read: a prose line, a date inside free text and an item the world
+    already had stay quiet, as do items dated on or before the turn.
+    """
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    turn_date: str
+    reason: str
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        old_items = {(item.collection, item.item_key) for item in before.records}
+        future = [
+            f"{item.collection}#{item.item_key} {name}={value}"
+            for item in after.records
+            if (item.collection, item.item_key) not in old_items
+            for name, value in item.fields.items()
+            if (match := _RECORD_DATE.fullmatch(value.strip())) is not None and match.group(1) > self.turn_date
+        ]
+        return _result(self.key, self.polarity, not future, f"future-dated new records: {future}")
 
 
 @dataclass(frozen=True)
@@ -1083,7 +1549,7 @@ class FieldIs:
             return True
         if self.tokens and all(_has_marker(value, token) for token in self.tokens):
             return True
-        if self.any_of and folded not in _EMPTY_VALUES and any(_has_marker(value, token) for token in self.any_of):
+        if self.any_of and folded not in _EMPTY_VALUES and _any(value, self.any_of):
             return True
         return False
 
@@ -1188,9 +1654,16 @@ Expectation = (
     | Distinct
     | Mentions
     | NoNewMention
+    | NoMixedLines
+    | CoMention
+    | NewPages
     | AttributedLines
+    | LinesCarry
     | HedgedLines
+    | CoLocated
     | TypedEdge
+    | EdgeCount
+    | NoEdgeBetween
     | NoNewEdge
     | NoNewPlanning
     | RecordItem
@@ -1233,9 +1706,30 @@ def selects_of(expectation: Any) -> tuple[Select, ...]:
         value = getattr(expectation, name, None)
         if isinstance(value, Select):
             found.append(value)
+    for name in ("homes", "targets"):
+        found.extend(item for item in getattr(expectation, name, ()) if isinstance(item, Select))
     for option in getattr(expectation, "options", ()):
         found.extend(selects_of(option))
     return tuple(found)
+
+
+@dataclass(frozen=True)
+class LaterUse:
+    """Blind-rubric anchors for the later fresh-session answer, written before any run.
+
+    ``useful`` is what a useful answer conveys; ``wrong`` lists answers that
+    would be poison (a hearsay asserted as fact, a seller presented as the
+    producer). ``expected_status`` is pinned only where the specification
+    fixes it: a bare shared name keeps its ambiguity. Elsewhere the packet's
+    status is the compiler's business and usefulness is judged on the answer.
+    """
+
+    useful: str
+    wrong: tuple[str, ...] = ()
+    expected_status: str | None = None
+    #: The principal the later fresh session runs as: the owner, never an
+    #: unscoped or guest caller.
+    audience: str = "owner"
 
 
 # --------------------------------------------------------------------------- #
@@ -1331,3 +1825,58 @@ def validate_candidates(
             raise FixtureError(f"{item.key}: every candidate is enforced by named expectations")
         if set(item.same_home_as) - set(keys):
             raise FixtureError(f"{item.key}: same_home_as names an unknown candidate")
+
+
+# --------------------------------------------------------------------------- #
+# The evaluator semantics every fixture digest carries
+# --------------------------------------------------------------------------- #
+
+
+def _declared_defaults() -> dict[str, dict[str, Any]]:
+    """Every contract type's field defaults.
+
+    Digests omit fields left at their default, so a changed default would
+    otherwise change meaning without moving any digest.
+    """
+
+    import sys
+
+    module = sys.modules[__name__]
+    defaults: dict[str, dict[str, Any]] = {}
+    for name in sorted(vars(module)):
+        value = getattr(module, name)
+        if isinstance(value, type) and is_dataclass(value) and value.__module__ == __name__:
+            declared = {}
+            for item in fields(value):
+                if item.default is not MISSING:
+                    declared[item.name] = _plain(item.default)
+                elif item.default_factory is not MISSING:
+                    declared[item.name] = _plain(item.default_factory())
+            if declared:
+                defaults[name] = declared
+    return defaults
+
+
+def semantics_fingerprint() -> str:
+    """The predicate semantics a fixture's evaluator digest is bound to:
+    the semantics version, the evaluator constants, every declared default and
+    the observation gate's own semantics (its gate functions and constants).
+    Read at call time, so a changed constant moves every evaluator digest."""
+
+    from . import observation
+
+    return sha256_json(
+        {
+            "semantics_version": SEMANTICS_VERSION,
+            "generic_relations": sorted(GENERIC_RELATIONS),
+            "extension": EXTENSION,
+            "non_governed_families": sorted(NON_GOVERNED_FAMILIES),
+            "retained_input_roots": list(RETAINED_INPUT_ROOTS),
+            "empty_values": sorted(_EMPTY_VALUES),
+            "provenance": list(PROVENANCE),
+            "planning_title": _PLANNING_TITLE.pattern,
+            "record_date": _RECORD_DATE.pattern,
+            "defaults": _declared_defaults(),
+            "observation_gate": observation.gate_semantics(),
+        }
+    )

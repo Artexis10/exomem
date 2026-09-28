@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 from epistemic.memory_loop import contract
+from epistemic.memory_loop import observation as obs
 from epistemic.memory_loop import supplier_chain as sc
 from epistemic.memory_loop.contract import FixtureError, read_state
 
@@ -34,10 +35,6 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 pytestmark = pytest.mark.timeout(600)
 
-#: Frozen digests. Editing an episode, a world or an expectation moves one of
-#: these; re-pinning is a deliberate act that voids earlier capture runs.
-FIXTURE_SET_SHA256 = "c4b0ac656094b274c20cf9450feeb464ee5ea71d9ad78ad688a6d8dec8c98778"
-EVALUATOR_SHA256 = "db5a274cef22e1a3f761558af3f350d86c3a39fe37b43d83d991051cda8bca6a"
 MODULE = Path(sc.__file__)
 
 
@@ -63,9 +60,16 @@ def test_the_manifest_is_consistent_and_covers_every_facet() -> None:
     } == set(sc.FACETS)
 
 
-def test_the_digests_are_frozen() -> None:
-    assert sc.fixture_set_sha256() == FIXTURE_SET_SHA256
-    assert sc.evaluator_sha256() == EVALUATOR_SHA256
+def test_the_module_pins_match_the_digests() -> None:
+    """Editing an episode, a world, an expectation or the shared predicate
+    semantics moves a digest; re-pinning the module is a deliberate act that
+    voids earlier capture runs."""
+
+    assert sc.fixture_set_sha256() == sc.FIXTURE_SET_SHA256
+    for item in sc.EPISODES:
+        assert sc.actor_sha256(item.episode_id) == sc.ACTOR_SHA256[item.episode_id]
+        assert sc.evaluator_sha256(item.episode_id) == sc.EVALUATOR_SHA256[item.episode_id]
+    assert set(sc.PRE_CAPTURE_SHA256) == {item.episode_id for item in sc.EPISODES}
 
 
 def test_editing_an_expectation_moves_the_evaluator_digest_but_not_the_actor() -> None:
@@ -196,6 +200,7 @@ def test_every_world_builds_its_seeds_through_the_product_writers(worlds) -> Non
             items = [record for record in state.records if record.collection == seed.manifest_path]
             assert len(items) == len(seed.items)
         assert world.spec_sha256 == sc.pre_capture_spec_sha256(item.episode_id)
+        assert world.logical_sha256 == sc.PRE_CAPTURE_SHA256[item.episode_id], item.episode_id
 
 
 def test_a_world_build_is_deterministic(worlds, tmp_path: Path) -> None:
@@ -274,24 +279,6 @@ def test_a_same_name_seed_without_a_decision_fails_the_build(tmp_path: Path) -> 
         contract.build_world(tmp_path / "vault", undecided, world_id="same-name-undecided")
 
 
-def test_current_runtime_reports_the_bare_shared_name_as_ambiguous(
-    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from exomem import commands, lexstore, working_set_index, working_set_runtime
-
-    root, _world = _copy(worlds, "shared-name", tmp_path, monkeypatch)
-    working_set_runtime.reset_caches_for_tests()
-    working_set_index.WorkingSetIndex(root).rebuild()
-    lexstore.ensure_fresh(root)
-    working_set_runtime.reset_caches_for_tests()
-
-    packet = commands.op_activate_context(root, turn=sc.episode("shared-name").later_turn)
-
-    assert packet.get("turn_status") == "ambiguous" or (
-        packet["abstained"] and packet["abstention"]["reason"] == "ambiguous"
-    ), packet
-
-
 # --------------------------------------------------------------------------- #
 # Not vacuous: scripted product writes (plumbing, not agent evidence)
 # --------------------------------------------------------------------------- #
@@ -358,6 +345,16 @@ def test_scripted_org_and_site_capture_passes_and_a_misrouted_facet_fails(
     assert _check("org-and-site", root, world, before).failed() == ("org-and-site/office-not-on-site",)
 
 
+def test_a_site_named_without_the_shared_name_is_still_the_site(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(worlds, "org-and-site", tmp_path, monkeypatch)
+    before = read_state(root)
+    _entity(root, "site", "North Slope Orchard", "About forty acres on the north slope of Tarrow valley.")
+
+    assert _check("org-and-site", root, world, before).accepted
+
+
 def test_a_duplicate_organization_fails_the_org_and_site_episode(
     worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -407,7 +404,10 @@ def test_the_shared_name_claim_on_either_identity_fails(
         },
     )
 
-    assert _check("shared-name", root, world, before).failed() == ("shared-name/claim-not-on-site",)
+    assert set(_check("shared-name", root, world, before).failed()) == {
+        "shared-name/claim-not-on-site",
+        "shared-name/hearsay-stays-attributed",
+    }
 
 
 PURCHASES = sc.PURCHASES.manifest_path
@@ -462,32 +462,17 @@ def test_an_inferred_producer_for_the_unknown_lot_fails(
 OPERATORS = sc.OPERATORS.manifest_path
 
 
-def test_scripted_succession_keeps_the_site_and_its_history(
-    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
-    before = read_state(root)
-    _entity(root, "organization", "Callow Cider Company", "Cider maker running the north-slope orchard.")
-    _append(
-        root,
-        OPERATORS,
-        {"site": "Merrow Farm Orchard", "operator": "Callow Cider Company", "since": "2026-09-01", "source": "Merrow Farm stall"},
-        "20000000-0000-4000-8000-000000000022",
-    )
-
-    check = _check("operator-succession", root, world, before)
-    assert check.accepted, check.results
-
-
 def test_a_succession_without_the_new_assignment_leaves_the_old_operator_current(
     worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
     before = read_state(root)
-    _entity(root, "organization", "Callow Cider Company", "Cider maker running the north-slope orchard.")
+    _correct_succession(root, world)
+    items = root / "Knowledge Base/Records/Site Operators/Items"
+    (items / "20000000-0000-4000-8000-000000000022.md").unlink()
 
-    failed = _check("operator-succession", root, world, before).failed()
-    assert set(failed) == {"operator-succession/transition-recorded", "operator-succession/current-operator"}
+    failed = set(_check("operator-succession", root, world, before).failed())
+    assert failed == {"operator-succession/transition-recorded", "operator-succession/current-operator"}
 
 
 def test_a_new_site_for_the_new_operator_fails_the_succession(
@@ -495,19 +480,15 @@ def test_a_new_site_for_the_new_operator_fails_the_succession(
 ) -> None:
     root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
     before = read_state(root)
-    _entity(root, "organization", "Callow Cider Company", "Cider maker.")
+    _correct_succession(root, world)
     _entity(root, "site", "Merrow Farm North Slope", "The orchard under its new operator.")
-    _append(
-        root,
-        OPERATORS,
-        {"site": "Merrow Farm Orchard", "operator": "Callow Cider Company", "since": "2026-09-01"},
-        "20000000-0000-4000-8000-000000000022",
-    )
 
     assert _check("operator-succession", root, world, before).failed() == ("operator-succession/one-site",)
 
 
-def _save_relation(root: Path, relation: str, description: str) -> None:
+def _save_relation(
+    root: Path, relation: str, description: str, parent: str = "relates_to", **declared: str
+) -> None:
     from exomem import commands, relation_registry
 
     commands.op_schema_memory(
@@ -517,10 +498,11 @@ def _save_relation(root: Path, relation: str, description: str) -> None:
         proposal={
             "upsert": {
                 relation: {
-                    "parent": "relates_to",
+                    "parent": parent,
                     "description": description,
                     "direction": "directed",
                     "aliases": [],
+                    **declared,
                 }
             }
         },
@@ -529,9 +511,66 @@ def _save_relation(root: Path, relation: str, description: str) -> None:
     )
 
 
+def _replace_body(root: Path, path: str, new_body: str) -> None:
+    """A body replacement through the reviewed-edit handshake an agent uses."""
+
+    from exomem import commands
+    from exomem.vault import content_hash
+
+    operation = {
+        "kind": "replace_body",
+        "new_body": new_body,
+        "expected_hash": content_hash((root / path).read_text(encoding="utf-8")),
+    }
+    preview = commands.op_edit_memory(
+        root, path=path, why="scripted fixture capture", operation={**operation, "validate_only": True}
+    )["semantic"]
+    commands.op_edit_memory(
+        root,
+        path=path,
+        why="scripted fixture capture",
+        operation={**operation, "transition_token": preview["transition_token"]},
+    )
+
+
 def _relate(root: Path, path: str, relation: str, target: str) -> None:
-    text = (root / path).read_text(encoding="utf-8")
-    _edit(root, path, {"kind": "replace_body", "new_body": text.split("\n---\n", 1)[1].rstrip() + f"\n\n## Relations\n\n- {relation} [[{target}]]\n"})
+    body = (root / path).read_text(encoding="utf-8").split("\n---\n", 1)[1].rstrip()
+    bullet = f"- {relation} [[{target}]]"
+    if "\n## Relations\n" in f"\n{body}\n":
+        body = body.replace("## Relations\n", f"## Relations\n\n{bullet}", 1)
+    else:
+        body = f"{body}\n\n## Relations\n\n{bullet}"
+    _replace_body(root, path, body + "\n")
+
+
+def _note(root: Path, title: str, slug: str, body: str) -> str:
+    from exomem import note
+
+    arguments = {
+        "vault_root": root,
+        "content": body,
+        "note_type": "insight",
+        "title": title,
+        "slug": slug,
+        "sources": [],
+        "tags": [],
+        "today": TODAY,
+    }
+    validation = note.note(validate_only=True, **arguments)
+    reviewed = {}
+    if getattr(validation.creation_validation, "reviewed_none_required", False):
+        reviewed = {
+            "relation_disposition": "reviewed_none",
+            "relation_review_hash": validation.draft_hash,
+            "relation_review_reason": "The scripted capture needs no relation.",
+        }
+    return note.note(
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        **reviewed,
+        **arguments,
+    ).path
 
 
 def test_scripted_brand_capture_passes_and_a_generic_relation_does_not(
@@ -547,3 +586,240 @@ def test_scripted_brand_capture_passes_and_a_generic_relation_does_not(
     check = _check("brand", root, world, before)
     assert check.failed() == ("brand/pellow-sells-under",), check.results
     assert check.outcome("brand/merrow-sells-under") == "pass"
+
+
+# --------------------------------------------------------------------------- #
+# Critic probes (round 2): wrong captures that were accepted
+# --------------------------------------------------------------------------- #
+
+
+def _correct_succession(root: Path, world, relation: str = "vault.operates") -> None:
+    """Callow runs the site; the predecessor's operates edge is retired, and the
+    Records history is the only place the old assignment survives."""
+
+    org = world.key_to_path["org_merrow"]
+    text = (root / org).read_text(encoding="utf-8")
+    body = text.split("\n---\n", 1)[1]
+    kept = "\n".join(line for line in body.splitlines() if "vault.operates" not in line)
+    kept = kept.replace("## Relations\n", "").rstrip()
+    _replace_body(root, org, kept + "\n")
+    callow = _entity(root, "organization", "Callow Cider Company", "Cider maker running the north-slope orchard.")
+    _relate(root, callow, relation, "Merrow Farm Orchard")
+    _append(
+        root,
+        OPERATORS,
+        {"site": "Merrow Farm Orchard", "operator": "Callow Cider Company", "since": "2026-09-01", "source": "Merrow Farm stall"},
+        "20000000-0000-4000-8000-000000000022",
+    )
+
+
+def test_the_succession_world_seeds_the_predecessors_operates_edge(worlds) -> None:
+    root, world = worlds["operator-succession"]
+    state = read_state(root)
+    edges = {
+        (edge.source, edge.relation, edge.target)
+        for edge in state.edges
+    }
+    assert (world.key_to_path["org_merrow"], "vault.operates", world.key_to_path["site_merrow"]) in edges
+
+
+def test_a_scripted_succession_that_retires_the_predecessor_edge_passes(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
+    before = read_state(root)
+    _correct_succession(root, world)
+
+    check = _check("operator-succession", root, world, before)
+    assert check.accepted, [result for result in check.results if result.outcome == "fail"]
+
+
+def test_probe_p1_a_succession_leaving_the_predecessor_operating_fails(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
+    before = read_state(root)
+    _entity(root, "organization", "Callow Cider Company", "Cider maker running the north-slope orchard.")
+    _append(
+        root,
+        OPERATORS,
+        {"site": "Merrow Farm Orchard", "operator": "Callow Cider Company", "since": "2026-09-01"},
+        "20000000-0000-4000-8000-000000000022",
+    )
+
+    failed = set(_check("operator-succession", root, world, before).failed())
+    assert {"operator-succession/predecessor-not-current", "operator-succession/current-operator-on-site"} <= failed
+
+
+def test_a_bare_shared_name_link_resolves_to_the_organization_as_the_product_does(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
+    before = read_state(root)
+    _correct_succession(root, world)
+    _relate(root, world.key_to_path["site_merrow"], "vault.operates", "Merrow Farm")
+
+    assert "operator-succession/predecessor-not-current" in _check("operator-succession", root, world, before).failed()
+
+
+def test_probe_p2_untruthful_core_relations_to_the_brand_fail(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(worlds, "brand", tmp_path, monkeypatch)
+    before = read_state(root)
+    _entity(root, "brand", "Tarrow Crown", "The valley growers' quality mark.")
+    _relate(root, world.key_to_path["org_merrow"], "contradicts", "Tarrow Crown")
+    _relate(root, world.key_to_path["org_pellow"], "tests", "Tarrow Crown")
+
+    failed = set(_check("brand", root, world, before).failed())
+    assert {"brand/merrow-sells-under", "brand/pellow-sells-under"} <= failed
+
+
+def test_probe_p7_hearsay_stated_as_fact_on_a_new_page_fails(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(worlds, "shared-name", tmp_path, monkeypatch)
+    before = read_state(root)
+    _note(root, "Merrow Farm sale", "merrow-farm-sale", "## Observations\n\n- [finding] Merrow Farm is changing hands next spring.\n")
+
+    assert "shared-name/hearsay-stays-attributed" in _check("shared-name", root, world, before).failed()
+
+
+def test_hearsay_kept_with_its_source_passes(worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root, world = _copy(worlds, "shared-name", tmp_path, monkeypatch)
+    before = read_state(root)
+    _note(
+        root,
+        "Market gossip",
+        "market-gossip",
+        "## Observations\n\n- [question] Someone in the market queue reckoned Merrow Farm is changing hands next spring; unconfirmed, and unclear whether the company or the orchard.\n",
+    )
+
+    assert _check("shared-name", root, world, before).accepted
+
+
+def test_probe_p8_an_evaluator_constant_is_part_of_the_evaluator_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    first = sc.evaluator_sha256("brand")
+    monkeypatch.setattr(contract, "GENERIC_RELATIONS", frozenset({"links_to", "mentions"}))
+
+    assert sc.evaluator_sha256("brand") != first
+
+
+def test_the_later_shared_name_turn_is_ambiguous_for_the_owner_audience(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands, lexstore, working_set_index, working_set_runtime
+    from exomem.governance.principal import owner_principal, request_scope
+
+    root, _world = _copy(worlds, "shared-name", tmp_path, monkeypatch)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(root).rebuild()
+    lexstore.ensure_fresh(root)
+    working_set_runtime.reset_caches_for_tests()
+
+    with request_scope(owner_principal(surface="mcp")):
+        packet = commands.op_activate_context(root, turn=sc.episode("shared-name").later_turn)
+
+    assert sc.expectations_for("shared-name").later_use.audience == "owner"
+    assert packet.get("turn_status") == "ambiguous" or (
+        packet["abstained"] and packet["abstention"]["reason"] == "ambiguous"
+    ), packet
+
+
+# --------------------------------------------------------------------------- #
+# Critic probes (round 3): an ownership-parented extension is not a governed meaning
+# --------------------------------------------------------------------------- #
+
+
+def test_probe_r3b_an_ownership_extension_for_the_new_operator_fails(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
+    before = read_state(root)
+    _save_relation(root, "vault.holds_site", "Holds a site.", parent="owns")
+    _correct_succession(root, world, relation="vault.holds_site")
+
+    failed = set(_check("operator-succession", root, world, before).failed())
+    assert {"operator-succession/current-operator-on-site", "operator-succession/no-new-ownership"} <= failed
+
+
+def test_probe_r4_a_declared_family_does_not_launder_an_ownership_extension(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fixture judges an extension by its parent's core family, never the
+    family the proposal declares."""
+
+    from exomem import relation_registry
+
+    root, world = _copy(worlds, "operator-succession", tmp_path, monkeypatch)
+    before = read_state(root)
+    _save_relation(root, "vault.holds_site", "Holds a site.", parent="owns", family="association")
+    assert relation_registry.load_registry(root).definition("vault.holds_site").family == "association"
+    _correct_succession(root, world, relation="vault.holds_site")
+
+    failed = set(_check("operator-succession", root, world, before).failed())
+    assert {"operator-succession/current-operator-on-site", "operator-succession/no-new-ownership"} <= failed
+
+
+def test_probe_r3b_an_ownership_extension_to_the_brand_fails_both_sellers(
+    worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(worlds, "brand", tmp_path, monkeypatch)
+    before = read_state(root)
+    _entity(root, "brand", "Tarrow Crown", "The valley growers' quality mark.")
+    _save_relation(root, "vault.owns_mark", "Owns a mark.", parent="owns")
+    _relate(root, world.key_to_path["org_merrow"], "vault.owns_mark", "Tarrow Crown")
+    _relate(root, world.key_to_path["org_pellow"], "vault.owns_mark", "Tarrow Crown")
+
+    failed = set(_check("brand", root, world, before).failed())
+    assert {"brand/merrow-sells-under", "brand/pellow-sells-under"} <= failed
+
+
+# --------------------------------------------------------------------------- #
+# Critic probe (round 3): an abstention covers the declared hearsay candidate
+# --------------------------------------------------------------------------- #
+
+
+def _shared_name_abstention(text: str) -> obs.NoNudgeObservation:
+    frozen = sc.frozen("shared-name")
+    return obs.load_observation(
+        {
+            "artifact_type": obs.ARTIFACT_TYPE,
+            "schema_version": 1,
+            "fixture_id": frozen.fixture_id,
+            "actor_sha256": frozen.actor_sha256,
+            "pre_capture_sha256": frozen.pre_capture_sha256,
+            "evaluator_sha256": frozen.evaluator_sha256,
+            "host_initiation": {
+                "client": {"client": "generic-mcp", "adapter_version": "0.0-test", "lifecycle": "best_effort"},
+                "input_origin": "synthetic_fixture",
+                "delivered_turns_sha256": frozen.turns_sha256,
+            },
+            "agent_decisions": [
+                {"seq": 1, "phase": "activation", "initiator": "agent"},
+                {
+                    "seq": 2,
+                    "phase": "disposition",
+                    "initiator": "agent",
+                    "candidate_key": "c1",
+                    "disposition": "no_capture",
+                    "text": text,
+                },
+            ],
+            "leaf_effects": [],
+            "publication": {"status": "not_observed"},
+        }
+    )
+
+
+def test_probe_r3c_an_untouched_vault_and_a_no_capture_on_anything_fails_shared_name() -> None:
+    report = obs.evaluate(_shared_name_abstention("anything"), sc.frozen("shared-name"))
+
+    assert report.leaf_effects.outcome == "fail"
+    assert any("hearsay" in reason for reason in report.leaf_effects.reasons)
+
+
+def test_a_no_capture_of_the_queue_hearsay_covers_shared_name() -> None:
+    record = _shared_name_abstention("Someone in the queue reckoned Merrow Farm is changing hands next spring.")
+
+    assert obs.evaluate(record, sc.frozen("shared-name")).leaf_effects.outcome == "pass"
