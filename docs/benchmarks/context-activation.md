@@ -325,7 +325,18 @@ the anchor from one that shares its word, and it is not in the product.
 Activation latency, three interleaved pairs (base is #1440), 18 fixtures times
 five rounds, cold caches per call, ceil-rank percentiles:
 
-LATENCY_TABLE
+| Pair | Base ws p50 / p95 (ms) | Head ws p50 / p95 (ms) | Base total p50 / p95 (ms) | Head total p50 / p95 (ms) |
+|------|------|------|------|------|
+| 1 | 104.5 / 167.6 | 111.8 / 175.7 | 127.6 / 1202.7 | 123.9 / 1252.7 |
+| 2 | 109.0 / 174.3 | 112.2 / 156.0 | 130.4 / 1147.3 | 120.1 / 1203.0 |
+| 3 | 106.5 / 152.4 | 110.3 / 169.9 | 123.6 / 1062.0 | 121.4 / 1124.9 |
+
+Working-set p95 moved by +4.8%, -10.5% and +11.5% (mean +1.5%), inside the 22 ms
+spread between the three base runs; total p95 moved by +4.2%, +4.9% and +5.9%
+(mean +5.0%), inside the +10% bound. Total p50 fell about 5%: a carried page is
+now read through the lenses it can answer instead of six that read nothing. A
+resolved turn pays one extra query (about 12-15 ms) to read what else it named;
+a carried turn pays an indexed category read of about a millisecond.
 
 ### Round 3 on corpus v4 (2026-09-28): red, 9/18
 
