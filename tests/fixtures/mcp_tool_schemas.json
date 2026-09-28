@@ -2552,19 +2552,20 @@
     }
   },
   "episode_memory": {
-    "description": "Record what a conversation worked on, decided and left open, for the next session on any client.\n\nCall `record` once when a conversation reaches a decision or a stopping\npoint, and skip it when nothing durable happened. You write the recap:\nshort one-line items, never a transcript. It is kept as a bounded Source\nunder `Sources/Episodes/`, and the newest recap of each conversation leads\nthe `recent_context` block `activate_context` serves on every client.\nRecording again under the same `episode` with changed content adds a\nrevision and retires the previous one; an identical retry writes nothing.\n\nA recorded episode can also carry typed candidates for its durable\nchanges: `prepare` one candidate's destination, set its `disposition`\n(including honest no_capture, deferred or rejected ones), and `resume`\nto execute the routed ones. A leaf is one typed step for an existing\nwriter, of a kind its route owns: focused_note creates a note, entity an\nentity, relation_only accepts a relation, existing_page and semantic_unit\nedit or supersede. It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this\nservice enables episode execution.",
+    "description": "Record what a conversation worked on, decided and left open, for the next session on any client.\n\nCall `record` once when a conversation reaches a decision or a stopping\npoint, and skip it when nothing durable happened. You write the recap:\nshort one-line items, never a transcript. It is kept as a bounded Source\nunder `Sources/Episodes/`, and the newest recap of each conversation leads\nthe `recent_context` block `activate_context` serves on every client.\nRecording again under the same `episode` with changed content adds a\nrevision and retires the previous one; an identical retry writes nothing.\n\nA recorded episode can also carry typed candidates for its durable\nchanges: `prepare` one candidate's destination, set its `disposition`\n(including honest no_capture, deferred or rejected ones), and `resume`\nto execute the routed ones. A leaf is one typed step for an existing\nwriter, of a kind its route owns: focused_note creates a note, entity an\nentity, relation_only accepts a relation, existing_page and semantic_unit\nedit or supersede, and records appends one item to a Records collection\n(append-record: {collection, item, item_key?, body?, why,\nexpected_container_hash}). It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this\nservice enables episode execution. After it runs, make one final\n`coverage` pass: compare the input it names with each receipt and its\nreadback, prepare anything omitted or misrouted, then attest with\n`resume` and `postcommit`. A committed note is not coverage.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "action": {
-          "description": "`record` writes a recap revision; `inspect` reads this episode's revision history back; `candidates` reads its candidates; `prepare`, `disposition` and `resume` plan and execute them.",
+          "description": "`record` writes a recap revision; `inspect` reads this episode's revision history back; `candidates` reads its candidates; `prepare`, `disposition` and `resume` plan and execute them; `coverage` reads the final pass's evidence.",
           "enum": [
             "record",
             "inspect",
             "candidates",
             "prepare",
             "disposition",
-            "resume"
+            "resume",
+            "coverage"
           ],
           "type": "string"
         },
@@ -2780,7 +2781,8 @@
                           "create-entity",
                           "accept-relation",
                           "edit",
-                          "supersede"
+                          "supersede",
+                          "append-record"
                         ]
                       },
                       "args": {
@@ -2813,7 +2815,7 @@
             }
           ],
           "default": null,
-          "description": "For `prepare`: {route, target?, title?, alternatives,\nevidence, reason, leaves: [{leaf_key, effect_revision, kind,\nargs}]}. A changed leaf needs the next `effect_revision`; a\ncommitted one cannot change."
+          "description": "For `prepare`: {route, target?, title?, alternatives,\nevidence, reason, leaves: [{leaf_key, effect_revision, kind,\nargs}]}. The destination is your call: `alternatives` lists up to\n8 pages you inspected as possible homes, each {target: its\n`exomem://` ref, scope: its declared scope in a line, version: the\n`content_hash` you read}; an open page has no priority among them.\nexisting_page and semantic_unit name the `target` every leaf\nwrites. A changed leaf needs the next `effect_revision`; a\ncommitted one cannot change."
         },
         "disposition": {
           "anyOf": [

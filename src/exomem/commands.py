@@ -7813,6 +7813,7 @@ _EpisodeProposalArgument = Annotated[
                                             "accept-relation",
                                             "edit",
                                             "supersede",
+                                            "append-record",
                                         ]
                                     },
                                     "args": {"type": "object"},
@@ -7832,7 +7833,9 @@ _EpisodeProposalArgument = Annotated[
 def op_episode_memory(
     vault_root: Path,
     source_schema: object,
-    action: Literal["record", "inspect", "candidates", "prepare", "disposition", "resume"],
+    action: Literal[
+        "record", "inspect", "candidates", "prepare", "disposition", "resume", "coverage"
+    ],
     episode: str | None = None,
     subject: str | None = None,
     summary: str | None = None,
@@ -7871,14 +7874,19 @@ def op_episode_memory(
     to execute the routed ones. A leaf is one typed step for an existing
     writer, of a kind its route owns: focused_note creates a note, entity an
     entity, relation_only accepts a relation, existing_page and semantic_unit
-    edit or supersede. It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
-    service enables episode execution.
+    edit or supersede, and records appends one item to a Records collection
+    (append-record: {collection, item, item_key?, body?, why,
+    expected_container_hash}). It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
+    service enables episode execution. After it runs, make one final
+    `coverage` pass: compare the input it names with each receipt and its
+    readback, prepare anything omitted or misrouted, then attest with
+    `resume` and `postcommit`. A committed note is not coverage.
 
     Args:
         action: `record` writes a recap revision; `inspect` reads this
             episode's revision history back; `candidates` reads its
             candidates; `prepare`, `disposition` and `resume` plan and
-            execute them.
+            execute them; `coverage` reads the final pass's evidence.
         episode: The `ep-` key a previous record returned, or the one a hook
             named. Omit it on a conversation's first record and reuse the
             returned key for the rest of that conversation. Required for
@@ -7902,7 +7910,12 @@ def op_episode_memory(
             one durable change, reused when you revise it.
         proposal: For `prepare`: {route, target?, title?, alternatives,
             evidence, reason, leaves: [{leaf_key, effect_revision, kind,
-            args}]}. A changed leaf needs the next `effect_revision`; a
+            args}]}. The destination is your call: `alternatives` lists up to
+            8 pages you inspected as possible homes, each {target: its
+            `exomem://` ref, scope: its declared scope in a line, version: the
+            `content_hash` you read}; an open page has no priority among them.
+            existing_page and semantic_unit name the `target` every leaf
+            writes. A changed leaf needs the next `effect_revision`; a
             committed one cannot change.
         disposition: For `disposition`: routed, no_capture, uncertain,
             rejected, deferred or awaiting_authority.
@@ -7925,7 +7938,11 @@ def op_episode_memory(
         input_revision, candidates: [{candidate_key, route, disposition,
         pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete,
         execution}; resume adds {status, executed, replayed, stale,
-        diverged, reconciled, blocked, deferred, publication}. Newlines, credential-shaped text and anything
+        diverged, reconciled, blocked, deferred, publication}; coverage adds
+        {input: {input_revision, ref, recovery}, receipts: [{candidate_key,
+        leaf_id, operation_id, receipt_digest, path, readback}]}. Every
+        candidates result carries coverage: {attempted, pending,
+        covered_through_input_revision, next}. Newlines, credential-shaped text and anything
         over a cap are refused with nothing written.
     """
     recap = {
@@ -7953,6 +7970,7 @@ def op_episode_memory(
         "record": (set(recap), set()),
         "inspect": (set(), set()),
         "candidates": (set(), set()),
+        "coverage": (set(), set()),
         "prepare": ({"candidate", "proposal"}, {"candidate", "proposal"}),
         "disposition": (
             {"candidate", "disposition", "reason"},
@@ -7966,7 +7984,7 @@ def op_episode_memory(
     if allowed is None:
         raise ValueError(
             "EPISODE_INVALID: action must be record, inspect, candidates, prepare, "
-            "disposition or resume"
+            "disposition, resume or coverage"
         )
     supplied = {**recap, **workflow}
     if any(value is not None and name not in allowed for name, value in supplied.items()):
@@ -7993,6 +8011,8 @@ def op_episode_memory(
         )
     if action == "candidates":
         return episode_workflow_module.inspect(vault_root, episode=episode)
+    if action == "coverage":
+        return episode_workflow_module.coverage(vault_root, episode=episode)
     if action == "prepare":
         return episode_workflow_module.prepare(
             vault_root, episode=episode, candidate=candidate, proposal=proposal

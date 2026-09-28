@@ -4723,6 +4723,9 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         # Typed candidate operations (close-memory-loop 3.3). `candidates`
         # projects identities and outcomes of the caller's own ledger.
         "candidates": "structure",
+        # The final coverage pass (4.2): the caller's own receipts and input
+        # ref, each release-checked; it writes nothing.
+        "coverage": "structure",
         "prepare": "mutation",
         "disposition": "mutation",
         "resume": "mutation",
