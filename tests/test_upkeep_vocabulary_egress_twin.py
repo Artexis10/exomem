@@ -28,7 +28,8 @@ from exomem.governance.principal import owner_principal, request_scope
 from exomem.writer_lease import invoke_command
 
 LATER = time.time() + 3 * 3600
-RESTRICTED = f"{fx.KB}/Notes/Restricted"
+#: Sorts before every visible note, so withheld rows come first in each key.
+RESTRICTED = f"{fx.KB}/Notes/A-Restricted"
 ALIAS_REF = upkeep.upkeep_ref(dreamer_store.candidate_id("anchor.alias", fx.ENTITY, fx.VARIANT_KEY))
 TAG_REF = upkeep.upkeep_ref(dreamer_store.candidate_id("convention.tag", "", fx.TAG_KEY))
 REFS = {"alias": ALIAS_REF, "tag": TAG_REF}
@@ -82,24 +83,30 @@ def _majority() -> dict[str, str]:
 
 
 def _crowd() -> dict[str, str]:
-    """32 withheld notes that carry the tag and link the variant spelling."""
+    """33 withheld notes that carry the tag and link the page by its title.
+
+    Past the member bound, and ahead of every visible member in path order:
+    the owner is served neither item, the caller exactly what the absent twin
+    serves. Their links resolve, so they are no variant, yet they share the
+    fold key and sort before the visible referrers.
+    """
     return {
         f"{RESTRICTED}/crowd-{index:02d}.md": fx.note(
             f"Restricted crowd {index:02d}",
             tags=(fx.TAG_MAJORITY,),
-            links=f"Service the [[{fx.VARIANT}]] weekly.",
+            links="Service the [[Orbit Pump]] weekly.",
         )
-        for index in range(32)
+        for index in range(33)
     }
 
 
 CASES = {
-    "competing_name": {"extra": _rival, "globs": ["Notes/Restricted/**"], "absent": ()},
-    "majority_spelling": {"extra": _majority, "globs": ["Notes/Restricted/**"], "absent": ()},
-    "member_bound": {"extra": _crowd, "globs": ["Notes/Restricted/**"], "absent": ()},
+    "competing_name": {"extra": _rival, "globs": ["Notes/A-Restricted/**"], "absent": ()},
+    "majority_spelling": {"extra": _majority, "globs": ["Notes/A-Restricted/**"], "absent": ()},
+    "member_bound": {"extra": _crowd, "globs": ["Notes/A-Restricted/**"], "absent": ()},
     "subject": {
         "extra": dict,
-        "globs": ["Notes/Restricted/**", "Notes/Entities/orbit-pump.md"],
+        "globs": ["Notes/A-Restricted/**", "Notes/Entities/orbit-pump.md"],
         "absent": (fx.ENTITY,),
     },
 }
@@ -231,7 +238,7 @@ def test_a_withheld_member_equals_an_absent_one(
 
 def test_the_owner_counts_every_member_toward_the_bound(tmp_path: Path) -> None:
     """The member bound does bite for a caller who sees the crowd."""
-    vault = _build(tmp_path, extra=_crowd(), globs=["Notes/Restricted/**"])
+    vault = _build(tmp_path, extra=_crowd(), globs=["Notes/A-Restricted/**"])
     with request_scope(owner_principal()):
         kinds = {item["kind"] for item in upkeep.review(vault, limit=50)["items"]}
     assert "anchor.alias" not in kinds
@@ -240,7 +247,7 @@ def test_the_owner_counts_every_member_toward_the_bound(tmp_path: Path) -> None:
 
 
 def test_the_owner_and_the_caller_see_different_minorities(tmp_path: Path) -> None:
-    vault = _build(tmp_path, extra=_majority(), globs=["Notes/Restricted/**"])
+    vault = _build(tmp_path, extra=_majority(), globs=["Notes/A-Restricted/**"])
     with request_scope(owner_principal()):
         owner = next(
             item

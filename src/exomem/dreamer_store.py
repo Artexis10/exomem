@@ -131,7 +131,7 @@ _TABLES = (
             f"CREATE INDEX IF NOT EXISTS {table}_path ON {table}(path)",
         )
     ),
-    "CREATE INDEX IF NOT EXISTS term_uses_raw ON term_uses(fold_key, raw)",
+    "CREATE INDEX IF NOT EXISTS term_uses_raw ON term_uses(fold_key, raw, path)",
 )
 _DATA_TABLES = (
     "seen",
@@ -254,7 +254,13 @@ class DreamerStore:
     # ------------------------------------------------------------------
 
     def connect(self) -> sqlite3.Connection:
-        """Open, wiping a mismatched or unreadable file, and ensure the schema."""
+        """Open, wiping a mismatched, unreadable or damaged file, and ensure the schema.
+
+        A file this process did not leave as it is now (the first open in a
+        process, or a file changed by anything else) is checked whole before
+        use: damage in a page no tick happens to read would otherwise stay
+        until a later write met it.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             conn = self._open()
@@ -262,11 +268,45 @@ class DreamerStore:
                 conn.close()
                 self.wipe()
                 conn = self._open()
+            elif not self._known() and not self._sound(conn):
+                conn.close()
+                self.wipe()
+                conn = self._open()
         except sqlite3.DatabaseError:
             self.wipe()
             conn = self._open()
         self._ensure_schema(conn)
+        self._remember()
         return conn
+
+    def close(self, conn: sqlite3.Connection) -> None:
+        """Close the worker's connection and remember the file as this process left it."""
+        conn.close()
+        self._remember()
+
+    def _state(self) -> tuple[int, int, int] | None:
+        try:
+            info = self.path.stat()
+        except OSError:
+            return None
+        return (info.st_ino, info.st_mtime_ns, info.st_size)
+
+    def _known(self) -> bool:
+        with _MEMO_LOCK:
+            return _LEFT.get(str(self.path)) == self._state()
+
+    def _remember(self) -> None:
+        state = self._state()
+        with _MEMO_LOCK:
+            _LEFT[str(self.path)] = state
+
+    @staticmethod
+    def _sound(conn: sqlite3.Connection) -> bool:
+        """False when the open file fails an integrity check. A lock is not damage."""
+        try:
+            return conn.execute("PRAGMA quick_check").fetchall() == [("ok",)]
+        except sqlite3.OperationalError:
+            return True
 
     def _open(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=5.0, isolation_level=None)
@@ -852,19 +892,28 @@ class DreamerStore:
         *,
         keep: Callable[[str], bool] | None = None,
         pages: int = MEMBER_BOUND + 1,
+        skip_path: str = "",
+        skip_lower: Iterable[str] = (),
     ) -> list[tuple[str, str]]:
         """`(path, value)` rows for one fold key, from at most `pages` pages.
 
         Pages come in path order. Under a release predicate a withheld page's
         rows are skipped and never counted, so the answer is exactly what it
         would be on a vault where that page did not exist; only the number of
-        rows read grows with the withheld pages it passes.
+        rows read grows with the withheld pages it passes. `skip_path` and
+        `skip_lower` (lower-cased values) leave rows out before they count, so
+        a worker looking for a variant is not stopped by rows it would drop.
         """
         _check_table(table)
         second = CONTRIBUTION_TABLES[table]
+        skipped = sorted(set(skip_lower))
+        clause = (
+            f" AND lower({second}) NOT IN ({','.join('?' for _ in skipped)})" if skipped else ""
+        )
         cursor = conn.execute(
-            f"SELECT path, {second} FROM {table} WHERE fold_key=? ORDER BY path, {second}",
-            (fold_key,),
+            f"SELECT path, {second} FROM {table} WHERE fold_key=? AND path<>?{clause} "
+            f"ORDER BY path, {second}",
+            (fold_key, skip_path, *skipped),
         )
         out: list[tuple[str, str]] = []
         verdicts: dict[str, bool] = {}
@@ -889,6 +938,27 @@ class DreamerStore:
             f"SELECT path FROM {table} WHERE fold_key=? ORDER BY path LIMIT 1", (fold_key,)
         ).fetchone()
         return None if row is None else str(row[0])
+
+    @staticmethod
+    def spelling_firsts(conn: sqlite3.Connection, fold_key: str) -> list[tuple[str, str]]:
+        """`(path, spelling)`: the first page of the least spelling and of the next one.
+
+        Two index seeks, whatever the cluster's size.
+        """
+        out: list[tuple[str, str]] = []
+        after = None
+        for _ in range(2):
+            row = conn.execute(
+                "SELECT path, raw FROM term_uses WHERE fold_key=? "
+                + ("AND raw>? " if after is not None else "")
+                + "ORDER BY raw, path LIMIT 1",
+                (fold_key, after) if after is not None else (fold_key,),
+            ).fetchone()
+            if row is None:
+                break
+            out.append((str(row[0]), str(row[1])))
+            after = str(row[1])
+        return out
 
     @staticmethod
     def spelling_span(conn: sqlite3.Connection, fold_key: str) -> tuple[str, str] | None:
@@ -978,6 +1048,8 @@ class StoreView:
 
 _MEMO_LOCK = threading.Lock()
 _MEMO: dict[str, StoreView] = {}
+#: Each sidecar's file identity as this process last left it (see `connect`).
+_LEFT: dict[str, tuple[int, int, int] | None] = {}
 
 
 def clear_reader_memo() -> None:

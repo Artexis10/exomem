@@ -1022,7 +1022,13 @@ def _alias_view(
     Strict is a caller's view: the fold key is unique to the subject among the
     pages it may see, and within the member bound. The worker stores the
     non-strict superset, which exists whenever the proposal holds for some
-    audience, so a withheld page can never prevent a row.
+    audience, so a withheld page can never prevent a row: it reads referrers
+    past the subject's own spellings (a link that already names the subject
+    resolves), so a crowd of those cannot hide a variant from it.
+
+    Whether a bare link resolves is itself audience-dependent: it resolves by
+    title or stem to a page that then carries the same fold key. So every bare
+    target is a member, and the strict uniqueness rule decides it per caller.
     """
     from . import working_set_index
 
@@ -1030,14 +1036,20 @@ def _alias_view(
     if not key or (keep is not None and not keep(subject)):
         return None
     conn = ctx.members_conn()
-    names = _pages_in(dreamer_store.DreamerStore.members(conn, "name_keys", key, keep=keep))
-    refs = _pages_in(dreamer_store.DreamerStore.members(conn, "name_refs", key, keep=keep))
+    resolving = set(measures.get("resolving") or ())
     if strict:
+        names = _pages_in(dreamer_store.DreamerStore.members(conn, "name_keys", key, keep=keep))
+        refs = _pages_in(dreamer_store.DreamerStore.members(conn, "name_refs", key, keep=keep))
         if len(set(names) | set(refs)) > dreamer_store.MEMBER_BOUND:
             return None
         if set(names) != {subject}:
             return None
-    resolving = set(measures.get("resolving") or ())
+    else:
+        refs = _pages_in(
+            dreamer_store.DreamerStore.members(
+                conn, "name_refs", key, skip_path=subject, skip_lower=resolving
+            )
+        )
     referrers = {
         path: sorted({raw for raw in raws if raw.casefold() not in resolving})
         for path, raws in refs.items()
@@ -1115,14 +1127,23 @@ def _alias_refresh(ctx: Context, subject: str, key: str) -> None:
 def _alias_refresh_key(ctx: Context, key: str, *, page: str | None = None) -> None:
     """Recompute every proposal on one fold key, whichever page moved."""
     store, conn = ctx.store, ctx.conn
+    open_subjects = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT subject_path FROM candidates WHERE family=? AND proposal_key=? "
+            "AND state='open'",
+            (ALIAS_FAMILY, key),
+        ).fetchall()
+    }
+    linked = conn.execute("SELECT 1 FROM name_refs WHERE fold_key=? LIMIT 1", (key,)).fetchone()
+    if linked is None and not open_subjects:
+        # Nothing links this name: no proposal, and no ambiguity to report.
+        store.clear_integrity_key(conn, key)
+        return
     subjects = {path for path, _source in store.members(conn, "name_keys", key)}
+    subjects |= open_subjects
     if page is not None:
         subjects.add(page)
-    for (subject,) in conn.execute(
-        "SELECT subject_path FROM candidates WHERE family=? AND proposal_key=? AND state='open'",
-        (ALIAS_FAMILY, key),
-    ).fetchall():
-        subjects.add(str(subject))
     for subject in sorted(subjects):
         _alias_refresh(ctx, subject, key)
     _alias_integrity(ctx, key)
@@ -1342,9 +1363,37 @@ def _tag_kwargs(ctx: Context, key: str) -> dict[str, Any] | None:
         return None
     view = _tag_view(ctx, key, keep=None, strict=False)
     if view is None:
-        return None
+        # Past the member bound one spelling can fill every page read; the
+        # row still exists, since a caller who sees fewer pages may see both.
+        firsts = dreamer_store.DreamerStore.spelling_firsts(conn, key)
+        view = _tag_fallback(ctx, key, firsts)
     first = dreamer_store.DreamerStore.first_member(conn, "term_uses", key)
     return {**view, "subject_path": first or view["subject_path"]}
+
+
+def _tag_fallback(ctx: Context, key: str, firsts: list[tuple[str, str]]) -> dict[str, Any]:
+    """A stored cluster row from the first page of two spellings (two index seeks)."""
+    (subject, minority), *others = firsts
+    subject_entry = _member_entry(ctx, subject, "subject", spelling=minority)
+    return {
+        "family": CONVENTION_FAMILY,
+        "kind": TAG_KIND,
+        "subject_path": subject,
+        "subject_ref": subject_entry["ref"],
+        "proposal_key": key,
+        "evidence": [
+            subject_entry,
+            *(_member_entry(ctx, path, "member", spelling=raw) for path, raw in others),
+        ],
+        "evidence_count": len(firsts),
+        "route": {
+            "tool": "edit_memory",
+            "args": {"path": subject, "operation": {"kind": "replace_tags"}},
+        },
+        "reason_code": "tag_spelling_variant",
+        "signal_version": review_state_digest([key, "past-bound", firsts]),
+        "measures": {"fold_key": key, "spelling": minority, "counts": {}, "why": ""},
+    }
 
 
 def _tag_refresh(ctx: Context, key: str) -> None:

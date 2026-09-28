@@ -527,7 +527,7 @@ def run_once(
         waiting=waiting,
     )
     if conn is not None:
-        conn.close()
+        store.close(conn)
     return TickResult(
         ran=True,
         processed=tuple(processed),
@@ -584,7 +584,7 @@ def _flush_deliveries(vault_root: Path) -> None:
         log.debug("dreamer: deliveries not recorded", exc_info=True)
     finally:
         if conn is not None:
-            conn.close()
+            store.close(conn)
 
 
 def _record_deliveries(store: dreamer_store.DreamerStore, conn: Any) -> bool:
