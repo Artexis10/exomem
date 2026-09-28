@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: ccadcf2a855b1ebb4fc0998c3c867f427038395659a547ce8c29489ec3737d68
+  skill_contract: 6d3267167b4250edbcd9dfd17801fcc3dbeca37be1e617b0c39bc953a08432d3
   version: "0.32.0"
 ---
 
@@ -146,6 +146,9 @@ Read the selected procedure and check the envelope below. Search for existing
 knowledge and inspect matching pages before creating another. Capture external
 originals into Source/Evidence first and include their returned references in
 `sources:` on the first compiled write; a URL or derivative is not the original.
+A file the user shares as evidence is preserved as its original bytes first; a
+transcription goes beside it, never instead. If this client cannot pass the bytes,
+say so plainly rather than saving only the text ([per-client paths](references/operation-routing.md)).
 Honest `sources: []` is valid for live reasoning with no captured external input.
 Use `connect_memory(operation="suggest-links")` on a draft when relevant connections
 are missing, and `suggest-relations` when their direction is unresolved. Reuse

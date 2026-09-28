@@ -1099,7 +1099,11 @@ A client then points at `http://127.0.0.1:8764/mcp` with
 - `exomem attach <file> --scope <scope> --category <category>` sends a file's
   bytes to the local `/upload` and prints the handle the service returns. It
   reads `EXOMEM_LOCAL_TOKEN_FILE` and `EXOMEM_LOCAL_PORT`, or `--token-file` and
-  `--port`.
+  `--port`. Without `--scope` and `--category` the service holds the bytes
+  outside the vault and prints a `file` handle for `preserve_artifacts` (or,
+  with `--lane source`, `capture_source`). A held handle is redeemable once,
+  within an hour, and only by a request using the same local token, so point
+  the client's MCP connection at the local listener with that token.
 
 The owner REST key and the static upload token keep working on the public path.
 Their use on a Cloudflare-transited request is logged as

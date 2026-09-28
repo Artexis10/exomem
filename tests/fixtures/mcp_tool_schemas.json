@@ -916,7 +916,7 @@
     }
   },
   "capture_source": {
-    "description": "Capture raw source material and optionally return compile guidance.\n\nTakes `content` for text or `files` for attached file handles, stored\nlosslessly under `Sources/`. This command is for raw material; proof-bearing\nartifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the\nartifact is for, not by what the client can carry.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
+    "description": "Capture raw source material and optionally return compile guidance.\n\nTakes `content` for text or `files` for attached file handles (a local\nclient passes the handle `exomem attach --lane source` prints), stored\nlosslessly under `Sources/`. This command is for raw material; proof-bearing\nartifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the\nartifact is for, not by what the client can carry.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -4519,7 +4519,7 @@
     }
   },
   "preserve_artifacts": {
-    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\ntemporary HTTPS file handles. Exomem retrieves each handle server-side and\nreturns one terminal state per file — `stored`, `already_stored`, or\n`failed`. `already_stored` means those exact bytes are already under that\ndestination, so nothing was written and the outcome names the existing path\nand ref; retrying a lost response with the same identity replays the batch\nrather than duplicating it. No binary data is passed as base64 through\nmodel-visible arguments. Clients without file handles keep using\n`transfer_artifact(operation=\"upload\")` followed by `/upload`.",
+    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\nfile handles: a chat client's attachments, or the handle `exomem attach`\nprints on a local client. When a shared file is evidence, preserve the\noriginal first and put any transcription in `transcriptions`, never\ninstead. Exomem retrieves each handle server-side and returns one terminal\nstate per file — `stored`, `already_stored`, or\n`failed`. `already_stored` means those exact bytes are already under that\ndestination, so nothing was written and the outcome names the existing path\nand ref; retrying a lost response with the same identity replays the batch\nrather than duplicating it. No binary data is passed as base64 through\nmodel-visible arguments. Clients without file handles keep using\n`transfer_artifact(operation=\"upload\")` followed by `/upload`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -4596,6 +4596,32 @@
           ],
           "default": null,
           "description": "Optional explicit adoption identity selecting exactly one\nsupplied handle. This establishes eligibility, not write consent;\nagent-initiated use obeys proactive_capture."
+        },
+        "transcriptions": {
+          "default": [],
+          "description": "Optional transcriptions of supplied originals, each {file_id, text}. Each is saved on its original's Evidence page, bound to the original's bytes, and only when that original is stored.",
+          "items": {
+            "description": "A transcription an AI client derived from one supplied original.",
+            "properties": {
+              "file_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "text": {
+                "maxLength": 100000,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_id",
+              "text"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "type": "array"
         },
         "response_detail": {
           "default": "compact",

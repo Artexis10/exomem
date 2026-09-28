@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: ccadcf2a855b1ebb4fc0998c3c867f427038395659a547ce8c29489ec3737d68
+  skill_contract: 6d3267167b4250edbcd9dfd17801fcc3dbeca37be1e617b0c39bc953a08432d3
   version: "0.1.0"
 ---
 
@@ -38,6 +38,9 @@ identity after an uncertain commit.
    Pass `source_kind` and `domain` on a `capture_source` call — both are open
    vocabularies, so name the label that fits even if it is unfamiliar, and keep
    `other` for material you genuinely cannot classify.
+   A transcription of an attached file never replaces the file: preserve the
+   original too (`preserve_artifacts` takes the transcription beside it), and say
+   so if this client cannot pass the bytes.
 3. Media processing is automatic; use `process_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `ask_memory`.
 4. If the source is worth distilling, use `compile_source` to plan and draft the compiled note — including the path preserved in step 2 as `sources:`. That is what links the note back to the raw artifact and marks the source processed; omit it and the source stays in the unprocessed backlog forever.
 5. Reuse known meaningful connections; use `connect_memory(operation="suggest-links")` when candidates are still missing and review them. Then write with `remember`, carrying the sources and accepted links in this first write.
