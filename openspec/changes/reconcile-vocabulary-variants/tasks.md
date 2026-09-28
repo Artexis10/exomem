@@ -17,6 +17,14 @@
       The cause is not reproduced and no defect is shown. Close this at the 5.2 live preview
       if the worker log still names no exception class; a logged class reopens it as a
       red-first fix.
+      A later write shows what an unavailable sync now reports. An `edit_memory` at 08:17Z
+      returned `graph_projection_unavailable` beside `graph_sync: completed`. Its own graph
+      receipt had drained by 08:17:37. At 08:17:38 the graph drain withdrew read availability
+      for residue repair, and the watcher registered a whole-vault rebuild
+      (`graph_sync_predecessor_mismatch`). Vocabulary then found no read snapshot and named
+      that reason. There was no exception and no stale flag: the two fields measure the
+      write's own graph effect and the published read snapshot. The queued recovery job
+      drains only at activation or on explicit review.
 - [x] 1.4 Test first, then keep closed projection reasons in `vocabulary_sync`.
 
 ## 2. Shared fold
