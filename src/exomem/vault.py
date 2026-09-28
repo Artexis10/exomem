@@ -22,7 +22,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from contextvars import ContextVar, copy_context
+from contextvars import Context, ContextVar, copy_context
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
@@ -849,8 +849,25 @@ def _defer_until_creation_lock_release(work: Callable[[], Any]) -> bool:
     if not getattr(_HELD_LOCKS, "keys", None) or pending is None:
         return False
     context = copy_context()
-    pending.append(lambda: context.run(work))
+    pending.append(lambda: _run_in_captured_context(context, work))
     return True
+
+
+def _run_in_captured_context(context: Context, work: Callable[[], Any]) -> None:
+    """Run `work` in the context captured at commit; keep what it sets.
+
+    Inline, the fan-out's own context writes landed in the writer's context:
+    the graph dispatch registers a rebuild there, and the writer's mutation
+    boundary starts it on exit. Every variable the work changes is copied
+    back into the context the lock is released in, so that is unchanged.
+    """
+    before = dict(context.items())
+    try:
+        context.run(work)
+    finally:
+        for var, value in context.items():
+            if var not in before or before[var] is not value:
+                var.set(value)
 
 
 def _run_after_release(pending: list[Callable[[], Any]]) -> None:

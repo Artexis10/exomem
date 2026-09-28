@@ -193,3 +193,55 @@ def test_a_death_before_the_released_fanout_still_converges_on_restart(
     lexstore.reset_memo()
     hits = lexstore.search_bm25(tmp_path, "quillmarrow", 5)
     assert hits and hits[0][0] == INSIGHT
+
+
+def test_what_the_deferred_fanout_sets_reaches_the_writers_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inline, the fan-out's own context writes landed in the writer's context:
+    the graph dispatch registers its rebuild there, and the writer's mutation
+    boundary starts it on exit. Run in a discarded copy, the registration was
+    lost and no graph rebuild ever ran after a `remember`."""
+    import contextvars
+
+    probe: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+        "fanout_probe", default=None
+    )
+    page = _page(tmp_path)
+    monkeypatch.setattr(
+        vault_module,
+        "post_commit_batch_fanout",
+        lambda *_a, **_k: probe.set("registered") and True,
+    )
+    with vault_module.vault_creation_lock(tmp_path, "semantic-creation"):
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(path=page, content="# Fanout probe\n\nsecond\n")],
+            vault_root=tmp_path,
+        )
+        assert probe.get() is None
+    assert probe.get() == "registered"
+
+
+def test_an_authored_contradiction_from_remember_reaches_the_graph(tmp_path: Path) -> None:
+    """End to end on a fresh vault: two `remember` commits, the second
+    contradicting the first, and the graph answers with the pair."""
+    from exomem import contradiction_stance, epistemic_graph, graph_sync
+
+    if not epistemic_graph.graph_enabled():
+        pytest.skip("graph index disabled")
+    (tmp_path / "Knowledge Base").mkdir()
+    first = commands.op_remember(
+        tmp_path,
+        content="# Cap first\n\n## Claim\n\nThe cap is 25 sessions.\n",
+        title="Cap first",
+    )["path"]
+    second = commands.op_remember(
+        tmp_path,
+        content=(
+            "# Cap second\n\n## Claim\n\nThe cap is 50 sessions.\n\n"
+            f"## Relations\n\n- contradicts [[{first[:-3]}]]\n"
+        ),
+        title="Cap second",
+    )["path"]
+    graph_sync.drain_active_rebuilds()
+    assert contradiction_stance.asserted_pairs(tmp_path) == [tuple(sorted((first, second)))]
