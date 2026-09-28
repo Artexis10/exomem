@@ -49,3 +49,32 @@ recovery watcher (close-memory-loop 5.10 / variants 1.3).
 - **Test quality:** the touched modules pass (62 tests). Three reverts, each confirmed red: the registry guard, the `mkdir` removal, and `note_graph_published` → `pass`, which makes `test_a_job_stranded_by_a_withdrawn_graph_drains_after_the_next_publish` fail.
 
 Command: `CUDA_VISIBLE_DEVICES= XDG_STATE_HOME=$(mktemp -d) uv run pytest -q -p no:cacheprovider tests/test_source_vocabulary_resolution.py tests/test_vocabulary_family_receipts.py tests/test_vocabulary_recovery.py tests/test_vocabulary_authority_lifecycle.py tests/test_server_runtime.py`
+
+## Recheck at `4b4596a3` (commits 41e4c54, d8dd8c7, 4b4596a)
+
+I re-read every file this round touched: `add.py`, `epistemic_graph.py`, `reclassify_source.py`, `server_runtime.py`, `source_taxonomy.py`, `vocabulary_resolution.py`, `tests/conftest.py` and the three test modules.
+
+- **M1: resolved.** `_publish_available_marker_in_transaction` no longer signals. `_note_graph_published` fires only for the live sidecar path, and only after the commit or swap:
+  - the full-rebuild swap (`epistemic_graph.py:3209`);
+  - the registry-rebind `replace_sidecar` (`:3670`);
+  - `_publish_available_marker` (`:4430`), which `_mark_incremental_available` also uses;
+  - the incremental `before_commit` (`:5688`);
+  - the deferred drain (`:6012`).
+
+  I found no swap site that skips the signal. A redrain that times out with work queued re-arms the watcher, up to `VOCABULARY_REDRAIN_RETRIES = 30` times in a row. My late-readable repro (0.3 s window, readable after 0.8 s) now **passes**: the job drains. A bound probe with retries set to 3 made 12 `available()` polls, then **0** more in the next 1.5 s.
+- **M2: resolved.** The watcher has its own `_vocabulary_stop`, which `_stop_background_workers` sets. The thread is joined (5 s bound), and the lifespan joins it a second time after the activation thread. It is now listed in `_VAULT_WALKING_THREAD_NAMES`. Census on the same two `test_derived_batch_receipts` tests: `LEAKED_VOCAB_THREADS 0` (it was 2).
+- **L1: resolved as ruled.** A kind-only reclassify of a `health` source under a malformed registry relocates to `Sources/Reports/Health/`. Supplying a domain still refuses with `INVALID_DOMAIN_TAXONOMY: domain taxonomy is malformed (Knowledge Base/_Schema/source-taxonomy.yaml)`, which is vault-relative. An ambiguous destination still refuses even without a supplied domain; the ruling only covered malformed registries.
+- **L2: resolved as ruled.** `add.py:370-383` compares `registry_text_snapshot(plan.source_text)` with `binding.snapshot` and refuses on a mismatch with `STALE_VOCABULARY_BINDING` ("retry the capture", no path). A missing registry hashes the same way on both sides (`{"registry": "missing"}`), so first-time registration in a fresh vault is not falsely refused. A registry that is malformed at plan time hashes to `None`, which also refuses.
+
+**Tests:** scoped `test_source_vocabulary_resolution`, `test_vocabulary_family_receipts`, `test_vocabulary_recovery`, `test_vocabulary_authority_lifecycle`, `test_server_runtime`, `test_derived_batch_receipts` and `test_epistemic_graph`: **164 passed**. I reverted each fix in a scratch copy, and every new test went red:
+- re-arm: `…after_the_window_still_drains` failed;
+- in-transaction signal: `…only_once_the_publish_is_readable` failed;
+- join: `…joins_the_vocabulary_watcher` failed, and the conftest census errored in teardown;
+- L1 fallback: failed;
+- L2 check: failed.
+
+**CI (PR #1438, head `4b4596a38c`):** 35 check runs: 25 success, 10 skipped (conditional lanes), 0 failed. The successes include `required CI gate`, `core tests` 12/12, `harness tests` 4/4, `lint + targeted types`, `OpenSpec validation`, `capabilities doc` and `product E2E`. The PR has no commit statuses and no Claude Approvals check run. `gh` is unavailable here, so I read the runs through the GitHub API.
+
+**New, advisory (Low, not blocking):** the bounded re-arm allows up to 30 × 10 s of `available()` polling at 4 Hz per publication. That is 1,200 probes, each able to reach `_disk_vault_freshness` (a vault walk) when the checkpoint is not the exact live one. It was 40 probes before. Exponential backoff between re-arms would cut this without weakening the fix.
+
+**Verdict: APPROVE**
