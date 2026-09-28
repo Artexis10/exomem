@@ -71,6 +71,7 @@
   Timings on abstention and the single-flighted cold inventory merged (#1332, #1358); the live-service verification list remains.
 - [ ] 6.10 Make embeddings the multilingual relevance sensor: one fingerprinted resident activation encoder (shared with recall when the profiles are equal), incremental signature vectors with no request-thread model load, the corpus-relative band with its `uncalibrated` floor, CJK containment contact, and no similarity reordering of the recent block; verify the multilingual fixture's hard gates on both arms, the served encoder's usefulness bars and latency, and live private multilingual turns before enablement.
   Fingerprinted resident encoder, incremental signature vectors and the corpus-relative band merged (#1381, #1385); live private multilingual turns remain before enablement.
+- [ ] 6.12 Serve the Planning item ref when the turn resolves to an item. The compiler resolves a Planning collection manifest as the `plan` anchor and serves the collection, so a turn about one intended item gets the collection's ref and a unit such as `plan:<collection>#<item title>`, never the item page the agent needs. Verify with the context-activation benchmark's real-compiler run: C3 and T3 stop failing for the collection-versus-item reason, with no scoring amendment for Planning identity, and a collection-level turn still resolves the collection.
 
 ## 7. Deliver governed adaptation and derived working context
 
