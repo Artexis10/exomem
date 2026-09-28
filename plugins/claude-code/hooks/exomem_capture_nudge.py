@@ -54,6 +54,19 @@ of that call — the door unconfigured, a timeout, any error, or the episode
 simply not found yet — falls straight through to the transcript-only
 behaviour above.
 
+Candidate coverage (close-memory-loop 4.1). A successful write or a `Saved ->`
+marker is an attempted capture: it answers that turn's capture reminder and
+never the episode's coverage. Once a session prepares, dispositions or resumes
+an episode candidate, the hook mirrors that episode's ledger state -- attempted
+leaves, pending items, the input revision it is covered through and its next
+step -- from one bounded `episode_memory(action="candidates")` call on the same
+door, at most once per episode-ask cooldown. While the ledger's next step is
+something the agent can do (`decide`, or `resume`/`attest` when the service
+executes candidates) the Stop gets the coverage ask, whatever was written that
+turn. A covered ledger is not read again until the session moves its workflow.
+A session that never prepared a candidate never reads it, and an unreachable
+door leaves the turn as it was.
+
 Contract (Claude Code / Codex Stop hook): read the event JSON on stdin; print
 `{"decision":"block","reason":...}` and exit 0 to block the stop and feed the
 reminder to the agent; exit 0 with no output to allow the stop. Never raises — a
@@ -88,7 +101,7 @@ _KB_WRITE = re.compile(
     r"record_memory:(?:create|append|update|revise|rebaseline)|"
     r"plan_memory:(?:create|add|update|triage)|"
     r"observe_memory:(?:add|update|remove)|"
-    r"episode_memory:record"
+    r"episode_memory:(?:record|prepare|disposition|resume)"
     r")",
     re.I,
 )
@@ -131,6 +144,19 @@ EPISODE_ASK = (
     "and open items; add said only for a user statement worth keeping verbatim. "
     "Distil; no transcript. If nothing durable happened, do nothing."
 )
+#: The candidate-coverage ask (task 4.1), with its own prefix. `{key}` is the
+#: episode whose candidates the session prepared, `{next}` its ledger's next step.
+COVERAGE_ASK = (
+    "[Exomem episode coverage] Episode {key} is not covered through its current "
+    "input; its ledger's next step is {next}. A committed note or a Saved marker "
+    'does not cover it. Read episode_memory action="candidates" and continue: '
+    'decide each candidate, resume the routed ones, or make the final pass '
+    '(action="coverage", then resume with postcommit=true). Deferred work may '
+    "stay deferred."
+)
+_WORKFLOW_ACTIONS = frozenset({"prepare", "disposition", "resume"})
+_EPISODE_KEY_RE = re.compile(r"^ep-[0-9a-f]{32}$")
+_COVERAGE_STEPS = frozenset({"decide", "resume", "attest", "none"})
 #: The label the server derives the same key from (`episode_capture.hook_key`).
 _EPISODE_CLIENT_LABELS = {"claude": "claude-code", "codex": "codex"}
 _EPISODE_KEY_LABEL = "exomem-episode-key-v1"
@@ -470,6 +496,26 @@ def _successful_episode_record(tool: dict) -> bool:
     )
 
 
+def _workflow_episode(tools: list[dict]) -> str | None:
+    """The episode a completed candidate action (prepare/disposition/resume)
+    named this turn, the latest first, or None."""
+    for tool in tools:
+        if tool.get("failed"):
+            continue
+        tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
+        episode = tool_input.get("episode")
+        if (
+            re.search(
+                r"(?:exomem|knowledge[_-]?base).*episode_memory", str(tool.get("name") or ""), re.I
+            )
+            and str(tool_input.get("action") or "") in _WORKFLOW_ACTIONS
+            and isinstance(episode, str)
+            and _EPISODE_KEY_RE.fullmatch(episode)
+        ):
+            return episode
+    return None
+
+
 def _episode_state_path(session_id: str) -> Path:
     key = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)[:120]
     return _hook_home() / ".cache" / "exomem-nudge" / f"episode_{key}"
@@ -479,6 +525,16 @@ _EPISODE_STATE_DEFAULT = {
     "substantive_since_record": 0,
     "last_ask_ts": 0.0,
     "last_seen_revisions": 0,
+    # The candidate ledger, mirrored from the door (task 4.1): which episode
+    # this session prepared candidates for, its next step (`unknown` until
+    # read, and again once the session moves its workflow), what it attempted,
+    # what is pending and the input revision it is covered through (0: none).
+    "workflow_episode": "",
+    "coverage_next": "unknown",
+    "attempted": 0,
+    "pending": 0,
+    "covered_through": 0,
+    "last_coverage_check_ts": 0.0,
 }
 #: `last_seen_revisions` after a record this hook saw itself: the door's count
 #: now includes that record, so the next read re-bases instead of comparing.
@@ -493,10 +549,22 @@ def _read_episode_state(path: Path) -> dict:
     if not isinstance(data, dict):
         return dict(_EPISODE_STATE_DEFAULT)
     try:
+        workflow = data.get("workflow_episode")
+        step = data.get("coverage_next")
         return {
             "substantive_since_record": max(0, int(data.get("substantive_since_record") or 0)),
             "last_ask_ts": float(data.get("last_ask_ts") or 0.0),
             "last_seen_revisions": max(-1, int(data.get("last_seen_revisions") or 0)),
+            "workflow_episode": (
+                workflow
+                if isinstance(workflow, str) and _EPISODE_KEY_RE.fullmatch(workflow)
+                else ""
+            ),
+            "coverage_next": step if step in _COVERAGE_STEPS else "unknown",
+            "attempted": max(0, int(data.get("attempted") or 0)),
+            "pending": max(0, int(data.get("pending") or 0)),
+            "covered_through": max(0, int(data.get("covered_through") or 0)),
+            "last_coverage_check_ts": float(data.get("last_coverage_check_ts") or 0.0),
         }
     except (TypeError, ValueError):
         return dict(_EPISODE_STATE_DEFAULT)
@@ -621,12 +689,42 @@ def _bounded(call, budget: float):
 def _episode_revision_count(key: str) -> int | None:
     """This episode's revision count, via one bounded, read-only REST call —
     `episode_memory(action="inspect", episode=key)` against the local door.
+    `_episode_door` has the bounds and failure handling.
+    """
+    data = _episode_door("inspect", key)
+    revisions = data.get("revisions") if data is not None else None
+    return len(revisions) if isinstance(revisions, list) else None
+
+
+def _episode_coverage(key: str) -> dict | None:
+    """This episode's ledger coverage, via `episode_memory(action="candidates")`
+    on the same door: `{next, attempted, pending, covered_through, execution}`,
+    or `None` on any failure or an unexpected shape."""
+    data = _episode_door("candidates", key)
+    coverage = data.get("coverage") if data is not None else None
+    if not isinstance(coverage, dict) or coverage.get("next") not in _COVERAGE_STEPS:
+        return None
+    try:
+        return {
+            "next": coverage["next"],
+            "attempted": max(0, int(coverage.get("attempted") or 0)),
+            "pending": max(0, int(coverage.get("pending") or 0)),
+            "covered_through": max(0, int(coverage.get("covered_through_input_revision") or 0)),
+            "execution": str(data.get("execution") or ""),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _episode_door(action: str, key: str) -> dict | None:
+    """One bounded, read-only `episode_memory(action=..., episode=key)` REST
+    call against the local door; its `data` object, or `None`.
 
     `None` on ANY failure: the door unconfigured (no key resolves), a bad or
     unresolved port, a timeout, a non-200, a malformed body, or the episode
     simply not found yet (a session's first ask, before anything was ever
-    recorded). The caller treats `None` exactly like "no new revision" —
-    today's ask-cadence behaviour, unchanged. Never raises.
+    recorded). Every caller treats `None` as knowing nothing new: the record
+    ask keeps today's cadence and the coverage ask stays silent. Never raises.
 
     Reads `_EPISODE_DOOR_TIMEOUT_SECONDS` fresh on every call rather than
     binding it as a default parameter, so a test (or a future tuning knob)
@@ -634,7 +732,7 @@ def _episode_revision_count(key: str) -> int | None:
     """
     timeout = _EPISODE_DOOR_TIMEOUT_SECONDS
 
-    def _call() -> int | None:
+    def _call() -> dict | None:
         # Key resolution may read `service.env`, which can block (a FIFO, a
         # stalled mount), so it runs inside the bound with the request.
         api_key, source = _resolve_rest_key()
@@ -643,7 +741,7 @@ def _episode_revision_count(key: str) -> int | None:
         port = _rest_port()
         if port is None:
             return None
-        body = json.dumps({"action": "inspect", "episode": key}).encode("utf-8")
+        body = json.dumps({"action": action, "episode": key}).encode("utf-8")
         req = urllib.request.Request(
             f"http://{_rest_host()}:{port}/api/episode_memory",
             data=body,
@@ -663,8 +761,7 @@ def _episode_revision_count(key: str) -> int | None:
         if not isinstance(payload, dict) or payload.get("success") is not True:
             return None
         data = payload.get("data")
-        revisions = data.get("revisions") if isinstance(data, dict) else None
-        return len(revisions) if isinstance(revisions, list) else None
+        return data if isinstance(data, dict) else None
 
     return _bounded(_call, timeout)
 
@@ -690,11 +787,13 @@ def _episode_ask(
     cooldown = _env_int("EXOMEM_EPISODE_ASK_COOLDOWN_SEC", preset[1])
     path = _episode_state_path(session_id)
     state = _read_episode_state(path)
-    if any(_successful_episode_record(tool) for tool in tools):
+    recorded = any(_successful_episode_record(tool) for tool in tools)
+    if recorded:
         state["substantive_since_record"] = 0
         state["last_seen_revisions"] = _REVISIONS_UNKNOWN
     elif substantive:
         state["substantive_since_record"] += 1
+    _note_workflow(state, tools, recorded)
     now = time.time()
     client = _EPISODE_CLIENT_LABELS.get(_hook_client(), _hook_client())
     key = episode_key(client, session_id)
@@ -719,10 +818,50 @@ def _episode_ask(
     due = about_due
     if due:
         state["last_ask_ts"] = now
+    coverage_ask = None if due else _coverage_ask(state, now, cooldown)
     _write_episode_state(path, state)
-    if not due:
+    if due:
+        return EPISODE_ASK.replace("{key}", key)
+    return coverage_ask
+
+
+def _note_workflow(state: dict, tools: list[dict], recorded: bool) -> None:
+    """A candidate action or a new record moves the ledger: read it again."""
+    workflow = _workflow_episode(tools)
+    if workflow is not None:
+        state["workflow_episode"] = workflow
+    if workflow is not None or recorded:
+        state["coverage_next"] = "unknown"
+
+
+def _coverage_ask(state: dict, now: float, cooldown: int) -> str | None:
+    """The candidate-coverage ask when the mirrored ledger has work the agent
+    can do. Reads the ledger at most once per cooldown, never for a session
+    without candidates or a ledger last seen covered, and asks nothing when
+    the door cannot say."""
+    key = state["workflow_episode"]
+    if (
+        not key
+        or state["coverage_next"] == "none"
+        or now - state["last_coverage_check_ts"] < cooldown
+    ):
         return None
-    return EPISODE_ASK.replace("{key}", key)
+    state["last_coverage_check_ts"] = now
+    seen = _episode_coverage(key)
+    if seen is None:
+        return None
+    state.update(
+        coverage_next=seen["next"],
+        attempted=seen["attempted"],
+        pending=seen["pending"],
+        covered_through=seen["covered_through"],
+    )
+    actionable = seen["next"] == "decide" or (
+        seen["execution"] == "enabled" and seen["next"] in {"resume", "attest"}
+    )
+    if not actionable:
+        return None
+    return COVERAGE_ASK.replace("{key}", key).replace("{next}", seen["next"])
 
 
 def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
@@ -732,12 +871,15 @@ def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
     follows, which Stops again with `stop_hook_active`. That record is the
     coverage the ask asked for; dropping it would repeat the ask every cooldown.
     """
-    if not session_id or not any(_successful_episode_record(tool) for tool in tools):
+    recorded = any(_successful_episode_record(tool) for tool in tools)
+    if not session_id or not (recorded or _workflow_episode(tools)):
         return
     path = _episode_state_path(session_id)
     state = _read_episode_state(path)
-    state["substantive_since_record"] = 0
-    state["last_seen_revisions"] = _REVISIONS_UNKNOWN
+    if recorded:
+        state["substantive_since_record"] = 0
+        state["last_seen_revisions"] = _REVISIONS_UNKNOWN
+    _note_workflow(state, tools, recorded)
     _write_episode_state(path, state)
 
 
@@ -848,8 +990,9 @@ def main() -> int:
     session_id = str(data.get("session_id") or data.get("sessionId") or "")
     if _restart_pending(tools):  # hooks are live but the MCP server is not loaded yet
         return 0
-    # Before every write/Saved shortcut below: those silence the per-turn
-    # reminder, but they never cover the episode (task 4.1).
+    # Before the attempted-capture checks below: a write or a Saved marker
+    # answers this turn's reminder, never the episode's coverage, which only
+    # a record or the candidate ledger establishes (task 4.1).
     ask = _episode_ask(
         session_id, tools, len(assistant_text.strip()) >= min_chars, level
     )
@@ -857,9 +1000,10 @@ def main() -> int:
         _log(assistant_text)
         print(json.dumps({"decision": "block", "reason": ask}))
         return 0
-    if any(_successful_kb_write(tool) for tool in tools):  # already captured this turn
-        return 0
-    if re.search(r"Saved\s*(?:->|→|:)", assistant_text):
+    attempted = any(_successful_kb_write(tool) for tool in tools) or bool(
+        re.search(r"Saved\s*(?:->|→|:)", assistant_text)
+    )
+    if attempted:  # capture was attempted this turn; coverage is the checks above
         return 0
     if len(assistant_text.strip()) < min_chars:  # trivial turn, not a landing
         return 0
