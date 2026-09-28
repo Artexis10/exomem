@@ -427,3 +427,24 @@ def test_the_record_round_trips_through_json() -> None:
     again = obs.load_observation_json(obs.dump_observation_json(loaded))
 
     assert again == loaded
+
+
+# --------------------------------------------------------------------------- #
+# Binding to the fixture's frozen digests
+# --------------------------------------------------------------------------- #
+
+
+def test_a_record_bound_to_the_frozen_digests_is_not_void() -> None:
+    assert obs.void_reasons(
+        _load(), actor_sha256=DIGEST, pre_capture_sha256=DIGEST, evaluator_sha256=DIGEST
+    ) == ()
+
+
+@pytest.mark.parametrize("field", ["actor_sha256", "pre_capture_sha256", "evaluator_sha256"])
+def test_a_record_bound_to_other_digests_is_void_not_rescored(field: str) -> None:
+    frozen = {"actor_sha256": DIGEST, "pre_capture_sha256": DIGEST, "evaluator_sha256": DIGEST}
+    frozen[field] = "c" * 64
+
+    reasons = obs.void_reasons(_load(), **frozen)
+
+    assert len(reasons) == 1 and field in reasons[0]

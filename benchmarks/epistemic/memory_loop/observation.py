@@ -324,6 +324,31 @@ class NoNudgeObservation(StrictModel):
         return self
 
 
+def void_reasons(
+    record: NoNudgeObservation,
+    *,
+    actor_sha256: str,
+    pre_capture_sha256: str,
+    evaluator_sha256: str,
+) -> tuple[str, ...]:
+    """Why a record cannot be scored against the fixture's frozen digests.
+
+    A record bound to another actor input, another pre-capture state or
+    another evaluator revision is void: an expectation edited after a run
+    never rescores that run.
+    """
+
+    reasons = []
+    for name, frozen in (
+        ("actor_sha256", actor_sha256),
+        ("pre_capture_sha256", pre_capture_sha256),
+        ("evaluator_sha256", evaluator_sha256),
+    ):
+        if getattr(record, name) != frozen:
+            reasons.append(f"{name} differs from the fixture's frozen digest")
+    return tuple(reasons)
+
+
 def load_observation(data: Mapping[str, Any]) -> NoNudgeObservation:
     return NoNudgeObservation.model_validate(dict(data), strict=False)
 

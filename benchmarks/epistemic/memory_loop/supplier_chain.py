@@ -52,6 +52,7 @@ from .contract import (
     FieldIs,
     FixtureError,
     LatestRecord,
+    LaterUse,
     Mentions,
     NoNewMention,
     NoteSeed,
@@ -370,22 +371,6 @@ class EdgeEvidence:
     expectation: str
     episode_id: str
     span: str
-
-
-@dataclass(frozen=True)
-class LaterUse:
-    """Blind-rubric anchors for the later fresh-session answer, written before any run.
-
-    ``useful`` is what a useful answer conveys; ``wrong`` lists answers that
-    would be poison (a hearsay asserted as fact, a seller presented as the
-    producer). ``expected_status`` is pinned only where the specification
-    fixes it: a bare shared name keeps its ambiguity. Elsewhere the packet's
-    status is the compiler's business and usefulness is judged on the answer.
-    """
-
-    useful: str
-    wrong: tuple[str, ...] = ()
-    expected_status: str | None = None
 
 
 @dataclass(frozen=True)

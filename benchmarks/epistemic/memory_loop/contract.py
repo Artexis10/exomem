@@ -934,15 +934,55 @@ class HedgedLines:
     reason: str
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        lines = [(page.path, line) for page in after.pages.values() for line in _new_lines(before, page)]
+        old_items = {(item.collection, item.item_key): item.fields for item in before.records}
+        lines += [
+            (item.collection, value)
+            for item in after.records
+            if old_items.get((item.collection, item.item_key)) != item.fields
+            for value in item.fields.values()
+        ]
         bad = [
-            f"{page.path}: {line.strip()}"
-            for page in after.pages.values()
-            for line in _new_lines(before, page)
+            f"{where}: {line.strip()}"
+            for where, line in lines
             if any(_has_marker(line, marker) for marker in self.subject)
             and any(_has_marker(line, marker) for marker in self.causal)
             and not any(_has_marker(line, marker) for marker in self.hedge)
         ]
         return _result(self.key, self.polarity, not bad, f"unhedged causal lines: {bad}")
+
+
+@dataclass(frozen=True)
+class CoLocated:
+    """The new lines carrying each marker group all sit on one page, an admissible home.
+
+    Facts that belong together (a label and a reported formulation of the same
+    product) land in one canonical home rather than being spread or copied, and
+    that home is one of ``homes`` rather than a related page whose scope does
+    not own them.
+    """
+
+    key: str
+    polarity: Literal["positive", "negative"]
+    groups: tuple[tuple[str, ...], ...]
+    homes: tuple[Select, ...]
+    reason: str
+
+    def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        holders: list[set[str]] = []
+        for group in self.groups:
+            holders.append(
+                {
+                    page.path
+                    for page in after.pages.values()
+                    for line in _new_lines(before, page)
+                    if any(_has_marker(line, marker) for marker in group)
+                }
+            )
+        pages = set().union(*holders) if holders else set()
+        admissible = {page.path for select in self.homes for page in select.matches(world, after, before)}
+        ok = len(pages) == 1 and all(holder == pages for holder in holders) and pages <= admissible
+        return _result(self.key, self.polarity, ok, f"holders {[sorted(h) for h in holders]}; admissible {sorted(admissible)}")
 
 
 @dataclass(frozen=True)
@@ -1169,6 +1209,7 @@ Expectation = (
     | NoNewMention
     | AttributedLines
     | HedgedLines
+    | CoLocated
     | TypedEdge
     | NoNewEdge
     | NoNewPlanning
@@ -1212,9 +1253,26 @@ def selects_of(expectation: Any) -> tuple[Select, ...]:
         value = getattr(expectation, name, None)
         if isinstance(value, Select):
             found.append(value)
+    found.extend(item for item in getattr(expectation, "homes", ()) if isinstance(item, Select))
     for option in getattr(expectation, "options", ()):
         found.extend(selects_of(option))
     return tuple(found)
+
+
+@dataclass(frozen=True)
+class LaterUse:
+    """Blind-rubric anchors for the later fresh-session answer, written before any run.
+
+    ``useful`` is what a useful answer conveys; ``wrong`` lists answers that
+    would be poison (a hearsay asserted as fact, a seller presented as the
+    producer). ``expected_status`` is pinned only where the specification
+    fixes it: a bare shared name keeps its ambiguity. Elsewhere the packet's
+    status is the compiler's business and usefulness is judged on the answer.
+    """
+
+    useful: str
+    wrong: tuple[str, ...] = ()
+    expected_status: str | None = None
 
 
 # --------------------------------------------------------------------------- #

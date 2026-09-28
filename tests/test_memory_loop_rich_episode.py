@@ -1,0 +1,498 @@
+"""The synthetic rich-episode fixture (close-memory-loop task 1.3).
+
+The verify clause is two things: expected destinations and provenance are
+specified before any write, and nothing in the fixture needs a private name.
+Both are pinned here, along with the fixture's two other obligations:
+
+**Expected red on the current runtime.** An untouched world fails every
+capture positive, and the episode executor has no leaf for the ``records``
+route, so the trial bake cannot run as an episode leaf today.
+
+**Not vacuous.** A scripted capture through the product's own writers
+(plumbing, not ordinary-agent evidence) satisfies every expectation, and each
+matched wrong capture fails exactly the expectation that guards it.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import shutil
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+from epistemic.memory_loop import contract
+from epistemic.memory_loop import observation as obs
+from epistemic.memory_loop import rich_episode as fx
+from epistemic.memory_loop.contract import read_state
+
+from exomem.public_artifact_privacy import assert_public_artifacts_clean
+
+pytestmark = pytest.mark.timeout(600)
+
+FIXTURE_SHA256 = "e56cf8b151c48cb36cc82b6a0ef30a9eefe6de729db4b827ae905d95de379078"
+EVALUATOR_SHA256 = "07bfff402ec9e9eb80b80837dc26425ae8c846bb9385bd9fdeab11a71f3eb27f"
+ACTOR_SHA256 = "b871a3e8f38fb59115bb96744b5392a1348866f4a4d3efb144961d7f20590e45"
+PRE_CAPTURE_SHA256 = "1b6ecad6bf192e1768b27bf3bd8d85bc1bf179542e8795e2b73fd8b2e79c53aa"
+
+
+# --------------------------------------------------------------------------- #
+# Destinations and provenance are specified before any write
+# --------------------------------------------------------------------------- #
+
+
+def test_the_destination_and_provenance_spec_is_consistent() -> None:
+    fx.assert_manifest_consistent()
+
+
+def test_the_digests_are_frozen() -> None:
+    assert fx.fixture_sha256() == FIXTURE_SHA256
+    assert fx.evaluator_sha256() == EVALUATOR_SHA256
+    assert fx.actor_sha256() == ACTOR_SHA256
+
+
+def test_every_candidate_names_its_home_route_disposition_and_provenance() -> None:
+    from exomem import episode_model
+
+    for candidate in fx.CANDIDATES:
+        assert candidate.homes and candidate.routes and candidate.dispositions, candidate.key
+        assert set(candidate.routes) <= set(episode_model._ROUTES)  # noqa: SLF001
+        assert set(candidate.dispositions) <= set(episode_model._DISPOSITIONS)  # noqa: SLF001
+        assert candidate.provenance in contract.PROVENANCE
+        assert candidate.checked_by
+
+
+def test_the_episode_covers_every_shape_the_task_names() -> None:
+    by_key = {candidate.key: candidate for candidate in fx.CANDIDATES}
+    # An existing supplier, hydrated rather than duplicated.
+    assert by_key["delivery-day"].homes == ("existing:org_wrenfold",)
+    # A dynamic equipment type: registered by the world, not a core type.
+    from exomem import entity_types
+
+    assert "equipment" not in entity_types.ENTITY_TYPE_IDS
+    assert [seed.type_id for seed in fx.WORLD.types] == ["equipment"]
+    assert by_key["oven"].routes == ("entity",)
+    # Direct and reported product facts, sharing a home, with distinct provenance.
+    assert (by_key["rye-label"].provenance, by_key["rye-blend"].provenance) == ("direct", "reported")
+    assert by_key["rye-blend"].attributed_to and by_key["rye-blend"].uncertain
+    assert by_key["rye-label"].same_home_as == ("rye-blend",)
+    # Prior related sourcing and comparison material.
+    assert {seed.key for seed in fx.WORLD.notes} == {"note_comparison", "note_sourcing"}
+    # An experiment event, never a causal conclusion.
+    assert by_key["trial-bake"].provenance == "event" and by_key["trial-bake"].uncertain
+    assert set(by_key["trial-bake"].routes) <= {"records", "experiment"}
+    # An ambiguous-owner negative and a possibility that plans nothing.
+    assert by_key["ambiguous-owner"].homes == ("none",)
+    assert "routed" not in by_key["ambiguous-owner"].dispositions
+    assert by_key["possibility"].dispositions == ("no_capture",)
+
+
+def test_a_reported_claim_without_a_source_is_refused() -> None:
+    blend = next(candidate for candidate in fx.CANDIDATES if candidate.key == "rye-blend")
+    broken = replace(blend, attributed_to=None)
+
+    with pytest.raises(contract.FixtureError, match="names its source"):
+        contract.validate_candidates(
+            (broken,), world_keys=fx.WORLD.keys(), expectation_keys=[item.key for item in fx.EXPECTATIONS]
+        )
+
+
+def test_a_route_the_product_does_not_define_is_refused() -> None:
+    oven = next(candidate for candidate in fx.CANDIDATES if candidate.key == "oven")
+
+    with pytest.raises(contract.FixtureError, match="unknown route"):
+        contract.validate_candidates(
+            (replace(oven, routes=("equipment_page",)),),
+            world_keys=fx.WORLD.keys(),
+            expectation_keys=[item.key for item in fx.EXPECTATIONS],
+        )
+
+
+def test_the_actor_view_withholds_the_destination_spec() -> None:
+    view = fx.actor_view()
+    assert set(view) == {"fixture_id", "turns", "later_turn"}
+    text = repr(view)
+    for candidate in fx.CANDIDATES:
+        assert candidate.statement not in text
+        for home in candidate.homes:
+            assert home not in text
+        for route in candidate.routes:
+            assert route not in text
+    for expectation in fx.EXPECTATIONS:
+        assert expectation.key not in text and expectation.reason not in text
+
+
+def test_a_run_bound_to_an_edited_evaluator_is_void() -> None:
+    record = obs.load_observation(
+        {
+            "artifact_type": obs.ARTIFACT_TYPE,
+            "schema_version": 1,
+            "fixture_id": fx.FIXTURE_ID,
+            "actor_sha256": ACTOR_SHA256,
+            "pre_capture_sha256": "d" * 64,
+            "evaluator_sha256": "e" * 64,
+            "host_initiation": {
+                "client": {"client": "generic-mcp", "adapter_version": "0", "lifecycle": "best_effort"},
+                "input_origin": "synthetic_fixture",
+                "delivered_turns_sha256": obs.turns_sha256(fx.TURNS),
+            },
+            "agent_decisions": [],
+            "leaf_effects": [],
+            "publication": {"status": "not_observed"},
+        }
+    )
+
+    reasons = obs.void_reasons(
+        record,
+        actor_sha256=fx.actor_sha256(),
+        pre_capture_sha256="d" * 64,
+        evaluator_sha256=fx.evaluator_sha256(),
+    )
+
+    assert reasons == ("evaluator_sha256 differs from the fixture's frozen digest",)
+
+
+# --------------------------------------------------------------------------- #
+# No private names, no nudges, nothing clinical
+# --------------------------------------------------------------------------- #
+
+
+def _fixture_texts() -> list[str]:
+    texts = [*fx.TURNS, fx.LATER_TURN]
+    for seed in fx.WORLD.entities:
+        texts.extend((seed.name, seed.summary, *seed.aliases))
+    for seed in fx.WORLD.notes:
+        texts.extend((seed.title, seed.observation))
+    for seed in fx.WORLD.records:
+        texts.append(seed.title)
+        texts.extend(value for _key, row in seed.items for _field, value in row)
+    for seed in fx.WORLD.types:
+        texts.extend((seed.label, seed.guidance))
+    return texts
+
+
+def test_every_proper_name_is_declared_as_invented() -> None:
+    allowed = (*fx.INVENTED_NAMES, *fx.ORDINARY_CAPITALIZED)
+    for text in _fixture_texts():
+        assert contract.undeclared_capitalized_words(text, allowed) == (), text
+
+
+def test_the_actor_turns_carry_no_nudge() -> None:
+    for turn in (*fx.TURNS, fx.LATER_TURN):
+        assert contract.find_nudges(turn) == ()
+
+
+def test_the_fixture_passes_the_privacy_gate_and_names_nothing_clinical() -> None:
+    assert_public_artifacts_clean([Path(fx.__file__)])
+    for text in _fixture_texts():
+        assert contract.find_medical_terms(text) == ()
+
+
+# --------------------------------------------------------------------------- #
+# The world, through the product's writers
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def built(tmp_path_factory: pytest.TempPathFactory):
+    root = tmp_path_factory.mktemp("rich-episode") / "vault"
+    return root, fx.build_pre_capture(root)
+
+
+def _copy(built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source, world = built
+    root = tmp_path / "vault"
+    shutil.copytree(source, root)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
+    return root, world
+
+
+def test_the_pre_capture_state_is_frozen(built) -> None:
+    _root, world = built
+    assert world.logical_sha256 == PRE_CAPTURE_SHA256
+    assert world.spec_sha256 == fx.pre_capture_spec_sha256()
+
+
+def test_the_world_registers_equipment_and_shares_the_owner_name(built) -> None:
+    from exomem import entity_types
+
+    root, world = built
+    assert entity_types.load_entity_types(root).resolve("equipment").id == "equipment"
+    state = read_state(root)
+    carriers = sorted(page.path for page in state.entities() if "Corran" in page.aliases)
+    assert carriers == sorted([world.key_to_path["person_corran"], world.key_to_path["org_corran"]])
+
+
+def test_the_pre_capture_state_does_not_already_carry_a_positive(built) -> None:
+    root, _world = built
+    bodies = " ".join(page.body for page in read_state(root).pages.values()).casefold()
+    for marker in ("thursday", "12.5", "two harvests", "tessel", "steam", "78%"):
+        assert marker not in bodies
+
+
+# --------------------------------------------------------------------------- #
+# Expected red on the current runtime
+# --------------------------------------------------------------------------- #
+
+
+def test_current_runtime_an_untouched_world_fails_every_capture_positive(built) -> None:
+    root, world = built
+    state = read_state(root)
+
+    check = fx.check_capture(world, state, state)
+
+    failed = set(check.failed())
+    positives = {item.key for item in fx.EXPECTATIONS if item.polarity == "positive"}
+    negatives = {item.key for item in fx.EXPECTATIONS if item.polarity == "negative"}
+    assert failed == positives - {
+        "rich-episode/one-supplier",
+        "rich-episode/supplier-intact",
+        "rich-episode/bake-history-kept",
+        "rich-episode/person-intact",
+        "rich-episode/kitchen-intact",
+        "rich-episode/one-lowmere",
+    }
+    assert not failed & negatives
+
+
+def test_current_runtime_the_episode_executor_has_no_records_leaf() -> None:
+    """Expected red for the trial bake through ``episode_memory``: the Records
+    route is adapter-pending, so a routed Records candidate stays pending and
+    only a direct ``record_memory`` write outside the episode can land it."""
+
+    from exomem import episode_model
+
+    assert "records" in episode_model._ADAPTER_PENDING_ROUTES  # noqa: SLF001
+    assert "records" not in episode_model._ROUTE_KINDS  # noqa: SLF001
+
+
+# --------------------------------------------------------------------------- #
+# Not vacuous: scripted product writes (plumbing, not agent evidence)
+# --------------------------------------------------------------------------- #
+
+TODAY = dt.date(2026, 9, 24)
+
+
+def _command(name: str):
+    from exomem import commands
+
+    return next(item for item in commands.PRODUCT_COMMANDS if item.name == name)
+
+
+def _edit(root: Path, path: str, old: str, new: str) -> None:
+    from exomem import writer_lease
+    from exomem.vault import content_hash
+
+    text = (root / path).read_text(encoding="utf-8")
+    writer_lease.invoke_command(
+        _command("edit_memory"),
+        root,
+        path=path,
+        why="scripted fixture capture",
+        operation={
+            "kind": "replace_string",
+            "old_string": old,
+            "new_string": new,
+            "expected_hash": content_hash(text),
+        },
+    )
+
+
+def _edit_reviewed(root: Path, path: str, old: str, new: str) -> None:
+    """An edit to a page whose saved relation review must be renewed first."""
+
+    from exomem import commands
+    from exomem.vault import content_hash
+
+    operation = {
+        "kind": "replace_string",
+        "old_string": old,
+        "new_string": new,
+        "expected_hash": content_hash((root / path).read_text(encoding="utf-8")),
+    }
+    preview = commands.op_edit_memory(
+        root, path=path, why="scripted wrong capture", operation={**operation, "validate_only": True}
+    )["semantic"]
+    commands.op_edit_memory(
+        root,
+        path=path,
+        why="scripted wrong capture",
+        operation={
+            **operation,
+            "transition_token": preview["transition_token"],
+            "relation_disposition": "reviewed_none",
+            "relation_review_hash": preview["relation_review_hash"],
+            "relation_review_reason": "The scripted wrong capture adds no relation.",
+        },
+    )
+
+
+def _append_body(root: Path, path: str, extra: str) -> None:
+    from exomem import writer_lease
+    from exomem.vault import content_hash
+
+    text = (root / path).read_text(encoding="utf-8")
+    writer_lease.invoke_command(
+        _command("edit_memory"),
+        root,
+        path=path,
+        why="scripted fixture capture",
+        operation={
+            "kind": "replace_body",
+            "new_body": text.split("\n---\n", 1)[1].rstrip() + f"\n\n{extra}\n",
+            "expected_hash": content_hash(text),
+        },
+    )
+
+
+def _note(root: Path, title: str, slug: str, body: str) -> str:
+    from exomem import note
+
+    arguments = {
+        "vault_root": root,
+        "content": body,
+        "note_type": "insight",
+        "title": title,
+        "slug": slug,
+        "sources": [],
+        "tags": [],
+        "today": TODAY,
+    }
+    validation = note.note(validate_only=True, **arguments)
+    reviewed = {}
+    if getattr(validation.creation_validation, "reviewed_none_required", False):
+        reviewed = {
+            "relation_disposition": "reviewed_none",
+            "relation_review_hash": validation.draft_hash,
+            "relation_review_reason": "The scripted capture adds its relation separately.",
+        }
+    return note.note(
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        **reviewed,
+        **arguments,
+    ).path
+
+
+RYE_BODY = (
+    "## Observations\n\n"
+    "- [finding] The sack label says milled July 2026, 12.5% protein.\n"
+    "- [assumption] The miller at Wrenfold said it is a blend of two harvests; not seen in writing.\n"
+)
+
+
+def _scripted_capture(root: Path, world, *, rye_body: str = RYE_BODY, outcome: str = "denser crumb, cause unclear") -> None:
+    from exomem import commands, link
+
+    link.link(
+        root,
+        entity_type="equipment",
+        name="Tessel deck oven",
+        summary="Deck oven with two stone decks and steam injection, up to 300 °C; arrived 22 September 2026.",
+        today=TODAY,
+    )
+    _edit(root, world.key_to_path["org_wrenfold"], "Stone mill in the next county.", "Stone mill in the next county. Delivers rye on Thursdays.")
+    rye = _note(root, "Wrenfold stoneground rye", "wrenfold-stoneground-rye", rye_body)
+    _append_body(root, rye, "## Relations\n\n- about_entity [[Wrenfold Mill]]")
+    collection = fx.BAKE_LOG.manifest_path
+    snapshot = commands.op_record_memory(root, action="inspect", collection=collection)["snapshot"]
+    commands.op_record_memory(
+        root,
+        action="append",
+        collection=collection,
+        item={
+            "baked_on": "2026-09-23",
+            "loaf": "rye test loaf",
+            "flour": "Wrenfold stoneground rye",
+            "oven": "Tessel deck oven",
+            "hydration": "78%",
+            "outcome": outcome,
+        },
+        item_key="30000000-0000-4000-8000-000000000012",
+        expected_container_hash=snapshot,
+        why="scripted fixture capture",
+    )
+
+
+def test_a_scripted_correct_capture_satisfies_every_expectation(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(root, world)
+
+    check = fx.check_capture(world, before, read_state(root))
+
+    assert check.accepted, [result for result in check.results if result.outcome == "fail"]
+
+
+def test_a_reported_blend_stated_as_fact_fails_attribution(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(
+        root,
+        world,
+        rye_body=(
+            "## Observations\n\n"
+            "- [finding] The sack label says milled July 2026, 12.5% protein.\n"
+            "- [fact] The rye is a blend of two harvests.\n"
+        ),
+    )
+
+    assert fx.check_capture(world, before, read_state(root)).failed() == ("rich-episode/blend-attributed",)
+
+
+def test_a_causal_outcome_fails_the_experiment_guard(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(root, world, outcome="denser crumb because of the new flour")
+
+    assert fx.check_capture(world, before, read_state(root)).failed() == ("rich-episode/no-causal-claim",)
+
+
+def test_product_facts_copied_onto_the_comparison_fail_scope_and_home(
+    built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(root, world)
+    comparison = world.key_to_path["note_comparison"]
+    _edit_reviewed(
+        root,
+        comparison,
+        "delivery reliability for rye flour.",
+        "delivery reliability for rye flour.\n- [finding] The July 2026 milling tests at 12.5% protein.",
+    )
+
+    failed = set(fx.check_capture(world, before, read_state(root)).failed())
+    assert failed == {"rich-episode/comparison-untouched", "rich-episode/rye-facts-one-home"}
+
+
+def test_resolving_the_ambiguous_owner_fails(built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(root, world)
+    _edit(
+        root,
+        world.key_to_path["person_corran"],
+        "Baker who shares the community kitchen.",
+        "Baker who shares the community kitchen. Has lent out a proofing cabinet.",
+    )
+
+    assert fx.check_capture(world, before, read_state(root)).failed() == ("rich-episode/owner-not-on-person",)
+
+
+def test_a_duplicate_supplier_fails_hydration(built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import link
+
+    root, world = _copy(built, tmp_path, monkeypatch)
+    before = read_state(root)
+    _scripted_capture(root, world)
+    link.link(root, entity_type="organization", name="Wrenfold Mill Ltd", summary="Rye supplier.", today=TODAY)
+
+    assert fx.check_capture(world, before, read_state(root)).failed() == ("rich-episode/one-supplier",)

@@ -118,6 +118,7 @@ tests/test_membench_utility_scenarios.py
 tests/test_membench_utility_scoring.py
 tests/test_membench_utility_world.py
 tests/test_memory_loop_observation.py
+tests/test_memory_loop_rich_episode.py
 tests/test_memory_loop_supplier_chain.py
 tests/test_memorybench_equivalence_projection.py
 tests/test_memorybench_export.py
