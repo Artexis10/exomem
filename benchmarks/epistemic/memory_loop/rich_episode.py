@@ -412,7 +412,7 @@ EXPECTATIONS: tuple[Expectation, ...] = (
         key="rich-episode/no-planning",
         polarity="negative",
         markers=("lowmere",),
-        reason="'I might try' is a possibility, not an expressed intent, in Planning or in Records.",
+        reason="'I might try' is a possibility, not an expressed intent: no plan holds it; a bake-log line may note it.",
     ),
     CoMention(
         key="rich-episode/owner-unresolved-everywhere",
@@ -554,9 +554,9 @@ LATER_USE = LaterUse(
 # Frozen pins (re-pinned deliberately; the tests refuse drift)
 # --------------------------------------------------------------------------- #
 
-FIXTURE_SHA256 = "5d589fda8c5362d54f2b175479c7120ad768feeba52f5a09f76e9c5f42f4d193"
+FIXTURE_SHA256 = "92ec19e5a0d1968851c0b9990621c1723df3d7257ec897618f8edcec09c4b8ca"
 ACTOR_SHA256 = "b871a3e8f38fb59115bb96744b5392a1348866f4a4d3efb144961d7f20590e45"
-EVALUATOR_SHA256 = "09f001ef5794ca65aea19fb7c32a4cf470e102def08ce74a7c3fdda647b6778f"
+EVALUATOR_SHA256 = "c2dd2a8c526654b8d0cf2bc14c4802ab60a04c726a79317734d2bc68054d21b5"
 PRE_CAPTURE_SHA256 = "1b6ecad6bf192e1768b27bf3bd8d85bc1bf179542e8795e2b73fd8b2e79c53aa"
 
 # --------------------------------------------------------------------------- #

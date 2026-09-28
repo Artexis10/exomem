@@ -628,27 +628,19 @@ def test_per_likely_and_the_supplier_name_attribute_the_blend(
     assert fx.check_capture(world, before, read_state(root)).accepted
 
 
-def test_a_possibility_recorded_as_a_future_record_is_planning(
+def test_probe_r3e_a_bake_log_line_noting_the_possibility_is_not_planning(
     built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import commands
+    """Tentative intent stays quiet: the trial bake's own line may note the
+    possibility without it counting as a commitment."""
 
     root, world = _copy(built, tmp_path, monkeypatch)
     before = read_state(root)
-    _scripted_capture(root, world)
-    collection = fx.BAKE_LOG.manifest_path
-    snapshot = commands.op_record_memory(root, action="inspect", collection=collection)["snapshot"]
-    commands.op_record_memory(
-        root,
-        action="append",
-        collection=collection,
-        item={"baked_on": "2026-10-15", "loaf": "rye trial", "flour": "Lowmere rye", "note": "try next month"},
-        item_key="30000000-0000-4000-8000-000000000013",
-        expected_container_hash=snapshot,
-        why="scripted wrong capture",
-    )
+    _scripted_capture(root, world, outcome="denser crumb, cause unclear; might try Lowmere's rye next month")
 
-    assert fx.check_capture(world, before, read_state(root)).failed() == ("rich-episode/no-planning",)
+    check = fx.check_capture(world, before, read_state(root))
+    assert check.outcome("rich-episode/no-planning") == "pass"
+    assert check.accepted, [result for result in check.results if result.outcome == "fail"]
 
 
 def test_the_trial_bake_has_only_the_route_its_check_can_see() -> None:

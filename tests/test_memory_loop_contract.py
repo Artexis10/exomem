@@ -18,13 +18,15 @@ from epistemic.memory_loop.contract import (
     EdgeView,
     NewPages,
     NoEdgeBetween,
+    NoNewPlanning,
     PageView,
+    RecordView,
     Select,
     TypedEdge,
     VaultState,
 )
 
-SEMANTICS_FINGERPRINT = "5934e6de99fe5386a421dab214d03888aa56cfc9aa093232802fb7049036c1a2"
+SEMANTICS_FINGERPRINT = "5e88706b4d2056c64c96204611c311e22bbc3933e16ab97cef711fd7f0c07cee"
 
 #: Every declared default of every contract type. A changed default changes
 #: meaning without moving any fixture digest on its own, so it is pinned here
@@ -230,6 +232,73 @@ def test_no_edge_between_reads_the_state_after_capture_not_only_new_edges() -> N
 
     assert check.evaluate(WORLD, seeded, seeded).outcome == "fail"
     assert check.evaluate(WORLD, seeded, _state(_edge(A, "owns", B))).outcome == "pass"
+
+
+# --------------------------------------------------------------------------- #
+# Planning is judged in the Planning tree, never in Records
+# --------------------------------------------------------------------------- #
+
+BAKES = "Knowledge Base/Records/Bake Log/_collection.md"
+TRIALS = "Knowledge Base/Planning/Supplier Trials"
+_NO_PLANNING = NoNewPlanning(key="k", polarity="negative", markers=("lowmere",), reason="r")
+
+
+def _planning_state(*pages: PageView, records: tuple[RecordView, ...] = ()) -> VaultState:
+    return VaultState(pages={page.path: page for page in pages}, records=records)
+
+
+def test_a_records_line_naming_a_possibility_is_not_planning() -> None:
+    line = RecordView(collection=BAKES, item_key="r1", fields={"loaf": "rye", "outcome": "might try Lowmere rye"})
+
+    assert _NO_PLANNING.evaluate({}, _planning_state(), _planning_state(records=(line,))).outcome == "pass"
+
+
+def test_an_item_in_a_new_plan_titled_collection_naming_the_possibility_is_planning() -> None:
+    plans = PageView(
+        path="Knowledge Base/Records/Flour Plans/_collection.md",
+        page_type="collection",
+        title="Flour plans",
+        status="active",
+        entity_type="",
+        aliases=(),
+        body="",
+    )
+    item = RecordView(collection=plans.path, item_key="r1", fields={"flour": "Lowmere rye", "when": "next month"})
+
+    after = _planning_state(plans, records=(item,))
+    assert _NO_PLANNING.evaluate({}, _planning_state(plans), after).outcome == "fail"
+
+
+def test_a_planning_item_naming_the_possibility_is_planning() -> None:
+    item = PageView(
+        path=f"{TRIALS}/Items/p1.md",
+        page_type="plan",
+        title="Try Lowmere rye",
+        status="active",
+        entity_type="",
+        aliases=(),
+        body="Order a sack of Lowmere rye.",
+        frontmatter={"plan_id": "p1"},
+    )
+
+    assert _NO_PLANNING.evaluate({}, _planning_state(), _planning_state(item)).outcome == "fail"
+
+
+def test_a_planning_item_about_something_else_is_not_this_possibility() -> None:
+    item = PageView(
+        path=f"{TRIALS}/Items/p2.md",
+        page_type="plan",
+        title="Descale the kettle",
+        status="active",
+        entity_type="",
+        aliases=(),
+        body="Monthly.",
+        frontmatter={"plan_id": "p2"},
+    )
+
+    assert _NO_PLANNING.evaluate({}, _planning_state(), _planning_state(item)).outcome == "pass"
+    unscoped = NoNewPlanning(key="k", polarity="negative", reason="r")
+    assert unscoped.evaluate({}, _planning_state(), _planning_state(item)).outcome == "fail"
 
 
 # --------------------------------------------------------------------------- #

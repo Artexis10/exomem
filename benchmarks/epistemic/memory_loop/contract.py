@@ -822,7 +822,7 @@ def read_state(root: Path) -> VaultState:
 
 #: Bump when any predicate's code changes meaning; it is part of every
 #: evaluator digest, so a semantic change voids runs bound to the old one.
-SEMANTICS_VERSION = 3
+SEMANTICS_VERSION = 4
 
 #: Core relations that record that two things are connected without saying
 #: how. They are honest when nothing more precise is supported, and never
@@ -1418,9 +1418,13 @@ _PLANNING_TITLE = re.compile(r"(?i)\b(?:plan|plans|planning|todo|to-do|intention
 class NoNewPlanning:
     """No commitment appears for a mentioned possibility.
 
-    Fails on a new Planning collection or item, a new collection titled or
-    profiled as a plan, or a new Records item whose values name one of
-    ``markers`` (planning written as Records).
+    Judged only where commitments live: a new page in the Planning tree, a
+    Planning item (``plan_id`` or the planning profile) or a new collection
+    titled as a plan, or a new item in such a collection. With ``markers`` it
+    fails only on one that names a marker, so an unrelated plan is not this
+    possibility. Records outside a planning collection are never read: a
+    Records line that notes the possibility is tentative intent kept as
+    history, and stays quiet.
     """
 
     key: str
@@ -1429,26 +1433,35 @@ class NoNewPlanning:
     markers: tuple[str, ...] = ()
 
     def evaluate(self, world: Mapping[str, str], before: VaultState, after: VaultState) -> Result:
+        planning = {path for path, page in after.pages.items() if _is_planning(page)}
         created = [
-            page.path
-            for page in after.pages.values()
-            if page.path not in before.pages
-            and (
-                "plan_id" in page.frontmatter
-                or page.frontmatter.get("semantic_profile") == "planning"
-                or page.path.startswith(f"{KB}/Planning/")
-                or (page.page_type == "collection" and _PLANNING_TITLE.search(page.title) is not None)
-            )
+            path
+            for path in sorted(planning - set(before.pages))
+            if not self.markers or _any(_page_text(after.pages[path]), self.markers)
         ]
         old_items = {(item.collection, item.item_key) for item in before.records}
         created += [
             f"{item.collection}#{item.item_key}"
             for item in after.records
-            if (item.collection, item.item_key) not in old_items
-            and self.markers
-            and any(_any(value, self.markers) for value in item.fields.values())
+            if item.collection in planning
+            and (item.collection, item.item_key) not in old_items
+            and (not self.markers or any(_any(value, self.markers) for value in item.fields.values()))
         ]
         return _result(self.key, self.polarity, not created, f"new planning: {created}")
+
+
+def _is_planning(page: PageView) -> bool:
+    return (
+        "plan_id" in page.frontmatter
+        or page.frontmatter.get("semantic_profile") == "planning"
+        or page.path.startswith(f"{KB}/Planning/")
+        or (page.page_type == "collection" and _PLANNING_TITLE.search(page.title) is not None)
+    )
+
+
+def _page_text(page: PageView) -> str:
+    values = " ".join(str(value) for value in page.frontmatter.values())
+    return f"{page.title}\n{values}\n{page.body}"
 
 
 @dataclass(frozen=True)
