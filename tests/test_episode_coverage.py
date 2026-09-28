@@ -989,3 +989,82 @@ def test_an_uncertain_leaf_whose_page_is_withheld_resumes_like_a_deleted_one(
     assert [item["code"] for item in outcomes["withheld"]["blocked"]] == [
         "EPISODE_OUTCOME_UNCERTAIN"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Semantic sink: one page receiving several distinct topic clusters
+# --------------------------------------------------------------------------- #
+
+
+def _append_cluster(vault: Path, key: str, page: str, sentence: str) -> None:
+    hash_ = commands.op_read_memory(vault, path=page)["content_hash"]
+    reviewed = _route(
+        vault,
+        key,
+        _proposal(
+            "existing_page",
+            [
+                {
+                    "leaf_key": "home",
+                    "effect_revision": 1,
+                    "kind": "edit",
+                    "args": {
+                        "path": page,
+                        "why": "Append the cluster.",
+                        "operation": {
+                            "kind": "edit_section",
+                            "heading": "Observations",
+                            "new_string": f"- [finding] {sentence} ^{key}",
+                            "section_position": "append",
+                            "expected_hash": hash_,
+                            "relation_disposition": "reviewed_none",
+                            "relation_review_reason": "No supported relation here.",
+                        },
+                    },
+                }
+            ],
+            target=page,
+        ),
+    )
+    assert _resume(vault, reviewed)["status"] == "ok"
+
+
+def test_a_page_receiving_several_topic_clusters_is_flagged_as_a_sink(
+    vault: Path, owner, enabled
+) -> None:
+    _record(vault)
+    _resume(
+        vault,
+        _route(
+            vault,
+            "hub",
+            _proposal("focused_note", [_note("shed-odds-and-ends", "The shed needs care.")], title="Shed"),
+        ),
+    )
+    page = f"{INSIGHTS}/shed-odds-and-ends.md"
+    # One page is not a sink; the flag is for several distinct clusters.
+    assert _episode(vault, action="coverage")["sink"] == []
+    _append_cluster(vault, "schedule", page, "Loom class runs on Tuesdays.")
+    assert _episode(vault, action="coverage")["sink"] == []
+    _append_cluster(vault, "supplies", page, "Spare bulbs are ordered.")
+
+    passed = _episode(vault, action="coverage")
+    assert passed["sink"] == [
+        {"path": page, "candidates": ["hub", "schedule", "supplies"]}
+    ]
+    ask = passed["sink_guidance"]
+    # Per-cluster disposition, with the honest exits named; guidance, not a block.
+    for phrase in ("each cluster", "existing canonical page", "no_capture"):
+        assert phrase in ask
+    assert passed["coverage_current"] == "verified"
+
+
+def test_distinct_pages_are_not_a_sink(vault: Path, owner, enabled) -> None:
+    _record(vault)
+    for key, slug in (("a", "lamp-one"), ("b", "lamp-two"), ("c", "lamp-three")):
+        _resume(
+            vault,
+            _route(vault, key, _proposal("focused_note", [_note(slug, f"{slug} fact.")], title=slug)),
+        )
+    passed = _episode(vault, action="coverage")
+    assert passed["sink"] == [] and "sink_guidance" not in passed
