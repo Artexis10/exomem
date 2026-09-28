@@ -117,11 +117,6 @@
       "removes": "the whole compiler: the documented EXOMEM_DISABLE_WORKING_SET kill switch"
     }
   },
-  "packet_size_tokens": {
-    "over_hard_cap": [],
-    "p50": 4,
-    "p95": 123
-  },
   "per_case": [
     {
       "blocked": false,
@@ -168,7 +163,6 @@
       ],
       "observed_status": "resolved",
       "packet_chars": 325,
-      "packet_tokens": 76,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -217,7 +211,6 @@
       "must_include_missing": [],
       "observed_status": "unresolved",
       "packet_chars": 0,
-      "packet_tokens": 0,
       "passed": true,
       "poison": {
         "hit": 0,
@@ -273,7 +266,6 @@
       ],
       "observed_status": "unresolved",
       "packet_chars": 20,
-      "packet_tokens": 4,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -322,7 +314,6 @@
       "must_include_missing": [],
       "observed_status": "unresolved",
       "packet_chars": 0,
-      "packet_tokens": 0,
       "passed": true,
       "poison": {
         "hit": 0,
@@ -377,7 +368,6 @@
       ],
       "observed_status": "unresolved",
       "packet_chars": 46,
-      "packet_tokens": 9,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -430,7 +420,6 @@
       "must_include_missing": [],
       "observed_status": "resolved",
       "packet_chars": 154,
-      "packet_tokens": 33,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -485,7 +474,6 @@
       ],
       "observed_status": "unresolved",
       "packet_chars": 0,
-      "packet_tokens": 0,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -536,7 +524,6 @@
       "must_include_missing": [],
       "observed_status": "unresolved",
       "packet_chars": 21,
-      "packet_tokens": 5,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -585,7 +572,6 @@
       "must_include_missing": [],
       "observed_status": "resolved",
       "packet_chars": 435,
-      "packet_tokens": 90,
       "passed": true,
       "poison": {
         "hit": 0,
@@ -634,7 +620,6 @@
       "must_include_missing": [],
       "observed_status": "resolved",
       "packet_chars": 321,
-      "packet_tokens": 72,
       "passed": true,
       "poison": {
         "hit": 0,
@@ -660,7 +645,6 @@
       "must_include_missing": [],
       "observed_status": "unresolved",
       "packet_chars": 0,
-      "packet_tokens": 0,
       "passed": true,
       "poison": {
         "hit": 0,
@@ -700,7 +684,6 @@
       "must_include_missing": [],
       "observed_status": "unresolved",
       "packet_chars": 20,
-      "packet_tokens": 4,
       "passed": false,
       "poison": {
         "hit": 1,
@@ -738,7 +721,6 @@
       "must_include_missing": [],
       "observed_status": "ambiguous",
       "packet_chars": 334,
-      "packet_tokens": 123,
       "passed": true,
       "poison": {
         "hit": 0,
@@ -781,7 +763,6 @@
       "must_include_missing": [],
       "observed_status": "ambiguous",
       "packet_chars": 334,
-      "packet_tokens": 123,
       "passed": false,
       "poison": {
         "hit": 2,
@@ -825,7 +806,6 @@
       ],
       "observed_status": "unresolved",
       "packet_chars": 0,
-      "packet_tokens": 0,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -866,7 +846,6 @@
       "must_include_missing": [],
       "observed_status": "unresolved",
       "packet_chars": 0,
-      "packet_tokens": 0,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -922,7 +901,6 @@
       ],
       "observed_status": "unresolved",
       "packet_chars": 20,
-      "packet_tokens": 4,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -971,7 +949,6 @@
       "must_include_missing": [],
       "observed_status": "unresolved",
       "packet_chars": 0,
-      "packet_tokens": 0,
       "passed": true,
       "poison": {
         "hit": 0,

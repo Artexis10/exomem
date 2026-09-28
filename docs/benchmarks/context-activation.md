@@ -216,6 +216,88 @@ calls with `EXOMEM_DISABLE_WORKING_SET=1` and retain their returned packets.
 Every positive case must fail under that intervention. Synthetic
 `DISABLED_PACKET` scorer tests exercise the scoring rule only.
 
+## The real-compiler run and its recorded report
+
+`membench.utility.context_activation_product` is the product path, and
+`tests/test_context_activation_real_compiler.py` runs it in CI. For each of the
+two corpus trees it builds the corpus through the supported writers, publishes
+the activation index, the lexical catalogue and the epistemic graph, refuses a
+corpus whose entity, hub, resource, Records or Planning structures did not
+publish, and freezes the reference binding. Only then does it call
+`commands.op_activate_context` once per fixture, on the tree that fixture
+names. References are the producer's own: an entity or hub by its memory ref,
+checked against the page's `exomem_id`, and every other page by its path.
+Each tree is scored under its own manifest (`mechanism:
+product_activate_context`) and binding, then the eighteen scores are read as
+one report. The scorer and its thresholds are unchanged.
+
+The reproducible part of that run is recorded in
+`docs/benchmarks/context-activation-product-2026-09.json`: fixture-set digest
+`a49d85f4…`, threshold digest `7b2785cf…`, the logical corpus digest of each
+tree, per-case duals, the mechanism-removal outcomes and the topology findings.
+Exact corpus bytes carry writer-minted identities, so each run's manifest
+carries its own exact digest and binding, and the recorded report binds the
+logical ones. The test fails when the recorded report no longer matches a
+fresh run. After a deliberate product or corpus change, re-record it:
+
+```
+CONTEXT_ACTIVATION_RECORD_REPORT=docs/benchmarks/context-activation-product-2026-09.json uv run pytest tests/test_context_activation_real_compiler.py -k recorded_report
+```
+
+### Result on 2026-09-28: red
+
+Seven of eighteen fixtures pass: C5, T5, C6, C7, T1, T2 and T9. The audit is
+red, and C9's padding comparison fails because the padded packet surfaces no
+resolved reference to measure precision on.
+
+| Case | Why it fails today |
+|------|--------------------|
+| C1 | Resolves the subscriptions collection; the two gold notes never arrive (recall 1/3) |
+| C2, C9 | The grill stays `partial` on retrieval alone; the turn abstains |
+| C3 | Abstains; the plan anchor it could reach is the collection, not the gold item |
+| T3 | Resolves the other workstream's collection, which is outside its gold item |
+| C4 | Nothing in the turn reaches the colleague's entity |
+| T4 | The two same-first-name people stay `partial`; the turn abstains `unresolved`, not `ambiguous` |
+| T6 | The grill is listed as a `partial` anchor, and the scorer counts it as poison |
+| T7 | The scoped turn still resolves the market hub beside the feature hub |
+| C8, T8 | The gold notes are not anchors, and nothing carries them |
+
+### Mechanism removal
+
+`FIXTURE_MECHANISMS` pre-registers the mechanism each fixture measures, and
+`removed()` takes it out of the running compiler. With
+`EXOMEM_DISABLE_WORKING_SET=1` every positive case fails. C5 fails without
+governed current state, T5 without anchor resolution and C7 without
+competing-sense abstention. C6, T1, T2 and T9 pass under every removal,
+including the kill switch: nothing in this corpus serves their words, so on
+this corpus they cannot catch a false activation. The test names them rather
+than skipping them.
+
+### Read this before treating the report as compiler quality (task 1.8)
+
+- **Gold notes have no anchor, and the carry refuses the corpus.** Insight,
+  pattern, failure and design notes are not activation anchors. They reach a
+  packet only through the retrieval carry, which refuses a corpus below 100
+  indexed pages. Both trees index 37: the padded tree's 200 distractors are
+  Evidence, which the lexical catalogue does not count.
+- **Most gold notes use unregistered observation categories.** `operating
+  constraint`, `pattern`, `method`, `failure` and `current state` resolve as
+  unregistered, and role lanes select units by registered category. Even a
+  forced carry of C8's gold page serves nothing. Only C3's `design` note yields
+  a unit.
+- **A unit of a gold note does not recall the note.** Units carry fragment refs
+  (`<memory ref>#unit-…`). Under D9 a fragment stays a distinct reference, so it
+  counts against precision and earns no recall.
+- **Planning identity.** The plan anchor is the collection manifest; C3 and T3
+  gold the item page.
+- **Recent context is turn-independent.** Every packet carries the same
+  recent-context block on a tree, which here lists the open Planning items. The
+  scorer counts turn-derived channels only, so C6's zero-injection bound is
+  measured over those.
+- **The cases run cold.** No continuity token and an empty hot profile, so
+  follow-up carry and recency referents are not measured by these eighteen
+  cases.
+
 ## Producing a dry-run argv for one arm (never executes anything)
 
 ```python

@@ -469,6 +469,18 @@ def test_passing_packets_fail_their_paired_fixture(run: Run) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_every_fixture_runs_cold_so_no_continuity_path_is_exercised(run: Run) -> None:
+    """The eighteen cases are cold starts: no continuity token, an empty hot
+    profile and no referential turn. Follow-up carry, recency referents and
+    capture-to-fresh-session activation are not measured here (task 1.6)."""
+
+    for case_id, packet in run.raw.items():
+        generation = packet["generation"]
+        assert generation["continuity"] == "absent", case_id
+        assert generation["hot_profile"]["state"] == "empty", case_id
+        assert "carried_by" not in generation, case_id
+
+
 def test_current_runtime_topology_audit_names_every_unreachable_gold_identity(run: Run) -> None:
     from exomem import working_set
 
@@ -598,9 +610,29 @@ def test_the_recorded_report_is_the_current_product_run(run: Run) -> None:
     assert recorded["mechanism"] == product.PRODUCT_MECHANISM
     assert recorded["fixture_set_digest"] == FIXTURE_SET_SHA256
     assert recorded["threshold_digest"] == THRESHOLD_SHA256
-    assert recorded == live, (
-        f"stale recorded report; re-record with {RECORD_ENV}=<path> (see module docstring)"
+    stale = _differences(recorded, live)
+    assert not stale, (
+        f"stale recorded report at {stale[:12]}; re-record with {RECORD_ENV}=<path> "
+        "(see module docstring)"
     )
+
+
+def _differences(recorded: Any, live: Any, where: str = "") -> list[str]:
+    """Every path at which the recorded report and a fresh run disagree."""
+
+    if isinstance(recorded, dict) and isinstance(live, dict):
+        return [
+            difference
+            for key in sorted(set(recorded) | set(live))
+            for difference in _differences(recorded.get(key), live.get(key), f"{where}/{key}")
+        ]
+    if isinstance(recorded, list) and isinstance(live, list) and len(recorded) == len(live):
+        return [
+            difference
+            for index, (left, right) in enumerate(zip(recorded, live, strict=True))
+            for difference in _differences(left, right, f"{where}[{index}]")
+        ]
+    return [] if recorded == live else [where or "/"]
 
 
 def test_the_recorded_report_passes_the_privacy_gate() -> None:

@@ -550,8 +550,10 @@ def report_dict(trees: tuple[Tree, ...], report: audit.AuditReport) -> dict[str,
     return out
 
 
-#: Per-case fields a recorded report keeps. Latency is left out on purpose:
-#: it describes the recording host, and every run manifest carries its own.
+#: Per-case fields a recorded report keeps. Latency is left out because it
+#: describes the recording host, and token counts because an ambiguity entry
+#: spells a writer-minted memory ref whose tokenisation differs per build;
+#: character counts do not. Every run manifest carries its own.
 RECORDED_CASE_FIELDS: tuple[str, ...] = (
     "case_id",
     "is_twin",
@@ -566,7 +568,6 @@ RECORDED_CASE_FIELDS: tuple[str, ...] = (
     "must_include_missing",
     "must_exclude_present",
     "packet_chars",
-    "packet_tokens",
     "by_anchor_kind",
     "blocked",
     "passed",
@@ -616,7 +617,6 @@ def recorded_report(
         "audit_passed": audit.audit_passed(report),
         "blocked": full["blocked"],
         "hedged_twins": full["hedged_twins"],
-        "packet_size_tokens": full["packet_size_tokens"],
         "c9_padding_robustness": full["c9_padding_robustness"],
         "per_case": [
             {name: row[name] for name in RECORDED_CASE_FIELDS} for row in full["per_case"]
