@@ -45,10 +45,12 @@ report:
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import time
@@ -89,6 +91,8 @@ PLATFORM_CHART = REPO_ROOT / "infra/helm/platform"
 IMAGE_DIR = CELLCTL_ROOT / "tests" / "_k3s_standin_image"
 BROKEN_IMAGE_DIR = CELLCTL_ROOT / "tests" / "_k3s_standin_image_broken"
 K3S_GATE = REPO_ROOT / "infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json"
+AUDIT_POLICY = REPO_ROOT / "infra/ansible/roles/k3s/files/audit-policy.yaml"
+K3S_AUDIT_LOG = "/var/lib/rancher/k3s/server/logs/audit.log"
 
 RUN_LIVE = os.environ.get("RUN_CELLCTL_K3S_TEST") == "1"
 HELM = os.environ.get("HELM_BIN") or shutil.which("helm")
@@ -300,16 +304,22 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
         # never reach the ValidatingAdmissionPolicy it is meant to prove. The
         # gate needs certificates.k8s.io/v1beta1 served too, or the API
         # server's own PodCertificateRequest informer keeps it from ready.
+        # The node's own audit policy (harden-exomem-cloud-operator-access
+        # D7), so the operator-access runbook's audit-log steps are
+        # rehearsed against the same policy the node runs.
         _run(
             [
                 "docker", "run", "--privileged", "--detach", "--name", name,
                 "--network", network,
                 "--publish", "127.0.0.1::6443",
+                "--mount", f"type=bind,src={AUDIT_POLICY},dst=/etc/rancher/k3s/audit-policy.yaml,readonly",
                 K3S_IMAGE, "server",
                 "--disable=traefik", "--disable=servicelb",
                 "--write-kubeconfig-mode=600",
                 "--kube-apiserver-arg=feature-gates=PodCertificateRequest=true",
                 "--kube-apiserver-arg=runtime-config=certificates.k8s.io/v1beta1=true",
+                "--kube-apiserver-arg=audit-policy-file=/etc/rancher/k3s/audit-policy.yaml",
+                f"--kube-apiserver-arg=audit-log-path={K3S_AUDIT_LOG}",
             ]
         )
         _run(
@@ -1236,3 +1246,516 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     _kubectl(k3s.name, ["delete", "namespace", namespace_2, "--ignore-not-found"])
 
     print("[3.10] all scenarios passed")
+
+
+# === harden-exomem-cloud-operator-access: the edge, the Cloud issuer and cell
+# connect admission, on the same disposable K3s cluster. ===
+
+EDGE_NAMESPACE = "exomem-edge"
+EDGE_RELEASE = "cellctl-k3s-edge"
+VALIDATION_VALUES = yaml.safe_load((PLATFORM_CHART / "values.validation.yaml").read_text(encoding="utf-8"))
+MCP_HOSTNAME = VALIDATION_VALUES["cloudGateway"]["hostname"]
+INGRESS_SOURCE_VALUE = VALIDATION_VALUES["cloudGateway"]["trustedIngressSourceValue"]
+TRAEFIK_CHART = next((PLATFORM_CHART / "charts").glob("traefik-*.tgz"))
+
+# The real Substrate gateway is not part of this suite. This stand-in serves
+# the chart's gateway port and echoes what reached it, so the test can see
+# the route, the path and the trusted-ingress header Traefik set.
+GATEWAY_STANDIN = """
+import http.server, json
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"stand_in": "exomem-cloud-gateway", "path": self.path,
+                           "headers": {k.lower(): v for k, v in self.headers.items()}}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+http.server.ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+"""
+
+# A client outside the cluster, on the node's own port 443, with the MCP
+# hostname as SNI and Host. It also sends a forged trusted-ingress header,
+# which Traefik must overwrite.
+PUBLIC_CLIENT = """
+import http.client, json, socket, ssl, sys
+host, address, path, header = sys.argv[1:5]
+context = ssl.create_default_context()
+context.check_hostname = False
+context.verify_mode = ssl.CERT_NONE
+class Connection(http.client.HTTPSConnection):
+    def connect(self):
+        self.sock = self._context.wrap_socket(socket.create_connection((address, 443), timeout=10), server_hostname=host)
+connection = Connection(host, 443, context=context, timeout=10)
+connection.request("GET", path, headers={header: "forged"})
+response = connection.getresponse()
+print(json.dumps({"status": response.status, "body": response.read().decode(errors="replace")}))
+"""
+
+RESTRICTED_POD_SECURITY = {
+    "securityContext": {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}},
+    "container": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
+}
+
+
+def _render_platform(*templates: str) -> list[dict[str, Any]]:
+    """The chart's documents from these template paths, in render order. A
+    path the chart does not have contributes nothing, so the same fixture
+    runs against an older chart and fails on behaviour, not on rendering."""
+
+    rendered = _run(
+        [
+            HELM, "template", EDGE_RELEASE, str(PLATFORM_CHART),
+            "--namespace", "exomem-platform",
+            "--values", str(PLATFORM_CHART / "values.validation.yaml"),
+        ]
+    ).stdout
+    documents = []
+    for chunk in re.split(r"^---$", rendered, flags=re.MULTILINE):
+        source = re.search(r"^# Source: [^/]+/(.+)$", chunk, flags=re.MULTILINE)
+        document = yaml.safe_load(chunk)
+        if source and source.group(1) in templates and isinstance(document, dict):
+            documents.append(document)
+    return documents
+
+
+def _apply_server_side(k3s_name: str, documents: list[dict[str, Any]]) -> None:
+    _kubectl(k3s_name, ["apply", "--server-side", "--force-conflicts", "--field-manager=edge-test", "--filename=-"], documents=documents)
+
+
+def _probe_pod(name: str, namespace: str, image: str, *, labels: dict[str, str] | None = None,
+               command: list[str] | None = None, port: int | None = None) -> dict[str, Any]:
+    container: dict[str, Any] = {
+        "name": "probe",
+        "image": image,
+        "command": command or ["python3", "-c", "import time; time.sleep(3600)"],
+        "securityContext": RESTRICTED_POD_SECURITY["container"],
+    }
+    if port is not None:
+        container["ports"] = [{"name": "http", "containerPort": port}]
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": name, "namespace": namespace, "labels": labels or {}},
+        "spec": {
+            "automountServiceAccountToken": False,
+            "securityContext": RESTRICTED_POD_SECURITY["securityContext"],
+            "containers": [container],
+        },
+    }
+
+
+def _tcp_probe(k3s_name: str, namespace: str, pod: str, address: str, port: int) -> bool:
+    source = (
+        "import socket, sys; s = socket.socket(); s.settimeout(3); "
+        f"sys.exit(0 if s.connect_ex(('{address}', {port})) == 0 else 1)"
+    )
+    return _exec_py(k3s_name, namespace, pod, source, check=False).returncode == 0
+
+
+def _wait_pods_ready(k3s_name: str, namespace: str, *pods: str) -> None:
+    for pod in pods:
+        _kubectl(k3s_name, ["wait", "--namespace", namespace, "--for=condition=Ready", f"pod/{pod}", "--timeout=180s"])
+
+
+def _container_ip(name: str) -> str:
+    address = _run(["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", name]).stdout.strip()
+    assert address, f"container {name} has no IP"
+    return address
+
+
+@dataclass
+class EdgePlatform:
+    image: str
+    cell_namespace: str
+    gateway_service_ip: str
+    # Where the render put Traefik and the Cloud Certificate, so every probe
+    # below targets the identity the chart actually deploys.
+    traefik_namespace: str
+    traefik_account: str
+    certificate_namespace: str
+
+
+@pytest.fixture(scope="module")
+def edge_platform(k3s: K3sCluster, tmp_path_factory: pytest.TempPathFactory) -> EdgePlatform:
+    """The chart's edge objects as rendered, over real Traefik on hostPort 443.
+
+    Stand-ins, named here: the gateway is a stand-in pod behind the chart's
+    own gateway Service and NetworkPolicy; the TLS Secret is a self-signed
+    certificate in place of the one cert-manager would issue (cert-manager's
+    CRDs are installed, its controller is not: ACME cannot run here).
+    """
+
+    work = tmp_path_factory.mktemp("edge")
+    image = _import_image(k3s.name, _build_standin_image(IMAGE_DIR), repository=STANDIN_REPOSITORY)
+
+    print("[edge] installing the Traefik and cert-manager CRDs the chart's objects need")
+    traefik_crds = [doc for doc in yaml.safe_load_all(_run([HELM, "show", "crds", str(TRAEFIK_CHART)]).stdout) if isinstance(doc, dict)]
+    cert_manager_crds = _render_platform(
+        *(f"charts/cert-manager/templates/crd-cert-manager.io_{kind}.yaml"
+          for kind in ("certificates", "certificaterequests", "clusterissuers", "issuers")),
+    )
+    _apply_server_side(k3s.name, traefik_crds + cert_manager_crds)
+    for crd in traefik_crds + cert_manager_crds:
+        _kubectl(k3s.name, ["wait", "--for=condition=Established", f"crd/{crd['metadata']['name']}", "--timeout=60s"])
+
+    print("[edge] applying the chart's namespaces, Traefik, Cloud route, gateway policy and operator RBAC")
+    platform = _render_platform(
+        "templates/namespaces.yaml",
+        "templates/cloud-ingress.yaml",
+        "templates/cloud-gateway.yaml",
+        "templates/operator-access.yaml",
+        *(f"charts/traefik/templates/{template}" for template in (
+            "rbac/serviceaccount.yaml", "rbac/role.yaml", "rbac/rolebinding.yaml",
+            "rbac/clusterrole.yaml", "rbac/clusterrolebinding.yaml",
+            "deployment.yaml", "service.yaml", "ingressclass.yaml",
+        )),
+    )
+    # The gateway Deployment runs Substrate's image, replaced by a stand-in
+    # below; cellctl.yaml contributes only exomem-cloud and its default-deny.
+    platform = [doc for doc in platform if not (doc["kind"] == "Deployment" and doc["metadata"]["name"] == "exomem-cloud-gateway")]
+    platform += [
+        doc for doc in _render_platform("templates/cellctl.yaml")
+        if doc["kind"] == "Namespace" or (doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"] == "default-deny")
+    ]
+    order = {"Namespace": 0, "ServiceAccount": 1, "ClusterRole": 2, "Role": 2}
+    platform.sort(key=lambda doc: order.get(doc["kind"], 10))
+    _apply_server_side(k3s.name, platform)
+    traefik = next(
+        doc for doc in platform
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == f"{EDGE_RELEASE}-traefik"
+    )
+    traefik_namespace = traefik["metadata"]["namespace"]
+    traefik_account = f"system:serviceaccount:{traefik_namespace}:{traefik['spec']['template']['spec']['serviceAccountName']}"
+    certificate_namespace = next(
+        doc for doc in platform if doc["kind"] == "Certificate" and doc["metadata"]["name"] == "exomem-cloud-gateway"
+    )["metadata"]["namespace"]
+
+    _run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+         "-subj", f"/CN={MCP_HOSTNAME}", "-addext", f"subjectAltName=DNS:{MCP_HOSTNAME}",
+         "-keyout", str(work / "tls.key"), "-out", str(work / "tls.crt")]
+    )
+    tls_secret = {
+        "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls",
+        "metadata": {"name": "exomem-cloud-gateway-tls", "namespace": certificate_namespace},
+        "data": {
+            "tls.crt": base64.b64encode((work / "tls.crt").read_bytes()).decode(),
+            "tls.key": base64.b64encode((work / "tls.key").read_bytes()).decode(),
+        },
+    }
+    _apply_server_side(k3s.name, [tls_secret])
+
+    gateway = _probe_pod(
+        "gateway-standin", "exomem-cloud", image,
+        labels={"app.kubernetes.io/name": "exomem-cloud-gateway"},
+        command=["python3", "-c", GATEWAY_STANDIN], port=8080,
+    )
+    cell_namespace = namespace_name(_cell_id())
+    _apply_server_side(k3s.name, [gateway, {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": cell_namespace}}])
+    _wait_pods_ready(k3s.name, "exomem-cloud", "gateway-standin")
+    _kubectl(k3s.name, ["rollout", "status", "--namespace", traefik_namespace, f"deployment/{EDGE_RELEASE}-traefik", "--timeout=300s"])
+    service_ip = json.loads(
+        _kubectl(k3s.name, ["get", "service", "exomem-cloud-gateway", "--namespace", "exomem-cloud", "--output=json"]).stdout
+    )["spec"]["clusterIP"]
+    return EdgePlatform(
+        image=image, cell_namespace=cell_namespace, gateway_service_ip=service_ip,
+        traefik_namespace=traefik_namespace, traefik_account=traefik_account, certificate_namespace=certificate_namespace,
+    )
+
+
+def _public_request(k3s: K3sCluster, path: str) -> tuple[int, str]:
+    response = _run(
+        ["docker", "run", "--rm", "--network", k3s.network, "python:3.12-alpine", "python3", "-c", PUBLIC_CLIENT,
+         MCP_HOSTNAME, _container_ip(k3s.name), path, "x-exomem-ingress-source"]
+    ).stdout
+    parsed = json.loads(response)
+    return parsed["status"], parsed["body"]
+
+
+def test_the_edge_reads_no_key_and_still_reaches_the_gateway(k3s: K3sCluster, edge_platform: EdgePlatform) -> None:
+    print(f"[edge] scenario: Traefik's ServiceAccount ({edge_platform.traefik_account}) is refused Secrets outside its namespace")
+    account = edge_platform.traefik_account
+    for namespace in ("exomem-cloud", "exomem-platform", edge_platform.cell_namespace):
+        for verb in ("get", "list", "watch"):
+            answer = _kubectl(
+                k3s.name, ["auth", "can-i", verb, "secrets", "--namespace", namespace, f"--as={account}"], check=False,
+            )
+            print(f"[edge] can-i {verb} secrets -n {namespace} as Traefik: {answer.stdout.strip()}")
+            assert answer.stdout.strip() == "no", (namespace, verb, answer.stdout, answer.stderr)
+    cluster_wide = _kubectl(
+        k3s.name, ["auth", "can-i", "list", "secrets", "--all-namespaces", f"--as={account}"], check=False,
+    )
+    assert cluster_wide.stdout.strip() == "no", cluster_wide.stdout
+    own = _kubectl(
+        k3s.name, ["auth", "can-i", "get", "secrets", "--namespace", edge_platform.traefik_namespace, f"--as={account}"], check=False,
+    )
+    assert own.stdout.strip() == "yes", "the identity probed above is not Traefik's"
+
+    print("[edge] scenario: Traefik's namespace holds only the certificate Secret")
+    assert edge_platform.certificate_namespace == edge_platform.traefik_namespace
+    secrets = json.loads(
+        _kubectl(k3s.name, ["get", "secrets", "--namespace", edge_platform.traefik_namespace, "--output=json"]).stdout
+    )["items"]
+    assert [secret["metadata"]["name"] for secret in secrets] == ["exomem-cloud-gateway-tls"]
+
+    print("[edge] scenario: a request through the public route reaches the gateway")
+
+    def _routed() -> bool:
+        status, _ = _public_request(k3s, "/mcp")
+        return status == 200
+
+    _wait_for(_routed, timeout=120, interval=3, description="Traefik to route the Cloud MCP path to the gateway")
+    status, body = _public_request(k3s, "/mcp")
+    assert status == 200, (status, body)
+    echoed = json.loads(body)
+    print(f"[edge] public /mcp -> {status}: path={echoed['path']} ingress-source-set={echoed['headers'].get('x-exomem-ingress-source') == INGRESS_SOURCE_VALUE}")
+    assert echoed["stand_in"] == "exomem-cloud-gateway" and echoed["path"] == "/mcp"
+    assert echoed["headers"]["x-exomem-ingress-source"] == INGRESS_SOURCE_VALUE
+    assert echoed["headers"]["host"] == MCP_HOSTNAME
+    unrouted, _ = _public_request(k3s, "/hosted/mcp")
+    assert unrouted == 404, unrouted
+
+    print("[edge] scenario: the gateway admits no pod but the edge's Traefik, not even a Traefik-labelled one elsewhere")
+    impostors = [
+        _probe_pod("old-edge-peer", "exomem-platform", edge_platform.image, labels={"exomem.io/ingress": "traefik"}),
+        _probe_pod("unlabelled-edge-pod", edge_platform.traefik_namespace, edge_platform.image),
+    ]
+    _apply_server_side(k3s.name, impostors)
+    for impostor in impostors:
+        namespace, name = impostor["metadata"]["namespace"], impostor["metadata"]["name"]
+        _wait_pods_ready(k3s.name, namespace, name)
+        assert not _tcp_probe(k3s.name, namespace, name, edge_platform.gateway_service_ip, 8080), (namespace, name)
+        _kubectl(k3s.name, ["delete", "pod", name, "--namespace", namespace, "--wait=false"])
+
+
+def _certificate(kind: str, namespace: str, issuer_kind: str | None = "ClusterIssuer",
+                 issuer: str = "exomem-cloud-dns01") -> dict[str, Any]:
+    issuer_ref: dict[str, str] = {"name": issuer}
+    if issuer_kind is not None:
+        issuer_ref["kind"] = issuer_kind
+    spec: dict[str, Any] = {"issuerRef": issuer_ref}
+    if kind == "Certificate":
+        spec |= {"secretName": "probe-tls", "dnsNames": [MCP_HOSTNAME]}
+    else:
+        spec |= {"request": base64.b64encode(b"not a real CSR; admission runs before any signer").decode()}
+    return {"apiVersion": "cert-manager.io/v1", "kind": kind, "metadata": {"name": "issuer-scope-probe", "namespace": namespace}, "spec": spec}
+
+
+def test_only_the_edge_namespace_may_name_the_cloud_cluster_issuer(k3s: K3sCluster, edge_platform: EdgePlatform) -> None:
+    def _dry_run(document: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+        return _kubectl(k3s.name, ["create", "--dry-run=server", "--filename=-"], documents=[document], check=False)
+
+    print("[edge] scenario: a Certificate naming the Cloud ClusterIssuer outside the edge namespace is refused")
+    refused = _certificate("Certificate", "exomem-cloud")
+
+    def _refused() -> bool:
+        result = _dry_run(refused)
+        return result.returncode != 0 and "exomem-cloud-issuer-scope" in result.stderr
+
+    _wait_for(_refused, timeout=60, interval=2, description="exomem-cloud-issuer-scope to refuse a Certificate in exomem-cloud")
+    print(f"[edge] refused: {_dry_run(refused).stderr.strip()}")
+    explicit_group = _certificate("Certificate", "exomem-platform")
+    explicit_group["spec"]["issuerRef"]["group"] = "cert-manager.io"
+    for document in (_certificate("CertificateRequest", edge_platform.cell_namespace), explicit_group):
+        result = _dry_run(document)
+        assert result.returncode != 0 and "exomem-cloud-issuer-scope" in result.stderr, (document, result.stderr)
+
+    print("[edge] scenario: the edge's own Certificate, and other issuers elsewhere, are admitted")
+    for document in (
+        _certificate("Certificate", EDGE_NAMESPACE),
+        _certificate("CertificateRequest", EDGE_NAMESPACE),
+        _certificate("Certificate", "exomem-cloud", issuer_kind="Issuer"),
+        _certificate("Certificate", "exomem-cloud", issuer_kind=None),
+        _certificate("Certificate", "exomem-cloud", issuer="some-other-issuer"),
+    ):
+        result = _dry_run(document)
+        assert result.returncode == 0, (document, result.stderr)
+
+
+# harden-exomem-cloud-operator-access tasks 2.2 and 2.3: the chart's D5
+# ValidatingAdmissionPolicy (operator-access.yaml, applied by edge_platform)
+# on the CONNECT operations it matches. It shipped because this probe showed
+# the API server enforcing it; a failure here means D4 must stand alone.
+BREAK_GLASS = ["--as=break-glass-probe", "--as-group=exomem:break-glass"]
+
+
+def _kubectl_bounded(k3s_name: str, args: list[str], *, seconds: int = 20) -> tuple[int | None, str]:
+    """Runs kubectl inside the node; None means it was still running (admitted
+    and streaming) when the bound expired."""
+
+    try:
+        result = subprocess.run(
+            ["docker", "exec", k3s_name, "timeout", "--signal=KILL", str(seconds), "kubectl", *args],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=False, timeout=seconds + 30,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "still running"
+    if result.returncode in (124, 137):
+        return None, (result.stdout + result.stderr).strip()
+    return result.returncode, (result.stdout + result.stderr).strip()
+
+
+def test_cell_connect_admission_is_enforced_for_every_identity_but_break_glass(
+    k3s: K3sCluster, edge_platform: EdgePlatform,
+) -> None:
+    cell = edge_platform.cell_namespace
+    other = "exomem-connect-probe"
+    _apply_server_side(k3s.name, [{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": other}}])
+    _apply_server_side(k3s.name, [_probe_pod("probe", cell, edge_platform.image), _probe_pod("probe", other, edge_platform.image)])
+    _wait_pods_ready(k3s.name, cell, "probe")
+    _wait_pods_ready(k3s.name, other, "probe")
+
+    policy = json.loads(
+        _kubectl(k3s.name, ["get", "validatingadmissionpolicy", "exomem-cell-connect-guard", "--output=json"]).stdout
+    )
+    print(f"[connect] the chart's D5 policy matches: {policy['spec']['matchConstraints']['resourceRules']}")
+
+    def _denied_by_policy(outcome: tuple[int | None, str]) -> bool:
+        code, output = outcome
+        return code not in (None, 0) and "exomem-cell-connect-guard" in output
+
+    exec_args = ["exec", "--namespace", cell, "probe", "--", "true"]
+    _wait_for(lambda: _denied_by_policy(_kubectl_bounded(k3s.name, exec_args)), timeout=60, interval=2,
+              description="the D5 policy to take effect on exec")
+
+    probes = {
+        "exec": exec_args,
+        "attach": ["attach", "--namespace", cell, "probe", "--container=probe"],
+        "port-forward": ["port-forward", "--namespace", cell, "pod/probe", "18765:8765"],
+        "ephemeral container": ["debug", "--namespace", cell, "probe", f"--image={edge_platform.image}",
+                                "--container=debugger", "--", "true"],
+        "raw CONNECT exec": ["get", "--raw", f"/api/v1/namespaces/{cell}/pods/probe/exec?command=true&stdout=true"],
+        "raw CONNECT attach": ["get", "--raw", f"/api/v1/namespaces/{cell}/pods/probe/attach?container=probe&stdout=true"],
+        "raw CONNECT portforward": ["get", "--raw", f"/api/v1/namespaces/{cell}/pods/probe/portforward?ports=8765"],
+    }
+    print("[connect] observed as the K3s admin (system:masters), not break-glass:")
+    for described, args in probes.items():
+        outcome = _kubectl_bounded(k3s.name, args)
+        print(f"[connect]   {described}: exit={outcome[0]} output={outcome[1]!r}")
+        assert _denied_by_policy(outcome), (described, outcome)
+
+    print("[connect] observed outside a cell namespace, as the same admin:")
+    outcome = _kubectl_bounded(k3s.name, ["exec", "--namespace", other, "probe", "--", "true"])
+    print(f"[connect]   exec in {other}: exit={outcome[0]} output={outcome[1]!r}")
+    assert outcome[0] == 0, outcome
+
+    print("[connect] observed as the break-glass group:")
+    for described, args in (
+        ("exec", [*BREAK_GLASS, *exec_args]),
+        ("ephemeral container", [*BREAK_GLASS, *probes["ephemeral container"]]),
+        ("raw CONNECT portforward", [*BREAK_GLASS, *probes["raw CONNECT portforward"]]),
+    ):
+        outcome = _kubectl_bounded(k3s.name, args)
+        print(f"[connect]   {described}: exit={outcome[0]} output={outcome[1]!r}")
+        assert "exomem-cell-connect-guard" not in outcome[1], (described, outcome)
+        if described != "raw CONNECT portforward":
+            assert outcome[0] == 0, (described, outcome)
+        else:
+            # Admitted, then refused by the kubelet proxy for want of an upgrade.
+            assert "Upgrade request required" in outcome[1] or "upgrade" in outcome[1].lower(), outcome
+
+
+# harden-exomem-cloud-operator-access task 2.4: the operator-access runbook's
+# marked blocks, run as written against this cluster. `k3s kubectl` is shimmed
+# to the host's kubectl, and the admin kubeconfig is this cluster's.
+OPERATOR_RUNBOOK = REPO_ROOT / "docs/runbooks/cloud-operator-access.md"
+
+
+def _runbook_block(marker: str) -> str:
+    text = OPERATOR_RUNBOOK.read_text(encoding="utf-8")
+    match = re.search(rf"<!-- rehearsed: {re.escape(marker)} -->\n```bash\n(.*?)\n```", text, flags=re.DOTALL)
+    assert match, f"no rehearsed block {marker!r} in {OPERATOR_RUNBOOK}"
+    return match.group(1)
+
+
+def test_the_operator_access_runbook_on_real_k3s(
+    k3s: K3sCluster, edge_platform: EdgePlatform, tmp_path: Path,
+) -> None:
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "k3s").write_text('#!/bin/sh\n[ "$1" = kubectl ] && shift\nexec kubectl "$@"\n', encoding="utf-8")
+    (shim / "k3s").chmod(0o755)
+    shared_memory = tmp_path / "shm"
+    shared_memory.mkdir(mode=0o700)
+    operator_kubeconfig = tmp_path / "root-kube" / "exomem-operator.kubeconfig"
+    audit_copy = tmp_path / "audit.log"
+    environment = {
+        **os.environ,
+        "PATH": f"{shim}:{os.environ['PATH']}",
+        "ADMIN_KUBECONFIG": str(k3s.kubeconfig),
+        "OPERATOR_KUBECONFIG": str(operator_kubeconfig),
+        "BREAK_GLASS_TMP": str(shared_memory),
+        "AUDIT_LOG": str(audit_copy),
+    }
+    environment.pop("KUBECONFIG", None)
+
+    def _bash(script: str) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(["bash", "-c", script], env=environment, cwd=tmp_path, capture_output=True, text=True, check=False)
+        assert result.returncode == 0, f"{script}\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+        return result
+
+    def _as(kubeconfig: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["kubectl", "--kubeconfig", str(kubeconfig), *args], env=environment, capture_output=True, text=True, check=False,
+        )
+
+    cell = edge_platform.cell_namespace
+    _apply_server_side(k3s.name, [_probe_pod("runbook-probe", cell, edge_platform.image)])
+    _wait_pods_ready(k3s.name, cell, "runbook-probe")
+
+    print("[runbook] issue the 30-day everyday operator certificate")
+    issued = _bash(_runbook_block("issue-operator"))
+    print(f"[runbook] {issued.stdout.strip()}")
+    assert "O = exomem:operators" in issued.stdout and "CN = exomem-operator" in issued.stdout
+    assert (operator_kubeconfig.stat().st_mode & 0o777) == 0o600
+    print("[runbook] the operator identity reads status and logs, and no Secret or connect subresource")
+    checked = _bash(_runbook_block("check-operator"))
+    assert "exomem:operators" in checked.stdout, checked.stdout
+    # The block's checks are not vacuous: the admin identity passes the same one.
+    admin_can = _as(k3s.kubeconfig, "auth", "can-i", "create", "pods", "--subresource=exec", "--all-namespaces")
+    assert admin_can.stdout.strip() == "yes", admin_can
+    assert _as(operator_kubeconfig, "get", "pods", "--namespace", cell).returncode == 0
+    assert _as(operator_kubeconfig, "logs", "--namespace", cell, "runbook-probe").returncode == 0
+    for denied in (
+        ("get", "secrets", "--namespace", "exomem-cloud"),
+        ("exec", "--namespace", cell, "runbook-probe", "--", "true"),
+    ):
+        result = _as(operator_kubeconfig, *denied)
+        print(f"[runbook] operator {denied[0]}: exit={result.returncode} {result.stderr.strip()!r}")
+        assert result.returncode != 0 and "forbidden" in result.stderr.lower(), (denied, result.stderr)
+
+    print("[runbook] mint a one-hour break-glass identity, use it, end it, then find it in the audit log")
+    session = "\n".join((
+        _runbook_block("mint-break-glass"),
+        'kubectl --kubeconfig "$BREAK_GLASS_KUBECONFIG" auth whoami',
+        f'kubectl --kubeconfig "$BREAK_GLASS_KUBECONFIG" exec --namespace {cell} runbook-probe -- true',
+        _runbook_block("end-break-glass"),
+        # No file for the identity outlives the task.
+        'test -z "$(ls -A "$BREAK_GLASS_TMP")"',
+        "sleep 2",
+        f"docker cp {k3s.name}:{K3S_AUDIT_LOG} \"$AUDIT_LOG\"",
+        _runbook_block("audit-break-glass"),
+    ))
+    result = _bash(session)
+    lines = result.stdout.splitlines()
+    print("[runbook] " + "\n[runbook] ".join(line for line in lines if not line.startswith("{")))
+    enddate = next(line for line in lines if line.startswith("notAfter="))
+    expires = time.mktime(time.strptime(enddate.removeprefix("notAfter="), "%b %d %H:%M:%S %Y %Z"))
+    assert expires - time.time() <= 3600 + 120, enddate
+    audit = [json.loads(line) for line in lines if line.startswith("{")]
+    csr_events = [event for event in audit if event["objectRef"].get("resource") == "certificatesigningrequests"]
+    assert {event["objectRef"].get("subresource") for event in csr_events} >= {None, "approval"}, csr_events
+    exec_events = [
+        event for event in audit
+        if event["user"]["username"] == "exomem-break-glass" and event["objectRef"].get("subresource") == "exec"
+    ]
+    assert exec_events and exec_events[0]["objectRef"]["namespace"] == cell
+    assert exec_events[0]["objectRef"]["name"] == "runbook-probe"
+    assert "exomem:break-glass" in exec_events[0]["user"]["groups"]
+    for event in audit:
+        assert event["level"] == "Metadata", event
+        assert "requestObject" not in event and "responseObject" not in event, event

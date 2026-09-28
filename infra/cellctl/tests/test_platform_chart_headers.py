@@ -28,6 +28,11 @@ PLATFORM_CHART = REPO_ROOT / "infra/helm/platform"
 
 HELM = shutil.which("helm")
 
+# harden-exomem-cloud-operator-access D1: Traefik and the public Cloud route
+# live here, away from every namespace that holds a durable key.
+EDGE_NAMESPACE = "exomem-edge"
+TRAEFIK = "platform-header-test-traefik"
+
 
 def _helm_template() -> list[dict[str, Any]]:
     result = subprocess.run(
@@ -509,7 +514,10 @@ def test_cloud_storage_class_uses_the_encryption_secret_and_deletes_volumes() ->
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_cloud_gateway_certificate_uses_namespaced_cloudflare_dns01() -> None:
+def test_cloud_gateway_certificate_uses_a_cluster_issuer_whose_token_stays_in_exomem_cloud() -> None:
+    # harden-exomem-cloud-operator-access D3: the Certificate and its TLS
+    # Secret live in the edge namespace, and name a ClusterIssuer whose
+    # DNS-01 token cert-manager resolves in exomem-cloud, never beside Traefik.
     documents = _helm_template()
     values = yaml.safe_load((PLATFORM_CHART / "values.validation.yaml").read_text(encoding="utf-8"))
     hostname = values["cloudGateway"]["hostname"]
@@ -519,16 +527,25 @@ def test_cloud_gateway_certificate_uses_namespaced_cloudflare_dns01() -> None:
         values["provisioner"]["transferHostname"],
     }
 
-    issuer = _find(documents, "Issuer", "exomem-cloud-dns01")
+    assert not [doc for doc in documents if doc.get("kind") == "Issuer"], "no namespaced Issuer may remain"
+    issuer = _find(documents, "ClusterIssuer", "exomem-cloud-dns01")
     certificate = _find(documents, "Certificate", "exomem-cloud-gateway")
-    assert issuer["metadata"]["namespace"] == certificate["metadata"]["namespace"] == "exomem-cloud"
+    assert "namespace" not in issuer["metadata"]
+    assert certificate["metadata"]["namespace"] == EDGE_NAMESPACE
     assert issuer["spec"]["acme"]["solvers"] == [{
         "selector": {"dnsNames": [hostname]},
         "dns01": {"cloudflare": {"apiTokenSecretRef": {
             "name": "exomem-cloudflare-dns-token", "key": "token",
         }}},
     }]
-    assert certificate["spec"]["issuerRef"] == {"name": issuer["metadata"]["name"], "kind": "Issuer"}
+    assert issuer["spec"]["acme"]["privateKeySecretRef"] == {"name": "exomem-cloud-acme-account-key"}
+    # A ClusterIssuer's Secret references resolve in cert-manager's cluster
+    # resource namespace, which must be the one the signed registry already
+    # delivers exomem-cloudflare-dns-token to.
+    controller = _find(documents, "Deployment", "platform-header-test-cert-manager")
+    (container,) = controller["spec"]["template"]["spec"]["containers"]
+    assert "--cluster-resource-namespace=exomem-cloud" in container["args"]
+    assert certificate["spec"]["issuerRef"] == {"name": issuer["metadata"]["name"], "kind": "ClusterIssuer"}
     assert certificate["spec"]["dnsNames"] == [hostname]
     assert certificate["spec"]["secretName"] == "exomem-cloud-gateway-tls"
     route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
@@ -626,8 +643,253 @@ def test_the_cloud_ingress_sets_the_trusted_ingress_source_header_the_gateway_ex
     assert header == "x-exomem-ingress-source"
 
     middleware = _find(documents, "Middleware", "exomem-cloud-trusted-ingress")
-    assert middleware["metadata"]["namespace"] == "exomem-cloud"
+    assert middleware["metadata"]["namespace"] == EDGE_NAMESPACE
     assert middleware["spec"]["headers"]["customRequestHeaders"] == {header: value}
     route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
     (rule,) = route["spec"]["routes"]
     assert rule["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}]
+
+
+# --- harden-exomem-cloud-operator-access: edge isolation (D1-D3) ---
+
+
+def _grants_secrets(rules: list[dict[str, Any]]) -> bool:
+    for rule in rules:
+        groups = rule.get("apiGroups") or []
+        resources = rule.get("resources") or []
+        if ("" in groups or "*" in groups) and ("secrets" in resources or "*" in resources):
+            return True
+    return False
+
+
+def _traefik_secret_scopes(documents: list[dict[str, Any]]) -> set[str]:
+    """Where Traefik's ServiceAccount may read Secrets: a namespace for each
+    RoleBinding whose role grants them, "*" for each such ClusterRoleBinding."""
+
+    account = _find(documents, "ServiceAccount", TRAEFIK)
+    subject = ("ServiceAccount", account["metadata"]["name"], account["metadata"]["namespace"])
+    scopes: set[str] = set()
+    for binding in documents:
+        if binding.get("kind") not in {"RoleBinding", "ClusterRoleBinding"}:
+            continue
+        subjects = {(s["kind"], s["name"], s.get("namespace")) for s in binding.get("subjects") or []}
+        if subject not in subjects:
+            continue
+        ref = binding["roleRef"]
+        role = next(
+            doc for doc in documents
+            if doc.get("kind") == ref["kind"] and doc["metadata"]["name"] == ref["name"]
+            and (ref["kind"] == "ClusterRole" or doc["metadata"].get("namespace") == binding["metadata"]["namespace"])
+        )
+        if _grants_secrets(role.get("rules") or []):
+            scopes.add("*" if binding["kind"] == "ClusterRoleBinding" else binding["metadata"]["namespace"])
+    return scopes
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_traefik_deployment_service_and_role_render_in_the_edge_namespace() -> None:
+    documents = _helm_template()
+    for kind in ("Deployment", "Service", "ServiceAccount"):
+        assert _find(documents, kind, TRAEFIK)["metadata"]["namespace"] == EDGE_NAMESPACE, kind
+    # Namespaced RBAC renders a Role in every namespace Traefik watches; the
+    # watch list must be the edge namespace alone.
+    roles = [doc for doc in documents if doc.get("kind") == "Role" and doc["metadata"]["name"] == TRAEFIK]
+    assert [role["metadata"]["namespace"] for role in roles] == [EDGE_NAMESPACE]
+    bindings = [doc for doc in documents if doc.get("kind") == "RoleBinding" and doc["metadata"]["name"] == TRAEFIK]
+    assert [binding["metadata"]["namespace"] for binding in bindings] == [EDGE_NAMESPACE]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_no_traefik_cluster_role_grants_secrets() -> None:
+    documents = _helm_template()
+    traefik_cluster_roles = [
+        doc for doc in documents
+        if doc.get("kind") == "ClusterRole"
+        and doc["metadata"].get("labels", {}).get("app.kubernetes.io/name") == "traefik"
+    ]
+    assert not [role["metadata"]["name"] for role in traefik_cluster_roles if _grants_secrets(role.get("rules") or [])]
+    assert "*" not in _traefik_secret_scopes(documents)
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_only_role_granting_traefik_secrets_is_in_the_edge_namespace() -> None:
+    assert _traefik_secret_scopes(_helm_template()) == {EDGE_NAMESPACE}
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_traefik_watches_only_the_edge_namespace_and_may_route_to_an_external_name() -> None:
+    deployment = _find(_helm_template(), "Deployment", TRAEFIK)
+    args = deployment["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert f"--providers.kubernetescrd.namespaces={EDGE_NAMESPACE}" in args
+    assert "--providers.kubernetescrd.allowExternalNameServices=true" in args
+    assert "--providers.kubernetescrd.disableClusterScopeResources=true" in args
+    assert "--providers.kubernetescrd.allowCrossNamespace=true" not in args
+    assert not any(arg.startswith("--providers.kubernetesingress") for arg in args)
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_edge_namespace_enforces_privileged_and_audits_restricted() -> None:
+    # Restricted includes Baseline, which refuses any non-zero hostPort, so
+    # enforcing it would refuse Traefik's hostPort 443 pod.
+    namespace = _find(_helm_template(), "Namespace", EDGE_NAMESPACE)
+    labels = namespace["metadata"]["labels"]
+    assert {key: value for key, value in labels.items() if key.startswith("pod-security.kubernetes.io/")} == {
+        "pod-security.kubernetes.io/enforce": "privileged",
+        "pod-security.kubernetes.io/enforce-version": "v1.35",
+        "pod-security.kubernetes.io/audit": "restricted",
+        "pod-security.kubernetes.io/audit-version": "v1.35",
+        "pod-security.kubernetes.io/warn": "restricted",
+        "pod-security.kubernetes.io/warn-version": "v1.35",
+    }
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_cloud_route_objects_render_in_the_edge_namespace() -> None:
+    documents = _helm_template()
+    for kind, name in (
+        ("IngressRoute", "exomem-cloud-gateway"),
+        ("Middleware", "exomem-cloud-trusted-ingress"),
+        ("Certificate", "exomem-cloud-gateway"),
+    ):
+        assert _find(documents, kind, name)["metadata"]["namespace"] == EDGE_NAMESPACE, kind
+
+    (external,) = [
+        doc for doc in documents
+        if doc.get("kind") == "Service" and doc["metadata"].get("namespace") == EDGE_NAMESPACE
+        and doc["spec"].get("type") == "ExternalName"
+    ]
+    assert external["metadata"]["name"] == "exomem-cloud-gateway"
+    assert external["spec"]["externalName"] == "exomem-cloud-gateway.exomem-cloud.svc.cluster.local"
+    route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
+    (rule,) = route["spec"]["routes"]
+    assert rule["services"] == [{"name": external["metadata"]["name"], "port": 8080}]
+
+    # The edge namespace holds no Secret but the certificate cert-manager
+    # writes there at runtime: the chart itself renders none, and no issuer.
+    in_edge = [doc for doc in documents if doc.get("metadata", {}).get("namespace") == EDGE_NAMESPACE]
+    assert not [doc for doc in in_edge if doc["kind"] in {"Secret", "Issuer"}]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_gateway_admits_ingress_only_from_edge_traefik_pods() -> None:
+    documents = _helm_template()
+    gateway = _find(documents, "NetworkPolicy", "exomem-cloud-gateway")["spec"]
+    assert gateway["ingress"] == [{
+        "from": [{
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": EDGE_NAMESPACE}},
+            "podSelector": {"matchLabels": {"exomem.io/ingress": "traefik"}},
+        }],
+        "ports": [{"port": 8080, "protocol": "TCP"}],
+    }]
+    traefik = _find(documents, "Deployment", TRAEFIK)
+    assert traefik["metadata"]["namespace"] == EDGE_NAMESPACE
+    assert traefik["spec"]["template"]["metadata"]["labels"]["exomem.io/ingress"] == "traefik"
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_only_the_edge_namespace_may_request_a_certificate_from_the_cloud_cluster_issuer() -> None:
+    # D3: any namespace can name a ClusterIssuer, and cert-manager's edit
+    # role aggregates into the built-in admin and edit roles, so admission
+    # keeps the MCP hostname's certificate to the Cloud route alone.
+    documents = _helm_template()
+    policy = _find(documents, "ValidatingAdmissionPolicy", "exomem-cloud-issuer-scope")["spec"]
+    assert policy["failurePolicy"] == "Fail"
+    (rule,) = policy["matchConstraints"]["resourceRules"]
+    assert rule["apiGroups"] == ["cert-manager.io"]
+    assert set(rule["resources"]) == {"certificates", "certificaterequests"}
+    assert set(rule["operations"]) == {"CREATE", "UPDATE"}
+    text = " ".join(
+        [v["expression"] for v in policy.get("variables", [])] + [v["expression"] for v in policy["validations"]]
+    )
+    issuer = _find(documents, "ClusterIssuer", "exomem-cloud-dns01")["metadata"]["name"]
+    for literal in (f"'{issuer}'", "'ClusterIssuer'", f"request.namespace == '{EDGE_NAMESPACE}'"):
+        assert literal in text, literal
+    binding = _find(documents, "ValidatingAdmissionPolicyBinding", "exomem-cloud-issuer-scope")["spec"]
+    assert binding == {"policyName": "exomem-cloud-issuer-scope", "validationActions": ["Deny"]}
+
+
+# --- harden-exomem-cloud-operator-access: operator identities (D4) ---
+
+OPERATOR_GROUP = "exomem:operators"
+BREAK_GLASS_GROUP = "exomem:break-glass"
+CONNECT_SUBRESOURCES = {"pods/exec", "pods/attach", "pods/portforward", "pods/proxy", "pods/ephemeralcontainers"}
+
+
+def _group_bindings(documents: list[dict[str, Any]], group: str) -> list[dict[str, Any]]:
+    return [
+        doc for doc in documents
+        if doc.get("kind") in {"RoleBinding", "ClusterRoleBinding"}
+        and {"kind": "Group", "name": group, "apiGroup": "rbac.authorization.k8s.io"} in (doc.get("subjects") or [])
+    ]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_everyday_operator_reads_status_events_and_logs_but_no_secret_or_connect_subresource() -> None:
+    documents = _helm_template()
+    role = _find(documents, "ClusterRole", "exomem-operator-read")
+    granted: dict[tuple[str, str], set[str]] = {}
+    for rule in role["rules"]:
+        assert "resourceNames" not in rule and "nonResourceURLs" not in rule, rule
+        for group in rule["apiGroups"]:
+            for resource in rule["resources"]:
+                granted.setdefault((group, resource), set()).update(rule["verbs"])
+    assert not [key for key in granted if "*" in key], granted
+    assert {verb for verbs in granted.values() for verb in verbs} <= {"get", "list", "watch"}
+    resources = {resource for _, resource in granted}
+    assert "secrets" not in resources
+    assert not resources & CONNECT_SUBRESOURCES
+    assert set(granted) == {
+        ("", "pods"), ("", "pods/log"), ("", "events"), ("", "namespaces"),
+        ("", "persistentvolumeclaims"), ("", "services"), ("", "nodes"),
+        ("apps", "deployments"), ("apps", "statefulsets"), ("batch", "jobs"),
+    }
+
+    (binding,) = _group_bindings(documents, OPERATOR_GROUP)
+    assert binding["kind"] == "ClusterRoleBinding"
+    assert binding["metadata"]["name"] == "exomem-operator-read"
+    assert binding["roleRef"] == {
+        "apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "exomem-operator-read",
+    }
+    assert binding["subjects"] == [{"kind": "Group", "name": OPERATOR_GROUP, "apiGroup": "rbac.authorization.k8s.io"}]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_break_glass_group_is_bound_to_cluster_admin_and_nothing_else() -> None:
+    # D4: no standing credential carries this group; a one-hour certificate
+    # minted through an approved CSR does.
+    (binding,) = _group_bindings(_helm_template(), BREAK_GLASS_GROUP)
+    assert binding["kind"] == "ClusterRoleBinding"
+    assert binding["metadata"]["name"] == "exomem-break-glass"
+    assert binding["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "cluster-admin"}
+    assert binding["subjects"] == [{"kind": "Group", "name": BREAK_GLASS_GROUP, "apiGroup": "rbac.authorization.k8s.io"}]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_connect_subresources_in_cell_namespaces_are_admitted_only_for_break_glass() -> None:
+    # D5, shipped after the live probe (test_k3s_integration.py) showed the
+    # API server enforcing this policy type on CONNECT. It reads only user
+    # info and the namespace, and applies to system:masters too.
+    documents = _helm_template()
+    policy = _find(documents, "ValidatingAdmissionPolicy", "exomem-cell-connect-guard")["spec"]
+    assert policy["failurePolicy"] == "Fail"
+    rules = {
+        (tuple(rule["operations"]), tuple(sorted(rule["resources"])))
+        for rule in policy["matchConstraints"]["resourceRules"]
+        if rule["apiGroups"] == [""]
+    }
+    assert rules == {
+        (("CONNECT",), ("pods/attach", "pods/exec", "pods/portforward")),
+        (("UPDATE",), ("pods/ephemeralcontainers",)),
+    }
+    assert len(policy["matchConstraints"]["resourceRules"]) == 2
+    assert "namespaceSelector" not in policy["matchConstraints"], "name-matched, so an unlabelled exo-cell-* is covered too"
+    (validation,) = policy["validations"]
+    expression = validation["expression"]
+    assert f"'{BREAK_GLASS_GROUP}' in request.userInfo.groups" in expression
+    assert "object" not in expression.replace("request.userInfo", "")
+    # The same namespace shape cellctl is confined to.
+    scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
+    assert "matches('^exo-cell-[a-z2-7]{16}$')" in " ".join(v["expression"] for v in scope["spec"]["validations"])
+    assert "request.namespace.matches('^exo-cell-[a-z2-7]{16}$')" in expression
+    binding = _find(documents, "ValidatingAdmissionPolicyBinding", "exomem-cell-connect-guard")["spec"]
+    assert binding == {"policyName": "exomem-cell-connect-guard", "validationActions": ["Deny"]}

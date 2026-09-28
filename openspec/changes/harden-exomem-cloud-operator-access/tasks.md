@@ -22,7 +22,8 @@
 - [ ] 2.2 Add a live-K3s probe that applies the D5 ValidatingAdmissionPolicy and checks, as a non-break-glass user, whether exec, attach, port-forward and ephemeral containers in an `exo-cell-*` namespace are denied at admission. Record the observed result in this design. Verify: the probe runs in the live job and its outcome is written into D5.
 - [ ] 2.3 If 2.2 proves enforcement, ship the policy and binding in the chart, with chart tests and a live test that the `exomem:break-glass` group is admitted. Otherwise record the decision in D5. Verify: the tests pass, or the D5 record is merged.
 - [ ] 2.4 Write `docs/runbooks/cloud-operator-access.md`. It covers issuing the 30-day operator certificate through the CSR API, minting a one-hour break-glass certificate on demand (with no standing file), installing kubeconfigs root-only, re-issue, making the operator kubeconfig the default, and finding CSR approvals and break-glass use in `/var/lib/rancher/k3s/server/logs/audit.log`. Verify: the privacy gate passes, and the runbook commands pass the live-K3s rehearsal.
-- [ ] 2.5 Add the D8 canary test to the live-K3s suite: seed a unique string through a cell, exercise search, recall and review, and assert it appears in no cell, cellctl or gateway log. Verify: it passes in the live job and fails when a deliberate log line echoes the canary.
+- [ ] 2.5 Write the D8 canary procedure into `docs/runbooks/cloud-operator-access.md`: seed a unique string through a cell over the Cloud connector, exercise search, recall and review, then search every cell, cellctl and gateway pod log with the operator identity. Include a negative control that echoes the canary from a throwaway pod outside cell namespaces and shows the same search finds it. Verify: the privacy gate and shellcheck pass on the runbook blocks; the live run is task 4.4.
+- [ ] 2.6 Make the K3s admin kubeconfig root-only (D4): the K3s configuration template writes it `0600`, root-owned, with no group. Verify: a red-first Ansible contract test pins the mode and the absence of `write-kubeconfig-group`.
 
 ## 3. Tenant-only exports (D6)
 
@@ -43,3 +44,5 @@
   - the CSR approval and the exec appear in the audit log without content;
   - that certificate is rejected after expiry.
 - [ ] 4.3 Review user-facing Cloud privacy copy against the spec's privacy requirement. Verify: every claim maps to a stated property, and both disclosures (content in transit at the edge and gateway, and operator-held keys) are present.
+- [ ] 4.4 Run the D8 canary procedure on the production node after 4.1. Verify: the canary appears in no cell, cellctl or gateway log, and the negative control finds it.
+- [ ] 4.5 Apply 2.6 on the node: set the admin kubeconfig to `0600 root:root` and deploy the K3s configuration change. Verify: `stat` shows `0600 root root`, and the administrator login cannot read it without `sudo`.

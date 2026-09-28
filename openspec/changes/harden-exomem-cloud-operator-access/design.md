@@ -49,7 +49,7 @@ A ClusterIssuer can be named from any namespace, and cert-manager's edit Cluster
    - Bound to a ClusterRole with get/list/watch on pods, `pods/log`, events, namespaces, deployments, statefulsets, jobs, PVCs, services and nodes.
    - No Secrets and no connect subresources.
    - Its kubeconfig is the default in every runbook.
-2. **Deploy (K3s admin kubeconfig, root-only).** Used by scripted Helm and apply procedures, which need broad write rights.
+2. **Deploy (K3s admin kubeconfig, root-only).** Used by scripted Helm and apply procedures, which need broad write rights. The node originally wrote it `0640` to group `exomem-operators`, which holds the administrator login, so the K3s configuration now writes it `0600` root-owned. The administrator reaches it only through `sudo`, which is logged.
 3. **Break-glass (`exomem-break-glass`).** Minted on demand through a CSR with `expirationSeconds: 3600`, in group `exomem:break-glass`, which is bound to `cluster-admin`. There is no standing file. The CSR's creation and approval are themselves audited. Client certificates cannot be revoked, so short expiry is the control.
 
 - *Rejected: using the admin kubeconfig day to day.* Admin can read every Secret and exec anywhere, so a mistyped namespace becomes content access.
@@ -61,6 +61,8 @@ A ValidatingAdmissionPolicy matches CONNECT on `pods/exec`, `pods/attach` and `p
 The chart ships this only after the live-K3s suite proves the API server matches these CONNECT operations under this policy type. If it does not, the policy is left out, the identity split in D4 stands alone, and this design records the observed behaviour.
 
 - *Rejected: an admission webhook.* It adds a service to run and fail closed, for the same effect.
+
+Observed 2026-09-28 on K3s v1.35.6+k3s1: the API server enforces this policy on CONNECT and on the ephemeral-container UPDATE. As the admin (`system:masters`) in an `exo-cell-*` namespace, exec, attach, port-forward and `kubectl debug`, plus raw CONNECT requests on exec, attach and portforward, were all denied by `exomem-cell-connect-guard`. The same admin's exec outside cell namespaces, and the break-glass group's exec and debug, were admitted. The policy ships. Any procedure that execs into a cell therefore needs break-glass, deploy scripts included.
 
 ### D6. The export runbook refuses operator-held recipients
 
@@ -74,7 +76,7 @@ Metadata-level logging captures the user, groups, verb, resource, subresource, n
 
 ### D8. Content-free logs are proven with a canary
 
-`pods/log` must be granted cluster-wide: RBAC cannot exclude cell namespaces created at runtime, and admission does not gate reads. So the guarantee rests on what cells and controllers emit. A live test writes a unique canary through a cell, exercises search, recall and review, then asserts the canary appears in no pod log, in the cell, cellctl or the gateway.
+`pods/log` must be granted cluster-wide: RBAC cannot exclude cell namespaces created at runtime, and admission does not gate reads. So the guarantee rests on what cells and controllers emit. A live check writes a unique canary through a cell, exercises search, recall and review, then asserts the canary appears in no pod log, in the cell, cellctl or the gateway. It runs on the production node through the Cloud connector, as a runbook procedure, with a negative control that shows the same log search finds a deliberately echoed canary. The live-K3s suite cannot host it: its cell is a stand-in with no search, recall or review.
 
 ## Risks / Trade-offs
 

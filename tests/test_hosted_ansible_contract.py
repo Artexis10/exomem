@@ -84,7 +84,11 @@ def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
     assert 'checksum: "sha256:{{ k3s_sha256_amd64 }}"' in tasks
     assert "cluster-init: true" in config
     assert "secrets-encryption: true" in config
-    assert 'write-kubeconfig-mode: "0640"' in config
+    # harden-exomem-cloud-operator-access D4/2.6: the admin kubeconfig is
+    # root-only. The operators group holds the administrator login, which
+    # reaches cluster-admin only through sudo.
+    assert 'write-kubeconfig-mode: "0600"' in config
+    assert "write-kubeconfig-group" not in config
     assert "disable:\n  - traefik\n  - servicelb\n  - local-storage" in config
     assert "service-account-max-token-expiration=24h" in config
     assert "image-gc-high-threshold=75" in config

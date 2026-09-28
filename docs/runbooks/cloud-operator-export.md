@@ -2,17 +2,24 @@
 
 # Cloud operator vault export
 
-**Status:** prepared, not yet exercised against a real Cloud cell. OpenSpec task
-6.4 stays open until an authorized export, recipient verification and scratch
-cleanup succeed. This procedure exports one tenant's point-in-time `vault/`
-only. It never mounts, stops or changes the live cell volume; it exports no
-`/data/host`, OAuth state, Kubernetes Secret or credential. No runtime HTTP
-service is required.
+**Status:** exercised against a real Cloud cell on 2026-09-28, where the
+restore, the age export to a tenant-only recipient, recipient verification and
+identity-checked scratch cleanup all passed. This procedure exports one
+tenant's point-in-time `vault/` only. It never mounts, stops or changes the
+live cell volume; it exports no `/data/host`, OAuth state, Kubernetes Secret or
+credential. No runtime HTTP service is required. Only the tenant can read the
+archive: it is encrypted to recipients the tenant supplies, and the operator
+never holds a key that decrypts it or sees its plaintext.
+
+The procedure reads the source cell's Secret, which the everyday operator
+identity cannot. Run it with a break-glass identity minted for this export
+([cloud operator access](cloud-operator-access.md)) as `KUBE_CONTEXT`, and mint
+a fresh one if it expires mid-procedure.
 
 ## Select the source and snapshot
 
-Record the authorized tenant, exact cell ID, recipient and requested recovery
-point in the approved operator channel. Use an approved **read-only** control
+Record the authorized tenant, exact cell ID and requested recovery point in
+the approved operator channel. Use an approved **read-only** control
 database service. The following query must return exactly one row with that
 tenant/cell pair; a namespace name alone does not establish ownership.
 
@@ -45,11 +52,39 @@ and require the same pair and selected backup ID. The export does not initiate
 a backup or quiesce a writer itself. Verified deletion removes the per-cell
 key and backups; this procedure cannot recover a deleted cell.
 
+The recipients file comes from the tenant through the approved channel. The
+operator never writes or edits it. The next block checks it before any restore
+and prints its fingerprint; record that fingerprint with the authorization.
+The block stops if a line is not a public recipient, or if any recipient is
+one the operator or escrow holds a key for: the age recipients of the SOPS
+artifacts under the reviewed release's `infra/secrets/`. If it stops, nothing
+has been restored. Ask the tenant for a file with only their own keys. Run it
+from the reviewed release's checkout.
+
 ```bash
 : "${SNAPSHOT:?selected backup ID required}"
 [[ "$SNAPSHOT" =~ ^[0-9a-f]{64}$ ]] || exit 1
-: "${RECIPIENTS:?reviewed age recipients file required}"
+: "${RECIPIENTS:?tenant-supplied age recipients file required}"
 test -r "$RECIPIENTS"
+sha256sum -- "$RECIPIENTS"
+tenant_recipients=$(grep -Ev '^[[:space:]]*(#|$)' "$RECIPIENTS" || true)
+test -n "$tenant_recipients"
+if printf '%s\n' "$tenant_recipients" \
+    | grep -Evq '^(age1[02-9ac-hj-np-z]{58}|ssh-ed25519 [A-Za-z0-9+/]+={0,2}( .*)?)$'; then
+  echo 'recipients file has a line that is not a public recipient; stop' >&2
+  exit 1
+fi
+registered=$(python3 -c '
+import json, pathlib
+for path in sorted(pathlib.Path("infra/secrets").rglob("*.sops.json")):
+    for entry in json.loads(path.read_text(encoding="utf-8")).get("sops", {}).get("age") or []:
+        print(entry["recipient"])
+')
+test -n "$registered"
+if printf '%s\n' "$tenant_recipients" | grep -Fxq -f <(printf '%s\n' "$registered"); then
+  echo 'a recipient is a registered operator or escrow key; stop before any restore' >&2
+  exit 1
+fi
 : "${OUT_DIR:?private output directory required}"
 test -d "$OUT_DIR" && test "$(stat -c %a "$OUT_DIR")" = 700
 SCRATCH="exo-scratch-${CELL_ID}-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
@@ -58,9 +93,9 @@ export CELL_ID SNAPSHOT SCRATCH
 
 Use the reviewed release's `infra/cellctl/src` and its pinned project-local uv
 environment (see `CONTRIBUTING.md`); set `CELLCTL_PYTHON` to that environment's
-Python. Keep shell tracing off. The age file contains only the authorized
-recipient's public key. Do not put the source Secret, archive plaintext or a
-private age identity in an argument, file or transcript.
+Python. Keep shell tracing off. The recipients file holds only the tenant's
+public keys. Do not put the source Secret, archive plaintext or a private age
+identity in an argument, file or transcript.
 
 ## Render and apply only scratch resources
 
@@ -102,7 +137,7 @@ size = pvc["spec"]["resources"]["requests"]["storage"]
 assert re.fullmatch(r"[1-9][0-9]*Gi", size)
 pod = get("pod", "cell-0", source)
 assert pod["status"]["phase"] == "Running"
-image = next(c["image"] for c in pod["spec"]["containers"] if c["name"] == "cell")
+image = next(c["image"] for c in pod["spec"]["containers"] if c["name"] == "exomem")
 assert re.search(r"@sha256:[a-f0-9]{64}$", image)
 data = get("secret", "cell-credentials", source)["data"]
 keys = ("backup-password", "b2-key-id", "b2-key-secret")
@@ -282,6 +317,11 @@ If an earlier step fails, retain scratch for bounded diagnosis. For an
 abandoned export, record that no artifact was handed off, then perform the
 same identity-checked, exact-name cleanup; never target the source namespace
 or a broad label selector. Record authorization, tenant/cell, snapshot ID/time,
-scratch name, image digest, ciphertext digest/size and verification/cleanup
-outcome without recording credentials or vault content. A real authorized
-export and recipient handoff are still needed to close task 6.4.
+the recipients file's fingerprint, scratch name, image digest, ciphertext
+digest/size and the tenant's verification and cleanup outcome, without
+recording credentials or vault content.
+
+**Status:** this procedure was run for the owner's cell on 2026-09-28. It
+restored from B2 into a scratch namespace and encrypted the archive to a
+tenant-only recipient. The recipient verified it (member count and marker
+present), and the scratch namespace and its volume were removed.
