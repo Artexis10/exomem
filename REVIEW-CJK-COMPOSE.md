@@ -69,3 +69,42 @@ The edit path (`commands.py:7391-7393`) accepts a decision but writes no
 - `ruff --select F` is clean.
 - `generate-capabilities.py --check`: current.
 - `hosted-plugin.py check`: current.
+
+## Recheck at 72fd2f8f
+
+**Verdict: APPROVE.** MEDIUM 1 is fixed. `alias_claim_fingerprint`
+(`entity_candidates.py:54-86`) now hashes three things: the alias's folds,
+each claimant from `claimed_names` (filtered by visibility), and each
+claimant's content hash. `distinct_from` now lists the claimants the guard
+refused on (`link.py:973`).
+
+| check | result |
+|---|---|
+| note claimant (`ハヤブサ号`) | a precomputed no-match value is refused (`STALE_IDENTITY_DECISION`); a fresh value is accepted |
+| folded spelling (`Dana’s Garage`) | a precomputed no-match value is refused; a fresh one is accepted with `distinct_from` naming the claimant |
+| second claimant after the decision | refused as stale; the new decision lists both claimants |
+| withheld claimant, restricted caller | editing the withheld page leaves the restricted caller's value unchanged; the owner's value differs; the create succeeds with no path leaked |
+| owner | still refused |
+| red-first | the 5 new tests fail on 6fb2c11f's `src` and pass at 72fd2f8f (same commit) |
+| operator cohort | **7/7** |
+
+Files touched:
+- `commands.py:7382` and `benchmarks/.../contract.py:366` pass
+  `exclude_path`, so the edit path and the fixture skip the page's own names,
+  as the guard does.
+- `link.py` drops the entity-only lookup.
+- The tests in `test_cjk_readiness.py` pin every row above.
+
+**Info (not blocking):**
+- A caller who can read every claimant can still compute the value. It is a
+  staleness binding, not a secret, and every input is visible to that caller.
+- Any edit to a claimant makes an open decision stale, including routine
+  edits. That is the intended strictness.
+- LOW 2 (one decision per write) and LOW 3 (edits not audited) remain open as
+  follow-ups.
+
+**Tests and gates:**
+- `test_cjk_readiness`, `test_link` and `test_edit_operations`: 149 passed.
+- `ruff --select F` is clean.
+- `generate-capabilities --check` and `hosted-plugin.py check` report current.
+- The privacy gate is clean.
