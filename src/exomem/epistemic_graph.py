@@ -218,7 +218,7 @@ _SNAPSHOT_PROOFS_LOCK = threading.Lock()
 #: The proof running now per sidecar, so concurrent readers share it rather
 #: than each paying the O(corpus) proof: a blocking reader waits for its
 #: verdict, a `SINGLE_FLIGHT` reader serves without the graph instead.
-_PROOFS_IN_FLIGHT: dict[str, threading.Event] = {}
+_PROOFS_IN_FLIGHT: dict[str, tuple[threading.Event, int]] = {}
 #: `prove` mode for a request path: prove inline when no proof is running for
 #: the sidecar, refuse as `unproven` when another reader's proof already is.
 SINGLE_FLIGHT = "single_flight"
@@ -2347,53 +2347,58 @@ class EpistemicGraphIndex:
                     _availability_freshness_value(current_identity),
                     sidecar_identity,
                 )
-                in_flight: threading.Event | None = None
-                mine: threading.Event | None = None
-                with _SNAPSHOT_PROOFS_LOCK:
-                    remembered = _SNAPSHOT_PROOFS.get(registry_key)
-                    covered = remembered is not None and remembered[0] == proof_identity
-                    if not covered and prove:
-                        in_flight = _PROOFS_IN_FLIGHT.get(registry_key)
-                        if in_flight is None:
-                            mine = threading.Event()
-                            _PROOFS_IN_FLIGHT[registry_key] = mine
-                if covered:
-                    current = remembered[1]
-                elif not prove or (in_flight is not None and prove == SINGLE_FLIGHT):
-                    if outcome_out is not None:
-                        outcome_out.append("unproven")
-                    conn.close()
-                    return None
-                else:
-                    reused = False
+                # One proof per sidecar at a time. A reader that waited loops
+                # back to the claim: the running proof may have raised or
+                # answered another identity, and then exactly one waiter
+                # claims the slot rather than all of them proving at once.
+                while True:
+                    in_flight: threading.Event | None = None
+                    mine: threading.Event | None = None
+                    self_owned = False
+                    with _SNAPSHOT_PROOFS_LOCK:
+                        remembered = _SNAPSHOT_PROOFS.get(registry_key)
+                        covered = remembered is not None and remembered[0] == proof_identity
+                        if not covered and prove:
+                            claim = _PROOFS_IN_FLIGHT.get(registry_key)
+                            if claim is None:
+                                mine = threading.Event()
+                                _PROOFS_IN_FLIGHT[registry_key] = (mine, threading.get_ident())
+                            elif claim[1] == threading.get_ident():
+                                # Re-entered from inside this thread's own
+                                # proof: waiting on it would never return.
+                                self_owned = True
+                            else:
+                                in_flight = claim[0]
+                    if covered:
+                        current = remembered[1]
+                        break
+                    if not prove or (in_flight is not None and prove == SINGLE_FLIGHT):
+                        if outcome_out is not None:
+                            outcome_out.append("unproven")
+                        conn.close()
+                        return None
                     if in_flight is not None:
-                        # A blocking reader shares the running proof rather
-                        # than stacking a second one, and reuses its verdict
-                        # when it answered the same question.
                         in_flight.wait()
-                        with _SNAPSHOT_PROOFS_LOCK:
-                            remembered = _SNAPSHOT_PROOFS.get(registry_key)
-                        if remembered is not None and remembered[0] == proof_identity:
-                            current = remembered[1]
-                            reused = True
-                    if not reused:
-                        try:
-                            decline: list[str] = []
-                            current = self._snapshot_sources_match_disk(
-                                conn,
-                                resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
-                                reason_out=decline,
-                            )
-                            # A proof that raised proved nothing about the sidecar.
-                            if decline != ["proof_raised"]:
-                                with _SNAPSHOT_PROOFS_LOCK:
-                                    _SNAPSHOT_PROOFS[registry_key] = (proof_identity, current)
-                        finally:
-                            if mine is not None:
-                                with _SNAPSHOT_PROOFS_LOCK:
-                                    if _PROOFS_IN_FLIGHT.get(registry_key) is mine:
-                                        _PROOFS_IN_FLIGHT.pop(registry_key, None)
-                                mine.set()
+                        continue
+                    try:
+                        decline: list[str] = []
+                        current = self._snapshot_sources_match_disk(
+                            conn,
+                            resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
+                            reason_out=decline,
+                        )
+                        # A proof that raised proved nothing about the sidecar.
+                        if decline != ["proof_raised"] and not self_owned:
+                            with _SNAPSHOT_PROOFS_LOCK:
+                                _SNAPSHOT_PROOFS[registry_key] = (proof_identity, current)
+                    finally:
+                        if mine is not None:
+                            with _SNAPSHOT_PROOFS_LOCK:
+                                claim = _PROOFS_IN_FLIGHT.get(registry_key)
+                                if claim is not None and claim[0] is mine:
+                                    _PROOFS_IN_FLIGHT.pop(registry_key, None)
+                            mine.set()
+                    break
             if current and stored_checkpoint is not None:
                 # The proof above (or the exact-live check) has just established
                 # that this sidecar describes the corpus this registry is

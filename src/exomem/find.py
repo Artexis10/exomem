@@ -1978,7 +1978,19 @@ def find(
     # unreranked hits for a later call that can afford the requested stage.
     active_budget = request_budget.current()
     budget_skipped_rerank = active_budget is not None and "rerank" in active_budget.skipped
-    if cache_key is not None and not degraded and not failed and not budget_skipped_rerank:
+    # A key computed while another reader's proof ran says "unproven", but the
+    # proof may have landed before candidate collection and let the graph lane
+    # run: never pin such a result under a key that claims the lane was absent.
+    unproven_graph_key = cache_key is not None and (
+        (".graph.sqlite", ("unproven",)) in cache_key[1]
+    )
+    if (
+        cache_key is not None
+        and not degraded
+        and not failed
+        and not budget_skipped_rerank
+        and not unproven_graph_key
+    ):
         with _FIND_CACHE_LOCK:
             _FIND_CACHE[cache_key] = copy.deepcopy(hits)
             if cache_checkpoints is not None:

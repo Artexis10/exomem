@@ -383,9 +383,69 @@ def test_a_blocking_reader_shares_a_running_proof(
     second = threading.Thread(target=check, args=("second",), name="second")
     second.start()
     time.sleep(0.2)
+    assert second.is_alive(), "the second reader did not wait for the running proof"
     release.set()
     first.join(30.0)
     second.join(30.0)
 
     assert results == {"first": True, "second": True}
     assert callers == ["first"], f"a second blocking reader re-proved: {callers}"
+
+
+def test_waiters_on_a_raised_proof_claim_one_new_proof(
+    inherited_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A proof that raised records nothing; its waiters must not all re-prove."""
+    root = inherited_vault
+    release = threading.Event()
+    entered = threading.Event()
+    lock = threading.Lock()
+    running = 0
+    peak = 0
+    calls: list[str] = []
+    real_proof = EpistemicGraphIndex._snapshot_sources_match_disk
+
+    def proof(inner_self: EpistemicGraphIndex, conn: object, **kwargs: object) -> bool:
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+            first = not calls
+            calls.append(threading.current_thread().name)
+        try:
+            if first:
+                entered.set()
+                release.wait(HELD_PROOF_SECONDS)
+                reason_out = kwargs.get("reason_out")
+                if isinstance(reason_out, list):
+                    reason_out.append("proof_raised")
+                return False
+            time.sleep(0.2)
+            return real_proof(inner_self, conn, **kwargs)
+        finally:
+            with lock:
+                running -= 1
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_snapshot_sources_match_disk", proof, raising=True)
+    results: dict[str, bool] = {}
+
+    def check(name: str) -> None:
+        results[name] = EpistemicGraphIndex(root).available()
+
+    first = threading.Thread(target=check, args=("first",), name="first")
+    first.start()
+    assert entered.wait(10.0)
+    waiters = [
+        threading.Thread(target=check, args=(f"waiter-{i}",), name=f"waiter-{i}") for i in range(3)
+    ]
+    for waiter in waiters:
+        waiter.start()
+    time.sleep(0.2)
+    release.set()
+    for thread in (first, *waiters):
+        thread.join(30.0)
+
+    assert results["first"] is False
+    assert all(results[f"waiter-{i}"] is True for i in range(3)), results
+    assert peak == 1, f"{peak} proofs ran at once after a raised proof"
+    assert len(calls) == 2, f"waiters re-proved {len(calls) - 1} times: {calls}"
