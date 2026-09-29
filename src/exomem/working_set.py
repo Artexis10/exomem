@@ -2594,7 +2594,17 @@ def compile_packet(
         raise BudgetExhausted("working_set.roles")
     with _span(timings, "working_set.roles"):
         anchor_kinds = tuple(dict.fromkeys(anchor.kind for anchor in resolution.resolved_anchors))
-        roles = context_roles.select_roles(registry, anchor_kinds=anchor_kinds, analysis=analysis)
+        named_kinds = {
+            anchor.kind
+            for anchor in resolution.resolved_anchors
+            if set(anchor.evidence) - working_set_resolve.PRIOR_CONTACT_KINDS
+        }
+        roles = context_roles.select_roles(
+            registry,
+            anchor_kinds=anchor_kinds,
+            analysis=analysis,
+            prior_only_kinds=frozenset(anchor_kinds) - named_kinds,
+        )
 
     # RESOLVED anchors only: a `partial` anchor is listed in `anchors[]` with
     # its status and evidence, but no lane runs for it and nothing of its page

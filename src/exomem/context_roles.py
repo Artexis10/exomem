@@ -726,12 +726,24 @@ def _narrowed(
 # --------------------------------------------------------------------------- #
 
 
+#: Anchor kinds whose defaults are honoured only when the turn's own words
+#: reached an anchor of that kind. An entity is the subject of many pages, so
+#: reading every conclusion linked to it answers a turn that names it; a
+#: referent supplied by recency alone ("where were we") names nothing, and
+#: serving all of the entity's linked pages would buy recall with precision.
+NAMED_ONLY_DEFAULT_KINDS: frozenset[str] = frozenset({"entity"})
+
+#: The unit categories that are a page's settled conclusions.
+CONCLUSION_CATEGORIES: frozenset[str] = frozenset({"decision", "insight", "finding"})
+
+
 def select_roles(
     registry: RoleRegistry,
     *,
     anchor_kinds: Sequence[str],
     analysis: Any,
     limit: int = MAX_SELECTED_ROLES,
+    prior_only_kinds: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, str], ...]:
     """Defaults for each resolved anchor kind, plus cue matches, in registry order.
 
@@ -743,9 +755,14 @@ def select_roles(
         return ()
     kinds = frozenset(anchor_kinds)
     text = str(getattr(analysis, "text", "") or "")
+    #: `prior_only_kinds` are the kinds reached by a prior (recency) alone.
+    withheld = NAMED_ONLY_DEFAULT_KINDS & prior_only_kinds
     selected: list[dict[str, str]] = []
     for role in sorted(registry.roles.values(), key=lambda item: item.priority):
-        if role.anchor_defaults & kinds:
+        # Only a role that reads settled conclusions is withheld; the anchor's
+        # own identity and facets are still served for a recency referent.
+        concludes = role.lane == "units" and bool(role.categories & CONCLUSION_CATEGORIES)
+        if role.anchor_defaults & (kinds - withheld if concludes else kinds):
             source = "anchor_default"
         else:
             # Role selection matches EVERY cue, `cues` and `evidence_cues`
