@@ -533,6 +533,19 @@ def render_tool_guidance(
     return f"Semantic authoring [{identity}]: {guidance}"
 
 
+#: The write surface's own carrier for `write-time-identity-candidates`
+#: (design D2): the only text every connected client -- one with no hook, no
+#: skill, nothing but the tool schema -- is certain to read. One sentence,
+#: on `remember` and `replace_memory`'s `content` parameter only: those are
+#: the two whole-page writers a note's full set of named identities passes
+#: through, where `observe_memory`'s single-unit `content` and `edit_memory`'s
+#: `operation` are not the note's own prose.
+LINK_NAMED_IDENTITIES_GUIDANCE = (
+    "Wikilink the people, organisations, places, equipment and products this "
+    "note names, whether or not a page exists yet."
+)
+
+
 def render_parameter_guidance(
     tool: str,
     parameter: str,
@@ -546,9 +559,9 @@ def render_parameter_guidance(
             "optional suffix values through the sibling `category`, `tags`, and `context` "
             "fields. Do not include the Markdown row wrapper in `content`."
         )
+    if (tool, parameter) in {("remember", "content"), ("replace_memory", "content")}:
+        return f"{render_tool_guidance(tool, contract)} {LINK_NAMED_IDENTITIES_GUIDANCE}"
     if (tool, parameter) in {
-        ("remember", "content"),
-        ("replace_memory", "content"),
         ("edit_memory", "operation"),
         ("manage_memory_file", "operation"),
         ("manage_memory_file", "content"),

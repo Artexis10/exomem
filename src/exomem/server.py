@@ -587,7 +587,12 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
                 previous_token=credentials.previous_token,
             )
         else:
-            auth = build_oauth(require_auth=require_auth, base_url=runtime.base_url)
+            auth = build_oauth(
+                require_auth=require_auth,
+                base_url=runtime.base_url,
+                # Only a supervisor-owned worker can receive the local stamp.
+                local_ingress=worker_socket is not None,
+            )
         mcp = ExomemFastMCP(
             "exomem",
             instructions=SERVER_INSTRUCTIONS,
@@ -933,6 +938,28 @@ def local_http_allowed(bind_host: str) -> bool:
     return bool(os.environ.get("EXOMEM_REST_API_KEY", "").strip())
 
 
+def http_middleware(mcp: FastMCP, *, worker_socket: Path | None = None) -> list:
+    """The HTTP transport's own middleware, outermost first.
+
+    Edge-ingress enforcement runs first so a Cloudflare-transited bypass is
+    refused before SSE priming or MCP/REST routing ever see the request
+    (design.md Decision 1). A supervisor-owned worker with no auth provider
+    also gets the local-ingress gate here; with the OAuth proxy the gate is
+    already in the proxy's own middleware, ahead of authentication, and a
+    cell's verifier never arms it.
+    """
+    middleware = [
+        ASGIMiddleware(EdgeIngressMiddleware),
+        ASGIMiddleware(AccessLogMiddleware),
+        ASGIMiddleware(PrimeMcpSSEMiddleware),
+    ]
+    if worker_socket is not None and getattr(mcp, "auth", None) is None:
+        from .local_ingress import LocalIngressMiddleware
+
+        middleware.insert(0, ASGIMiddleware(LocalIngressMiddleware))
+    return middleware
+
+
 def run(
     *,
     transport: str = "stdio",
@@ -987,14 +1014,7 @@ def run(
             transport=transport,
             host=host,
             port=port,
-            # Edge-ingress enforcement runs first so a Cloudflare-transited
-            # bypass is refused before SSE priming or MCP/REST routing ever
-            # see the request (design.md Decision 1).
-            middleware=[
-                ASGIMiddleware(EdgeIngressMiddleware),
-                ASGIMiddleware(AccessLogMiddleware),
-                ASGIMiddleware(PrimeMcpSSEMiddleware),
-            ],
+            middleware=http_middleware(mcp, worker_socket=worker_socket),
             # Remote clients may be routed to another replica or outlive this
             # process.  A process-local Mcp-Session-Id turns either event into
             # a 404/reconnect cascade; each Exomem operation is already an

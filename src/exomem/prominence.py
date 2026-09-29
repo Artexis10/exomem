@@ -170,17 +170,26 @@ _CONFIG_KEY = "prominence"
 #: runs within a few hundred bytes of a hard ceiling, so it stays ASCII (a
 #: non-ASCII dash costs six JSON bytes) and inside 220.
 ACTIVATION_CARRIER_LINE = (
-    "Call `activate_context` with the user's turn verbatim before answering a "
-    "substantive turn that has no prior context; resolve an `ambiguous` packet by "
-    "calling again with `anchor` set."
+    "Before a substantive turn with no prior context, call `activate_context` "
+    "with the turn verbatim; on `ambiguous`, call again with `anchor`."
+)
+
+#: The link instruction (`capture-identities-at-write-time` design D2, task
+#: 3.1), appended to `balanced` and `maximal` only -- a level that captures
+#: only when asked must not be told to link unprompted either. Sized to what
+#: was left after paying for it (91 B): all five kinds design D2 names, and
+#: "even with no page yet" so the instruction covers the identity that has
+#: none, not only the one that already has a page.
+LINK_NAMED_IDENTITIES_LINE = (
+    "Wikilink named people, places, organisations, equipment and products "
+    "even with no page yet."
 )
 
 _ARTIFACT_ADOPTION_CAPTURE = (
     " Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
-    "preserves exact bytes as Source/Evidence by role, never MIME. No handle means "
-    "non-committing handoff. Delivery requires Evidence receipt/Record; no remote byte "
-    "inference. Missing schema uses structural_suggestions/restructure_execution; "
-    "relations use link_acceptance."
+    "keeps exact bytes as Source/Evidence by role, never MIME. No handle: non-committing "
+    "handoff. Delivery needs an Evidence receipt/Record; no remote byte inference. "
+    "Missing schema: structural_suggestions/restructure_execution; relations: link_acceptance."
 )
 
 #: The episode-completeness pass, appended to `balanced` and `maximal` only.
@@ -198,11 +207,10 @@ _ARTIFACT_ADOPTION_CAPTURE = (
 #: on its next durable write. What must survive here is the rule, not the roster.
 _EPISODE_SWEEP_CAPTURE = (
     " After any capture, make one bounded episode pass over the recent exchange for "
-    "anything else that would materially improve a later decision, lookup, repeated "
-    "task, comparison or continuation — for example an outcome, a stable preference, "
-    "a method, an entity facet or an operational quirk; examples, not a closed set. "
-    "Never re-write what the response lists as written recently, and stay silent "
-    "when nothing qualifies."
+    "anything else that would materially improve a later decision, lookup, task, "
+    "comparison or continuation, e.g. an outcome, a preference, a method, an entity "
+    "facet or an operational quirk; examples, not a closed set. Never re-write what "
+    "the response lists as written recently, and stay silent when nothing qualifies."
 )
 
 _CAPTURE_EFFECTIVE_TEMPLATE = MappingProxyType(
@@ -352,17 +360,19 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "Skip chit-chat, control messages, and context-free fresh tasks."
         ),
         capture=(
-            "Capture at a stepping stone: a durable conclusion, recurring entity with "
-            "reusable facts, or method that was carried out with a reported result. Not "
+            LINK_NAMED_IDENTITIES_LINE + " "
+            "Capture at a stepping stone: a durable conclusion, central or recurring "
+            "entity with reusable facts, or method that was carried out with a reported "
+            "result. Not "
             "mid-thought exploration, tangents, or unresolved questions. Capture stable "
             "preferences, recurring routines, historical baselines, or durable affiliations "
             "only when stability or recurrence and reusable comparison, interpretation, or "
             "decision value are clear. Route a uniquely resolved Entity facet or affiliation "
-            "there; otherwise use one concise compiled observation; use Records only for a "
+            "there, else one concise compiled observation; Records only for a "
             "compatible existing measurement. Fleeting preferences, one-offs, incidental "
-            "associations, trivia, and tentative claims stay quiet. A concise observation or "
-            "narrow Entity facet follows proactive_capture; an affiliation relation requires "
-            "link_acceptance; Entity creation or structural change requires confirmed "
+            "associations, trivia, and tentative claims stay quiet. A concise observation, "
+            "narrow Entity facet or new Entity follows proactive_capture; an affiliation "
+            "relation requires link_acceptance; merge or structural change requires confirmed "
             "restructure_execution. Route stated intent to "
             "Planning and observed outcome to Records. "
             "Transition only on explicit user intent; otherwise leave Planning "
@@ -379,26 +389,28 @@ CONTRACTS: dict[str, ProminenceContract] = {
         level="maximal",
         recall=(
             ACTIVATION_CARRIER_LINE + " "
-            "Search memory before answering any substantive turn, not only the ones "
+            "Search memory before answering any substantive turn, not only those "
             "that obviously reference prior work. Assume the knowledge base may hold "
-            "something relevant until a search says otherwise. Only skip for pure "
+            "something relevant until a search says otherwise. Skip only pure "
             "chit-chat and control messages."
         ),
         capture=(
-            "Capture at every stepping stone, and treat the bar for 'durable' as low: "
+            LINK_NAMED_IDENTITIES_LINE + " "
+            "Capture at every stepping stone; treat the bar for 'durable' as low: "
             "a decision, a resolved problem, a diagnosed failure, a reusable pattern, "
-            "a fact about a recurring entity, or a method you actually ran and how it "
-            "turned out. Capture stable preferences, recurring routines, historical baselines, "
+            "a fact about a central or recurring entity, or a method you actually ran and "
+            "how it turned out. Capture stable preferences, recurring routines, historical "
+            "baselines, "
             "or durable affiliations only when stability or recurrence and reusable comparison, "
             "interpretation, or decision value are clear. Route a uniquely resolved Entity "
-            "facet or affiliation there; otherwise use one concise compiled observation; use "
+            "facet or affiliation there, else one concise compiled observation; "
             "Records only for a compatible existing measurement. Fleeting preferences, one-offs, "
-            "incidental associations, trivia, and tentative claims stay quiet. A concise observation "
-            "or narrow Entity facet follows proactive_capture; an affiliation relation requires "
-            "link_acceptance; Entity creation or structural change requires confirmed "
+            "incidental associations, trivia, and tentative claims stay quiet. A concise observation, "
+            "narrow Entity facet or new Entity follows proactive_capture; an affiliation "
+            "relation requires link_acceptance; merge or structural change requires confirmed "
             "restructure_execution. When torn between "
             "capturing and letting it pass, capture. "
-            "Prefer a real page over a mental note, and do not wait to be asked. "
+            "Prefer a real page over a mental note; do not wait to be asked. "
             "Route stated intent to Planning and observed outcome to Records. "
             "Transition only on explicit user intent; otherwise leave Planning "
             "unchanged or, under the resolved posture, propose a bounded review."

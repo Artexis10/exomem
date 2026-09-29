@@ -35,10 +35,13 @@ what writes deposit, so the reason codes speak of units and claim nothing more.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from .text_scripts import is_scriptio_continua, vocabulary_words
 
 KIND = "scope_divergence"
 
@@ -110,13 +113,35 @@ _STOPWORDS = FUNCTION_WORDS | frozenset(
 )
 
 
+def _is_term(token: str) -> bool:
+    """Long enough to be a word, and not a function word or a number.
+
+    Three characters, except in an unspaced script, where one character is a
+    syllable or a morpheme and two are an ordinary word (故障, 体重).
+    """
+    return (
+        (len(token) > 2 or (len(token) == 2 and all(map(is_scriptio_continua, token))))
+        and token not in _STOPWORDS
+        and not token.isdigit()
+    )
+
+
 def _terms(values: Iterable[str]) -> frozenset[str]:
-    """Normalise tags, title words, and project keys into one comparable vocabulary."""
+    """Normalise tags, title words, and project keys into one comparable vocabulary.
+
+    ASCII splits exactly as it always has. Other text is NFKC-normalised and
+    read as words in every script (`text_scripts.vocabulary_words`), so a
+    Japanese title yields its words instead of nothing.
+    """
     out: set[str] = set()
     for value in values:
-        for token in _TOKEN_SPLIT.split(str(value).casefold()):
-            if len(token) > 2 and token not in _STOPWORDS and not token.isdigit():
-                out.add(token)
+        text = str(value).casefold()
+        tokens = (
+            _TOKEN_SPLIT.split(text)
+            if text.isascii()
+            else vocabulary_words(unicodedata.normalize("NFKC", text).casefold())
+        )
+        out.update(token for token in tokens if _is_term(token))
     return frozenset(out)
 
 

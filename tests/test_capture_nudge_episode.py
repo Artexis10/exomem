@@ -771,3 +771,291 @@ def test_an_older_service_that_refuses_attribution_still_serves_the_packet(
         (True, False),
         (False, False),
     ]
+
+
+# --- 4.1: a committed note never covers unresolved candidates ------------------
+#
+# The checkpoint's candidate state is the ledger's, read through the same
+# bounded REST door: attempted, pending, covered through which input revision,
+# and the next step. A write or a Saved marker this turn is an attempted
+# capture; it answers this turn's capture reminder and never the episode's
+# coverage. Sessions that never prepared a candidate never consult the ledger.
+
+WORKFLOW_KEY = "ep-" + "9a" * 16
+
+
+def _is_coverage_ask(result: dict | None) -> bool:
+    return bool(result) and result["reason"].startswith("[Exomem episode coverage]")
+
+
+def _candidates_payload(
+    step: str,
+    *,
+    execution: str = "enabled",
+    attempted: int = 0,
+    pending: int = 2,
+    covered: int | None = None,
+) -> bytes:
+    return json.dumps(
+        {
+            "success": True,
+            "data": {
+                "episode": WORKFLOW_KEY,
+                "input_revision": 1,
+                "execution": execution,
+                "coverage": {
+                    "attempted": attempted,
+                    "pending": pending,
+                    "covered_through_input_revision": covered,
+                    "historically_covered_through": None,
+                    "next": step,
+                    "basis": "agent_attestation",
+                },
+            },
+        }
+    ).encode("utf-8")
+
+
+def _ledger_door(monkeypatch: pytest.MonkeyPatch, **payload: object) -> dict:
+    """A door whose `candidates` answer the test steers; `calls` records bodies."""
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "test-key")
+    ledger: dict = {"payload": payload, "calls": []}
+
+    def fake_urlopen(request, timeout):
+        body = json.loads(request.data.decode("utf-8"))
+        ledger["calls"].append(body)
+        if body["action"] == "candidates":
+            return _RestResponse(_candidates_payload(**ledger["payload"]))
+        return _RestResponse(_inspect_payload(0))
+
+    monkeypatch.setattr(hook, "_open_no_redirect", fake_urlopen)
+    return ledger
+
+
+def _prepared(tmp_path: Path, name: str = "prepare.jsonl") -> Path:
+    return _transcript(
+        tmp_path,
+        SUBSTANTIVE,
+        tool="mcp__exomem__episode_memory",
+        tool_input={"action": "prepare", "episode": WORKFLOW_KEY, "candidate": "thesis"},
+        name=name,
+    )
+
+
+def _noted(tmp_path: Path, *, saved: bool, name: str = "note.jsonl") -> Path:
+    text = ("Saved -> Knowledge Base/Notes/x.md. " + "x" * 400) if saved else SUBSTANTIVE
+    return _transcript(
+        tmp_path, text, tool="mcp__exomem__remember", tool_input={"title": "x"}, name=name
+    )
+
+
+@pytest.mark.parametrize("saved", [False, True])
+def test_one_committed_note_cannot_suppress_unresolved_candidates(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    saved: bool,
+) -> None:
+    monkeypatch.setenv("EXOMEM_EPISODE_ASK_COOLDOWN_SEC", "0")
+    ledger = _ledger_door(monkeypatch, step="decide")
+
+    first = _stop(monkeypatch, capsys, _prepared(tmp_path))
+    assert _is_coverage_ask(first) and WORKFLOW_KEY in first["reason"]
+    assert ledger["calls"][-1] == {"action": "candidates", "episode": WORKFLOW_KEY}
+
+    # A committed note (and its Saved marker) is an attempt, not coverage.
+    ledger["payload"] = {"step": "resume", "attempted": 0}
+    noted = _stop(monkeypatch, capsys, _noted(tmp_path, saved=saved))
+    assert _is_coverage_ask(noted) and "resume" in noted["reason"]
+
+    # Covered through the current input: the write turn is quiet again.
+    ledger["payload"] = {"step": "none", "attempted": 2, "pending": 0, "covered": 1}
+    assert _stop(monkeypatch, capsys, _prepared(tmp_path, "resumed.jsonl")) is None
+    assert _stop(monkeypatch, capsys, _noted(tmp_path, saved=saved, name="n2.jsonl")) is None
+
+
+def test_the_checkpoint_mirrors_the_ledgers_attempted_pending_and_covered_state(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _ledger_door(monkeypatch, step="attest", attempted=3, pending=1, covered=None)
+    assert _is_coverage_ask(_stop(monkeypatch, capsys, _prepared(tmp_path)))
+
+    state = hook._read_episode_state(hook._episode_state_path(SESSION))
+    assert {key: state[key] for key in ("workflow_episode", "coverage_next", "attempted", "pending", "covered_through")} == {
+        "workflow_episode": WORKFLOW_KEY,
+        "coverage_next": "attest",
+        "attempted": 3,
+        "pending": 1,
+        "covered_through": 0,
+    }
+
+
+def test_a_session_without_candidates_never_consults_the_ledger(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "test-key")
+
+    def fail_urlopen(request, timeout):
+        raise AssertionError("no candidate was ever prepared in this session")
+
+    monkeypatch.setattr(hook, "_open_no_redirect", fail_urlopen)
+    for index in range(3):
+        assert _stop(monkeypatch, capsys, _noted(tmp_path, saved=bool(index % 2), name=f"{index}.jsonl")) is None
+
+
+def test_disabled_execution_asks_only_for_decisions(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("EXOMEM_EPISODE_ASK_COOLDOWN_SEC", "0")
+    ledger = _ledger_door(monkeypatch, step="resume", execution="disabled")
+    assert _stop(monkeypatch, capsys, _prepared(tmp_path)) is None
+
+    ledger["payload"] = {"step": "decide", "execution": "disabled"}
+    assert _is_coverage_ask(_stop(monkeypatch, capsys, _prepared(tmp_path, "p2.jsonl")))
+
+
+def test_the_coverage_ask_is_bounded_by_its_cooldown(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _k, cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(hook.time, "time", lambda: clock["now"])
+    ledger = _ledger_door(monkeypatch, step="decide")
+
+    assert _is_coverage_ask(_stop(monkeypatch, capsys, _prepared(tmp_path)))
+    calls = len(ledger["calls"])
+    # Within the cooldown the ledger is not read again and nothing is asked.
+    for index in range(3):
+        assert not _is_coverage_ask(
+            _stop(monkeypatch, capsys, _noted(tmp_path, saved=False, name=f"{index}.jsonl"))
+        )
+    assert len(ledger["calls"]) == calls
+    clock["now"] += cooldown
+    assert _is_coverage_ask(_stop(monkeypatch, capsys, _noted(tmp_path, saved=False)))
+
+
+def test_a_covered_ledger_is_read_again_only_when_the_workflow_moves(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("EXOMEM_EPISODE_ASK_COOLDOWN_SEC", "0")
+    ledger = _ledger_door(monkeypatch, step="none", pending=0, covered=1)
+    assert _stop(monkeypatch, capsys, _prepared(tmp_path)) is None
+    calls = len(ledger["calls"])
+    for index in range(3):
+        _stop(monkeypatch, capsys, _noted(tmp_path, saved=False, name=f"{index}.jsonl"))
+    assert len(ledger["calls"]) == calls
+
+    # A workflow action answered in a continuation re-arms the check, silently.
+    ledger["payload"] = {"step": "attest"}
+    assert _stop(monkeypatch, capsys, _prepared(tmp_path, "cont.jsonl"), active=True) is None
+    assert len(ledger["calls"]) == calls
+    assert _is_coverage_ask(_stop(monkeypatch, capsys, _noted(tmp_path, saved=False)))
+
+
+def test_an_unavailable_ledger_falls_back_to_todays_behavior(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("EXOMEM_EPISODE_ASK_COOLDOWN_SEC", "0")
+    monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+    monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(tmp_path / "missing.env"))
+    # Preparing a candidate is itself an attempted capture: this turn is answered.
+    assert _stop(monkeypatch, capsys, _prepared(tmp_path)) is None
+    # With nothing known about the ledger, the write answers this turn as before.
+    assert _stop(monkeypatch, capsys, _noted(tmp_path, saved=True)) is None
+
+
+def test_the_checkpoint_reads_the_real_ledger_through_the_rest_door(
+    home: Path,
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The payload the hook parses is the one the service actually returns."""
+    from starlette.testclient import TestClient
+
+    from exomem import commands, episode_workflow, server
+    from exomem import schema as schema_module
+    from exomem.governance.principal import owner_principal, request_scope
+
+    monkeypatch.setenv("EXOMEM_EPISODE_ASK_COOLDOWN_SEC", "0")
+    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
+    monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
+    for leaky in ("EXOMEM_UPLOAD_TOKEN", "EXOMEM_CF_ACCESS_TEAM_DOMAIN", "EXOMEM_CF_ACCESS_AUD"):
+        monkeypatch.delenv(leaky, raising=False)
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
+    client = TestClient(server.build_server(require_auth=False).http_app())
+
+    def via_app(request, timeout):
+        response = client.post(
+            "/api/episode_memory",
+            content=request.data,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer sekret"},
+        )
+        return _RestResponse(response.content, response.status_code)
+
+    monkeypatch.setattr(hook, "_open_no_redirect", via_app)
+
+    def episode(**kwargs: object) -> dict:
+        return commands.op_episode_memory(
+            vault, schema_module.load_source_schema(vault), episode=WORKFLOW_KEY, **kwargs
+        )
+
+    with request_scope(owner_principal(surface="mcp")):
+        episode(
+            action="record",
+            subject="Loom shed lighting",
+            summary="Chose warm lamps for the shed.",
+            decided=["Warm lamps light the loom shed"],
+        )
+        episode(
+            action="prepare",
+            candidate="lamps",
+            proposal={
+                "route": "focused_note",
+                "title": "Warm shed lamps",
+                "alternatives": [],
+                "evidence": "complete",
+                "reason": "A distinct future question.",
+                "leaves": [
+                    {
+                        "leaf_key": "write",
+                        "effect_revision": 1,
+                        "kind": "create-note",
+                        "args": {
+                            "title": "Warm shed lamps",
+                            "slug": "warm-shed-lamps",
+                            "content": (
+                                "## Observations\n\n- [finding] Warm lamps light the"
+                                " loom shed. ^warm-shed-lamps\n"
+                            ),
+                            "relation_disposition": "reviewed_none",
+                            "relation_review_reason": "No supported relation here.",
+                        },
+                    }
+                ],
+            },
+        )
+    asked = _stop(monkeypatch, capsys, _prepared(tmp_path))
+    assert _is_coverage_ask(asked) and "decide" in asked["reason"]
+
+    with request_scope(owner_principal(surface="mcp")):
+        reviewed = episode(
+            action="disposition", candidate="lamps", disposition="routed", reason="r"
+        )
+        executed = episode(
+            action="resume", input_revision=1, journal_digest=reviewed["journal_digest"]
+        )
+    # Executed but not yet attested: a note landed, and the pass is still due.
+    attest = _stop(monkeypatch, capsys, _noted(tmp_path, saved=True))
+    assert _is_coverage_ask(attest) and "attest" in attest["reason"]
+
+    with request_scope(owner_principal(surface="mcp")):
+        episode(
+            action="resume",
+            input_revision=1,
+            postcommit=True,
+            journal_digest=executed["journal_digest"],
+        )
+    assert _stop(monkeypatch, capsys, _prepared(tmp_path, "after.jsonl")) is None

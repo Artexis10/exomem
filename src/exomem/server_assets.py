@@ -191,6 +191,35 @@ def register_health_routes(
     if traffic_monitor is None:
         traffic_monitor = runtime_readiness_module.get_silent_traffic_monitor()
 
+    # The proof in flight, by tool-surface digest. A probe that arrives while
+    # one runs answers from it: waiters queued without bound behind the
+    # readiness workers, and a client that gave up still left its proof queued, so a 30 s
+    # stall replayed 30 proofs back to back. A finished proof is never reused.
+    readiness_flights: dict[object, asyncio.Future] = {}
+
+    def _readiness_flight(digest: object, traffic: dict) -> asyncio.Future:
+        flight = readiness_flights.get(digest)
+        if flight is not None and not flight.done():
+            return flight
+        # The proof runs on the readiness workers, apart from anyio's default
+        # limiter that every synchronous tool call shares.
+        flight = asyncio.get_running_loop().run_in_executor(
+            _READINESS_EXECUTOR,
+            functools.partial(
+                runtime_readiness_module.runtime_readiness,
+                mcp_tool_surface_sha256=digest,
+                traffic=traffic,
+            ),
+        )
+        readiness_flights[digest] = flight
+
+        def _forget(done: asyncio.Future) -> None:
+            if readiness_flights.get(digest) is done:
+                del readiness_flights[digest]
+
+        flight.add_done_callback(_forget)
+        return flight
+
     def _record_health_probe() -> dict:
         try:
             return traffic_monitor.record_health_probe()
@@ -247,16 +276,12 @@ def register_health_routes(
                 mcp_app._exomem_tool_surface_sha256 = digest
             except Exception:  # noqa: BLE001 - readiness must stay structured
                 digest = None
-        # The measurement reads the filesystem and sqlite catalog and can wait
-        # on the coordination probe; it must not run on the event loop.
-        snapshot = await asyncio.get_running_loop().run_in_executor(
-            _READINESS_EXECUTOR,
-            functools.partial(
-                runtime_readiness_module.runtime_readiness,
-                mcp_tool_surface_sha256=digest,
-                traffic=traffic,
-            ),
-        )
+        # Off the event loop, on the readiness workers: the retrieval proof and
+        # coordination status take reserved-state locks, and one probe held the
+        # loop 5.8 s on one at the 0.96.0 promotion, timing out the liveness
+        # polls queued behind it. Shielded: one caller going away must not
+        # cancel the proof the others are waiting on.
+        snapshot = await asyncio.shield(_readiness_flight(digest, traffic))
         status_code = 200 if snapshot["status"] == "ready" else 503
         return JSONResponse(
             snapshot,

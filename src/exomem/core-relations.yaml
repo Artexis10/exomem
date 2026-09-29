@@ -28,3 +28,8 @@ relations:
   part_of: {description: Is a part of, family: composition, direction: directed, inverse: contains, origins: [semantic_relation]}
   contains: {description: Contains as a part, family: composition, direction: directed, inverse: part_of, origins: [semantic_relation]}
   extends: {description: Extends or specializes, family: specialization, direction: directed, origins: [semantic_relation]}
+  located_at: {description: Is physically located at, family: location, direction: directed, origins: [semantic_relation]}
+  operates: {description: Operates or runs day to day, family: operation, direction: directed, origins: [semantic_relation]}
+  supplies: {description: Supplies goods or services to, family: supply, direction: directed, origins: [semantic_relation]}
+  produces: {description: Produces or makes, family: production, direction: directed, origins: [semantic_relation]}
+  member_of: {description: Is a member of, family: membership, direction: directed, origins: [semantic_relation]}

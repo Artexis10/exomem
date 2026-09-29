@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: ccadcf2a855b1ebb4fc0998c3c867f427038395659a547ce8c29489ec3737d68
+  skill_contract: d7c1cfcd59a688b504a849c38119d0696342bd676692f38a2bcdcb010b8e6c02
   version: "0.1.0"
 ---
 
@@ -42,7 +42,7 @@ collection. Fleeting preferences, one-off activity, incidental associations, tri
 metrics, and tentative events stay quiet. Durable interpretations retain explicit
 attribution and uncertainty rather than becoming established facts. Eligibility never creates an Entity,
 collection, or schema. Concise observations and narrow additive facts follow
-`proactive_capture`; affiliation relations use `link_acceptance`; Entity creation or
+`proactive_capture`; affiliation relations use `link_acceptance`; a new Entity follows `proactive_capture`; merge or
 substantial curation uses confirmed `restructure_execution`.
 
 ## Workflow
@@ -70,8 +70,12 @@ carry transient progress; capture reusable decisions and verified milestones.
    then call `connect_memory(operation="resolve-entity", name=...)` before writing.
 7. When one active entity matches, use `edit_memory` for a small stable-fact
    correction or the canonical relation workflow for a new connection.
-8. Only when no entity matches and the identity is stable, recurring, central,
-   and useful beyond this source, use `connect_memory(operation="create-entity")`.
+8. Only when no entity matches and the identity is stable, and central or
+   recurring, and useful beyond this source, use `connect_memory(operation="create-entity")`.
+   When the name you write is in another script than the user's own spelling
+   of it, add a native-script alias (`aliases=[...]` at create, or the
+   `aliases` field through `edit_memory` on an existing page); see
+   `references/writing.md` § Names in another script.
 
 ## Lifecycle
 Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `record_memory(action="append")`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome.

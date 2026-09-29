@@ -35,8 +35,8 @@ Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
 metrics, and tentative claims stay quiet. Do not create an Entity, collection, or
 schema from eligibility alone: concise observations and narrow additive facts obey
-`proactive_capture`, affiliation relations require `link_acceptance`, and Entity
-creation or substantial curation requires confirmed `restructure_execution`.
+`proactive_capture`, affiliation relations require `link_acceptance`, a new Entity follows `proactive_capture`;
+merge or substantial curation requires confirmed `restructure_execution`.
 
 ## Planning
 
@@ -488,8 +488,8 @@ model, embedding, or due-state claim.
 1. Read the active entity registry and selected knowledge-pack priorities.
 2. Call `connect_memory(operation="resolve-entity", name=...)`. If one active entity matches, use a guarded
    `edit_memory` correction or the canonical relation workflow instead of create.
-3. If no entity matches and the identity is stable, recurring, central, and
-   useful beyond this source, call `connect_memory(operation="create-entity")`.
+3. If no entity matches and the identity is stable, and central or recurring,
+   and useful beyond this source, call `connect_memory(operation="create-entity")`.
 4. Draft the page following `page-types.md` § entity, propose, and write on confirm.
 5. For an existing entity, show a guarded diff and update through `edit_memory`.
 6. Refresh the entity index and top-level counts through the governed writer.

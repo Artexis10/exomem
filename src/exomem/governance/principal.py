@@ -111,14 +111,20 @@ class RequestPrincipal:
     # True only for the owner audience reached through the host's explicit
     # remote binding. It labels the request; it never changes a decision.
     remote_owner: bool = False
+    # True only for the owner audience reached with a local client token over
+    # the supervisor's local listener. A label, like `remote_owner`.
+    local_owner: bool = False
 
     @property
     def principal_kind(self) -> str:
-        """Closed audit label: `owner`, `owner-oauth`, `principal` or `unresolved`."""
+        """Closed audit label: `owner`, `owner-oauth`, `owner-local`,
+        `principal` or `unresolved`."""
         if not self.resolved:
             return "unresolved"
         if self.audience_id == OWNER_AUDIENCE:
-            return "owner-oauth" if self.remote_owner else "owner"
+            if self.remote_owner:
+                return "owner-oauth"
+            return "owner-local" if self.local_owner else "owner"
         return "principal"
 
     def with_purpose(self, purpose: str | None) -> RequestPrincipal:
@@ -182,6 +188,25 @@ def owner_principal(*, surface: str = "cli", purpose: str | None = None) -> Requ
         purpose=purpose,
         resolved=True,
         issuer_family=_LOCAL_OWNER_ISSUER_FAMILIES.get(surface),
+    )
+
+
+#: The issuer family of a local client token, whichever surface it reaches.
+LOCAL_INGRESS_ISSUER_FAMILY = "mcp-local"
+
+
+def local_owner_principal(*, surface: str) -> RequestPrincipal:
+    """The owner, reached with a local client token over local ingress.
+
+    Its own issuer family keeps session authority from crossing between this
+    door and the stdio, REST-key or remote doors.
+    """
+    return RequestPrincipal(
+        audience_id=OWNER_AUDIENCE,
+        surface=surface,
+        resolved=True,
+        issuer_family=LOCAL_INGRESS_ISSUER_FAMILY,
+        local_owner=True,
     )
 
 
@@ -323,8 +348,25 @@ def _is_bound_remote_owner(token: object, binding: RemoteOwnerBinding | None) ->
     )
 
 
+def _local_ingress_owner() -> bool:
+    """Whether this request is a verified local client over local ingress.
+
+    Both halves are required: the request's live grant, which only the
+    local-ingress gate binds after verifying the bearer against the local
+    audience, and a verified token that is that grant's own object. Claims
+    alone never qualify, whatever they say.
+    """
+    from .. import local_ingress
+
+    if local_ingress.current_grant() is None:
+        return False
+    return local_ingress.is_local_grant_token(_verified_access_token())
+
+
 def resolve_mcp_principal() -> RequestPrincipal:
     """MCP boundary: OAuth principal, bearer credential, or local-stdio owner."""
+    if _local_ingress_owner():
+        return local_owner_principal(surface="mcp")
     claims, expectation = _mcp_identity_claims()
     if claims is not None:
         audience = normalize_audience(subject=claims.get("sub"), issuer=claims.get("iss"))
