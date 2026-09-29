@@ -27,3 +27,5 @@
 - [x] 3.7 If ruled: move "Before writing" and "Semantic authoring contract" from `SKILL.md` into references in the scaffold and plugin (generic wording; `test_scaffold_no_leak`), regenerate the plugin tree. **Result:** done: 30,175 to 16,107 bytes; references `before-writing.md` and `semantic-authoring.md` in scaffold and plugin.
 - [ ] 3.8 If ruled: trim tool and parameter descriptions; regenerate `tests/fixtures/mcp_tool_schemas.json` and the tool-surface fingerprint; confirm v1 to v4 legacy schemas and candidates are byte-identical. **Result:** NOT done here: tool-schema trimming was split into its own lane by ruling. The only schema change is the new `section` parameter on `bootstrap`.
 - [x] 3.9 Re-run `scripts/context-footprint.py`, replace the estimates in `measurements.md` 5.4 with measurements, and record the ruled per-item budgets. **Result:** measured; see `measurements.md` section 6.
+
+- [x] 3.10 Ruling round 2: make the recall carrier line surface-aware so hosted v5 carries a recall rule (`prominence.ASK_MEMORY_CARRIER_LINE`, `commands.op_bootstrap`); v1 to v4 stay frozen; test that every unfrozen surface carries a recall rule.
