@@ -120,7 +120,7 @@ Every committed collection mutation SHALL be exactly one audit transition in the
 - **THEN** `Knowledge Base/log.md` is not read or rewritten by it
 
 ### Requirement: Collection store snapshots are consistent and portable
-The substrate SHALL produce consistent snapshots of the collection store only through the SQLite online backup API into a staging file that is switched to a single-file journal mode, integrity-checked and atomically renamed. It SHALL publish such a snapshot as a replica inside the vault after committed transactions, coalesced off the acknowledgement path, and synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export. The replica SHALL NEVER be opened for writing in place. A host acquiring the writer lease, or a service starting on a copied vault, SHALL adopt the replica when it continues the same store further than the local store, or when no local store exists, after which it is writable. It SHALL refuse collection writes with a divergence error, while serving reads and knowledge writes, when the local store holds transactions the replica lacks. A preview-first operator reconciliation SHALL turn every item changed by the divergent store after the fork point into a held view correction on the surviving store, so divergence never silently loses a write. Restore SHALL validate integrity, schema version and store identity, and SHALL surface any difference between the restored rows and existing views as held view corrections rather than overwriting either.
+The substrate SHALL produce consistent snapshots of the collection store only through the SQLite online backup API into a staging file that is switched to a single-file journal mode, integrity-checked and atomically renamed. It SHALL publish such a snapshot as a replica inside the vault after committed transactions, coalesced off the acknowledgement path, and synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export. The replica SHALL NEVER be opened for writing in place. A host acquiring the writer lease, or a service starting on a copied vault, SHALL adopt the replica when it continues the same store further than the local store, or when no local store exists, after which it is writable. It SHALL refuse collection writes with a divergence error, while serving reads and knowledge writes, when the local store holds transactions the replica lacks. A preview-first operator reconciliation SHALL turn every item changed by the divergent store after the fork point into a held view correction on the surviving store, so divergence never silently loses a write. Running more than one collection writer on one vault without the multi-host writer lease SHALL be explicitly unsupported, and `describe` and the doctor probe SHALL say so. Restore SHALL validate integrity, schema version and store identity, and SHALL surface any difference between the restored rows and existing views as held view corrections rather than overwriting either.
 
 #### Scenario: Backup of the vault is consistent
 - **WHEN** restic or a vault copy captures the vault while agents are writing
@@ -232,15 +232,23 @@ The substrate SHALL implement structured collections as one generic mechanism pa
 - optional named product-owned validators from a closed registry;
 - a surfacing rule, a default audience (`owner` or `policy`), presentation recipes and saved views.
 
-A declaration SHALL NOT carry code, model instructions, or unbounded patterns. Records and Planning SHALL be built-in declarations shipped with the product, changed only by release. Only built-in declarations MAY carry wire aliases for legacy property, receipt and error names. A collection manifest SHALL name its type, with `semantic_profile: records` and `semantic_profile: planning` accepted as aliases for the built-in types. The kind SHALL change only version semantics and compiler surfacing: identity, natural keys, guards, transactions, audit, governance, projection, edit-back, query, snapshots and migration SHALL be the same code for every type.
+A declaration SHALL NOT carry code, model instructions, or unbounded patterns. A new type's placement segment SHALL be refused with `COLLECTION_TYPE_PLACEMENT_OCCUPIED`, naming the folder, when it already holds any file that is not a collection view, so rendered views never mix with hand-written notes. A file without a collection binding under a type's placement SHALL never be read as an item. Records and Planning SHALL be built-in declarations shipped with the product, changed only by release. Only built-in declarations MAY carry wire aliases for legacy property, receipt and error names. A collection manifest SHALL name its type, with `semantic_profile: records` and `semantic_profile: planning` accepted as aliases for the built-in types. The kind SHALL change only version semantics and compiler surfacing: identity, natural keys, guards, transactions, audit, governance, projection, edit-back, query, snapshots and migration SHALL be the same code for every type.
 
 #### Scenario: A built-in type is a declaration, not a code path
 - **WHEN** the Records and Planning declarations are loaded
 - **THEN** both collection types resolve through the same type registry and generic operations as any declared type, and no mechanism branches on their names
 
 #### Scenario: A declaration with code or an unknown kind is refused
-- **WHEN** a proposed declaration names an unknown kind, an unknown key, an undeclared natural-key field, an unreachable state, or a placement that collides with a reserved layer or non-empty directory
+- **WHEN** a proposed declaration names an unknown kind, an unknown key, an undeclared natural-key field, an unreachable state, or a placement that collides with an existing or reserved layer
 - **THEN** validation reports field-addressed findings and nothing is saved
+
+#### Scenario: A placement folder holding notes refuses
+- **WHEN** a new type's placement `Knowledge Base/<placement>/` already holds a hand-written note or any other file that is not a collection view
+- **THEN** the save refuses with `COLLECTION_TYPE_PLACEMENT_OCCUPIED` naming that folder, without naming or counting its files, and no type, collection or view is created
+
+#### Scenario: A note added later is never read as a row
+- **WHEN** a Markdown file with no collection binding is created under an existing type's placement
+- **THEN** edit-back holds it as `VIEW_UNBOUND` and no item is created unless it is explicitly resumed
 
 #### Scenario: Only built-ins carry wire aliases
 - **WHEN** a declared type proposes a `wire` block or the name of a built-in type

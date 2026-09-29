@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Records is a built-in collection type and record_memory is its typed facade
-`records` SHALL be a built-in collection type of kind `observed`, placement `Records`, extensible by each collection's own item schema, with default audience `policy`. `record_memory` SHALL be a typed facade: its actions SHALL map onto the generic collection operations through the built-in declaration's wire map (`append` to `add`, and every other action one to one). Its argument sets, `record_id` naming, `_record_receipt` receipts, error codes and `describe` contract SHALL be unchanged for Records collections. Until the owner rules otherwise on the declared-type surface, `record_memory` SHALL also serve collections of declared types that no facade owns. For those it SHALL use generic item naming, a `_collection_receipt` marker and generic error codes, SHALL accept `action: "transition"` for declared lifecycles, and `describe` SHALL teach a named type from its declaration. It SHALL refuse Planning collections.
+`records` SHALL be a built-in collection type of kind `observed`, placement `Records`, extensible by each collection's own item schema, with default audience `policy`. `record_memory` SHALL be a typed facade: its actions SHALL map onto the generic collection operations through the built-in declaration's wire map (`append` to `add`, and every other action one to one). Its argument sets, `record_id` naming, `_record_receipt` receipts, error codes and `describe` contract SHALL be unchanged for Records collections. `record_memory` SHALL also serve collections of declared types that no facade owns, without a new tool. For those it SHALL use generic item naming, a `_collection_receipt` marker and generic error codes. The added surface SHALL be exactly two things: an `action` value `transition`, which takes the existing `item_key`, `expected_item_version`, `why` and `changes` (naming the target state), and an optional `collection_type` argument on `describe`, which teaches a named type from its declaration. The generated `record_memory` schema SHALL grow by no more than 400 bytes. It SHALL refuse Planning collections.
 
 #### Scenario: Records wire is unchanged by the facade
 - **WHEN** the same append, update and query are issued against a Records collection before and after the facade is introduced
@@ -10,6 +10,10 @@
 #### Scenario: A declared type's item is added through record_memory
 - **WHEN** an agent appends to a collection of a declared `recipes` type and later transitions it to `current`
 - **THEN** both commit through the generic operations with `_collection_receipt` receipts, and the transition is checked against the declared state machine
+
+#### Scenario: The added surface stays within its byte budget
+- **WHEN** the local `record_memory` tool schema is generated before and after declared-type support
+- **THEN** the only differences are the `transition` action value and the optional `collection_type` argument, and the schema grows by at most 400 bytes
 
 #### Scenario: Frozen hosted candidates do not see declared-type actions
 - **WHEN** the released hosted candidate schemas are compared with their pinned digests

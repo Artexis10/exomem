@@ -74,7 +74,7 @@ Single source of truth is preserved because exactly one live store accepts write
 - If the local store holds transactions that the replica does not, collection writes refuse `COLLECTION_STORE_DIVERGED` and operator attention is raised. Knowledge writes and all reads continue.
 - The recovery point for a crashed writer is the coalescing window. That is the same exposure as today's file replication lag. Stranded transactions stay in the crashed host's store for operator recovery.
 
-*Alternative rejected:* the live store inside the vault. The ratified `machine-local-state-placement` requirement exists because sync agents hash, hold and replace database files, and a WAL database copied mid-checkpoint is corrupt. This is **Needs ruling R1**, because the owner's brief says "per vault" without naming the root.
+*Alternative rejected:* the live store inside the vault. The ratified `machine-local-state-placement` requirement exists because sync agents hash, hold and replace database files, and a WAL database copied mid-checkpoint is corrupt. Ruled (R1): the live store under the per-vault state root, plus the integrity-checked single-file replica at `Knowledge Base/_Collections/collections.sqlite`.
 
 ### 2. Schema
 
@@ -233,7 +233,7 @@ Every canonical object has a rendered view at today's path:
 
 **Rendering** reuses today's renderers: `render_markdown_item`, `render_markdown_log_item`, the managed presentation blocks and the filename recipes. The system frontmatter stays (`type`, `collection_id`, `record_id` / `plan_id`, `schema_version`), so identity is visible in the file. The audit marker comments and the manifest `record_audit` / `plan_audit` mappings are no longer rendered.
 
-**Views are normalized on re-render.** Frontmatter is emitted in canonical order and style. The authored body is canonical data (`items.body`) and is re-emitted exactly. Only YAML formatting that is not data (quoting style, key order, comments inside frontmatter) is not preserved. This replaces the byte-preservation contract of today's update splicer (**Needs ruling R5**).
+**Views are normalized on re-render.** Frontmatter is emitted in canonical order and style. The authored body is canonical data (`items.body`) and is re-emitted exactly. Only YAML formatting that is not data (quoting style, key order, comments inside frontmatter) is not preserved. This replaces the byte-preservation contract of today's update splicer (ruled R5).
 
 **Item views are published before the acknowledgement; aggregate views follow asynchronously.** This follows #1457's measurement and recommendation: sync projection costs 2.6–3.8 ms at 1,000 and 10,000 items, while async projection lagged 4–34 ms and is unbounded under a stalled worker. Any reader of the vault file (`get_page`, a script, Obsidian, the next agent turn) therefore sees the write it was acknowledged for.
 - **Changed item, manifest and held views are published synchronously.** Inside the transaction the writer renders each one to a target-adjacent staging file and fsyncs it, and marks its `projection_state` row `pending`. It then `COMMIT`s, renames the staging file over the view, and records `rendered_sha256`, `rendered_row_version` and `current`. Only then does it acknowledge.
@@ -289,7 +289,7 @@ The watcher is the human's write path, not a bypass. It uses the same leaf funct
 
 The existing pure evaluator, scopes (`paths`, `refs`, `tags`, `types`, `projects`, `classes` and their excludes), standing rules, grants and org caps apply unchanged. **Row-level audience** is therefore authored exactly like any other policy, in `_Governance`, for example with a scope selecting a row's `ref` or `tag`, or a path under the projection root.
 
-No per-row audience column is added. Governance stays in one authored place, and a data write can never widen or narrow its own release (**Needs ruling R3**, since the brief says "row-level audience").
+No per-row audience column is added. Governance stays in one authored place, and a data write can never widen or narrow its own release (ruled R3).
 
 **Resolved once per operation.** The policy, tombstones and state paths are resolved once per call, which is #1457 fix 1. Every row then evaluates against that resolved policy in memory.
 
@@ -328,10 +328,10 @@ The same set feeds `snapshot` (§3). Withheld rows are indistinguishable from ab
 | C9 | `Knowledge Base/log.md` | stops receiving `Records audit-v1` / `Planning audit-v1` lines. Per-collection history pages replace them. Existing lines stay as immutable history | behaviour change, specified |
 | C10 | Held candidates | the same `held` / `hold` / `discard` arguments and references; storage is a table with read-only views at today's `Held/` paths | unchanged wire |
 | C11 | `describe` | storage section explains the store, views and edit-back; authoring contract unchanged | text only |
-| C12 | `bulk_upsert` (PR #1452, not yet released) | one transaction and ONE transition with N `audit_effects`. `first_transition` equals `last_transition`. `BULK_UPSERT_AUDIT_DEPTH` and the chain-depth budget are removed. Everything else in #1452's ratified contract stands | pre-release |
+| C12 | `bulk_upsert` (#1452 ships first on files, ruled R2) | the store adopts #1452's request and response API unchanged. It is one transaction and ONE transition with N `audit_effects`, and `first_transition` equals `last_transition`. `BULK_UPSERT_AUDIT_DEPTH` and the chain-depth budget are removed. The per-call row cap rises from #1452's file-mode cap to 500 | the cap is raised and a refusal code is retired; no argument changes |
 | C13 | size limits | `_MAX_ITEM_FILES` (2,000), `_MAX_COLLECTION_BYTES` (8 MB) and `_MAX_RECORDS` (10,000) stop bounding store collections. The new limit is `COLLECTION_ROW_LIMIT` = 100,000 rows per collection, exposed by `describe`. A log-layout view keeps its 2 MB rendering cap; a log collection past it refuses the write with a remediation to switch to the items layout | limit raised |
 | C15 | `schema_memory` | new `subject: "collection-types"` with `inventory`, `inspect`, `validate`, `diff`, `save-collection-type`, `history` and `restore`; `infer` refused (§14.5) | additive; frozen candidates unchanged |
-| C16 | `record_memory` | per ruling R8: also serves collections of declared types, with the new `action: "transition"` and an optional `collection_type` on `describe` | additive on the local surface and v5 only |
+| C16 | `record_memory` | ruled R8: also serves collections of declared types, with the new `action: "transition"` and an optional `collection_type` on `describe`. Nothing else is added (§14.7 schema-byte budget) | additive on the local surface and v5 only |
 | C17 | `plan_memory` | a facade over the generic operations (§14.7); wire unchanged | unchanged |
 | C18 | manifests | `collection_type:` names the type; `semantic_profile: records\|planning` remain accepted aliases; `link` fields may declare `target.collection_type` and `pin: version` (§14.3) | additive |
 | C19 | `activate_context` packet | `generation.collection_types_hash`; the `collections` lane replaces the `records` and `planning` lanes (both kept as aliases); `ANCHOR_KINDS` gains `item` | additive |
@@ -348,9 +348,20 @@ PR #1452's `bulk_upsert` runs in one `BEGIN IMMEDIATE` transaction:
 4. insert one `txns` row with N `audit_effects`;
 5. `COMMIT`.
 
-`abort` rolls back on any rejection and reports every row's would-be outcome. `skip` commits the accepted rows. A transaction with only `unchanged` rows writes nothing and does not advance the generation. The 500-row bound stays. The spike measures 20 ms for 500 rows (250 inserts, 250 updates) at 10,000 existing rows, and 6 ms for a full-replay batch.
+`abort` rolls back on any rejection and reports every row's would-be outcome. `skip` commits the accepted rows. A transaction with only `unchanged` rows writes nothing and does not advance the generation. The spike measures 20 ms for 500 rows (250 inserts, 250 updates) at 10,000 existing rows, and 6 ms for a full-replay batch.
 
-The option-B "bulk audit event" that #1452 deferred is simply the native shape here. **Needs ruling R2** covers the sequencing with #1452.
+The option-B "bulk audit event" that #1452 deferred is simply the native shape here.
+
+**Sequencing (ruled R2).**
+1. **#1457 lands now as the interim.** It brings per-operation authorization, the stat-generation item cache, batched guard rechecks, and the manifest parse cache. File-mode collections keep those until the legacy window closes (R7). The store reuses #1457's once-per-operation policy resolution.
+2. **#1452 ships now on files**, with its per-call row cap enforced so a single bulk call holds the writer lease for no more than about 5 s. Its per-item chained events and `BULK_UPSERT_AUDIT_DEPTH` apply to file mode only.
+3. **The store implementation adopts #1452's API unchanged.** That covers the action name, `rows`, `on_reject`, `source`, the guard, per-row outcomes and codes, and the batch receipt. Only three things differ on the store:
+   - it drops `BULK_UPSERT_AUDIT_DEPTH` and the chain-depth budget, because a batch is one transition;
+   - it raises the per-call cap to 500 (`BULK_UPSERT_MAX_ROWS`, reported by `describe`), since the store takes 20 ms at 500 rows;
+   - `first_transition` equals `last_transition`.
+
+   A collection's cap follows its storage mode, so a client written against the file cap keeps working after migration.
+4. When #1452's change is archived into the canonical `records` spec before this one, this change gains a `records` MODIFIED delta for #1452's bulk requirements carrying exactly those differences (task 0.4). Until then, #1452's requirements are not canonical and cannot be modified here.
 
 ### 10. Migration: verifiable, reversible, zero-downtime
 
@@ -437,7 +448,7 @@ The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and
 | Receipt projection | ≈ 1 ms | ≤ 1 ms | unchanged |
 | **Total** | ≈ 155 ms p50 (157 ms at 10 items) | **≤ 19 ms p95** | |
 
-Each stage gets its own timer in the acceptance harness, and a stage over budget fails the release gate (task 10.1). The collection-resolution and fan-out rows are where the 90 ms goes. Both are removed by the store design itself, not by tuning.
+Each stage gets its own timer in the acceptance harness, and a stage over budget fails the release gate (task P1a.15). The collection-resolution and fan-out rows are where the 90 ms goes. Both are removed by the store design itself, not by tuning.
 
 The guard refresh a client performs between writes is also a command, so it pays the dispatcher. #1457 estimates 15–25 ms, against a storage cost of 0.04 ms. Two things make it rare and cheap:
 - every mutation receipt already returns `after_container_hash` and `item_version`, so chained writes need no refresh;
@@ -563,7 +574,9 @@ views:                        # saved views, validated against this type's vocab
 ```
 
 **Validation** is closed and field-addressed, like manifest validation today.
-- Unknown keys, an unknown `kind`, a `placement` that collides with an existing layer, a reserved directory or a non-empty ordinary directory, a natural key naming undeclared fields, and an unreachable or undeclared state are all findings.
+- Unknown keys, an unknown `kind`, a `placement` that collides with an existing layer or a reserved directory, a natural key naming undeclared fields, and an unreachable or undeclared state are all findings.
+- **Occupied placement (ruled R10).** Declaring a type whose placement segment `Knowledge Base/<placement>/` already holds any file that is not a collection view is refused with `COLLECTION_TYPE_PLACEMENT_OCCUPIED`. A new type has no collection views yet, so in practice the folder must be absent or empty. The error names the folder and says to choose another placement or move the notes. That way rendered views never mix with hand-written notes, and edit-back never reads a note as a row. The refusal names only the folder the caller proposed, with no file names or counts, and it is identical whichever of those files the caller could read.
+- **Later.** A Markdown file created afterwards under a type's placement is still never read as a row. Edit-back holds it as `VIEW_UNBOUND`, a proposed insert that is applied only by an explicit resume (§6).
 - A declaration with any finding cannot be saved.
 - A declaration carries no code, templates-as-code, regexes beyond the bounded cue strings, or model instructions.
 
@@ -596,7 +609,7 @@ Every change is still a new `row_version` in `item_versions`, one `audit_effect`
 
 A declaration may narrow its kind's roles (`surfacing.roles`, a subset). It may not name roles outside them, so a procedural type cannot present itself as `constraints` or `identity`.
 
-The vocabulary grows only by shipped revision (**Needs ruling R9**), because each kind needs a compiler mapping and version wording.
+The vocabulary grows only by shipped revision (ruled R9), because each kind needs a compiler mapping and version wording.
 
 #### 14.3 Pinned version references
 
@@ -686,7 +699,7 @@ Row-level policy (§7) applies within every type. Tightening `policy` → `owner
 
 #### 14.7 Generic operations; `record_memory` and `plan_memory` are typed facades
 
-The leaf API is generic: `collections.ops.{describe, validate, inspect, create, query, add, update, transition, revise, rebaseline, bulk_upsert, hold, resume, discard}`. It takes a collection and resolves its type. `transition` is the generic lifecycle move: `item_key`, `to_state`, `expected_item_version`, `why`. It is checked against the declared state machine, per-state constraints and named validators.
+The leaf API is generic: `collections.ops.{describe, validate, inspect, create, query, add, update, transition, revise, rebaseline, bulk_upsert, hold, resume, discard}`. It takes a collection and resolves its type. `transition` is the generic lifecycle move: `item_key`, `expected_item_version`, `why`, and `changes` naming the target state as `{<state field>: <state>}`, optionally with other field changes. It is checked against the declared state machine, per-state constraints and named validators.
 
 The two existing tools become **facades**, which are declarative maps held in the built-in declarations' `wire` blocks:
 - **`record_memory` → type `records`.** Actions map one to one (`append` → `add`). The receipt, error codes, argument sets and describe text are unchanged.
@@ -694,12 +707,18 @@ The two existing tools become **facades**, which are declarative maps held in th
 
 The facades refuse a collection of the other built-in type (today's boundary scenarios hold).
 
-**Declared-type items** need an MCP surface (**Needs ruling R8**). Recommendation: `record_memory` also accepts any collection whose type is neither `planning` nor another facade's type. For declared types:
+**Declared-type items (ruled R8): `record_memory` serves them; no new tool.** `record_memory` accepts any collection whose type is neither `planning` nor another facade's type. For declared types:
 - it uses generic names (`item_key`, receipt marker `_collection_receipt`, generic error codes);
 - it gains `action: "transition"`;
 - `describe` takes an optional `collection_type` and teaches that type from its declaration.
 
-That adds no tool, and it keeps the frozen hosted candidates unchanged: the new action and parameter appear only on the local surface and the v5 candidate. The alternative is a new generic `collection_memory` tool, with `record_memory` and `plan_memory` as pure facades. That is cleaner naming but one more tool against the fixed tool budget.
+The frozen hosted candidates are unchanged: the new action and parameter appear only on the local surface and the v5 candidate.
+
+**Schema-byte budget.** The tool-description diet is cutting schema bytes, so the added surface is minimal. There are exactly two additions:
+- one enum value (`transition`) on the existing `action`;
+- one optional string parameter (`collection_type`) with a one-line description.
+
+`transition` reuses the existing `item_key`, `expected_item_version` and `why` parameters, plus the existing `changes` for the target state, as `{<state field>: <state>}`. It adds no `to_state` parameter. The tool description gains at most one sentence. Everything a declared type needs (its fields, states, transitions, examples) is taught on demand by `describe(collection_type=…)` from the declaration, never carried in the static schema. The generated tool schema for `record_memory` may grow by at most 400 bytes, measured and gated in task P5.3.
 
 #### 14.8 Worked example: Recipes (procedural) and Recipe Executions (observed)
 
@@ -797,7 +816,7 @@ Schema and rows therefore change together, atomically, under one audit chain. Th
 
 **7. Everything else that reads items as pages; read-your-writes.**
 - **Item views are published before the acknowledgement** (§5). Any file reader, including `get_page` and the next agent turn, sees the acknowledged write. That costs about 3 ms, as #1457 measured. Only aggregate views (log layout, history and type pages) and index sync are asynchronous.
-- **Structured readers move to the store** (task 5.5): due-state, plan progress, capture sweeps, the working set and current-state resolution, `audit` outcome bindings, and evidence bundles built from items. They are read-your-writes by construction and no longer parse Markdown.
+- **Structured readers move to the store** (task P1a.12): due-state, plan progress, capture sweeps, the working set and current-state resolution, `audit` outcome bindings, and evidence bundles built from items. They are read-your-writes by construction and no longer parse Markdown.
 - **`find` and recall** already exclude Records and Planning descendants except manifests (`recall_policy`). Declared types join that exclusion (§14.5). Lexical, resolver and graph indexing of views therefore lagging the drain does not change any recall answer about item values.
 - **Plan links, supersession and pinned references** resolve through the store (§14.3), not through view files.
 
@@ -833,15 +852,18 @@ Schema and rows therefore change together, atomically, under one audit chain. Th
 - **Multi-host RPO** equals the replica coalescing window. That matches today's file replication lag, and divergence fails closed (§1).
 - **Two modes during migration.** They add temporary complexity. *Mitigation:* the switch is per vault, and deletion is a scheduled task with its own acceptance.
 
-## Needs ruling
+## Rulings
 
-- **R1 Placement.** Recommended: the live store at the state root (`external-canonical`), with a coalesced single-file replica in the vault (`Knowledge Base/_Collections/collections.sqlite`). The alternative, a live WAL store inside the vault, contradicts `machine-local-state-placement` and is unsafe under file sync.
-- **R2 Sequencing with #1452.** Recommended: land #1457 fix 1 (policy resolved once per operation) now, because this design reuses it. Re-target #1452's code onto the store instead of building it on files. #1452's request and response contract carries over, minus `BULK_UPSERT_AUDIT_DEPTH`. The alternative, shipping #1452 on files first (its option C), relieves import pain sooner but adds file-audit machinery that §13 then deletes.
-- **R3 Row-level audience.** Recommended: express it through existing policy scopes evaluated per row (path, ref, tags), with no per-row audience column.
-- **R4 `log.md`.** Recommended: stop writing Records and Planning audit lines into `Knowledge Base/log.md`, and replace them with per-collection history pages (owner addendum). Confirm that no vault-wide one-line digest is wanted.
-- **R5 View normalization.** Recommended: re-render normalizes frontmatter formatting, with the body and values exact. This replaces today's byte-preservation of untouched YAML.
-- **R6 Datasets.** Recommended: the `dataset` strategy stays file-canonical and query-only.
-- **R8 Declared-type item surface.** Recommended: `record_memory` also serves collections of declared types (generic names, new `transition` action), with no new tool and frozen candidates unchanged. The alternative is a new generic `collection_memory` tool, with `record_memory` and `plan_memory` as pure facades.
-- **R9 Kind vocabulary.** Recommended first set: `observed`, `intended`, `procedural`, `reference`. Each needs a compiler-role mapping and version wording, so the set grows only by shipped revision. Candidates for later: `constraint` (→ `constraints`) and `precedent` (→ `precedents`).
-- **R10 Declared placement.** Recommended: one new top-level Knowledge Base segment per type (`Knowledge Base/Recipes/`), refused if it collides with a reserved layer or a non-empty ordinary directory. The alternative, nesting under a shared `Knowledge Base/Collections/<Type>/`, avoids top-level growth but moves no built-in type.
-- **R7 Legacy window.** Recommended: keep file mode and the reverse exporter for two minor releases after the store ships, then run the §13 deletion.
+Needs ruling: **None.** The orchestrator's rulings on #1459 are folded into the sections cited.
+
+- **R1 accepted.** The live store is under the per-vault state root (`external-canonical`), plus the integrity-checked single-file replica at `Knowledge Base/_Collections/collections.sqlite` (§1, §11).
+- **R2 amended.** #1457 lands now as the interim. #1452 ships now on files with its enforced per-call row cap (lease held for about 5 s at most). The store adopts #1452's API unchanged, drops `BULK_UPSERT_AUDIT_DEPTH`, and raises the cap to 500 (§9 "Sequencing", §8 C12).
+- **R3 accepted.** Row-level audience is expressed through existing `_Governance` scopes evaluated per row, with no per-row audience column (§7).
+- **R4 accepted.** Collection mutations write no `log.md` lines. There are per-collection history pages and no vault-wide digest for now (§5, §8 C9).
+- **R5 accepted.** Re-render normalizes frontmatter formatting; values, body and the log frame are exact (§5).
+- **R6 accepted.** Datasets stay file-canonical and query-only.
+- **R7 accepted.** File mode and the reverse exporter stay for two minor releases after store GA, then the §13 deletion runs (tasks phase P6).
+- **R8 accepted.** `record_memory` serves declared types. No new tool, and the added surface is minimal and byte-budgeted (§14.7).
+- **R9 accepted.** The kinds are `observed`, `intended`, `procedural` and `reference`, growing by shipped revision only (§14.2).
+- **R10 accepted, with a guard.** Each type gets one top-level segment. A segment already holding non-collection files refuses with `COLLECTION_TYPE_PLACEMENT_OCCUPIED`, naming the folder (§14.1).
+- **Two writers without the lease are explicitly unsupported** for collection writes. They fail closed with `COLLECTION_STORE_DIVERGED` and reconcile into held corrections (§15 item 5; the `structured-collections` snapshot requirement).
