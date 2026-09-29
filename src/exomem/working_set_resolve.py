@@ -790,11 +790,11 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
 
 
 #: Clause punctuation, for `_run_breaks`: sentence ends, comma, colon,
-#: semicolon, and dashes (an en or em dash, or a hyphen standing alone between
+#: semicolon, parentheses and square brackets, and dashes (an en or em dash, or a hyphen standing alone between
 #: spaces; a hyphen inside a word is part of the word), in the cased scripts'
 #: and the CJK forms.
 _CLAUSE_BREAK = re.compile(
-    r"[.,:;!?\n\r\u2026\u2013\u2014\u3001\u3002\uff01\uff0c\uff0e\uff1a\uff1b\uff1f]+"
+    r"[.,:;!?()\[\]\n\r\u2026\u2013\u2014\u3001\u3002\uff01\uff0c\uff0e\uff1a\uff1b\uff1f]+"
     r"|(?:^|\s)-+(?=\s|$)"
 )
 #: The coordinators the tokeniser's stopwords already carry: "X and Y" is two

@@ -79,7 +79,7 @@ names of two anchors of any other kind SHALL NOT form this ambiguity. Second, a
 qualifier: each anchor's contact SHALL be the longest contiguous run of turn tokens that
 spells its own authored name words (stopwords may sit inside a run, never at its edges;
 punctuation and coordinators end a contiguous run: a sentence end, comma, colon,
-semicolon or dash, and "and" or "or", so "X, Y" and "X and Y" are two things, not one
+semicolon, parenthesis, square bracket or dash, and "and" or "or", so "X, Y" and "X and Y" are two things, not one
 run).
 When two same-kind anchors resolve without a deciding-alone kind and one's run lies
 strictly inside the other's, the narrower anchor SHALL NOT be listed, and neither SHALL a
@@ -121,7 +121,7 @@ listed. Neither rule SHALL compare anchors of different kinds.
   partial hub reached only inside that run is not listed
 
 #### Scenario: Punctuation and coordinators end a contiguous run
-- **WHEN** a turn puts a comma, full stop, colon, dash, "and" or "or" between the shared
+- **WHEN** a turn puts a comma, full stop, colon, dash, parenthesis, bracket, "and" or "or" between the shared
   name words and the word only one hub's name carries
 - **THEN** the run does not span it and the packet is `ambiguous` between the hubs
 

@@ -342,6 +342,8 @@ SOLAR_RETRIEVED = (SOLAR.path, SOLAR_MONITORING.path)
         "The solar array — monitoring is next week.",
         "The solar array and monitoring are both late.",
         "The solar array or monitoring, whichever is first.",
+        "Check the solar array (monitoring can wait).",
+        "Check the solar array [monitoring can wait].",
     ],
 )
 def test_clause_punctuation_and_coordinators_end_a_contiguous_run(turn: str) -> None:
@@ -443,3 +445,16 @@ def test_an_uncased_person_name_in_a_mixed_script_turn_still_asks() -> None:
     )
 
     assert resolution.status == "ambiguous"
+
+
+def test_a_slash_does_not_end_a_run() -> None:
+    """A slash is left alone: "kitchen/renovation" stays one run of name words."""
+
+    resolution = _resolve(
+        "Where does the kitchen/renovation budget stand?",
+        (KITCHEN, KITCHEN_BUDGET),
+        counts=KITCHEN_COUNTS,
+        retrieved=(KITCHEN.path, KITCHEN_BUDGET.path),
+    )
+
+    assert resolution.status == "resolved"
