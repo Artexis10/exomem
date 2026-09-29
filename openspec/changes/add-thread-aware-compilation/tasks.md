@@ -174,14 +174,14 @@ The orchestrator ruled on the design on 2026-09-29; the rulings are recorded in 
 
 ## 5. S5: acceptance and latency
 
-- [ ] 5.1 Run the `conversation` group on arms a to d against the pinned digest.
+- [x] 5.1 Run the `conversation` group on arms a to d against the pinned digest.
   - Publish per-case, per-anchor-kind metrics with their duals, and no aggregate.
   - Arm (a) must come out red, and arms b to d must meet the floors.
 - [x] 5.2 Pin these in the CI latency gate, with the measured numbers recorded in the manifest (maximum-size conversation, synthetic reference corpus):
   - `working_set.conversation` p95 ≤ 60 ms;
   - warm activation p95 ≤ 1,000 ms.
   Evidence: tests/test_latency_gate.py::test_a_maximum_size_conversation_stays_within_the_stage_and_warm_p95_budgets; measured in acceptance-run.json (stage p95 32.4 ms, warm p95 169.5 ms).
-  Status: run recorded in acceptance-run.json and pinned in tests/test_context_activation_conversation_acceptance.py: recall, drowning and size floors hold on arms b to d and arm (a) is red, but 9 twin rows fail their pre-registered expectation (PR, Needs ruling 2 and 3). Not ticked until ruled.
+  Evidence: acceptance-run.json and tests/test_context_activation_conversation_acceptance.py on the corrected digest `1c81d3e9…`: every scored row on arms a to d meets its pre-registered expectation except arm (a)'s intended failures; PENDING_RULING is empty. Post-hoc fixture correction recorded in design.md.
 
   Record separately that live-cell latency is owned by its own lane and was not regressed: a request without `conversation` records no conversation stage.
 - [ ] 5.3 In the delivery that completes 5.1 and 5.2, sync the deltas into the canonical specs and archive with `openspec archive`. Run `openspec validate --all --strict` before and after.

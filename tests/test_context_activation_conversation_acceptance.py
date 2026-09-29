@@ -5,11 +5,9 @@ product on every arm and asserts the pre-registered floors per case and per
 anchor kind, with no aggregate. Arm (a) is the mechanism-removal control and
 must stay red. Arms (b) to (d) must meet the floors.
 
-Nine (case, arm) rows do not meet them, and the fixtures may not be edited
-after a manifest references their digest, so they are pinned here as the exact
-set awaiting an orchestrator ruling (see the PR, "Needs ruling"). The test
-fails if that set changes in either direction: a fix must delete rows from
-`PENDING_RULING`, never silently pass.
+Every scored row must meet its pre-registered expectation, except the rows
+pinned in `PENDING_RULING` (empty). The test fails if that set changes in
+either direction.
 """
 
 from __future__ import annotations
@@ -21,17 +19,11 @@ from membench.utility.context_activation_conversation import (
 )
 from test_context_activation_conversation_baseline import Run, run  # noqa: F401
 
-#: Twins whose CONTENT-FREE current turn carries a fixture-authored `focus`
-#: naming the earlier subject. `focus` is current-turn evidence by ruling, so an
-#: exact alias in it resolves that anchor (the attachment cases depend on this):
-#: the pre-registered "twin resolves nothing" expectation contradicts the ruled
-#: semantics on arms (c) and (d).
-FOCUS_NAMES_THE_POISON = {(f"W{n}", arm) for n in range(17, 25) for arm in ("c", "d")}
-#: "Cheers, there is plenty of chat for one day." speaks the shipped follow-up
-#: marker "one", so it is anaphoric and the conversation carry serves the
-#: earlier subject as a `partial` anchor (arm b: no `focus`).
-BARE_ONE_IS_ANAPHORIC = {("W24", "b")}
-PENDING_RULING = FOCUS_NAMES_THE_POISON | BARE_ONE_IS_ANAPHORIC
+#: Rows awaiting a ruling. Empty since the orchestrator's rulings on #1455:
+#: twins W17 to W24 were re-authored with a focus that names nothing (V29 pins
+#: that a focus naming the subject resolves), and bare "one" no longer makes a
+#: turn anaphoric. Anything that fails again must be added here with its reason.
+PENDING_RULING: set[tuple[str, str]] = set()
 
 
 def test_the_control_arm_stays_red_and_the_incident_classes_fail_without_the_conversation(run: Run) -> None:  # noqa: F811
@@ -63,7 +55,7 @@ def test_every_row_meets_its_expectation_except_the_pinned_pending_ruling_set(ru
 
 def test_the_withheld_pair_and_the_attachment_cases_pass_on_the_arms_that_carry_a_conversation(run: Run) -> None:  # noqa: F811
     for row in run.rows:
-        if row.arm != "a" and row.case_id in {"V26", "V27", "W26", "V28", "W28"}:
+        if row.arm != "a" and row.case_id in {"V26", "V27", "V29", "W26", "V28", "W28"}:
             assert row.passed, (row.case_id, row.arm, row.failure_reasons)
 
 
