@@ -38,3 +38,17 @@ The compact core SHALL stay at or under its ruled byte ceiling at every engageme
 
 - **WHEN** compact bootstrap is served under a frozen hosted profile at any level
 - **THEN** its digest, with only the server version and tool-surface digests normalised, equals the digest recorded before the split
+
+### Requirement: Injected agent context stays inside a per-item byte budget
+
+Every text Exomem injects into a coding agent's context without the agent asking for it, namely the Stop-hook capture and episode checks, the `UserPromptSubmit` retrieval reminder, the working-set block, the continuation checkpoint and the skill carrier, SHALL stay at or under a ruled byte ceiling per item, asserted by test. A hook nudge SHALL keep the rule it exists to carry (the capture trigger and the live-policy pointer, the `episode_memory` record call with its key and its do-nothing escape, and the `ask_memory` recall with its skip escape and its not-found-in-scope reading) and MAY point at the core operating contract for the long form instead of restating it. The working-set block SHALL be omitted when its rendered items are unchanged since the last one injected in the session. The hook scripts under `src/exomem/_hooks/` and their plugin mirrors SHALL remain byte-identical.
+
+#### Scenario: A nudge cannot regrow into the old text
+
+- **WHEN** a hook constant exceeds its byte ceiling or drops a rule named in the manifest
+- **THEN** the budget test fails naming the constant
+
+#### Scenario: An unchanged working set is not re-injected
+
+- **WHEN** a gated prompt's activated packet renders the same item refs as the last block injected in this session
+- **THEN** the hook emits no working-set block for a non-referential prompt

@@ -108,3 +108,38 @@ The frozen profiles are enforced, not asserted: `tests/test_bootstrap_frozen_pro
 2. **`hosted-alpha-agent-v4`.** Treated as frozen here (it is in `LEGACY_PROFILE_CONTRACTS` and has a committed candidate). Confirm, or say v4 gets the diet.
 3. **The `withheld = absent` rule is not in the served payload today.** It is enforced server-side and the payload carries only `governance.disclosure_model` and `workflow.miss_rule`. The core list names it, so Phase 2 would add one sentence (about 150 bytes) to the core. Confirm it is added, or that the server enforcement alone is the intended carrier and the manifest entry is dropped.
 4. **`profile="session"`.** Keep as is (22,008 bytes), or rebase it on the core so a skill-holding client also drops to about 14 KB?
+
+## Scope addition: every byte injected into a coding agent
+
+The bootstrap is not the only tax. `measurements.md` section 5 sizes the hook injections, the tool schemas and the skill carrier, and section 5.4 gives the 50-turn before/after. Findings that change the design: the Stop-hook capture check is 1,841 B, restates what the served core already carries, and fires on 40% (balanced) to 90% (maximal) of Stops; the retrieval reminder repeats verbatim; the working-set block (opt-in) has no memory of what it already injected; and the 32 tool schemas (169,911 B) outweigh everything else combined.
+
+### 6. Stop nudges: one short line that points at the rule
+
+Replace `REMINDER` (1,841 B) with a one-line capture check of about 300 B that names the trigger and points at the rule the core already serves (`engagement.contract.capture`, and `bootstrap(section=...)` where the client has it): distil, no transcript; capture a durable decision, outcome or stable fact per live policy; supersede rather than correct beside; stated intent goes to Planning and observed outcome to Records; transient code, test and CI output stays out. Replace `EPISODE_ASK` (495 B) with about 330 B that keeps the episode key, the `episode_memory(action="record")` call and "if nothing durable happened, do nothing". Variant A keeps both cadences. Variant B folds the two into one nudge with the same text discipline and fires at most once per episode window (the episode ask's own turn count and cooldown), so the capture check no longer rides every third Stop; the episode ask already asks for the durable record, and the capture loop's rule stays in the core. B changes when an agent is asked, not what it is told; it needs the no-nudge benchmark families to show initiation unchanged (task 3.5) before it ships.
+
+### 7. Retrieval reminder: short, and not repeated
+
+Replace `REMINDER` (861 B) with about 260 B: run a quiet `ask_memory` only when recent context does not already cover the topic and the prompt may touch prior knowledge; cite hits; a miss means not found in that scope; otherwise skip. Variant A keeps the cadence. Variant B emits it once per session and again after a compaction or resume (the checkpoint hook already runs there), so it does not repeat between; at `maximal`, whose contract is recall before every substantive turn, it emits a pointer of about 90 B per prompt (`Recall first: activate_context with the turn.`) instead of silence. The text already tells the agent not to repeat a search because it reappeared; B makes the hook agree.
+
+### 8. Working-set block: silent when unchanged
+
+The packet already carries a `continuity` token. Persist a hash of the rendered item refs beside it and emit nothing when the new packet's refs equal the last emitted set, and a one-line "unchanged since your last turn" only for a referential prompt. Cut the header from 278 to about 120 B and the default ceiling from 4,000 to 2,000 chars on non-referential turns (referential prompts keep 4,000: they are the thread). Opt-in cost is a bound, not a measurement: at most 24 fires per balanced 2-hour session, so up to about 103 KB before and, with a 50% unchanged rate and the smaller ceiling, about 14 KB after.
+
+### 9. Session start and continuation
+
+Model-facing continuation text drops the checkpoint id line and the transcript-binding sha256 line (kept in the checkpoint file and the metadata log, where the hook uses them), and the advisory paragraph shrinks from about 400 to about 150 B. Cap `MAX_CONTEXT_BYTES` at 2,048. Fresh-start injection stays none: no hook injects at `startup`, and this change does not add one. For skill clients, `SKILL.md` (30,175 B, byte-identical in scaffold and plugin) moves its "Before writing" (5,980 B) and "Semantic authoring contract" (8,234 B) sections into `references/` with one-line pointers, leaving about 16 KB; its `Recall loop`, `Proactive engagement`, `Portable operating rules` and `Decision` sections stay.
+
+### 10. Tool schemas
+
+Trim descriptions and per-parameter descriptions in the live registry: tool descriptions to at most about 600 B (`activate_context` 5,479, `edit_memory` 3,961, `remember` 3,494, `observe_memory` 3,156, `replace_memory` 2,966, `manage_memory_file` 2,900 and `maintain_memory` 2,795 are the offenders), parameter descriptions to at most about 80 B each with the prose moved to the `describe` action or a bootstrap section, and defaults not restated. Estimated 170 KB to about 110 KB (-35%). This edits a pinned baseline (`tests/fixtures/mcp_tool_schemas.json`, `test_mcp_schema_fidelity`) and the published tool-surface fingerprint, so it regenerates those and the v5 candidate, and touches nothing in v1 to v4 (legacy schemas are pinned separately). A larger option, a `lean` tool profile exposing about a dozen core tools to coding clients (about 86 KB), changes the tool-surface contract and is not proposed here without a ruling.
+
+### 11. Rules the nudges and hooks must keep
+
+The manifest in decision 3 extends to the hook texts: a compact Stop line must contain the capture trigger (durable decision, outcome or stable fact), the live-policy pointer, distil-not-transcript, supersede-not-correct-beside, and the Planning/Records split; the episode line must contain the `episode_memory` record call, the key and the do-nothing escape; the retrieval line must contain `ask_memory`, cite, the miss-means-not-found-in-scope rule and the skip escape. Hook constants are duplicated between `src/exomem/_hooks/` and `plugins/claude-code/hooks/` (byte-identical, parity test) and the prominence presets are duplicated into the standalone scripts (pinned by `tests/test_prominence.py` and `tests/test_capture_nudge_episode.py`); Phase 2 edits both mirrors together.
+
+### Additional open questions (for the ruling)
+
+5. **Stop cadence.** Variant A (shorter text, same cadence: -80% at balanced) or B (one nudge per episode window: -94%, needs the no-nudge benchmark to confirm initiation)?
+6. **Retrieval cadence.** A (same cadence, short text) or B (once per session plus after compaction; a 90-byte pointer per prompt at maximal)?
+7. **Tool schemas.** Include the -35% description trim in this change, split it into its own change (it moves a pinned fingerprint), or leave it out? It is the largest single cost.
+8. **SKILL.md.** Move "Before writing" and "Semantic authoring contract" into references (30 KB to about 16 KB)?

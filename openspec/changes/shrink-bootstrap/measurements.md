@@ -80,3 +80,59 @@ Skill scaffold, for the retrieval path (bytes on disk, not served): SKILL.md 30,
 | Supersede, never overwrite; raw material append-only | `epistemic_contract.commitments` | |
 | Delegation ceiling | `engagement.envelope` | |
 | Due-state restraint | `authoring_contract.post_write.due_state_*` | |
+
+## 5. Everything else Exomem injects (scope addition)
+
+Reproduce: `python scripts/context-footprint.py`. Exact where a constant exists; modelled where cadence depends on the agent. Model assumptions: 50 turns, one prompt and one Stop each, 144 s apart (2 hours), 10% of prompts are short control prompts, 70% of balanced turns (90% at maximal) end in text long enough to count as substantive, the agent writes and records nothing (worst case for the nudges; recording resets only the episode counter, and the cooldowns bind first, so complying changes the modelled counts by nothing at these cadences).
+
+### 5.1 What fires, when, and what it costs
+
+| injection | source | trigger | bytes each | notes |
+|---|---|---|---:|---|
+| Skill or bootstrap carrier | `SKILL.md` (30,175) loaded when the skill fires; `bootstrap` result | once per session, agent-initiated | 22,008 (session profile) to 63,055 (compact) | no hook injects at a fresh start: `SessionStart` is registered only for `compact\|resume` |
+| Continuation checkpoint | `exomem_continuation_checkpoint.py` `render_continuation` | `SessionStart` on compact/resume, `PreCompact`/`SessionEnd` write only | up to 4,096 (`MAX_CONTEXT_BYTES`) | includes a checkpoint id, a transcript-binding line with a sha256 (meaningful to the hook, not the model) and a 400 B advisory |
+| Retrieval check | `exomem_retrieve_nudge.py` `REMINDER` | every `UserPromptSubmit` past the length, control-prompt and cooldown gates; balanced: session cooldown 300 s and client-wide 900 s; maximal: no cooldown | 861 | repeats verbatim; its own text says "do not repeat a KB search just because this reminder appears again" |
+| Working-set block | same hook, `EXOMEM_RETRIEVE_INJECT=working_set` | **opt-in, off by default**; replaces the reminder on gated prompts; referential prompts always | header 278 + up to 4,000 | ceiling by design; a real fill was not measurable without a live vault |
+| Capture check | `exomem_capture_nudge.py` `REMINDER` | `Stop`, when the turn's text is long enough and no write or `Saved ->` marker landed; balanced: min 300 chars, cooldown 300 s; maximal: 120 chars, 60 s | **1,841** | blocks the stop (`decision: block`), so each fire also buys an extra model turn |
+| Episode check | same hook, `EPISODE_ASK` | `Stop`, every 6 substantive turns (balanced, 1,200 s cooldown) or 3 (maximal, 600 s); takes precedence over the capture check on that Stop | 495 | blocks the stop |
+| Episode coverage | same hook, `COVERAGE_ASK` | only when the session prepared an episode candidate | ~460 | not modelled |
+| MCP `episode_due` | `activate_context` packet | tool-only clients, after 8 activations, 1,800 s cooldown | one sentence | already bounded |
+| MCP tool schemas | 32 tools, `tests/fixtures/mcp_tool_schemas.json` | resent every turn by clients that do not defer tools; occupies the window either way | **169,911** total: descriptions 37,137, input schemas 131,071 (per-parameter descriptions 60,507) | largest single cost, see 5.3 |
+| Skill front matter | 10 plugin skills | listed in the system prompt every turn | 3,041 | |
+
+Nudge counts in the 50-turn model: balanced 15 capture + 5 episode Stops (20 of 50 Stops, 30,090 B) and 7 retrieval reminders (6,027 B); maximal 35 + 10 (45 of 50 Stops, 69,385 B) and 45 retrieval reminders (38,745 B). Each of those Stop blocks is also one extra model turn that re-reads the whole context.
+
+### 5.2 Where the capture check's 1,841 bytes come from
+
+`REMINDER` restates, in telegraphic form, most of what `engagement.contract.capture` already serves in the bootstrap core at balanced and maximal: reuse evidence, decompose before routing, hydrate and resolve entities, supersede rather than correct beside, intent to Planning and observed outcome to Records, "selected is not write consent", no local scan, no transcripts. The hook fires it dozens of times per session against a bootstrap the agent read once.
+
+### 5.3 The tool schemas are the largest cost, and the diet so far does not touch them
+
+32 tools, 169,911 B (about 42,500 tokens): larger than the whole bootstrap plus every hook nudge in a 50-turn session combined. Prompt caching lowers what a client pays per turn but not the window it occupies. Heaviest: `edit_memory` 13,885 (description 3,961), `manage_memory_file` 13,627, `remember` 12,712 (description 3,494), `replace_memory` 11,238, `activate_context` 9,607 (description 5,479), `connect_memory` 9,280 (50 parameters), `episode_memory` 7,776, `record_memory` 7,619, `maintain_memory` 7,576, `schema_memory` 7,483, `observe_memory` 7,338. Of the 131,071 B of input schemas, 60,507 B are per-parameter descriptions and about 70 KB is JSON-schema structure (types, enums, defaults). The pinned baseline is `tests/fixtures/mcp_tool_schemas.json`; hosted v1 to v4 pin their own legacy schemas and are unaffected by live-registry edits.
+
+### 5.4 Fifty-turn session, before and after (bytes injected, once-per-session plus per-turn)
+
+Balanced level, hooks installed, default (reminder-only) retrieve mode, one compaction in the session. "Claude Code" carries the skill and the session bootstrap; "Codex / generic" carries the compact bootstrap. After (A) shrinks the text and keeps every cadence; After (B) also moves to at most one Stop nudge per episode window and one retrieval reminder per session (re-armed on compaction). Design in `design.md` decisions 6 to 9.
+
+| item | Claude Code before | after A | after B | Codex / generic before | after A | after B |
+|---|---:|---:|---:|---:|---:|---:|
+| session carrier (skill + bootstrap, or compact) | 52,183 | 30,300 | 30,300 | 62,698 | 13,600 | 13,600 |
+| continuation checkpoint (1 compaction) | 4,096 | 1,900 | 1,900 | 4,096 | 1,900 | 1,900 |
+| Stop nudges (capture + episode) | 30,090 | 6,150 | 1,900 | 30,090 | 6,150 | 1,900 |
+| retrieval reminders | 6,027 | 1,800 | 500 | 6,027 | 1,800 | 500 |
+| **injected total** | **92,396** | **40,150** | **34,600** | **102,911** | **23,450** | **17,900** |
+| tokens (bytes / 4) | ~23,100 | ~10,000 | ~8,650 | ~25,700 | ~5,900 | ~4,500 |
+
+Same, at maximal (recall before every turn, 45 Stops nudged before):
+
+| item | Claude Code before | after A | after B | Codex / generic before | after A | after B |
+|---|---:|---:|---:|---:|---:|---:|
+| session carrier | 52,540 | 30,600 | 30,600 | 63,055 | 13,900 | 13,900 |
+| continuation checkpoint | 4,096 | 1,900 | 1,900 | 4,096 | 1,900 | 1,900 |
+| Stop nudges | 69,385 | 13,800 | 3,800 | 69,385 | 13,800 | 3,800 |
+| retrieval reminders | 38,745 | 11,700 | 4,100 | 38,745 | 11,700 | 4,100 |
+| **injected total** | **164,766** | **58,000** | **40,400** | **175,281** | **41,300** | **23,700** |
+
+Resent per turn, not in the totals above (cached by most clients, but resident in the window): tool schemas 169,911 (about 110,000 after design decision 10, -35%) and skill front matter 3,041 (about 1,600 after). Over 50 turns that is 8.5 MB resent before and 5.5 MB after; the dieted bootstrap and nudges are about 1% and 0.5% of that. The window occupancy that a cold session pays is what matters to attention, so the ordering by size is: tool schemas (170 KB) > bootstrap or skill (22 to 63 KB) > Stop nudges over a session (30 to 69 KB) > retrieval reminders > checkpoint.
+
+The "after" figures are design estimates from the target sizes in `design.md`; Phase 2 replaces them with measurements.
