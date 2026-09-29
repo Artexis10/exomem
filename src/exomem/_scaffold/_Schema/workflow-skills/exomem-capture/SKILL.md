@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: cee8f5ea4103fbc87c8aabb41b69bbbb087d8304b5bb2729f708edfd45323b50
+  skill_contract: fb13de5890424630b9e8ef9dce3a4ede99b4a57ed9526562337ef8db1387cec3
   version: "0.1.0"
 ---
 
@@ -70,6 +70,11 @@ carry transient progress; capture reusable decisions and verified milestones.
    then call `connect_memory(operation="resolve-entity", name=...)` before writing.
 7. When one active entity matches, use `edit_memory` for a small stable-fact
    correction or the canonical relation workflow for a new connection.
+   A stable, uniquely attributable identity or contact fact about a resolved
+   person, including the vault owner's own entity (for example a phone number
+   or address read from a screenshot), is an entity-level fact: route it to
+   that entity or its linked personal-details node under `proactive_capture`,
+   not just in the reply that used it.
 8. Only when no entity matches and the identity is stable, and central or
    recurring, and useful beyond this source, use `connect_memory(operation="create-entity")`.
 

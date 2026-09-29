@@ -103,7 +103,8 @@ RULE = (
     "one bounded pass over the recent exchange for anything that would materially "
     "improve a later decision, lookup, repeated task, comparison or continuation; "
     "dedupe against written_recently and existing memory; stay silent when nothing "
-    "qualifies. The classes in `consider` are examples, not a closed set"
+    "qualifies. Identity or contact facts about a person, the owner included, go to "
+    "that entity via proactive_capture. `consider` lists examples, not a closed set"
 )
 
 #: Examples, not an enumeration. `rule` says so and every prose carrier says so.
@@ -113,6 +114,7 @@ CONSIDER: tuple[str, ...] = (
     "stable preference",
     "method or parameter",
     "entity facet",
+    "identity or contact fact about a person",
     "operational or vendor quirk",
     "evidence worth preserving",
     "relation",

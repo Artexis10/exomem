@@ -289,6 +289,30 @@ def _written_path(vault_root: Path, binding: Mapping[str, Any]) -> str | None:
     return path if isinstance(path, str) else None
 
 
+#: Distinct candidates landing on one page before the pass calls it a sink.
+SINK_CLUSTERS = 3
+SINK_GUIDANCE = (
+    "One page received several distinct topic clusters in this episode. Give "
+    "each cluster a disposition: route it to an existing canonical page, entity, "
+    "Planning or Records item, or to a justified new page, or mark it no_capture "
+    "when nothing durable remains. Prepare a corrective candidate for any cluster "
+    "that does not belong here. This is guidance, not a block."
+)
+
+
+def _sinks(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pages that several distinct candidates' committed effects landed on."""
+    by_path: dict[str, set[str]] = {}
+    for item in receipts:
+        if item["path"] is not None:
+            by_path.setdefault(item["path"], set()).add(item["candidate_key"])
+    return [
+        {"path": path, "candidates": sorted(keys)}
+        for path, keys in sorted(by_path.items())
+        if len(keys) >= SINK_CLUSTERS
+    ]
+
+
 def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     """The evidence for the agent's final coverage pass. Read-only.
 
@@ -299,7 +323,9 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     reverified now against the live page. It attests with `resume`
     `postcommit=true`. A page the caller may no longer read reads back
     `unavailable`, exactly like a page that is gone. Nothing here judges
-    whether the candidates exhaust the input.
+    whether the candidates exhaust the input. `sink` names any page that
+    several distinct candidates landed on, with guidance to disposition each
+    cluster; it never blocks attestation.
     """
     session = _Session(vault_root, episode)
     state = session.state
@@ -338,6 +364,7 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
                         "readback": readback,
                     }
                 )
+    sink = _sinks(receipts)
     return {
         **_projection(session),
         "action": "coverage",
@@ -350,6 +377,8 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
         "coverage_current": (
             "verified" if all(item["readback"] == "verified" for item in receipts) else "changed"
         ),
+        "sink": sink,
+        **({"sink_guidance": SINK_GUIDANCE} if sink else {}),
     }
 
 

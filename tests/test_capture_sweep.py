@@ -755,3 +755,20 @@ def test_every_batch_scope_is_paired_with_the_shared_batch_carrier() -> None:
         "these commands open a batch scope without the shared batch carrier, so "
         f"their episode boundary is silently swallowed: {sorted(opens_scope - carries)}"
     )
+
+
+def test_a_stable_identity_or_contact_fact_about_a_person_is_an_entity_level_fact(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock, tmp_path: Path
+) -> None:
+    """A stable, uniquely attributable detail about a resolved person -- the
+    vault owner included -- belongs on that person's entity, not only in the
+    reply that used it. The sweep says so in the rule and lists the class."""
+    _caller(monkeypatch, **HTTP_PRINCIPAL)
+
+    block = capture_sweep.block(tmp_path)
+
+    assert block is not None
+    rule = block["rule"].lower()
+    assert "identity or contact" in rule and "owner" in rule
+    assert "proactive_capture" in rule and "entity" in rule
+    assert any("contact" in item for item in block["consider"])
