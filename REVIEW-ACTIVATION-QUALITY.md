@@ -157,3 +157,38 @@ The one failure is `test_activation_lexical_term_budget::…stops_at_k` (SQLite
 `USE TEMP B-TREE FOR ORDER BY`). It fails the same on base, as the original review noted.
 The 21 skips are `onnx` missing. The tokenizer was rebuilt from npm `js-tiktoken`,
 sha256 `446a9538…`, which matches.
+
+## Recheck 2 (fb531e9, 4c48383, acea007, 6983ad9)
+
+**Verdict: APPROVE.** Every Recheck 1 item is fixed. The three new concerns are LOW.
+Each one either fails towards `ambiguous` or sits outside the ruled wording.
+
+### Findings
+
+| Finding | Verdict | Evidence |
+|------|------|------|
+| NC1 HIGH, punctuation | **FIXED** | `_run_breaks` (`working_set_resolve.py:805`) ends a run at `_CLAUSE_BREAK` (`:796`) and at "and" and "or" (`:802`). All four Recheck 1 probes and "the kitchen renovation and the budget for it" → `ambiguous`, both hubs listed. Unbroken runs still narrow ("solar array monitoring", "kitchen renovation budget"). Pinned at `test_working_set_resolve_senses.py:347,365`. |
+| NC2, lower-case person word | **FIXED** | In a mixed-case turn, "Please mark the task done" and "Did mark call?" → `unresolved`. "Mark called…", "i spoke with Mark" and all-lower-case "please mark…" still ask. `:397,414`. |
+| NC3, headline and all caps | **FIXED as ruled** | `_casing_signal` (`:829`). Title-case and all-caps harbour turns → `unresolved`. People still ask (`:434`). |
+| LOW 2 docstring | **FIXED** | `working_set.py:1326-1328` states the bound. |
+| Re-record | **VERIFIED** | Re-running `CONTEXT_ACTIVATION_RECORD_REPORT=<scratch> pytest …real_compiler -k recorded_report` on 6983ad9 gives a file byte-identical (`cmp`) to the committed v4 report. The merge acea007 resolves only the A7 and A8 constants in `test_context_activation_real_compiler.py`. A10 is pre-registered on base and has no run yet, so nothing is owed here. |
+
+### Re-attack
+
+- **Names containing "and" or a comma.** "What is the Smith and Wesson hub status?" and `Check the "Smith and Wesson" restock` (against a "Smith hub") → `ambiguous`, not the Smith and Wesson hub. "How is the R&D, Europe budget?" → `ambiguous` between "R&D, Europe hub" and "R&D hub". Without the comma it resolves. A break only shortens runs, so it can lose a narrowing but never force a wrong one. Quotes don't protect "and". (NC-A)
+- **CJK.** 、, 。 and ， each break a spaced run ("厨房 装修、预算 以后 再说" → `ambiguous`). Unspaced text is unchanged: whole-run tokens, no narrowing.
+- **The fallback.** `_run_breaks` reports no breaks when per-segment tokens differ from the turn's tokens. That would silently revive NC1. Twelve edge cases never triggered it: "U.S.", "3.5", "10:30", URLs, apostrophes, "solar-array,", " , ", ",x", " - ", " — ", elided French. Dotted abbreviations over-break, which is safe.
+
+### New concerns (LOW, none blocking)
+
+- **NC-A.** An authored name containing "and" or a comma can't narrow its shorter namesake. The turn asks instead. Possible follow-up: exempt a coordinator or comma that is inside an exact name or alias phrase the turn spelled. `working_set_resolve.py:802,1228`.
+- **NC-B.** Parentheses and slashes don't end a run. "Check the solar array (monitoring can wait)" and "solar array/monitoring later" → `resolved` to the monitoring hub alone, the NC1 failure through rarer punctuation. Consider adding `()[]` to `_CLAUSE_BREAK` (`:796`). A slash is arguable.
+- **NC-C.** A headline with lower-case function words ("Notes from the Harbour Walk") still counts as cased, so it asks between the two businesses. That matches the spec's "every word capitalised" wording, but it is a headline in practice.
+
+### Runs
+
+Local scoped suite still running; numbers follow in the next push.
+
+| Check | Result |
+|------|------|
+| `gh pr checks 1440` at 6983ad9 (GitHub API) | 26 passed, 10 skipped, 0 failed; required CI gate passed |
