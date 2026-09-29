@@ -106,16 +106,17 @@ import urllib.request
 from pathlib import Path
 
 REMINDER = (
-    "[Exomem retrieval check] Before answering: if this prompt touches a topic your "
-    "Exomem knowledge base might hold — a project, a past decision, a domain you've taken "
-    "notes on, or a 'what did I conclude / have I looked at' question — run a quiet "
-    "`ask_memory` only if recent conversation context does not already cover it, then fold "
-    "any hits into the answer (cite them). Do not repeat a KB search just because this "
-    "reminder appears again; reuse fresh KB context until the topic changes or the "
-    "answer needs more evidence. The KB is the source of truth for prior conclusions; "
-    "a miss means 'not found in what I searched,' not 'doesn't exist.' If the prompt "
-    "plainly has no KB bearing (chit-chat, status/control messages, or a fresh task "
-    "with no prior notes), skip silently."
+    "[Exomem retrieval check] If this prompt may touch prior knowledge (a project, decision "
+    "or domain) and recent context does not already cover it, run a quiet `ask_memory` and "
+    "cite hits; a miss means not found in that scope. Chit-chat, control messages or a fresh "
+    "task: skip."
+)
+#: What `maximal` gets on every prompt after the session's first: its contract is recall
+#: before every substantive turn, so it is never silent, but it need not repeat the
+#: paragraph above. `balanced` and `light` stay silent between reminders.
+REMINDER_POINTER = (
+    "[Exomem retrieval check] Recall first: `ask_memory` or `activate_context` with the "
+    "turn; skip only chit-chat."
 )
 
 # Inject-mode routing-stub block: header + up to 3 `- path (type, updated)` lines,
@@ -1763,6 +1764,26 @@ def main() -> int:
         return 0
 
     session_id = str(data.get("session_id") or data.get("sessionId") or "")
+    if mode == _OFF_MODE:
+        # Reminder-only: the full reminder once per session (the checkpoint hook
+        # clears the marker on compaction, which rewrites the context it lived in).
+        # `maximal` follows it with a pointer on every later prompt; the other
+        # levels stay silent. The client-wide cooldown is not consulted: a fresh
+        # session's one reminder is not the one another tab already saw.
+        reminded_ok, reminded = _cooldown_ok(session_id, 10**9)
+        if reminded_ok:
+            text = REMINDER
+        elif _prominence() == "maximal":
+            text = REMINDER_POINTER
+        else:
+            return 0
+        _touch(reminded)
+        _log(prompt, "off", 0)
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": text,
+        }}))
+        return 0
     ok, stamp = _cooldown_ok(session_id, cooldown)
     # Already nudged recently this session — keep it quiet. Except a
     # referential prompt (working-set mode only, see above): its packet is the
