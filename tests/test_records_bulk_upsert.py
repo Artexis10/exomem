@@ -422,3 +422,127 @@ def test_describe_teaches_bulk_upsert(vault_root: Path) -> None:
     text = repr(record_memory(vault_root, action="describe"))
     for needle in ("bulk_upsert", "500", "2048", "unchanged", "on_reject"):
         assert needle in text
+
+
+def _x3_rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "item": {
+                "occurred_on": f"2026-08-{day:02d}",
+                "title": f"Session {day}",
+                "status": "completed",
+                "movements": [{"movement": "Deadlift", "band": "grey", "repetitions": "22"}],
+            }
+        }
+        for day in (3, 4, 5)
+    ]
+
+
+def test_a_markdown_log_takes_inserts_then_updates_as_one_verified_chain(tmp_path: Path) -> None:
+    from record_fixtures import copy_x3_fixture
+
+    fixture = copy_x3_fixture(tmp_path)
+    (tmp_path / "Knowledge Base/log.md").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Knowledge Base/log.md").write_text("# Activity\n", encoding="utf-8")
+    _evidence(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    start = record_formats.load_adapter(tmp_path, manifest).read().source_versions[-1].hash
+    baseline = len(record_formats.load_adapter(tmp_path, manifest).read().records)
+
+    first = records.bulk_upsert_records(
+        tmp_path, manifest.path, rows=_x3_rows(), why="import sessions",
+        expected_container_hash=start, source=EVIDENCE,
+    )
+    assert _outcomes(first) == ["inserted"] * 3
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    assert records.inspect_audit_gap(tmp_path, manifest)["status"] == "ok"
+    assert len(record_formats.load_adapter(tmp_path, manifest).read().records) == baseline + 3
+
+    rows = _x3_rows()
+    rows[0]["item"]["movements"][0]["repetitions"] = "23"
+    rows.append(
+        {
+            "item": {
+                "occurred_on": "2026-08-06",
+                "title": "Session 6",
+                "status": "completed",
+                "movements": [{"movement": "Row", "band": "grey", "repetitions": "10"}],
+            }
+        }
+    )
+    second = records.bulk_upsert_records(
+        tmp_path, manifest.path, rows=rows, why="import sessions",
+        expected_container_hash=first["after_container_hash"], source=EVIDENCE,
+    )
+    assert _outcomes(second) == ["updated", "unchanged", "unchanged", "inserted"]
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    assert records.inspect_audit_gap(tmp_path, manifest)["status"] == "ok"
+    stored = record_formats.load_adapter(tmp_path, manifest).read()
+    assert len(stored.records) == baseline + 4
+    assert stored.source_versions[-1].hash == second["after_container_hash"]
+    revised = next(r for r in stored.records if r.values.get("title") == "Session 3")
+    assert revised.values["movements"][0]["repetitions"] == "23"
+
+
+def _write_rule(vault_root: Path, name: str, scope_id: str, rule_id: str, paths: str, ceiling: int) -> None:
+    root = vault_root / "Knowledge Base" / "_Governance"
+    (root / "scopes").mkdir(parents=True, exist_ok=True)
+    (root / "rules").mkdir(parents=True, exist_ok=True)
+    (root / "scopes" / f"{name}.yaml").write_text(
+        f"governance_version: 1\nid: {scope_id}\nname: {name}\npaths: [\"{paths}\"]\n",
+        encoding="utf-8",
+    )
+    (root / "rules" / f"{name}.yaml").write_text(
+        f"governance_version: 1\nid: {rule_id}\nscope_ids: [\"{scope_id}\"]\n"
+        f"audience: external\nceiling: {ceiling}\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_withheld_item_makes_the_whole_collection_read_as_absent(vault_root: Path) -> None:
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    first = _bulk(vault_root, _rows(2))
+    _write_rule(
+        vault_root, "records", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        "Records/**", 6,
+    )
+    _write_rule(
+        vault_root, "hidden", "01ARZ3NDEKTSV4RRFFQ69G5FZZ", "01ARZ3NDEKTSV4RRFFQ69G5FZY",
+        "Records/Publications/Entries/**", 0,
+    )
+    before = _state(vault_root)
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+            _bulk(
+                vault_root, _rows(2, start=10), expected_container_hash=first["after_container_hash"]
+            )
+    assert _state(vault_root) == before
+
+
+def test_a_withheld_source_reads_exactly_like_an_absent_one(vault_root: Path) -> None:
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    _write_rule(
+        vault_root, "records", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        "**", 6,
+    )
+    _write_rule(
+        vault_root, "hidden", "01ARZ3NDEKTSV4RRFFQ69G5FZZ", "01ARZ3NDEKTSV4RRFFQ69G5FZY",
+        "Evidence/import-b.md", 0,
+    )
+    rows = _rows(3)
+    rows[1]["source"] = EVIDENCE_B
+    rows[2]["source"] = "Knowledge Base/Evidence/absent.md"
+    with request_scope(RequestPrincipal(audience_id="owner", surface="mcp")):
+        visible = _bulk(vault_root, [rows[1]], on_reject="skip")
+    assert visible["rows"][0]["outcome"] == "inserted"
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        result = _bulk(vault_root, rows[:1] + [{**rows[1], "item": ledger_item(slug="other")}, rows[2]], on_reject="skip", expected_container_hash=visible["after_container_hash"])
+    assert result["rows"][0]["outcome"] == "inserted"
+    hidden, absent = result["rows"][1], result["rows"][2]
+    assert hidden["outcome"] == absent["outcome"] == "rejected"
+    assert hidden["code"] == absent["code"] == "SOURCE_NOT_FOUND"
+    assert {k: v for k, v in hidden.items() if k not in {"index", "source"}} == {
+        k: v for k, v in absent.items() if k not in {"index", "source"}
+    }

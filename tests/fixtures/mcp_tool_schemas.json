@@ -5042,7 +5042,7 @@
       "additionalProperties": false,
       "properties": {
         "action": {
-          "description": "Exactly one of describe, validate, inspect, query, create, append, update, revise, rebaseline, or discard.",
+          "description": "Exactly one of describe, validate, inspect, query, create, append, bulk_upsert, update, revise, rebaseline, or discard.",
           "enum": [
             "describe",
             "validate",
@@ -5050,6 +5050,7 @@
             "query",
             "create",
             "append",
+            "bulk_upsert",
             "update",
             "revise",
             "rebaseline",
@@ -5067,7 +5068,7 @@
             }
           ],
           "default": null,
-          "description": "Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, rebaseline, and discard."
+          "description": "Optional for inventory inspect; required for targeted inspect, query, revision validate, append, bulk_upsert, update, revise, rebaseline, and discard."
         },
         "manifest_path": {
           "anyOf": [
@@ -5344,7 +5345,7 @@
             }
           ],
           "default": null,
-          "description": "Exact current container hash for append, update, revise, or rebaseline."
+          "description": "Exact current container hash for append, bulk_upsert, update, revise, or rebaseline."
         },
         "expected_manifest_hash": {
           "anyOf": [
@@ -5521,6 +5522,50 @@
           ],
           "default": null,
           "description": "Set false to refuse an invalid candidate without holding it. A refused append or update otherwise preserves the complete candidate as a held file under the collection and returns its reference beside the refusal."
+        },
+        "rows": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "bulk_upsert only: 1 to 500 objects of `item`, optional `body` and optional `source`, all committed under the one expected_container_hash. Each row reports inserted, updated, unchanged or rejected."
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "bulk_upsert only: default provenance, the path of a preserved Sources or Evidence page, for rows that name none."
+        },
+        "on_reject": {
+          "anyOf": [
+            {
+              "enum": [
+                "abort",
+                "skip"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "bulk_upsert only: abort (default) writes nothing if any row is rejected and reports every would-be outcome; skip commits the rest."
         },
         "response_detail": {
           "default": "compact",

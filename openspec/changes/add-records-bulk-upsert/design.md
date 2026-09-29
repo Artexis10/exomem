@@ -30,7 +30,7 @@ record_memory(
 )
 ```
 
-Each row is `{item, body?, source?}`. `item_key` is not accepted per row: identity is the declared natural key when the collection has a complete one. A collection WITHOUT a complete natural key is not refused: bulk runs **insert-only** there, each row gets a fresh UUID identity, the outcome is `inserted` or `rejected` and never `updated` or `unchanged`, and re-running the same rows duplicates them. `describe` and the response (`identity: "natural-key" | "generated"`) say so. A row's provenance is `row.source` or, absent that, the batch `source`; a row with neither is rejected `SOURCE_REQUIRED`.
+Each row is `{item, body?, source?}`. `item_key` is not accepted per row. Identity is the declared natural key **per row**: a row whose values complete the declared natural key derives its identity from it (upsert semantics); a row that does not (the natural-key fields are optional in the schema) gets a generated UUID identity, is `inserted` or `rejected` and never `updated` or `unchanged`, and re-running the same rows duplicates them (ruled). Each row reports `identity: "natural-key" | "generated"`, and `describe` says so. A row's provenance is `row.source` or, absent that, the batch `source`; a row with neither is rejected `SOURCE_REQUIRED`.
 
 ### 3. One guard, checked once, inside the lease
 
@@ -47,7 +47,7 @@ For each row, in input order: schema and representability validation, size limit
 | item holds identity, different payload | `updated` (item file replaced) |
 | twin holds the natural key under another identity, ambiguous record, invalid values, provenance failure | `rejected` with `code` and field paths |
 
-On a natural-keyed collection, two rows in one request that derive the same identity are a caller error: the later one is `rejected` `DUPLICATE_ROW_KEY` naming the earlier row's index, never a silent last-write-wins.
+Between rows with a natural key, two rows in one request that derive the same identity are a caller error: the later one is `rejected` `DUPLICATE_ROW_KEY` naming the earlier row's index, never a silent last-write-wins.
 
 `updated` replaces the item's values wholesale with the row's values, and its body only when the row supplies one; it does not merge. This differs from single `append`, which refuses a different payload for a held identity (`RECORD_ID_CONFLICT`). That difference is the point of "upsert" and is stated in `describe`.
 
@@ -76,7 +76,7 @@ The response carries ONE batch receipt: `batch_id`, `rows`, `counts`, `committed
 No new argument. Two existing layers compose:
 
 1. **Transport idempotency.** The command dispatcher already binds `mutation_request_id` and the implicit retry scope to every mutation; a retry under the same transport identity (REST `Idempotency-Key`) returns the recorded result without re-executing. `bulk_upsert` is an ordinary mutating command and inherits this unchanged.
-2. **Content replay.** On a natural-keyed collection identical payloads are `unchanged`, so replaying a committed batch writes nothing and reports every row `unchanged`, with no key and after the store's TTL. On an insert-only collection there is no content replay, so retry safety there rests on layer 1 alone (documented).
+2. **Content replay.** On a natural-keyed collection identical payloads are `unchanged`, so replaying a committed batch writes nothing and reports every row `unchanged`, with no key and after the store's TTL. Generated-identity rows have no content replay, so retry safety for them rests on layer 1 alone (documented).
 
 Exactly-once: a batch either commits under `batch_atomic_write` (all events, all planned files) or leaves no file, no audit event and no manifest change. A crash between "commit" and "response" is resolved by either layer above.
 
@@ -105,3 +105,10 @@ Bulk does not hold (ruled). A rejected row is reported with its diagnostics and 
 ## Open Questions
 
 None: ruled on PR #1452 (N = 500 ratified and measured after building; abort default, no dry-run; provenance falls back to the receipt; transport key plus content replay only; insert-only without a natural key).
+
+## Implementation notes
+
+- `records.bulk_upsert_records` plans every row against ONE snapshot, then chains ordinary `append`/`update` events in memory (intermediate manifest and container hashes are computed in sequence and never published) and publishes item files, one manifest write, and one combined log write (`vault.plan_log_writes_many`) with one `batch_atomic_write`. Both `markdown-items` and `markdown-log` storage are supported; `dataset` refuses as it does for append.
+- The container guard for `markdown-log` is the source file hash (the same value single append takes); for `markdown-items` it is the snapshot hash.
+- Per-item advisory carriers (`due_state`, `capture_sweep`) are not emitted for a batch: they are per-write hints and 500 of them would bury the receipt. Coverage still reads complete or partial from the written items' `sources` links at the next recompute.
+- Measured cost is dominated by `vault.batch_atomic_write`'s per-target access validation and post-commit fanout, which grow with the number of written files; that is the surface #1457 (records write-path performance) works on, so this change does not touch it.
