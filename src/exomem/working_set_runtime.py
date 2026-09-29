@@ -1295,6 +1295,12 @@ def carry_candidates(
             corroboration_tokens=list(rare),
             corroboration_groups=[list(pair) for pair in pairs],
             recall_checkpoint=recall_checkpoint,
+            # The first lexical pass's budget: the rarest units only. The
+            # carry ran every content word of a verbatim prompt against the
+            # whole knowledge base, and was the costliest stage of an
+            # abstaining turn; the rare stems the phrase gate reads are the
+            # ones the budget keeps.
+            term_budget=lexical_term_budget(),
             # Inside the query, so the LIMIT counts only rows that can be
             # candidates: twelve captures that repeat the turn filled the
             # window on their own when they were cut after it.

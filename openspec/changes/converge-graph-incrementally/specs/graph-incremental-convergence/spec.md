@@ -632,3 +632,56 @@ unpublished external epoch.
 
 - **WHEN** a whole-vault pass exhausts its stabilization attempts
 - **THEN** its outcome line says `outcome=failed` and names the publication-failure code
+
+### Requirement: A replayed path is proved against the graph before any whole-vault rebuild
+
+A refresh called by the deferred full-index receipt replay, which marks its dispatch
+as replayed, SHALL first try to prove each named path outside the recall delta since
+the graph's stored checkpoint against the graph's stored rows. Any other caller naming
+such a path -- reconcile and explicit repair refresh unchanged pages on purpose to
+reproject derived rows -- SHALL keep the whole-vault fallback. The proof SHALL hold only
+when the event registry is live and records the path exactly as the disk has it (the
+same stat signature, or absent from both), so the registry is not behind the disk for
+it. A path so proved SHALL be current when the graph's file row carries the source hash
+of the path's current bytes and the page's stored semantic-unit rows match its current
+projection generation and parser version, or when the path has no row and is not an
+indexed page; a current path SHALL be a no-op for the graph, and the refresh SHALL continue with the
+recall delta alone. A proved path that is not current SHALL be queued as durable graph
+repair with the delta, the availability marker SHALL be withdrawn, and a caller that
+needs a converged graph SHALL have that scope drained incrementally, with the drain's
+own topology widening and publication proof. Only a path that cannot be proved, or a
+drain that cannot converge the scope, SHALL fall back to the whole-vault rebuild.
+
+#### Scenario: A replayed receipt the graph already reflects rebuilds nothing
+
+- **WHEN** a deferred full-index receipt is replayed for a page whose bytes match the
+  graph's stored source hash and whose change predates the stored checkpoint
+- **THEN** the graph refresh runs no whole-vault pass, changes no rows, and the graph's
+  edges still equal those of a whole-vault rebuild
+
+#### Scenario: A replayed page whose rows are stale is repaired incrementally
+
+- **WHEN** a replayed page is outside the recall delta but its stored row does not
+  match its current bytes, and the registry records the page as the disk has it
+- **THEN** the page is queued and drained incrementally with its link dependants, no
+  whole-vault pass runs, and the edges equal those of a whole-vault rebuild
+
+#### Scenario: A replayed page with stale-generation unit rows is repaired
+
+- **WHEN** a replayed page's bytes match its stored file row but its stored unit rows
+  carry a projection generation other than the page's current one
+- **THEN** the page is judged stale and repaired, and its unit rows carry the current
+  generation
+
+#### Scenario: A caller that is not a replay keeps the fallback
+
+- **WHEN** reconcile or another non-replay caller refreshes a page outside the recall
+  delta whose bytes match its stored row
+- **THEN** the refresh falls back with reason `caller_path_outside_delta`, so derived
+  rows are reprojected
+
+#### Scenario: A replayed page the registry does not vouch for still rebuilds
+
+- **WHEN** a replayed page's stored row is stale and the registry's record of it differs
+  from the disk
+- **THEN** the refresh falls back as before, with reason `caller_path_outside_delta`

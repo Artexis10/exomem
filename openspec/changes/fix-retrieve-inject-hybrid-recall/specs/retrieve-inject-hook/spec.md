@@ -16,6 +16,14 @@ unreachable." The hook SHALL read the hit list from either envelope shape the
 facade emits: `data` as a list, or `data.hits` when the facade attaches a marker
 such as `degraded` or `warming`.
 
+When a local client token is configured (`EXOMEM_LOCAL_TOKEN_FILE` names a readable,
+non-empty file) and a local port resolves (`EXOMEM_LOCAL_PORT` in the hook's environment,
+else in the managed install's `service.env`), the hook SHALL first make the same POST to
+`http://127.0.0.1:<local port>` with that token, never to `EXOMEM_HOST`. For one release,
+any failure of that local request SHALL fall through to the lifted-key request above under
+the same wall-clock budget, and the log line SHALL name the rung that answered as `local`
+or `rest`.
+
 #### Scenario: REST configured and reachable
 
 - **WHEN** `EXOMEM_RETRIEVE_INJECT` is truthy, a key resolves, and the local
@@ -40,6 +48,18 @@ such as `degraded` or `warming`.
 - **THEN** the request is made in hybrid mode and the block carries those pages
 - **AND** the hook never queries in keyword mode, whose all-tokens gate returns
   nothing for such a prompt
+
+#### Scenario: The local listener answers with the local token
+
+- **WHEN** a local token file and a local port are configured and the local listener
+  answers successfully
+- **THEN** the hits come from `127.0.0.1:<local port>` with the local token
+- **AND** neither the lifted key nor the CLI transport is used
+
+#### Scenario: The local listener is not live yet
+
+- **WHEN** a local token file and a local port are configured but the local request fails
+- **THEN** the hook makes today's lifted-key request within the remaining budget
 
 ### Requirement: Opt-In CLI Transport Fallback
 

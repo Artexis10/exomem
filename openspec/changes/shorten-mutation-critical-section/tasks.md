@@ -169,3 +169,21 @@
 - [ ] 7.5 Stage a verified candidate before replacement; verify concurrent writes
       through the live service, both hostnames, receipts and boundary timings.
       Preserve the old service until the candidate is ready.
+
+## 8. Fan-out after the creation namespace is released
+
+- [x] 8.1 Red-first `tests/test_fanout_after_creation_lock.py`: a batch
+      committed under `vault_creation_lock` fans out only after release, on the
+      writer's context; outside any lock it still fans out inline; a body
+      failure after commit still fans out and keeps its own error; an
+      `observe_memory` commit completes its lexical component with no repair
+      scheduled and no full-index receipt.
+- [x] 8.2 `vault.py`: queue the post-commit fan-out on the held creation lock
+      and run it at release in a copied context; stamp `derived.fanout` after
+      the deferred run. `semantic_writes._commit_existing` attaches the
+      post-release index report.
+- [ ] 8.3 Live: after deploy, the personal service logs no
+      `lexical sidecar upsert deferred (VAULT_LOCK_NESTED ...)` for
+      `edit_memory`, `observe_memory` or `remember`, and `full_upserts` stops
+      growing with ordinary writes.
+

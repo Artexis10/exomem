@@ -7,6 +7,7 @@ ingress can make the same decision before opening a candidate page.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import threading
@@ -219,15 +220,40 @@ def is_recall_candidate(vault_root: Path, path: Path | str) -> bool:
             data, _guard = vault.read_bounded_guarded_bytes(
                 root, rel, limit=_MAX_MANIFEST_BYTES
             )
-            from . import structured_collections
-
-            manifest = structured_collections.parse_manifest_bytes(root, rel, data)
         except (UnicodeError, ValueError, OSError, vault.PathGuardError):
             return False
-        return manifest.semantic_profile in {"records", "planning"}
+        return _manifest_admits(root, rel, data)
     if not access.is_indexable(root, rel):
         return False
     return True
+
+
+#: Admission of a collection manifest, keyed by its exact bytes. Parsing is a
+#: pure function of the bytes, and a graph-context read admitted a Records or
+#: Planning seed by re-parsing its whole manifest on every activation.
+_MANIFEST_ADMISSION: dict[tuple[str, str, bytes], bool] = {}
+_MANIFEST_ADMISSION_MAX = 512
+_MANIFEST_ADMISSION_LOCK = threading.Lock()
+
+
+def _manifest_admits(root: Path, rel: str, data: bytes) -> bool:
+    key = (str(root), rel, hashlib.sha256(data).digest())
+    with _MANIFEST_ADMISSION_LOCK:
+        cached = _MANIFEST_ADMISSION.get(key)
+    if cached is not None:
+        return cached
+    from . import structured_collections
+
+    try:
+        manifest = structured_collections.parse_manifest_bytes(root, rel, data)
+        admitted = manifest.semantic_profile in {"records", "planning"}
+    except (UnicodeError, ValueError):
+        admitted = False
+    with _MANIFEST_ADMISSION_LOCK:
+        if len(_MANIFEST_ADMISSION) >= _MANIFEST_ADMISSION_MAX:
+            _MANIFEST_ADMISSION.pop(next(iter(_MANIFEST_ADMISSION)))
+        _MANIFEST_ADMISSION[key] = admitted
+    return admitted
 
 
 def is_structured_only_path(vault_root: Path, path: Path | str) -> bool:

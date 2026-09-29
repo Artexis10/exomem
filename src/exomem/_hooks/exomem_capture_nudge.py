@@ -112,16 +112,16 @@ REMINDER = (
     "Decompose before routing; open notes have no priority. Keep hypotheses attributed/uncertain. "
     "Check coverage once/episode. Stable preference/recurring routine/historical baseline/"
     "durable affiliation needs stability or recurrence plus reusable comparison/interpretation/decision value; "
-    "fleeting/one-off/incidental/trivial/tentative events: quiet. At balanced/maximal, "
+    "fleeting/one-off/incidental/trivial/tentative: quiet. At balanced/maximal, "
     "after primary work, before the final response, "
     'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once per session; '
-    "no local scan; no model. Active agent uses active entity registry and selected knowledge packs: "
+    "no local scan; no model. Active agent uses active entity registry/selected knowledge packs: "
     'connect_memory(operation="resolve-entity"); stop on ambiguity; single incidental mention stays '
     "in context. Uniquely resolved Entity: narrow additive entity facet, else concise compiled "
     "observation/proactive_capture; "
     "affiliation relation/link_acceptance; compatible Records only. Hydrate: edit_memory first; else "
-    'connect_memory(operation="create-entity") only for stable recurring identity beyond source. '
-    "Entity creation/substantial curation: confirmed "
+    'connect_memory(operation="create-entity") only for identity stable, and central or recurring: '
+    "proactive_capture. Merge/substantial curation: confirmed "
     "restructure_execution. Recheck on confirmed batch terminal receipt; closure-only eighth recheck. "
     "Distil; no transcripts. replace_memory supersedes contradicted "
     "conclusions, not corrections beside them. Stated intent -> "

@@ -2,31 +2,61 @@
 
 # Cloud operator vault export
 
-**Status:** prepared, not yet exercised against a real Cloud cell. OpenSpec task
-6.4 stays open until an authorized export, recipient verification and scratch
-cleanup succeed. This procedure exports one tenant's point-in-time `vault/`
-only. It never mounts, stops or changes the live cell volume; it exports no
-`/data/host`, OAuth state, Kubernetes Secret or credential. No runtime HTTP
-service is required.
+**Status:** exercised against a real Cloud cell on 2026-09-28, where the
+restore, the age export to a tenant-only recipient, recipient verification and
+identity-checked scratch cleanup all passed. That run used the admin identity,
+before break-glass existed. This procedure exports one
+tenant's point-in-time `vault/` only. It never mounts, stops or changes the
+live cell volume; it exports no `/data/host`, OAuth state, Kubernetes Secret or
+credential. No runtime HTTP service is required. Only the tenant can read the
+archive: it is encrypted to recipients the tenant supplies, and the operator
+never holds a key that decrypts it or sees its plaintext.
+The opposite direction, bringing the owner's own vault into their cell, is
+[cloud owner vault restore](cloud-operator-import.md).
 
-## Select the source and snapshot
+The procedure reads the source cell's Secret and execs into the scratch
+namespace, which the everyday operator identity cannot do and cell admission
+admits only for break-glass. So it runs on the node, as root, in the shell
+where you minted a break-glass identity for this export
+([cloud operator access](cloud-operator-access.md)). No kubeconfig, break-glass
+or admin, ever leaves the node; only the ciphertext and its digest do. If the
+one-hour certificate expires mid-procedure, mint a fresh one and rerun this
+setup.
 
-Record the authorized tenant, exact cell ID, recipient and requested recovery
-point in the approved operator channel. Use an approved **read-only** control
-database service. The following query must return exactly one row with that
-tenant/cell pair; a namespace name alone does not establish ownership.
+`kubectl` is not on the node's PATH. The setup puts a private `kubectl` shim
+in front of `k3s kubectl`, so the shell and the render script below both use
+the break-glass kubeconfig:
 
 ```bash
 set -euo pipefail
 umask 077
+: "${BREAK_GLASS_KUBECONFIG:?mint a break-glass identity first}"
+export KUBECONFIG="$BREAK_GLASS_KUBECONFIG" KUBE_CONTEXT=break-glass
+EXPORT_BIN=$(mktemp -d /dev/shm/exomem-export-bin.XXXXXX)
+cat > "$EXPORT_BIN/kubectl" <<'SHIM'
+#!/bin/sh
+exec k3s kubectl "$@"
+SHIM
+chmod 700 "$EXPORT_BIN/kubectl"
+export PATH="$EXPORT_BIN:$PATH"
+kubectl() { command kubectl --context "$KUBE_CONTEXT" "$@"; }
+test "$(command kubectl config current-context)" = "$KUBE_CONTEXT"
+kubectl auth whoami | grep -qF 'exomem:break-glass'
+```
+
+## Select the source and snapshot
+
+Record the authorized tenant, exact cell ID and requested recovery point in
+the approved operator channel. Use an approved **read-only** control
+database service. The following query must return exactly one row with that
+tenant/cell pair; a namespace name alone does not establish ownership.
+
+```bash
 : "${PGSERVICE:?approved read-only control-db service required}"
 : "${TENANT_ID:?authorized tenant ID required}"
 : "${CELL_ID:?authorized cell ID required}"
 [[ "$CELL_ID" =~ ^[a-z2-7]{16}$ ]] || exit 1
-: "${KUBE_CONTEXT:?reviewed cluster context required}"
-test "$(command kubectl config current-context)" = "$KUBE_CONTEXT"
-kubectl() { command kubectl --context "$KUBE_CONTEXT" "$@"; }
-export KUBE_CONTEXT
+: "${KUBE_CONTEXT:?run the break-glass setup above first}"
 psql -X -v ON_ERROR_STOP=1 -v tenant_id="$TENANT_ID" -v cell_id="$CELL_ID" <<'SQL'
 SELECT cell_id, tenant_id, desired_state, observed_state, ready,
        hold_kind, last_backup_at, last_backup_snapshot
@@ -38,18 +68,65 @@ SQL
 Require the expected pair, `ready = true`, no active hold, a non-deleting
 state, and a completed backup after the writes the tenant expects. Copy that
 row's `last_backup_snapshot` into `SNAPSHOT`. Stop if the backup is too old for
-the request. Record `KUBE_CONTEXT` with the authorization. Writes after it are
+the request. Record the break-glass CSR name with the authorization. Writes after it are
 absent; wait for cellctl's next normal backup
 if a newer point is needed. Repeat the query immediately before the restore
 and require the same pair and selected backup ID. The export does not initiate
 a backup or quiesce a writer itself. Verified deletion removes the per-cell
 key and backups; this procedure cannot recover a deleted cell.
 
+The recipients file comes from the tenant through the approved channel. The
+operator never writes or edits it. The tenant also sends the file's SHA-256
+(`sha256sum <file>` on their side) through a separate channel, and says how
+many recipients it holds. The next block checks the file before any restore
+and prints its fingerprint and recipient count; record both with the
+authorization. It stops when:
+
+- the file's SHA-256 differs from the one the tenant sent;
+- a line is an SSH key (`ssh-*`): SSH recipients cannot be matched against the
+  registered keys, so only age X25519 recipients (`age1…`) are accepted;
+- a line is anything else that is not an age X25519 recipient;
+- any recipient is one the operator or escrow holds a key for: the age
+  recipients of the SOPS artifacts under the reviewed release's
+  `infra/secrets/`.
+
+If it stops, nothing has been restored. Ask the tenant for a file with only
+their own age keys. Run it from a checkout of the reviewed release on the node.
+
 ```bash
 : "${SNAPSHOT:?selected backup ID required}"
 [[ "$SNAPSHOT" =~ ^[0-9a-f]{64}$ ]] || exit 1
-: "${RECIPIENTS:?reviewed age recipients file required}"
+: "${RECIPIENTS:?tenant-supplied age recipients file required}"
+: "${RECIPIENTS_SHA256:?the SHA-256 the tenant sent separately}"
+[[ "$RECIPIENTS_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
 test -r "$RECIPIENTS"
+if [ "$(sha256sum < "$RECIPIENTS" | cut -d' ' -f1)" != "$RECIPIENTS_SHA256" ]; then
+  echo 'recipients file does not match the SHA-256 the tenant sent; stop' >&2
+  exit 1
+fi
+tenant_recipients=$(grep -Ev '^[[:space:]]*(#|$)' "$RECIPIENTS" || true)
+test -n "$tenant_recipients"
+if printf '%s\n' "$tenant_recipients" | grep -q '^[[:space:]]*ssh-'; then
+  echo 'SSH recipients cannot be checked against the registered keys; ask for age X25519 recipients; stop' >&2
+  exit 1
+fi
+if printf '%s\n' "$tenant_recipients" | grep -Evq '^age1[02-9ac-hj-np-z]{58}$'; then
+  echo 'recipients file has a line that is not an age X25519 recipient; stop' >&2
+  exit 1
+fi
+RECIPIENT_COUNT=$(printf '%s\n' "$tenant_recipients" | wc -l)
+registered=$(python3 -c '
+import json, pathlib
+for path in sorted(pathlib.Path("infra/secrets").rglob("*.sops.json")):
+    for entry in json.loads(path.read_text(encoding="utf-8")).get("sops", {}).get("age") or []:
+        print(entry["recipient"])
+')
+test -n "$registered"
+if printf '%s\n' "$tenant_recipients" | grep -Fxq -f <(printf '%s\n' "$registered"); then
+  echo 'a recipient is a registered operator or escrow key; stop before any restore' >&2
+  exit 1
+fi
+echo "recipients sha256=$RECIPIENTS_SHA256 count=$RECIPIENT_COUNT"
 : "${OUT_DIR:?private output directory required}"
 test -d "$OUT_DIR" && test "$(stat -c %a "$OUT_DIR")" = 700
 SCRATCH="exo-scratch-${CELL_ID}-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
@@ -58,9 +135,9 @@ export CELL_ID SNAPSHOT SCRATCH
 
 Use the reviewed release's `infra/cellctl/src` and its pinned project-local uv
 environment (see `CONTRIBUTING.md`); set `CELLCTL_PYTHON` to that environment's
-Python. Keep shell tracing off. The age file contains only the authorized
-recipient's public key. Do not put the source Secret, archive plaintext or a
-private age identity in an argument, file or transcript.
+Python. Keep shell tracing off. The recipients file holds only the tenant's
+public keys. Do not put the source Secret, archive plaintext or a private age
+identity in an argument, file or transcript.
 
 ## Render and apply only scratch resources
 
@@ -102,7 +179,7 @@ size = pvc["spec"]["resources"]["requests"]["storage"]
 assert re.fullmatch(r"[1-9][0-9]*Gi", size)
 pod = get("pod", "cell-0", source)
 assert pod["status"]["phase"] == "Running"
-image = next(c["image"] for c in pod["spec"]["containers"] if c["name"] == "cell")
+image = next(c["image"] for c in pod["spec"]["containers"] if c["name"] == "exomem")
 assert re.search(r"@sha256:[a-f0-9]{64}$", image)
 data = get("secret", "cell-credentials", source)["data"]
 keys = ("backup-password", "b2-key-id", "b2-key-secret")
@@ -220,6 +297,11 @@ both `kubectl exec` and age failures. Keep only the completed ciphertext:
 archive="$OUT_DIR/${CELL_ID}-${SNAPSHOT}.vault.tar.age"
 test ! -e "$archive"
 temporary=$(mktemp "$OUT_DIR/.vault-XXXXXX.age")
+if [ "$(sha256sum < "$RECIPIENTS" | cut -d' ' -f1)" != "$RECIPIENTS_SHA256" ]; then
+  rm -f -- "$temporary"
+  echo 'recipients file changed since it was checked; stop' >&2
+  exit 1
+fi
 if kubectl -n "$SCRATCH" exec pod/vault-archive -- python3 -c '
 import os, sys, tarfile
 p = "/data/vault"
@@ -243,14 +325,49 @@ stat -c '%s bytes' "$archive"
 ```
 
 Transfer ciphertext and digest/size through the approved protected channel.
-The authorized recipient compares the digest, decrypts with their own private
-age identity and verifies archive members without extracting or printing
-contents:
+The authorized recipient compares the digest, then counts the recipient
+stanzas in the archive header. The count of `-> X25519` stanzas must equal the
+number of recipients they supplied, and no other recipient type may appear.
+The count alone catches an added key but not a swapped one, so every identity
+behind the supplied recipients must then decrypt the archive: one key per
+identity file, and together exactly the recipients sent, so neither a repeated
+identity nor a multi-key file can stand in for a missing recipient. Together these
+prove it is encrypted to exactly the recipients the tenant supplied. Grease
+stanzas, which some age implementations add and which carry no key, are
+ignored. Then the recipient verifies archive members without extracting or
+printing contents:
 
 ```bash
 set -euo pipefail
+: "${SUPPLIED_RECIPIENTS:?how many recipients the file you sent holds}"
 sha256sum "$RECEIVED_ARCHIVE" # compare with the recorded sender digest
-age -d -i "$RECIPIENT_IDENTITY" "$RECEIVED_ARCHIVE" | python3 -c '
+x25519=$(LC_ALL=C awk '/^--- /{exit} /^-> X25519 /{n++} END{print n+0}' "$RECEIVED_ARCHIVE")
+others=$(LC_ALL=C awk '/^--- /{exit} /^-> / && $2 != "X25519" && $2 !~ /-grease$/ {n++} END{print n+0}' "$RECEIVED_ARCHIVE")
+echo "header: x25519=$x25519 other=$others"
+if [ "$x25519" != "$SUPPLIED_RECIPIENTS" ] || [ "$others" != 0 ]; then
+  echo 'the archive is encrypted to a recipient you did not supply; do not use it' >&2
+  exit 1
+fi
+# One identity file per supplied recipient, one key per file, and together
+# exactly the recipients you sent; then each must open the archive.
+: "${SENT_RECIPIENTS:?the recipients file you sent}"
+read -r -a identities <<< "${RECIPIENT_IDENTITIES:-$RECIPIENT_IDENTITY}"
+[ "${#identities[@]}" = "$SUPPLIED_RECIPIENTS" ]
+derived=""
+for identity in "${identities[@]}"; do
+  keys=$(age-keygen -y "$identity")
+  [ "$(printf '%s\n' "$keys" | grep -c .)" = 1 ] || { echo "$identity must hold exactly one key" >&2; exit 1; }
+  derived+="$keys"$'\n'
+done
+sent=$(grep -v -e '^#' -e '^[[:space:]]*$' "$SENT_RECIPIENTS" | sort)
+if [ "$(printf '%s' "$derived" | sort)" != "$sent" ] || [ -n "$(printf '%s' "$derived" | sort | uniq -d)" ]; then
+  echo 'your identities do not match the recipients you sent, one for one' >&2
+  exit 1
+fi
+for identity in "${identities[@]}"; do
+  age -d -i "$identity" "$RECEIVED_ARCHIVE" > /dev/null
+done
+age -d -i "${identities[0]}" "$RECEIVED_ARCHIVE" | python3 -c '
 import sys, tarfile
 count = 0
 with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as stream:
@@ -276,12 +393,20 @@ SCRATCH_CELL=$(kubectl get namespace "$SCRATCH" -o jsonpath='{.metadata.labels.e
 test "$SCRATCH_CELL" = "$CELL_ID"
 kubectl delete namespace "$SCRATCH" --wait=true --timeout=600s
 test -z "$(kubectl get namespace "$SCRATCH" --ignore-not-found -o name)"
+rm -rf -- "$EXPORT_BIN"
 ```
+
+Then end the break-glass session as the access runbook describes.
 
 If an earlier step fails, retain scratch for bounded diagnosis. For an
 abandoned export, record that no artifact was handed off, then perform the
 same identity-checked, exact-name cleanup; never target the source namespace
 or a broad label selector. Record authorization, tenant/cell, snapshot ID/time,
-scratch name, image digest, ciphertext digest/size and verification/cleanup
-outcome without recording credentials or vault content. A real authorized
-export and recipient handoff are still needed to close task 6.4.
+the recipients file's fingerprint, scratch name, image digest, ciphertext
+digest/size and the tenant's verification and cleanup outcome, without
+recording credentials or vault content.
+
+**Status:** this procedure was run for the owner's cell on 2026-09-28, with
+the admin identity, before break-glass existed. It restored from B2 into a
+scratch namespace and encrypted the archive to a tenant-only recipient. The recipient verified it (member count and marker
+present), and the scratch namespace and its volume were removed.

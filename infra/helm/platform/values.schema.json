@@ -293,6 +293,14 @@
         "encryptionSecretNamespace": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}
       }
     },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiServerCidrs"],
+      "properties": {
+        "apiServerCidrs": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "cloudIngress": {
       "type": "object",
       "additionalProperties": false,

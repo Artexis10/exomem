@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 2ee8ca0364334f2cfe60f262d2397faa177f415dd4c499eebac7004be9d53fb6
+  skill_contract: cee8f5ea4103fbc87c8aabb41b69bbbb087d8304b5bb2729f708edfd45323b50
   version: "0.1.0"
 ---
 
@@ -42,7 +42,7 @@ collection. Fleeting preferences, one-off activity, incidental associations, tri
 metrics, and tentative events stay quiet. Durable interpretations retain explicit
 attribution and uncertainty rather than becoming established facts. Eligibility never creates an Entity,
 collection, or schema. Concise observations and narrow additive facts follow
-`proactive_capture`; affiliation relations use `link_acceptance`; Entity creation or
+`proactive_capture`; affiliation relations use `link_acceptance`; a new Entity follows `proactive_capture`; merge or
 substantial curation uses confirmed `restructure_execution`.
 
 ## Workflow
@@ -75,8 +75,8 @@ carry transient progress; capture reusable decisions and verified milestones.
    or address read from a screenshot), is an entity-level fact: route it to
    that entity or its linked personal-details node under `proactive_capture`,
    not just in the reply that used it.
-8. Only when no entity matches and the identity is stable, recurring, central,
-   and useful beyond this source, use `connect_memory(operation="create-entity")`.
+8. Only when no entity matches and the identity is stable, and central or
+   recurring, and useful beyond this source, use `connect_memory(operation="create-entity")`.
 
 ## Lifecycle
 Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `record_memory(action="append")`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome.

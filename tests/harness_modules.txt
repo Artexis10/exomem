@@ -5,11 +5,13 @@
 tests/test_benchmark_capabilities.py
 tests/test_capture_sweep_journey.py
 tests/test_context_activation_audit.py
+tests/test_context_activation_continuity.py
 tests/test_context_activation_fixtures.py
 tests/test_context_activation_multilingual_embeddings.py
 tests/test_context_activation_multilingual_fixtures.py
 tests/test_context_activation_multilingual_product.py
 tests/test_context_activation_product_corpus.py
+tests/test_context_activation_real_compiler.py
 tests/test_context_activation_resolver_soundness.py
 tests/test_continuation_checkpoint.py
 tests/test_database_bootstrap_rotation_gate.py
@@ -117,6 +119,12 @@ tests/test_membench_utility_runner.py
 tests/test_membench_utility_scenarios.py
 tests/test_membench_utility_scoring.py
 tests/test_membench_utility_world.py
+tests/test_memory_loop_contract.py
+tests/test_memory_loop_decomposition.py
+tests/test_memory_loop_observation.py
+tests/test_memory_loop_rich_episode.py
+tests/test_memory_loop_supplier_chain.py
+tests/test_memory_loop_synthesis_pair.py
 tests/test_memorybench_equivalence_projection.py
 tests/test_memorybench_export.py
 tests/test_memorybench_export_observations.py
@@ -124,6 +132,7 @@ tests/test_memorybench_guest_observations.py
 tests/test_memorybench_provider_sources.py
 tests/test_memorybench_recording_proxy.py
 tests/test_memorybench_setup.py
+tests/test_operator_site_cohort.py
 tests/test_protocol_budget.py
 tests/test_protocol_canary.py
 tests/test_protocol_cli.py

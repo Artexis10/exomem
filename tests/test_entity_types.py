@@ -152,42 +152,123 @@ def test_public_entity_type_schema_and_cli_choices_come_from_registry() -> None:
         assert parameter.choices == ()
 
 
-def test_supported_optional_frontmatter_matches_the_entity_writer() -> None:
+def test_vault_type_declares_bounded_facets(tmp_path: Path) -> None:
+    """A vault type is no longer limited to the ten core writer fields: the
+    registry's `facets` section declares bounded facets (name, single or multi,
+    text/wikilink/date, at most 16 per type) for a core or vault-defined type.
+    The core writer fields keep their exact mapping and cannot be redeclared."""
     writer_fields = tuple(
         inspect.signature(link._entity_writer_optional_values).parameters
     )
-
     assert entity_types.ENTITY_WRITER_OPTIONAL_FRONTMATTER == writer_fields
     assert entity_types.SUPPORTED_OPTIONAL_FRONTMATTER == frozenset(writer_fields)
+
+    proposal = _proposal({"site": _extension(folder="Sites", label="Site", aliases=[], parent=None)})
+    proposal["facets"] = {
+        "site": {
+            "operator": {"cardinality": "single", "value": "wikilink"},
+            "established": {"cardinality": "single", "value": "date"},
+            "soils": {"cardinality": "multi", "value": "text"},
+        },
+        "organization": {"roles": {"cardinality": "multi", "value": "text"}},
+    }
+    _write_registry(tmp_path, proposal)
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    assert registry.findings == ()
+    assert [
+        (facet.name, facet.cardinality, facet.value) for facet in registry.facets_for("site")
+    ] == [
+        ("operator", "single", "wikilink"),
+        ("established", "single", "date"),
+        ("soils", "multi", "text"),
+    ]
+    assert [facet.name for facet in registry.facets_for("organization")] == ["roles"]
+    assert registry.facets_for("person") == ()
+
+    too_many = {f"facet_{index}": {"value": "text"} for index in range(17)}
+    for declaration, code in (
+        ({"site": too_many}, "too_many_facets"),
+        ({"site": {"affiliation": {"value": "text"}}}, "reserved_facet_name"),
+        ({"site": {"entity_type": {"value": "text"}}}, "reserved_facet_name"),
+        ({"site": {"Operator": {"value": "text"}}}, "invalid_facet_name"),
+        ({"site": {"operator": {"value": "number"}}}, "invalid_facet_value"),
+        ({"site": {"operator": {"cardinality": "many"}}}, "invalid_facet_cardinality"),
+        ({"site": {"operator": {"value": "text", "unit": "kg"}}}, "unknown_field"),
+        ({"venue": {"operator": {"value": "text"}}}, "unknown_facet_type"),
+    ):
+        invalid = entity_types.load_entity_types(proposal={**proposal, "facets": declaration})
+        assert code in {item["code"] for item in invalid.findings}, declaration
+        # A declaration with any finding contributes no facets at all.
+        assert invalid.facets_for("site") == ()
+        assert "site" in invalid.extensions
 
     distinct_values = {
         field: [f"{field}-value"] if field == "used_in" else f"{field}-value"
         for field in writer_fields
     }
     rendered = link._render_entity(
-        entity_type="place",
+        entity_type="site",
         name="Aster Hall",
-        summary="A synthetic place used to pin optional entity frontmatter.",
+        summary="A synthetic site used to pin core and declared entity frontmatter.",
         why_in_kb=None,
         date_iso="2026-08-22",
         tags=[],
         connections=[],
         exomem_id="00000000-0000-4000-8000-000000000001",
         definition=entity_types.EntityTypeDefinition(
-            id="place",
-            folder="Places",
-            label="Place",
+            id="site",
+            folder="Sites",
+            label="Site",
             aliases=(),
-            capture_guidance="A stable synthetic place identity.",
+            capture_guidance="A stable synthetic site identity.",
             optional_frontmatter=writer_fields,
             core=False,
         ),
+        facets=[
+            ("operator", ["[[Knowledge Base/Entities/Organizations/Aster Co]]"], False),
+            ("established", ["2019-04-01"], False),
+            ("soils", ["loam", "clay: heavy"], True),
+        ],
         **distinct_values,
     )
     frontmatter = yaml.safe_load(rendered.split("---", 2)[1])
 
     for field, value in distinct_values.items():
         assert frontmatter[field] == value
+    assert frontmatter["operator"] == "[[Knowledge Base/Entities/Organizations/Aster Co]]"
+    assert frontmatter["established"] == "2019-04-01"
+    assert frontmatter["soils"] == ["loam", "clay: heavy"]
+
+
+def test_parent_may_name_a_parentless_vault_type(tmp_path: Path) -> None:
+    """A vault-rooted family: `milking-machine` under a vault `equipment` root.
+    Families stay one level deep, so a child's parent must itself be a root."""
+    _write_registry(
+        tmp_path,
+        _proposal(
+            {
+                "equipment": _extension(
+                    folder="Equipment", label="Equipment", aliases=[], parent=None
+                ),
+                "milking-machine": _extension(
+                    folder="Milking Machines",
+                    label="Milking Machine",
+                    aliases=[],
+                    parent="equipment",
+                ),
+            }
+        ),
+    )
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    assert registry.findings == ()
+    assert registry.family_of("milking-machine") == "equipment"
+    assert registry.family_of("equipment") == "equipment"
+    assert registry.families["equipment"] == ("equipment", "milking-machine")
+    assert registry.matches_family("milking-machine", "equipment")
 
 
 def _extension(

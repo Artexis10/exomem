@@ -206,10 +206,26 @@ class LocalRuntimeActivation:
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
+        # The request path, warmed by one internal turn before the startup
+        # drain: a quiet-mode standby skips its cache warm, so without this the
+        # first real turn after a promotion pays the cold resolver, page and
+        # index handles itself.
+        self._start_component("request-path warm", _warm_request_path)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._start_component(
             "file watcher recovery",
             self._finish_file_watcher_startup,
         )
+        # Lazily, once the drain is done and off this thread: nothing below
+        # waits on a matrix load, and the reaper still frees it when idle.
+        threading.Thread(
+            target=_warm_embedding_matrix,
+            args=(self.vault_root,),
+            name="exomem-matrix-warm",
+            daemon=True,
+        ).start()
         starters = (
             ("graph drain", _start_graph_drain),
             ("media", self._start_media_worker),
@@ -694,6 +710,59 @@ def drain_vocabulary_recovery(
     if drained:
         log.info("drained %d queued vocabulary recovery job(s)", drained)
     return drained
+
+
+#: The internal warm turn. Plain words the lexical, semantic and recent
+#: stages all see; it names nothing, so no anchor resolves and no heat is kept.
+_REQUEST_PATH_WARM_TURN = "what changed recently and what is still open"
+
+
+def _warm_request_path(vault_root: Path) -> None:
+    """Run one activation for its caches only: no log, no session, no heat.
+
+    Calls the activation body directly, so the activation log, the upkeep
+    carrier and the continuity carry-through never see it; with no session,
+    anchor or caller it records no heat and no episode nudge. Never raises.
+    """
+    started = time.perf_counter()
+    try:
+        from . import commands, working_set
+
+        commands._op_activate_context_body(  # noqa: SLF001 - deliberately log-free
+            vault_root,
+            _REQUEST_PATH_WARM_TURN,
+            working_set.DEFAULT_BUDGET_CHARS,
+            purpose=None,
+            continuity=None,
+            anchor=None,
+            include_timings=False,
+            client=None,
+            session=None,
+            workspace=None,
+        )
+    except Exception:  # noqa: BLE001 - a warm is never load-bearing
+        log.info("request-path warm skipped", exc_info=True)
+        return
+    log.info("request-path warm done in %.0f ms", (time.perf_counter() - started) * 1000.0)
+
+
+def _warm_embedding_matrix(vault_root: Path) -> None:
+    """One tiny vector search so the first hybrid recall or write skips the load."""
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return
+    started = time.perf_counter()
+    try:
+        import numpy as np
+
+        from . import embeddings, recall_space
+
+        index = embeddings.get_embedding_index(vault_root)
+        dim = int(getattr(index, "dim", recall_space.LEGACY_DIM))
+        index.search(np.full(dim, 1.0 / (dim**0.5), dtype=np.float32), k=1)
+    except Exception:  # noqa: BLE001 - a warm is never load-bearing
+        log.info("embedding matrix warm skipped", exc_info=True)
+        return
+    log.info("embedding matrix warm done in %.0f ms", (time.perf_counter() - started) * 1000.0)
 
 
 def _start_metrics_persistence() -> None:

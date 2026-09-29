@@ -84,7 +84,26 @@ def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
     assert 'checksum: "sha256:{{ k3s_sha256_amd64 }}"' in tasks
     assert "cluster-init: true" in config
     assert "secrets-encryption: true" in config
-    assert 'write-kubeconfig-mode: "0640"' in config
+    # harden-exomem-cloud-operator-access D4/2.6: the admin kubeconfig is
+    # root-only. The operators group holds the administrator login, which
+    # reaches cluster-admin only through sudo.
+    assert 'write-kubeconfig-mode: "0600"' in config
+    assert "write-kubeconfig-group" not in config
+    # K3s rewrites k3s.yaml in place and keeps its old group, so a node that
+    # once wrote it to the operators group keeps that group until the role
+    # resets the file itself, after K3s has started and written it.
+    import yaml
+
+    server = yaml.safe_load(_read("roles/k3s/tasks/server.yml"))
+    names = [task["name"] for task in server]
+    (reset,) = [
+        task for task in server
+        if task.get("ansible.builtin.file", {}).get("path") == "/etc/rancher/k3s/k3s.yaml"
+    ]
+    assert reset["ansible.builtin.file"] == {
+        "path": "/etc/rancher/k3s/k3s.yaml", "owner": "root", "group": "root", "mode": "0600",
+    }
+    assert names.index(reset["name"]) > names.index("Wait for the local Kubernetes API readiness endpoint")
     assert "disable:\n  - traefik\n  - servicelb\n  - local-storage" in config
     assert "service-account-max-token-expiration=24h" in config
     assert "image-gc-high-threshold=75" in config
@@ -417,6 +436,15 @@ def test_postgres_role_archives_wal_and_verifies_restores_weekly() -> None:
         "path: /etc/pgbackrest\n    state: directory\n    owner: postgres\n"
         "    group: postgres\n    mode: \"0750\""
     ) in tasks
+    # A quiet control database fills a 16 MB WAL segment only every few days,
+    # and archive-push ships only whole segments, so without a timeout the
+    # recovery point in B2 is the last nightly backup: up to a day of lost
+    # writes, including write-once wrapped cell keys. archive_timeout forces a
+    # segment switch, bounding the loss to that many seconds.
+    pg_conf = _read("roles/postgres/templates/exomem-postgres.conf.j2")
+    archive_timeout = re.search(r"^archive_timeout = (\d+)$", pg_conf, re.MULTILINE)
+    assert archive_timeout is not None
+    assert 0 < int(archive_timeout.group(1)) <= 300
     assert "OnCalendar=*-*-* 03:00:00" in full_timer
     assert "OnCalendar=Sun *-*-* 04:00:00" in verify_timer
     assert "exomem-pgbackrest-restore-verify.sh" in verify_service

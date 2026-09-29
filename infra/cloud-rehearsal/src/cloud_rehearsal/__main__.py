@@ -170,7 +170,7 @@ async def _run(args: argparse.Namespace) -> int:
             report.overlays.extend(deployed.overlays)
             platform.wait_rollout(stack, platform.CLOUD_NAMESPACE, "cellctl")
             platform.wait_rollout(stack, platform.CLOUD_NAMESPACE, "exomem-cloud-gateway")
-            platform.wait_rollout(stack, platform.PLATFORM_NAMESPACE, "rehearsal-traefik")
+            platform.wait_rollout(stack, platform.EDGE_NAMESPACE, "rehearsal-traefik")
             _wait_json(resolver, f"https://{tls.MCP_HOST}/.well-known/oauth-protected-resource{substrate.MCP_PATH}", "the gateway through ingress")
         ctx = Context(stack=stack, substrate=control, images=built, resolver=resolver, report=report)
         with _stage(report, "release"):

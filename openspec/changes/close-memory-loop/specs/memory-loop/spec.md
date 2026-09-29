@@ -105,6 +105,12 @@ The system SHALL resolve and enrich existing entities before creating duplicates
 - **THEN** the agent proposes or applies permitted hydration of that identity instead of creating a duplicate
 - **AND** ambiguous or incidental mentions do not cause automatic identity assignment
 
+#### Scenario: A vault-rooted family resolves by its parent
+
+- **WHEN** a vault registers an equipment type with no parent and a subtype whose parent is that equipment type
+- **THEN** exact resolution, resolution by the equipment family and family-filtered traversal reach the subtype's entities with the same ref and path on MCP, CLI and REST
+- **AND** neither type is classified as an organization
+
 #### Scenario: A useful reusable relationship is missing
 
 - **WHEN** no current registered relation truthfully expresses a supported reusable distinction
@@ -145,6 +151,12 @@ The system SHALL support separately evidenced operator organizations, physical s
 - **THEN** the agent records supported roles/facets or relationships on that identity without creating three organizations
 - **AND** an incidental trading name does not automatically create a separate brand
 
+#### Scenario: Roles are declared facets of one identity
+
+- **WHEN** the vault's entity registry declares a multi-valued roles facet for organizations and one organization is producer, operator and supplier
+- **THEN** creating that organization records all three roles on the one identity
+- **AND** a facet the registry does not declare for the type is refused without a write
+
 #### Scenario: A brand has an independently useful identity
 
 - **WHEN** evidence establishes a durable brand whose ownership or usage can change independently of an existing organization
@@ -161,6 +173,14 @@ Exact names and aliases that have multiple real-world referents SHALL return bou
 - **THEN** the resolver preserves both candidates and the agent can select the evidence-supported identity for each claim
 - **AND** insufficient context leaves the claim unresolved without a write to an arbitrary target
 - **AND** later activation preserves the same ambiguity rather than treating the alias as globally owned by one node
+
+#### Scenario: A justified distinct identity is an explicit decision
+
+- **WHEN** the agent creates a site whose exact name an active organization already carries
+- **THEN** the entity writer returns the bounded candidates and a fingerprint over them without writing anything
+- **AND** only a `distinct` decision bound to that fingerprint commits the site, leaving the organization's page, title and aliases unchanged
+- **AND** a decision made against candidates that have since changed is refused as stale
+- **AND** a same-type exact duplicate without such a decision is still refused
 
 ### Requirement: Supplier topology preserves evidence for each relationship
 
