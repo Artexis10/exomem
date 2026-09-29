@@ -184,4 +184,6 @@ roles:
     lane: units
     categories: [contact]
     anchor_defaults: []
-    cues: ["phone", "call them", "call her", "call him", "email", "e-mail", "address", "reach them", "contact details", "contact info"]
+    # Selected by an intent shape over whole turn tokens (a contact noun tied to the
+    # person, or a reach verb whose object is the person), never by a cue substring.
+    intent: contact
