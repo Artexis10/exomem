@@ -309,13 +309,16 @@ def audit_topology(corpus: CorpusManifest, publication: Publication) -> tuple[To
     from exomem import working_set
 
     by_path = publication.by_path()
+    # A Planning item's anchor is filed under its collection and reports the
+    # item's own page as its ref (close-memory-loop task 6.12).
+    published_refs = {anchor.ref for anchor in publication.anchors}
     carry_refused = publication.indexed_pages < working_set.RETRIEVAL_CARRY_MIN_PAGES
     findings: list[TopologyFinding] = []
     for fixture in FIXTURES:
         for key in fixture.gold:
             path = corpus.key_to_path[key]
             key_kind = KEY_KINDS.get(key, "unknown")
-            if path in by_path:
+            if path in by_path or path in published_refs:
                 continue
             if key_kind == "planning_item":
                 finding = (
@@ -342,7 +345,10 @@ MECHANISMS: dict[str, str] = {
     "working_set": "the whole compiler: the documented EXOMEM_DISABLE_WORKING_SET kill switch",
     "resolver": "anchor resolution: no candidate resolves, so no anchor, lane or current state is served",
     "soundness": "the soundness rule: any one contact kind (a rare term or retrieval alone) resolves",
-    "competing_senses": "competing-sense abstention: disconnected same-kind resolved anchors never abstain",
+    "competing_senses": (
+        "competing-sense handling: disconnected same-kind anchors never abstain, whether "
+        "resolved or reached by one bare shared name, and a qualifier never narrows two senses"
+    ),
     "records_state": "governed current state: no Records or profile state reaches the packet",
     "naming_gate": (
         "the retrieval carry's naming gate: the top lexical hit for the turn's words is carried, "
@@ -404,7 +410,12 @@ def removed(mechanism: str) -> Iterator[None]:
             yield
         return
     if mechanism == "competing_senses":
-        with mock.patch.object(working_set_resolve, "_competing_groups", lambda _resolved: ()):
+        with (
+            mock.patch.object(working_set_resolve, "_competing_groups", lambda _resolved: ()),
+            mock.patch.object(
+                working_set_resolve, "_narrowed_by_qualifier", lambda anchors: tuple(anchors)
+            ),
+        ):
             yield
         return
     if mechanism == "records_state":
@@ -533,6 +544,10 @@ REPORTED_AMENDMENTS: tuple[str, ...] = (audit.UNIT_PARENT_RECALL, audit.HEDGED_P
 #: Amendment A7 (ambiguity candidates in a positive case's precision),
 #: reported in its own column beside the raw and the A2+A4 scores.
 AMBIGUITY_AMENDMENTS: tuple[str, ...] = (audit.AMBIGUITY_PRECISION,)
+#: Amendment A8 (a carried gold page counts), its own column.
+CARRIED_GOLD_AMENDMENTS: tuple[str, ...] = (audit.CARRIED_GOLD,)
+#: Amendment A9 (agent-choice scoring), its own column.
+AGENT_CHOICE_AMENDMENTS: tuple[str, ...] = (audit.AGENT_CHOICE,)
 
 
 def score_trees(
@@ -640,12 +655,16 @@ def recorded_report(
     removals: Mapping[str, audit.AuditReport],
     amended: audit.AuditReport,
     amended_a7: audit.AuditReport,
+    amended_a8: audit.AuditReport,
+    amended_a9: audit.AuditReport,
 ) -> dict[str, Any]:
     """The reproducible part of one product run (task 4.2).
 
     ``report`` is the raw pre-registered score; ``amended`` is the same
-    packets scored under :data:`REPORTED_AMENDMENTS` and ``amended_a7``
-    under :data:`AMBIGUITY_AMENDMENTS`, each recorded beside it.
+    packets scored under :data:`REPORTED_AMENDMENTS`, ``amended_a7`` under
+    :data:`AMBIGUITY_AMENDMENTS` and ``amended_a8`` under
+    :data:`CARRIED_GOLD_AMENDMENTS` and ``amended_a9`` under
+    :data:`AGENT_CHOICE_AMENDMENTS`, each recorded beside it.
 
     Everything here is a function of the fixtures, the thresholds, the
     logical corpus and the compiler. Exact corpus bytes carry writer-minted
@@ -701,6 +720,11 @@ def recorded_report(
         ],
         "amended": amended_block(REPORTED_AMENDMENTS, amended),
         "amended_a7": amended_block(AMBIGUITY_AMENDMENTS, amended_a7),
+        "amended_a8": amended_block(CARRIED_GOLD_AMENDMENTS, amended_a8),
+        "amended_a9": {
+            **amended_block(AGENT_CHOICE_AMENDMENTS, amended_a9),
+            "agent_choice_digest": audit.agent_choice_digest(),
+        },
         "fixture_mechanisms": dict(FIXTURE_MECHANISMS),
         "mechanism_removal": {
             mechanism: {
@@ -730,7 +754,9 @@ def run_product_audit(
 
 __all__ = [
     "AMBIGUITY_AMENDMENTS",
+    "AGENT_CHOICE_AMENDMENTS",
     "AMENDED_CASE_FIELDS",
+    "CARRIED_GOLD_AMENDMENTS",
     "FIXTURE_MECHANISMS",
     "MECHANISMS",
     "PRODUCT_MECHANISM",

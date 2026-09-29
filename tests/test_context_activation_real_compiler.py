@@ -83,42 +83,40 @@ PRE_REGISTERED_THRESHOLDS = {
 
 #: Today's outcome on corpus v4, case by case (raw, pre-registered). A red
 #: case lists reasons its report must contain (by prefix); a passing case
-#: lists none.
-PASSING_TODAY = frozenset({"T2", "C5", "C6", "C7", "T9"})
+#: lists none. T3, T4, T5 and T7 pass since the activation-quality round:
+#: the Planning item's own page (task 6.12), a bare shared name asks, the
+#: anchor lede is not repeated as a unit, and a qualifier narrows two senses.
+PASSING_TODAY = frozenset({"T2", "T3", "T4", "C5", "T5", "C6", "C7", "T7", "T9"})
 RED_TODAY: dict[str, tuple[str, ...]] = {
     "C1": (
         "gold recall 0.33 below the 0.9 floor",
         "missing required fact(s): ['weekly limit', 'capacity ceiling']",
     ),
-    # The retrieval carry is live on this corpus and carries T1's own
-    # fitness-goal note: a page outside the twin's empty gold.
+    # The retrieval carry is live on this corpus and carries the step-count
+    # fitness-goal page (C1's pre-registered poison): outside T1's empty gold.
     "T1": ("twin surfaced a ref outside its own gold", "precision 0.00 below the 0.8 floor"),
+    # Stays red by ruling (R3): the grill resolves only partially, and a
+    # shared tag is not corroboration on a real vault. Semantic corroboration
+    # is future sensed-model work.
     "C2": (
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.50 below the 0.9 floor",
     ),
-    # Product red (amendment A3, close-memory-loop 6.12): the compiler serves
-    # the Planning collection, never the item the turn is about.
+    # The plan anchor now reports its item (close-memory-loop 6.12), and the
+    # turn's words reach the other workstream's item, never this one's. Stays
+    # red by ruling (R4): "the next roadmap item" relies on workspace context a
+    # cold run lacks; a keyed variant belongs in the continuity group.
     "C3": (
         "expected status 'resolved', observed 'unresolved'",
+        "1 poison anchor(s) surfaced",
         "gold recall 0.00 below the 0.9 floor",
     ),
-    "T3": ("twin surfaced a ref outside its own gold", "gold recall 0.00 below the 0.9 floor"),
     "C4": (
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.50 below the 0.9 floor",
     ),
-    # Product red (amendment A5): a bare first name stays partial, so the
-    # turn abstains unresolved rather than ambiguous. On v4 the carry also
-    # reaches C4's failure note.
-    "T4": ("expected status 'ambiguous', observed 'unresolved'", "1 poison anchor(s) surfaced"),
-    # The scanner cart's own resource unit is served; D9 keeps a unit
-    # fragment distinct from its page, and A2 amends recall only.
-    "T5": ("twin surfaced a ref outside its own gold", "precision 0.67 below the 0.8 floor"),
     # The carry reaches an ordinary note on temperature conversions.
     "T6": ("twin surfaced a ref outside its own gold", "precision 0.00 below the 0.8 floor"),
-    # Product red (amendment A5): the scoped turn also resolves the market hub.
-    "T7": ("expected status 'resolved', observed 'ambiguous'", "2 poison anchor(s) surfaced"),
     "C8": (
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.00 below the 0.9 floor",
@@ -127,6 +125,7 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.00 below the 0.9 floor",
     ),
+    # As C2, on the padded tree (R3).
     "C9": (
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.50 below the 0.9 floor",
@@ -136,12 +135,24 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
 #: The same packets under amendments A2 and A4, reported beside the raw
 #: outcome. On corpus v4 neither amendment changes a verdict: no gold note
 #: reaches a packet only as a unit, and no poison is served as a hedge.
-AMENDED_PASSING_TODAY = frozenset({"T2", "C5", "C6", "C7", "T9"})
+AMENDED_PASSING_TODAY = PASSING_TODAY
 
 #: The same packets under amendment A7 alone (ambiguity candidates in a
 #: positive case's precision). C7's real packet names only its gold hubs as
 #: ambiguity, so A7 changes no verdict on corpus v4.
-A7_PASSING_TODAY = frozenset({"T2", "C5", "C6", "C7", "T9"})
+A7_PASSING_TODAY = PASSING_TODAY
+
+#: The same packets under amendment A8 alone (a carried gold page with its
+#: units satisfies the status, and its units count in precision). No verdict
+#: changes: C4's carried failure note still leaves the colleague's entity
+#: unreached, and the other carried pages are outside their case's gold.
+A8_PASSING_TODAY = PASSING_TODAY
+
+#: The same packets under amendment A9 alone (agent-choice scoring, digest
+#: pinned before this first run). Every red positive still misses a gold
+#: page: none fails for a mislabel alone, so A9 changes no verdict on the
+#: activation-quality runtime either.
+A9_PASSING_TODAY = PASSING_TODAY
 
 #: Negative controls whose pre-registered mechanism does not change their
 #: outcome. Empty on corpus v4: C6, T1, T2 and T9 each fail with the naming
@@ -157,9 +168,7 @@ TOPOLOGY_TODAY: dict[tuple[str, str], str] = {
     ("C1", "c1_weekly_limit_insight"): NO_ANCHOR,
     ("C1", "c1_capacity_ceilings_pattern"): NO_ANCHOR,
     ("C2", "c2_cooking_method_insight"): NO_ANCHOR,
-    ("C3", "c3_planning_item"): "planning identity: the published plan anchor is",
     ("C3", "c3_design_pointer"): NO_ANCHOR,
-    ("T3", "t3_other_project_planning_item"): "planning identity: the published plan anchor is",
     ("C4", "c4_failure_note"): NO_ANCHOR,
     ("C8", "c8_active_head"): NO_ANCHOR,
     ("T8", "t8_unchained_active_note"): NO_ANCHOR,
@@ -210,6 +219,10 @@ class Run:
     amended: audit.AuditReport
     #: The same packets under amendment A7 alone, its own column.
     amended_a7: audit.AuditReport
+    #: The same packets under amendment A8 alone (a carried gold page counts).
+    amended_a8: audit.AuditReport
+    #: The same packets under amendment A9 alone (agent-choice scoring).
+    amended_a9: audit.AuditReport
     #: gold note key -> every unit ref any role lane serves from its page.
     note_units: dict[str, tuple[str, ...]]
 
@@ -273,6 +286,8 @@ def _compute(workdir: Path) -> Run:
         removal_reports[mechanism] = product.score_trees(trees, packets)
     amended = product.score_trees(trees, raw, amendments=product.REPORTED_AMENDMENTS)
     amended_a7 = product.score_trees(trees, raw, amendments=product.AMBIGUITY_AMENDMENTS)
+    amended_a8 = product.score_trees(trees, raw, amendments=product.CARRIED_GOLD_AMENDMENTS)
+    amended_a9 = product.score_trees(trees, raw, amendments=product.AGENT_CHOICE_AMENDMENTS)
     base = next(tree for tree in trees if tree.distractor_count == 0)
     return Run(
         trees,
@@ -283,6 +298,8 @@ def _compute(workdir: Path) -> Run:
         removal_reports,
         amended,
         amended_a7,
+        amended_a8,
+        amended_a9,
         _note_units(base),
     )
 
@@ -487,6 +504,8 @@ def test_current_runtime_amended_outcomes_are_recorded_beside_the_raw_ones(run: 
 
     assert {s.case_id for s in run.amended.per_case if s.passed} == AMENDED_PASSING_TODAY
     assert {s.case_id for s in run.amended_a7.per_case if s.passed} == A7_PASSING_TODAY
+    assert {s.case_id for s in run.amended_a8.per_case if s.passed} == A8_PASSING_TODAY
+    assert {s.case_id for s in run.amended_a9.per_case if s.passed} == A9_PASSING_TODAY
     assert {s.case_id for s in run.report.per_case if s.passed} == PASSING_TODAY
     raw = {s.case_id: s for s in run.report.per_case}
     for amended in run.amended.per_case:
@@ -561,13 +580,18 @@ def test_current_runtime_topology_audit_names_every_unreachable_gold_identity(ru
         assert findings[pair].startswith(prefix), (pair, findings[pair])
 
 
-def test_current_runtime_planning_resolves_the_collection_not_the_gold_item(run: Run) -> None:
+def test_current_runtime_planning_resolves_the_gold_item_filed_under_its_collection(
+    run: Run,
+) -> None:
+    """Task 6.12: the plan anchor reports the item's own page, and keeps its
+    collection as its home."""
+
     tree = run.tree(0)
     item = tree.corpus.key_to_path["t3_other_project_planning_item"]
     collection = item.rpartition("/Items/")[0] + "/_collection.md"
     resolved = [anchor for anchor in run.raw["T3"]["anchors"] if anchor["status"] == "resolved"]
-    assert [(anchor["kind"], anchor["ref"]) for anchor in resolved] == [("plan", collection)]
-    assert item not in json.dumps(run.raw["T3"])
+    assert [(a["kind"], a["ref"], a["path"]) for a in resolved] == [("plan", item, collection)]
+    assert {unit["ref"] for unit in run.raw["T3"]["units"]} == {item}
 
 
 def test_current_runtime_gold_note_categories_are_registered_by_the_corpus_vault(run: Run) -> None:
@@ -692,6 +716,8 @@ def test_the_recorded_report_is_the_current_product_run(run: Run) -> None:
         removals=run.removal_reports,
         amended=run.amended,
         amended_a7=run.amended_a7,
+        amended_a8=run.amended_a8,
+        amended_a9=run.amended_a9,
     )
     target = os.environ.get(RECORD_ENV)
     if target:

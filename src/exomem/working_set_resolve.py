@@ -279,6 +279,24 @@ class TurnAnalysis:
     #: a Latin word glued to a Japanese phrase, and the parts of a Japanese
     #: run between its hiragana. Compared like tokens; they hold no position.
     words: tuple[str, ...] = ()
+    #: Words the raw turn capitalises somewhere other than at a sentence start,
+    #: folded like the lexical terms. Casing is how a cased script marks a word
+    #: as a name; a capital that only ever opens a sentence marks nothing.
+    #: Empty for a turn with no lower-case letter, where capitals carry no
+    #: signal.
+    capitalised: frozenset[str] = frozenset()
+    #: Token indices where the raw turn punctuates a clause boundary (sentence
+    #: end, comma, colon, semicolon, dash) just before that token: no run of
+    #: name words spans one (`_name_span`). `tokens_of` drops punctuation, so
+    #: the positions are derived from the raw text and `tokens` is unchanged.
+    run_breaks: frozenset[int] = frozenset()
+    #: Does the raw turn's casing say anything? True only for a turn that mixes
+    #: capitalised and lower-case words: an all-lower-case turn, an all-caps
+    #: one and a headline with every word capitalised carry no signal.
+    cased_turn: bool = False
+    #: Words the raw turn writes with a capital anywhere, a sentence start
+    #: included, folded like the lexical terms. Empty when `cased_turn` is false.
+    capitalised_anywhere: frozenset[str] = frozenset()
 
 
 #: A follow-up is short: at most this many tokens. "what about the second
@@ -362,6 +380,10 @@ class AnchorFacts:
     categories: tuple[str, ...]
     neighbourhood: frozenset[str]
     anchor_neighbourhood: frozenset[str] = frozenset()
+    #: An entity page's own `entity_type` (`person`, `organization`, ...),
+    #: casefolded; empty for every other kind and for an entity that declares
+    #: none.
+    entity_type: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,6 +408,22 @@ class CandidateFacts:
     #: second competing sense, and telling the two apart needs the actual
     #: matched phrase text, not just the fact that `exact_alias` fired.
     exact_alias_phrases: frozenset[str] = frozenset()
+    #: The anchor's own authored name terms the turn shared, when that shared
+    #: set is what earned its `lexical_overlap` or `rare_term`. Never
+    #: serialised into a packet; `resolve` reads it to tell a qualifier that
+    #: narrows two senses from a bare name two senses share.
+    name_contact: frozenset[str] = frozenset()
+    #: The turn token span `[start, end)` of the longest contiguous run that
+    #: spells this anchor's own name words (stopwords may sit inside it, never
+    #: at its edges). `None` when no name word was reached. Never serialised.
+    name_span: tuple[int, int] | None = None
+    entity_type: str = ""
+    #: Did the turn capitalise a shared name word away from a sentence start
+    #: (`TurnAnalysis.capitalised`)? Never serialised.
+    name_capitalised: bool = False
+    #: Did a turn whose casing says something write the shared name word
+    #: without a capital anywhere (`TurnAnalysis.capitalised_anywhere`)?
+    name_lower_case: bool = False
 
     @property
     def deciding_kinds(self) -> frozenset[str]:
@@ -412,6 +450,13 @@ class ResolvedAnchor:
     #: fields explicitly and does not list this one, so it never reaches a
     #: served packet.
     exact_alias_phrases: frozenset[str] = frozenset()
+    #: Carried over from `CandidateFacts` for `resolve`'s own use, and, like
+    #: `exact_alias_phrases`, never serialised.
+    name_contact: frozenset[str] = frozenset()
+    name_span: tuple[int, int] | None = None
+    entity_type: str = ""
+    name_capitalised: bool = False
+    name_lower_case: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -928,7 +973,91 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
             tokens, referential_cue=referential_cue, filler=vocabulary.filler
         ),
         words=embedded_words(tokens, _word_edges(vocabulary)),
+        capitalised=_capitalised_terms(turn),
+        run_breaks=_run_breaks(text, tokens),
+        cased_turn=_casing_signal(turn),
+        capitalised_anywhere=_capitalised_terms(turn, anywhere=True),
     )
+
+
+#: Clause punctuation, for `_run_breaks`: sentence ends, comma, colon,
+#: semicolon, parentheses and square brackets, and dashes (an en or em dash, or a hyphen standing alone between
+#: spaces; a hyphen inside a word is part of the word), in the cased scripts'
+#: and the CJK forms.
+_CLAUSE_BREAK = re.compile(
+    r"[.,:;!?()\[\]\n\r\u2026\u2013\u2014\u3001\u3002\uff01\uff0c\uff0e\uff1a\uff1b\uff1f]+"
+    r"|(?:^|\s)-+(?=\s|$)"
+)
+#: The coordinators the tokeniser's stopwords already carry: "X and Y" is two
+#: things, so neither ends up inside one run of name words.
+_RUN_COORDINATORS: frozenset[str] = frozenset({"and", "or"})
+
+
+def _run_breaks(text: str, tokens: Sequence[str]) -> frozenset[int]:
+    """Token indices with clause punctuation just before them in `text`.
+
+    Tokenises each punctuation-delimited segment with `tokens_of`; when that
+    does not reproduce `tokens` exactly the positions cannot be trusted and
+    none are reported (a run then breaks only at coordinators).
+    """
+    breaks: set[int] = set()
+    seen: list[str] = []
+    for segment in _CLAUSE_BREAK.split(text):
+        if seen:
+            breaks.add(len(seen))
+        seen.extend(tokens_of(segment))
+    if tuple(seen) != tuple(tokens):
+        return frozenset()
+    return frozenset(index for index in breaks if 0 < index < len(tokens))
+
+
+#: Where a sentence ends, for `_capitalised_terms`: the full stops, question
+#: and exclamation marks and semicolons of the cased scripts, and a line break.
+_SENTENCE_END = re.compile(r"[.!?;\n\r\u2026]+")
+_RAW_WORD = re.compile(r"[^\W_][\w'\u2019-]*")
+
+
+def _casing_signal(turn: str) -> bool:
+    """Does the raw turn's casing carry information?
+
+    Only a turn that writes some cased word with a capital AND some cased word
+    without one does. An all-lower-case turn, an all-caps turn and a headline
+    whose every word is capitalised mark no word as a name.
+    """
+    raw = unicodedata.normalize("NFKC", str(turn or ""))
+    upper = lower = False
+    for word in _RAW_WORD.findall(raw):
+        if not _is_cased(word[:1]):
+            continue
+        if word[:1].isupper():
+            upper = True
+        else:
+            lower = True
+    return upper and lower
+
+
+def _capitalised_terms(turn: str, *, anywhere: bool = False) -> frozenset[str]:
+    """Words the raw turn writes with a capital other than as a sentence's
+    first word, folded as lexical terms are (`TurnAnalysis.capitalised`).
+    `anywhere` counts a sentence's first word too."""
+    raw = unicodedata.normalize("NFKC", str(turn or ""))
+    if not _casing_signal(raw):
+        return frozenset()
+    out: set[str] = set()
+    for sentence in _SENTENCE_END.split(raw):
+        for position, word in enumerate(_RAW_WORD.findall(sentence)):
+            if (position == 0 and not anywhere) or not word[:1].isupper():
+                continue
+            for token in tokens_of(normalize(word)):
+                folded = _fold_lexical_term(token)
+                if folded is not None:
+                    out.add(folded)
+    return frozenset(out)
+
+
+def _is_cased(term: str) -> bool:
+    """Does `term`'s script distinguish capitals at all?"""
+    return any(character.upper() != character.lower() for character in term)
 
 
 # --------------------------------------------------------------------------- #
@@ -1188,8 +1317,10 @@ def candidates_for(
         )
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
+        name_contact: frozenset[str] = frozenset()
         if len(shared_broad) >= min_terms and len(shared_name) >= 2:
             evidence.add("lexical_overlap")
+            name_contact = shared_name
         elif len(shared_name) == 1:
             (only_shared_name_term,) = shared_name
             count = term_counts.get(only_shared_name_term)
@@ -1220,6 +1351,7 @@ def candidates_for(
                 )
                 if not consumed:
                     evidence.add("rare_term")
+                    name_contact = shared_name
         # An unspaced script writes a name inside a run of words, never as a
         # token of its own: containment is its `rare_term` (design §6.3),
         # never `exact_alias`, and like any `rare_term` it needs a second,
@@ -1268,6 +1400,20 @@ def candidates_for(
                 anchor_neighbourhood=row.anchor_neighbourhood,
                 evidence=frozenset(evidence),
                 exact_alias_phrases=matched_phrases,
+                name_contact=name_contact,
+                name_span=_name_span(
+                    analysis.tokens, stopwords, name_terms_folded, analysis.run_breaks
+                )
+                if name_contact
+                else None,
+                entity_type=row.entity_type,
+                name_capitalised=bool(name_contact & analysis.capitalised),
+                name_lower_case=bool(
+                    name_contact
+                    and analysis.cased_turn
+                    and all(_is_cased(term) for term in name_contact)
+                    and not name_contact & analysis.capitalised_anywhere
+                ),
             )
         )
     out.sort(key=_candidate_order)
@@ -1283,6 +1429,47 @@ def candidates_for(
         rest = [item for item in out if "recency" not in item.evidence]
         return tuple(sorted([*hot, *rest[: MAX_CANDIDATES - len(hot)]], key=_candidate_order))
     return tuple(out[:MAX_CANDIDATES])
+
+
+def _name_span(
+    tokens: Sequence[str],
+    stopwords: frozenset[str],
+    name_terms: frozenset[str],
+    breaks: frozenset[int] = frozenset(),
+) -> tuple[int, int] | None:
+    """The longest contiguous run of `tokens` spelling `name_terms` words.
+
+    Stopwords may sit inside a run ("bank of the north") but never start or
+    end one, and any other word breaks it. So does clause punctuation
+    (`breaks`: token indices with a boundary just before them) and a
+    coordinator ("and", "or"): "the solar array, monitoring" and "the solar
+    array and monitoring" are two things, not one name. Ties go to the
+    earliest run, so the span is deterministic. `None` when no token is a
+    name word.
+    """
+    best: tuple[int, int] | None = None
+    best_words = 0
+    start: int | None = None
+    last_name = -1
+    words = 0
+    for index, token in enumerate(tokens):
+        if index in breaks or token in _RUN_COORDINATORS:
+            start = None
+            if token in _RUN_COORDINATORS:
+                continue
+        folded = None if token in stopwords else _fold_lexical_term(token)
+        if folded is not None and folded in name_terms:
+            if start is None:
+                start, words = index, 0
+            last_name = index
+            words += 1
+            if words > best_words:
+                best, best_words = (start, last_name + 1), words
+        elif token in stopwords and start is not None:
+            continue
+        else:
+            start = None
+    return best
 
 
 def _derived_key(title: str) -> str:
@@ -1933,6 +2120,11 @@ def resolve(
                 neighbourhood=candidate.neighbourhood,
                 anchor_neighbourhood=candidate.anchor_neighbourhood,
                 exact_alias_phrases=candidate.exact_alias_phrases,
+                name_contact=candidate.name_contact,
+                name_span=candidate.name_span,
+                entity_type=candidate.entity_type,
+                name_capitalised=candidate.name_capitalised,
+                name_lower_case=candidate.name_lower_case,
             )
         )
     if recency_resolves:
@@ -1944,6 +2136,7 @@ def resolve(
         anchors.sort(key=lambda item: 0 if item.status == "resolved" else 1)
     anchors = anchors[:MAX_ANCHORS]
     anchors = _demote_subsumed_same_kind_aliases(anchors, turn_tokens)
+    anchors = _narrowed_by_qualifier(anchors)
     resolved = [anchor for anchor in anchors if anchor.status == "resolved"]
     groups = _competing_groups(resolved)
     # R3 (fix/activation-competing-senses): a named anchor carries the
@@ -1979,7 +2172,138 @@ def resolve(
         return Resolution(status="ambiguous", anchors=tuple(anchors), ambiguity=tuple(ambiguity))
     if resolved:
         return Resolution(status="resolved", anchors=tuple(anchors))
+    bare = [
+        entry
+        for kind, group in _bare_name_groups(anchors)
+        for entry in _ambiguity_dicts(kind, group)
+    ]
+    if bare:
+        return Resolution(status="ambiguous", anchors=tuple(anchors), ambiguity=tuple(bare))
     return Resolution(status="unresolved", anchors=tuple(anchors))
+
+
+def _span_inside(inner: tuple[int, int] | None, outer: tuple[int, int] | None) -> bool:
+    """Is turn span `inner` strictly inside `outer`?"""
+    if inner is None or outer is None or inner == outer:
+        return False
+    return outer[0] <= inner[0] and inner[1] <= outer[1]
+
+
+def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedAnchor, ...]:
+    """A qualifier narrows competing senses (close-memory-loop, activation
+    quality).
+
+    Each anchor's contact is the longest contiguous run of the turn that
+    spells its own name words (`name_span`). Two same-kind anchors both
+    resolved, and the run spelling one lies strictly inside the run spelling
+    the other: the turn said the shared words AND, in the same breath, a word
+    only the second one's name carries. "The tide model rollout" named the
+    rollout hub, not the research hub that "the tide model" alone would leave
+    open. The narrower sense is not listed at all; and, for that kind,
+    neither is a `partial` anchor the turn reached only inside that run,
+    which is a free rider on that mention exactly as R2's consumed
+    `rare_term` is.
+
+    A word of the wider name said ELSEWHERE in the turn ("I blew my grocery
+    budget, and the kitchen renovation is stalled") leaves both runs the same
+    and narrows nothing; nor does a turn that names each sense in its own
+    run. With no strict containment the turn is left as it was, and an
+    ambiguous turn keeps every sense its words touched as the agent's menu. A
+    sense the turn spelled by name (`exact_alias`, `agent_choice`) is never
+    narrowed out: R1 already decides between spelled names. Cross-kind
+    anchors are complementary and never narrow one another.
+    """
+    resolved = [
+        anchor
+        for anchor in anchors
+        if anchor.status == "resolved" and anchor.name_span is not None
+    ]
+    narrowed: dict[str, set[str]] = {}
+    chosen: dict[str, list[ResolvedAnchor]] = {}
+    for anchor in resolved:
+        if DECIDING_ALONE_KINDS & set(anchor.evidence):
+            continue
+        wider = [
+            other
+            for other in resolved
+            if other.kind == anchor.kind and _span_inside(anchor.name_span, other.name_span)
+        ]
+        if wider:
+            narrowed.setdefault(anchor.kind, set()).add(anchor.anchor_id)
+            chosen.setdefault(anchor.kind, []).extend(wider)
+    if not narrowed:
+        return tuple(anchors)
+
+    def dropped(anchor: ResolvedAnchor) -> bool:
+        excluded = narrowed.get(anchor.kind)
+        if not excluded:
+            return False
+        if anchor.anchor_id in excluded:
+            return True
+        return (
+            anchor.status == "partial"
+            and not set(anchor.evidence) & (CONTACT_KINDS - {"rare_term", "lexical_overlap"})
+            and any(_span_inside(anchor.name_span, wide.name_span) for wide in chosen[anchor.kind])
+        )
+
+    return tuple(anchor for anchor in anchors if not dropped(anchor))
+
+
+#: Anchor kinds a bare name can refer to. A person's or an organisation's
+#: name is how it is spoken of; a word two hub or resource titles share is an
+#: ordinary noun, and saying it names neither.
+BARE_NAME_KINDS: frozenset[str] = frozenset({"entity"})
+#: The entity type whose shared name is a name however the turn writes it.
+PERSON_ENTITY_TYPE = "person"
+
+
+def _spoken_as_name(term: str, members: Sequence[ResolvedAnchor]) -> bool:
+    """Was the shared word `term` said as a NAME, not as an ordinary word?
+
+    Every member a person: a first name is a name however it is written, in
+    any script, unless the turn's casing says something (some words
+    capitalised, some not) and it wrote this word in lower case, so "please
+    mark the task done" never asks between two people named Mark, while an
+    all-lower-case turn ("priya sent it") still does. Otherwise only a cased script can tell, and only by a capital
+    the turn gave the word away from a sentence start ("we ordered from
+    Harbour again", not "the harbour was busy" or "Harbour traffic was
+    heavy"). An uncased script (CJK) carries no such mark, so there a shared
+    word forms the group for people only.
+    """
+    if all(member.entity_type == PERSON_ENTITY_TYPE for member in members):
+        return not any(member.name_lower_case for member in members)
+    return _is_cased(term) and any(member.name_capitalised for member in members)
+
+
+def _bare_name_groups(
+    anchors: Sequence[ResolvedAnchor],
+) -> tuple[tuple[str, tuple[ResolvedAnchor, ...]], ...]:
+    """Unlinked entities one bare shared name reached, when nothing resolved.
+
+    Each member is `partial` on that one name word alone (`rare_term`, plus
+    qualifiers at most): the turn said a first name, say "Priya", and two
+    people are called Priya. When the word was said as a name
+    (`_spoken_as_name`), that is the question competing senses exist to ask,
+    so the turn is `ambiguous` between them, formed by the same connectivity
+    rule every competing group uses: two people who link each other are one
+    neighbourhood, not two senses. One entity alone stays a `partial` lead.
+    """
+    by_name: dict[tuple[str, str], list[ResolvedAnchor]] = {}
+    for anchor in anchors:
+        if (
+            anchor.status != "partial"
+            or anchor.kind not in BARE_NAME_KINDS
+            or len(anchor.name_contact) != 1
+            or set(anchor.evidence) & CONTACT_KINDS != {"rare_term"}
+        ):
+            continue
+        (term,) = anchor.name_contact
+        by_name.setdefault((anchor.kind, term), []).append(anchor)
+    groups: list[tuple[str, tuple[ResolvedAnchor, ...]]] = []
+    for (_kind, term), members in sorted(by_name.items()):
+        if len(members) >= 2 and _spoken_as_name(term, members):
+            groups.extend(_competing_groups(members))
+    return tuple(groups)
 
 
 def _competing_groups(
@@ -2088,6 +2412,7 @@ def facts_from_rows(rows: Iterable[Any]) -> tuple[AnchorFacts, ...]:
             categories=row.categories,
             neighbourhood=row.neighbourhood,
             anchor_neighbourhood=row.anchor_neighbourhood,
+            entity_type=str(getattr(row, "entity_type", "") or ""),
         )
         for row in rows
     )

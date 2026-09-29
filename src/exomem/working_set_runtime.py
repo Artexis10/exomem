@@ -1177,6 +1177,8 @@ def rare_turn_terms(
     # word past the cap and the page named by its title was never carried.
     # Raw material is not counted either, nor counted as a page: four
     # captured sessions that discussed a page did the same to its title.
+    # Nor retired revisions: the carry never serves one, and a page revised
+    # three times repeated its own name words past the cap.
     result = lexstore.term_document_frequencies(
         vault_root,
         stems,
@@ -1186,11 +1188,31 @@ def rare_turn_terms(
         recall_checkpoint=recall_checkpoint,
         exclude_navigation=True,
         exclude_raw_material=True,
+        exclude_statuses=working_set.RETIRED_PAGE_STATUSES,
     )
     if not result.readiness.complete:
         return (), 0, result.readiness.status
     frequencies, corpus_pages = result.value or ({}, 0)
     cap = working_set.rare_document_cap(corpus_pages)
+
+    def paths_for(near: Sequence[str], limit: int) -> Mapping[str, Sequence[str]]:
+        listed = lexstore.term_document_paths(
+            vault_root,
+            near,
+            limit=limit,
+            scope="kb",
+            freshness=freshness,
+            allow_delta=False,
+            recall_checkpoint=recall_checkpoint,
+            exclude_navigation=True,
+            exclude_raw_material=True,
+            exclude_statuses=working_set.RETIRED_PAGE_STATUSES,
+        )
+        return (listed.value or {}) if listed.readiness.complete else {}
+
+    frequencies = working_set.discount_superseded_pages(
+        vault_root, frequencies, paths_for, cap=cap
+    )
     rare = tuple(stem for stem in stems if int(frequencies.get(stem, 0)) <= cap)
     return rare, int(corpus_pages), "available"
 
