@@ -1,0 +1,27 @@
+{
+  "fixture_set": "context-activation-conversation-v1",
+  "fixture_digest": "374056f5fc22d9a75249b83162d141a5b293b2fc5fc68071ebcad88a2fd5170f",
+  "encoding": "o200k_base (rebuilt from npm js-tiktoken; sha256 446a9538cb6c348e...)",
+  "arm_a_mechanism_removal": {"red": true, "multi_turn_failed": "9 of 13", "note": "same as baseline-arm-a.json"},
+  "gold_recall_below_floor": {"b": [], "c": [], "d": []},
+  "drowning_failures": {"b": [], "c": [], "d": []},
+  "packet_size_within_bounds": {"b": true, "c": true, "d": true},
+  "withheld_pair_byte_identical": {"a": true, "b": true, "d": true},
+  "attachment_cases": "V26, V27, W26 pass on arms c and d; abstain on arm a",
+  "rows_failing_their_pre_registered_expectation": {
+    "count": 9,
+    "arm_b": ["W24"],
+    "arm_c": ["W17", "W18", "W19", "W20", "W21", "W22", "W23", "W24"],
+    "arm_d": ["W17", "W18", "W19", "W20", "W21", "W22", "W23", "W24"],
+    "cause": "see the PR, Needs ruling items 2 and 3"
+  },
+  "latency": {
+    "corpus": "2000 dense notes + 500 entities, model-free synthetic reference corpus",
+    "samples": 20,
+    "working_set.conversation_p95_ms": 32.39,
+    "warm_activation_with_max_conversation_p95_ms": 169.47,
+    "warm_activation_without_conversation_p95_ms": 47.36,
+    "stage_recorded_without_conversation": false,
+    "budgets": {"stage_p95_ms": 60, "warm_p95_ms": 1000}
+  }
+}
