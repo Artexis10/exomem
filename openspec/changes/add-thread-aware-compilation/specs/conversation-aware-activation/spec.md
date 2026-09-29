@@ -53,7 +53,16 @@ The CLI SHALL expose the fields as:
 
 ### Requirement: Focus is resolved as part of the current turn
 
-A `focus` string SHALL be resolved as a second segment of the current turn, contributing the worded contact kinds `exact_alias`, `lexical_overlap` and `claims_match`, and the qualifiers those kinds admit. It SHALL NOT run a recall query or an embedding, so it contributes neither `retrieval` nor `vector_band`. An anchor reached through `focus` SHALL record which segment reached it (`turn`, `focus` or both), beside its evidence kinds.
+A `focus` string SHALL be resolved as a second segment of the current turn, contributing the worded contact kinds `exact_alias`, `lexical_overlap` and `claims_match`, and the qualifiers those kinds admit. It SHALL NOT run a recall query or an embedding, so it contributes neither `retrieval` nor `vector_band`.
+
+Every served anchor SHALL carry an `origin` naming whose words reached it, so the agent can tell what the user said from what the agent itself said was in play:
+
+- `turn`: reached by the turn segment only;
+- `focus`: reached by the `focus` segment only;
+- `turn_and_focus`: reached by both;
+- `conversation`: carried from an earlier user entry (see the carry requirement below).
+
+An anchor whose only contact came from `focus` SHALL keep `origin = "focus"` whatever qualifiers it gathers. A `focus` origin SHALL NOT count as the agent's `anchor` choice (`agent_choice`), and SHALL NOT override an ambiguity between anchors the turn segment itself resolved. The working-set hook's rendered block and the tool description SHALL state that `focus`-origin material is there because the agent named it, not because the user did. A packet built without `focus` SHALL label every anchor `turn`, or `conversation` when carried.
 
 Tokens SHALL NOT pair across the two segments:
 
@@ -64,13 +73,41 @@ Tokens SHALL NOT pair across the two segments:
 
 - **WHEN** a turn weighs "the budget trade-off we discussed", and the agent's `focus` names "Harbor Lantern budget versus the Kestrel hiring plan"
 - **THEN** both anchors named by exact alias in `focus` resolve
-- **AND** each records the segment `focus`
+- **AND** each carries `origin = "focus"`
+
+#### Scenario: Focus cannot settle the user's own ambiguity
+
+- **WHEN** the turn segment resolves two competing hubs, and `focus` names one of them
+- **THEN** the packet stays `ambiguous`, and that hub carries `origin = "turn_and_focus"` in the ambiguity list
 
 #### Scenario: Focus does not make a referential turn non-referential
 
 - **WHEN** the turn is "continue" and a `focus` names one anchor by alias
 - **THEN** the turn is still referential for the recency rules
 - **AND** that anchor resolves through `focus` on its own evidence
+
+### Requirement: Attachment-derived cues travel in focus and never as authority
+
+A client whose own vision or file layer read names or objects from the user's attachments (images, screenshots, documents) MAY put those cues into `focus`, within its bound. The server SHALL NOT distinguish them from any other `focus` text, so they SHALL:
+
+- resolve with the worded kinds of the `focus` segment only;
+- be labelled `origin = "focus"`;
+- never count as the user's words, as an `anchor` choice, or as evidence of anything beyond contact;
+- be request-scoped under the same retention rules as all conversation content.
+
+Activation SHALL NOT receive, fetch or decode an attachment. It SHALL NOT run OCR, CLIP, captioning or any other media model, and it SHALL add no media stage. The tool description and the shipped skill scaffold SHALL tell the agent it may do this.
+
+#### Scenario: Screenshots with near-empty text reach their subject through focus
+
+- **WHEN** the user sends two screenshots with the text "thoughts on this?", and the client's vision layer read the invented names "Ottilie Marsh" and "Tidewater grant" from them and put both into `focus`
+- **THEN** both anchors resolve through `focus` with `origin = "focus"`
+- **AND** the same turn without `focus` abstains `unresolved`, exactly as it does today
+- **AND** no media model or attachment read runs inside activation
+
+#### Scenario: A misread cue reaches nothing
+
+- **WHEN** `focus` carries attachment-derived words that name no anchor by any worded kind
+- **THEN** the packet is the packet for the same turn without `focus`, apart from `generation.conversation`
 
 ### Requirement: Conversation evidence is a subordinate qualifier
 
@@ -135,16 +172,29 @@ A turn SHALL be anaphoric when both of these hold:
 
 Length is not a criterion: an anaphoric turn MAY carry any number of other words.
 
-The carry SHALL run for an anaphoric turn only when all three hold:
+**Precedence.** The conversation carry SHALL sit at one fixed place in the order in which activation decides a turn that its words did not resolve. That order builds on the keyless continuity, referential recency and follow-up contracts as they stand on `main` (context-activation-continuity, and memory-loop in `close-memory-loop`), and SHALL NOT change any of them. For each request, the first rule below that decides it wins:
 
-- it has no `focus` contact;
-- no recency, continuity or follow-up rule has already resolved or carried an anchor for it;
+1. An `anchor` override (`agent_choice`).
+2. Resolution by the turn segment and the `focus` segment.
+3. The referential recency rule, for a referential turn ("A turn that names nothing MAY resolve to the hottest recent anchor"), including the continuity-thread resume.
+4. The follow-up carry from the caller's own session tier (`carried_by = "follow_up"`), for a turn that meets the shipped follow-up test.
+5. The conversation carry, specified here.
+6. The retrieval carry from one dominant recall hit, where memory-loop admits it.
+7. Abstention.
+
+A rule *decides* when it resolves or carries an anchor, or when it abstains `ambiguous`. A rule that finds nothing falls through to the next.
+
+The conversation carry therefore runs before the retrieval carry. A long anaphoric turn whose subject the user named earlier is carried from the user's own words, and is never served an unrelated recall hit that happens to match the turn's incidental words. Where the conversation carry abstains `ambiguous`, the retrieval carry SHALL NOT run.
+
+The conversation carry SHALL run for an anaphoric turn only when both hold:
+
+- no earlier rule has decided it;
 - the conversation has at least one visible `user` entry.
 
 The compiler SHALL then walk the visible `user` entries of `recent` from newest to oldest. It SHALL stop at the first entry in which at least one anchor resolves under the ordinary rules applied to that entry's text alone, with no recall query and no embedding.
 
 - **Exactly one anchor.** That anchor SHALL be carried as the packet's single anchor:
-  - at status `partial`, with evidence `[conversation]`;
+  - at status `partial`, with evidence `[conversation]` and `origin = "conversation"`;
   - its material served under the ordinary lanes;
   - `generation.carried_by = "conversation"`.
 - **Two or more.** The turn SHALL abstain `ambiguous` listing them, and SHALL NOT choose.
@@ -163,6 +213,17 @@ A refs-only conversation SHALL NOT carry: a ref says what was read, not what "it
 - **WHEN** the newest user entry resolved "Kestrel hiring plan", an older one resolved "Harbor Lantern budget", and the turn is "what are the risks with that?"
 - **THEN** "Kestrel hiring plan" is carried
 - **AND** nothing from "Harbor Lantern budget" is served
+
+#### Scenario: The conversation carry precedes the retrieval carry
+
+- **WHEN** an anaphoric turn reaches no anchor, its incidental words would admit one dominant recall hit under the retrieval carry, and an earlier user entry resolves a different anchor
+- **THEN** the earlier entry's anchor is carried with `generation.carried_by = "conversation"`
+- **AND** the recall hit is not served
+
+#### Scenario: A shipped follow-up carry still wins
+
+- **WHEN** a short follow-up turn is carried from the caller's own session tier under the shipped follow-up rule, and the conversation's newest user entry names a different anchor
+- **THEN** the packet reports `generation.carried_by = "follow_up"`, unchanged from today
 
 #### Scenario: A turn that names its own subject is not carried
 
@@ -257,7 +318,9 @@ The server instructions SHALL keep asking the agent to pass the user's message v
 
 None of them SHALL ask the agent to summarise the conversation into `turn`, or to paste whole earlier turns. The pinned sentence is:
 
-"In a longer conversation also pass `conversation`: `focus`, one line naming the subjects now in play, and `refs`, the pages you already read; never rewrite `turn`."
+"In a longer conversation, or when the user's words lean on attachments, also pass `conversation`: `focus`, one line naming the subjects now in play, including names you read from attachments, and `refs`, the pages you already read; never rewrite `turn`."
+
+The tool description SHALL additionally state that `focus` may carry names or objects the agent read from the user's attachments, that such cues are matched as the agent's words (`origin = "focus"`) and never as the user's, and that activation reads no attachment itself.
 
 The server instructions SHALL stay within the length budget the existing server-instructions test enforces.
 
@@ -278,7 +341,8 @@ The group SHALL hold at least:
 - one negative twin per case: the same current turn with a conversation about unrelated invented material, or the same conversation with a current turn that reaches nothing;
 - three drowning cases, where a long conversation about one subject is followed by a current turn about another;
 - three topic-switch cases, where the newest subject is gold and the older one is poison;
-- one withheld-versus-absent pair, scored for byte identity.
+- one withheld-versus-absent pair, scored for byte identity;
+- two attachment cases, each a nearly content-free turn ("thoughts on this?") with a fixture-authored `focus` of cues as a vision layer would read them, gold on the named anchors with `origin = "focus"`, plus a twin whose `focus` cues name nothing in the corpus.
 
 Every case SHALL pre-register:
 
@@ -329,7 +393,14 @@ On the model-free synthetic reference corpus used by the CI latency gate, with a
 - the `working_set.conversation` stage at p95 of at most 60 ms;
 - warm `activate_context` at p95 of at most 1,000 ms.
 
+These bounds are the acceptance measure for this change. Live-cell end-to-end latency is owned by a separate lane. This change SHALL NOT regress it: a request without `conversation` SHALL do no conversation work, and SHALL record no `working_set.conversation` span.
+
 A conversation stage that cannot start within the request's remaining reserve SHALL be skipped, and the packet SHALL then be compiled exactly as without `conversation` and report `generation.conversation = "absent"`. The skip SHALL NOT fail the request.
+
+#### Scenario: A request without a conversation does no conversation work
+
+- **WHEN** `activate_context` runs with `include_timings=true` and no `conversation`
+- **THEN** its timings carry no `working_set.conversation` stage
 
 #### Scenario: A spent deadline drops the conversation, not the packet
 
