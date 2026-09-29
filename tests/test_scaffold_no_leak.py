@@ -70,7 +70,10 @@ def test_scaffold_teaches_generic_governance_lifecycle_and_forged_envelopes() ->
 
 
 def test_scaffold_teaches_v1_vocabulary_consideration_without_granting_writes() -> None:
-    skill = (SCAFFOLD / "_Schema" / "SKILL.md").read_text(encoding="utf-8")
+    # "Before writing" moved into a reference (`shrink-bootstrap`); the skill points at it.
+    skill = (SCAFFOLD / "_Schema" / "SKILL.md").read_text(encoding="utf-8") + (
+        SCAFFOLD / "_Schema" / "references" / "before-writing.md"
+    ).read_text(encoding="utf-8")
     writing = (SCAFFOLD / "_Schema" / "references" / "writing.md").read_text(
         encoding="utf-8"
     )
@@ -128,6 +131,11 @@ def test_shipped_contract_embeddings_are_canonical_and_public_safe() -> None:
     for path in carriers:
         assert path.is_file(), f"missing shipped contract carrier {path}"
         text = path.read_text(encoding="utf-8")
+        if path == core:
+            # The core skill's embedding moved into a reference (`shrink-bootstrap`).
+            text += (path.parent / "references" / "semantic-authoring.md").read_text(
+                encoding="utf-8"
+            )
         assert text.count(concise) == 1, f"{path} lost the canonical contract"
 
     # The embedded contract carries only invented, generic examples: the canonical
