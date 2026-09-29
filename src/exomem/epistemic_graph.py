@@ -207,6 +207,23 @@ REBUILD_STABILIZATION_MAX_ATTEMPTS = 8
 #: `graph_drain.MAX_RETRY_SECONDS`, cleared by a proof that succeeds.
 _REPUBLISH_BACKOFF: dict[str, tuple[float, float]] = {}
 _REPUBLISH_BACKOFF_LOCK = threading.Lock()
+#: The last public source-bytes proof per sidecar (#1454), keyed by the sidecar
+#: registry key and holding `(identity, verdict)`. An inherited sidecar is never
+#: at the exact live checkpoint -- adoption makes its checkpoint a delta origin,
+#: not the current one -- so without this every `available()` re-proved the
+#: whole corpus: the drain, the readiness probe and graph recall kept a 9,300
+#: file vault busy indefinitely. The identity is everything the verdict depends
+#: on: the sidecar's stored metadata, its file identity, and the current
+#: recall projection identity. A change to any of them is a new question.
+_SNAPSHOT_PROOFS: dict[str, tuple[tuple[Any, ...], bool]] = {}
+_SNAPSHOT_PROOFS_LOCK = threading.Lock()
+#: The proof running now per sidecar, so concurrent readers share it rather
+#: than each paying the O(corpus) proof: a blocking reader waits for its
+#: verdict, a `SINGLE_FLIGHT` reader serves without the graph instead.
+_PROOFS_IN_FLIGHT: dict[str, tuple[threading.Event, int]] = {}
+#: `prove` mode for a request path: prove inline when no proof is running for
+#: the sidecar, refuse as `unproven` when another reader's proof already is.
+SINGLE_FLIGHT = "single_flight"
 
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
@@ -1177,6 +1194,31 @@ def clear_publication_memos() -> None:
         _PUBLICATION_REFUSALS.clear()
 
 
+def clear_snapshot_proofs() -> None:
+    """Test seam: forget every remembered public source-bytes proof."""
+    with _SNAPSHOT_PROOFS_LOCK:
+        _SNAPSHOT_PROOFS.clear()
+
+
+def _sidecar_file_identity(live: Path) -> tuple[Any, ...]:
+    """The live sidecar and its WAL as stat identities; None for an absent file.
+
+    Sampled before a reader opens its snapshot, so a publication landing after
+    the sample keys a newer identity than the verdict was proved against. An
+    empty WAL is the same as an absent one: the first reader creates it, and
+    that is not a change to anything the proof read.
+    """
+    identity: list[Any] = []
+    for path in (live, live.with_name(live.name + "-wal")):
+        try:
+            st = path.stat()
+        except OSError:
+            identity.append(None)
+            continue
+        identity.append((st.st_ino, st.st_size, st.st_mtime_ns) if st.st_size else None)
+    return tuple(identity)
+
+
 def record_publication_recovery_state(
     vault_root: Path,
     *,
@@ -1816,9 +1858,16 @@ class EpistemicGraphIndex:
         vault_root: Path,
         *,
         mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None,
+        prove_cold_snapshots: bool | str = True,
     ):
+        """`prove_cold_snapshots` is the default `prove` mode of every public
+        read on this index when no remembered verdict covers the sidecar: True
+        proves (waiting for a proof already running), False refuses, and
+        `SINGLE_FLIGHT` proves unless another reader's proof is running, then
+        refuses -- for a request path that must not stack proofs (#1454)."""
         self.vault_root = Path(vault_root)
         self.path = sidecar_path(self.vault_root)
+        self._prove_cold_snapshots = prove_cold_snapshots
         self.registry = relation_registry.load_registry(self.vault_root)
         self.entity_types = load_entity_types(self.vault_root)
         self.language_registry = semantic_language_registry.load_registry(self.vault_root)
@@ -2126,8 +2175,28 @@ class EpistemicGraphIndex:
         conn.close()
         return True
 
+    def availability_state(self, *, prove: bool | str = False) -> str:
+        """`available`, `unavailable` or `unproven`.
+
+        By default it never runs the cold proof: for probes that report rather
+        than decide -- readiness, coordination status. A request passes
+        `SINGLE_FLIGHT`. `unproven` means the sidecar passed every cheap check
+        and only the source-bytes proof stands between it and a read: nothing
+        has run it for the current identity, or another reader is running it.
+        """
+        outcome: list[str] = []
+        conn = self._open_read_snapshot(prove=prove, outcome_out=outcome)
+        if conn is not None:
+            conn.close()
+            return "available"
+        return "unproven" if outcome else "unavailable"
+
     def _open_read_snapshot(
-        self, *, require_current_projection: bool = True
+        self,
+        *,
+        require_current_projection: bool = True,
+        prove: bool | str | None = None,
+        outcome_out: list[str] | None = None,
     ) -> sqlite3.Connection | None:
         """Open one validated read transaction without creating or migrating schema.
 
@@ -2171,13 +2240,24 @@ class EpistemicGraphIndex:
         failure. If a future change lets a Class B failure mark again, this
         guard becomes a liveness bug wearing a safety costume and must be
         removed rather than relied on.
+
+        Outside the exact live checkpoint a public reader's source-bytes proof
+        is remembered per sidecar identity and recall projection identity
+        (#1454), and one proof runs at a time per sidecar. ``prove`` defaults to
+        the index's ``prove_cold_snapshots``: False refuses instead of proving
+        when nothing is remembered, ``SINGLE_FLIGHT`` refuses only while another
+        reader's proof is running, and True waits for that proof. A refusal
+        appends ``"unproven"`` to ``outcome_out``.
         """
+        if prove is None:
+            prove = self._prove_cold_snapshots
         if (
             not graph_enabled()
             or (require_current_projection and freshness.external_pending(self.vault_root))
             or not self.path.exists()
         ):
             return None
+        sidecar_identity = _sidecar_file_identity(self.path)
         # Sampled before any proving starts. Everything below -- the marker
         # reads, the source-bytes proof over the whole corpus -- takes time a
         # watcher publication can land inside, and an origin adopted at the
@@ -2287,10 +2367,71 @@ class EpistemicGraphIndex:
                 and stored_checkpoint == current_checkpoint
             )
             if current and not exact_live_checkpoint:
-                current = self._snapshot_sources_match_disk(
-                    conn,
-                    resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
+                # Remembered per everything the verdict depends on (#1454):
+                # outside the exact live checkpoint an inherited sidecar never
+                # reaches the fast path, so an unremembered proof is re-paid by
+                # every reader for as long as the process lives.
+                proof_identity = (
+                    tuple(sorted(values.items())),
+                    _availability_freshness_value(current_identity),
+                    sidecar_identity,
                 )
+                # One proof per sidecar at a time. A reader that waited loops
+                # back to the claim: the running proof may have raised or
+                # answered another identity, and then exactly one waiter
+                # claims the slot rather than all of them proving at once.
+                while True:
+                    in_flight: threading.Event | None = None
+                    mine: threading.Event | None = None
+                    self_owned = False
+                    with _SNAPSHOT_PROOFS_LOCK:
+                        remembered = _SNAPSHOT_PROOFS.get(registry_key)
+                        covered = remembered is not None and remembered[0] == proof_identity
+                        if not covered and prove:
+                            claim = _PROOFS_IN_FLIGHT.get(registry_key)
+                            if claim is None:
+                                mine = threading.Event()
+                                _PROOFS_IN_FLIGHT[registry_key] = (mine, threading.get_ident())
+                            elif claim[1] == threading.get_ident():
+                                # Re-entered from inside this thread's own
+                                # proof: waiting on it would never return.
+                                self_owned = True
+                            else:
+                                in_flight = claim[0]
+                    if covered and remembered is not None:
+                        current = remembered[1]
+                        break
+                    if not prove or (in_flight is not None and prove == SINGLE_FLIGHT):
+                        if outcome_out is not None:
+                            outcome_out.append("unproven")
+                        conn.close()
+                        return None
+                    if in_flight is not None:
+                        # Bounded by one proof this reader would otherwise run
+                        # itself; the owner sets the Event in its `finally`. A
+                        # timer here re-opens stacking on exactly the vaults
+                        # whose proof is slow (#1454).
+                        in_flight.wait()
+                        continue
+                    try:
+                        decline: list[str] = []
+                        current = self._snapshot_sources_match_disk(
+                            conn,
+                            resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
+                            reason_out=decline,
+                        )
+                        # A proof that raised proved nothing about the sidecar.
+                        if decline != ["proof_raised"] and not self_owned:
+                            with _SNAPSHOT_PROOFS_LOCK:
+                                _SNAPSHOT_PROOFS[registry_key] = (proof_identity, current)
+                    finally:
+                        if mine is not None:
+                            with _SNAPSHOT_PROOFS_LOCK:
+                                claim = _PROOFS_IN_FLIGHT.get(registry_key)
+                                if claim is not None and claim[0] is mine:
+                                    _PROOFS_IN_FLIGHT.pop(registry_key, None)
+                            mine.set()
+                    break
             if current and stored_checkpoint is not None:
                 # The proof above (or the exact-live check) has just established
                 # that this sidecar describes the corpus this registry is
@@ -8663,7 +8804,7 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
     )
 
 
-def cache_token(vault_root: Path) -> tuple | None:
+def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     """`(schema_version, extension_registry_hash, generation, instance)` or None.
 
     None whenever the sidecar is unavailable (disabled, missing, or
@@ -8671,11 +8812,17 @@ def cache_token(vault_root: Path) -> tuple | None:
     absent-sentinel so typed-mode and fallback-mode entries never collide.
     `generation` advances for in-place writes; `instance` changes when a full
     rebuild atomically replaces the SQLite file, preventing generation ABA.
+
+    `prove` is the index's cold-proof mode (#1454). A request passes
+    `SINGLE_FLIGHT`: it proves inline unless another reader's proof is running,
+    and then an unproven sidecar answers `("unproven",)`, a key of its own,
+    since that request serves without the graph lane.
     """
-    idx = EpistemicGraphIndex(vault_root)
-    conn = idx._open_read_snapshot()
+    idx = EpistemicGraphIndex(vault_root, prove_cold_snapshots=prove)
+    outcome: list[str] = []
+    conn = idx._open_read_snapshot(outcome_out=outcome)
     if conn is None:
-        return None
+        return ("unproven",) if outcome else None
     try:
         values = dict(
             conn.execute(

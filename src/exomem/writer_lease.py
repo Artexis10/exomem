@@ -5644,17 +5644,19 @@ class LeaseManager:
 
                 vault_root = Path(vault_or_cell)
                 graph_status = graph_sync.status(vault_root)
-                if (
-                    graph_status["state"] == "current"
-                    and not epistemic_graph.EpistemicGraphIndex(
-                    vault_root,
-                    mutation_coordinator=self._mutation_coordinator_for(vault_root),
-                    ).available()
-                ):
-                    graph_status = {
-                        "state": "unavailable",
-                        "generation": graph_status["generation"],
-                    }
+                if graph_status["state"] == "current":
+                    # A status probe reports; it never pays the O(corpus)
+                    # source-bytes proof. It reads the remembered verdict, or
+                    # says that nothing has proved the sidecar yet (#1454).
+                    availability = epistemic_graph.EpistemicGraphIndex(
+                        vault_root,
+                        mutation_coordinator=self._mutation_coordinator_for(vault_root),
+                    ).availability_state()
+                    if availability != "available":
+                        graph_status = {
+                            "state": availability,
+                            "generation": graph_status["generation"],
+                        }
                 base["graph_sync"] = graph_status
             except Exception:  # noqa: BLE001 - coordination diagnostics stay bounded
                 base["graph_sync"] = {"state": "unavailable", "generation": 0}
