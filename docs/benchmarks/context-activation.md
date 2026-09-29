@@ -341,6 +341,33 @@ now read through the lenses it can answer instead of six that read nothing. A
 resolved turn pays one extra query (about 12-15 ms) to read what else it named;
 a carried turn pays an indexed category read of about a millisecond.
 
+### What a resolved entity's project already settled (standing precedent)
+
+Three rules from a field incident (a person entity resolved, yet the conclusion
+page about that person's panel and the project's standing methodology page were
+missing, and a scoped claim was cut before its qualifier). Tests use invented
+names (`test_working_set_standing_precedent.py`); each rule is a spec scenario
+in `close-memory-loop`.
+
+| Shape | Rule |
+|-------|------|
+| A person's own conclusion shares no word with the turn and sits past the entity's 40-link cap | Inbound wikilinks past the cap are kept under their own relation (never part of the neighbourhood), and up to six of the entity's linked pages that hold decision, insight or finding units are read under `precedents`, newest first |
+| The project's method page constrains any claim in the domain but is never named | A page declares itself standing with frontmatter `standing: true` and its own `project`; the packet serves it under `precedents` for a resolved anchor in that project, one page per project, two per packet, two units per page, ahead of the role's other units and outside its item cap |
+| "chronic X only" lost to a 360-character cut | A unit is served whole up to 900 characters; a longer unit is a `unit_too_long` pointer, never a half-claim |
+
+Real-compiler deltas: none. The recorded v4 report is unchanged (raw 9/18, A8
+10/18) because the corpus declares no standing page, no entity there has more
+inbound links than the cap keeps, and no served unit exceeded 360 characters.
+The negative controls (an unlinked conclusion, a linked page with no
+conclusion, another project's standing page, a second standing page in the
+same project, a turn resolving nothing in the project) stay out, each pinned
+in the new test module.
+
+Activation latency, three interleaved base/head pairs (base is the previous
+head), 16 fixtures times five rounds, cold caches per call, ceil-rank
+percentiles: working-set p95 moved by +6.5%, -3.5% and +0.5%; total p95 by
++1.9%, +0.3% and +1.2%, inside the +10% bound.
+
 ### Round 3 on corpus v4 (2026-09-28): red, 9/18
 
 The activation-quality round (close-memory-loop, context-activation ADDED

@@ -289,12 +289,62 @@ An entity anchor SHALL be read through the precedents lens by default, so that t
 served with their own provenance (category, parent page, supersession), inside the
 existing per-lane and packet budgets. A conclusion note that is not linked to the
 entity SHALL NOT be served on its account, and a superseded conclusion SHALL be marked
-as such, never presented as current.
+as such, never presented as current. The default applies when the turn's own words
+reached the entity; an entity that only recency supplied ("where were we") is read
+through its own identity and facets, not through every conclusion linked to it.
 
 #### Scenario: A settled decision about an organisation is served with the entity
 - **WHEN** a turn names an organisation entity and a decision note links to that entity
 - **THEN** the packet serves the decision unit with `provenance.category: "decision"`
   and its parent page, and serves no decision note that does not link to the entity
+
+### Requirement: A resolved entity's conclusion pages are eligible without word overlap or link-list room
+The pages that link to a resolved entity and hold `decision`, `insight` or `finding`
+units SHALL be eligible under `precedents` whether or not they share a word with the
+turn and whether or not they fit within the entity's capped list of typed links. The
+index SHALL record inbound wikilinks past that cap under a relation of their own that
+never counts toward the anchor's neighbourhood (resolution reads what it always
+read). At most six such pages beyond the neighbourhood are read, newest first, and
+their units are subject to the lane and packet budgets and to the same egress guard.
+
+#### Scenario: A topic-specific conclusion past the link cap is served
+- **WHEN** a turn resolves a person entity that more pages link to than the link cap
+  keeps, and one of those pages holds a `decision` unit that shares no word with the turn
+- **THEN** the packet serves that unit under `precedents`, and serves no linked page
+  that holds no conclusion unit and no conclusion page that does not link to the entity
+
+### Requirement: A project's standing precedent page is served for its resolved anchors
+A page SHALL declare itself the standing precedent of its project with frontmatter
+`standing: true` and the project key in its own `project` or `projects`. When a turn
+resolves an anchor in that project (a project anchor, or a page anchor whose own
+frontmatter names the project), the compiler SHALL serve that page's units under
+`precedents`, at most one page per project and two standing pages per packet, at most
+two units per page, ahead of the role's other units and outside its item cap, charged to
+the packet's character budget. Several declarations in one project resolve to the most
+recently updated. Another project's standing page, and a turn that resolved nothing in
+the project, serve none. The reach runs under its own `working_set.precedents` timing
+span and is skipped when the request budget cannot afford it.
+
+#### Scenario: The methodology page constrains a turn that never names it
+- **WHEN** a turn resolves an entity whose project declares a standing page and the
+  turn shares no word with that page
+- **THEN** the packet serves the page's unit under `precedents`, and serves neither a
+  second standing page of that project nor another project's standing page
+
+### Requirement: A served scoped claim keeps its scope qualifier
+A unit SHALL be served whole or not at all. The compiler SHALL NOT cut a unit's text
+short, because a cut drops a qualifier ("chronic X", "for Y only") and turns a scoped
+claim into a general one. A unit longer than 900 characters SHALL be reported as a
+pointer with reason `unit_too_long`, never as a half-claim.
+
+#### Scenario: A qualifier past the preferred size survives
+- **WHEN** a unit longer than 360 characters ends with its scope qualifier
+- **THEN** the packet serves the unit's full text including the qualifier
+
+#### Scenario: A unit too long to serve whole becomes a pointer
+- **WHEN** a unit is longer than 900 characters
+- **THEN** it is not served as a unit and is reported as a pointer with reason
+  `unit_too_long`
 
 ### Requirement: A carried page is read through the lenses its own units answer
 The retrieval carry SHALL read each carried page through the `units` lenses that select

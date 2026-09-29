@@ -47,9 +47,22 @@ log = logging.getLogger(__name__)
 DEFAULT_BUDGET_CHARS = 4000
 MIN_BUDGET_CHARS = 500
 MAX_BUDGET_CHARS = 8000
+#: The size a unit is designed to fit, and the ceiling past which it is not
+#: served as a unit at all. A unit is never cut short: a scoped claim ("for
+#: chronic X only") loses its meaning with its qualifier, so a unit that is
+#: too long becomes a pointer (`unit_too_long`), never a half-claim.
 MAX_UNIT_CHARS = 360
+MAX_UNIT_HARD_CHARS = 900
 MAX_ITEMS_PER_ROLE = 3
 MAX_POINTERS = 40
+#: Pages linked to a resolved entity that hold conclusions and are read under
+#: `precedents` beyond the entity's capped link list, and the pages of the
+#: entity's project(s) that stand as precedent (one per project), with the
+#: units of each that are exempt from the role cap.
+ENTITY_CONCLUSION_PAGES = 6
+MAX_STANDING_PAGES = 2
+MAX_STANDING_UNITS = 2
+PRECEDENTS_ROLE = "precedents"
 #: Units the unit lane reads before neighbourhood filtering. Generous because the
 #: catalogue query is filtered by category and the path filter runs after it.
 UNIT_LANE_LIMIT = 200
@@ -311,23 +324,16 @@ def clamp_budget(value: object) -> int:
     return max(MIN_BUDGET_CHARS, min(MAX_BUDGET_CHARS, requested))
 
 
-def bounded_text(text: str, limit: int = MAX_UNIT_CHARS) -> str:
-    """Cut authored prose at a boundary that leaves no unclosed wikilink.
+def bounded_text(text: str) -> str:
+    """The unit's own prose, whole.
 
-    A naive `text[:360]` produced `... [[norther`, which is unreadable AND
-    unscannable: the egress guard recognises a reference by matching `[[…]]`, so
-    a cut that orphans the opening brackets hides a withheld page from the scan
-    as well as from the reader. Cutting before the orphaned `[[` costs a few
-    characters and keeps both properties.
+    A unit is never cut. The earlier fixed cut orphaned a `[[wikilink` (hiding a
+    withheld page from the egress scan) and, worse, dropped a scope qualifier
+    ("chronic X", "for Y only") so a scoped claim read as a general one. A
+    unit longer than `MAX_UNIT_HARD_CHARS` is refused as a unit by the caller
+    and reported as a pointer instead.
     """
-    compact = text.strip()
-    if len(compact) <= limit:
-        return compact
-    cut = compact[:limit]
-    opened = cut.rfind("[[")
-    if opened != -1 and cut.find("]]", opened) == -1:
-        return cut[:opened].rstrip()
-    return cut
+    return text.strip()
 
 
 def graph_depth_for(status: str) -> int:
@@ -428,6 +434,7 @@ def build_packet(
         return (
             0 if item.level == "unit" else 1,
             order.get(item.role, len(order)),
+            0 if item.provenance.get("standing") else 1,
             _lifecycle_rank(item.lifecycle),
             -_date_rank(item.updated),
             item.ref,
@@ -473,8 +480,12 @@ def build_packet(
         if _redundant_superseded(item, present_paths):
             continue
         text = bounded_text(item.text)
+        if len(text) > MAX_UNIT_HARD_CHARS:
+            deferred.append((item, "unit_too_long"))
+            continue
         role_count = per_role.get(item.role, 0)
-        if role_count >= MAX_ITEMS_PER_ROLE:
+        standing = bool(item.provenance.get("standing"))
+        if role_count >= MAX_ITEMS_PER_ROLE and not standing:
             deferred.append((item, "role_cap"))
             continue
         if used + len(text) > limit or not text:
@@ -491,7 +502,8 @@ def build_packet(
             }
         )
         used += len(text)
-        per_role[item.role] = role_count + 1
+        if not standing:
+            per_role[item.role] = role_count + 1
 
     # A pointer is cheap but not free: its title and `why` are prose the caller
     # pays for, so the same ceiling bounds them. Once the budget is spent the
@@ -665,8 +677,15 @@ def run_lanes(
     timings: Any = None,
     freshness_snapshot: Any = None,
     neighbourhood: frozenset[str] | None = None,
+    precedent_pages: frozenset[str] = frozenset(),
+    standing_pages: frozenset[str] = frozenset(),
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
     """Run one bounded lane per selected role. Every lane soft-fails alone.
+
+    `precedent_pages` are pages the `precedents` lane reads beyond the anchors'
+    neighbourhood (an entity's conclusion pages past its link cap), and
+    `standing_pages` the project pages that stand as precedent: their units
+    lead the role and are exempt from its item cap (`reach_precedents`).
 
     `current_state` is resolved ONCE by the caller and handed in, because the
     Records lane and the packet's own `current_state[]` block are two views of
@@ -699,14 +718,19 @@ def run_lanes(
         result = LaneResult(())
         with _span(timings, lane_stage):
             try:
+                extra = (
+                    precedent_pages | standing_pages if definition.id == PRECEDENTS_ROLE else frozenset()
+                )
                 result = _lane(
                     root,
                     definition,
                     anchors=anchors,
-                    neighbourhood=neighbourhood,
+                    neighbourhood=neighbourhood | extra if extra else neighbourhood,
                     current_state=current_state,
                     freshness_snapshot=freshness_snapshot,
                 )
+                if extra and standing_pages:
+                    result = _with_standing_units(result, standing_pages)
             except Exception:  # noqa: BLE001 - one lane's failure is not the packet's
                 log.debug("activation lane %s failed", role_id, exc_info=True)
                 failed = True
@@ -718,6 +742,105 @@ def run_lanes(
             missing.append({"role": role_id, "reason": "lane_truncated"})
         items.extend(result.items)
     return tuple(items), tuple(dict(entry) for entry in missing)
+
+
+def _with_standing_units(result: LaneResult, standing_pages: frozenset[str]) -> LaneResult:
+    """Mark a standing page's units, keeping at most `MAX_STANDING_UNITS` each."""
+    kept: dict[str, int] = {}
+    items: list[LaneItem] = []
+    for item in result.items:
+        if item.path in standing_pages:
+            if kept.get(item.path, 0) >= MAX_STANDING_UNITS:
+                continue
+            kept[item.path] = kept.get(item.path, 0) + 1
+            item = replace(item, provenance={**item.provenance, "standing": True})
+        items.append(item)
+    return LaneResult(tuple(items), result.truncated)
+
+
+def _conclusion_pages(
+    vault_root: Path,
+    candidates: Iterable[str],
+    *,
+    categories: frozenset[str],
+) -> tuple[str, ...]:
+    """The candidates that hold at least one unit of a conclusion category,
+    newest first, at most `ENTITY_CONCLUSION_PAGES`.
+
+    One indexed category read (`lexstore.unit_categories_of`) chooses the pages;
+    only the survivors' own dates are then read, from the warm page cache.
+    """
+    from . import find_corpus, lexstore
+
+    ordered = sorted(candidates)[: 4 * UNIT_LANE_LIMIT]
+    try:
+        found = lexstore.get_store(Path(vault_root)).unit_categories_of(tuple(ordered))
+    except Exception:  # noqa: BLE001 - a failed probe reaches no extra page
+        log.debug("activation conclusion-page probe failed", exc_info=True)
+        return ()
+    holders = [path for path in ordered if (found or {}).get(path, frozenset()) & categories]
+    dated: list[tuple[int, str]] = []
+    root = Path(vault_root)
+    for path in holders[: 4 * ENTITY_CONCLUSION_PAGES]:
+        page = find_corpus.CACHE.get(root / path, root)
+        dated.append((_date_rank(getattr(page, "updated", "") or ""), path))
+    dated.sort(key=lambda entry: (-entry[0], entry[1]))
+    return tuple(path for _rank, path in dated[:ENTITY_CONCLUSION_PAGES])
+
+
+def reach_precedents(
+    vault_root: Path,
+    *,
+    resolved: Sequence[Any],
+    roles: Sequence[Mapping[str, Any]],
+    registry: context_roles.RoleRegistry,
+    index: working_set_index.WorkingSetIndex | None,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """`(precedent_pages, standing_pages)` the `precedents` lane also reads.
+
+    An entity's own conclusion pages (pages that link to it and hold
+    decision, insight or finding units) are eligible whether or not they share a
+    word with the turn and whether or not they fit the entity's capped link
+    list. A resolved anchor's project may declare one standing page
+    (`standing: true`), which is read for the anchor whatever it says about the
+    turn's words. Both only when the `precedents` role was selected, both
+    bounded, and both soft: nothing here can fail the packet.
+    """
+    if index is None or not resolved or not any(r.get("id") == PRECEDENTS_ROLE for r in roles):
+        return frozenset(), frozenset()
+    definition = registry.roles.get(PRECEDENTS_ROLE)
+    if definition is None:
+        return frozenset(), frozenset()
+    from . import find_corpus
+
+    rows = {row.anchor_id: row for row in index.anchors()}
+    root = Path(vault_root)
+    precedent: set[str] = set()
+    standing: list[str] = []
+    for anchor in resolved:
+        row = rows.get(str(getattr(anchor, "anchor_id", "") or ""))
+        keys: list[str] = []
+        anchor_id = str(getattr(anchor, "anchor_id", "") or "")
+        if anchor_id.startswith("project:"):
+            keys.append(anchor_id.split(":", 1)[1])
+        path = str(getattr(anchor, "path", "") or "")
+        if path.endswith(".md"):
+            page = find_corpus.CACHE.get(root / path, root)
+            frontmatter = getattr(page, "frontmatter", None)
+            if isinstance(frontmatter, dict):
+                keys.extend(sorted(find_corpus.all_projects(frontmatter)))
+        if row is not None and getattr(anchor, "kind", "") == "entity":
+            already = frozenset(getattr(anchor, "neighbourhood", ()) or ())
+            precedent.update(
+                _conclusion_pages(
+                    root, row.linked_by - already, categories=frozenset(definition.categories)
+                )
+            )
+        for key in keys:
+            project = rows.get(f"project:{key}")
+            if project is not None and project.standing and project.standing not in standing:
+                standing.append(project.standing)
+    return frozenset(precedent), frozenset(standing[:MAX_STANDING_PAGES])
 
 
 def _neighbourhood_paths(vault_root: Path, anchors: Sequence[Any]) -> frozenset[str]:
@@ -2626,6 +2749,13 @@ def compile_packet(
             state_fields=conventions.state_fields,
             date_fields=conventions.date_fields,
         )
+    precedent_pages: frozenset[str] = frozenset()
+    standing_pages: frozenset[str] = frozenset()
+    if not budget_exhausted("working_set.precedents"):
+        with _span(timings, "working_set.precedents"):
+            precedent_pages, standing_pages = reach_precedents(
+                root, resolved=lane_anchors, roles=roles, registry=registry, index=index
+            )
     items, missing = run_lanes(
         root,
         anchors=lane_anchors,
@@ -2634,6 +2764,8 @@ def compile_packet(
         current_state=current_state,
         timings=timings,
         freshness_snapshot=freshness_snapshot,
+        precedent_pages=precedent_pages,
+        standing_pages=standing_pages,
     )
     # Concurrent contexts: pages the turn named beside what it resolved. An
     # additive read that soft-fails; the resolved anchors' own packet is

@@ -115,7 +115,12 @@ log = logging.getLogger(__name__)
 #: v11 (close-memory-loop, activation quality) stores an entity page's own
 #: `entity_type` in `anchor_entity_types`, the index field the context-activation
 #: spec names: the resolver asks whether a bare shared name belongs to people.
-SCHEMA_VERSION = 11
+#: v12 (close-memory-loop, standing precedent) records an anchor's inbound
+#: wikilinks past `MAX_LINKS_PER_ANCHOR` under their own relation
+#: (`OVERFLOW_RELATION`, never part of `neighbourhood`) and a project's
+#: declared standing page under `STANDING_RELATION`: an older sidecar holds
+#: neither and must rebuild once.
+SCHEMA_VERSION = 12
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -141,6 +146,18 @@ MAX_ANCHORS = 2000
 INLINE_VECTOR_ENCODE_LIMIT = 64
 MAX_PLAN_ITEMS = 200
 MAX_LINKS_PER_ANCHOR = 40
+#: Inbound wikilinks kept past `MAX_LINKS_PER_ANCHOR`, under a relation of
+#: their own. They corroborate nothing (`AnchorRow.neighbourhood` leaves them
+#: out, so resolution reads exactly what it always did); they only say which
+#: pages link to an anchor, so a heavily linked entity's own conclusion pages
+#: are still findable.
+MAX_OVERFLOW_LINKS_PER_ANCHOR = 200
+OVERFLOW_RELATION = "wikilink_overflow"
+#: A project anchor's edge to the one page the project declares standing
+#: (frontmatter `standing: true` on a page of that project).
+STANDING_RELATION = "project_standing"
+_LINKED_BY_RELATIONS = frozenset({"wikilink", OVERFLOW_RELATION})
+_NON_NEIGHBOUR_RELATIONS = frozenset({OVERFLOW_RELATION, STANDING_RELATION})
 SIGNATURE_MAX_CHARS = 600
 LEDE_MAX_CHARS = 240
 
@@ -648,7 +665,27 @@ class AnchorRow:
     @property
     def neighbourhood(self) -> frozenset[str]:
         """Paths this anchor is typed-linked to, in either direction."""
-        return frozenset(target for target, _relation, _direction in self.links)
+        return frozenset(
+            target
+            for target, relation, _direction in self.links
+            if relation not in _NON_NEIGHBOUR_RELATIONS
+        )
+
+    @property
+    def linked_by(self) -> frozenset[str]:
+        """Pages that link TO this anchor, including those past the link cap."""
+        return frozenset(
+            target
+            for target, relation, direction in self.links
+            if direction == "inbound" and relation in _LINKED_BY_RELATIONS
+        )
+
+    @property
+    def standing(self) -> str:
+        """The page this project anchor's project declares standing, or `""`."""
+        return next(
+            (target for target, relation, _d in self.links if relation == STANDING_RELATION), ""
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1368,6 +1405,28 @@ def _bounded_project_members(members: Sequence[tuple[str, str]]) -> tuple[str, .
     return tuple(path for path, _updated in ordered[:PROJECT_ANCHOR_MEMBER_CAP])
 
 
+def _standing_page(vault_root: Path, members: Sequence[tuple[str, str]]) -> str:
+    """The one page a project declares standing, or `""`.
+
+    A page declares itself with frontmatter `standing: true` and belongs to
+    the project by its own `project` or `projects`. Several declarations
+    (a superseded method note left in place) resolve to the most recently
+    updated, ties broken by path, so exactly one page stands per project.
+    The pages come from the walk's own cache; no second enumeration.
+    """
+    declared: list[tuple[str, str]] = []
+    for rel, updated in dict(members).items():
+        page = find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
+        frontmatter = getattr(page, "frontmatter", None)
+        if isinstance(frontmatter, dict) and frontmatter.get("standing") is True:
+            declared.append((rel, updated))
+    if not declared:
+        return ""
+    declared.sort(key=lambda item: item[0])
+    declared.sort(key=lambda item: _member_recency_key(item[1]), reverse=True)
+    return declared[0][0]
+
+
 def _project_candidates(
     vault_root: Path, member_paths: Mapping[str, Sequence[tuple[str, str]]]
 ) -> tuple[list[_Candidate], dict[str, list[tuple[str, str, str]]]]:
@@ -1431,8 +1490,12 @@ def _project_candidates(
                 source_signature=f"{key}:{folder}:{category}:{','.join(members)}",
             )
         )
-        if members:
-            edges[anchor_id] = [(path, "project_member", "outbound") for path in members]
+        rows = [(path, "project_member", "outbound") for path in members]
+        standing = _standing_page(vault_root, member_paths.get(key, ()))
+        if standing:
+            rows.append((standing, STANDING_RELATION, "outbound"))
+        if rows:
+            edges[anchor_id] = rows
     return out, edges
 
 
@@ -1448,12 +1511,21 @@ def _resolve_links(
     would otherwise have no neighbourhood at all.
     """
     edges: dict[str, list[tuple[str, str, str]]] = {}
+    overflow: dict[str, list[tuple[str, str, str]]] = {}
 
     def _add(anchor_id: str, target: str, direction: str) -> None:
         bucket = edges.setdefault(anchor_id, [])
         row = (target, "wikilink", direction)
-        if row not in bucket and len(bucket) < MAX_LINKS_PER_ANCHOR:
+        if row in bucket:
+            return
+        if len(bucket) < MAX_LINKS_PER_ANCHOR:
             bucket.append(row)
+            return
+        if direction == "inbound":
+            spill = overflow.setdefault(anchor_id, [])
+            extra = (target, OVERFLOW_RELATION, direction)
+            if extra not in spill and len(spill) < MAX_OVERFLOW_LINKS_PER_ANCHOR:
+                spill.append(extra)
 
     for source_rel, targets in outbound.items():
         source_anchor = anchor_paths.get(source_rel)
@@ -1466,6 +1538,8 @@ def _resolve_links(
                 target_anchor = anchor_paths.get(target_rel)
                 if target_anchor is not None:
                     _add(target_anchor, source_rel, "inbound")
+    for anchor_id, rows in overflow.items():
+        edges[anchor_id].extend(rows)
     return edges
 
 
@@ -2136,7 +2210,9 @@ class WorkingSetIndex:
                     categories=tuple(categories.get(anchor_id, ())),
                     links=tuple(links.get(anchor_id, ())),
                     anchor_neighbourhood=frozenset(
-                        other for other, _relation, _direction in links.get(anchor_id, ())
+                        other
+                        for other, relation, _direction in links.get(anchor_id, ())
+                        if relation not in _NON_NEIGHBOUR_RELATIONS
                     )
                     & anchor_paths,
                     entity_type=str(entity_types.get(anchor_id) or ""),
