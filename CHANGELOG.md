@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.97.0](https://github.com/Artexis10/exomem/compare/v0.96.0...v0.97.0) (2026-09-28)
+
+
+### Features
+
+* **cloud:** isolate the edge and split operator access ([#1418](https://github.com/Artexis10/exomem/issues/1418)) ([895e17a](https://github.com/Artexis10/exomem/commit/895e17a72caebc0011e03f2fc5cb2f8c721aa8f5))
+* **cloud:** unpacker and runbook for the owner's vault restore ([#1442](https://github.com/Artexis10/exomem/issues/1442)) ([2ccc5ca](https://github.com/Artexis10/exomem/commit/2ccc5ca8dc539a82ab2e7e6ee8b4256e758be1e7))
+
+
+### Bug Fixes
+
+* **ansible:** ship control-database WAL at least once a minute ([#1426](https://github.com/Artexis10/exomem/issues/1426)) ([53ac15a](https://github.com/Artexis10/exomem/commit/53ac15a2d1df2ace61e828de678d663cf89f4a39))
+* **cloud:** keep cell health answerable during index builds, and give cells 3Gi ([#1446](https://github.com/Artexis10/exomem/issues/1446)) ([362ffb0](https://github.com/Artexis10/exomem/commit/362ffb0dc89501a19642e0a4bea2b851eab6e238))
+
 ## [0.96.0](https://github.com/Artexis10/exomem/compare/v0.95.2...v0.96.0) (2026-09-28)
 
 
