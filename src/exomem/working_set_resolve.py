@@ -622,7 +622,10 @@ def embedded_words(
     `analyze_turn`). With a stretch open, a run that STARTS with a declared
     particle also ends it, matching the longest particle, and the rest of the
     run joins the next stretch: a particle glued to the next kana word
-    (`ハヤブサ号はどう`, `をまた`) still marks the name's edge. Any other
+    (`ハヤブサ号はどう`, `をまた`) still marks the name's edge. The unsplit
+    stretch is a word too, and so is each cut of it before a particle inside
+    the run, so a name that continues through such a run (`サクラもち本舗`,
+    `木村はるか`) is an exact match that outranks its head. Any other
     hiragana is part of the stretch around it, so a name written partly in
     hiragana (`ねこやなぎ銀行`, also after `駅前の`) keeps its own edge, and its
     kanji tail (`銀行`) is only contained, as in `ハヤブサ号線`.
@@ -646,21 +649,32 @@ def embedded_words(
             if cls != "cjk":
                 pieces.append(run)
                 continue
-            stretch = ""
+            # `stretch` is split at particles; `full` is the same text with
+            # no split, so a name that continues through a hiragana run that
+            # merely starts with a particle character still has its spelling.
+            stretch = full = ""
             for kana, part in _hiragana_segments(run):
                 if kana and part in boundaries:
-                    if stretch:
-                        pieces.append(stretch)
-                    stretch = ""
-                elif kana and stretch and (particle := _leading_particle(part)):
+                    pieces.extend(dict.fromkeys((stretch, full)))
+                    stretch = full = ""
+                    continue
+                if kana and full:
+                    # A name can end inside the run, just before a particle
+                    # (`木村はるかの`), so each such cut is a candidate too.
+                    pieces.extend(
+                        full + part[:cut]
+                        for cut in range(1, len(part))
+                        if _leading_particle(part[cut:])
+                    )
+                if kana and stretch and (particle := _leading_particle(part)):
                     # A particle glued to the next kana word (はどう, をまた)
                     # still ends the stretch; the rest joins the next one.
                     pieces.append(stretch)
                     stretch = part[len(particle):]
                 else:
                     stretch += part
-            if stretch:
-                pieces.append(stretch)
+                full += part
+            pieces.extend(dict.fromkeys((stretch, full)))
         if cursor < len(token):
             pieces.append(token[cursor:])
         for piece in pieces:
@@ -1056,9 +1070,23 @@ def candidates_for(
     row_exact_phrases: dict[str, frozenset[str]] = {}
     own_covered: dict[str, frozenset[int]] = {}
     covered_positions: set[int] = set()
+    # An embedded word that only spells the head of a longer embedded word some
+    # indexed name equals (`サクラ` inside `サクラもち本舗`) is consumed: the
+    # turn wrote the longer name, the same way containment consumes a name.
+    embedded_only = frozenset(analysis.words) - frozenset(analysis.tokens) - frozenset(analysis.ngrams)
+    matched_words = {
+        word
+        for row in rows
+        for word in ({normalize(row.title), *row.aliases} & frozenset(analysis.words))
+    }
+    consumed_words = frozenset(
+        word
+        for word in embedded_only
+        if any(other != word and word in other for other in matched_words)
+    )
     for row in rows:
         names = {normalize(row.title), *row.aliases} - {""}
-        matched = names & phrases
+        matched = (names & phrases) - consumed_words
         row_exact_phrases[row.anchor_id] = frozenset(matched)
         positions: set[int] = set()
         for phrase in matched:

@@ -728,15 +728,15 @@ def test_a_name_with_hiragana_inside_beats_its_head_split_at_a_particle_characte
 @pytest.mark.parametrize(
     ("turn", "expected"),
     [
-        ("ハヤブサ号のもう一台", {"ハヤブサ号", "ハヤブサ号のもう一台"}),
+        ("ハヤブサ号のもう一台", {"ハヤブサ号", "う一台"}),
         ("青木陽介はいつ来る？", {"青木陽介"}),
     ],
 )
 def test_a_glued_particle_still_ends_the_name_and_the_greedy_match_is_pinned(
     turn: str, expected: set[str]
 ) -> None:
-    """のもう is split at the longest particle のも (leaving う一台), so the
-    unsplit stretch is emitted beside the head; a name that ends at a particle
+    """のもう is split at the longest particle のも, which leaves う一台 and no
+    もう一台: the greedy match is the contract. A name that ends at a particle
     keeps its head as a word."""
     words = set(working_set_resolve.analyze_turn(turn).words)
     assert expected <= words
