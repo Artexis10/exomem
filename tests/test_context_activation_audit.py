@@ -1542,3 +1542,288 @@ def test_a7_leaves_twins_to_their_own_rules() -> None:
     raw = score_case(packet, fixture_by_id("T7"))
     amended = _amended(packet, "T7", amendments={AMBIGUITY_PRECISION})
     assert (amended.precision, amended.failure_reasons) == (raw.precision, raw.failure_reasons)
+
+
+# -- Amendment A8: a carried gold page counts (positive cases only) ------------
+
+#: Unit parents as a frozen map spells them: the page's own ref -> its key.
+A8_PARENTS = {
+    "page-c4-failure": "c4_failure_note",
+    "page-c4-entity": "c4_entity_profile",
+    "page-t4-a": "t4_shared_first_name_entity_a",
+}
+
+
+def _carried(ref: str, *unit_refs: str, extra_units: tuple = ()) -> ActivationPacket:
+    return ActivationPacket(
+        anchors=(Anchor(ref=ref, title=ref, kind="page", status="retrieval_carried"),),
+        units=(
+            *(
+                Unit(ref=f"{unit_ref}#unit-{i}", role="precedents", text="It failed on the Mac build.")
+                for i, unit_ref in enumerate(unit_refs)
+            ),
+            *extra_units,
+        ),
+        abstained=True,
+        abstention_reason="unresolved",
+    )
+
+
+def _a8(packet: ActivationPacket, case_id: str):
+    from membench.utility.context_activation import CARRIED_GOLD
+
+    return _amended(
+        packet,
+        case_id,
+        amendments={CARRIED_GOLD},
+        key_to_ref={"c4_failure_note": "page-c4-failure", "c4_entity_profile": "page-c4-entity"},
+        unit_parents={"page-c4-failure": "page-c4-failure", "page-c4-entity": "page-c4-entity"},
+    )
+
+
+def test_a8_a_carried_gold_page_with_its_units_satisfies_status_and_precision() -> None:
+    packet = _carried("page-c4-failure", "page-c4-failure")
+    raw = score_case(packet, fixture_by_id("C4"), key_to_ref={"c4_failure_note": "page-c4-failure"})
+    amended = _a8(packet, "C4")
+    assert not raw.status_match and raw.precision == 0.0
+    assert amended.status_match and amended.precision == 1.0
+    # The entity is still never reached: recall stays the honest 0.50.
+    assert amended.failure_reasons == ("gold recall 0.50 below the 0.9 floor",)
+
+
+def test_a8_full_gold_through_a_carried_page_and_its_entity_unit_passes() -> None:
+    packet = _carried("page-c4-failure", "page-c4-failure", "page-c4-entity")
+    assert _a8(packet, "C4").passed
+
+
+def test_a8_a_carried_gold_page_without_its_units_earns_no_status() -> None:
+    packet = _carried("page-c4-failure")
+    assert not _a8(packet, "C4").status_match
+
+
+def test_a8_a_carried_page_outside_the_gold_earns_nothing() -> None:
+    packet = _carried("page-elsewhere", "page-elsewhere")
+    amended = _a8(packet, "C4")
+    assert not amended.status_match
+    assert amended.precision == 0.0
+
+
+def test_a8_units_of_a_non_gold_page_stay_distinct_in_precision() -> None:
+    packet = _carried(
+        "page-c4-failure",
+        "page-c4-failure",
+        extra_units=(Unit(ref="page-elsewhere#unit-9", role="precedents", text="t"),),
+    )
+    assert _a8(packet, "C4").precision == 0.5
+
+
+def test_a8_leaves_twins_to_their_own_rules() -> None:
+    from membench.utility.context_activation import CARRIED_GOLD
+
+    packet = _carried("page-t4-a", "page-t4-a")
+    raw = score_case(packet, fixture_by_id("T4"), key_to_ref={"t4_shared_first_name_entity_a": "page-t4-a"})
+    amended = _amended(
+        packet,
+        "T4",
+        amendments={CARRIED_GOLD},
+        key_to_ref={"t4_shared_first_name_entity_a": "page-t4-a"},
+        unit_parents={"page-t4-a": "page-t4-a"},
+    )
+    assert (amended.status_match, amended.precision, amended.failure_reasons) == (
+        raw.status_match,
+        raw.precision,
+        raw.failure_reasons,
+    )
+
+
+def test_a8_requires_a_frozen_parent_map() -> None:
+    from membench.utility.context_activation import CARRIED_GOLD
+
+    with pytest.raises(ValueError, match="unit_parents"):
+        _amended(ActivationPacket(), "C4", amendments={CARRIED_GOLD})
+
+
+# -- Amendment A9: agent-choice scoring (pre-registered; digest pinned) --------
+
+#: Pinned in the commit that introduced A9, before its first run on product
+#: packets. A change to the rule text or to the code applying it is a new
+#: digest and a visible edit here.
+AGENT_CHOICE_SHA256 = "bfedee2fce49dd23d2cae7e2756c7a9f8d747dc5e72c4ef7152ea5a35c064a2f"
+
+
+def _a9(packet: ActivationPacket, case_id: str, **kwargs):
+    from membench.utility.context_activation import AGENT_CHOICE
+
+    return _amended(packet, case_id, amendments={AGENT_CHOICE}, unit_parents={}, **kwargs)
+
+
+def _anchor(ref: str, status: str, kind: str = "page") -> Anchor:
+    return Anchor(ref=ref, title=ref, kind=kind, status=status)
+
+
+def _c4_honest(*extra_anchors: Anchor, current_state: tuple = ()) -> ActivationPacket:
+    """C4's two gold pages under honest labels, with the gold fact served."""
+    return ActivationPacket(
+        anchors=(
+            _anchor("c4_failure_note", "retrieval_carried"),
+            _anchor("c4_entity_profile", "partial", kind="entity"),
+            *extra_anchors,
+        ),
+        units=(Unit(ref="c4_failure_note#unit-1", role="precedents", text="It failed on the Mac build."),),
+        current_state=current_state,
+        abstained=True,
+        abstention_reason="unresolved",
+    )
+
+
+def test_a9_is_the_pre_registered_rule() -> None:
+    from membench.utility.context_activation import agent_choice_digest
+
+    assert agent_choice_digest() == AGENT_CHOICE_SHA256
+
+
+def test_a9_honest_labels_with_the_gold_facts_pass_where_raw_fails() -> None:
+    packet = _c4_honest()
+    assert not score_case(packet, fixture_by_id("C4")).passed
+    assert _a9(packet, "C4").passed
+
+
+def test_a9_extra_honest_siblings_do_not_fail() -> None:
+    packet = _c4_honest(_anchor("zz_sibling", "partial"), _anchor("zz_other", "retrieval_carried"))
+    packet = dataclasses.replace(packet, ambiguity=("zz_candidate",))
+    assert _a9(packet, "C4").passed
+
+
+def test_a9_a_gold_page_as_an_ambiguity_candidate_is_honest() -> None:
+    packet = ActivationPacket(
+        anchors=(_anchor("c4_failure_note", "retrieval_carried"),),
+        ambiguity=("c4_entity_profile",),
+        units=(Unit(ref="c4_failure_note#unit-1", role="precedents", text="It failed on the Mac build."),),
+        abstained=True,
+        abstention_reason="ambiguous",
+    )
+    assert _a9(packet, "C4").passed
+
+
+@pytest.mark.parametrize(
+    ("packet", "reason"),
+    [
+        (_c4_honest(_anchor("zz_wrong", "resolved")), "A9: 1 non-gold page(s) served as resolved"),
+        (
+            _c4_honest(current_state=(CurrentStateEntry(anchor="zz_wrong", source="records", statement="s"),)),
+            "A9: 1 non-gold page(s) served as current_state",
+        ),
+        (
+            ActivationPacket(
+                anchors=(_anchor("c4_failure_note", "retrieval_carried"),),
+                units=(Unit(ref="c4_failure_note#unit-1", role="precedents", text="It failed on the Mac build."),),
+            ),
+            "A9: 1 gold page(s) not served under an honest label",
+        ),
+        (
+            dataclasses.replace(_c4_honest(), units=()),
+            "A9: gold fact(s) missing from served material: ['failed on the Mac build']",
+        ),
+        (
+            dataclasses.replace(_c4_honest(), budget_limit_chars=10, budget_used_chars=11),
+            "A9: packet exceeds its budget",
+        ),
+    ],
+)
+def test_a9_fails_a_mislabelled_missing_or_over_budget_packet(packet, reason) -> None:
+    scored = _a9(packet, "C4")
+    assert not scored.passed
+    assert reason in scored.failure_reasons, scored.failure_reasons
+
+
+def test_a9_names_poison_served_as_resolved() -> None:
+    fixture = fixture_by_id("C5")
+    (poison,) = fixture.poison
+    packet = ActivationPacket(anchors=(_anchor(poison, "resolved", kind="resource"),))
+    assert "A9: 1 poison page(s) served as resolved" in _a9(packet, "C5").failure_reasons
+
+
+@pytest.mark.parametrize("case_id", ["C6", "T1", "T4", "T7"])
+def test_a9_leaves_twins_and_the_no_memory_case_unchanged(case_id: str) -> None:
+    fixture = fixture_by_id(case_id)
+    packet = ActivationPacket(
+        anchors=tuple(_anchor(key, "partial") for key in (*fixture.gold, "zz_sibling")),
+        abstained=True,
+        abstention_reason="unresolved",
+    )
+    raw = score_case(packet, fixture)
+    amended = _a9(packet, case_id)
+    assert (amended.passed, amended.failure_reasons) == (raw.passed, raw.failure_reasons)
+
+
+def test_a9_never_changes_the_raw_metrics() -> None:
+    packet = _c4_honest(_anchor("zz_wrong", "resolved"))
+    raw = score_case(packet, fixture_by_id("C4"))
+    amended = _a9(packet, "C4")
+    assert (amended.gold_hit, amended.precision, amended.poison_hit, amended.status_match) == (
+        raw.gold_hit,
+        raw.precision,
+        raw.poison_hit,
+        raw.status_match,
+    )
+
+
+# -- Amendment A10: invalid twins (pre-registered list; digest pinned) ---------
+
+#: Pinned in the commit that introduced A10, before its first run.
+INVALID_TWINS_SHA256 = "7828bc8f4e39f90fac71a13c37e22e87c002bb4a98367ee0f8dc82be09757c61"
+
+
+def test_a10_is_the_pre_registered_list() -> None:
+    from membench.utility.context_activation import INVALID_TWINS, invalid_twins_digest
+
+    assert invalid_twins_digest() == INVALID_TWINS_SHA256
+    assert {case: page for case, (page, _why) in INVALID_TWINS.items()} == {
+        "T1": "t1_fitness_goal_note",
+        "T2": "t2_camera_gear_note",
+        "T9": "t2_camera_gear_note",
+    }
+
+
+def test_a10_lists_only_negative_twins_answered_by_a_pre_registered_fixture_page() -> None:
+    from epistemic.corpora.context_activation import KEY_KINDS
+    from membench.utility.context_activation import INVALID_TWINS
+
+    poison_pages = {key for fixture in FIXTURES for key in fixture.poison}
+    for case_id, (page, why) in INVALID_TWINS.items():
+        fixture = fixture_by_id(case_id)
+        assert fixture.case_id.startswith("T") and not fixture.gold, case_id
+        assert fixture.expected_status == "unresolved", case_id
+        assert page in KEY_KINDS and page in poison_pages, case_id
+        assert why.strip(), case_id
+
+
+def test_a10_excludes_a_listed_twin_and_leaves_raw_alone() -> None:
+    from membench.utility.context_activation import INVALID_TWIN, excluded_case_ids
+
+    packet = ActivationPacket(
+        anchors=(Anchor(ref="t1_fitness_goal_note", title="t", kind="page", status="retrieval_carried"),),
+        units=(Unit(ref="t1_fitness_goal_note#unit-1", role="preferences", text="step-count goal"),),
+        abstained=True,
+        abstention_reason="unresolved",
+    )
+    raw = score_case(packet, fixture_by_id("T1"))
+    amended = _amended(packet, "T1", amendments={INVALID_TWIN})
+    assert not raw.passed and "twin surfaced a ref outside its own gold" in raw.failure_reasons
+    assert amended.failure_reasons[0].startswith("A10: invalid twin, excluded: t1_fitness_goal_note")
+    assert excluded_case_ids([raw, amended]) == ("T1",)
+    assert (amended.precision, amended.twin_false_activation) == (raw.precision, raw.twin_false_activation)
+
+
+@pytest.mark.parametrize("case_id", ["T6", "T3", "C1"])
+def test_a10_leaves_every_other_case_unchanged(case_id: str) -> None:
+    from membench.utility.context_activation import INVALID_TWIN
+
+    packet = ActivationPacket(
+        anchors=(Anchor(ref="zz_page", title="z", kind="page", status="retrieval_carried"),),
+        abstained=True,
+        abstention_reason="unresolved",
+    )
+    raw = score_case(packet, fixture_by_id(case_id))
+    amended = _amended(packet, case_id, amendments={INVALID_TWIN})
+    assert (amended.passed, amended.failure_reasons) == (raw.passed, raw.failure_reasons)

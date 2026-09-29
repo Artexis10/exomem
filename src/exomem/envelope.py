@@ -124,10 +124,10 @@ FOUNDER_GATE: str = (
 #: active surface cannot call, and a ceiling that vanished on a reduced surface
 #: would be a ceiling nobody was told about.
 CONFIRM_REQUIRED: str = (
-    "the confirm-required surfaces are restructure application, collection creation, "
-    "supersession commit, entity merge and deletion. Deletion has a server-side confirm parameter; "
-    "adoption apply is preview-first; supersession has no server-side gate yet: "
-    "future work; on a personal vault, additive entity creation follows proactive_capture"
+    "confirm-required: restructure application, collection creation, supersession commit, "
+    "entity merge and deletion. Deletion has a server-side confirm parameter; adoption "
+    "apply is preview-first; supersession has no server-side gate yet: future work. On a "
+    "personal vault, additive entity creation follows proactive_capture"
 )
 
 #: The protocol the agent contract teaches, per action the agent is about to

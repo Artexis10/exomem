@@ -1562,6 +1562,24 @@ def registry_epoch_writes(
     )
 
 
+def _is_utf8_stream(stream: BinaryIO) -> bool:
+    """Whether a seekable staged payload is strict UTF-8, leaving its position."""
+    import codecs
+
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    position = stream.tell()
+    try:
+        stream.seek(0)
+        while chunk := stream.read(1024 * 1024):
+            decoder.decode(chunk)
+        decoder.decode(b"", final=True)
+    except UnicodeDecodeError:
+        return False
+    finally:
+        stream.seek(position)
+    return True
+
+
 def _epoch_writes_with_predecessor(
     vault_root: Path, writes: Iterable[PlannedWrite]
 ) -> tuple[PlannedWrite, PlannedWrite, GraphSyncCheckpoint | None] | None:
@@ -1571,7 +1589,12 @@ def _epoch_writes_with_predecessor(
     """
     from . import recall_policy, relation_registry
     from .kbdir import kb_dirname
-    from .vault import PlannedWrite, content_hash, in_excluded_scan_dir
+    from .vault import (
+        PlannedWrite,
+        PreparedBinaryContent,
+        content_hash,
+        in_excluded_scan_dir,
+    )
 
     # Keep emitted internal writes in the caller's path namespace.  On Windows
     # a caller may legitimately use an 8.3 or case variant while ``resolve``
@@ -1610,11 +1633,20 @@ def _epoch_writes_with_predecessor(
             or recall_policy.is_structured_only_path(root, relative)
         ):
             continue
-        if not isinstance(write.content, str):
+        if isinstance(write.content, str):
+            digest = content_hash(write.content)
+        elif isinstance(write.content, PreparedBinaryContent) and _is_utf8_stream(
+            write.content.stream
+        ):
+            # A preserved `.md` artifact arrives as staged bytes. The graph scan
+            # reads it as strict UTF-8, and the staged SHA-256 of valid UTF-8 is
+            # exactly the text's content hash.
+            digest = write.content.sha256
+        else:
             raise GraphEpochIncoherent(
                 "graph-relevant batch content is not Markdown text"
             )
-        paths.append((relative, content_hash(write.content)))
+        paths.append((relative, digest))
         if not write.path.exists():
             created_paths.append(relative)
     if registry_write is None and not paths:

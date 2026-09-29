@@ -598,6 +598,29 @@ _OptionalClientArtifactFiles = Annotated[
 ]
 
 
+class ClientTranscription(TypedDict):
+    """A transcription an AI client derived from one supplied original."""
+
+    file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+    text: Annotated[str, StringConstraints(min_length=1, max_length=100_000)]
+
+
+#: Optional like `_OptionalClientArtifactFiles`, and for the same reason not
+#: `| None`: an empty list already means "no transcriptions supplied".
+_OptionalClientTranscriptions = Annotated[
+    list[ClientTranscription],
+    Field(
+        max_length=8,
+        description=(
+            "Optional transcriptions of supplied originals, each {file_id, text}. "
+            "Each is saved on its original's Evidence page, bound to the "
+            "original's bytes, and only when that original is stored. Files "
+            "must have unique file_id values when transcriptions are supplied."
+        ),
+    ),
+]
+
+
 class SearchResponse(TypedDict):
     results: list[SearchResult]
 
@@ -1942,8 +1965,14 @@ def op_bootstrap(
             },
             "binary_upload": {
                 "tool": "preserve_artifacts",
-                "fields": ["files", "scope", "category"],
+                # The tool schema already lists these, so compact leaves them to it.
+                **(
+                    {"fields": ["files", "scope", "category", "transcriptions"]}
+                    if profile != "compact"
+                    else {}
+                ),
                 "when": "the client can supply temporary file handles",
+                "custody": "original first; transcription beside, never instead",
                 "fallback": {
                     "tool": "transfer_artifact",
                     "args": {"operation": "upload"},
@@ -2050,6 +2079,20 @@ def op_bootstrap(
                     "preserve_artifacts(scope='...', category='...', files=["
                     "{'download_url': 'https://...', 'file_id': '...', "
                     "'mime_type': 'image/png', 'file_name': 'receipt.png'}])"
+                ),
+            },
+            {
+                "goal": "preserve an attached original with its transcription",
+                "call": (
+                    "preserve_artifacts(scope='...', category='...', files=[<handle>], "
+                    "transcriptions=[{'file_id': '<handle file_id>', 'text': '...'}])"
+                ),
+            },
+            {
+                "goal": "preserve a local client's file",
+                "call": (
+                    "run `exomem attach <file>`, then pass its printed `file` handle in "
+                    "preserve_artifacts(files=[...]); `--lane source` for capture_source"
                 ),
             },
             {
@@ -4164,6 +4207,7 @@ def op_edit(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    identity_decision: dict | None = None,
 ) -> dict:
     """Lightweight in-place edit of a page (body, tags, a surgical snippet,
     a batch, an opinion row, or one frontmatter field).
@@ -4326,6 +4370,8 @@ def op_edit(
                 relation_review_reason=relation_review_reason,
             )
         elif field is not None:
+            if field == "aliases":
+                _refuse_claimed_aliases(vault_root, path, value, identity_decision)
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root,
                 path=path,
@@ -4625,6 +4671,7 @@ def op_link(
     decision_status: str | None = None,
     identity_decision: _IdentityDecisionArgument = None,
     facets: _EntityFacetsArgument = None,
+    aliases: list[str] | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -4663,6 +4710,11 @@ def op_link(
         facets: Values for facets the registry declares for this type: a
             string for a single facet, a list for a multi one. Undeclared
             names are refused.
+        aliases: Other names the entity answers to, in any script, written to
+            its `aliases`. Give the native-script spelling of a name written
+            in another script (a Japanese name for an English-titled page) so
+            a turn in that script reaches it. At most 8, one line and 64
+            characters each; one any other page already answers to refuses.
 
     Returns:
         {path, warnings}, or a non-mutating `identity_preparation` when the
@@ -4699,6 +4751,7 @@ def op_link(
             decision_status=decision_status,
             identity_decision=identity_decision,
             facets=facets,
+            aliases=aliases,
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
@@ -7304,12 +7357,57 @@ def op_remember(
     )
 
 
+
+def _refuse_claimed_aliases(
+    vault_root: Path, path: str, value: object, identity_decision: dict | None = None
+) -> None:
+    """Refuse an `aliases` patch naming what another page already answers to.
+
+    The same guard `create-entity` runs (`entity_candidates.claimed_names`):
+    an alias another page holds would make a turn naming it resolve both. The
+    page's own title and current aliases are never a collision. A genuinely
+    shared name is admitted by an explicit `distinct` `identity_decision`
+    bound to that alias's candidate fingerprint; a page the caller may not see
+    never claims an alias, so a restricted caller is neither refused nor asked.
+    """
+    names = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    aliases = [str(item).strip() for item in names if isinstance(item, str) and str(item).strip()]
+    if not aliases:
+        return
+    rel = path if path.endswith(".md") else f"{path}.md"
+    claimed = entity_candidates_module.claimed_names(vault_root, aliases, exclude_path=rel)
+    if not claimed:
+        return
+    fingerprint = entity_candidates_module.claim_set_fingerprint(
+        vault_root, list(claimed), exclude_path=rel
+    )
+    if identity_decision is None:
+        alias, paths = next(iter(claimed.items()))
+        raise ValueError(
+            f"ENTITY_EXISTS: another page already answers to the alias {alias!r} "
+            f"({', '.join(paths)}); pick a name only this page answers to, or pass "
+            "identity_decision {outcome: distinct} with this candidate_fingerprint if it "
+            f"is a different identity (candidate_fingerprint: {fingerprint})"
+        )
+    try:
+        decision = link_module._identity_decision(identity_decision)  # noqa: SLF001
+    except link_module.LinkError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+    if decision["candidate_fingerprint"] != fingerprint:
+        raise ValueError(
+            "STALE_IDENTITY_DECISION: what these aliases resolve to changed since the "
+            "decision, or the decision was made for other names; decide again "
+            f"(candidate_fingerprint: {fingerprint})"
+        )
+
+
 def op_edit_memory(
     vault_root: Path,
     path: str,
     why: str,
     operation: edit_operations_module.EditOperation = None,  # type: ignore[assignment]
     validate_only: bool = False,
+    identity_decision: _IdentityDecisionArgument = None,
     **legacy: Any,
 ) -> dict:
     """Edit an existing memory page with an auditable reason.
@@ -7349,6 +7447,10 @@ def op_edit_memory(
         validate_only: Preview the edit without committing it. Accepted here or
             as `operation.validate_only`; giving it in both places is fine when
             they agree. Same meaning as on `remember` and `replace_memory`.
+        identity_decision: `{outcome: "distinct", candidate_fingerprint}` for an
+            `aliases` patch naming a name another page already answers to, when
+            the name is genuinely shared; the fingerprint comes from that
+            refusal. Not needed for names only withheld pages answer to.
 
     The previous flat keyword arguments remain accepted by direct Python/runtime
     callers for one compatibility release, but are deprecated and intentionally
@@ -7357,6 +7459,8 @@ def op_edit_memory(
     arguments: dict[str, Any] = {"path": path, "why": why, **legacy}
     if operation is not None:
         arguments["operation"] = operation
+    if identity_decision is not None:
+        arguments["identity_decision"] = identity_decision
     if validate_only:
         arguments["validate_only"] = True
     normalized = edit_operations_module.normalize_edit_arguments(arguments)
@@ -7685,7 +7789,8 @@ def op_capture_source(
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
 
-    Takes `content` for text or `files` for attached file handles, stored
+    Takes `content` for text or `files` for attached file handles (a local
+    client passes the handle `exomem attach --lane source` prints), stored
     losslessly under `Sources/`. This command is for raw material; proof-bearing
     artifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the
     artifact is for, not by what the client can carry.
@@ -8124,12 +8229,17 @@ def op_preserve_artifacts(
     category: str,
     files: _ClientArtifactFiles,
     adoption: _OptionalArtifactAdoption = None,
+    transcriptions: _OptionalClientTranscriptions = (),  # noqa: B006 - read-only
 ) -> dict:
     """Preserve client-provided binary file handles as append-only Evidence.
 
     Use this canonical binary-preservation command when the client can supply
-    temporary HTTPS file handles. Exomem retrieves each handle server-side and
-    returns one terminal state per file — `stored`, `already_stored`, or
+    file handles: a chat client's attachments, or the handle `exomem attach`
+    prints on a local client (single use: storing its file spends it, while a
+    refused or failed file leaves it redeemable until it expires). When a
+    shared file is evidence, preserve the original first and put any
+    transcription in `transcriptions`, never instead. Exomem retrieves each handle server-side and returns one terminal
+    state per file — `stored`, `already_stored`, or
     `failed`. `already_stored` means those exact bytes are already under that
     destination, so nothing was written and the outcome names the existing path
     and ref; retrying a lost response with the same identity replays the batch
@@ -8147,6 +8257,8 @@ def op_preserve_artifacts(
         adoption: Optional explicit adoption identity selecting exactly one
             supplied handle. This establishes eligibility, not write consent;
             agent-initiated use obeys proactive_capture.
+        transcriptions: Optional {file_id, text} transcriptions of supplied
+            files, recorded on each stored original's page.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -8155,7 +8267,12 @@ def op_preserve_artifacts(
     # one counters block rather than N: see `due_state.batch_scope`.
     with due_state_module.batch_scope(vault_root):
         result = client_artifacts.preserve_artifacts(
-            vault_root, scope=scope, category=category, files=files, adoption=adoption
+            vault_root,
+            scope=scope,
+            category=category,
+            files=files,
+            adoption=adoption,
+            transcriptions=transcriptions,
         )
     _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,
@@ -9545,6 +9662,7 @@ def op_connect_memory(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    aliases: list[str] | None = None,
     ref: str | None = None,
     expected_hash: str | None = None,
     why: str | None = None,
@@ -9611,6 +9729,8 @@ def op_connect_memory(
         decided: Decision date.
         project: Decision project key.
         decision_status: Decision status.
+        aliases: Other names the entity answers to, in any script; give the
+            native-script spelling of a name written in another script.
         ref: Relation-queue item ref for accept-relation.
         expected_hash: Target page `content_hash` drift guard for accept-relation.
             Required for accept-relation.
@@ -9670,6 +9790,7 @@ def op_connect_memory(
             "decided": None,
             "project": None,
             "decision_status": None,
+            "aliases": None,
             "ref": None,
             "expected_hash": None,
             "why": None,
@@ -9838,6 +9959,7 @@ def op_connect_memory(
             decision_status=decision_status,
             identity_decision=identity_decision,
             facets=facets,
+            aliases=aliases,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
@@ -12716,7 +12838,12 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("add", "propose_compilation"),
-        {"surface": "primary", "actions": ("save",), "first_run_safe": False},
+        {
+            "surface": "primary",
+            "actions": ("save",),
+            "first_run_safe": False,
+            "mcp_meta": {"openai/fileParams": ("files",)},
+        },
     ),
     (
         "episode_memory",
@@ -12991,7 +13118,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                     schema_default=param.schema_default,
                 )
                 for param in params
-                if param.name in {"path", "why", "operation", "validate_only"}
+                if param.name in {"path", "why", "operation", "validate_only", "identity_decision"}
             )
         if response_detail is not None:
             response_detail_help = (

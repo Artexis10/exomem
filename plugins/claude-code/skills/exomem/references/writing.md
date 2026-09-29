@@ -20,6 +20,25 @@ Resolve entity candidates against the active entity registry and selected knowle
   A single incidental mention, unresolved identity, or transient participant
   stays in source/note context.
 
+### Names in another script
+
+A turn written in one script reaches a page only through a name in that script:
+a user who writes in Japanese says the katakana or kanji name, not the Latin
+title. So when you write an entity's name in a script other than the one the
+user used for it (a Latin title for a name they wrote in Japanese, or the
+reverse), add a native-script alias: the user's own spelling.
+
+- At capture: `connect_memory(operation="create-entity", aliases=[...])`.
+- On an existing page: `edit_memory` with `{"kind": "patch_frontmatter",
+  "field": "aliases", "value": [...current, "<the user's spelling>"],
+  "expected_hash": ...}` and a `why`; the list replaces the field, so keep the
+  current aliases.
+
+Use only a spelling the user wrote or the source states; never a
+transliteration or translation you made up. An alias is a name the page
+answers to, so one any other page already answers to (a note's title included)
+is refused, at capture and on edit.
+
 ## Vocabulary consideration
 
 Before saving durable knowledge, consider reuse, enrich, propose-new, generic, no-edge, or defer from the material and bounded review evidence. Resolve candidate entity

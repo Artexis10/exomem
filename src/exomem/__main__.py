@@ -621,7 +621,10 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
 
     Bytes, never a path: the service never reads the caller's filesystem.
     The request goes only to literal loopback, with a local client token, and
-    the command prints the handle the service returns.
+    the command prints the handle the service returns. With `--scope` and
+    `--category` the bytes are preserved as Evidence at once; without them the
+    service holds them and the printed `file` handle is what `preserve_artifacts`
+    (or, with `--lane source`, `capture_source`) takes in `files`.
     """
     import mimetypes
 
@@ -637,6 +640,13 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     parser.add_argument("--category", default="", help="evidence category within the scope")
     parser.add_argument("--description", default="", help="optional description")
     parser.add_argument("--filename", default="", help="name to store it under")
+    parser.add_argument(
+        "--lane",
+        choices=("evidence", "source"),
+        default="evidence",
+        help="without --scope/--category: the lane the held file is for "
+        "(evidence -> preserve_artifacts, source -> capture_source)",
+    )
     parser.add_argument(
         "--token-file", default="", help="local client token file (default $EXOMEM_LOCAL_TOKEN_FILE)"
     )
@@ -664,6 +674,9 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         print(f"attach: {source} is not a file", file=sys.stderr)
         return 2
     name = args.filename or source.name
+    hold = not args.scope and not args.category
+    if not hold and args.lane != "evidence":
+        parser.error("--lane applies only without --scope/--category; a direct preserve is Evidence")
     fields = {
         key: value
         for key, value in {
@@ -671,6 +684,8 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
             "category": args.category,
             "description": args.description,
             "filename": args.filename,
+            "hold": "1" if hold else "",
+            "lane": args.lane if hold else "",
         }.items()
         if value
     }
