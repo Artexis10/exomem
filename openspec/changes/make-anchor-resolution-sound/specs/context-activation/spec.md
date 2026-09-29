@@ -47,8 +47,9 @@ yields one term per unbroken run, which the product does not segment, and a deri
 name containing a word longer than 48 code points SHALL NOT be admitted, so that a
 sentence is never taken for a name while a lead of long compound words still is. Locale-specific case rules are
 not applied: a Turkish dotted capital I and a plain I are different terms. Collection
-claims routing keeps its own basic-Latin term splitter, so `claims_match` and Records
-current state do not yet follow this rule. Lexical
+claims routing keeps its own term splitter, which reads ASCII exactly as `[a-z0-9]+`
+and other text as words in any script, a Japanese run split at its hiragana, and
+matches a claim written inside a longer unspaced term. Lexical
 comparison SHALL ignore stopwords and SHALL compare terms with
 regular plural and singular forms folded together (`-s`; `-es` when the word ends `-ses`, `-xes`, `-zes`, `-ches` or `-shes`;
 `-ies` to `-y`), never folding a word of three characters or fewer and never a word

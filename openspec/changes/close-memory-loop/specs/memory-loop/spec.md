@@ -111,6 +111,20 @@ The system SHALL resolve and enrich existing entities before creating duplicates
 - **THEN** exact resolution, resolution by the equipment family and family-filtered traversal reach the subtype's entities with the same ref and path on MCP, CLI and REST
 - **AND** neither type is classified as an organization
 
+#### Scenario: An entity is captured with a name in another script
+
+- **WHEN** the agent creates an entity whose title is in a script other than
+  the user's spelling of its name, passing that spelling as an alias
+- **THEN** the page records it in its owner `aliases`, stripped, deduplicated
+  and never repeating the title
+- **AND** an empty, multi-line or over-long alias, more than eight, or one
+  any other visible page already answers to (its title, stem or alias, read
+  with the resolver's apostrophe, hyphen and soft-hyphen folds), refuses the
+  whole creation
+- **AND** an `edit_memory` write of the `aliases` field is refused the same
+  way, the page's own names excepted, and a page the caller may not see reads
+  as absent
+
 #### Scenario: A useful reusable relationship is missing
 
 - **WHEN** no current registered relation truthfully expresses a supported reusable distinction
@@ -359,7 +373,22 @@ In a script written without spaces, an anchor name of at least two characters,
 wholly in the script of the turn's unspaced run, contained in that run and rare
 by the anchor-name yardstick MAY grant rare-term evidence, never exact-alias
 evidence; a name whose every occurrence lies inside a longer contained name
-SHALL be consumed by it. Because the band is an aggregate over the whole anchor
+SHALL be consumed by it. A Japanese run's stretch holding at least two
+characters besides hiragana, between hiragana runs that are each wholly a
+declared particle or filler word, or ended by a hiragana run that starts with
+a declared particle (the rest of that run joining the next stretch), and a
+word of another script glued to an
+unspaced run, SHALL be read as a word of the turn, so a name equal to it grants
+exact-alias evidence as a spaced token does; any other hiragana belongs to the
+stretch around it, and a name inside a longer stretch stays contained. The
+unsplit stretch, and each cut of it just before a declared particle inside a
+hiragana run, SHALL be words of the turn too, and a word whose every occurrence
+lies inside a longer word that an indexed name equals SHALL be consumed by it,
+so a name written through such a run (`サクラもち本舗`, `木村はるか`) resolves
+instead of its head, while a head the turn also writes on its own is not
+consumed. Kana-only text that can be read either way (`サクラもちがうって言ってた`)
+is a known ambiguity: the longest indexed name wins, and the head resolves when
+no such name exists. Because the band is an aggregate over the whole anchor
 catalogue, withheld anchors included, under a non-empty governed policy it SHALL
 run only for owner-bound principals: every other principal SHALL receive
 semantic evidence `audience_restricted` and no `vector_band` contact, decided
@@ -512,10 +541,43 @@ fast abstention or compiler-only timing.
 #### Scenario: A CJK turn contains an anchor's name
 
 - **WHEN** a Japanese turn written without spaces contains a rare anchor's
-  two-character name
+  two-character name inside a longer compound
 - **THEN** the anchor earns `rare_term`, never `exact_alias`, and resolves with
   a band and stays partial without one
 - **AND** the same name inside an unrelated compound, with no band, stays partial
+
+#### Scenario: A Japanese turn spells an anchor's name between particles
+
+- **WHEN** a Japanese turn holds an anchor's name as the whole stretch between
+  two particles (`山小屋の白樺を借りられるか`), or glues a Latin anchor
+  name to a Japanese phrase (`Exomemのレイテンシ`)
+- **THEN** the anchor earns `exact_alias` and resolves without a band
+- **AND** a particle glued to the next kana word still ends the name
+  (`ハヤブサ号はどう？`, `ハヤブサ号をまた洗車した`)
+- **AND** a name written partly in hiragana (`ねこやなぎ銀行の口座`,
+  `駅前のねこやなぎ銀行`) keeps its own edge: a shorter anchor named by its
+  kanji tail (`銀行`) is only contained
+- **AND** a name written kanji or katakana, then hiragana that starts with a
+  particle character, then more of the name (`サクラもち本舗に行く`,
+  `木村はるかの予定`) resolves as itself, and an anchor named by its head
+  (`サクラ`, `木村`) is consumed, unless the turn also names the head on its
+  own (`サクラとサクラもち本舗の違い` resolves both)
+- **AND** kana-only text that reads either way (`サクラもちがうって言ってた`)
+  resolves the longest indexed name (`サクラもち`), and the head (`サクラ`)
+  when no such name exists: a known ambiguity, pinned rather than resolved
+- **AND** a pointing-back Japanese turn made only of a declared cue and filler
+  (`続けてください`) is referential, while one that also says something of its
+  own (`続きを読んで`) is not
+
+#### Scenario: A turn in another script reaches a page through its native-script alias
+
+- **WHEN** an English-titled entity page was captured, or later edited, with a
+  Japanese owner alias, and a Japanese turn holds that alias as a word
+- **THEN** the page earns `exact_alias` and resolves
+- **AND** a twin English-titled entity page without a Japanese alias is not
+  resolved by a Japanese turn naming it, and no band alone resolves it
+- **AND** the alias inside a longer compound is only contained and does not
+  resolve on its own
 
 #### Scenario: A same-language unrelated anchor earns no band
 

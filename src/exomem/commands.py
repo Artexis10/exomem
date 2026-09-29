@@ -4369,6 +4369,8 @@ def op_edit(
                 relation_review_reason=relation_review_reason,
             )
         elif field is not None:
+            if field == "aliases":
+                _refuse_claimed_aliases(vault_root, path, value)
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root,
                 path=path,
@@ -4668,6 +4670,7 @@ def op_link(
     decision_status: str | None = None,
     identity_decision: _IdentityDecisionArgument = None,
     facets: _EntityFacetsArgument = None,
+    aliases: list[str] | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -4706,6 +4709,11 @@ def op_link(
         facets: Values for facets the registry declares for this type: a
             string for a single facet, a list for a multi one. Undeclared
             names are refused.
+        aliases: Other names the entity answers to, in any script, written to
+            its `aliases`. Give the native-script spelling of a name written
+            in another script (a Japanese name for an English-titled page) so
+            a turn in that script reaches it. At most 8, one line and 64
+            characters each; one any other page already answers to refuses.
 
     Returns:
         {path, warnings}, or a non-mutating `identity_preparation` when the
@@ -4742,6 +4750,7 @@ def op_link(
             decision_status=decision_status,
             identity_decision=identity_decision,
             facets=facets,
+            aliases=aliases,
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
@@ -7347,6 +7356,27 @@ def op_remember(
     )
 
 
+
+def _refuse_claimed_aliases(vault_root: Path, path: str, value: object) -> None:
+    """Refuse an `aliases` patch naming what another page already answers to.
+
+    The same guard `create-entity` runs (`entity_candidates.claimed_names`):
+    an alias another page holds would make a turn naming it resolve both. The
+    page's own title and current aliases are never a collision.
+    """
+    names = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    aliases = [str(item).strip() for item in names if isinstance(item, str) and str(item).strip()]
+    if not aliases:
+        return
+    rel = path if path.endswith(".md") else f"{path}.md"
+    claimed = entity_candidates_module.claimed_names(vault_root, aliases, exclude_path=rel)
+    if claimed:
+        alias, paths = next(iter(claimed.items()))
+        raise ValueError(
+            f"ENTITY_EXISTS: another page already answers to the alias {alias!r} "
+            f"({', '.join(paths)}); pick a name only this page answers to"
+        )
+
 def op_edit_memory(
     vault_root: Path,
     path: str,
@@ -9601,6 +9631,7 @@ def op_connect_memory(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    aliases: list[str] | None = None,
     ref: str | None = None,
     expected_hash: str | None = None,
     why: str | None = None,
@@ -9667,6 +9698,8 @@ def op_connect_memory(
         decided: Decision date.
         project: Decision project key.
         decision_status: Decision status.
+        aliases: Other names the entity answers to, in any script; give the
+            native-script spelling of a name written in another script.
         ref: Relation-queue item ref for accept-relation.
         expected_hash: Target page `content_hash` drift guard for accept-relation.
             Required for accept-relation.
@@ -9726,6 +9759,7 @@ def op_connect_memory(
             "decided": None,
             "project": None,
             "decision_status": None,
+            "aliases": None,
             "ref": None,
             "expected_hash": None,
             "why": None,
@@ -9894,6 +9928,7 @@ def op_connect_memory(
             decision_status=decision_status,
             identity_decision=identity_decision,
             facets=facets,
+            aliases=aliases,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "

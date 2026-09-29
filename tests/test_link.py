@@ -629,3 +629,74 @@ def test_adoption_refuses_a_shared_name_instead_of_recording_no_page(vault: Path
             expected_hash=None,
         )
     assert _vault_bytes(vault) == before
+
+
+def test_link_records_aliases_in_frontmatter(vault: Path) -> None:
+    """Capture-time aliases: another spelling of the name, in any script, lands
+    in the owner's `aliases` field of the new page, in the order given."""
+    result = link_module.link(
+        vault,
+        entity_type="organization",
+        name="Corvane Motors",
+        summary="A small carmaker.",
+        aliases=["コルヴェイン", " Corvane ", "コルヴェイン", "Corvane Motors"],
+        today=TODAY,
+    )
+    fm = _fm(vault / result.path)
+    # Stripped, deduplicated, and never the name itself.
+    assert fm["aliases"] == ["コルヴェイン", "Corvane"]
+    resolved = entity_candidates.resolve_entity_candidate(vault, name="コルヴェイン")
+    assert resolved["status"] == "match"
+
+
+def test_link_without_aliases_writes_no_alias_field(vault: Path) -> None:
+    result = link_module.link(
+        vault,
+        entity_type="organization",
+        name="Tessary Works",
+        summary="A tool shop.",
+        today=TODAY,
+    )
+    assert "aliases" not in _fm(vault / result.path)
+
+
+@pytest.mark.parametrize(
+    "aliases",
+    [[""], ["   "], ["x" * 65], ["line\nbreak"], [f"Name {n}" for n in range(9)]],
+    ids=["empty", "blank", "too-long", "newline", "too-many"],
+)
+def test_link_refuses_an_ungoverned_alias(vault: Path, aliases: list[str]) -> None:
+    with pytest.raises(link_module.LinkError) as info:
+        link_module.link(
+            vault,
+            entity_type="organization",
+            name="Corvane Motors",
+            summary="A small carmaker.",
+            aliases=aliases,
+            today=TODAY,
+        )
+    assert info.value.code == "INVALID_LINK"
+    assert info.value.missing == ["aliases"]
+    assert not (vault / "Knowledge Base" / "Entities" / "Organizations" / "Corvane Motors.md").exists()
+
+
+def test_link_refuses_an_alias_another_entity_already_answers_to(vault: Path) -> None:
+    link_module.link(
+        vault,
+        entity_type="organization",
+        name="Corvane Motors",
+        summary="A small carmaker.",
+        aliases=["コルヴェイン"],
+        today=TODAY,
+    )
+    with pytest.raises(link_module.LinkError) as info:
+        link_module.link(
+            vault,
+            entity_type="organization",
+            name="Corvane Holdings",
+            summary="Its parent.",
+            aliases=["コルヴェイン"],
+            today=TODAY,
+        )
+    assert info.value.code == "ENTITY_EXISTS"
+    assert info.value.missing == ["aliases"]

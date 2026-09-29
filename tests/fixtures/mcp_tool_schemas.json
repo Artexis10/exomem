@@ -1695,6 +1695,21 @@
           "default": null,
           "description": "Decision status."
         },
+        "aliases": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Other names the entity answers to, in any script; give the native-script spelling of a name written in another script."
+        },
         "ref": {
           "anyOf": [
             {

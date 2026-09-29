@@ -114,9 +114,14 @@ def classify(
     from . import working_set_resolve
 
     leading = frozenset(leading)
+    # A Japanese sentence is one token; the words it holds are what the user
+    # could be taught to say (`embedded_words`), so they are offered instead.
     content = tuple(
         dict.fromkeys(
-            token for token in analysis.tokens if token not in stopwords and token not in filler
+            word
+            for token in analysis.tokens
+            for word in (working_set_resolve.embedded_words((token,)) or (token,))
+            if word not in stopwords and word not in filler
         )
     )
     if analysis.referential:

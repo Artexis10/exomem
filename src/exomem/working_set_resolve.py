@@ -15,6 +15,7 @@ exercised by the unit tests and by the live operation.
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 import statistics
@@ -24,6 +25,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .ranking_config import DEFAULT_RANKING, RankingConfig
+from .text_scripts import JAPANESE_PARTICLES, is_hiragana
 from .working_set_index import (
     RARE_TERM_MAX_ANCHORS,
     STOPWORDS,
@@ -273,6 +275,10 @@ class TurnAnalysis:
     #: prior RESOLVE anything, and is read only to carry the caller's own
     #: thread as a `partial` anchor (`is_follow_up`).
     follow_up: bool = False
+    #: Words a turn token holds without a space around them (`embedded_words`):
+    #: a Latin word glued to a Japanese phrase, and the parts of a Japanese
+    #: run between its hiragana. Compared like tokens; they hold no position.
+    words: tuple[str, ...] = ()
 
 
 #: A follow-up is short: at most this many tokens. "what about the second
@@ -540,6 +546,25 @@ def _continua_runs(token: str) -> list[tuple[int, str, str]]:
     return runs
 
 
+def _inside_longer_words(word: str, longer: Iterable[str], tokens: Sequence[str]) -> bool:
+    """Whether every occurrence of `word` in the turn's tokens lies inside an
+    occurrence of a longer word of `longer` (`_contained_names`' rule): a turn
+    that also writes the head on its own has not consumed it."""
+    others = [other for other in longer if other != word and word in other]
+    seen = False
+    for token in tokens:
+        spans = [
+            (start, start + len(other))
+            for other in others
+            for start in _occurrences(token, other)
+        ]
+        for start in _occurrences(token, word):
+            seen = True
+            if not any(low <= start and start + len(word) <= high for low, high in spans):
+                return False
+    return seen
+
+
 def _contained_names(
     analysis: TurnAnalysis, rows: Sequence[AnchorFacts], term_counts: Mapping[str, int]
 ) -> frozenset[str]:
@@ -595,6 +620,171 @@ def _contained_names(
         if not consumed:
             contained.add(anchor_id)
     return frozenset(contained)
+
+
+def embedded_words(
+    tokens: Sequence[str], boundaries: frozenset[str] = JAPANESE_PARTICLES
+) -> tuple[str, ...]:
+    """The words the turn's tokens hold without a space around them.
+
+    Japanese marks its word boundaries with script, not spaces. A Latin word
+    glued to a Japanese phrase (`exomemのレイテンシ`) ends where the Japanese
+    begins, and inside a Japanese run the particles are written in hiragana,
+    so the stretch between two of them (`の白樺を` holds `白樺`) is a word, or
+    a compound of words, never the fragment of a longer one. Such a word is
+    spelled exactly as a spaced token would be, so a name equal to it is
+    `exact_alias`; a name inside a longer stretch (`白樺並木`) is still only
+    contained (`_contained_names`).
+
+    A hiragana run is an edge when the WHOLE run is one of `boundaries` (the
+    declared particles, plus the vocabulary's filler words from
+    `analyze_turn`). With a stretch open, a run that STARTS with a declared
+    particle also ends it, matching the longest particle, and the rest of the
+    run joins the next stretch: a particle glued to the next kana word
+    (`ハヤブサ号はどう`, `をまた`) still marks the name's edge. The unsplit
+    stretch is a word too, and so is each cut of it before a particle inside
+    the run, so a name that continues through such a run (`サクラもち本舗`,
+    `木村はるか`) is an exact match that outranks its head. Any other
+    hiragana is part of the stretch around it, so a name written partly in
+    hiragana (`ねこやなぎ銀行`, also after `駅前の`) keeps its own edge, and its
+    kanji tail (`銀行`) is only contained, as in `ハヤブサ号線`.
+
+    A stretch counts only when it holds at least two code points besides
+    hiragana and is not the whole token: one Han character is as often a verb
+    stem as a word (`借りた`), the same floor containment has. A run with no hiragana
+    (Chinese, Thai) splits only from a glued Latin word.
+    """
+    words: list[str] = []
+    for token in tokens:
+        runs = _continua_runs(token)
+        if not runs:
+            continue
+        cursor = 0
+        pieces: list[str] = []
+        for offset, run, cls in runs:
+            if offset > cursor:
+                pieces.append(token[cursor:offset])
+            cursor = offset + len(run)
+            if cls != "cjk":
+                pieces.append(run)
+                continue
+            # `stretch` is split at particles; `full` is the same text with
+            # no split, so a name that continues through a hiragana run that
+            # merely starts with a particle character still has its spelling.
+            stretch = full = ""
+            for kana, part in _hiragana_segments(run):
+                if kana and part in boundaries:
+                    pieces.extend(dict.fromkeys((stretch, full)))
+                    stretch = full = ""
+                    continue
+                if kana and full:
+                    # A name can end inside the run, just before a particle
+                    # (`木村はるかの`), so each such cut is a candidate too.
+                    pieces.extend(
+                        full + part[:cut]
+                        for cut in range(1, len(part))
+                        if _leading_particle(part[cut:])
+                    )
+                if kana and stretch and (particle := _leading_particle(part)):
+                    # A particle glued to the next kana word (はどう, をまた)
+                    # still ends the stretch; the rest joins the next one.
+                    pieces.append(stretch)
+                    stretch = part[len(particle):]
+                else:
+                    stretch += part
+                full += part
+            pieces.extend(dict.fromkeys((stretch, full)))
+        if cursor < len(token):
+            pieces.append(token[cursor:])
+        for piece in pieces:
+            word = piece.strip("'-")
+            if (
+                sum(1 for char in word if not is_hiragana(char)) >= 2
+                and word != token
+                and any(char.isalpha() for char in word)
+                and word not in words
+            ):
+                words.append(word)
+    return tuple(words)
+
+
+#: The declared particles, longest first, for `_leading_particle`.
+_PARTICLES_LONGEST_FIRST = tuple(sorted(JAPANESE_PARTICLES, key=len, reverse=True))
+
+
+def _leading_particle(kana: str) -> str | None:
+    """The longest declared particle `kana` starts with, if any."""
+    return next((particle for particle in _PARTICLES_LONGEST_FIRST if kana.startswith(particle)), None)
+
+
+def _hiragana_segments(run: str) -> list[tuple[bool, str]]:
+    """`run` as alternating (is hiragana, text) segments."""
+    segments: list[tuple[bool, str]] = []
+    for char in run:
+        kana = is_hiragana(char)
+        if segments and segments[-1][0] == kana:
+            segments[-1] = (kana, segments[-1][1] + char)
+        else:
+            segments.append((kana, char))
+    return segments
+
+
+@functools.lru_cache(maxsize=16)
+def _word_edges(vocabulary: ReferentialVocabulary) -> frozenset[str]:
+    """The declared particles plus the vocabulary's hiragana filler words."""
+    return JAPANESE_PARTICLES | frozenset(
+        word for word in vocabulary.filler if word and all(is_hiragana(char) for char in word)
+    )
+
+
+@functools.lru_cache(maxsize=16)
+def _run_pieces(vocabulary: ReferentialVocabulary) -> tuple[frozenset[str], frozenset[str]]:
+    """(cues, cues and filler) spelled wholly in an unspaced script."""
+    cues = frozenset(
+        phrase for phrase in vocabulary.phrases if " " not in phrase and _continua_class(phrase)
+    )
+    filler = frozenset(word for word in vocabulary.filler if _continua_class(word))
+    return cues, cues | filler
+
+
+def _spell_out_cues(tokens: Sequence[str], vocabulary: ReferentialVocabulary) -> tuple[str, ...]:
+    """`tokens`, with each unspaced token made only of cues and filler spelled
+    out word by word (`続けてください` -> `続けて ください`).
+
+    A Japanese turn that points back is one unspaced run, and the words around
+    its cue are glued to it. Read word by word, the whole-word cue rule then
+    applies unchanged: the turn is referential only if it holds a cue and
+    nothing besides filler. A token that does not split wholly into those
+    words is left as it is, so any word of its own keeps it a residue.
+    """
+    cues, pieces = _run_pieces(vocabulary)
+    if not cues:
+        return tuple(tokens)
+    out: list[str] = []
+    for token in tokens:
+        split = _split_into(token, pieces) if _continua_class(token) else None
+        if split is not None and any(part in cues for part in split):
+            out.extend(split)
+        else:
+            out.append(token)
+    return tuple(out)
+
+
+def _split_into(text: str, pieces: frozenset[str]) -> tuple[str, ...] | None:
+    """One split of `text` into members of `pieces`, fewest parts first."""
+    if text in pieces:
+        return (text,)
+    longest = max(map(len, pieces))
+    best: list[tuple[str, ...] | None] = [None] * (len(text) + 1)
+    best[0] = ()
+    for end in range(1, len(text) + 1):
+        for start in range(max(0, end - longest), end):
+            head = best[start]
+            if head is None or text[start:end] not in pieces:
+                continue
+            if best[end] is None or len(head) + 1 < len(best[end]):
+                best[end] = (*head, text[start:end])
+    return best[len(text)]
 
 
 def _occurrences(text: str, name: str) -> list[int]:
@@ -721,7 +911,7 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
                 if phrase not in seen:
                     seen.add(phrase)
                     ngrams.append(phrase)
-    token_text = f" {' '.join(tokens)} "
+    token_text = f" {' '.join(_spell_out_cues(tokens, vocabulary))} "
     # A declared cue, and nothing else said (close-memory-loop D2, as
     # narrowed twice): the turn has to say it points back, and must not also
     # say what it is about.
@@ -737,6 +927,7 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         follow_up=is_follow_up(
             tokens, referential_cue=referential_cue, filler=vocabulary.filler
         ),
+        words=embedded_words(tokens, _word_edges(vocabulary)),
     )
 
 
@@ -845,7 +1036,7 @@ def candidates_for(
     """
     config = config or DEFAULT_RANKING
     term_counts = term_anchor_counts or {}
-    turn_terms = frozenset(analysis.tokens) - stopwords
+    turn_terms = frozenset((*analysis.tokens, *analysis.words)) - stopwords
     # R4 (fix/activation-competing-senses): possessive fold, applied on the
     # TURN side of the lexical comparison -- "gamma's" must contribute the
     # term "gamma" the same way a plural turn token already folds to its
@@ -870,6 +1061,7 @@ def candidates_for(
     phrases = (
         frozenset(analysis.ngrams)
         | frozenset(analysis.tokens)
+        | frozenset(analysis.words)
         | frozenset(
             folded
             for token in analysis.tokens
@@ -897,9 +1089,23 @@ def candidates_for(
     row_exact_phrases: dict[str, frozenset[str]] = {}
     own_covered: dict[str, frozenset[int]] = {}
     covered_positions: set[int] = set()
+    # An embedded word that only spells the head of a longer embedded word some
+    # indexed name equals (`サクラ` inside `サクラもち本舗`) is consumed: the
+    # turn wrote the longer name, the same way containment consumes a name.
+    embedded_only = frozenset(analysis.words) - frozenset(analysis.tokens) - frozenset(analysis.ngrams)
+    matched_words = {
+        word
+        for row in rows
+        for word in ({normalize(row.title), *row.aliases} & frozenset(analysis.words))
+    }
+    consumed_words = frozenset(
+        word
+        for word in embedded_only
+        if _inside_longer_words(word, matched_words, analysis.tokens)
+    )
     for row in rows:
         names = {normalize(row.title), *row.aliases} - {""}
-        matched = names & phrases
+        matched = (names & phrases) - consumed_words
         row_exact_phrases[row.anchor_id] = frozenset(matched)
         positions: set[int] = set()
         for phrase in matched:
@@ -1129,6 +1335,7 @@ def audience_view(
     phrases = (
         frozenset(analysis.ngrams)
         | frozenset(analysis.tokens)
+        | frozenset(analysis.words)
         | frozenset(
             folded
             for token in analysis.tokens
@@ -1137,7 +1344,7 @@ def audience_view(
     )
     turn_terms = frozenset(
         folded
-        for term in frozenset(analysis.tokens) - _STOPWORDS
+        for term in frozenset((*analysis.tokens, *analysis.words)) - _STOPWORDS
         if (folded := _fold_lexical_term(term)) is not None
     )
     decided: dict[str, bool] = {}
