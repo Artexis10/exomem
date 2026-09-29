@@ -20,6 +20,15 @@ For every surface whose bootstrap contract is not published as a frozen hosted p
 - **WHEN** a client calls `bootstrap(section="nonexistent")`
 - **THEN** the operation fails with a validation error naming the accepted sections
 
+### Requirement: The recall rule names only commands the surface exports
+
+Where the active surface does not export `activate_context`, the compact bootstrap SHALL carry the recall contract with the recall carrier line naming `ask_memory` in its place, rather than losing the contract to the surface filter. Every unpublished surface's compact bootstrap SHALL carry a recall rule at every engagement level. Released hosted profiles SHALL keep their published payload.
+
+#### Scenario: A hosted surface still receives the recall rule
+
+- **WHEN** compact bootstrap is served at `balanced` or `maximal` on a surface that exports `ask_memory` but not `activate_context`
+- **THEN** `engagement.contract.recall` is present, tells the agent to search memory, names `ask_memory`, and does not name `activate_context`
+
 ### Requirement: Compact core stays under a derived byte budget
 
 The compact core SHALL stay at or under its ruled byte ceiling at every engagement level on every non-frozen surface, including the hook-capable worst case, with the vault-derived blocks at their maximum bound. The ceiling SHALL be derived from the core allocation with a documented margin, not from the size the payload happens to have. Every section SHALL also stay at or under its own ceiling. Raising any ceiling SHALL require an entry in the core rule manifest or an argument recorded beside the constant that the added bytes are needed on every session.

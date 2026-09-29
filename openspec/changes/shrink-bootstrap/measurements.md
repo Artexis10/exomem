@@ -147,7 +147,7 @@ Reproduce: `scripts/bootstrap-byte-breakdown.py --sections`, `scripts/context-fo
 |---|---:|---:|---:|---:|
 | default (generic MCP) | 60,481 to 11,747 | 60,765 to 12,031 | 62,698 to 13,973 | 63,055 to 14,330 |
 | claude-code | 60,490 to 11,756 | 60,774 to 12,040 | 62,707 to 13,982 | 63,064 to 14,339 |
-| hosted-alpha-agent-v5 | 59,025 to 11,570 | 59,309 to 11,854 | 60,960 to 13,514 | 61,203 to 13,757 |
+| hosted-alpha-agent-v5 | 59,025 to 11,570 | 59,309 to 11,854 | 60,960 to 13,745 | 61,203 to 14,102 |
 | hosted-alpha-agent-v1 (frozen) | 51,906 | 52,190 | 53,841 | 54,084 |
 | hosted-alpha-agent-v3 (frozen) | 56,448 | 56,732 | 58,383 | 58,626 |
 | hosted-alpha-agent-v4 (frozen) | 58,760 | 59,044 | 60,695 | 60,938 |
@@ -188,4 +188,4 @@ The Claude Code carrier stays large because the skill (16,107 bytes now, from 30
 - **Working-set silent-when-unchanged.** Opt-in and off by default, not part of the ruling; not implemented.
 - **Checkpoint id and transcript-binding lines** stay in the model-facing text: existing tests pin them.
 - **"Withheld is absent" sentence.** Dropped by ruling: server-enforced.
-- **Pre-existing finding, not from this change:** on hosted v4 and v5 the surface filter drops the whole `recall` contract (it opens with the `activate_context` carrier, and hosted does not export `activate_context`), so hosted clients receive no recall-before-answering text in the bootstrap. The core manifest test skips that rule on hosted surfaces and says why. v1 to v4 are frozen; v5 could be fixed by making the recall line surface-aware. Needs a ruling.
+- **Recall rule on hosted (found and fixed here, ruled).** On hosted v4 and v5 the surface filter dropped the whole `recall` contract, because it opens with the `activate_context` carrier and hosted does not export that command; hosted clients, which are hookless, received no recall-before-answering text in the bootstrap. The carrier line is now surface-aware: where `activate_context` is not exported the same instruction names `ask_memory`. This applies to unpublished surfaces only (hosted v5 grows by 231 bytes at balanced/maximal); v1 to v4 are frozen and keep the published payload, which still lacks the recall text. `test_every_surface_the_split_applies_to_carries_a_recall_rule` pins it.
