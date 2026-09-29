@@ -406,6 +406,15 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     pstats.Stats(profile, stream=buffer).sort_stats("tottime").print_stats(25)
     out["profile_tottime"] = buffer.getvalue()
 
+    # D: one cProfile pass over the guard-refresh read (record_memory inspect).
+    profile = cProfile.Profile()
+    profile.enable()
+    refresh_hash()
+    profile.disable()
+    buffer = io.StringIO()
+    pstats.Stats(profile, stream=buffer).sort_stats("cumulative").print_stats(r"exomem", 40)
+    out["profile_refresh_cumulative"] = buffer.getvalue()
+
     shutil.rmtree(tmp, ignore_errors=True)
     return out
 
@@ -457,7 +466,8 @@ def _parent(args: argparse.Namespace) -> int:
             row for row in reversed(completed.stdout.splitlines()) if row.startswith(marker)
         )
         results.append(json.loads(line[len(marker) :]))
-        Path(args.out).write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        text = json.dumps(results, indent=2).replace(f"{REPO}/", "")
+        Path(args.out).write_text(text + "\n", encoding="utf-8")
     print(f"wrote {args.out}", file=sys.stderr)
     return 0
 
