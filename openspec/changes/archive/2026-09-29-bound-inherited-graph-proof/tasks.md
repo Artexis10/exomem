@@ -28,5 +28,7 @@
 
 - [x] 3.1 Existing epistemic-graph, graph-drain, readiness and find suites stay
       green.
-- [x] 3.2 Full suite, lint, the public-artifact privacy gate, and
-      `openspec validate --all --strict`.
+- [x] 3.2 Lint, the public-artifact privacy gate, and
+      `openspec validate --all --strict` before and after the archive. The
+      full corpus runs in CI; the partial local run's only failures (three
+      context-activation files) fail identically on unchanged `main`.
