@@ -174,6 +174,17 @@ ACTIVATION_CARRIER_LINE = (
     "with the turn verbatim; on `ambiguous`, call again with `anchor`."
 )
 
+
+#: The same carrier for a surface that does not export `activate_context` (hosted).
+#: The surface filter drops any string naming an unavailable command, so on such a
+#: surface the whole recall contract, which opens with the line above, used to vanish
+#: from the bootstrap: the one carrier a hookless client has. `ask_memory` is exported
+#: everywhere `activate_context` is not.
+ASK_MEMORY_CARRIER_LINE = (
+    "Before a substantive turn with no prior context, call `ask_memory` on the "
+    "turn's topic."
+)
+
 #: The link instruction (`capture-identities-at-write-time` design D2, task
 #: 3.1), appended to `balanced` and `maximal` only -- a level that captures
 #: only when asked must not be told to link unprompted either. Sized to what

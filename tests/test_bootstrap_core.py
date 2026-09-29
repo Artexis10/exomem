@@ -85,7 +85,8 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     ),
     "activation-carrier": (
         CARRYING,
-        lambda core: "activate_context" in core["engagement"]["contract"]["recall"],
+        lambda core: prominence.ACTIVATION_CARRIER_LINE in core["engagement"]["contract"]["recall"]
+        or prominence.ASK_MEMORY_CARRIER_LINE in core["engagement"]["contract"]["recall"],
     ),
     "capture-at-every-stepping-stone": (
         CARRYING,
@@ -141,23 +142,41 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
 }
 
 
-#: Pre-existing on the base, not introduced by the split: the hosted surfaces do not
-#: export `activate_context`, and the surface filter drops any string that names an
-#: unavailable command, so the whole `recall` contract (which opens with the
-#: activation carrier line) is absent from a hosted compact payload. Recorded in the
-#: PR under "Needs ruling"; the rules below are asserted everywhere else.
-RECALL_DROPPED_ON_HOSTED = frozenset({"recall-before-answering", "activation-carrier"})
-
-
 @pytest.mark.parametrize("surface", SURFACES)
 @pytest.mark.parametrize("level", prominence.CANON)
 def test_the_core_carries_every_manifest_rule(monkeypatch, level, surface):
     core = _bootstrap(monkeypatch, level, surface)
     for rule, (levels, predicate) in CORE_RULES.items():
-        if surface and surface.startswith("hosted-") and rule in RECALL_DROPPED_ON_HOSTED:
-            continue
         if level in levels:
             assert predicate(core), f"core lacks {rule!r} at {level} on {surface or 'default'}"
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+@pytest.mark.parametrize("level", prominence.CANON)
+def test_every_surface_the_split_applies_to_carries_a_recall_rule(monkeypatch, level, surface):
+    """Hosted does not export `activate_context`, and the surface filter drops any string
+    that names an unavailable command: the whole recall contract used to vanish from a
+    hosted compact payload, on the one surface with no hook to carry it. The line is now
+    surface-aware, so the rule survives and names only commands the surface exports."""
+    core = _bootstrap(monkeypatch, level, surface)
+    recall = core["engagement"]["contract"]["recall"]
+    assert recall
+    exported = set(core["active_capabilities"]["available_product_tools"])
+    if level in CARRYING:
+        assert "Search memory" in recall
+        if "activate_context" in exported:
+            assert "activate_context" in recall
+        else:
+            assert "activate_context" not in recall
+            assert "ask_memory" in recall and "ask_memory" in exported
+
+
+@pytest.mark.parametrize("profile", ("hosted-alpha-agent-v1", "hosted-alpha-agent-v3", "hosted-alpha-agent-v4"))
+def test_released_profiles_keep_their_published_payload_without_the_recall_fix(monkeypatch, profile):
+    """v1 to v4 are frozen (see `test_bootstrap_frozen_profiles`): the surface-aware
+    recall line applies to unpublished surfaces only."""
+    contract = _bootstrap(monkeypatch, "maximal", profile)["engagement"]["contract"]
+    assert "recall" not in contract
 
 
 @pytest.mark.parametrize("level", ("off", "light"))
