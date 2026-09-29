@@ -210,7 +210,7 @@ by content, as before.
 
 1. **Index-backed file design.** What is built above (stat-generation cache, batched guards). The
    Markdown items stay the source of truth.
-2. **Throwaway SQLite-authoritative prototype** (`scripts/prototype-sqlite-records.py`, not in `src/`,
+2. **Throwaway SQLite-authoritative prototype** (`benchmarks/prototype-sqlite-records.py`, not in `src/`,
    not wired to anything). Rows in a per-vault SQLite table, same natural key (unique index), the
    guard is a per-collection generation integer, one audit row per transition in the same transaction,
    Markdown item files rendered from the row by the real `render_markdown_item`. WAL mode,
@@ -287,27 +287,19 @@ target and the difference is small next to the fixed 90 to 150 ms, which neither
   read-your-writes for the next `find`. A synchronous projection keeps that property and still costs only
   about 2 to 3 ms.
 
-## Recommendation
+## Decision
 
-**Do not make SQLite authoritative yet. Ship the index-backed file design, and build a derived SQLite
-sidecar for the guard and natural-key lookup if collections are expected to pass about 1,000 items.**
+**Storage authority is SQLite (owner decision, applied after review of these numbers).** The
+recommendation originally written here was to keep the files authoritative and add a derived sidecar; it
+was overruled on the grounds that a derived sidecar reintroduces two sources of truth. The migration is
+designed in a separate lane (`design/structured-collections-sqlite`). The cost list above is the input
+to that design, not a reason against it, and the prototype stays in `benchmarks/` as reference only.
 
-- At the collection sizes people actually keep, the file design is fine after these fixes: 188 ms p50 and
-  250 ms p95 at 100 items, and about 1.1 s at the 2,000-item cap. The 21-minute backfill was
-  client-turn time, and bulk upsert (#1452) removes the per-row fixed cost that remains.
-- The SQLite numbers are a large win only where the file design is linear, above roughly 1,000 items. The
-  cost list is long, and the expensive items (backup and restore, Obsidian edits, migration of the audit
-  chain, hosted export) are things that work today because the files are the truth.
-- The middle path takes most of the win at a fraction of the cost: a per-collection SQLite sidecar
-  in the existing derived-index location holding one row per item (key, natural key, item hash,
-  generation) and a collection generation, rebuilt from the files and validated by the same stat
-  generation. That gives an O(1) natural-key check and an O(1) container guard, keeps the files
-  authoritative, keeps backups and Obsidian as they are, and can be thrown away and rebuilt. It does not
-  remove the guard rounds inside the batch writer, so it would need the writer to trust the sidecar plus
-  a per-write recheck of only the item being written.
-- Revisit an authority switch if any of these become true: collections routinely exceed 2,000 items (the
-  current cap), the workload needs multi-row transactions or bulk upserts as a first-class operation,
-  or the fixed 90 to 150 ms is the complaint rather than the per-item growth. Agent traffic being over
-  95 percent weakens the case for plain-file authority but does not by itself justify the migration
-  and backup cost; what it does argue for is keeping the projection synchronous so agents keep
-  read-your-writes.
+Rulings that apply to this change:
+
+- The index-backed file fix ships as is. 706 ms p95 at 1,000 items is accepted as an interim
+  improvement until the SQLite work replaces the storage layer.
+- Content reads on Windows (stat generations not trusted there) are accepted.
+- Whatever the SQLite design keeps from this page: a synchronous projection preserves read-your-writes for
+  `find`, the graph and index sync; the shared fixed cost of 90 to 150 ms is unaffected by the storage
+  layer; withheld = absent must be evaluated per row through its projection path.

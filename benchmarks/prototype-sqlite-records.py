@@ -20,7 +20,7 @@ validation, the mutation-boundary lease, the idempotency ledger, governance and
 withheld-is-absent filtering, index fan-out and the response. The findings doc adds
 the flat, size-independent cost of those (measured on the real path) back on.
 
-    uv run python scripts/prototype-sqlite-records.py --sizes 1000,10000 --appends 30
+    uv run python benchmarks/prototype-sqlite-records.py --sizes 1000,10000 --appends 30
 """
 
 from __future__ import annotations
