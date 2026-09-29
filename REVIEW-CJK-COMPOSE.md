@@ -29,8 +29,8 @@ branch as it did on the CJK branch.
 
 ## MEDIUM 1: the alias fingerprint cannot see the claimants HIGH 1 guards against
 
-`alias_claim_fingerprint` (`entity_candidates.py:54-65`) hashes the result of
-`resolve_entity_candidate`. That function walks `Entities/` only and uses
+`alias_claim_fingerprint` (`entity_candidates.py:54-65`) hashes
+`resolve_entity_candidate`, which walks only `Entities/` and uses
 `identity_key`. The guard itself uses `claimed_names`, which reads the index:
 notes, stems, and the apostrophe, hyphen and soft-hyphen folds. When the
 claimant is a note or a folded spelling, the resolution is `no_match`, so the
@@ -40,8 +40,8 @@ fingerprint is a pure function of the alias string.
   equals `candidate_fingerprint(name, "alias", no_match)`. A caller can
   compute it without ever being refused.
 - After a second note starts answering to `ハヤブサ号`, the old decision is
-  still accepted, and it records `distinct_from: []`. The decision is bound to
-  nothing, so it can never go stale.
+  still accepted, with `distinct_from: []`. It is bound to nothing and never
+  goes stale.
 
 **Fix:** derive the fingerprint and `distinct_from` from the claimants that
 `claimed_names` returns (already filtered by visibility). Add red-first tests
