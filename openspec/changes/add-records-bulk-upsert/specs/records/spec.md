@@ -36,7 +36,7 @@ Each row SHALL be validated as a single append is validated (schema, representab
 
 #### Scenario: Oversized batch refuses
 - **WHEN** a request carries 51 rows, or would raise the collection past its item ceiling
-- **THEN** it refuses whole with a bounded-size code and no file, manifest change or audit entry is written
+- **THEN** it refuses whole with the typed `BULK_UPSERT_TOO_MANY_ROWS` error, whose message and details say to split the import into batches of at most the cap chained by the returned `after_container_hash` (`rows`, `maximum`, `batches_needed`, `chain_with`), and no file, manifest change or audit entry is written
 
 #### Scenario: A batch that would cross the chain-depth budget refuses up front
 - **WHEN** the collection's audit chain already holds 2040 events and a batch would write 20 items
