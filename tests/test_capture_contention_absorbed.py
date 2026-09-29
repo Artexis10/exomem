@@ -31,7 +31,9 @@ WRITERS = 5
 
 
 @pytest.fixture(autouse=True)
-def _reset_managers():
+def _reset_managers(monkeypatch: pytest.MonkeyPatch):
+    # These tests park WRITERS captures at once; the waiter cap is its own test.
+    monkeypatch.setenv("EXOMEM_SYNC_WORKERS", str(WRITERS * 4))
     yield
     writer_lease.reset_managers_for_tests()
 

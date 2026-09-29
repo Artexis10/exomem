@@ -185,8 +185,12 @@ An idempotent capture write (`observe_memory`, `remember`, `episode_memory`,
 and `record_memory` with `action="append"`) that finds the mutation boundary
 busy SHALL be waited out on the server rather than refused, for a bounded
 time (default 40 s, `EXOMEM_CAPTURE_WAIT_SECONDS`, and never past the caller's
-own request budget). Waiting writes SHALL attempt in arrival order, and a
-write arriving while others wait SHALL join behind them. The retry MUST run
+own request budget: the wait MUST end early enough that the last attempt,
+the delivery reserve and one guard acquire timeout still fit inside it).
+Waiting writes SHALL attempt in arrival order within one process, and a write
+arriving while others wait SHALL join behind them. Waiting parks a shared
+synchronous worker, so no more than a quarter of the workers (at least one)
+MAY wait at once; a capture past that cap is refused at once. The retry MUST run
 under the same idempotency identity, so the write commits exactly once, and
 MUST NOT re-run any attempt that observed a commit. A client MUST NOT receive
 `MUTATION_BUSY` for a capture write whose holder is still inside its allowance
@@ -194,7 +198,8 @@ and whose wait has not run out.
 
 A refusal remains only for a holder already past its allowance, or a wait that
 ran out. It SHALL keep `MUTATION_BUSY` with `committed: false` and add a
-`cause` (`holder_overdue` or `capture_wait_exhausted`), the time waited, and a
+`cause` (`holder_overdue`, `capture_wait_exhausted` or
+`capture_waiters_full`), the time waited, and a
 remediation that says the write did not commit and may be retried with the same
 idempotency key. `EXOMEM_CAPTURE_CONTENTION_ABSORB=0` restores the previous
 immediate refusal.
@@ -218,3 +223,20 @@ immediate refusal.
 - **WHEN** the boundary stays busy for the whole bounded wait
 - **THEN** the write is refused with `cause: capture_wait_exhausted`
 - **AND** nothing was committed
+
+#### Scenario: Waiting captures leave workers free for reads
+
+- **WHEN** as many captures as the waiter cap allows are waiting on a held boundary
+- **THEN** a further capture is refused at once with `cause: capture_waiters_full`
+- **AND** a read served by the same worker pool completes without queueing
+
+#### Scenario: A wait never outlives the request budget
+
+- **WHEN** a capture waits on a busy boundary under a bound request budget
+- **THEN** it is refused, with its cause, before the delivery reserve begins
+
+#### Scenario: Only refusals a client saw are counted
+
+- **WHEN** a capture retries on the server and then commits
+- **THEN** `exomem_mutation_busy_total` does not increase
+- **AND** the one refusal that does reach a client increases it once

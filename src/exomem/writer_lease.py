@@ -33,7 +33,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from . import call_spans, request_budget
+from . import call_spans, mutation_lock, request_budget
 from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
@@ -3774,6 +3774,11 @@ def _is_receipt_vault_root(root: Path) -> bool:
 _CAPTURE_ABSORBED_COMMANDS = frozenset({"observe_memory", "remember", "episode_memory"})
 _CAPTURE_WAIT_SECONDS = 40.0
 _CAPTURE_RETRY_FLOOR_SECONDS = 0.05
+_CAPTURE_WAITERS_FULL_REMEDIATION = (
+    "The write did not commit. Other captures are already waiting on the boundary and "
+    "the server keeps workers free for reads: retry with the same idempotency key "
+    "after retry_after_ms."
+)
 _CAPTURE_HOLDER_OVERDUE_REMEDIATION = (
     "The write did not commit. The mutation boundary's holder has run past its "
     "allowance and looks stuck: inspect coordination_status or cell health, then "
@@ -3793,11 +3798,41 @@ def _capture_write_absorbs_contention(command_name: str, kwargs: Mapping[str, An
     return command_name == "record_memory" and kwargs.get("action") == "append"
 
 
-def _capture_wait_seconds() -> float:
+# A waiting capture parks one of the process's sync workers (anyio's limiter,
+# shared with search and activation). Only a fraction may be parked, so a long
+# holder cannot turn every worker into a sleeping capture and starve reads.
+_CAPTURE_WAITERS_LOCK = threading.Lock()
+_capture_waiters = 0
+
+
+def _capture_waiter_cap() -> int:
+    from . import runtime_resources
+
+    return max(1, runtime_resources.resolve_policy().sync_workers // 4)
+
+
+def _take_capture_waiter_slot() -> bool:
+    global _capture_waiters
+    with _CAPTURE_WAITERS_LOCK:
+        if _capture_waiters >= _capture_waiter_cap():
+            return False
+        _capture_waiters += 1
+        return True
+
+
+def _release_capture_waiter_slot() -> None:
+    global _capture_waiters
+    with _CAPTURE_WAITERS_LOCK:
+        _capture_waiters = max(0, _capture_waiters - 1)
+
+
+def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
     """The bounded server-side wait, capped by the caller's own deadline.
 
     An MCP call that would outlive its request budget gets the typed refusal
     while the client is still listening, never a wait that ends in a timeout.
+    The last attempt may start at the returned bound and still block for one
+    guard timeout, so the bound leaves room for the delivery reserve plus that.
     """
     try:
         wait = float(os.environ.get("EXOMEM_CAPTURE_WAIT_SECONDS", _CAPTURE_WAIT_SECONDS))
@@ -3806,12 +3841,16 @@ def _capture_wait_seconds() -> float:
     wait = max(0.0, wait)
     budget = request_budget.current()
     if budget is not None:
-        wait = min(wait, max(0.0, budget.remaining() - 2.0))
+        wait = min(
+            wait,
+            max(0.0, budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS - guard_seconds),
+        )
     return wait
 
 
 class _FairCaptureQueue:
-    """First-come-first-served order for capture writes waiting on the boundary.
+    """First-come-first-served order, within one process, for capture writes
+    waiting on the boundary.
 
     Only a write that has already met a busy boundary joins, and a write that
     arrives while others wait joins behind them instead of racing for the lock,
@@ -4315,15 +4354,16 @@ class LeaseManager:
             receipt_key_digest = None
         request_id = mutation_request_id or str(uuid.uuid4())
         receipt = _receipt_tag(key) if key else None
+        vocabulary_binding = None
+        vocabulary_replay_terminal = self.idempotency.completed_terminal(key, digest)
         # The private-identity inventory is a whole-vault walk. Build it here,
-        # before any boundary is taken, so a write that meets it cold does not
-        # hold every other writer stopped while it walks.
-        if receipt_vault_root is not None:
+        # after the replay check (a durable terminal replays without paying for
+        # it) and before any boundary is taken, so a write that meets it cold
+        # does not hold every other writer stopped while it walks.
+        if receipt_vault_root is not None and vocabulary_replay_terminal is None:
             from . import reserved_paths
 
             reserved_paths.warm_identity_catalogue_before_boundary(receipt_vault_root)
-        vocabulary_binding = None
-        vocabulary_replay_terminal = self.idempotency.completed_terminal(key, digest)
         if kwargs.get("vocabulary_ref") is not None or kwargs.get("vocabulary_fingerprint") is not None:
             # These fields only correlate an explicit canonical writer call
             # with an already reviewed choice.  They never carry a receipt,
@@ -5397,15 +5437,22 @@ class LeaseManager:
         if key is None or not _capture_write_absorbs_contention(command.name, kwargs):
             return run()
         started = time.monotonic()
-        deadline = started + _capture_wait_seconds()
+        deadline = started + _capture_wait_seconds(self._mutation_timeout_seconds)
         queue = self._capture_queue
-        ticket = queue.join() if queue.waiting() else None
+        ticket = None
         absorbed = 0
+        holds_slot = False
 
         def waited_ms() -> float:
             return round((time.monotonic() - started) * 1000, 2)
 
+        def uncounted_busy() -> OpError:
+            with mutation_lock.absorbing_busy():
+                return _mutation_busy(None, wait_ms=waited_ms())
+
         def refuse(error: OpError, cause: str, remediation: str) -> OpError:
+            # The one place a busy from this loop becomes client-visible.
+            mutation_lock.record_client_visible_busy()
             error.details.update(cause=cause, waited_ms=waited_ms(), absorbed_attempts=absorbed)
             error.remediation = remediation
             _log_mutation_event(
@@ -5419,21 +5466,34 @@ class LeaseManager:
             return error
 
         try:
+            if queue.waiting():
+                # Arriving behind others means parking this thread as they do.
+                if not _take_capture_waiter_slot():
+                    raise refuse(
+                        uncounted_busy(),
+                        "capture_waiters_full",
+                        _CAPTURE_WAITERS_FULL_REMEDIATION,
+                    )
+                holds_slot = True
+                ticket = queue.join()
             while True:
                 if ticket is not None and not queue.wait_turn(ticket, deadline):
                     raise refuse(
-                        _mutation_busy(None, wait_ms=waited_ms()),
+                        uncounted_busy(),
                         "capture_wait_exhausted",
                         _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
                     )
                 try:
-                    result = run()
+                    with mutation_lock.absorbing_busy():
+                        result = run()
                 except OpError as error:
                     if (
                         error.code != "MUTATION_BUSY"
                         or commit_state["observed"]
                         or error.details.get("committed") is not False
                     ):
+                        if error.code == "MUTATION_BUSY":
+                            mutation_lock.record_client_visible_busy()
                         raise
                     holder = error.details.get("holder")
                     if isinstance(holder, Mapping) and holder.get("overdue") is True:
@@ -5447,6 +5507,14 @@ class LeaseManager:
                             "capture_wait_exhausted",
                             _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
                         ) from None
+                    if not holds_slot:
+                        if not _take_capture_waiter_slot():
+                            raise refuse(
+                                error,
+                                "capture_waiters_full",
+                                _CAPTURE_WAITERS_FULL_REMEDIATION,
+                            ) from None
+                        holds_slot = True
                     absorbed += 1
                     if ticket is None:
                         ticket = queue.join()
@@ -5462,6 +5530,8 @@ class LeaseManager:
                     )
                 return result
         finally:
+            if holds_slot:
+                _release_capture_waiter_slot()
             if ticket is not None:
                 queue.leave(ticket)
 
