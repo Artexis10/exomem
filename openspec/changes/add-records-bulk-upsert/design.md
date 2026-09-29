@@ -112,3 +112,13 @@ None: ruled on PR #1452 (N = 500 ratified and measured after building; abort def
 - The container guard for `markdown-log` is the source file hash (the same value single append takes); for `markdown-items` it is the snapshot hash.
 - Per-item advisory carriers (`due_state`, `capture_sweep`) are not emitted for a batch: they are per-write hints and 500 of them would bury the receipt. Coverage still reads complete or partial from the written items' `sources` links at the next recompute.
 - Measured cost is dominated by `vault.batch_atomic_write`'s per-target access validation and post-commit fanout, which grow with the number of written files; that is the surface #1457 (records write-path performance) works on, so this change does not touch it.
+
+## Measured (synthetic 8-field ledger, markdown-items, CPU-only container)
+
+| rows | serial guarded appends | one `bulk_upsert` |
+| --- | --- | --- |
+| 24 | 15.2 s | 1.5 s |
+| 100 | 71.9 s | 4.8 s |
+| 500 | not run (extrapolates to about 6 min) | 57 s |
+
+With the #1457 write-path branch merged in: serial 14.0 s / 55.9 s, bulk 1.5 s / 4.5 s / 54 s. Bulk is roughly 10x faster at 24 and 12-16x at 100, but grows superlinearly at 500 because `vault.batch_atomic_write` validates and fans out per target, so one publication of 500 files holds the writer lease for about a minute. Batching those per-target costs is the next lever and belongs with #1457's work, not here; until then a caller wanting shorter lease holds sends batches of about 100 chained by the returned container hash.
