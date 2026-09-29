@@ -744,26 +744,20 @@ def op_configure_memory(
 ) -> dict:
     """Inspect, set or clear your saved Exomem engagement level for this vault.
 
-    Inspect first, then set off, light, balanced or maximal with the returned
-    revision as expected_revision. The choice follows this authenticated identity
-    on later requests without a restart. It changes recall/capture eagerness, never
-    compute mode or authority. Other identities and vaults remain independent.
-    Pass context "coding" or "conversation" to set a level for that kind of client
-    alone, leaving the identity-wide value untouched, and use clear with that
-    context and expected_revision to remove it again. The context that applies to
-    a request is detected from the calling client, never chosen by an argument.
-    Adopt the returned engagement contract in the current conversation.
+    Inspect first, then set a level with the returned revision as
+    expected_revision. The choice follows this authenticated identity across
+    requests and changes recall/capture eagerness only, never compute mode or
+    authority. Pass context to set a level for that kind of client alone
+    (clear removes it; needs context and expected_revision). Adopt the returned
+    contract in this conversation.
 
     Args:
-        action: "inspect" reads the saved state, "set" writes a level, and
-            "clear" removes one context value.
-        prominence: The level to save — off, light, balanced or maximal; required
-            by set and rejected by clear.
-        expected_revision: The revision a prior inspect returned, so a stale write
-            is refused rather than overwriting a later choice.
-        context: Which saved context value to write or clear; the context applied
-            to a request is always derived from the client surface, never from
-            this argument.
+        action: inspect reads, set writes a level, clear removes one context value.
+        prominence: Level to save: off, light, balanced or maximal. Required by
+            set, rejected by clear.
+        expected_revision: Revision from a prior inspect; a stale write is refused.
+        context: Saved context value to write or clear; the applied context is
+            detected from the client, never from this argument.
     """
     from . import prominence as prominence_module
     from . import prominence_preferences
@@ -834,23 +828,19 @@ def op_bootstrap(
     """Return Exomem's versioned operating contract and live session state.
 
     Call this when current live state is missing. A client with the installed
-    Exomem skill uses session with its metadata skill-contract digest; generic
-    clients or those missing the rules use compact, full, or diagnostics to
-    learn tool use: when to search, when to save, how to interpret scoped
-    misses, which `find` knobs are cheap vs diagnostic, how compiled notes
-    differ from raw sources/evidence, and how Exomem differs from built-in AI
-    memory. The payload is deterministic instruction plus local compute policy
-    and product-surface metadata; it does not inspect or summarize vault content.
+    Exomem skill uses session with its skill-contract digest; generic clients
+    use compact, full or diagnostics to learn tool use (when to search and save,
+    scoped misses, compiled notes versus sources/evidence). The payload is
+    deterministic instruction plus compute policy and surface metadata; it does
+    not inspect vault content.
 
     Args:
-        profile: "compact" (default), "full", "diagnostics", or "session".
-            Session supplies live state to a client that has loaded the installed
-            skill operating rules and presents its current skill contract digest.
-        workflow: Optional caller-selected workflow label. Returned as context
-            only; it does not change server behavior.
-        skill_contract: Installed skill metadata digest required for the session
-            profile. An absent or stale digest returns compact in this call with
-            a closed unavailable reason.
+        profile: compact, full, diagnostics or session. Session supplies live
+            state to a client that already loaded the skill rules and presents
+            its skill contract digest.
+        workflow: Caller workflow label, returned as context only.
+        skill_contract: Skill digest required for session; an absent or stale
+            one returns compact with a closed unavailable reason.
 
     Returns:
         A structured, versioned contract with workflow, search, save, upload,
@@ -6031,64 +6021,49 @@ def op_ask_memory(
     explain: bool = False,
     purpose: str | None = None,
 ) -> _RecallOutput:
-    """Recall durable knowledge from Exomem with product defaults.
+    """Recall durable knowledge: the normal first read.
 
-    This is the normal first read: search compiled knowledge, sources,
-    evidence, media sidecars, and curated vault files without making the
-    caller choose internal primitives. Set `deep=true` to return a packed
-    reasoning context instead of only hits. Heavy behavior stays explicit:
-    rerank is only forced when `rerank=true`, and graph enrichment is only
-    requested when `graph_enrich=true`.
+    Searches compiled knowledge, sources, evidence, media sidecars and curated
+    vault files. `deep=true` returns a packed reasoning context instead of hits.
+    Rerank and graph enrichment run only on request. Use `activate_context`
+    when you do not yet know what to look for.
+    Details: references/recall.md.
 
     Args:
         query: Question or search phrase. Empty means recent/filtered recall.
-        types: Optional page-type filters.
-        projects: Optional project-key filters.
-        tags: Optional tag filters.
-        speakers: Optional diarized speaker filters.
-        file_types: Optional artifact kind filters such as pdf, image, csv, json.
-        exclude_file_types: Optional artifact kinds to exclude.
-        categories: Semantic-unit category shortcuts, such as config or rule.
-        kinds: Semantic-unit kind shortcuts, such as decision or claim.
-        source_kinds: Source-kind filters — what the artifact IS. Open
-            vocabulary, so any registered or previously used key is valid.
-        domains: Subject-domain filters — what the artifact is ABOUT.
-            Independent of source_kinds and equally open.
-        relations: Typed-relation filter — recall pages participating in a typed
-            edge of these relations (e.g. supports, contradicts, supersedes),
-            OR'd within the list, extensions rolling up to their core parent.
-        relation_of: Restrict `relations` to pages connected to this anchor page
-            (vault-relative path); the anchor is excluded from results.
-        relation_direction: outbound, inbound, or any (default). Ignored for
-            symmetric relations.
+        types: Page types.
+        projects: Project keys.
+        tags: Tags.
+        speakers: Diarized speakers.
+        file_types: Artifact kinds, e.g. pdf, csv.
+        exclude_file_types: Artifact kinds to drop.
+        categories: Unit categories, e.g. config.
+        kinds: Unit kinds, e.g. decision.
+        source_kinds: What the artifact IS (open vocabulary).
+        domains: What it is ABOUT (open vocabulary).
+        relations: Typed-edge relations (e.g. supports, supersedes), OR'd.
+        relation_of: Anchor path; restrict `relations` to pages connected to it.
+        relation_direction: outbound, inbound or any.
         filters: Structured page/unit metadata filters.
-        result_level: auto, page, unit, or mixed.
-        limit: Max hits. Default 15.
-        continuation: Opaque continuation returned by a prior governed recall page.
-        scope: kb, vault, or kb-only.
-        mode: hybrid, keyword, or vector.
-        detail: compact or full hit detail.
+        result_level: auto, page, unit or mixed.
+        limit: Max hits.
+        continuation: Token from a prior recall page.
+        scope: kb, vault or kb-only.
+        mode: hybrid, keyword or vector.
+        detail: compact or full.
         deep: Return a packed context for reasoning.
-        graph: Include graph-neighbour ranking in hybrid/vector search.
-        rerank: Force or suppress cross-encoder reranking; omit for mode-aware auto.
-        rerank_max_candidates: Bound scorer input to an integer from the effective
-            result limit through 300; omission preserves the existing prefix.
-        prefer_compiled: Prefer compiled notes over raw sources by default.
-        prefer_active: Prefer active conclusions over superseded ones.
-        prefer_used: Apply usage boost when explicitly requested.
-        widen_outside_kb: With scope="kb", also reserve up to limit-1 slots for
-            curated vault pages OUTSIDE the knowledge base. Off by default:
-            scope="kb" means the knowledge base and nothing else. Turn it on
-            when a terse out-of-KB file (a tracker, a handbook) is what you are
-            looking for, or use scope="vault" to search everything equally.
-        graph_enrich: With deep mode, include typed graph neighborhood data.
-        include_timings: Include retrieval timings for diagnostics.
-        explain: Add bounded retrieval-plan and per-hit ranking evidence.
-        purpose: Optional declared purpose for this request, e.g. "audit" or
-            "due-diligence". Governance rules may widen or narrow what a given
-            audience may see for a stated purpose; leaving it unset is
-            deterministic, not a wildcard. Never affects ranking, and never
-            enters the recall cache key.
+        graph: Graph-neighbour ranking in hybrid/vector search.
+        rerank: Force or suppress reranking; omit for auto.
+        rerank_max_candidates: Scorer input bound, result limit to 300.
+        prefer_compiled: Prefer compiled over raw sources.
+        prefer_active: Prefer active over superseded.
+        prefer_used: Apply a usage boost.
+        widen_outside_kb: With scope="kb", also reserve slots for curated pages
+            outside the KB.
+        graph_enrich: With deep, include graph neighborhoods.
+        include_timings: Include retrieval timings.
+        explain: Add retrieval-plan and ranking evidence.
+        purpose: Declared purpose; governance may widen or narrow visibility.
     """
     result = op_find(
         vault_root,
@@ -6224,172 +6199,52 @@ def op_activate_context(
 ) -> dict:
     """Compile durable context for a raw conversational turn, without a query.
 
-    Call this ONCE at the start of a substantive turn, before deciding what to
-    search for. Pass the user's words verbatim — this is not a search query and
-    must not be rewritten into one. It returns a bounded working-memory packet:
-    which durable anchors the turn is about (entities, resources, hubs, Records
-    collections, active plans, projects), the context roles it filled, short
-    provenance-bearing units, pointers to what did not fit the budget, and the
-    current state of any resource whose collection records one.
+    Call ONCE at the start of a substantive turn, with the user's words verbatim
+    (not rewritten into a query). Returns a bounded working-memory packet:
+    `recent_context` first (recently worked pages, served even when nothing
+    resolved), then the anchors the turn is about, filled context roles, short
+    provenance-bearing units, pointers to what did not fit, and governed
+    `current_state`. Use `ask_memory` when you already know what you are looking
+    for; use this when you do not, then `read_memory` on a ref the packet points at.
 
-    Every packet leads with `recent_context`: up to eight pages this vault has
-    recently been worked on — edited, read, captured as a session, recorded as a
-    conversation recap, or left open in Planning — each with its title, why it
-    is recent, the date of that contact and, where the page carries one, its own
-    authored `status` or `summary` line. A recap entry (`why: "episode"`) is the
-    newest revision of one conversation's `episode_memory` record and carries
-    that conversation's `episode` key; follow it with `read_memory`. That line is the page's, not a current-state reading: these
-    pages are chosen by recency rather than by the turn, so the block never
-    queries a Records collection the turn did not name. `current_state[]`
-    remains the carrier for the resolved anchors' governed state.
-    It is served whether or not the turn resolved anything, so a fresh session
-    opening on "continue" receives the thread it is picking up. `as_of` dates
-    the CONTACT, not the event the page describes. With `session` or
-    `workspace` passed, this conversation's own pages come first.
-
-    A turn that names nothing ("continue", "where were we") is answered from
-    recent work: the thread your `continuity` token names, else what was last
-    worked on, picked with `anchor`, or named by a recorded episode, in this
-    conversation first, then its workspace, then the vault. Reads rank below
-    any of those, and a maintenance batch counts as nobody's work. An anchor
-    reached this way resolves with `recency` in its evidence. A single
-    ordinary page reached this way is served as `kind: "page"`, `status:
-    "resolved"`, evidence `["recency"]` and `generation.carried_by:
-    "recency"`; a page tied with anything else abstains `ambiguous`, listing
-    both, for you to pick with `anchor`. Without `session`, `workspace` or a
-    `continuity` token, other conversations' recent work orders
-    `recent_context` but is never taken as the referent.
-
-    A short follow-up that names nothing new ("what about the second one?",
-    "and the results?") is answered from this conversation's own thread:
-    where that thread holds one page clearly ahead of the rest, it is carried
-    as a single `partial` anchor with `generation.carried_by: "follow_up"`;
-    where two are close, both are listed under `ambiguity` for `anchor`.
-
-    Read-only and abstaining by construction. It writes nothing, changes no
-    `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
-    already runs, and returns `abstained: true` with a reason rather than guessing
-    when the turn resolves nothing (`unresolved`), names two competing senses
-    (`ambiguous`), is served while the derived index is still warming
-    (`index_warming`), or is switched off (`disabled`). An ambiguous turn lists
-    both anchors under `ambiguity` and runs no role lane — you pick the sense and
-    call again with `anchor` set to the ref you mean.
-
-    A turn that named no anchor but whose own distinctive words clearly reach one
-    compiled page is served from that page instead of abstaining, and says so:
-    its single `anchors[]` entry has `kind: "page"` and `status:
-    "retrieval_carried"`, and `generation.carried_by` is `"retrieval"`. Read that
-    as "nothing was named; recall alone put this here" — no anchor was resolved,
-    yet the packet's continuity token names that page, so a following
-    "continue" resumes it; a turn with nothing distinctive in it abstains
-    `unresolved` rather than guessing between pages. Naming that
-    SAME page yourself with `anchor` instead resolves it outright, at `status:
-    "resolved"` and `generation.carried_by: "agent_choice"` — your choice, not
-    recall's guess.
-
-    When a turn names SEVERAL pages this way, nothing is carried and the packet
-    abstains `unresolved`, listing them under `anchors[]` at `status:
-    "retrieval_named"`. That is not `ambiguity`, which reports two anchors that
-    both resolved: nothing resolved here. Call again with `anchor` set to the
-    ref you mean — an ordinary compiled page takes it exactly as a page reached
-    by `retrieval_carried` above does — and that page's own units are served.
-
-    On the MCP door a packet may also carry `episode_due`: after several
-    activations with no `episode_memory` record from this caller, it asks you to
-    record one at the conversation's next decision or stopping point. It is
-    advice, at most once per half hour, and absent when proactive capture is off.
-
-    At the start of your session a packet may also carry `upkeep`: at most one
-    item the background upkeep pass proposed, such as two notes that could be
-    connected or an entity page that newer facts have outgrown. It carries its
-    own `route`, a `context_route` to read first, and a `dispose` route
-    (`triage_memory` dismiss or snooze). Consideration does not authorize
-    mutation: act through the route under its own rules, or dispose of it.
-
-    Use `ask_memory` instead when you already know what you are looking for; use
-    this when you do not, and follow it with `read_memory` on whatever ref the
-    packet points at.
+    Read-only. It abstains (`abstained: true` plus a reason: `unresolved`,
+    `ambiguous`, `index_warming`, `disabled`) rather than guessing. On an
+    ambiguous turn, choose a sense and call again with `anchor` set to its ref;
+    the same applies to an `unresolved` turn listing `retrieval_named` candidates.
+    A turn naming nothing ("continue") resumes recent work, guided by
+    `continuity`, `session` and `workspace`. A packet may also carry
+    `episode_due` (record an `episode_memory`) or `upkeep` (one proposed
+    item; act through its own route or dispose of it via `triage_memory`).
+    Details: references/recall.md.
 
     Args:
         turn: The user's turn, verbatim. Empty abstains.
-        max_chars: Character ceiling for the packet's text. Default 4,000,
-            clamped to 500..8,000. Overflow becomes pointers, never truncated
-            claims.
-        purpose: Optional declared purpose for this request, e.g. "audit" or
-            "due-diligence". Governance rules may widen or narrow what a given
-            audience may see for a stated purpose; leaving it unset is
-            deterministic, not a wildcard. Never affects ranking, and never
-            enters the packet cache key.
-        continuity: The opaque `continuity` token the previous packet of this
-            conversation returned: pass it back verbatim on every call. Every
-            packet returns one, an abstention too. It identifies this
-            conversation, so a client that passes no `session` still has its
-            own thread; only a salted hash of that identity is stored, and it
-            lapses after six idle hours. On a turn that names nothing ("continue",
-            "where were we") the anchors or page it names are the first thing
-            the turn is taken to refer to, and may resolve on that alone. On any other turn it
-            only strengthens anchors the turn already reaches on its own
-            evidence: it never reaches one by itself there, and never turns an
-            `unresolved` turn into a resolved one. It is ignored and reported as
-            `generation.continuity = "stale"` when it was minted against another
-            vault's index or another role registry. Drop it on a new session or
-            after a compaction.
-        anchor: One ref the agent is naming on its own authority: the sense
-            meant from a previous `ambiguity` block, or any ordinary compiled
-            page a packet already listed (`recent_context`, `retrieval_named`,
-            or an `unresolved` turn's candidates) — not raw `Sources`/`Evidence`
-            material, which stays a `read_memory` target. That anchor or page
-            is then treated as resolved on your choice alone, its roles run,
-            and any competing senses are omitted. A ref that names nothing
-            eligible this way, or one this audience may not see, is refused
-            identically and no packet is built. When the user corrects which
-            page they meant, call again with the same turn and `anchor` set
-            to it.
-        include_timings: Include per-stage timings for diagnostics.
-        client: Optional lowercase label for the calling client, e.g.
-            `claude-code`, `codex` or `chatgpt`. Recorded host-locally only; an
-            invalid label is ignored, never refused.
-        session: Optional opaque conversation identifier, at most 256
-            characters, such as the `episode` key an `episode_memory` record
-            returned. Pass the same one on every turn of a conversation: a turn
-            that names nothing ("continue") is then answered from THIS
-            conversation's own last thread and picks first, before anything
-            other conversations touched, and `recent_context` lists its pages
-            first. Only a salted hash of it is stored, on this machine. It
-            also names whose session start an `upkeep` item may arrive at.
-        workspace: Optional opaque key for the project or folder the
-            conversation runs in, at most 256 characters, such as a hash of
-            the working directory. A fresh conversation in the same workspace
-            continues that workspace's thread before the rest of the vault's.
-            Only a salted hash of it is stored. Omitting both keys, a turn
-            that names nothing is answered from this conversation's
-            `continuity` thread alone, never from other conversations' work.
+        max_chars: Packet text ceiling, clamped to 500..8,000. Overflow becomes
+            pointers, never truncated claims.
+        purpose: Declared purpose, e.g. "audit"; governance may widen or narrow
+            visibility. Never affects ranking.
+        continuity: The `continuity` token the previous packet returned; pass it
+            back verbatim on every call (drop it on a new session or after
+            compaction). It only strengthens anchors the turn already reaches,
+            except on a turn that names nothing. Reported `stale` if minted
+            against another vault index.
+        anchor: One ref you choose on your own authority: a sense from an
+            `ambiguity` block, or an ordinary compiled page a packet listed
+            (not raw Sources/Evidence). It is treated as resolved and its roles
+            run. An ineligible or not-visible ref is refused identically.
+        include_timings: Include per-stage timings.
+        client: Lowercase client label, e.g. `claude-code`. Invalid labels are
+            ignored.
+        session: Opaque conversation id (at most 256 chars), e.g. an
+            `episode_memory` `episode` key; pass the same one every turn so
+            "continue" resolves from this conversation first.
+        workspace: Opaque project/folder key (at most 256 chars); a fresh
+            conversation there continues that workspace's thread.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
-             continuity?, episode_due?, upkeep?, learning?}. `recent_context` is first and is present on an
-             abstained packet too. An abstained packet always empties
-             `roles`, `units`, `pointers` and `current_state` — no material
-             about an anchor that did not resolve — but `anchors` (a
-             `partial`, `retrieval_named` or competing `ambiguity` candidate),
-             `ambiguity` and `missing` may still be populated.
-             `generation.continuity` reports whether a token you passed was
-             `applied`, `stale` or `absent`; `generation.continuity_thread`
-             whether its conversation was continued (`applied`), had lapsed
-             or was unreadable (`stale`, answered as a new conversation, never
-             refused) or was not passed (`absent`). `generation.hot_profile` reports
-             the recent-work projection's `state` (`current`, `partial`,
-             `seeded`, `behind` or `empty`) and `session_start`, the date
-             its current working session began.
-             `learning` may ride on an `anchor` call whose turn never named
-             the page you chose: one advisory naming the writer that would
-             teach the vault the user's words — `edit_memory` adding to the
-             page's `learned_aliases`, or `schema_memory save-conventions`
-             adding a referential cue — each with the `expected_hash` it must
-             carry, plus `turn_terms`, the user's own words. It writes
-             nothing. Act on it only if those words should reach that page
-             next time; otherwise dismiss its `review` ref with
-             `triage_memory`.
+             continuity?, episode_due?, upkeep?, learning?}. An abstained packet
+             empties `roles`, `units`, `pointers` and `current_state`.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and
@@ -7077,26 +6932,21 @@ def op_read_memory(
 ) -> dict:
     """Read one memory page or one exact semantic unit by reference.
 
-    Use after `ask_memory` chooses a hit, or when a caller already knows the
-    path. With `unit_ref`, returns that exact current semantic unit, its parent
-    citation/lifecycle, and at most 2,400 characters of surrounding Markdown.
-    Missing, stale, ambiguous, and superseded references are reported through
-    the response `status`; no nearby unit is silently substituted. Without
-    `unit_ref`, this preserves the existing page-read response exactly.
+    Use after `ask_memory` chooses a hit, or when the path is known. With
+    `unit_ref`, returns that exact current unit, its parent citation/lifecycle
+    and at most 2,400 characters of surrounding Markdown; missing, stale,
+    ambiguous or superseded references are reported in `status`, never
+    substituted. Without `unit_ref`, it returns the page.
 
     Args:
-        path: Vault-relative path or Knowledge Base-relative shorthand.
-        frontmatter_only: Return only frontmatter for cheap scanning.
-        include_history: Include recorded edit/supersession history.
-        links: Include inbound and outbound wikilink summaries.
-        include_raw: Include the raw markdown file text.
-        unit_ref: Exact unit reference returned by unit-level recall. Page-only
-            expansion flags are not accepted together with an exact unit read.
-        purpose: Optional declared purpose for this request, e.g. "audit" or
-            "due-diligence". Governance rules may widen or narrow what a given
-            audience may see for a stated purpose; leaving it unset is
-            deterministic, not a wildcard. Never affects ranking, and never
-            enters the recall cache key.
+        path: Vault-relative path or KB-relative shorthand.
+        frontmatter_only: Return only frontmatter.
+        include_history: Include edit/supersession history.
+        links: Include inbound/outbound wikilink summaries.
+        include_raw: Include the raw markdown text.
+        unit_ref: Exact unit ref from unit-level recall; not combinable with
+            page-only expansion flags.
+        purpose: Declared purpose; governance may widen or narrow visibility.
     """
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
     # onto the bound principal so the release decisions taken inside `op_get`
@@ -7186,18 +7036,17 @@ def op_browse_memory(
     samples: int = 5,
     recursive: bool = False,
 ) -> dict:
-    """Browse vault structure without reading many files.
+    """Browse vault structure.
 
-    `mode="overview"` returns a bounded product adoption/structure report.
-    `mode="list"` returns entries for a folder. Both are read-only.
+    overview: structure report; list: folder entries. Read-only.
 
     Args:
-        path: Vault-relative subtree. Empty means vault root.
+        path: Subtree; empty: root.
         mode: overview or list.
-        max_depth: Overview tree depth cap.
-        include_hidden: Include dotfiles and hidden/system folders.
-        samples: Filename samples per folder for overview mode.
-        recursive: In list mode, walk subfolders.
+        max_depth: Depth.
+        include_hidden: Show hidden.
+        samples: Per folder.
+        recursive: List: recurse.
     """
     if mode == "overview":
         return op_overview(
@@ -8297,17 +8146,13 @@ def op_transfer_artifact(
 ) -> dict:
     """Prepare out-of-band binary artifact transfer.
 
-    Compatibility transport for clients that cannot supply file handles to
-    `capture_source` or `preserve_artifacts`. Returns a short-lived token and URL
-    for uploading a binary or downloading a vault file into a sandbox. Minting an
-    upload token does not mean bytes were stored.
+    For clients that cannot pass file handles to `capture_source` or
+    `preserve_artifacts`. Returns a short-lived token and URL. Minting a token stores nothing.
 
     Args:
         operation: upload or download.
-        lane: where an upload lands — `source` for raw material, `evidence` for
-            proof-bearing artifacts. Bound into the token when it is minted, so
-            the destination cannot be chosen by whoever posts the bytes. Ignored
-            for downloads.
+        lane: Upload target `source` (raw) or `evidence` (proof-bearing);
+            bound into the token; ignored for downloads.
     """
     _ = vault_root
     if operation not in ("upload", "download"):
@@ -8345,15 +8190,13 @@ def op_process_media(
 ) -> dict:
     """Process, inspect, or retry governed media without waiting for extraction.
 
-    Supported media copied into the governed Knowledge Base or uploaded through
-    Exomem is processed automatically. Use this action to reconcile one artifact
-    immediately, inspect bounded durable status, or retry actionable blocked/failed
-    work after remediation. Existing valid transcripts are preserved.
+    Governed media is processed automatically. Use this to reconcile one
+    artifact now, inspect status, or retry blocked/failed work after remediation.
 
     Args:
-        path: Optional governed Knowledge Base media path. Omit for bounded all-media work.
-        paths: Optional list of 1-32 unique governed media paths for process or retry.
-        operation: process, status, or retry.
+        path: Governed KB media path; omit for bounded all-media work.
+        paths: 1-32 unique governed media paths for process or retry.
+        operation: process, status or retry.
     """
     from . import due_state as due_state_module
     from .cli_ops import OpError
@@ -8672,14 +8515,13 @@ def op_read_media(
 ) -> ToolResult:
     """Read sampled video frames inline for visual inspection.
 
-    This is MCP-only because it returns image content blocks. Heavy media
-    extraction remains explicit and dependency-gated.
+    MCP-only: returns image content blocks.
 
     Args:
         path: Vault-relative video path.
         max_frames: Maximum frames to return.
-        start_sec: Optional start timestamp in seconds.
-        end_sec: Optional end timestamp in seconds.
+        start_sec: Start timestamp, seconds.
+        end_sec: End timestamp, seconds.
     """
     return op_get_video_frames(
         vault_root,
@@ -12168,22 +12010,21 @@ def op_query_dataset(
 ) -> dict:
     """Query a CSV, TSV, or JSON dataset under the vault.
 
-    Use after `ask_memory` or `browse_memory` identifies a dataset card or raw
-    file. This returns exact rows or aggregates without dumping whole files.
+    Use after `ask_memory` or `browse_memory` finds a dataset.
 
     Args:
-        path: Vault-relative dataset path.
-        record_path: Dotted JSON array path.
-        filters: List of filter objects.
-        columns: Columns to project.
-        sort_by: Column to sort by.
-        descending: Sort descending.
+        path: Dataset path.
+        record_path: Dotted JSON path.
+        filters: Filters.
+        columns: Columns.
+        sort_by: Sort by.
+        descending: Reverse.
         limit: Row cap.
-        offset: Pagination offset.
-        aggregate: count, profile, or func:column.
-        date_from: Date range start.
-        date_to: Date range end.
-        date_column: Date column name.
+        offset: Skip rows.
+        aggregate: count, profile or func:column.
+        date_from: Start.
+        date_to: End.
+        date_column: Column.
     """
     return op_query_data(
         vault_root,
@@ -12210,8 +12051,7 @@ def remember_description(project_keys_hint: str) -> str:
 def op_coordination_status(vault_root: Path) -> dict:
     """Report this replica's writer-lease role and coordinator health.
 
-    Read-only and safe during coordinator outages. Credentials and vault content
-    are never included.
+    Read-only, safe during coordinator outages.
     """
     from .writer_lease import coordination_status
 
