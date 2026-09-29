@@ -239,7 +239,7 @@ A caller-session-start activation packet MAY carry an `upkeep` block holding at 
 
 ### Requirement: Frozen verifiers are optional review labels only
 
-Any frozen verifier SHALL obey the existing canonical `frozen-verifiers` admission and effects requirements, remain default-off, version-pinned, separately admitted and limited to review labels with abstention. It SHALL NOT author knowledge, select canonical identity, control retrieval/ranking, gate capture or define policy. Failure, abstention or resource pressure SHALL remove optional assistance without changing online semantics. CPU-first admission SHALL measure quality, false positives and resource interference; GPU use SHALL require separately verified co-tenant capacity. Programme acceptance SHALL include an admission decision with evidence, not mandatory model enablement.
+Any frozen verifier SHALL obey the existing canonical `frozen-verifiers` admission and effects requirements, remain default-off, version-pinned, separately admitted and limited to review labels, and to evidence for sensed families under the `sensed-epistemic-model` capability, with abstention. It SHALL NOT author knowledge, select canonical identity, control retrieval/ranking, gate capture or define policy. Failure, abstention or resource pressure SHALL remove optional assistance without changing online semantics. CPU-first admission SHALL measure quality, false positives and resource interference; GPU use SHALL require separately verified co-tenant capacity. Programme acceptance SHALL include an admission decision with evidence, not mandatory model enablement.
 
 #### Scenario: A verifier disagrees or cannot run
 
@@ -247,7 +247,8 @@ Any frozen verifier SHALL obey the existing canonical `frozen-verifiers` admissi
 - **THEN** the active agent can inspect original evidence and the ordinary governed workflow remains available
 - **AND** the label cannot directly change a canonical fact, authority decision or retrieval result
 
-#### Scenario: Verifier labels do not reach upkeep
+#### Scenario: Readings reach upkeep only as sensed families
 
-- **WHEN** an admitted verifier is enabled while upkeep proposals are produced and delivered
-- **THEN** no upkeep family, carrier or review surface calls the verifier, and upkeep output is identical to a run with it disabled
+- **WHEN** an admitted instrument's readings exist while upkeep proposals are produced and delivered
+- **THEN** no structural family, carrier or review surface calls an instrument, and every structural family's items, order and caps are identical to a run with sensing disabled
+- **AND** a reading reaches the agent only through a sensed family that the `sensed-epistemic-model` capability governs, and enters canon only through a write the agent authors that cites the reading
