@@ -339,7 +339,7 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
         return wall, row, spans
 
     # Warm-up: imports, first-call caches, and one-time state directory creation.
-    one_append(-1000, False, None)
+    one_append(5000, False, None)
 
     def summarize(rows: list[dict[str, float]]) -> dict[str, dict[str, float]]:
         names = sorted({name for row in rows for name in row})
@@ -457,7 +457,7 @@ def _parent(args: argparse.Namespace) -> int:
             row for row in reversed(completed.stdout.splitlines()) if row.startswith(marker)
         )
         results.append(json.loads(line[len(marker) :]))
-    Path(args.out).write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        Path(args.out).write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {args.out}", file=sys.stderr)
     return 0
 
