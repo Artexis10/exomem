@@ -110,3 +110,43 @@ claimed alias, never both.
   "山田さんから連絡" never asks between the two 山田 entities.
 - The bare-name ambiguity groups count unfiltered neighbourhoods, which might hint
   at a withheld anchor. Not verified.
+
+## Recheck at efe52086
+
+Scope: B1 and B2 only, rerun with the original reproductions, plus review of
+eb4b227d and efe52086.
+
+**Verdict: SHIP.**
+
+**B1: fixed** (eb4b227d).
+- `entity_candidates.claim_set_fingerprint` hashes the union of the title's
+  candidates and each claimed alias's claimants. `link.py` and
+  `_refuse_claimed_aliases` both bind to it.
+- Create with title and alias both claimed: CREATED (was never creatable).
+- Patch adding two claimed aliases: accepted with one decision (previously
+  alternated with `STALE_IDENTITY_DECISION`).
+- A decision made for only some of the names, or before a claimant changed, no
+  longer matches and is refused as stale.
+- The memory-loop contract and the spec delta follow the new binding.
+
+**B2: fixed** (efe52086).
+- A contact resting on an embedded-only term gets no `name_span`, so
+  `_narrowed_by_qualifier` never narrows it.
+- "check alpha tide model rolloutの計画" and "alpha tide modelのrolloutの計画" are
+  now ambiguous and keep both hubs (previously wrongly resolved).
+- The all-Latin turn is unchanged, and the 山田 cases are unchanged.
+
+**Regression checks**
+- The same 72 combined lane files, plus the real-compiler, continuity and audit
+  suites: 2466 passed, 15 skipped, 0 failed.
+- The recorded reports equal the fresh runs: raw 9/18 and continuity 4/4 are
+  unchanged.
+- Gates clean: ruff F, capabilities `--check`, harness-modules `--check`, the
+  privacy gate, and `openspec@1.10.0 validate --all --strict` (224/224).
+- Archive discipline: OK.
+- CI on efe52086: `required CI gate` success, all other runs success or
+  conditionally skipped.
+
+**Still open (non-blocking, unchanged from above)**
+- The `learned_aliases` bypass of the claim guard.
+- A decided alias is refused again on a later patch that keeps it.
