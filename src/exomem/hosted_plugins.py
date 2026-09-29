@@ -1897,6 +1897,33 @@ def oauth_discovery_overlay(contract: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: Released candidates whose ask_memory `outputSchema` is rendered from a pinned
+#: source file rather than the live tool. Exactly the candidates the v1-v4
+#: immutability manifest covers; v4-command-binding-v1 and v5 follow the live schema.
+ASK_MEMORY_PINNED_CANDIDATES: frozenset[str] = frozenset(
+    {DEFAULT_CANDIDATE, LIFECYCLE_CANDIDATE, EPISTEMIC_CANDIDATE, PARITY_CANDIDATE}
+)
+ASK_MEMORY_PIN_NAME = "ask-memory-output-schema.json"
+
+
+def _ask_memory_pin_path(root: Path, candidate: str) -> Path:
+    return _candidate_root(root, candidate) / ASK_MEMORY_PIN_NAME
+
+
+def _apply_ask_memory_pin(contract: dict[str, Any], root: Path, candidate: str) -> None:
+    """Restore the released ask_memory outputSchema on a frozen candidate.
+
+    The live schema describes every shape the tool now returns; a released
+    candidate's descriptor must keep the bytes it shipped with.
+    """
+    if candidate not in ASK_MEMORY_PINNED_CANDIDATES:
+        return
+    pinned = json.loads(_ask_memory_pin_path(root, candidate).read_text(encoding="utf-8"))
+    for command in contract["commands"]:
+        if command["name"] == "ask_memory":
+            command["mcp_tool"]["outputSchema"] = pinned
+
+
 def compatibility_manifest(
     repo_root: Path | None = None, *, candidate: str = DEFAULT_CANDIDATE
 ) -> dict[str, Any]:
@@ -1904,6 +1931,7 @@ def compatibility_manifest(
     definition = load_definition(root, candidate=candidate)
     dependencies = skill_dependencies(root, candidate=candidate)
     contract = hosted_gateway.build_agent_gateway_contract(profile=definition.profile)
+    _apply_ask_memory_pin(contract, root, candidate)
     oauth_overlay = oauth_discovery_overlay(contract)
     # The descriptor identifies the contract surface, not the build that emitted
     # it. `exomem_release` belongs to the running server's contract, and keeping
