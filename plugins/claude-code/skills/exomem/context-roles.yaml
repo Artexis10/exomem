@@ -178,3 +178,10 @@ roles:
     # it), which is why it does not also need to be added above.
     evidence_cues: ["?", "what about", "why does"]
     evidence_categories: [question, problem]
+
+  contact:
+    description: How to reach this person or organisation, served only when the turn asks.
+    lane: units
+    categories: [contact]
+    anchor_defaults: []
+    cues: ["phone", "call them", "call her", "call him", "email", "e-mail", "address", "reach them", "contact details", "contact info"]

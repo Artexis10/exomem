@@ -31,6 +31,7 @@ SHIPPED_VOCABULARY = (
     "baseline",
     "evidence",
     "open_questions",
+    "contact",
 )
 
 
@@ -55,7 +56,7 @@ def test_shipped_registry_loads_with_the_declared_vocabulary() -> None:
     assert registry.source == "shipped"
     assert registry.findings == ()
     assert tuple(registry.roles) == SHIPPED_VOCABULARY
-    assert len(registry.roles) == 14
+    assert len(registry.roles) == 15
     for role in registry.roles.values():
         assert role.description
         assert role.lane in context_roles.LANES
@@ -323,7 +324,9 @@ EVIDENCE_BEARING_ROLES = (
     "precedents",
     "open_questions",
 )
-NEITHER_FIELD_ROLES = ("identity", "resources", "people", "location", "baseline", "evidence")
+NEITHER_FIELD_ROLES = (
+    "identity", "resources", "people", "location", "baseline", "evidence", "contact",
+)
 
 
 def test_shipped_evidence_bearing_roles_carry_both_fields() -> None:

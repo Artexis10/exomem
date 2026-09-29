@@ -49,7 +49,7 @@ def test_people_pages_document_aliases_and_about_entity() -> None:
     assert "about_entity" in people
 
 
-def test_capture_workflow_keeps_contact_details_off_the_entity_page() -> None:
+def test_capture_workflow_puts_contact_details_in_a_contact_section_of_the_entity() -> None:
     text = " ".join(
         (SCHEMA / "workflow-skills" / "exomem-capture" / "SKILL.md")
         .read_text(encoding="utf-8")
@@ -59,8 +59,9 @@ def test_capture_workflow_keeps_contact_details_off_the_entity_page() -> None:
     assert "vault owner" in text and "proactive_capture" in text
     # A fact used in the reply is not yet captured: it is written when learned.
     assert "not just in the reply" in text
-    assert "never written into an entity page body" in text
-    assert "separate page linked from the entity" in text
-    assert "govern_memory" in text
-    # No page type is invented for it.
+    assert "dedicated `## Contact` section" in text
+    assert "`- [contact] ...` unit" in text
+    assert "only when the turn asks" in text
+    # No separate page and no invented page type for it.
+    assert "Do not create a separate contact page" in text
     assert "personal-details" not in text

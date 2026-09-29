@@ -285,16 +285,16 @@ The final coverage pass SHALL report a sink: a page that the committed effects o
 - **WHEN** an episode's candidates each land on their own page, or the shared page is an entity, production-log or hub page, or the shared page is withheld from the caller
 - **THEN** the coverage pass reports no sink and carries no sink guidance
 
-### Requirement: Stable person facts route to the entity and contact details to a governed page
+### Requirement: Stable person facts and contact details route to the entity
 
-Capture guidance and the capture-sweep advisory SHALL recognise a stable, uniquely attributable non-contact fact about a resolved person (role, affiliation, relationship), including the vault owner's own entity, as an entity-level fact routed to that entity under `proactive_capture`. Contact details (phone, address, email, identifiers) SHALL NEVER be written into an entity page body; they SHALL go to a separate page linked from the entity, released only through the existing governance scopes and audience policy, so a page withheld from a caller is absent from every read, search and coverage result for that caller. No new page type is introduced. This SHALL NOT weaken the single-incidental-mention, ambiguity and unresolved-identity rules, and the sweep advisory's `rule` SHALL stay within its 400-character wire cap.
+Capture guidance and the capture-sweep advisory SHALL recognise a stable, uniquely attributable fact about a resolved person (role, affiliation, relationship, or a contact detail such as a phone, address, email or identifier), including the vault owner's own entity, as an entity-level fact routed to that entity under `proactive_capture`. Contact details SHALL be written in a dedicated `## Contact` section of the entity page, each as its own `contact` unit, never in the summary or in `fact` units, and SHALL NOT be moved to a separate page or a new page type. This SHALL NOT weaken the single-incidental-mention, ambiguity and unresolved-identity rules, and the sweep advisory's `rule` SHALL stay within its 400-character wire cap.
 
 #### Scenario: The owner's own contact detail is read from a screenshot
 
 - **WHEN** a session reads a contact detail attributable to the vault owner and uses it in a reply
-- **THEN** the capture guidance directs the agent to a separate linked, governance-covered page and never to the owner's entity body
+- **THEN** the capture guidance directs the agent to record it as a `contact` unit in the `## Contact` section of the owner's entity, not in a separate page and not in the entity summary
 
-#### Scenario: A withheld contact page is absent
+#### Scenario: A withheld entity takes its contact section with it
 
-- **WHEN** a contact page is withheld from the caller by a governance scope
-- **THEN** it does not appear in the coverage pass's receipts or sink report
+- **WHEN** the entity page is withheld from the caller by a governance scope
+- **THEN** no contact unit of it appears in any read, search or activation result for that caller
