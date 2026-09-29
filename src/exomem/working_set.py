@@ -677,15 +677,15 @@ def run_lanes(
     timings: Any = None,
     freshness_snapshot: Any = None,
     neighbourhood: frozenset[str] | None = None,
-    precedent_pages: frozenset[str] = frozenset(),
-    standing_pages: frozenset[str] = frozenset(),
+    precedent_reach: Callable[[], tuple[frozenset[str], frozenset[str]]] | None = None,
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
     """Run one bounded lane per selected role. Every lane soft-fails alone.
 
-    `precedent_pages` are pages the `precedents` lane reads beyond the anchors'
-    neighbourhood (an entity's conclusion pages past its link cap), and
-    `standing_pages` the project pages that stand as precedent: their units
-    lead the role and are exempt from its item cap (`reach_precedents`).
+    `precedent_reach` is called inside the `precedents` lane, behind that lane's
+    own budget gate and timing span, and returns the pages the lane also reads
+    beyond the anchors' neighbourhood (an entity's conclusion pages past its
+    link cap) and the project pages that stand as precedent: their units lead
+    the role and are exempt from its item cap (`reach_precedents`).
 
     `current_state` is resolved ONCE by the caller and handed in, because the
     Records lane and the packet's own `current_state[]` block are two views of
@@ -718,9 +718,11 @@ def run_lanes(
         result = LaneResult(())
         with _span(timings, lane_stage):
             try:
-                extra = (
-                    precedent_pages | standing_pages if definition.id == PRECEDENTS_ROLE else frozenset()
-                )
+                precedent_pages: frozenset[str] = frozenset()
+                standing_pages: frozenset[str] = frozenset()
+                if precedent_reach is not None and definition.id == PRECEDENTS_ROLE:
+                    precedent_pages, standing_pages = precedent_reach()
+                extra = precedent_pages | standing_pages
                 result = _lane(
                     root,
                     definition,
@@ -2749,13 +2751,6 @@ def compile_packet(
             state_fields=conventions.state_fields,
             date_fields=conventions.date_fields,
         )
-    precedent_pages: frozenset[str] = frozenset()
-    standing_pages: frozenset[str] = frozenset()
-    if not budget_exhausted("working_set.precedents"):
-        with _span(timings, "working_set.precedents"):
-            precedent_pages, standing_pages = reach_precedents(
-                root, resolved=lane_anchors, roles=roles, registry=registry, index=index
-            )
     items, missing = run_lanes(
         root,
         anchors=lane_anchors,
@@ -2764,8 +2759,9 @@ def compile_packet(
         current_state=current_state,
         timings=timings,
         freshness_snapshot=freshness_snapshot,
-        precedent_pages=precedent_pages,
-        standing_pages=standing_pages,
+        precedent_reach=lambda: reach_precedents(
+            root, resolved=lane_anchors, roles=roles, registry=registry, index=index
+        ),
     )
     # Concurrent contexts: pages the turn named beside what it resolved. An
     # additive read that soft-fails; the resolved anchors' own packet is

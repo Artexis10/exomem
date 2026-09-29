@@ -322,8 +322,9 @@ frontmatter names the project), the compiler SHALL serve that page's units under
 two units per page, ahead of the role's other units and outside its item cap, charged to
 the packet's character budget. Several declarations in one project resolve to the most
 recently updated. Another project's standing page, and a turn that resolved nothing in
-the project, serve none. The reach runs under its own `working_set.precedents` timing
-span and is skipped when the request budget cannot afford it.
+the project, serve none. The reach runs inside the `precedents` lane, behind that lane's
+own request-budget gate and under its timing span, so it adds no stage of its own and
+is skipped with the lane when the request budget cannot afford it.
 
 #### Scenario: The methodology page constrains a turn that never names it
 - **WHEN** a turn resolves an entity whose project declares a standing page and the
