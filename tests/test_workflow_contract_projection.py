@@ -8,7 +8,7 @@ def test_compact_full_and_selected_knowledge_pack_share_workflow_contract_projec
 ) -> None:
     from exomem import commands, knowledge_packs, workflow_contracts
 
-    compact = commands.op_bootstrap(tmp_path, profile="compact")
+    compact = commands.op_bootstrap(tmp_path, profile="compact", section="all")
     full = commands.op_bootstrap(tmp_path, profile="full")
     portable = workflow_contracts.portable_projection()
     identity = {key: portable[key] for key in ("family", "schema_version", "digest")}

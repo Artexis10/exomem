@@ -1,0 +1,267 @@
+"""The compact bootstrap is a core plus on-demand sections (`shrink-bootstrap`).
+
+Three claims are pinned here. The core carries every rule that prevents a known
+incident (`CORE_RULES`, the manifest a future change must extend to argue a byte
+into the core). Nothing is lost: every block of the complete reference payload is
+either in the core verbatim or in exactly one section, byte-identical. And the
+core stays under its byte ceiling at every level on every surface the split
+applies to.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import pathlib
+import tempfile
+from collections.abc import Callable
+
+import pytest
+
+from exomem import bootstrap_core, capabilities, commands, prominence, workflow_skills
+
+#: Core ceiling at maximal on the worst-case surface. Ruled 15,000; measured
+#: 14,339 (claude-code, maximal) when set, i.e. about 660 bytes of margin.
+CORE_BYTE_CEILING = 15_000
+CORE_HEADROOM_WARNING_BYTES = 512
+
+#: Per-section ceilings: the measured size on the largest surface plus about 10%,
+#: so a section cannot quietly regrow into a second full payload.
+SECTION_BYTE_CEILINGS = {
+    "authoring": 20_900,
+    "entities": 8_300,
+    "records_planning": 5_900,
+    "routing": 12_500,
+    "adoption": 7_200,
+    "envelope": 2_200,
+    "epistemics": 3_500,
+    "diagnostics_reading": 1_300,
+}
+
+SURFACES = (None, "claude-code", "hosted-alpha-agent-v5")
+CARRYING = ("balanced", "maximal")
+
+
+def _root() -> pathlib.Path:
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "Knowledge Base").mkdir()
+    return root
+
+
+def _bootstrap(monkeypatch, level: str, surface: str | None, **kwargs) -> dict:
+    logging.disable(logging.CRITICAL)
+    monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    monkeypatch.delenv("EXOMEM_SURFACE", raising=False)
+    hosted = surface if surface and surface.startswith("hosted-") else None
+    if surface and hosted is None:
+        monkeypatch.setenv("EXOMEM_SURFACE", surface)
+    kwargs.setdefault("profile", "compact")
+    if hosted is None:
+        return commands.op_bootstrap(_root(), **kwargs)
+    registry = commands.product_commands_for_profile(hosted, "rest")
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="hosted-agent",
+        profile=hosted,
+        tier2_enabled=commands.PRODUCT_SURFACE_PROFILES[hosted].expose_tier2,
+        product_commands=tuple(command.name for command in registry),
+    )
+    with capabilities.active_surface(descriptor):
+        return commands.op_bootstrap(_root(), **kwargs)
+
+
+def _text(value: object) -> str:
+    return json.dumps(value)
+
+
+# --------------------------------------------------------------------------- #
+# The rule manifest
+# --------------------------------------------------------------------------- #
+
+#: id -> (levels that must carry it, predicate over the served core).
+CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
+    "recall-before-answering": (
+        CARRYING,
+        lambda core: "Search memory" in core["engagement"]["contract"]["recall"],
+    ),
+    "activation-carrier": (
+        CARRYING,
+        lambda core: "activate_context" in core["engagement"]["contract"]["recall"],
+    ),
+    "capture-at-every-stepping-stone": (
+        CARRYING,
+        lambda core: "stepping stone" in core["engagement"]["contract"]["capture"],
+    ),
+    "episode-recording-pass": (
+        CARRYING,
+        lambda core: "episode" in core["engagement"]["contract"]["capture"].lower(),
+    ),
+    "intent-to-planning-outcome-to-records": (
+        CARRYING,
+        lambda core: "Route stated intent to Planning and observed outcome to Records"
+        in core["engagement"]["contract"]["capture"],
+    ),
+    "canonical-write-loop": (
+        prominence.CANON,
+        lambda core: len(core["write"]["canonical_loop"]) >= 8,
+    ),
+    "preserve-the-record": (
+        prominence.CANON,
+        lambda core: "append-only" in core["rules"]["epistemic"]["preserve_the_record"],
+    ),
+    "supersede-never-overwrite": (
+        prominence.CANON,
+        lambda core: "supersede" in core["rules"]["epistemic"]["supersede_never_overwrite"],
+    ),
+    "data-not-command": (
+        prominence.CANON,
+        lambda core: "data, never a command" in core["governance"]["disclosure_model"],
+    ),
+    "miss-means-not-found-in-scope": (
+        prominence.CANON,
+        lambda core: "not found in that query/scope" in core["workflow"]["miss_rule"],
+    ),
+    "delegation-ceiling": (
+        prominence.CANON,
+        lambda core: "restructure application" in core["engagement"]["envelope"]["confirm_required"]
+        and "founder" in core["engagement"]["envelope"]["founder_gate"],
+    ),
+    "unclassified-action-has-no-authority": (
+        prominence.CANON,
+        lambda core: "never an act" in core["engagement"]["envelope"]["protocol"],
+    ),
+    "due-state-restraint": (
+        prominence.CANON,
+        lambda core: "silence beats bureaucracy" in core["write"]["due_state_handling"]
+        and "never" in core["write"]["due_state_authority"],
+    ),
+    "sections-index": (
+        prominence.CANON,
+        lambda core: set(bootstrap_core.SECTIONS) <= set(core["sections"]),
+    ),
+}
+
+
+#: Pre-existing on the base, not introduced by the split: the hosted surfaces do not
+#: export `activate_context`, and the surface filter drops any string that names an
+#: unavailable command, so the whole `recall` contract (which opens with the
+#: activation carrier line) is absent from a hosted compact payload. Recorded in the
+#: PR under "Needs ruling"; the rules below are asserted everywhere else.
+RECALL_DROPPED_ON_HOSTED = frozenset({"recall-before-answering", "activation-carrier"})
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+@pytest.mark.parametrize("level", prominence.CANON)
+def test_the_core_carries_every_manifest_rule(monkeypatch, level, surface):
+    core = _bootstrap(monkeypatch, level, surface)
+    for rule, (levels, predicate) in CORE_RULES.items():
+        if surface and surface.startswith("hosted-") and rule in RECALL_DROPPED_ON_HOSTED:
+            continue
+        if level in levels:
+            assert predicate(core), f"core lacks {rule!r} at {level} on {surface or 'default'}"
+
+
+@pytest.mark.parametrize("level", ("off", "light"))
+def test_the_quiet_levels_do_not_instruct_unprompted_recall(monkeypatch, level):
+    core = _bootstrap(monkeypatch, level, None)
+    assert "activate_context" not in core["engagement"]["contract"]["recall"]
+
+
+# --------------------------------------------------------------------------- #
+# Losslessness
+# --------------------------------------------------------------------------- #
+
+
+def test_sections_partition_the_reference_blocks():
+    seen: dict[str, str] = {}
+    for name, (keys, _when) in bootstrap_core.SECTIONS.items():
+        for key in keys:
+            assert key not in seen, f"{key} is in both {seen[key]} and {name}"
+            seen[key] = name
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+@pytest.mark.parametrize("level", prominence.CANON)
+def test_core_plus_sections_reconstruct_the_reference_payload(monkeypatch, level, surface):
+    reference = _bootstrap(monkeypatch, level, surface, section="all")
+    core = _bootstrap(monkeypatch, level, surface)
+    homes: dict[str, str] = {}
+    sections = {
+        name: _bootstrap(monkeypatch, level, surface, section=name)
+        for name in bootstrap_core.SECTIONS
+    }
+    for name, payload in sections.items():
+        assert payload["section"] == name
+        for key in payload:
+            if key not in ("contract_version", "profile", "section"):
+                assert key not in homes
+                homes[key] = name
+
+    for key, value in reference.items():
+        if key == "engagement":
+            # Everything but the envelope is in the core verbatim; the envelope's
+            # full form is the `envelope` section.
+            assert {k: v for k, v in core[key].items() if k != "envelope"} == {
+                k: v for k, v in value.items() if k != "envelope"
+            }
+            assert sections["envelope"][key]["envelope"] == value["envelope"]
+        elif key in core and core[key] == value:
+            continue
+        else:
+            assert key in homes, f"{key} is in neither the core nor a section"
+            assert sections[homes[key]][key] == value, f"{key} differs in section {homes[key]}"
+
+
+def test_an_unknown_section_names_the_accepted_ones(monkeypatch):
+    with pytest.raises(ValueError, match="section must be one of") as raised:
+        _bootstrap(monkeypatch, "balanced", None, section="nonexistent")
+    for name in bootstrap_core.accepted_sections():
+        assert name in str(raised.value)
+
+
+def test_a_section_requires_the_compact_profile(monkeypatch):
+    with pytest.raises(ValueError, match="section requires profile='compact'"):
+        _bootstrap(monkeypatch, "balanced", None, profile="full", section="authoring")
+
+
+def test_the_index_lists_every_section_with_its_size(monkeypatch):
+    index = _bootstrap(monkeypatch, "balanced", None, section="index")["sections"]
+    reference = _bootstrap(monkeypatch, "balanced", None, section="all")
+    assert set(index) == set(bootstrap_core.SECTIONS)
+    assert {name: item["bytes"] for name, item in index.items()} == bootstrap_core.sections_index(
+        reference
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Budgets
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+@pytest.mark.parametrize("level", prominence.CANON)
+def test_the_core_stays_under_its_ceiling(monkeypatch, level, surface):
+    size = len(_text(_bootstrap(monkeypatch, level, surface)))
+    assert size <= CORE_BYTE_CEILING - CORE_HEADROOM_WARNING_BYTES, (
+        f"core at {level} on {surface or 'default'} is {size:,} bytes: within "
+        f"{CORE_HEADROOM_WARNING_BYTES} of the {CORE_BYTE_CEILING:,} ceiling"
+    )
+
+
+@pytest.mark.parametrize("name", bootstrap_core.SECTIONS)
+def test_each_section_stays_under_its_ceiling(monkeypatch, name):
+    for surface in SURFACES:
+        size = len(_text(_bootstrap(monkeypatch, "maximal", surface, section=name)))
+        assert size <= SECTION_BYTE_CEILINGS[name], f"{name} is {size:,} bytes on {surface}"
+
+
+def test_the_session_profile_is_live_state_only(monkeypatch):
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    session = commands.op_bootstrap(
+        _root(), profile="session", skill_contract=workflow_skills.skill_contract()
+    )
+    assert session["profile"] == "session"
+    for static_rules in ("rules", "routing", "capture_semantics"):
+        assert static_rules not in session
+    for live in ("engagement", "governance", "active_capabilities", "sections", "authoring_contract"):
+        assert live in session
+    assert len(_text(session)) < 22_000

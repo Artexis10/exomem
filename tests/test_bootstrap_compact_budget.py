@@ -20,416 +20,21 @@ import pytest
 
 from exomem import commands
 
-#: Ceiling for the compact payload. Chosen above the measured floor so ordinary growth
-#: is fine, and far below the 64 KB regression point. Lower it when compact shrinks
-#: further; never raise it without deciding the extra bytes earn a caller's context.
+#: Ceiling for the compact payload, which since `shrink-bootstrap` is the always-served
+#: CORE (reference detail is served on demand through `bootstrap(section=...)`).
 #:
-#: Raised once, from 56,000, and the decision is on the record with its arithmetic.
-#: The epistemic contract added 3,198 bytes to a 52,877-byte floor, taking compact to
-#: 56,075 — 75 bytes past the old ceiling. Those bytes earn their place, because the
-#: payload is the entire contract a hosted or generic MCP client ever receives, and
-#: without them such a client never learns that raw material is append-only, that a
-#: changed conclusion is superseded rather than overwritten, or that a refuted claim
-#: stays active. That doctrine reached only skill-capable Claude surfaces, so one vault
-#: got two epistemologies depending on which client wrote to it.
+#: Ruled at 15,000 bytes at `maximal` on the worst-case surface. It replaces a ceiling of
+#: 63,300 that had been raised five times to fit whatever had been added. The core was
+#: measured at 14,339 bytes (claude-code, maximal) when this was set: about 660 bytes of
+#: margin, deliberately above the 512-byte warning band below. The old history is not
+#: reproduced here; the arithmetic that matters is `openspec/changes/shrink-bootstrap`.
 #:
-#: Fitting under 56,000 was possible and was declined on the merits: dropping the
-#: `kinds` (193 B) and `relations` (145 B) sub-blocks of the payload's epistemic
-#: vocabulary would have landed compact at 55,737, a real 263 bytes clear. They restate
-#: material the payload carries elsewhere, and they were kept anyway, because an agent
-#: reading the doctrine should not have to assemble the vocabulary from three other
-#: sections to act on it.
-#:
-#: Be clear about what the raise is: this change spent the entire growth budget the old
-#: ceiling expressed and pre-authorised 1,925 bytes more. It is not headroom restored.
-#: A second addition of this size must argue for itself from scratch, and 58,000 still
-#: sits ~6 KB below the 64,070-byte regression point the gate was built to catch.
-#: `MINIMUM_SAVING_RATIO` below is untouched; the saving moved 32.74% -> 31.46%.
-#:
-#: Raised a second time, and the arithmetic is again on the record — re-measured
-#: on the final tree rather than carried over from a draft. The measured floor at
-#: 58,000 was 57,872 — 128 bytes of headroom, i.e. none. The due-state carriers add
-#: three `authoring_contract.post_write` entries (`due_state`,
-#: `due_state_handling`, `due_state_authority`) totalling 1,224 bytes, taking
-#: compact to 59,096. The block those entries describe costs this measurement
-#: nothing: it is vault-derived and absent on the empty fixture, and it is bounded
-#: at five references anyway.
-#:
-#: Why the bytes earn their place. This payload is the ENTIRE contract a hookless
-#: client receives, and the due-state block is a channel that arrives unasked on
-#: ordinary results. An agent that receives counts it was never taught to read has
-#: two failure modes and both are worse than the bytes: ignore them, and the change
-#: delivers nothing; act on every one, and the substrate becomes the nag its own
-#: design refuses to be. The three entries are the smallest statement of what the
-#: counts are, when to raise one, and that the runtime never acts on them.
-#:
-#: Fitting under 58,000 was examined and rejected as dishonest rather than tight.
-#: The only reductions available were dropping `due_state_authority` (183 B, the
-#: line that says the runtime never resolves or archives anything on the counts'
-#: behalf) or collapsing the handling guidance to its first clause (~250 B, losing
-#: the fingerprint rule and the silence-beats-bureaucracy rule). Both remove
-#: exactly the restraint the counters need in order not to become a nuisance.
-#:
-#: The new ceiling is 59,500: 404 bytes of headroom, deliberately less than the
-#: last raise pre-authorised, and still ~4.5 KB below the 64,070-byte regression
-#: point. `MINIMUM_SAVING_RATIO` is untouched, and the saving moved DOWN — 35.46%
-#: without these entries to 34.98% with them — because bytes added to compact make
-#: compact resemble full a little more. It stays far above the 15% floor. (The
-#: 31.46% recorded for the previous raise is stale: the payload has moved since,
-#: and the two figures here are both measured on the current tree, which is why
-#: they do not chain onto it.)
-#:
-#: Raised a third time, measured on the final tree with the same method. The floor
-#: at 59,500 measured 59,096 — exactly what the previous raise recorded, so nothing
-#: else moved in between. Nag governance adds three `authoring_contract.post_write`
-#: entries: `review_reason` (220 B), `family_disposition` (396 B) and
-#: `family_disposition_reading` (290 B), 912 bytes with separators, taking compact
-#: to 60,008. The dispositions and the ledger they describe cost this measurement
-#: nothing: both are vault-derived and empty on the fixture.
-#:
-#: Why these bytes earn their place. The change gives a user a way to say "stop
-#: suggesting this kind of thing" and gives the runtime a reason code to count. An
-#: agent that has not been taught either does the two things this change exists to
-#: prevent: it answers the request by lowering prominence, which silences every
-#: family including the ones the user still wants, and it writes free-text `why`
-#: strings that record `unspecified`, leaving the metrics with no denominator. A
-#: hookless client receives this payload and nothing else, so untaught here is
-#: untaught anywhere.
-#:
-#: Fitting under 59,500 was examined and rejected. It needed roughly 508 bytes,
-#: which is two of the three entries. `review_reason` (220 B) is the vocabulary
-#: itself; without it no code is ever composed. `family_disposition_reading`
-#: (290 B) is the line saying a quiet family is silent rather than clean, which is
-#: precisely the misreading a per-family silence introduces and the reason the
-#: spec requires it. Collapsing `family_disposition` to the reference form alone
-#: (~200 B) would drop "rather than lowering prominence" — the wrong answer the
-#: guidance exists to displace.
-#:
-#: The new ceiling is 60,400: 392 bytes of headroom, again deliberately less than
-#: the 404 the last raise left, and ~3.7 KB below the 64,070-byte regression point.
-#: `MINIMUM_SAVING_RATIO` is untouched; the saving moved 35.63% -> 34.63%.
-#:
-#: Raised a FOURTH time, and this raise is different from the three above it:
-#: it spends the whole budget the change that made it was allowed to spend, and
-#: leaves a margin thinner than any previous raise. Read the arithmetic before
-#: adding anything.
-#:
-#: Measured on this tree with the same method. The floor at 60,400 was 60,066 --
-#: 334 bytes of headroom, already inside the warning band. Lifecycle routing adds
-#: 1,240 bytes, taking compact to 61,306:
-#:
-#:   engagement          +258  the capture axis names the two lifecycle classes
-#:                             (stated intent -> Planning, observed outcome ->
-#:                             Records) and the pairing rule; the payload projects
-#:                             the ACTIVE level's contract, so exactly one level's
-#:                             text is ever counted here
-#:   records             +560  `intent_boundary` gains `stated_intent`,
-#:                             `observed_outcome` and `pairing_rule`;
-#:                             `capture_examples` gains one paired landing
-#:   simple_actions      +321  the `plan` front-door action, with its route
-#:   planning            +193  the inventory form of `inspect` and the bounded
-#:                             query that resolves an observation to one item
-#:   common_actions        +8  `plan` in the action vocabulary
-#:
-#: Why the bytes earn their place. The evidence for these two classes exists ONLY
-#: in the conversation, and only the CLI hooks can see a conversation -- so on a
-#: hosted, claude.ai or ChatGPT client this payload is the entire mechanism. An
-#: agent that is not taught them does exactly what the dogfood session recorded:
-#: it treats "three done" and "the rest next time" as chat, files nothing, and
-#: waits to be told to use Planning. The pairing rule is not decoration either:
-#: without it the two classes produce a record and leave the plan item open,
-#: which is the specific miss the whole change exists to close.
-#:
-#: The wording was cut twice before this number was accepted. The tentative-claim
-#: and elapsed-time clause is stated once (in `intent_boundary`) rather than in
-#: both carriers; the paired example is one clause rather than a sentence; the
-#: Planning inventory and its resolving query are one key rather than two. Those
-#: three passes removed 406 bytes. What remains is the rule and its two routes.
-#:
-#: The new ceiling is 61,400: 94 bytes of headroom, and that is a cliff, not a
-#: budget. It is the cap the change was authorised to reach and it is now spent.
-#: The next addition of any size trips this test, and the honest response is to
-#: TRIM compact -- the queued compact-bootstrap trim -- not to raise this number
-#: again. `MINIMUM_SAVING_RATIO` is untouched; compact still saves ~35% over full.
-#:
-#: That prediction came true on the next merge, and the response was the one
-#: written above: TRIM, not raise. `main`'s vault-defined entity types added ~150
-#: bytes of guidance on top of the lifecycle slice's 1,240, taking the merged
-#: payload to 61,455 -- 55 over. 158 bytes came back out of the LIFECYCLE slice's
-#: own text, because that is the text this branch is entitled to spend: the two
-#: capture classes lost their preamble but not their routes; the pairing rule
-#: lost "append the"/"the item"/"reported" but keeps one landing, two
-#: consequences, the record-before-transition order, "once", and both named
-#: non-outcomes; the paired example is a clause; the `plan` front-door row drops
-#: one adjective. No rule left the payload, and the pins moved WITH the text
-#: rather than being loosened around it. Merged compact is 61,297, 103 bytes
-#: under. The ceiling did not move.
-#:
-#: TRIM again, same answer. Completing the action catalog so that every product
-#: command is reachable from some action added ten names to `advanced` lists:
-#: 183 bytes, taking the merged payload to 61,480 -- 80 over. The names are not
-#: prose and there was nothing in them to shorten; a name removed is a command
-#: an agent can no longer route to, which is the defect being fixed.
-#:
-#: The bytes came back from redundancy instead. Six of the entries named a
-#: command that is already another action's primary route -- `connect_memory`
-#: and `review_memory` under `ask`, `connect_memory` and `plan_memory` under
-#: `remember`, `review_memory` under `review`, `maintain_memory` under
-#: `maintain`. The catalog already names `connect`, `review`, `plan` and
-#: `maintain` as actions, so those entries told an agent nothing the payload
-#: did not already say, and `plan` only became an action on the merge that
-#: caused the overflow. The rule is now: `advanced` carries commands no route
-#: reaches. Coverage is unchanged -- the gate counts routes and `advanced`
-#: together -- and compact is 61,376, 24 bytes under. The ceiling did not move.
-#:
-#: 24 bytes is not headroom. The next addition trims or argues, and this branch
-#: has no claim on the argument: it spent 79 of the 103 bytes main left.
-#:
-#: TRIMMED, and this time the trim is the whole change rather than the price of
-#: one. The pre-write destination-choice clause landed in the FULL contract only
-#: and the canonical spec recorded the hook in as many words -- "the compact
-#: payload remains byte-identical until the queued compact-bootstrap trim admits
-#: the clause" -- with a test pinning that absence so it could not drift. This is
-#: that trim. The clause is now carried by every profile, and the ceiling did not
-#: move.
-#:
-#: Method is the one the two entries above set, and nothing here departs from it:
-#: bytes come back from REDUNDANCY -- text the payload already states somewhere
-#: else -- and pins moved WITH their text rather than being loosened around it.
-#: Six passages, 864 bytes, each measured on the final tree by restoring it alone:
-#:
-#:   workflow.loop suggest-links step       105  the same call is
-#:                                               `authoring_contract.canonical_loop`
-#:                                               step 5 on the draft, and
-#:                                               `preflight.connect_memory` names it
-#:                                               as the standard pre-write check
-#:   workflow.loop write-routing step       141  the four routes it listed ARE
-#:                                               `authoring_contract.route_by_intent`,
-#:                                               and each of the four is separately
-#:                                               pinned there
-#:   three retry_examples                   127  synonyms, adjacent terms and
-#:                                               scope='vault' are `workflow.miss_rule`,
-#:                                               which states all three as the rule
-#:                                               rather than as examples of it. One
-#:                                               fragment went with them that miss_rule
-#:                                               does NOT restate -- see below
-#:   one retry_example                       77  deep=true for synthesis is
-#:                                               canonical_loop step 2 and
-#:                                               `tool_defaults.reasoning_lookup`
-#:   tool_defaults.metadata_lookup          156  the same tool with byte-identical args
-#:                                               as `normal_lookup`; the richer filters
-#:                                               it pointed at are spelled out in
-#:                                               `search_guidance.semantic_recall`
-#:   performance_profiles normal, reasoning 258  each repeated one `tool_defaults`
-#:                                               row's args. `normal` also restated
-#:                                               that row's `when`; `reasoning` did
-#:                                               not, because that row carried no
-#:                                               `when` at all -- its interpretation
-#:                                               survives in canonical_loop step 2,
-#:                                               and this delivery ADDS the missing
-#:                                               `when` to the row itself so the
-#:                                               spec's three-lookup scenario still
-#:                                               reads all three from `tool_defaults`
-#:                                               (+42 B). The diagnostics profile stays
-#:
-#: One fragment left the payload UNRESTATED, and the ruling is deliberate rather
-#: than an oversight. "try synonyms and singular/plural forms" went out with the
-#: three retry examples, and miss_rule covers "synonyms" but not the morphological
-#: half: a plural is not a synonym. It is dropped as a sub-case of the synonym
-#: retry tactic, not as a rule -- the shipped skill scaffold still teaches
-#: morphological retry in references/operations.md, so the tactic is not lost to
-#: the product, only to this payload. Restoring it means widening miss_rule, which
-#: costs bytes this change does not have; it is the FIRST candidate to restore when
-#: a future trim frees them.
-#:
-#: What did NOT leave: no rule, no landing, no consequence, no named non-outcome,
-#: no route, and no command name reachable nowhere else. connect_memory, remember,
-#: replace_memory, observe_memory and edit_memory all keep their routes. The fifth
-#: retry example survives on the same test: scan-only BEFORE proposing a migration
-#: or copy is a guard, and nothing else in the payload states it.
-#:
-#: The clause costs compact 316 bytes in a condensed wording, 290 characters
-#: against full's 512, and both halves of the rule survive the condensation --
-#: destination choice happens at write time, by finding a focused existing
-#: destination or creating one; the post-write advisory is the safety net for
-#: missed routing, never the primary mechanism. Full's wording is untouched.
-#:
-#: Two of the cuts left a seam, and closing them is part of the same delivery
-#: rather than a later patch: the reasoning row's missing `when` above (+42 B),
-#: and the loop's last step, which said "read the returned warnings" after the
-#: step naming the write had gone. It now opens "after a write" (+15 B), which
-#: supplies the antecedent the cut removed.
-#:
-#: 61,376 - 864 + 316 + 57 = 60,885, measured. That is 515 bytes of headroom and
-#: the first time since the fourth raise that this payload has sat clear of
-#: HEADROOM_WARNING_BYTES. The margin is load-bearing in both directions:
-#: restoring any ONE of the six passages while keeping the clause puts compact
-#: back inside the warning band -- 410, 374, 388, 438, 359 and 257 bytes of
-#: headroom respectively -- so nothing here was cut for margin that was not
-#: needed. `MINIMUM_SAVING_RATIO` is untouched; the saving moved 35.32% -> 35.29%,
-#: because the redundant passages were shared text and full lost them too.
-#:
-#: Two larger redundancies were found and NOT taken. They are recorded here so
-#: the next trim starts from them instead of rediscovering them.
-#: `authoring_contract.semantic_units.contract` is the top-level
-#: `semantic_authoring` projection repeated in full -- 9,042 bytes, the single
-#: largest duplication in this payload -- and `tool_catalog` is `product_commands`
-#: repeated, 1,602 more. Neither is prose. Both are published payload KEYS a
-#: client may read, and the nested projection is pinned by name in
-#: test_bootstrap.py, so taking either means deleting a pin or withdrawing a key:
-#: a surface decision, not a trim. `records.software_rule` was rejected on a
-#: different ground -- it does restate `planning.execution_truth_boundary`, but it
-#: is that boundary stated INSIDE the Records contract, and it is pinned there.
-#:
-#: 515 bytes is spendable budget, not licence. The next addition of this size
-#: argues for itself the way the raises above had to.
-#:
-#: Raised a FIFTH time, and it argues for itself the way that line demanded.
-#: Measured on this tree with the same method: the floor at 61,400 was 60,885 --
-#: exactly what the trim above recorded, so nothing else moved in between. The
-#: delegation envelope adds 1,871 bytes, taking compact to 62,756:
-#:
-#:   engagement.envelope.classes    610  six action classes, each with its
-#:                                       ceiling, its disposition or the
-#:                                       governance-owned marker, and whether the
-#:                                       disposition is fixed, derived or
-#:                                       overridden
-#:   engagement.envelope.protocol   622  the four-move decider protocol: name the
-#:                                       class, check the ceiling, honour the
-#:                                       disposition, record the outcome
-#:   …confirm_required              323  which surfaces are confirm-required, and
-#:                                       which of them actually have a
-#:                                       server-side gate today
-#:   …founder_gate                  204  the standing-delegation refusal, by name
-#:   …level                          20  the level the derivation came from
-#:   post_write.family_disposition_
-#:     reading                       75  the dispositions view lists the
-#:                                       registered family vocabulary and the
-#:                                       envelope, not only what is quiet
-#:
-#: Why the bytes earn their place, and this is the strongest case any raise here
-#: has had. Before this payload, a hookless client received a contract about how
-#: EAGER Exomem should be and nothing at all about what it is ALLOWED to do on
-#: its own. An agent with no ceilings has to invent them, and the two ways it
-#: invents are both defects the no-nudge programme exists to prevent: it treats a
-#: permissive level as permission to act, or it asks about everything. The
-#: ceilings are product law and the payload is the only place a generic MCP
-#: client ever learns they exist. `founder_gate` is 204 bytes that stop an agent
-#: improvising either a refusal or a CONSENT when a user asks for standing
-#: delegation, which is the one request in this contract that must never be
-#: granted by improvisation.
-#:
-#: What was cut before this number was accepted. `confirm_required` opened by
-#: restating "obtain explicit user confirmation first", which IS protocol step 3;
-#: it now opens by naming the four surfaces instead (-80 B, no rule lost, both
-#: halves of the server-side-gap statement intact). `ignored` is emitted only
-#: when a stored value could not be used, rather than as an always-present empty
-#: list (-15 B on every ordinary session). The class rows carry no `range` key:
-#: the range is enforced at write time and refused by name, so serving it would
-#: be documentation of an error message.
-#:
-#: What was NOT cut, and why. The per-class `ceiling` (132 B across six rows)
-#: repeats a constant table, and it stays: a client that has to look the ceiling
-#: up elsewhere is a client that will act without one. The `confirm-shortcut`
-#: gloss inside protocol step 3 stays because without it the word reads as
-#: "skip the confirmation", which is exactly the misreading the disposition's
-#: definition exists to prevent.
-#:
-#: The new ceiling is 63,300: 544 bytes of headroom, just clear of
-#: HEADROOM_WARNING_BYTES, and deliberately less than the 515-plus-1,871 this
-#: raise consumed. `MINIMUM_SAVING_RATIO` is untouched; the saving moved
-#: 35.29% -> 34.60%, because bytes added to compact make compact resemble full a
-#: little more, and it stays far above the 15% floor.
-#:
-#: The two large redundancies recorded above -- the 9,042-byte
-#: `authoring_contract.semantic_units.contract` duplication and the 1,602-byte
-#: `tool_catalog` -- are STILL the place the next trim starts. Neither is prose
-#: and both are surface decisions rather than trims, which is why this change did
-#: not take them; but a payload carrying 10.6 KB of duplication has no business
-#: raising this ceiling a sixth time before it takes one of them.
-#:
-#: 2026-09-18, `activate-context-on-host-turns`, +183 B and NO raise. The
-#: activation carrier line (182 B of served JSON plus its separating space) went
-#: into the `balanced` and `maximal` recall contracts. The measurement that
-#: matters here is the one this file did not previously take: headroom BY
-#: ENGAGEMENT LEVEL, `(default surface, claude-code)` --
-#:
-#:     off       2,755 / 2,746
-#:     light     2,471 / 2,462
-#:     balanced    557 /   548   <- the default level, and the warning margin
-#:     maximal     192 /   183   <- the real worst case
-#:
-#: `maximal` was ALREADY inside the 512-byte warning band before this change
-#: (375 B), and it is the level whose entire purpose is to spend prose budget, so
-#: the margin is not claimed there and the ceiling is. The prior belief that a
-#: hook-capable surface and `maximal` could not combine was wrong --
-#: `hook_cadence` is served at every level -- and that mistake is why the tight
-#: case went unmeasured for five raises. The level matrix now lives in
-#: `tests/test_bootstrap_activation_carrier.py`.
-#:
-#: 192 bytes is not a budget, and the next addition at `maximal` trips the
-#: ceiling. The two redundancies above are still the place to get them from; do
-#: not raise this to buy room for one more sentence.
-#:
-#: `close-memory-loop`'s `episode_memory` command (2026-09-24) spent that
-#: margin: it added the command to `product_commands` (primary, routes,
-#: `first_run_safe`) and to the `capture` action's `advanced` list, ~110 bytes
-#: at every engagement level alike because none of it is level-gated text.
-#: Measured `(default surface, claude-code)`: balanced 447 / 438, maximal
-#: 82 / 73. `HEADROOM_WARNING_BYTES` was dropped to 400 as a stopgap so the
-#: planned, reviewed command could land without an emergency trim; the ceiling
-#: itself did not move.
-#:
-#: TRIMMED, restoring the margin the stopgap deferred. Bytes came back from
-#: REDUNDANCY, the same method as the two entries above: text the payload
-#: already states somewhere else, not a rule dropped.
-#:
-#:   authoring_contract.post_write.capture_sweep_handling   115  restated, in
-#:       full, the "worth keeping" bar `engagement.contract.capture`'s episode
-#:       pass already spells out ("a later decision, lookup, repeated task,
-#:       comparison or continuation"); the handling entry now says only to
-#:       make that pass, and a code comment points at the section that still
-#:       defines the bar
-#:   records.manual_first / planning.manual_first            48  both said
-#:       "direct human edits and work without an agent are supported product
-#:       paths" verbatim; shortened to "manual edits without Exomem are a
-#:       supported path" in both, losing no clause
-#:   epistemic_contract.commitments.state_the_expectation_first
-#:     and .capture_nudge                                    54  both restated
-#:       "about a future observation"; `records.intent_boundary.prediction`
-#:       (pinned exactly by `test_bootstrap.py`) already carries that same
-#:       clause on the same concept, so dropping it from these two loses
-#:       nothing the payload states nowhere else
-#:
-#: 217 bytes recovered, all from compact-wide text served at every engagement
-#: level, so the fix lifts every level's headroom by the same amount rather
-#: than trading one level's margin for another's. Measured
-#: `(default surface, claude-code)`: balanced 664 / 655, maximal 299 / 290 --
-#: `HEADROOM_WARNING_BYTES` restored to 512 below. `MINIMUM_SAVING_RATIO` is
-#: untouched.
-#:
-#: What did NOT leave: no rule and no tool mention. `episode_memory` keeps its
-#: place in `product_commands` and the `capture` action's `advanced` list;
-#: every commitment, capture class and post-write advisory still says what it
-#: said, only without repeating a clause the payload already states elsewhere.
-#:
-#: `capture-identities-at-write-time` (authored 2026-09-19, merged onto the trim
-#: above 2026-09-28), PAID rather than spent. Added `LINK_NAMED_IDENTITIES_LINE`
-#: (91 B) to `balanced` and `maximal` capture, and "central or " into the
-#: "recurring entity" phrase each already carried (+11 B each) -- +102 B at both
-#: levels. Paid for by tightening existing sentences without changing what they
-#: instruct: `ACTIVATION_CARRIER_LINE` 182 B -> 138 B (-44 B; reordered its two
-#: clauses and dropped words the reordering made redundant),
-#: `_EPISODE_SWEEP_CAPTURE` 421 B -> 392 B (-29 B; an em-dash "for example"
-#: became a plain-ASCII "e.g.", and two adjectives came off two of five
-#: already-non-exhaustive examples), and the Entity routing sentence at both
-#: levels ("there; otherwise use one ... ; use Records only" -> "there, else one
-#: ... ; Records only", -13 B) plus two `maximal`-only conjunctions (-7 B). No
-#: ceiling raise. Measured on a scratch vault `(default surface, claude-code)`:
-#:
-#:     balanced    644 /   635
-#:     maximal     287 /   278   <- inside the 512 band, clear of maximal's 256
-COMPACT_BYTE_CEILING = 63_300
+#: Do not raise it to fit a new block. A block earns core bytes only by being a rule that
+#: prevents a known incident, and the way to argue that is a new entry in `CORE_RULES` in
+#: `tests/test_bootstrap_core.py`. Reference detail goes in a section, which has its own
+#: ceiling there. `tests/test_bootstrap_core.py` also asserts the per-level, per-surface
+#: ceiling; this module keeps the original headroom and profile-ratio checks.
+COMPACT_BYTE_CEILING = 15_000
 
 #: The defect was compact and full being near-identical. A profile that does not
 #: measurably differ from full is not a profile.
@@ -443,6 +48,10 @@ def payloads() -> dict[str, dict]:
     return {
         profile: commands.op_bootstrap(root, profile=profile)
         for profile in ("compact", "full", "diagnostics")
+    } | {
+        # The complete pre-core compact payload, for the tests below that pin what
+        # compact still teaches; `payloads["compact"]` is the always-served core.
+        "reference": commands.op_bootstrap(root, profile="compact", section="all")
     }
 
 
@@ -541,7 +150,7 @@ def test_profiles_are_ordered_by_size(payloads):
 
 def test_compact_omits_unselected_pack_guidance(payloads):
     """Only the selected pack's instructions can apply; the rest are dead weight."""
-    available = payloads["compact"]["knowledge_packs"]["available"]
+    available = payloads["reference"]["knowledge_packs"]["available"]
     assert available, "the catalogue must still be discoverable"
     for pack in available:
         assert "agent_instructions" not in pack
@@ -550,10 +159,10 @@ def test_compact_omits_unselected_pack_guidance(payloads):
 
 def test_compact_still_names_every_pack(payloads):
     """Trimming bodies must not hide which packs exist."""
-    compact_ids = {p["id"] for p in payloads["compact"]["knowledge_packs"]["available"]}
+    compact_ids = {p["id"] for p in payloads["reference"]["knowledge_packs"]["available"]}
     full_ids = {p["id"] for p in payloads["full"]["knowledge_packs"]["available"]}
     assert compact_ids == full_ids
-    for pack in payloads["compact"]["knowledge_packs"]["available"]:
+    for pack in payloads["reference"]["knowledge_packs"]["available"]:
         assert pack["name"]
 
 
@@ -569,13 +178,13 @@ def test_full_retains_the_complete_catalogue(payloads):
 
 def test_selected_pack_guidance_survives_in_compact(payloads):
     """The one pack whose instructions actually apply must keep them."""
-    selected = json.dumps(payloads["compact"]["knowledge_packs"]["selected"])
+    selected = json.dumps(payloads["reference"]["knowledge_packs"]["selected"])
     assert "agent_instructions" in selected
 
 
 def test_compact_action_catalogues_reference_selected_pack_guidance_once(payloads):
     """Action aliases point at the selected pack; they do not repeat its body."""
-    compact = payloads["compact"]
+    compact = payloads["reference"]
     for catalogue_name in ("simple_actions", "front_door_actions"):
         for action in compact[catalogue_name].values():
             for guidance in action.get("selected_pack_guidance", []):
@@ -590,7 +199,7 @@ def test_compact_action_catalogues_reference_selected_pack_guidance_once(payload
 
 def test_compact_still_teaches_the_core_loop(payloads):
     """A smaller contract is only a win if it is still a contract."""
-    compact = payloads["compact"]
+    compact = payloads["reference"]
     workflow = compact["workflow"]
     assert workflow["save_rule"]
     assert workflow["miss_rule"]
@@ -624,7 +233,7 @@ def test_bootstrap_planning_contract_is_complete_and_exact(payloads):
 
 def test_compact_and_full_agree_on_everything_but_detail(payloads):
     """The trim is a presentation choice; it must not change what is advertised."""
-    compact, full = payloads["compact"], payloads["full"]
+    compact, full = payloads["reference"], payloads["full"]
     assert set(compact) <= set(full)
     assert compact["server"] == full["server"]
     assert compact["active_capabilities"] == full["active_capabilities"]

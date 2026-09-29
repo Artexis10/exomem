@@ -69,10 +69,13 @@ def _mcp_tools(mcp) -> dict[str, dict]:
 
 
 def _call_bootstrap(mcp) -> dict:
+    """The complete reference payload: compact is the core since `shrink-bootstrap`."""
     with principal_module.request_scope(
         principal_module.owner_principal(surface="mcp")
     ):
-        result = asyncio.run(mcp.call_tool("bootstrap", {}, run_middleware=False))
+        result = asyncio.run(
+            mcp.call_tool("bootstrap", {"section": "all"}, run_middleware=False)
+        )
     if isinstance(result.structured_content, dict):
         return result.structured_content
     return json.loads(result.content[0].text)

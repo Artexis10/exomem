@@ -495,7 +495,7 @@ def test_bootstrap_teaches_how_to_read_the_block(
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
     (tmp_path / "Knowledge Base").mkdir()
 
-    payload = commands.op_bootstrap(tmp_path, profile="compact")
+    payload = commands.op_bootstrap(tmp_path, profile="compact", section="all")
     handling = payload["authoring_contract"]["post_write"]["capture_sweep_handling"]
 
     assert "example" in handling.lower()
@@ -510,7 +510,11 @@ def test_the_session_projection_carries_the_handling_entry(
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
     (tmp_path / "Knowledge Base").mkdir()
 
-    session = commands.op_bootstrap(tmp_path, profile="session")
+    from exomem import workflow_skills
+
+    session = commands.op_bootstrap(
+        tmp_path, profile="session", skill_contract=workflow_skills.skill_contract()
+    )
 
     assert "capture_sweep_handling" in session["authoring_contract"]["post_write"]
 
@@ -574,7 +578,7 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
 def test_the_compact_bootstrap_budget_is_not_raised() -> None:
     from tests.test_bootstrap_compact_budget import COMPACT_BYTE_CEILING
 
-    assert COMPACT_BYTE_CEILING == 63_300
+    assert COMPACT_BYTE_CEILING == 15_000
 
 
 # ----------------------------------------------------- registry exclusion (D6)

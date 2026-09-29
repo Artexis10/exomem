@@ -31,7 +31,7 @@ from exomem import commands, prominence
 CARRIER_MAX_BYTES = 220
 #: The compact profile's ceiling and the margin its own test warns below
 #: (`tests/test_bootstrap_compact_budget.py`, which records why the margin is 512).
-COMPACT_BYTE_CEILING = 63_300
+COMPACT_BYTE_CEILING = 15_000
 HEADROOM_WARNING_BYTES = 512
 #: `maximal` gets its own, smaller floor rather than none at all -- see the
 #: rationale beside `BUDGET_SURFACES` below.

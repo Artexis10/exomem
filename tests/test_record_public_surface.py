@@ -97,7 +97,7 @@ def test_record_descriptions_teach_observed_state_and_proposal_before_creation()
 def test_compact_bootstrap_puts_record_route_before_semantic_authoring() -> None:
     root = Path(tempfile.mkdtemp())
     (root / "Knowledge Base").mkdir()
-    payload = commands.op_bootstrap(root, profile="compact")
+    payload = commands.op_bootstrap(root, profile="compact", section="all")
     serialized = json.dumps(payload, ensure_ascii=False).encode()
 
     assert "record" in payload["simple_actions"]
@@ -150,7 +150,7 @@ def test_the_hook_cadence_block_does_not_push_record_past_the_proxy(monkeypatch)
     monkeypatch.setenv("EXOMEM_SURFACE", "claude-code")
     root = Path(tempfile.mkdtemp())
     (root / "Knowledge Base").mkdir()
-    payload = commands.op_bootstrap(root, profile="compact")
+    payload = commands.op_bootstrap(root, profile="compact", section="all")
     serialized = json.dumps(payload, ensure_ascii=False).encode()
 
     assert payload["engagement"]["hook_cadence"]["saved_preference_reaches_hooks"] is False

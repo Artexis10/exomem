@@ -170,7 +170,7 @@ def _observe(vault: Path, content: str, *, response_detail: str | None = None) -
 def _prime(vault: Path) -> None:
     """Build the projection, then start the session that will carry it."""
     _due_state().reconcile(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     _fresh_session()
 
 
@@ -205,7 +205,7 @@ def test_an_overdue_check_by_reaches_no_carrier_today(vault: Path) -> None:
     _due_state().reconcile(vault)
 
     _fresh_session()
-    bootstrap_payload = commands.op_bootstrap(vault)
+    bootstrap_payload = commands.op_bootstrap(vault, section="all")
     _fresh_session()
     mutation = _observe(vault, "Reader saturation reproduces on the replica too.")
     _fresh_session()
@@ -385,7 +385,7 @@ def test_the_bootstrap_payload_carries_the_block(vault: Path) -> None:
     _overdue_prediction(vault, check_by=_yesterday())
     _due_state().reconcile(vault)
 
-    payload = commands.op_bootstrap(vault)
+    payload = commands.op_bootstrap(vault, section="all")
 
     block = payload["due_state"]
     assert block["total"] == 1
@@ -394,11 +394,11 @@ def test_the_bootstrap_payload_carries_the_block(vault: Path) -> None:
 
 
 def test_a_quiet_vault_bootstraps_without_the_key(vault: Path) -> None:
-    assert "due_state" not in commands.op_bootstrap(vault)
+    assert "due_state" not in commands.op_bootstrap(vault, section="all")
 
 
 def test_the_bootstrap_guidance_teaches_how_to_read_the_counts(vault: Path) -> None:
-    post_write = commands.op_bootstrap(vault)["authoring_contract"]["post_write"]
+    post_write = commands.op_bootstrap(vault, section="all")["authoring_contract"]["post_write"]
 
     assert "due_state" in post_write
     assert "due_state_handling" in post_write
@@ -430,7 +430,7 @@ def test_the_teaching_lines_survive_a_reduced_surface(vault: Path) -> None:
         product_commands=("bootstrap", "ask_memory"),
     )
     with active_surface(descriptor):
-        payload = commands.op_bootstrap(vault)
+        payload = commands.op_bootstrap(vault, section="all")
 
     post_write = payload["authoring_contract"]["post_write"]
     for key in ("due_state", "due_state_handling", "due_state_authority"):
@@ -467,7 +467,7 @@ def test_post_write_guidance_names_only_fields_the_default_response_carries(
     only if the compact projection can actually put it there, and anything else
     must say how to reach it.
     """
-    post_write = commands.op_bootstrap(vault)["authoring_contract"]["post_write"]
+    post_write = commands.op_bootstrap(vault, section="all")["authoring_contract"]["post_write"]
 
     for field, description in post_write.items():
         root = field.split("_handling")[0].split("_authority")[0]
@@ -757,7 +757,7 @@ def test_a_recall_after_bootstrap_is_quiet_when_the_totals_have_not_moved(
     _due_state().reconcile(vault)
     _fresh_session()
 
-    payload = commands.op_bootstrap(vault)
+    payload = commands.op_bootstrap(vault, section="all")
     recall = commands.op_ask_memory(vault, query="autovacuum", limit=5)
 
     assert "due_state" in payload, "bootstrap always carries a ready block"
@@ -789,7 +789,7 @@ def test_a_write_after_bootstrap_carries_the_block_when_the_totals_move(
     commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="later")
     _fresh_session()
 
-    payload = commands.op_bootstrap(vault)
+    payload = commands.op_bootstrap(vault, section="all")
     assert payload["due_state"]["total"] == 1
 
     commands.op_triage_memory(vault, ref=parked, action="reopen")
@@ -933,8 +933,8 @@ def test_removing_the_bootstrap_carrier_fails_this_module(
     """Mechanism-removal for carrier 3."""
     _overdue_prediction(vault, check_by=_yesterday())
     _due_state().reconcile(vault)
-    assert "due_state" in commands.op_bootstrap(vault)
+    assert "due_state" in commands.op_bootstrap(vault, section="all")
 
     monkeypatch.setattr(_due_state(), "served", lambda *a, **k: None)
 
-    assert "due_state" not in commands.op_bootstrap(vault)
+    assert "due_state" not in commands.op_bootstrap(vault, section="all")
