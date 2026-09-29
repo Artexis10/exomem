@@ -398,7 +398,7 @@ Blockers are duplicate or ambiguous identities, schema violations, unsupported v
 | bulk upsert 500 rows | < 1 s end to end | ≈ 500 serial appends | 20 ms; replay 6 ms |
 | query, filter + sort + limit 50, N=10,000 | same results as the file path; p95 ≤ 50 ms per-row governed, ≤ 5 ms uniform | 7.6 s refresh read at N=1,000 | 44 ms per-row path, 0.4 ms uniform fast path |
 | snapshot, N=10,000 | < 250 ms, off the ack path | n/a | 77 ms |
-| view render + publish | off the ack path | inside the write | 1.2 ms p95 |
+| view render + publish | off the ack path | inside the write | 0.6 ms p95 |
 
 The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and `synchronous=FULL` (`benchmarks/collections_sqlite_spike/results-*.json`). They exclude the dispatcher, the idempotency ledger, governance resolution and receipt projection.
 
