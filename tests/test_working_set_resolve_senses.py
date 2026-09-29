@@ -5,13 +5,16 @@ with the context-activation benchmark corpus:
 
 * A bare name that two or more distinct entities share is a question, not an
   unresolved turn. When nothing resolves and the only thing that reached two
-  unlinked entities is one shared name word, the turn is `ambiguous` between
-  them, and the retrieval carry is never asked to guess a page instead.
+  unlinked entities is one shared name word, and that word is spoken as a name
+  (the entities are people, or a cased turn capitalises it somewhere other
+  than a sentence start), the turn is `ambiguous` between them, and the
+  retrieval carry is never asked to guess a page instead.
 * A qualifier narrows competing senses. When two same-kind anchors resolve and
-  the name words the turn reached on one are a strict subset of those it
-  reached on the other, the turn's extra word chose the second; the narrower
-  sense and any same-kind partial reached only by words of the chosen name are
-  not listed.
+  the contiguous run of the turn that spells one's name words lies strictly
+  inside the run that spells the other's, the turn's extra word chose the
+  second; the narrower sense and any same-kind partial reached only inside that
+  run are not listed. A word of the wider name said elsewhere in the turn
+  narrows nothing.
 
 Pure logic over facts: no vault, no index.
 """
@@ -28,6 +31,7 @@ def _row(
     kind: str,
     terms: tuple[str, ...] = (),
     neighbourhood: tuple[str, ...] = (),
+    entity_type: str = "",
 ) -> resolve_module.AnchorFacts:
     return resolve_module.AnchorFacts(
         anchor_id=path,
@@ -41,6 +45,7 @@ def _row(
         categories=(),
         neighbourhood=frozenset(neighbourhood),
         anchor_neighbourhood=frozenset(neighbourhood),
+        entity_type=entity_type,
     )
 
 
@@ -66,8 +71,10 @@ def _resolve(
 # A bare shared name
 # --------------------------------------------------------------------------- #
 
-PRIYA_N = _row("people/priya-nandakumar.md", "Priya Nandakumar", kind="entity")
-PRIYA_O = _row("people/priya-oduya.md", "Priya Oduya", kind="entity")
+PRIYA_N = _row(
+    "people/priya-nandakumar.md", "Priya Nandakumar", kind="entity", entity_type="person"
+)
+PRIYA_O = _row("people/priya-oduya.md", "Priya Oduya", kind="entity", entity_type="person")
 NAME_COUNTS = {"priya": 2, "nandakumar": 1, "oduya": 1}
 
 
@@ -114,7 +121,13 @@ def test_two_linked_entities_sharing_a_name_are_not_competing() -> None:
     """The same connectivity rule every competing group uses: two people who
     link each other are one neighbourhood, not two senses."""
 
-    linked_n = _row(PRIYA_N.path, PRIYA_N.title, kind="entity", neighbourhood=(PRIYA_O.path,))
+    linked_n = _row(
+        PRIYA_N.path,
+        PRIYA_N.title,
+        kind="entity",
+        neighbourhood=(PRIYA_O.path,),
+        entity_type="person",
+    )
     resolution = _resolve("Priya sent the invoice over.", (linked_n, PRIYA_O), counts=NAME_COUNTS)
 
     assert resolution.status == "unresolved"
@@ -132,6 +145,71 @@ def test_a_bare_name_beside_a_resolved_anchor_does_not_abstain_the_turn() -> Non
 
     assert resolution.status == "resolved"
     assert [a.path for a in resolution.resolved_anchors] == [ledger.path]
+
+
+def test_a_lower_case_first_name_two_people_share_still_asks() -> None:
+    resolution = _resolve("priya sent the invoice over.", (PRIYA_N, PRIYA_O), counts=NAME_COUNTS)
+
+    assert resolution.status == "ambiguous"
+
+
+BAKERY = _row("orgs/harbour-bakery.md", "Harbour Bakery", kind="entity", entity_type="organization")
+CLINIC = _row("orgs/harbour-clinic.md", "Harbour Clinic", kind="entity", entity_type="organization")
+HARBOUR_COUNTS = {"harbour": 2, "bakery": 1, "clinic": 1}
+
+
+def test_an_ordinary_noun_two_business_names_share_is_not_a_bare_name() -> None:
+    """Reviewer probe: a harbour busy with ferries is not a question about two
+    businesses that happen to be named after it."""
+
+    resolution = _resolve(
+        "the harbour was busy this morning, ferries everywhere",
+        (BAKERY, CLINIC),
+        counts=HARBOUR_COUNTS,
+    )
+
+    assert resolution.status == "unresolved"
+    assert resolution.ambiguity == ()
+
+
+def test_a_capital_only_at_the_sentence_start_is_not_a_name() -> None:
+    resolution = _resolve(
+        "Harbour traffic was heavy again. Ferries everywhere.",
+        (BAKERY, CLINIC),
+        counts=HARBOUR_COUNTS,
+    )
+
+    assert resolution.status == "unresolved"
+
+
+def test_a_capitalised_shared_name_mid_sentence_asks_between_businesses() -> None:
+    resolution = _resolve(
+        "We ordered the rolls from Harbour again.", (BAKERY, CLINIC), counts=HARBOUR_COUNTS
+    )
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {BAKERY.path, CLINIC.path}
+
+
+YAMADA_T = _row("people/yamada-taro.md", "山田 太郎", kind="entity", entity_type="person")
+YAMADA_H = _row("people/yamada-hanako.md", "山田 花子", kind="entity", entity_type="person")
+YAMADA_ORG_A = _row("orgs/yamada-a.md", "山田 商店", kind="entity", entity_type="organization")
+YAMADA_ORG_B = _row("orgs/yamada-b.md", "山田 工務店", kind="entity", entity_type="organization")
+YAMADA_COUNTS = {"山田": 2, "太郎": 1, "花子": 1, "商店": 1, "工務店": 1}
+
+
+def test_an_uncased_shared_name_asks_between_people() -> None:
+    resolution = _resolve("山田 から 連絡 が ありました", (YAMADA_T, YAMADA_H), counts=YAMADA_COUNTS)
+
+    assert resolution.status == "ambiguous"
+
+
+def test_an_uncased_shared_word_never_asks_between_non_people() -> None:
+    resolution = _resolve(
+        "山田 から 連絡 が ありました", (YAMADA_ORG_A, YAMADA_ORG_B), counts=YAMADA_COUNTS
+    )
+
+    assert resolution.status == "unresolved"
 
 
 # --------------------------------------------------------------------------- #
@@ -195,3 +273,54 @@ def test_a_qualifier_never_narrows_across_kinds() -> None:
 
     assert resolution.status == "resolved"
     assert {anchor.path for anchor in resolution.resolved_anchors} == {ROLLOUT.path, board.path}
+
+
+KITCHEN = _row("hubs/kitchen-renovation.md", "Kitchen renovation hub", kind="hub")
+KITCHEN_BUDGET = _row(
+    "hubs/kitchen-renovation-budget.md", "Kitchen renovation budget hub", kind="hub"
+)
+KITCHEN_COUNTS = {"kitchen": 2, "renovation": 2, "budget": 1, "hub": 2}
+
+
+def test_a_word_of_the_wider_name_said_elsewhere_narrows_nothing() -> None:
+    """Reviewer probe: "budget" belongs to the groceries, not to the kitchen."""
+
+    resolution = _resolve(
+        "I blew my grocery budget this week, and the kitchen renovation is stalled again",
+        (KITCHEN, KITCHEN_BUDGET),
+        counts=KITCHEN_COUNTS,
+        retrieved=(KITCHEN.path, KITCHEN_BUDGET.path),
+    )
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {KITCHEN.path, KITCHEN_BUDGET.path}
+
+
+def test_the_qualifier_inside_the_name_still_narrows() -> None:
+    resolution = _resolve(
+        "Where does the kitchen renovation budget stand?",
+        (KITCHEN, KITCHEN_BUDGET),
+        counts=KITCHEN_COUNTS,
+        retrieved=(KITCHEN.path, KITCHEN_BUDGET.path),
+    )
+
+    assert resolution.status == "resolved"
+    assert [anchor.path for anchor in resolution.anchors] == [KITCHEN_BUDGET.path]
+
+
+SOLAR = _row("hubs/solar-array.md", "Solar array hub", kind="hub")
+SOLAR_MONITORING = _row("hubs/solar-array-monitoring.md", "Solar array monitoring hub", kind="hub")
+
+
+def test_a_turn_naming_both_hubs_keeps_both() -> None:
+    """Reviewer probe: the monitoring question and the array question are two."""
+
+    resolution = _resolve(
+        "Is the monitoring wired up yet, and did the solar array pass inspection?",
+        (SOLAR, SOLAR_MONITORING),
+        counts={"solar": 2, "array": 2, "monitoring": 1, "hub": 2},
+        retrieved=(SOLAR.path, SOLAR_MONITORING.path),
+    )
+
+    assert {anchor.path for anchor in resolution.anchors} == {SOLAR.path, SOLAR_MONITORING.path}
+    assert resolution.status == "ambiguous"

@@ -105,10 +105,10 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.50 below the 0.9 floor",
     ),
-    # The plan anchor reports its item (close-memory-loop 6.12); the turn's
-    # words reach the other workstream's item, never this one's. Stays red by
-    # ruling (R4): "the next roadmap item" relies on workspace context a cold
-    # run lacks; a keyed variant belongs in the continuity group.
+    # The plan anchor now reports its item (close-memory-loop 6.12), and the
+    # turn's words reach the other workstream's item, never this one's. Stays
+    # red by ruling (R4): "the next roadmap item" relies on workspace context a
+    # cold run lacks; a keyed variant belongs in the continuity group.
     "C3": (
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.50 below the 0.9 floor",

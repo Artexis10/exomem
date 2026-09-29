@@ -1205,6 +1205,25 @@ def rare_turn_terms(
         return (), 0, result.readiness.status
     frequencies, corpus_pages = result.value or ({}, 0)
     cap = working_set.rare_document_cap(corpus_pages)
+
+    def paths_for(near: Sequence[str], limit: int) -> Mapping[str, Sequence[str]]:
+        listed = lexstore.term_document_paths(
+            vault_root,
+            near,
+            limit=limit,
+            scope="kb",
+            freshness=freshness,
+            allow_delta=False,
+            recall_checkpoint=recall_checkpoint,
+            exclude_navigation=True,
+            exclude_raw_material=True,
+            exclude_statuses=working_set.RETIRED_PAGE_STATUSES,
+        )
+        return (listed.value or {}) if listed.readiness.complete else {}
+
+    frequencies = working_set.discount_superseded_pages(
+        vault_root, frequencies, paths_for, cap=cap
+    )
     rare = tuple(stem for stem in stems if int(frequencies.get(stem, 0)) <= cap)
     return rare, int(corpus_pages), "available"
 
