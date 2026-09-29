@@ -235,12 +235,15 @@ Every canonical object has a rendered view at today's path:
 
 **Views are normalized on re-render.** Frontmatter is emitted in canonical order and style. The authored body is canonical data (`items.body`) and is re-emitted exactly. Only YAML formatting that is not data (quoting style, key order, comments inside frontmatter) is not preserved. This replaces the byte-preservation contract of today's update splicer (**Needs ruling R5**).
 
-**The projector is post-commit and crash-safe.**
-- A commit marks the affected `projection_state` rows `pending` in the same transaction.
-- A single projector task renders them after commit, off the acknowledgement path. It writes a target-adjacent staging file, fsyncs and renames it, then records `rendered_sha256`, `rendered_row_version` and `current`.
-- On restart it drains every `pending` row.
-- `inspect` reports pending views (Planning: diagnostics code `PROJECTION_PENDING`; Records: an additive `projection` summary).
-- Projection failure never fails a committed mutation. It raises attention and retries.
+**Item views are published before the acknowledgement; aggregate views follow asynchronously.** This follows #1457's measurement and recommendation: sync projection costs 2.6–3.8 ms at 1,000 and 10,000 items, while async projection lagged 4–34 ms and is unbounded under a stalled worker. Any reader of the vault file (`get_page`, a script, Obsidian, the next agent turn) therefore sees the write it was acknowledged for.
+- **Changed item, manifest and held views are published synchronously.** Inside the transaction the writer renders each one to a target-adjacent staging file and fsyncs it, and marks its `projection_state` row `pending`. It then `COMMIT`s, renames the staging file over the view, and records `rendered_sha256`, `rendered_row_version` and `current`. Only then does it acknowledge.
+  - A crash before `COMMIT` leaves only a staging file, which bounded crash recovery removes.
+  - A crash after `COMMIT` and before the rename leaves the row `pending`, and the view is re-rendered on restart.
+  - A view is never ahead of the store.
+  - A rename failure, such as a Windows open-file lock, does not fail the committed mutation. The row stays `pending` and is retried, and the receipt carries a `projection_pending` warning.
+- **Log views (log layout), history pages, per-year pages and type views** are rewritten asynchronously by one coalescing projector. They can be large, and they are not what a following read of the changed item needs. They use the same `pending` / staging / rename protocol with bounded lag, and are drained on restart and on quiesce.
+- **Index sync of views is never on the acknowledgement path.** Lexical, resolver, memory-refs and graph sync of a published view goes to the derived drain. Records and Planning views are already excluded from recall, so a following `find` is unaffected. Structured readers (due-state, plan progress, capture sweeps, the working set, evidence bundles) read the store directly, so they have read-your-writes by construction (§15, item 7).
+- `inspect` reports pending views (Planning: diagnostics code `PROJECTION_PENDING`; Records: an additive `projection` summary). Projection failure never fails a committed mutation. It raises attention and retries.
 
 **History page.** It is generated from `txns` and `audit_effects` and readable like today's `log.md` entries: `## <date> <operation>`, then the actor, the reason, and wikilinks to the changed item views, newest first.
 - The main page holds the latest 200 transitions. Older transitions go to per-year pages, and only the current year page is rewritten.
@@ -248,7 +251,7 @@ Every canonical object has a rendered view at today's path:
 - It is rendered for the collection-level release decision. Effects on rows that the collection-level audience could not read are omitted, and a transaction touching only such rows is omitted entirely, so the page never discloses more than its own path's release. Full per-row history remains available through `inspect` / `include_agent_history` under per-row authorization.
 - Edits to history pages are ignored and the page is re-rendered. It is read-only by contract, and no edit-back exists for audit.
 
-**Indexing.** Views stay ordinary vault files. Recall exclusion is unchanged (`recall_policy.is_recall_candidate` already excludes `Knowledge Base/Records` and `Knowledge Base/Planning` descendants except manifests). The lexical, resolver and graph sync of a view happens when the projector publishes it, so it is no longer on the mutation's acknowledgement path.
+**Indexing.** Views stay ordinary vault files. Recall exclusion is unchanged (`recall_policy.is_recall_candidate` already excludes `Knowledge Base/Records` and `Knowledge Base/Planning` descendants except manifests). The lexical, resolver and graph sync of a published view goes to the derived drain, so it is not on the mutation's acknowledgement path.
 
 ### 6. Edit-back: the file watcher turns view edits into governed updates
 
@@ -414,17 +417,38 @@ Blockers are duplicate or ambiguous identities, schema violations, unsupported v
 | bulk upsert 500 rows | < 1 s end to end | ≈ 500 serial appends | 20 ms; replay 6 ms |
 | query, filter + sort + limit 50, N=10,000 | same results as the file path; p95 ≤ 50 ms per-row governed, ≤ 5 ms uniform | 7.6 s refresh read at N=1,000 | 44 ms per-row path, 0.4 ms uniform fast path |
 | snapshot, N=10,000 | < 250 ms, off the ack path | n/a | 77 ms |
-| view render + publish | off the ack path | inside the write | 0.6 ms p95 |
+| item view render + staging fsync + publish | on the ack path, < 4 ms p95 | inside the write | 0.6 ms p95 (spike); 2.6–3.8 ms p50/p95 for the whole sync-projection storage layer (#1457 prototype) |
+| guard refresh as a command (inspect-lite) | p95 < 15 ms | 416 / 546 ms at N=1,000 after #1457's fixes | 0.02–0.04 ms storage (#1457 prototype) |
 
 The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and `synchronous=FULL` (`benchmarks/collections_sqlite_spike/results-*.json`). They exclude the dispatcher, the idempotency ledger, governance resolution and receipt projection.
 
-**End-to-end append budget.** From #1457: the dispatcher and ledger are ≈ 4 ms and flat. Policy resolved once per operation is a few ms. Manifest parsing (≈ 80 ms today, 9 parses) becomes a parse cached per `manifest_version`. The store transaction is < 1 ms. Receipt projection is ≈ 1 ms.
+**End-to-end append budget.** #1457's SQLite prototype confirms the storage layer is flat: 2.6–3.8 ms with synchronous projection at both 1,000 and 10,000 items. Its end-to-end estimate of about 93/100 ms p50/p95 is dominated by about 90 ms of shared cost outside storage, which that composite carried over unchanged from today's writer. That 90 ms is the real target of the 20 ms goal. The budget, per stage at p95:
+
+| Stage | Today (#1457, after its fixes, 10 items) | Store design | How |
+| --- | ---: | ---: | --- |
+| Dispatcher, idempotency ledger, egress filter, digest | 7 ms | ≤ 5 ms | unchanged code; the ledger's fast-ack already sits inside it |
+| Writer lease / mutation boundary enter and exit | ≈ 2 ms | ≤ 2 ms | unchanged |
+| Collection resolution and manifest | 15 ms (78 ms before the parse cache) | ≤ 1 ms | a `collections` row lookup by name or id, plus a parsed-contract cache keyed by `(collection_id, manifest_version)`; no manifest discovery, file read or YAML parse on the write path |
+| Request validation | ≈ 2 ms | ≤ 2 ms | unchanged; validators come from the cached contract |
+| Governance precommit | ≈ 5 ms | ≤ 2 ms | policy resolved once (#1457 fix 1); uniform-release decision, or one identity-only pass (§7) |
+| Store transaction plus synchronous item view | ≈ 60 ms of guard and write work | ≤ 4 ms | measured 2.6–3.8 ms (#1457 prototype), 0.7 ms without the view (this spike) |
+| Post-commit fan-out: index sync and self-write registration | ≈ 50 ms (86–133 ms before) | 0 ms on the ack path | moved to the derived drain, since views are recall-excluded (§5) |
+| Due-state and capture-sweep carriers | ≈ 3 ms | ≤ 2 ms | computed from the store row instead of an adapter re-read |
+| Receipt projection | ≈ 1 ms | ≤ 1 ms | unchanged |
+| **Total** | ≈ 155 ms p50 (157 ms at 10 items) | **≤ 19 ms p95** | |
+
+Each stage gets its own timer in the acceptance harness, and a stage over budget fails the release gate (task 10.1). The collection-resolution and fan-out rows are where the 90 ms goes. Both are removed by the store design itself, not by tuning.
+
+The guard refresh a client performs between writes is also a command, so it pays the dispatcher. #1457 estimates 15–25 ms, against a storage cost of 0.04 ms. Two things make it rare and cheap:
+- every mutation receipt already returns `after_container_hash` and `item_version`, so chained writes need no refresh;
+- `record_memory(action="inspect")` gains no work, but its guard fields come from the `collections` row, not a snapshot (target p95 < 15 ms).
 
 Removed from the acknowledgement path:
 - the full collection read (≈ 4.3 ms per item);
-- about 20 directory censuses;
+- about 20 directory censuses and nine `lstat` guard rounds per item;
+- manifest discovery and parsing;
 - `log.md` read-rewrite;
-- synchronous view index sync (≈ 86 ms), which moves to the projector.
+- synchronous view index sync (≈ 50–133 ms), which moves to the derived drain.
 
 **Query parity.** The parity path runs `query_data.evaluate_rows` over the rows the store returns, so filter operators, NFC normalization, type coercion and aggregates are the same code as today. SQL push-down is used only on the uniform-release fast path, and only for operators with a passing parity test against the file adapter on a generated parity corpus. The fast path covers eq, ne, lt/lte/gt/gte on declared scalar fields, sort, limit and count/min/max/sum/avg. Any other operator falls back to the parity path. Declared-field expression indexes are created per collection for the fields its saved views filter or sort on.
 
@@ -731,6 +755,73 @@ Version 3 renames `total_minutes` to `minutes` and makes `serves` required with 
 
 The pinned executions still point at revisions 2 and 3 as they were. Grouping by `recipe.version` still works, and the historical values keep their old field name in `item_versions`, reported under the version's own type version.
 
+### 15. Answers to the #1457 cost list
+
+PR #1457 compared its index-backed file design with a throwaway SQLite-authoritative prototype (`scripts/prototype-sqlite-records.py` on `claude/records-write-latency-nv6aui`). Its numbers:
+- the prototype appends at about 93/100 ms p50/p95 end to end at both 1,000 and 10,000 items, of which the storage layer is 2.6–3.8 ms;
+- the guard refresh costs 0.02–0.04 ms in storage;
+- async projection lag was 4–34 ms;
+- the file design at 10,000 items is 5.7 s p95.
+
+It recommended not switching authority yet, and listed what a switch costs. The owner has decided the switch. Each cost item is answered here, with where the design handles it.
+
+**1. Migration of existing collections and audit chains; the meaning of client-held hashes.**
+- **Item identity.** Rows keep each item's UUID key, natural key, values, body and payload hash (§10 step 2, proof checks a–c).
+- **Audit history.** The split history (manifest head, `log.md`, `_archive/logs/`) is parsed by the extracted legacy reader and imported event by event. Each event keeps its verbatim JSON, its transition id and its parent link, chained in `txns` (§10 step 3). Proof check (d) requires the imported head and chain length to equal the legacy ones, and check (f) requires the legacy inspect status to be preserved: a `gap` stays a `gap`, never blessed. The existing gap, continuity and rebaseline semantics therefore still hold for imported history (§8 C6).
+- **Client-held hashes.** A client-held `expected_container_hash` changes derivation (§8 C1–C2). It gets exactly one `STALE_RECORD` and refreshes.
+
+**2. Authority split between a Markdown manifest (schema) and the database (rows).** There is no split.
+- The manifest text is canonical in the store (`collection_manifests`, versioned with the rows in the same transactions). `_collection.md` is its view.
+- A manifest edit in Obsidian becomes a governed `revise` through edit-back, or a held correction (§6).
+- Type-level schema lives in `collection_type_versions` (§14.5).
+
+Schema and rows therefore change together, atomically, under one audit chain. The #1457 cost item assumed the manifest stays a user-edited file; this design removes that assumption.
+
+**3. Backup and restore (restic, vault copy).** #1457 is right that a live WAL database copied mid-write can be torn, and that a database in the state root is not captured by copying the vault. The answer is §1 plus §11:
+- The live store stays out of the vault.
+- A single-file, `integrity_check`ed replica is published into the vault. It is made with the backup API into a staging file and renamed atomically. `VACUUM INTO` is an equivalent primitive and would be acceptable.
+- The replica is published after commits (coalesced) and synchronously on quiesce, lease release, shutdown, handoff and export. A restic snapshot or a folder copy of the vault is therefore a complete, consistent backup.
+- **A vault copy is not a read-only mirror.** Starting a service on the copy adopts the replica as its live store (same `store_id`, §1 takeover rule), and it is writable from then on.
+- **Restore** is: restore the vault, start the service, adopt the replica, re-render views into staging, and compare. A difference becomes a held correction, never an overwrite (§11).
+- The exposure is the replica's coalescing window for a crash between commit and publication, bounded at 1 s. It is flushed synchronously at every orderly boundary. Operators who need zero window use `exomem collections backup --stdout` as the restic source.
+
+**4. Obsidian visibility and edits.** Views are not read-only in effect. The owner chose governed edit-back (option 2): a valid edit becomes an audited update, and an invalid, ambiguous or conflicting one becomes a held correction. An edit is never silently overwritten by the next projection, because edit-back runs on the changed file before any re-render, and a stale-base edit is held with the human's bytes (§6).
+
+**5. Sync tools and two machines writing.** This is the one place the store design is genuinely weaker than files. Today two machines writing different items merge through ordinary file sync, and a same-file conflict becomes a sync conflict copy.
+- **With the multi-host writer lease** (the supported multi-writer setup), only the lease holder writes the store. Edits made on another machine are view edits. They reach the writer's vault through sync and go through edit-back there, so no store merge is ever needed (§1, §6). Sync conflict copies of views are held `VIEW_CONFLICT_COPY`.
+- **Without the lease**, two services each writing their own live store on one synced vault diverge. The takeover check detects it: same `store_id`, and each store has transactions the other lacks. Collection writes then fail closed with `COLLECTION_STORE_DIVERGED`, while reads and knowledge writes continue.
+- **Nothing is lost.** An operator command, `maintain_memory(mode="collections-store-reconcile", dry_run=...)`, takes the divergent store's transactions after the fork point. It turns every changed item into a held view correction on the surviving store, carrying that store's values and diagnostics, and records the reconciliation as one content-free transaction. A human then resolves each one, as with a sync conflict copy today.
+- Running two writers without the lease becomes explicitly unsupported for collection writes. `describe` and the doctor probe say so. Knowledge Markdown is unaffected.
+
+**6. Out-of-band edit policy.** This is a product decision the file design does not need, and the owner has made it: ingest through the governed write path, or hold (§6). Detection is exact. `projection_state.rendered_sha256` identifies the design's own writes, and a changed file is classified against the row version it was rendered from.
+
+**7. Everything else that reads items as pages; read-your-writes.**
+- **Item views are published before the acknowledgement** (§5). Any file reader, including `get_page` and the next agent turn, sees the acknowledged write. That costs about 3 ms, as #1457 measured. Only aggregate views (log layout, history and type pages) and index sync are asynchronous.
+- **Structured readers move to the store** (task 5.5): due-state, plan progress, capture sweeps, the working set and current-state resolution, `audit` outcome bindings, and evidence bundles built from items. They are read-your-writes by construction and no longer parse Markdown.
+- **`find` and recall** already exclude Records and Planning descendants except manifests (`recall_policy`). Declared types join that exclusion (§14.5). Lexical, resolver and graph indexing of views therefore lagging the drain does not change any recall answer about item values.
+- **Plan links, supersession and pinned references** resolve through the store (§14.3), not through view files.
+
+**8. Hosted cells.**
+- One writer lease per cell makes SQLite a natural fit, and the live store sits in the cell state root on the tenant volume.
+- Cell export and restore gain the store snapshot as canonical data, excluding `-wal`/`-shm` (§11; the `hosted-vault-portability` delta). Restore stages, validates and re-renders before publication.
+- `cloud_import` of a file-canonical vault runs the §10 importer and proof in staging before the cell starts.
+- Evidence bundles read rows.
+
+**9. Governance and withheld = absent, and per-row cost.**
+- Each row keeps its view path as its governance subject, along with its ref, type, tags and project (§7).
+- Per-row evaluation is avoided in the common case by the uniform-release decision: one decision when no scope in the resolved policy can distinguish the collection's rows (0.4 ms at 10,000 in the spike).
+- When rows are distinguishable, the per-row pass evaluates identity-only columns against a once-resolved policy (44 ms at 10,000 in the spike). Where the distinguishing selectors are path prefixes, refs or declared tags, they compile into a SQL predicate with a tombstone join, and the pass runs in the database. Other selectors fall back to the in-memory pass. Both are held to the parity test.
+- Audit rows are redacted by the same subject rules (history pages §5; `inspect` history §7).
+
+**10. Deletion and trash.** Records and Planning have no item deletion today, and this change adds none.
+- The file tools (`delete_file`, `move_file`, `delete_directory`, `recover_from_trash`) refuse on paths that `projection_state` owns, with `COLLECTION_VIEW_PATH` and a remediation naming the collection operation.
+- If a view is removed outside Exomem, the deletion is held as `VIEW_DELETED` and the view is re-rendered.
+- The trash never holds canonical collection data, so trash recovery has nothing to restore for collections.
+
+**11. Exactly-once.** #1457 notes that exactly-once already comes from the idempotency ledger, independent of storage. The store adds the one window the ledger cannot close: a commit before the ledger records it. It does so with `txns.request_id` and the receipt recorded in the same transaction (§4).
+
+**12. Recommendation for the middle path (a derived SQLite sidecar with files authoritative).** It is superseded by the owner's decision. Its revisit conditions are now met, because bulk upsert (#1452) and declarable collection types (§14) make multi-row transactions and larger collections first-class. The sidecar's benefits (O(1) guard, O(1) natural-key lookup) are the store's primary indexes, and the stat-generation item cache that #1457 added (`record_item_cache.py`) becomes unnecessary for store collections. It stays useful for file mode during the legacy window (R7).
+
 ## Risks / Trade-offs
 
 - **Opaque storage.** Canonical rows are no longer greppable Markdown. *Mitigation:* views at today's paths, the replica as one portable file, the reverse exporter, and the history page.
@@ -738,6 +829,7 @@ The pinned executions still point at revisions 2 and 3 as they were. Grouping by
 - **Edit-back surprises.** An edit can land as a held correction instead of applying. *Mitigation:* held views are visible under `Held/`, in inspect and in attention. The settle windows avoid holding mid-typing states.
 - **SQLite on network filesystems** (SMB/NFS) is unsafe with WAL. *Mitigation:* the live store sits on the state root, which is a local path by default. Readiness verifies `journal_mode=wal` took effect and refuses a network-mounted state root.
 - **SQLite version floor** (≥ 3.38 for STRICT and JSON). Python ≥ 3.11 builds bundle newer SQLite on Windows and macOS. Linux distributions vary. Readiness refuses with a clear remediation.
+- **Two writers without the lease** can no longer merge collections through file sync. Divergence fails closed and is reconciled into held corrections (§15, item 5).
 - **Multi-host RPO** equals the replica coalescing window. That matches today's file replication lag, and divergence fails closed (§1).
 - **Two modes during migration.** They add temporary complexity. *Mitigation:* the switch is per vault, and deletion is a scheduled task with its own acceptance.
 

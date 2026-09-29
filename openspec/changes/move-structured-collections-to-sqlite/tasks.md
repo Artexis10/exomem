@@ -34,11 +34,11 @@
 
 ## 6. Projection
 
-- [ ] 6.1 Red: a committed mutation marks views pending, and the projector renders them after commit. A crash after commit re-renders on restart. A projection failure does not fail the mutation and is reported. Rendering of values and body is exact. No audit markers or heads are rendered.
+- [ ] 6.1 Red: a committed mutation marks views pending, and aggregate views (log layout, history, type) are rendered after commit. A crash after commit re-renders on restart. A projection failure does not fail the mutation and is reported. Rendering of values and body is exact. No audit markers or heads are rendered.
 - [ ] 6.2 Projector task: target-adjacent staging, fsync, rename, `projection_state` update, view index sync moved off the acknowledgement path.
 - [ ] 6.3 History page and per-year pages from `txns` / `audit_effects`: newest first, bounded, content-free, collection-level release filtering (red first: a row-restricted effect is omitted).
 - [ ] 6.4 Held candidate and held view-correction views under `Held/` (read-only).
-
+- [ ] 6.5 Synchronous item, manifest and held view publication: staged and fsynced in the transaction, renamed after commit, before the acknowledgement. Red first: a crash before commit leaves no view ahead of the store; a crash after commit re-renders; `get_page` right after an acknowledged append returns the new values. File tools refuse view paths with `COLLECTION_VIEW_PATH`.
 ## 7. Edit-back
 
 - [ ] 7.1 Red, per classification row in `design.md` §6: own write ignored; formatting-only edit re-rendered; valid edit becomes one governed update with a view-edit transition; replay of the same bytes gives one transition; stale base is held `VIEW_CONFLICT`; invalid edit is held `VIEW_INVALID`; delete is held `VIEW_DELETED` and re-rendered; unbound file is held `VIEW_UNBOUND`; sync-conflict copy is held; manifest edit becomes revise; log-view block diff; history and held views are read-only; typing storm leaves no held correction.
@@ -57,11 +57,11 @@
 - [ ] 9.1 Red: a snapshot taken while writers run opens and passes `integrity_check`. The replica is never opened read-write. Lease takeover adopts a newer replica. Divergence refuses collection writes while reads and knowledge writes continue.
 - [ ] 9.2 Snapshot primitive, coalesced replica publisher, synchronous flush on quiesce, lease release, shutdown, handoff and export; WAL checkpoints; `exomem collections backup --to/--stdout`.
 - [ ] 9.3 Hosted: live store in the cell state root; portability export and staged restore include the snapshot and exclude `-wal` / `-shm` (`hosted_portability`, `hosted_restore`); restore surfaces differences as held view corrections.
-
+- [ ] 9.4 Divergence reconciliation `maintain_memory(mode="collections-store-reconcile")`: preview-first, and every item changed after the fork point becomes a held correction. Service start on a copied vault adopts the replica (red first for both).
 ## 10. Measure
 
 - [ ] 10.1 Extend `scripts/measure-records-append-latency.py` (#1457) to the store: guarded append p95 at 1,000 and 10,000 items; bulk 500; query parity latency at 100, 1,000 and 10,000. Record before and after in `design.md` and the PR. Targets: append p95 < 20 ms, bulk 500 < 1 s, query no worse than the file path.
-
+- [ ] 10.2 A per-stage budget gate for the §12 budget table. The dispatcher, lease, resolution, validation, governance, store and view, fan-out, carriers and receipt each have their own timer, and a stage over budget fails. Guard refresh through `inspect` p95 < 15 ms.
 ## 11. Delete the hand-built machinery (after the legacy window, ruling R7)
 
 - [ ] 11.1 Remove every item in `design.md` §13. Measure and report the deleted line count. File mode and its tests go with it; `legacy.py` stays until the reverse exporter is retired.

@@ -43,11 +43,23 @@ Each collection SHALL carry a generation that increments exactly once per commit
 - **THEN** the caller's snapshot is unchanged and the continuation resumes
 
 ### Requirement: Collection views are Markdown projections of the store
-The substrate SHALL render every collection manifest, item, log-layout collection, and held candidate as a Markdown view at the same vault-relative path the file-canonical layout used, using the existing item, log, filename and managed-presentation renderers and keeping the visible system identity properties. Views SHALL NOT be canonical. Rendering SHALL happen after commit, off the mutation's acknowledgement path, from durable pending-projection state recorded in the same transaction as the mutation, so a crash after commit re-renders on restart. A projection failure SHALL NOT turn a committed mutation into a refusal; it SHALL be retried and reported. Views SHALL be normalized on re-render: values and the authored body SHALL be emitted exactly, while YAML formatting that is not data need not be preserved. Audit markers and manifest audit heads SHALL NOT be rendered.
+The substrate SHALL render every collection manifest, item, log-layout collection, and held candidate as a Markdown view at the same vault-relative path the file-canonical layout used, using the existing item, log, filename and managed-presentation renderers and keeping the visible system identity properties. Views SHALL NOT be canonical.
+
+The item, manifest and held views changed by a mutation SHALL be staged and fsynced inside the mutation's transaction and published after commit, before the mutation is acknowledged, so that any reader of the vault file sees the acknowledged write. A view SHALL never be published ahead of its committed row. Log-layout views, history pages and type views SHALL be published asynchronously with bounded lag. Every view's pending state SHALL be recorded durably in the same transaction as the mutation, so that a crash after commit re-renders it on restart. A projection failure SHALL NOT turn a committed mutation into a refusal: it SHALL be retried, and reported as a receipt warning and in inspection.
+
+Index synchronization of views SHALL NOT be on the acknowledgement path. Structured readers SHALL read the store rather than views. Vault file tools SHALL refuse to delete, move or recover a path owned by a collection view, with a remediation naming the collection operation. Views SHALL be normalized on re-render: values and the authored body SHALL be emitted exactly, while YAML formatting that is not data need not be preserved. Audit markers and manifest audit heads SHALL NOT be rendered.
 
 #### Scenario: A committed append appears as a view
-- **WHEN** an append commits
-- **THEN** the item's view appears at the path its filename recipe names with its values, body and managed presentation, and the mutation's receipt did not wait for it
+- **WHEN** an append is acknowledged
+- **THEN** the item's view already exists at the path its filename recipe names, with its values, body and managed presentation, and a following `get_page` of that path returns them
+
+#### Scenario: A view is never ahead of the store
+- **WHEN** the process stops after a view is staged but before the transaction commits
+- **THEN** no view shows the uncommitted values, and the staging file is removed by bounded crash recovery
+
+#### Scenario: File tools cannot delete a view
+- **WHEN** a file tool is asked to delete or move an item view
+- **THEN** it refuses with `COLLECTION_VIEW_PATH`, and the store and view are unchanged
 
 #### Scenario: Projection resumes after a crash
 - **WHEN** the process stops after a commit but before the view is written
@@ -108,7 +120,7 @@ Every committed collection mutation SHALL be exactly one audit transition in the
 - **THEN** `Knowledge Base/log.md` is not read or rewritten by it
 
 ### Requirement: Collection store snapshots are consistent and portable
-The substrate SHALL produce consistent snapshots of the collection store only through the SQLite online backup API into a staging file that is switched to a single-file journal mode, integrity-checked and atomically renamed. It SHALL publish such a snapshot as a replica inside the vault after committed transactions, coalesced off the acknowledgement path, and synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export. The replica SHALL NEVER be opened for writing in place. A host acquiring the writer lease SHALL adopt the replica when it continues the same store further than the local store, and SHALL refuse collection writes with a divergence error, while serving reads and knowledge writes, when the local store holds transactions the replica lacks. Restore SHALL validate integrity, schema version and store identity, and SHALL surface any difference between the restored rows and existing views as held view corrections rather than overwriting either.
+The substrate SHALL produce consistent snapshots of the collection store only through the SQLite online backup API into a staging file that is switched to a single-file journal mode, integrity-checked and atomically renamed. It SHALL publish such a snapshot as a replica inside the vault after committed transactions, coalesced off the acknowledgement path, and synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export. The replica SHALL NEVER be opened for writing in place. A host acquiring the writer lease, or a service starting on a copied vault, SHALL adopt the replica when it continues the same store further than the local store, or when no local store exists, after which it is writable. It SHALL refuse collection writes with a divergence error, while serving reads and knowledge writes, when the local store holds transactions the replica lacks. A preview-first operator reconciliation SHALL turn every item changed by the divergent store after the fork point into a held view correction on the surviving store, so divergence never silently loses a write. Restore SHALL validate integrity, schema version and store identity, and SHALL surface any difference between the restored rows and existing views as held view corrections rather than overwriting either.
 
 #### Scenario: Backup of the vault is consistent
 - **WHEN** restic or a vault copy captures the vault while agents are writing
@@ -121,6 +133,14 @@ The substrate SHALL produce consistent snapshots of the collection store only th
 #### Scenario: Divergence fails closed
 - **WHEN** the local store holds transactions absent from the replica
 - **THEN** collection writes refuse with the divergence error and operator attention is raised
+
+#### Scenario: Divergence reconciles into held corrections
+- **WHEN** an operator reconciles two diverged stores
+- **THEN** every item the losing store changed after the fork point is held as a correction on the surviving store with its values, and nothing is overwritten
+
+#### Scenario: A copied vault is writable
+- **WHEN** a service starts on a copy of the vault with no local store
+- **THEN** it adopts the vault's replica as its live store and accepts collection writes
 
 ### Requirement: Collection store migration is verifiable and reversible
 A vault SHALL move from file-canonical collections to the store only through a declared offline migration that imports every Records and Planning collection and proves a round trip before the store becomes canonical. The proof requires all of the following: item counts equal; every row, rendered and parsed back, yields equal values, body, identity and natural key; payload hashes equal the legacy derivation; the imported legacy audit chain has the same head and length; manifest text is byte-equal; and the legacy audit status is preserved, never upgraded. Import SHALL rewrite no vault file and SHALL record the current file bytes as the current views. A vault with duplicate identities, schema violations or unsupported versions SHALL NOT migrate until they are fixed. The migration SHALL run under the managed standby-upgrade handoff: pre-import on the standby without ownership, re-verification of changed collections after the previous worker exits, and atomic publication, so that writes pause only for the ordinary bounded handoff. The substrate SHALL provide a preview-first reverse export that renders the store into the legacy file layout with a content-free checkpoint transition per collection, so the legacy inspector reports `acknowledged_gap` for any collection written in store mode.
@@ -142,11 +162,15 @@ A vault SHALL move from file-canonical collections to the store only through a d
 - **THEN** collections never written in store mode are byte-equal to their pre-migration files, and written collections are legacy-valid and report `acknowledged_gap`
 
 ### Requirement: Collection store writes meet a latency budget
-With the store canonical, the release acceptance harness SHALL measure, and the delivery SHALL meet: a guarded single append p95 under 20 ms end to end at 10,000 items; a 500-row bulk upsert under 1 s end to end; and structured query results identical to the file-canonical path on the parity corpus, with query latency no worse than the file path at every measured size. The acknowledgement path SHALL NOT include reading other items, hashing the collection, rendering or publishing views, index synchronization of views, or reading or rewriting `Knowledge Base/log.md`.
+With the store canonical, the release acceptance harness SHALL measure, and the delivery SHALL meet: a guarded single append p95 under 20 ms end to end at 10,000 items, measured through the real dispatcher, idempotency ledger, writer lease, collection resolution, governance and synchronous item-view publication, with a per-stage timer and budget for each; a 500-row bulk upsert under 1 s end to end; and structured query results identical to the file-canonical path on the parity corpus, with query latency no worse than the file path at every measured size. A client guard refresh through `inspect` SHALL have p95 under 15 ms. The acknowledgement path SHALL NOT include reading other items, hashing the collection, discovering or parsing a manifest file, rendering or publishing views other than the changed item, manifest and held views, index synchronization of views, or reading or rewriting `Knowledge Base/log.md`.
 
 #### Scenario: Append stays flat as the collection grows
-- **WHEN** guarded appends are measured at 1,000 and 10,000 items
-- **THEN** both p95 values are under 20 ms
+- **WHEN** guarded appends are measured at 1,000 and 10,000 items through the real dispatcher
+- **THEN** both p95 values are under 20 ms, and no stage exceeds its budget
+
+#### Scenario: Collection resolution does not read the manifest file
+- **WHEN** an append resolves its collection
+- **THEN** the contract comes from the store row and a cache keyed by manifest version, and no manifest file is read or parsed
 
 #### Scenario: Bulk upsert of 500 rows
 - **WHEN** 500 valid rows are submitted in one bulk upsert against a 10,000-item collection
