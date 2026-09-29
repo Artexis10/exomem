@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from exomem import metrics, mutation_lock, relation_review, semantic_writes, writer_lease
+from exomem import (
+    metrics,
+    mutation_lock,
+    relation_review,
+    reserved_paths,
+    semantic_writes,
+    writer_lease,
+)
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.commands import op_remember, product_commands_for
@@ -118,6 +125,10 @@ def test_pre_boundary_validation_failure_never_acquires_the_boundary(
     with pytest.raises(ValueError) as baseline:
         op_remember(vault, **committing_kwargs)
     assert "SEMANTIC_CONTRACT_BLOCKED" in str(baseline.value)
+
+    # The pre-boundary warm takes its own brief identity-scope hold when cold; warm
+    # it now so the trap below watches only the write's mutation boundary.
+    reserved_paths.warm_identity_catalogue_before_boundary(vault)
 
     def unreachable_hold(self, **kwargs):
         raise AssertionError(

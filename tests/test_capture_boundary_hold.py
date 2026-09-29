@@ -116,7 +116,8 @@ def test_a_cold_identity_walk_never_runs_inside_a_record_update_boundary(
     )
 
     assert result
-    assert set(states) <= {"free"}
+    assert states, "the cold inventory should have been built by this write"
+    assert set(states) == {"free"}
 
 
 def _oracle_notes_by_subfolder(notes_dir: Path) -> dict[str, dict[str, int]]:
@@ -168,3 +169,21 @@ def test_index_counts_match_the_rglob_rules_they_replaced(tmp_path: Path) -> Non
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("x", encoding="utf-8")
     assert indexes._count_sources(sources) == {"Articles": 2, "Books": 1}
+
+
+def test_a_directory_named_like_a_page_is_counted_and_descended_as_rglob_did(
+    tmp_path: Path,
+) -> None:
+    from exomem import indexes
+
+    notes = tmp_path / "Notes"
+    (notes / "Research" / "Alpha" / "dir.md").mkdir(parents=True)
+    (notes / "Research" / "Alpha" / "dir.md" / "inner.md").write_text("x", encoding="utf-8")
+    (notes / "Research" / "Alpha" / "a.md").write_text("x", encoding="utf-8")
+    sources = tmp_path / "Sources"
+    (sources / "Articles" / "dir.md").mkdir(parents=True)
+    (sources / "Articles" / "dir.md" / "inner.md").write_text("x", encoding="utf-8")
+
+    assert indexes._count_notes_by_subfolder(notes) == _oracle_notes_by_subfolder(notes)
+    assert indexes._count_notes_by_subfolder(notes) == {"Research": {"Alpha": 3}}
+    assert indexes._count_sources(sources) == {"Articles": 2}

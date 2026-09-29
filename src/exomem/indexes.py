@@ -150,8 +150,9 @@ def _count_markdown_pages(root: Path, *, skip_underscore_dirs: bool = False) -> 
     """Non-index `*.md` entries under `root`, recursively, in one scandir pass.
 
     The same set `root.rglob("*.md")` minus `index.md` yields (symlinked
-    directories are not descended), without a `stat` per entry: this runs
-    inside the commit of every write, so its cost is the write's hold time.
+    directories are not descended; a directory named `*.md` is counted and
+    descended), without a `stat` per entry: this runs inside the commit of
+    every write, so its cost is the write's hold time.
     """
     count = 0
     pending = [os.fspath(root)]
@@ -159,10 +160,10 @@ def _count_markdown_pages(root: Path, *, skip_underscore_dirs: bool = False) -> 
         try:
             with os.scandir(pending.pop()) as entries:
                 for entry in entries:
-                    if entry.name.endswith(".md"):
-                        if entry.name != "index.md":
-                            count += 1
-                    elif entry.is_dir(follow_symlinks=False) and not (
+                    if entry.name.endswith(".md") and entry.name != "index.md":
+                        count += 1
+                    # A directory named `x.md` is counted above and still descended.
+                    if entry.is_dir(follow_symlinks=False) and not (
                         skip_underscore_dirs and entry.name.startswith("_")
                     ):
                         pending.append(entry.path)
