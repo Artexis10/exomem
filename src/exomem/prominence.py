@@ -198,10 +198,9 @@ LINK_NAMED_IDENTITIES_LINE = (
 
 _ARTIFACT_ADOPTION_CAPTURE = (
     " Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
-    "preserves exact bytes as Source/Evidence by role, never MIME. No handle means "
-    "non-committing handoff. Delivery requires Evidence receipt/Record; no remote byte "
-    "inference. Missing schema uses structural_suggestions/restructure_execution; "
-    "relations use link_acceptance."
+    "keeps exact bytes as Source/Evidence by role, never MIME. No handle: non-committing "
+    "handoff. Delivery needs an Evidence receipt/Record; no remote byte inference. "
+    "Missing schema: structural_suggestions/restructure_execution; relations: link_acceptance."
 )
 
 #: The episode-completeness pass, appended to `balanced` and `maximal` only.
@@ -401,9 +400,9 @@ CONTRACTS: dict[str, ProminenceContract] = {
         level="maximal",
         recall=(
             ACTIVATION_CARRIER_LINE + " "
-            "Search memory before answering any substantive turn, not only the ones "
+            "Search memory before answering any substantive turn, not only those "
             "that obviously reference prior work. Assume the knowledge base may hold "
-            "something relevant until a search says otherwise. Only skip for pure "
+            "something relevant until a search says otherwise. Skip only pure "
             "chit-chat and control messages."
         ),
         capture=(

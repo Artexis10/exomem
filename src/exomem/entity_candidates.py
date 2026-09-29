@@ -86,6 +86,53 @@ def alias_claim_fingerprint(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def claim_set_fingerprint(
+    vault_root: Path,
+    aliases: list[str] | tuple[str, ...],
+    *,
+    exclude_path: str | None = None,
+    title_resolution: Mapping[str, object] | None = None,
+) -> str:
+    """The one fingerprint a write's `distinct` decision binds to.
+
+    A write can claim a title and several aliases at once, and one decision
+    has to decide all of them. The value is the union of every claimant the
+    guard refuses on: each alias's `alias_claim_fingerprint` (its claimants and
+    their content versions) and, for a create, the title's own candidates
+    (identity, path, type, match kind and the omitted count, not the spelling
+    of the title). A claimant appearing, changing or disappearing for any name
+    in the write makes an older decision stale, and a decision made for a
+    subset of the names never matches.
+    """
+    title: object = None
+    if title_resolution is not None and (
+        title_resolution.get("candidates") or title_resolution.get("omitted_candidate_count")
+    ):
+        title = {
+            "candidates": sorted(
+                [
+                    str(item.get("ref") or ""),
+                    str(item.get("path") or ""),
+                    str(item.get("entity_type") or ""),
+                    str(item.get("matched_by") or ""),
+                ]
+                for item in (title_resolution.get("candidates") or [])
+                if isinstance(item, Mapping)
+            ),
+            "omitted": int(title_resolution.get("omitted_candidate_count") or 0),
+        }
+    payload = {
+        "kind": "claim_set",
+        "title": title,
+        "aliases": sorted(
+            alias_claim_fingerprint(vault_root, alias, exclude_path=exclude_path)
+            for alias in aliases
+        ),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _aliases(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value,)

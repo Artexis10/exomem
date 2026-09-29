@@ -1147,3 +1147,92 @@ def test_a_withheld_claimant_is_left_out_of_a_restricted_callers_fingerprint(
     _reset_caches()
     owner_now = _alias_refusal(ja_vault, "Corvane Motors", "ハヤブサ号")
     assert owner_now != found.group(1)
+
+
+# --------------------------------------------------------------------------- #
+# One decision covers the title and every claimed alias in the write
+# --------------------------------------------------------------------------- #
+
+
+def test_a_homonym_reusing_its_short_alias_is_created_with_one_decision(ja_vault: Path) -> None:
+    """The title `Tessary` is another page's alias and the alias `Tessary Works`
+    is that page's title: the identity lane's own homonym. One decision, bound
+    to the union of both claims, creates it (as it does on main)."""
+    tessary = _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["Tessary"])
+    before = (ja_vault / tessary).read_bytes()
+
+    with pytest.raises(ValueError, match="ENTITY_EXISTS") as refused:
+        commands.op_connect_memory(
+            ja_vault,
+            operation="create-entity",
+            entity_type="organization",
+            name="Tessary",
+            summary="A different business that shares the short name.",
+            aliases=["Tessary Works"],
+        )
+    found = _FINGERPRINT.search(str(refused.value))
+    assert found, str(refused.value)
+    fingerprint = found.group(1)
+    assert not (ja_vault / KB / "Entities" / "Organizations" / "Tessary.md").exists()
+
+    created = commands.op_connect_memory(
+        ja_vault,
+        operation="create-entity",
+        entity_type="organization",
+        name="Tessary",
+        summary="A different business that shares the short name.",
+        aliases=["Tessary Works"],
+        identity_decision=_decided(fingerprint),
+    )
+    assert created["path"] == f"{KB}/Entities/Organizations/Tessary.md"
+    assert "Tessary Works" in (ja_vault / created["path"]).read_text(encoding="utf-8")
+    assert tessary in created["identity_decision"]["distinct_from"]
+    assert (ja_vault / tessary).read_bytes() == before
+
+    # The decision is bound to the claimants: a stale copy of it is refused.
+    with pytest.raises(ValueError, match="STALE_IDENTITY_DECISION"):
+        commands.op_connect_memory(
+            ja_vault,
+            operation="create-entity",
+            entity_type="organization",
+            name="Tessary",
+            summary="Again.",
+            aliases=["Tessary Works"],
+            identity_decision=_decided("0" * 64),
+        )
+
+
+def test_an_aliases_patch_with_two_claimed_aliases_takes_one_decision(ja_vault: Path) -> None:
+    _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["テッサリー"])
+    _create_entity(ja_vault, "Northgate Tools", "The trade counter.", aliases=["ノースゲート"])
+    corvane = _create_entity(ja_vault, "Corvane Motors", "The carmaker.")
+    both = ["テッサリー", "ノースゲート"]
+
+    with pytest.raises(ValueError, match="ENTITY_EXISTS") as refused:
+        _patch_aliases(ja_vault, corvane, both)
+    found = _FINGERPRINT.search(str(refused.value))
+    assert found, str(refused.value)
+
+    _patch_aliases(ja_vault, corvane, both, identity_decision=_decided(found.group(1)))
+    text = (ja_vault / corvane).read_text(encoding="utf-8")
+    assert "テッサリー" in text and "ノースゲート" in text
+
+
+def test_a_decision_missing_one_aliass_claimants_is_refused(ja_vault: Path) -> None:
+    _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["テッサリー"])
+    _create_entity(ja_vault, "Northgate Tools", "The trade counter.", aliases=["ノースゲート"])
+    corvane = _create_entity(ja_vault, "Corvane Motors", "The carmaker.")
+
+    with pytest.raises(ValueError, match="ENTITY_EXISTS") as one:
+        _patch_aliases(ja_vault, corvane, ["テッサリー"])
+    only_first = _FINGERPRINT.search(str(one.value))
+    assert only_first, str(one.value)
+
+    with pytest.raises(ValueError, match="STALE_IDENTITY_DECISION"):
+        _patch_aliases(
+            ja_vault,
+            corvane,
+            ["テッサリー", "ノースゲート"],
+            identity_decision=_decided(only_first.group(1)),
+        )
+    assert "ノースゲート" not in (ja_vault / corvane).read_text(encoding="utf-8")

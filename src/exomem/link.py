@@ -901,32 +901,32 @@ def link(
     # answers to would make a turn naming it resolve both. One lookup for all
     # of them, read as the resolver reads names (`claimed_names`).
     claimed = entity_candidates.claimed_names(vault_root, aliases_clean) if aliases_clean else {}
-    alias_fingerprints = {
-        alias: entity_candidates.alias_claim_fingerprint(vault_root, alias) for alias in claimed
-    }
-    claimed_paths = dict(claimed)
-    title_decided = decision is not None and (
-        identity_resolution["status"] != "no_match"
+    # One decision covers the title and every claimed alias in this write: its
+    # fingerprint binds the union of their claimants.
+    if claimed:
+        fingerprint = entity_candidates.claim_set_fingerprint(
+            vault_root, list(claimed), title_resolution=identity_resolution
+        )
+    decision_covers = (
+        decision is not None
         and decision["candidate_fingerprint"] == fingerprint
-    )
-    alias_decided = decision is not None and (
-        decision["candidate_fingerprint"] in alias_fingerprints.values()
+        and (identity_resolution["status"] != "no_match" or bool(claimed))
     )
     accepted_decision: dict | None = None
-    if decision is not None and not (title_decided or alias_decided):
+    if decision is not None and not decision_covers:
         raise LinkError(
             "STALE_IDENTITY_DECISION",
             ["identity_decision"],
-            "what this name resolves to changed since the decision; decide again "
-            "against the returned candidates",
+            "what this name and its aliases resolve to changed since the decision; "
+            "decide again against the returned candidates",
             candidates,
-            None if identity_resolution["status"] == "no_match" else fingerprint,
+            None if identity_resolution["status"] == "no_match" and not claimed else fingerprint,
         )
-    if title_decided:
-        accepted_decision = {
-            **decision,
-            "distinct_from": [str(item.get("ref") or item["path"]) for item in candidates],
-        }
+    if decision_covers:
+        distinct_from = [str(item.get("ref") or item["path"]) for item in candidates]
+        for found in claimed.values():
+            distinct_from.extend(path for path in found if path not in distinct_from)
+        accepted_decision = {**decision, "distinct_from": distinct_from}
     elif identity_resolution["status"] != "no_match":
         same_type = identity_resolution["omitted_candidate_count"] or any(
             item["entity_type"] == entity_type for item in candidates
@@ -961,17 +961,7 @@ def link(
             candidates,
             fingerprint,
         )
-    if claimed and alias_decided:
-        # The decision covers the alias whose fingerprint it carries; any other
-        # claimed alias still refuses below.
-        decided_alias = next(
-            alias
-            for alias, value in alias_fingerprints.items()
-            if value == decision["candidate_fingerprint"]
-        )
-        claimed = {alias: found for alias, found in claimed.items() if alias != decided_alias}
-        accepted_decision = {**decision, "distinct_from": list(claimed_paths[decided_alias])}
-    if claimed:
+    if claimed and not decision_covers:
         alias = next(iter(claimed))
         raise LinkError(
             "ENTITY_EXISTS",
@@ -980,7 +970,7 @@ def link(
             "identity_decision {outcome: distinct} with this candidate_fingerprint if "
             "it is a different identity",
             [{"alias": name, "path": path} for name, found in claimed.items() for path in found],
-            alias_fingerprints[alias],
+            fingerprint,
         )
     folder = kb_root(vault_root) / "Entities" / definition.folder
     entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"

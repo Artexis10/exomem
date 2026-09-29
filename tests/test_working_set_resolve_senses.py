@@ -458,3 +458,51 @@ def test_a_slash_does_not_end_a_run() -> None:
     )
 
     assert resolution.status == "resolved"
+
+
+# --------------------------------------------------------------------------- #
+# A CJK word glued to a Latin one is still a word of the run
+# --------------------------------------------------------------------------- #
+#
+# `name_contact` counts the words a token holds without a space around them
+# (`analysis.words`), so the name spans that decide narrowing have to see them
+# too. Otherwise "rolloutの計画" leaves the rollout hub's run at "tide model",
+# strictly inside the other hub's "alpha tide model", and narrowing drops the
+# hub the turn named.
+
+TIDE_ROLLOUT = _row("hubs/tide-model-rollout.md", "Tide model rollout", kind="hub")
+ALPHA_TIDE = _row("hubs/alpha-tide-model.md", "Alpha tide model", kind="hub")
+TIDE_HUBS = (TIDE_ROLLOUT, ALPHA_TIDE)
+TIDE_COUNTS = {"tide": 2, "model": 2, "rollout": 1, "alpha": 1}
+TIDE_RETRIEVED = (TIDE_ROLLOUT.path, ALPHA_TIDE.path)
+
+
+def _tide(turn: str):
+    return _resolve(turn, TIDE_HUBS, counts=TIDE_COUNTS, retrieved=TIDE_RETRIEVED)
+
+
+def test_a_latin_twin_of_two_overlapping_hub_names_stays_ambiguous() -> None:
+    resolution = _tide("check alpha tide model rollout please")
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {
+        TIDE_ROLLOUT.path,
+        ALPHA_TIDE.path,
+    }
+
+
+def test_a_cjk_word_glued_to_the_last_latin_word_does_not_narrow_the_turn() -> None:
+    resolution = _tide("check alpha tide model rolloutの計画")
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {
+        TIDE_ROLLOUT.path,
+        ALPHA_TIDE.path,
+    }
+
+
+def test_the_qualifier_still_narrows_when_no_word_is_glued() -> None:
+    resolution = _tide("Could you check the tide model rollout for me?")
+
+    assert resolution.status == "resolved"
+    assert [anchor.path for anchor in resolution.anchors] == [TIDE_ROLLOUT.path]
