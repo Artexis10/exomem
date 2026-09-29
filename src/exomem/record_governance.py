@@ -2932,7 +2932,7 @@ def _require_mutation_visibility(
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     if manifest.storage.strategy != "markdown-items":
         return
-    if census is not None and _census_covers_every_directory(census):
+    if census is not None and _census_covers_collection(census, manifest.storage.source):
         candidates = 0
         for directory in census:
             for entry in directory.entries:
@@ -2972,14 +2972,18 @@ def _require_mutation_visibility(
                 )
 
 
-def _census_covers_every_directory(census: Sequence[vault.DirectoryCensusGuard]) -> bool:
-    """Whether every child directory named by a census has a census of its own.
+def _census_covers_collection(census: Sequence[vault.DirectoryCensusGuard], source: str) -> bool:
+    """Whether a census is this collection's own and names every directory beneath it.
 
-    A snapshot read through an authorizing adapter omits the censuses of directories
-    it could not see. Walking that partial set would skip entries a mutation must
-    refuse on, so an incomplete census is never reused.
+    It must hold exactly one census of the storage source, so an empty census or one
+    of an unrelated directory proves nothing. A snapshot read through an authorizing
+    adapter also omits the censuses of directories it could not see; walking that
+    partial set would skip entries a mutation must refuse on. Either way the caller
+    falls back to a fresh scan.
     """
     captured = {directory.target for directory in census}
+    if sum(directory.target == source for directory in census) != 1:
+        return False
     return all(
         entry.relative_path in captured
         for directory in census

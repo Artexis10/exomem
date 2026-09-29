@@ -16,7 +16,9 @@ Two rules keep it honest:
   (the same rule git applies to its index). A recently written file is re-read by
   content until it ages out.
 * **Untrusted platforms.** Where `st_ctime` does not move on a write (Windows) no
-  generation is trusted and every read is by content, as before.
+  generation is trusted and every read is by content, as before. A filesystem that
+  does not advance ctime on a write (some FUSE or network mounts) defeats the
+  generation key the same way; this cache cannot detect it.
 
 The parsed frontmatter is memoised by content digest, which is content-addressed and
 so never stale.
@@ -29,8 +31,10 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from . import vault
@@ -127,17 +131,19 @@ def read_item(root: Path, relative: str, *, limit: int) -> tuple[bytes, str, vau
     return data, digest, stat_guard
 
 
-def parsed_frontmatter(digest: str, text: str) -> tuple[dict[str, Any], str, str | None]:
+def parsed_frontmatter(digest: str, text: str) -> tuple[Mapping[str, Any], str, str | None]:
     """`vault.parse_frontmatter(text, strict=True)`, memoised on the content digest.
 
-    Callers treat the result as read-only. A malformed item raises and is not cached.
+    The mapping is read-only (one memo entry is shared by every caller and vault); a
+    malformed item raises and is not cached.
     """
     with _LOCK:
         hit = _PARSED.get(digest)
         if hit is not None:
             _PARSED.move_to_end(digest)
             return hit
-    result = vault.parse_frontmatter(text, strict=True)
+    frontmatter, body, marker = vault.parse_frontmatter(text, strict=True)
+    result = (MappingProxyType(frontmatter), body, marker)
     with _LOCK:
         _PARSED[digest] = result
         while len(_PARSED) > MAX_PARSED:

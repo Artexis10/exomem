@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from record_fixtures import ledger_item, setup_ledger_collection
 
-from exomem import record_governance, records
+from exomem import access, record_governance, records
 from exomem.governance import lifecycle
 from exomem.governance import policy as policy_module
 
@@ -356,3 +356,163 @@ def test_inspect_snapshots_the_collection_once(
     result = record_governance.inspect_collection(vault, COLLECTION)
     assert calls["n"] == 1, f"{calls['n']} snapshots in one inspect"
     assert "expected_container_hash" in str(result)
+
+
+# --- a census is proof of visibility only if it is this collection's own -----------------------
+
+
+def _refused_item_census(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from exomem import record_formats
+    from exomem import structured_collections as collections
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _seed(vault, 3)
+    manifest = collections.load_manifest(vault, vault / COLLECTION)
+    snapshot = record_formats.load_adapter(vault, manifest).read()
+    refused = _first_item(vault).name
+    real = access.refuse_if_excluded
+    monkeypatch.setattr(
+        access,
+        "refuse_if_excluded",
+        lambda root, relative: refused in relative or real(root, relative),
+    )
+    return vault, manifest, snapshot.directory_guards
+
+
+def _visibility_error(vault: Path, manifest, census) -> str:
+    from exomem.structured_collections import CollectionError
+
+    with pytest.raises(CollectionError) as error:
+        record_governance.require_mutation_visibility(vault, manifest, census=census)
+    return error.value.code
+
+
+def test_refused_item_is_seen_without_a_census(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, manifest, _census = _refused_item_census(tmp_path, monkeypatch)
+    assert _visibility_error(vault, manifest, None) == "COLLECTION_NOT_FOUND"
+
+
+def test_empty_census_is_not_proof_of_visibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, manifest, _census = _refused_item_census(tmp_path, monkeypatch)
+    assert _visibility_error(vault, manifest, ()) == "COLLECTION_NOT_FOUND"
+
+
+def test_census_of_another_directory_is_not_proof_of_visibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import vault as vault_module
+
+    vault, manifest, _census = _refused_item_census(tmp_path, monkeypatch)
+    elsewhere = vault / "Knowledge Base/Elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "a.md").write_text("x")
+    unrelated = vault_module.DirectoryCensusGuard.capture(
+        vault, "Knowledge Base/Elsewhere", max_entries=10
+    )
+    assert _visibility_error(vault, manifest, (unrelated,)) == "COLLECTION_NOT_FOUND"
+
+
+def test_own_census_still_sees_a_refused_item_without_a_fresh_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The snapshot's own census keeps the fast path: it refuses, and does not rescan the tree."""
+    from exomem import vault as vault_module
+
+    vault, manifest, census = _refused_item_census(tmp_path, monkeypatch)
+    captures = 0
+    real_capture = vault_module.DirectoryCensusGuard.capture.__func__
+
+    def capture(cls, *args, **kwargs):
+        nonlocal captures
+        captures += 1
+        return real_capture(cls, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.DirectoryCensusGuard, "capture", classmethod(capture))
+    assert _visibility_error(vault, manifest, census) == "COLLECTION_NOT_FOUND"
+    assert captures == 0
+    assert _visibility_error(vault, manifest, None) == "COLLECTION_NOT_FOUND"
+    assert captures > 0
+
+
+def test_own_census_skips_the_fresh_scan_when_nothing_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import record_formats
+    from exomem import structured_collections as collections
+    from exomem import vault as vault_module
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _seed(vault, 3)
+    manifest = collections.load_manifest(vault, vault / COLLECTION)
+    census = record_formats.load_adapter(vault, manifest).read().directory_guards
+    captures = 0
+    real_capture = vault_module.DirectoryCensusGuard.capture.__func__
+
+    def capture(cls, *args, **kwargs):
+        nonlocal captures
+        captures += 1
+        return real_capture(cls, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.DirectoryCensusGuard, "capture", classmethod(capture))
+    record_governance.require_mutation_visibility(vault, manifest, census=census)
+    assert captures == 0
+    record_governance.require_mutation_visibility(vault, manifest, census=None)
+    assert captures > 0
+
+
+# --- a platform whose stat generation is not trusted reads by content -------------------------
+
+
+def test_untrusted_platform_reads_by_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where ctime does not move on a write, nothing is cached and a same-size edit is seen."""
+    import os
+
+    from exomem import record_item_cache
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(vault_module, "STAT_GENERATION_TRUSTED", False)
+    monkeypatch.setattr(record_item_cache, "RACY_WINDOW_NS", 0)
+    record_item_cache.clear()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _seed(vault, 3)
+    _age(vault)
+    target = _first_item(vault)
+    relative = target.relative_to(vault).as_posix()
+    limit = 1_000_000
+
+    data, digest, guard = record_item_cache.read_item(vault, relative, limit=limit)
+    assert record_item_cache._ITEMS == {}
+    assert guard.leaf_policy == "content"
+    guard.recheck(vault)
+
+    original = target.stat()
+    edited = data.replace(b"First", b"Frist", 1)
+    assert edited != data and len(edited) == len(data)
+    target.write_bytes(edited)
+    os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
+    with pytest.raises(vault_module.PathGuardError):
+        guard.recheck(vault)
+    reread, redigest, _guard = record_item_cache.read_item(vault, relative, limit=limit)
+    assert reread == edited and redigest != digest
+    assert record_item_cache._ITEMS == {}
+
+
+def test_parsed_frontmatter_memo_is_read_only() -> None:
+    from exomem import record_item_cache
+
+    record_item_cache.clear()
+    frontmatter, _body, _marker = record_item_cache.parsed_frontmatter(
+        "digest", "---\ntitle: A\n---\nbody\n"
+    )
+    with pytest.raises(TypeError):
+        frontmatter["title"] = "B"  # type: ignore[index]
+    assert record_item_cache.parsed_frontmatter("digest", "")[0]["title"] == "A"
