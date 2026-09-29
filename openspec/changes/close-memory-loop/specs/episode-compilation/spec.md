@@ -265,26 +265,36 @@ A host lifecycle checkpoint that asks the agent to record an episode SHALL treat
 - **WHEN** the host compacts the session's context and the checkpoint asks again
 - **THEN** the ask names the same episode key as before compaction, so a new record revises the same episode
 
-### Requirement: A sink page is surfaced for per-cluster disposition
+### Requirement: A sink page is surfaced for per-candidate disposition
 
-The final coverage pass SHALL detect a sink: one page that several distinct candidates' committed effects landed on within an episode, so that unrelated topic clusters accumulate in a single note. It SHALL report the page and its candidates and SHALL carry guidance asking the active agent to give each cluster a disposition: route it to an existing canonical page, entity, Planning or Records item, or a justified new page, or mark it `no_capture` where nothing durable remains. The guidance SHALL be surfaced through the coverage pass and the Stop checkpoint ask; it SHALL NOT block attestation, refuse a write or move content. Detection SHALL be structural over committed receipts and SHALL NOT claim to judge topic similarity.
+The final coverage pass SHALL report a sink: a page that the committed effects of three or more distinct candidates landed on within an episode, unless the page is an `entity` or `production-log` page or carries the `hub` tag, which are meant to gather many candidates. It SHALL report the page, its `type`, the count of distinct candidates and their keys, and SHALL carry guidance that states the finding structurally (the page received effects from those candidates) and offers each candidate a disposition: keep it here when this is the canonical page, route it to an existing canonical page, entity, Planning or Records item or a justified new page, or mark it `no_capture` where nothing durable remains. The guidance SHALL be surfaced through the coverage pass only, and the Stop checkpoint ask SHALL NOT change or grow. It SHALL NOT block attestation, refuse a write or move content. Detection SHALL be structural over committed receipts and SHALL NOT claim to judge topic similarity. A page the caller may not read SHALL NOT appear in the report.
 
-#### Scenario: Several clusters are appended to one operational note
+#### Scenario: Several candidates are appended to one operational note
 
-- **WHEN** an episode's committed effects append three distinct clusters to one page
-- **THEN** the coverage pass reports that page as a sink with its candidates and the per-cluster disposition guidance
+- **WHEN** an episode's committed effects from three distinct candidates land on one non-exempt page
+- **THEN** the coverage pass reports that page as a sink with its type, `distinct_candidates` and candidate keys, and the disposition guidance
 - **AND** coverage can still be attested
 
-#### Scenario: Distinct pages are not a sink
+#### Scenario: One candidate with several effects is not a sink
 
-- **WHEN** an episode's candidates each land on their own page
+- **WHEN** a single candidate commits three effects to one page
+- **THEN** the coverage pass reports no sink
+
+#### Scenario: Distinct pages, exempt pages and withheld pages are not a sink
+
+- **WHEN** an episode's candidates each land on their own page, or the shared page is an entity, production-log or hub page, or the shared page is withheld from the caller
 - **THEN** the coverage pass reports no sink and carries no sink guidance
 
-### Requirement: Stable identity and contact facts route to the resolved person
+### Requirement: Stable person facts route to the entity and contact details to a governed page
 
-Capture guidance and the capture-sweep advisory SHALL recognise a stable, uniquely attributable identity or contact fact about a resolved person, including the vault owner's own entity, as an entity-level fact. Such a fact SHALL be routed to that entity, or to a linked personal-details node, under `proactive_capture`, rather than only being used in the reply. This SHALL NOT weaken the single-incidental-mention, ambiguity and unresolved-identity rules.
+Capture guidance and the capture-sweep advisory SHALL recognise a stable, uniquely attributable non-contact fact about a resolved person (role, affiliation, relationship), including the vault owner's own entity, as an entity-level fact routed to that entity under `proactive_capture`. Contact details (phone, address, email, identifiers) SHALL NEVER be written into an entity page body; they SHALL go to a separate page linked from the entity, released only through the existing governance scopes and audience policy, so a page withheld from a caller is absent from every read, search and coverage result for that caller. No new page type is introduced. This SHALL NOT weaken the single-incidental-mention, ambiguity and unresolved-identity rules, and the sweep advisory's `rule` SHALL stay within its 400-character wire cap.
 
 #### Scenario: The owner's own contact detail is read from a screenshot
 
-- **WHEN** a session reads a stable contact detail attributable to the vault owner and uses it in a reply
-- **THEN** the sweep and capture guidance direct the agent to record it on the owner's entity or linked personal-details node without waiting for the user to ask
+- **WHEN** a session reads a contact detail attributable to the vault owner and uses it in a reply
+- **THEN** the capture guidance directs the agent to a separate linked, governance-covered page and never to the owner's entity body
+
+#### Scenario: A withheld contact page is absent
+
+- **WHEN** a contact page is withheld from the caller by a governance scope
+- **THEN** it does not appear in the coverage pass's receipts or sink report
