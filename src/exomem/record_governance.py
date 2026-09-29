@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 import stat
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
@@ -924,13 +926,43 @@ def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
     """
     root = Path(vault_root)
     policy = egress.policy_module.load(root)
+    tombstones = egress.lifecycle.tombstoned_paths(root)
 
     def allowed(relative: str) -> bool:
         return not access.refuse_if_excluded(root, relative) and (
-            egress.release_level_for_path_only(root, relative, policy=policy) == egress.LEVEL_FULL
+            egress.release_level_for_path_only(
+                root, relative, policy=policy, tombstones=tombstones
+            )
+            == egress.LEVEL_FULL
         )
 
     return allowed
+
+
+#: The policy and tombstone set one Records operation decided against, keyed by
+#: vault root. Both are read once per pass because the plane does not move
+#: while the pass runs; per-path they cost a governance-root probe and a stat of
+#: every tombstone and event file, which made one append O(items).
+_AUTHORIZATION_PASS: ContextVar[tuple[Path, Any, frozenset[str]] | None] = ContextVar(
+    "exomem_records_authorization_pass", default=None
+)
+
+
+@contextmanager
+def authorization_pass(vault_root: Path) -> Iterator[None]:
+    """Read the policy and tombstones once for every `_authorize` in the block."""
+    root = Path(vault_root)
+    active = _AUTHORIZATION_PASS.get()
+    if active is not None and active[0] == root:
+        yield
+        return
+    token = _AUTHORIZATION_PASS.set(
+        (root, egress.policy_module.load(root), egress.lifecycle.tombstoned_paths(root))
+    )
+    try:
+        yield
+    finally:
+        _AUTHORIZATION_PASS.reset(token)
 
 
 def _authorize(
@@ -938,12 +970,19 @@ def _authorize(
 ) -> bool:
     if access.refuse_if_excluded(root, relative):
         return False
+    tombstones: frozenset[str] | None = None
+    active = _AUTHORIZATION_PASS.get()
+    if active is not None and active[0] == Path(root):
+        if policy is None:
+            policy = active[1]
+        tombstones = active[2]
     return (
         egress.release_level_for_path_only(
             root,
             relative,
             receipt_decision="release_authorized" if receipt else None,
             policy=policy,
+            tombstones=tombstones,
         )
         == egress.LEVEL_FULL
     )
@@ -1412,7 +1451,10 @@ def inspect_collection(
     # `records` already imports this governance boundary for mutations.
     from . import records
 
-    with egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector:
+    with (
+        authorization_pass(root),
+        egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector,
+    ):
         manifest = _resolve_released_collection(root, collection, receipt=True)
         if not _authorize(root, manifest.storage.source, receipt=True):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
@@ -2800,7 +2842,10 @@ def precommit_authorize_mutation(
     if snapshot is not None:
         paths.update(version.path for version in snapshot.source_versions)
         paths.update(path for path, kind, _digest in snapshot.source_inventory if kind == "file")
-    with egress.disclosure_boundary(root, "record_mutation_precommit") as collector:
+    with (
+        authorization_pass(root),
+        egress.disclosure_boundary(root, "record_mutation_precommit") as collector,
+    ):
         for path in sorted(paths):
             if not _authorize(root, path, receipt=True):
                 raise collections.CollectionError(
