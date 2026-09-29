@@ -1,6 +1,6 @@
 ## 1. Ruling
 
-- [x] 1.1 Orchestrator ruled on the API shape (PR #1452): N = 500, upsert-replace, insert-only without a natural key, receipt fallback for provenance, no new idempotency argument, abort default, no dry-run.
+- [x] 1.1 Orchestrator ruled on the API shape (PR #1452): N = 500 as the SQLite-engine target (capped at 50 per call until then), upsert-replace, insert-only without a natural key, receipt fallback for provenance, no new idempotency argument, abort default, no dry-run.
 
 ## 2. Writer
 
@@ -25,3 +25,8 @@
 - [x] 5.1 Measure 24 rows and 500 rows against 24 and 500 serial appends on a synthetic collection; record before/after in design.md and the PR body.
 - [x] 5.2 Gates: privacy gate, `ruff --select F`, `openspec validate --all --strict`, `generate-capabilities.py --check`, scoped pytest.
 - [ ] 5.3 Merge, then synchronize the delta into `records` and archive the change (orchestrator).
+
+## 6. Cap the lease hold
+
+- [x] 6.1 Ruled: cap rows per call so one call holds the writer lease for about 5 s at most. Measured 50 rows at 2.4 s (empty) and 4.3 s (400 items held), 100 rows at 4.3 s and 7.4 s; set `BULK_UPSERT_MAX_ROWS = 50`, keep `BULK_UPSERT_TARGET_ROWS = 500`, and state both with the reason in `describe`.
+- [x] 6.2 Regenerate the derived artifacts (tool schemas and fingerprint, capabilities doc, hosted v5 candidate locks) and record the new pending digest in the ChatGPT connector attestation; the owner refreshes the connector on deploy.

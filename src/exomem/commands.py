@@ -11846,7 +11846,7 @@ def op_record_memory(
         hold: Set false to refuse an invalid candidate without holding it. A refused
             append or update otherwise preserves the complete candidate as a held
             file under the collection and returns its reference beside the refusal.
-        rows: bulk_upsert only: 1 to 500 objects of `item`, optional `body` and
+        rows: bulk_upsert only: 1 to 50 objects of `item`, optional `body` and
             optional `source`, all committed under the one expected_container_hash.
             Each row reports inserted, updated, unchanged or rejected.
         source: bulk_upsert only: default provenance, the path of a preserved Sources

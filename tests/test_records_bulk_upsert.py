@@ -323,18 +323,19 @@ def test_natural_keyed_rows_report_their_identity_kind(vault_root: Path) -> None
     assert {row["identity"] for row in _bulk(vault_root, _rows(2))["rows"]} == {"natural-key"}
 
 
-def test_more_than_five_hundred_rows_refuse_whole(vault_root: Path) -> None:
+def test_more_rows_than_the_cap_refuse_whole(vault_root: Path) -> None:
     before = _state(vault_root)
     with pytest.raises(collections.CollectionError, match="BULK_UPSERT_TOO_MANY_ROWS"):
-        _bulk(vault_root, _rows(501))
+        _bulk(vault_root, _rows(records.BULK_UPSERT_MAX_ROWS + 1))
     assert _state(vault_root) == before
 
 
-def test_five_hundred_rows_are_accepted_for_planning(vault_root: Path) -> None:
-    # No source, so every row is rejected in planning: the bound admits 500 rows
-    # without publishing 500 files (the commit itself is measured in the PR).
-    result = _bulk(vault_root, _rows(500), source=None, on_reject="skip")
-    assert result["counts"]["rejected"] == 500
+def test_the_row_cap_admits_exactly_its_bound(vault_root: Path) -> None:
+    # No source, so every row is rejected in planning: the cap admits exactly its
+    # bound without publishing that many files.
+    cap = records.BULK_UPSERT_MAX_ROWS
+    result = _bulk(vault_root, _rows(cap), source=None, on_reject="skip")
+    assert result["counts"]["rejected"] == cap
     assert result["committed"] is False
 
 
@@ -420,8 +421,10 @@ def test_the_command_action_refuses_arguments_of_other_actions(vault_root: Path)
 
 def test_describe_teaches_bulk_upsert(vault_root: Path) -> None:
     text = repr(record_memory(vault_root, action="describe"))
-    for needle in ("bulk_upsert", "500", "2048", "unchanged", "on_reject"):
+    for needle in ("bulk_upsert", "2048", "unchanged", "on_reject", "max_rows_why", "target_rows"):
         assert needle in text
+    limits = record_memory(vault_root, action="describe")["bulk_upsert"]["limits"]
+    assert limits["max_rows"] == 50 and limits["target_rows"] == 500
 
 
 def _x3_rows() -> list[dict[str, Any]]:

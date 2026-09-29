@@ -5537,7 +5537,7 @@
             }
           ],
           "default": null,
-          "description": "bulk_upsert only: 1 to 500 objects of `item`, optional `body` and optional `source`, all committed under the one expected_container_hash. Each row reports inserted, updated, unchanged or rejected."
+          "description": "bulk_upsert only: 1 to 50 objects of `item`, optional `body` and optional `source`, all committed under the one expected_container_hash. Each row reports inserted, updated, unchanged or rejected."
         },
         "source": {
           "anyOf": [

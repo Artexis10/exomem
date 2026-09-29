@@ -8,7 +8,7 @@ Already true and reused: natural-key identity (`collections.derived_item_key`, `
 
 **Goals:** N rows, one guard, one write, one receipt; a complete per-row outcome report; safe retry; no weaker guarantee than a single append.
 
-**Non-Goals:** streaming or resumable multi-request imports (N is bounded at 500); a bulk `update` of arbitrary existing items by `item_key` (this action upserts by natural key only); bulk deletion; server-side interpretation or normalisation of rows (the caller supplies normalised rows); the `dataset` storage strategy (still read-only); any change to hosted frozen candidates.
+**Non-Goals:** streaming or resumable multi-request imports (a call is bounded at 50 rows; a larger import is the client calling repeatedly); a bulk `update` of arbitrary existing items by `item_key` (this action upserts by natural key only); bulk deletion; server-side interpretation or normalisation of rows (the caller supplies normalised rows); the `dataset` storage strategy (still read-only); any change to hosted frozen candidates.
 
 ## Decisions
 
@@ -26,7 +26,7 @@ record_memory(
   expected_container_hash="...",   # required; ONE guard for the whole batch
   source="Evidence/....md",        # optional batch default provenance ref
   on_reject="abort" | "skip",      # default "abort"
-  rows=[ { "item": {...}, "body": "...", "source": "Evidence/....md" }, ... ]  # 1..500
+  rows=[ { "item": {...}, "body": "...", "source": "Evidence/....md" }, ... ]  # 1..50
 )
 ```
 
@@ -86,7 +86,7 @@ The writer already refuses any mutation unless the caller's release filter allow
 
 ### 10. Limits
 
-500 rows per call (a proposal; the constant is `BULK_UPSERT_MAX_ROWS`, exposed by `describe`). Each row obeys the existing per-value (32 KiB) and body limits; the request is also bounded in total bytes. The existing collection ceiling (`_MAX_ITEM_FILES`, 2,000) applies to the projected post-batch item count, so a batch that would cross it refuses whole with `COLLECTION_ITEM_LIMIT`, and the chain-depth budget (decision 7) refuses whole with `BULK_UPSERT_AUDIT_DEPTH`. A larger source is sent as several batches, each chained from the previous response's container hash: still 1/500th of the round trips.
+50 rows per call (`BULK_UPSERT_MAX_ROWS`, exposed by `describe` with the reason). The writer lease is single and a bulk holds it for the whole publish; the hold grows faster than the row count (measured: 50 rows about 2.4 s into an empty ledger and 4.3 s into one holding 400 items, 100 rows 4.3 s and 7.4 s, 500 rows 54 s), and one call blocking every other write for a minute is unacceptable. 50 keeps one call near 5 s. `BULK_UPSERT_TARGET_ROWS = 500` is the documented per-call size for the SQLite-authoritative engine, whose writes do not grow with the number of files published; until then a larger import is repeated calls, each chained from the previous response's `after_container_hash`. Each row obeys the existing per-value (32 KiB) and body limits.
 
 ### 11. Held candidates
 
@@ -99,12 +99,12 @@ Bulk does not hold (ruled). A rejected row is reported with its diagnostics and 
 ## Risks / Trade-offs
 
 - **Blast radius of one wrong batch.** Upsert can overwrite. Mitigation: the container-hash guard, `abort` default, per-row outcomes with the updated identities named, and the audit transition. No dry-run action (ruled).
-- **Larger single transaction.** One `batch_atomic_write` of up to ~500 item files. Bounded by N and by the existing item ceiling; measured before the constant is ratified.
+- **Larger single transaction.** One `batch_atomic_write` of up to 50 item files, bounded by the cap and the existing item ceiling. The cap was set from measurements (decision 10).
 - **Behavioural difference from `append`.** `updated` for a changed payload. Named in `describe` and the spec so agents do not expect `RECORD_ID_CONFLICT`.
 
 ## Open Questions
 
-None: ruled on PR #1452 (N = 500 ratified and measured after building; abort default, no dry-run; provenance falls back to the receipt; transport key plus content replay only; insert-only without a natural key).
+None: ruled on PR #1452 (N = 500 kept as the SQLite-engine target, capped at 50 per call on the current engine after measurement; abort default, no dry-run; provenance falls back to the receipt; transport key plus content replay only; insert-only without a natural key).
 
 ## Implementation notes
 
@@ -121,4 +121,4 @@ None: ruled on PR #1452 (N = 500 ratified and measured after building; abort def
 | 100 | 71.9 s | 4.8 s |
 | 500 | not run (extrapolates to about 6 min) | 57 s |
 
-With the #1457 write-path branch merged in: serial 14.0 s / 55.9 s, bulk 1.5 s / 4.5 s / 54 s. Bulk is roughly 10x faster at 24 and 12-16x at 100, but grows superlinearly at 500 because `vault.batch_atomic_write` validates and fans out per target, so one publication of 500 files holds the writer lease for about a minute. Batching those per-target costs is the next lever and belongs with #1457's work, not here; until then a caller wanting shorter lease holds sends batches of about 100 chained by the returned container hash.
+With the #1457 write-path branch merged in: serial 14.0 s / 55.9 s, bulk 1.5 s / 4.5 s / 54 s. Bulk is roughly 10x faster at 24 and 12-16x at 100, but grows superlinearly at 500 because `vault.batch_atomic_write` validates and fans out per target, so one publication of 500 files holds the writer lease for about a minute. Batching those per-target costs is the next lever and belongs with #1457's work, not here; that is why a call is capped at 50 rows (decision 10).

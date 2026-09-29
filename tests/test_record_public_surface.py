@@ -25,6 +25,7 @@ RECORD_ACTIONS = (
     "query",
     "create",
     "append",
+    "bulk_upsert",
     "update",
     "revise",
     "rebaseline",
@@ -35,7 +36,9 @@ RECORD_ACTIONS = (
 #: is an immutable release identity whose contract must not follow the live
 #: registry (see `hosted_legacy_schemas`), so a new action lands on the current
 #: profile and leaves this list where its promotion record found it.
-HOSTED_V2_RECORD_ACTIONS = tuple(action for action in RECORD_ACTIONS if action != "discard")
+HOSTED_V2_RECORD_ACTIONS = tuple(
+    action for action in RECORD_ACTIONS if action not in {"discard", "bulk_upsert"}
+)
 
 
 def test_record_command_exposes_the_lifecycle_arguments_and_selector_routing() -> None:
@@ -76,7 +79,7 @@ def test_record_command_exposes_the_lifecycle_arguments_and_selector_routing() -
     )
     assert all(
         not commands.invocation_is_read_only(command, {"action": action})
-        for action in ("create", "append", "update", "revise", "rebaseline", "discard")
+        for action in ("create", "append", "bulk_upsert", "update", "revise", "rebaseline", "discard")
     )
 
 

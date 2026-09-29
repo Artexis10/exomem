@@ -28,7 +28,14 @@ log = logging.getLogger(__name__)
 _MAX_WHY_BYTES = 512
 _MAX_VALUE_BYTES = 32 * 1024
 _MAX_ITEM_FILES = 2_000
-BULK_UPSERT_MAX_ROWS = 500
+# One call holds the writer lease for its whole publish, and that hold grows
+# faster than the row count (about 2.4 s for 50 rows into an empty ledger, 4.3 s
+# into one holding 400 items, 54 s for 500). The cap keeps one call near 5 s;
+# a larger import is the client calling repeatedly, each call chained from the
+# previous response's container hash. The target stays 500 for the SQLite
+# engine, whose writes do not grow with the number of files published.
+BULK_UPSERT_MAX_ROWS = 50
+BULK_UPSERT_TARGET_ROWS = 500
 # The audit chain walk refuses beyond this depth (`chain-depth`), and a bulk
 # upsert writes one event per written row, so it must fit inside the budget.
 _MAX_AUDIT_CHAIN_DEPTH = 2048

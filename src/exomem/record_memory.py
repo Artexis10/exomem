@@ -231,7 +231,7 @@ def record_memory(
         hold: Set false to refuse an invalid candidate without holding it. A refused
             append or update otherwise preserves the complete candidate as a held
             file under the collection and returns its reference beside the refusal.
-        rows: bulk_upsert only: 1 to 500 objects of `item`, optional `body` and
+        rows: bulk_upsert only: 1 to 50 objects of `item`, optional `body` and
             optional `source`, committed under ONE `expected_container_hash`.
         source: bulk_upsert only: default provenance, the path of a preserved
             Sources or Evidence page, for rows that name none.
@@ -468,7 +468,8 @@ def _bulk_upsert_contract() -> dict[str, Any]:
             "collection": "the Records collection",
             "rows": (
                 f"1 to {records.BULK_UPSERT_MAX_ROWS} objects of item, optional body and "
-                "optional source"
+                "optional source per call; send a larger import as repeated calls, each "
+                "chained from the previous response's after_container_hash"
             ),
             "expected_container_hash": "required; compared once for the whole batch",
             "why": "one audit reason for the batch",
@@ -514,6 +515,16 @@ def _bulk_upsert_contract() -> dict[str, Any]:
         ),
         "limits": {
             "max_rows": records.BULK_UPSERT_MAX_ROWS,
+            "max_rows_why": (
+                "one call holds the single writer lease for its whole publish, and that hold "
+                "grows faster than the row count, so the cap keeps one call near 5 seconds "
+                "and never blocks every other write for a minute"
+            ),
+            "target_rows": records.BULK_UPSERT_TARGET_ROWS,
+            "target_rows_note": (
+                "the intended per-call size once collections are SQLite-authoritative; "
+                "until then a client imports in repeated calls of at most max_rows"
+            ),
             "audit_chain_depth_budget": records._MAX_AUDIT_CHAIN_DEPTH,
             "depth_rule": (
                 f"each written row consumes one of the collection's {records._MAX_AUDIT_CHAIN_DEPTH} "

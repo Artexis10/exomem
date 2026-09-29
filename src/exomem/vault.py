@@ -5315,7 +5315,11 @@ def _batch_atomic_write_locked(
             )
             _after_batch_destination_published(final)
             workspace.recheck()
-        recheck_path_guards(Path(vault_root), (*read_only_guards, *all_completion_guards))
+        completion = (*read_only_guards, *all_completion_guards)
+        if completion:
+            # `vault_root` is None for a write with no guarded ancestors, so it
+            # is only turned into a Path when there is something to prove.
+            recheck_path_guards(Path(vault_root), completion)
         for workspace in workspace_by_parent.values():
             workspace.recheck()
         for guard in final_guards.values():
