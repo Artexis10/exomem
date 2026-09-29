@@ -145,16 +145,16 @@ Reproduce: `scripts/bootstrap-byte-breakdown.py --sections`, `scripts/context-fo
 
 | surface | off | light | balanced | maximal |
 |---|---:|---:|---:|---:|
-| default (generic MCP) | 60,481 to 11,747 | 60,765 to 12,031 | 62,698 to 13,973 | 63,055 to 14,330 |
-| claude-code | 60,490 to 11,756 | 60,774 to 12,040 | 62,707 to 13,982 | 63,064 to 14,339 |
-| hosted-alpha-agent-v5 | 59,025 to 11,570 | 59,309 to 11,854 | 60,960 to 13,745 | 61,203 to 14,102 |
-| hosted-alpha-agent-v1 (frozen) | 51,906 | 52,190 | 53,841 | 54,084 |
-| hosted-alpha-agent-v3 (frozen) | 56,448 | 56,732 | 58,383 | 58,626 |
-| hosted-alpha-agent-v4 (frozen) | 58,760 | 59,044 | 60,695 | 60,938 |
+| default (generic MCP) | 60,481 to 11,838 | 60,765 to 12,122 | 62,698 to 14,048 | 63,055 to 14,398 |
+| claude-code | 60,490 to 11,847 | 60,774 to 12,131 | 62,707 to 14,057 | 63,064 to 14,407 |
+| hosted-alpha-agent-v5 | 59,025 to 11,661 | 59,309 to 11,945 | 60,960 to 13,820 | 61,203 to 14,170 |
+| hosted-alpha-agent-v1 (frozen) | 51,890 | 52,174 | 53,809 | 54,052 |
+| hosted-alpha-agent-v3 (frozen) | 56,432 | 56,716 | 58,351 | 58,594 |
+| hosted-alpha-agent-v4 (frozen) | 58,744 | 59,028 | 60,663 | 60,906 |
 
-Worst case (claude-code, maximal) 14,339 against the ruled 15,000 ceiling: 661 bytes of margin, above the 512-byte warning band. `bootstrap(section="all")` returns the complete pre-core payload (63,055 at default/maximal). Section sizes at maximal: authoring 18,992; routing 11,375; entities 7,454; adoption 6,510; records_planning 5,360; epistemics 3,138; envelope 1,917; diagnostics_reading 1,128.
+Worst case (claude-code, maximal) 14,407 against the ruled 15,000 ceiling: 593 bytes of margin, above the 512-byte warning band. `bootstrap(section="all")` returns the complete pre-core payload (63,055 at default/maximal). Section sizes at maximal: authoring 18,992; routing 11,375; entities 7,454; adoption 6,510; records_planning 5,360; epistemics 3,138; envelope 1,917; diagnostics_reading 1,128.
 
-`profile="session"` (default surface): 18,726 / 19,010 / 20,943 / 21,300 at off / light / balanced / maximal, against 22,008 at maximal before. It is rebased on the core (core `engagement` and `server`, plus the section index) but does not get much smaller: the tests pin the live state a skill-holding client is served (workflow contracts, relation vocabulary, entity registry, source taxonomy, vocabulary workflow, the post-write handling the skill does not carry), and that state is most of its size.
+`profile="session"` (default surface): 18,710 / 18,994 / 20,911 / 21,261 at off / light / balanced / maximal, against 22,008 at maximal before. It is rebased on the core (core `engagement` and `server`, plus the section index) but does not get much smaller: the tests pin the live state a skill-holding client is served (workflow contracts, relation vocabulary, entity registry, source taxonomy, vocabulary workflow, the post-write handling the skill does not carry), and that state is most of its size.
 
 ### 6.2 Fifty-turn coding session, bytes injected
 
@@ -164,21 +164,21 @@ Balanced:
 
 | item | Claude Code before | after | Codex or generic before | after |
 |---|---:|---:|---:|---:|
-| session carrier (skill + session, or compact) | 51,826 | 37,050 | 62,698 | 13,973 |
+| session carrier (skill + session, or compact) | 51,826 | 37,018 | 62,698 | 14,048 |
 | continuation checkpoint (1 compaction, cap) | 4,096 | 2,048 | 4,096 | 2,048 |
 | Stop nudges | 30,090 | 10,035 | 30,090 | 10,035 |
 | retrieval reminders | 6,027 | 716 | 6,027 | 716 |
-| **total** | **92,039** | **49,849** | **102,911** | **26,772** |
+| **total** | **92,039** | **49,817** | **102,911** | **26,847** |
 
 Maximal:
 
 | item | Claude Code before | after | Codex or generic before | after |
 |---|---:|---:|---:|---:|
-| session carrier | 52,183 | 37,407 | 63,055 | 14,330 |
+| session carrier | 52,183 | 37,368 | 63,055 | 14,398 |
 | continuation checkpoint (cap) | 4,096 | 2,048 | 4,096 | 2,048 |
 | Stop nudges | 69,385 | 18,775 | 69,385 | 18,775 |
 | retrieval reminders | 38,745 | 9,101 | 38,745 | 9,101 |
-| **total** | **164,409** | **67,331** | **175,281** | **44,254** |
+| **total** | **164,409** | **67,292** | **175,281** | **44,322** |
 
 The Claude Code carrier stays large because the skill (16,107 bytes now, from 30,175) and the session profile are both loaded. Tool schemas (170 KB) are untouched here: that lane was split out by ruling, and the only schema change in this change is the new `section` parameter on `bootstrap` (+229 bytes).
 
@@ -189,3 +189,9 @@ The Claude Code carrier stays large because the skill (16,107 bytes now, from 30
 - **Checkpoint id and transcript-binding lines** stay in the model-facing text: existing tests pin them.
 - **"Withheld is absent" sentence.** Dropped by ruling: server-enforced.
 - **Recall rule on hosted (found and fixed here, ruled).** On hosted v4 and v5 the surface filter dropped the whole `recall` contract, because it opens with the `activate_context` carrier and hosted does not export that command; hosted clients, which are hookless, received no recall-before-answering text in the bootstrap. The carrier line is now surface-aware: where `activate_context` is not exported the same instruction names `ask_memory`. This applies to unpublished surfaces only (hosted v5 grows by 231 bytes at balanced and 345 at maximal); v1 to v4 are frozen and keep the published payload, which still lacks the recall text. `test_every_surface_the_split_applies_to_carries_a_recall_rule` pins it.
+
+### 6.4 CI follow-up (1be00878)
+
+- The assistant-bootstrap probe in `scripts/graph_value_benchmark.py` requires the compact payload to teach filter-only lookup. The core now carries a 87-byte `routing.filter_only` line (manifest rule `filter-only-lookup`); the core worst case moved 14,339 to 14,407 bytes, 593 bytes under the ceiling. The frozen-profile rows above moved with the base, not with this change.
+- The reminder-only retrieval hook keeps the client-wide cooldown (`test_membench_trackc` cp14): a second tab opened inside the window stays quiet and is reminded once the window passes. A compaction clears the client-wide stamp too, because a session that just compacted is fresh again.
+- Two shard failures were this change's own: two new tests called `logging.disable(logging.CRITICAL)` and never restored it, which silenced any later logging test in the same process (`test_log_process_files`, `test_session_oauth`). Removed and pinned by running the old test file before those two tests.

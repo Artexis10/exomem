@@ -991,9 +991,8 @@ def test_bootstrap_no_longer_publishes_the_fallback_as_the_capture_default(
 
 
 def test_bootstrap_registers_the_classification_suggestion_kind(vault: Path) -> None:
-    post_write = commands.op_bootstrap(vault, profile="compact", section="all")["authoring_contract"][
-        "post_write"
-    ]
+    reference = commands.op_bootstrap(vault, profile="compact", section="all")
+    post_write = reference["authoring_contract"]["post_write"]
     assert "source_classification_debt" in post_write["structure_suggestion"]
     assert "source_classification_debt" in post_write["structure_suggestion_handling"]
 
