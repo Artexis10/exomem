@@ -65,16 +65,18 @@ def test_capture_guidance_adds_a_native_script_alias_for_a_name_written_in_anoth
     assert '"field": "aliases"' in section or "field: aliases" in section
 
 
-def test_capture_workflow_routes_stable_person_and_self_facts_to_the_entity() -> None:
+def test_capture_workflow_keeps_contact_details_off_the_entity_page() -> None:
     text = " ".join(
         (SCHEMA / "workflow-skills" / "exomem-capture" / "SKILL.md")
         .read_text(encoding="utf-8")
         .split()
     )
 
-    assert "identity or contact fact" in text
-    assert "vault owner" in text
-    assert "personal-details" in text
-    assert "proactive_capture" in text
+    assert "vault owner" in text and "proactive_capture" in text
     # A fact used in the reply is not yet captured: it is written when learned.
     assert "not just in the reply" in text
+    assert "never written into an entity page body" in text
+    assert "separate page linked from the entity" in text
+    assert "govern_memory" in text
+    # No page type is invented for it.
+    assert "personal-details" not in text

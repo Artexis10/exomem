@@ -757,18 +757,34 @@ def test_every_batch_scope_is_paired_with_the_shared_batch_carrier() -> None:
     )
 
 
-def test_a_stable_identity_or_contact_fact_about_a_person_is_an_entity_level_fact(
+def test_the_sweep_rule_keeps_contact_details_out_of_the_entity_body(
     monkeypatch: pytest.MonkeyPatch, clock: _Clock, tmp_path: Path
 ) -> None:
-    """A stable, uniquely attributable detail about a resolved person -- the
-    vault owner included -- belongs on that person's entity, not only in the
-    reply that used it. The sweep says so in the rule and lists the class."""
+    """A person's role goes to the entity; contact details only to a linked
+    governed page. The rule is the only prose on the wire, so it says so."""
     _caller(monkeypatch, **HTTP_PRINCIPAL)
 
     block = capture_sweep.block(tmp_path)
 
     assert block is not None
     rule = block["rule"].lower()
-    assert "identity or contact" in rule and "owner" in rule
-    assert "proactive_capture" in rule and "entity" in rule
-    assert any("contact" in item for item in block["consider"])
+    assert "role" in rule and "entity" in rule
+    assert "contact details" in rule and "governed page" in rule
+    assert "never the entity body" in rule
+    # The advisory grows only by the rule: the example list is unchanged.
+    assert block["consider"] == [
+        "conclusion",
+        "outcome or state change",
+        "stable preference",
+        "method or parameter",
+        "entity facet",
+        "operational or vendor quirk",
+        "evidence worth preserving",
+        "relation",
+        "planning implication",
+        "record implication",
+    ]
+
+
+def test_the_sweep_rule_stays_within_its_wire_cap() -> None:
+    assert len(capture_sweep.RULE) <= 400
