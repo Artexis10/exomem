@@ -33,6 +33,7 @@ from typing import Any, NamedTuple
 
 from . import (
     activation_conventions,
+    context_intents,
     context_roles,
     request_budget,
     source_taxonomy,
@@ -1559,7 +1560,9 @@ def _indexed_title(index: working_set_index.WorkingSetIndex | None, path: str) -
 
 
 def _carry_roles(
-    registry: context_roles.RoleRegistry, analysis: Any
+    registry: context_roles.RoleRegistry,
+    analysis: Any,
+    anchor_names: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, str], ...]:
     """The lenses a carried page is read through.
 
@@ -1576,6 +1579,12 @@ def _carry_roles(
     cued: list[tuple[int, Any]] = []
     for role in registry.roles.values():
         if role.lane != "units":
+            continue
+        if role.intent:
+            # An intent role is served only when its shape is present, never
+            # merely because a carried page leaves a slot free.
+            if context_intents.intent_matches(role.intent, analysis, anchor_names):
+                cued.append((0, role))
             continue
         matched = bool(role.cues) and any(cue in text for cue in role.cues)
         cued.append((0 if matched else 1, role))
@@ -1662,12 +1671,13 @@ def _carried_packet(
     block.
     """
     path, _score = page
-    roles = _carry_roles(registry, analysis)
+    title = _indexed_title(index, path) or path
+    roles = _carry_roles(registry, analysis, context_intents.anchor_terms((title,)))
     carried = working_set_resolve.ResolvedAnchor(
         anchor_id=path,
         path=path,
         ref=None,
-        title=_indexed_title(index, path) or path,
+        title=title,
         kind="page",
         lifecycle=_page_lifecycle(vault_root, path),
         status=status,
@@ -1812,7 +1822,10 @@ def _follow_up_packet(
             raise BudgetExhausted("working_set.roles")
         with _span(timings, "working_set.roles"):
             roles = context_roles.select_roles(
-                registry, anchor_kinds=(carried.kind,), analysis=analysis
+                registry,
+                anchor_kinds=(carried.kind,),
+                analysis=analysis,
+                anchor_names=context_intents.anchor_terms((carried.title,)),
             )
         if budget_exhausted("working_set.current_state"):
             raise BudgetExhausted("working_set.current_state")
@@ -2330,7 +2343,14 @@ def compile_packet(
         raise BudgetExhausted("working_set.roles")
     with _span(timings, "working_set.roles"):
         anchor_kinds = tuple(dict.fromkeys(anchor.kind for anchor in resolution.resolved_anchors))
-        roles = context_roles.select_roles(registry, anchor_kinds=anchor_kinds, analysis=analysis)
+        roles = context_roles.select_roles(
+            registry,
+            anchor_kinds=anchor_kinds,
+            analysis=analysis,
+            anchor_names=context_intents.anchor_terms(
+                anchor.title for anchor in resolution.resolved_anchors
+            ),
+        )
 
     # RESOLVED anchors only: a `partial` anchor is listed in `anchors[]` with
     # its status and evidence, but no lane runs for it and nothing of its page
