@@ -297,3 +297,74 @@ Add the four rows above as red twins beside
 - **CI:** run 36497983471 on the head: the required CI gate passed, and so did
   core shards 1-12, harness shards 1-4, lint, OpenSpec, Windows NTFS, E2E,
   package build, onboarding and the TUI. Conditional jobs were skipped.
+
+## Recheck at 51299916 (37d47199 red, 51299916 green)
+
+**Verdict: APPROVE, on one condition before merge:** sync the spec and design
+(LOW 9). MEDIUM 6 is fixed, and every earlier control still holds. The two new
+edge cases don't block.
+
+### Finding status
+
+- **HIGH 1, MEDIUM 2, MEDIUM 3, LOW 4 and MEDIUM 5 are still fixed.** The
+  suite passes, including the five particle-glued turns and `ねこやなぎ銀行`,
+  both alone and after `駅前の`.
+- **MEDIUM 6 is FIXED.** The fix has two parts. First,
+  `working_set_resolve.py:652-677` also emits the unsplit stretch and each
+  cut before a particle. Second, `:1073-1089` then consumes the head.
+
+Probes used an entity for each full name and a note for its head:
+
+- The four rows from the previous recheck now resolve only the full name,
+  and the head is `partial`.
+- `木村はるか` resolves when it ends a sentence (`明日は木村はるか`,
+  `予定は木村はるか。`), and before each of が, の, は, を, に, と and も.
+- `松井ともこの電話番号` and `サクラもち本舗の新作` resolve.
+- **Withheld = absent.** Take a restricted caller, with `木村はるか` withheld,
+  and the turn `木村はるかの予定を確認して`. `木村` resolves with
+  `exact_alias`, exactly as in the twin where `木村はるか` does not exist.
+  `audience_view` filters rows before `candidates_for`, so a hidden longer
+  name consumes nothing.
+
+### NEW LOW 7: head consumption ignores position
+
+`working_set_resolve.py:1083-1087` consumes a word that appears anywhere
+inside a longer matched word. In `サクラとサクラもち本舗の違い`, the user
+names both pages, yet `サクラ` is `partial`. **Fix:** consume only when
+every occurrence lies inside the longer word's span, as `_contained_names`
+does.
+
+### NEW LOW 8: a name ending in hiragana absorbs the next kana word
+
+The cut candidates are why. `サクラもちがうって言ってた` (サクラ + も + 違う)
+and `サクラもちかくにある` resolve the entity `サクラもち`, and the note
+`サクラ` is only `partial`. At f1dacb91 both resolved `サクラ`. Kana-only text
+can be read either way (`木村はるかに遠い` has the same problem), and longest
+match is defensible. Pin the chosen reading with a twin.
+
+### NEW LOW 9: the contract text is stale
+
+51299916 touches only `src/` and `tests/`. `spec.md:337-343` and
+`design.md:191` still describe only the leading-particle split. They don't
+cover the unsplit stretch, the cut candidates or head consumption. Under
+CLAUDE.md, a contract change must update its spec. Add `サクラもち本舗` and
+`木村はるか` to the scenario.
+
+### Other files
+
+- The fix commit edits a words-only pin (`test_cjk_readiness.py:728-742`,
+  `ハヤブサ号のもう一台` → `う一台`). That is not a behavioural weakening.
+- ASCII turns have no embedded words, so the new sets stay empty for
+  English. The extra work is linear in rows, which are capped by
+  `MAX_ANCHORS`.
+
+### Tests and gates
+
+- Scoped run: 326 passed and 1 failed, across `test_cjk_readiness`,
+  `test_working_set_unicode_terms`, `test_working_set_resolve`,
+  `test_working_set_learning`, `test_learning_fresh_session_journey` and
+  `test_activation_lexical_term_budget`. The failure is the same SQLite-plan
+  test that fails on `main`.
+- `ruff --select F` is clean, and `generate-capabilities.py --check` reports
+  current.
+- CI: the required CI gate passed on run 36553480391.
