@@ -960,6 +960,11 @@ class CreationCommit:
     # asks the agent for one bounded pass over the recent exchange after a quiet
     # interval. Same seam, same fail-open guard, its own governance.
     capture_sweep: dict[str, Any] | None = None
+    # Advisory only, and a FOURTH kind: this one names an unresolved identity
+    # THIS write's own link just brought to the two-page gate
+    # (`write-time-identity-candidates`), not a fact about the page's scope, the
+    # vault's backlog, or the episode.
+    entity_candidate: dict[str, Any] | None = None
     # Server-internal point-lookup context. The mutation terminal consumes and
     # strips it; no response detail exposes a local vault path.
     relation_advisory_context: dict[str, str] | None = None
@@ -985,6 +990,8 @@ class CreationCommit:
             value["due_state"] = self.due_state
         if self.capture_sweep is not None:
             value["capture_sweep"] = self.capture_sweep
+        if self.entity_candidate is not None:
+            value["entity_candidate"] = self.entity_candidate
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
         if self.vocabulary_resolution is not None:
@@ -1067,6 +1074,10 @@ class ExistingCommit:
     # Advisory only, and a THIRD kind again: the two above describe the page and
     # the vault, while this one describes the EPISODE this write sits in.
     capture_sweep: dict[str, Any] | None = None
+    # Advisory only, and a FOURTH kind: this one names an unresolved identity
+    # THIS write's own link just brought to the two-page gate
+    # (`write-time-identity-candidates`).
+    entity_candidate: dict[str, Any] | None = None
     relation_advisory_context: dict[str, str] | None = None
     # Exact canonical write bytes, not the normalized semantic source hash.
     # Absent on legacy/replay results without an exact byte proof.
@@ -1093,6 +1104,8 @@ class ExistingCommit:
             value["due_state"] = self.due_state
         if self.capture_sweep is not None:
             value["capture_sweep"] = self.capture_sweep
+        if self.entity_candidate is not None:
+            value["entity_candidate"] = self.entity_candidate
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
         if self.after_hash is not None:
@@ -2065,8 +2078,13 @@ def _commit_existing_locked(
     auxiliaries: tuple[vault.PlannedWrite, ...],
     derived_auxiliaries: tuple[tuple[str, vault.PlannedWrite], ...],
     result: semantic_contract.SemanticContractResult,
+    index_reports: list[Any] | None = None,
 ) -> ExistingCommit:
-    """Plan lifecycle state and commit while the semantic namespace is held."""
+    """Plan lifecycle state and commit while the semantic namespace is held.
+
+    The batch's index fan-out runs as the namespace is released, so its report
+    lands in `index_reports` after this returns; the caller attaches it.
+    """
     if preflight.committed_replay:
         if preflight.applicability != "full":
             return ExistingCommit(
@@ -2215,7 +2233,7 @@ def _commit_existing_locked(
             "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
             str(error),
         ) from error
-    reports: list[Any] = []
+    reports: list[Any] = [] if index_reports is None else index_reports
     from . import vocabulary_auxiliaries
 
     manifest = vocabulary_auxiliaries.seal(
@@ -2552,6 +2570,43 @@ def _capture_sweep_block(
         return None
 
 
+def _entity_candidate_block(
+    vault_root: Path,
+    state: Any,
+    corpus: semantic_contract.SemanticCorpusContext | None,
+    *,
+    previous_state: Any = None,
+) -> dict[str, Any] | None:
+    """The write-time `entity_candidate` advisory this write may carry.
+
+    Shares `_capture_sweep_block`'s placement, cost profile and fail-open
+    guard: the wikilinks and their resolution come from the page state and
+    corpus the preflight already built, and the one extra read this adds is a
+    single keyed lookup against the already-maintained graph dependency index
+    (`write-time-identity-candidates` design D5), never a vault walk.
+
+    `previous_state` is the page's pre-write `SemanticPageState` for an edit
+    (`ExistingPreflight.before`) or `None` for a creation, where every link is
+    new by construction. It is what tells a genuinely new link from a no-op
+    re-edit of an already-linking page, because the graph's own dependency row
+    for this page can already reflect this exact commit by the time this runs.
+
+    A fault here costs the caller a candidate, never the write.
+    """
+    try:
+        from . import capture_sweep
+
+        return capture_sweep.entity_candidate(
+            vault_root,
+            page_state=state,
+            corpus=corpus,
+            previous_page_state=previous_state,
+        )
+    except Exception:  # noqa: BLE001 — a candidate advisory never breaks a commit
+        log.debug("entity-candidate advisory failed (non-fatal)", exc_info=True)
+        return None
+
+
 def _page_reference(state: Any) -> str | None:
     """The canonical `exomem://memory/<id>` reference for a committed page state.
 
@@ -2598,6 +2653,12 @@ def commit_existing(
     )
     due = _due_state_block(vault_root, preflight.path)
     sweep = _capture_sweep_block(vault_root, preflight.after, preflight.after_corpus)
+    candidate = _entity_candidate_block(
+        vault_root,
+        preflight.after,
+        preflight.after_corpus,
+        previous_state=preflight.before,
+    )
     context = {
         "vault": str(Path(vault_root)),
         "registry_hash": preflight.after.relation_registry_hash,
@@ -2608,6 +2669,7 @@ def commit_existing(
         records_routing=delivered_routing,
         due_state=due,
         capture_sweep=sweep,
+        entity_candidate=candidate,
         relation_advisory_context=context,
     )
 
@@ -2743,6 +2805,7 @@ def _commit_existing(
                 except Exception:  # noqa: BLE001 — rebuildable graph cache never blocks commit
                     pass
 
+        index_reports: list[Any] = []
         try:
             with _timed_acquire(
                 timings,
@@ -2751,13 +2814,18 @@ def _commit_existing(
             ):
                 log_active_mutation_phase("semantic_locked_commit_start")
                 with mutation_timing_span(timings, "commit.locked_commit"):
-                    return _commit_existing_locked(
+                    committed = _commit_existing_locked(
                         root,
                         preflight=preflight,
                         auxiliaries=auxiliaries,
                         derived_auxiliaries=derived_auxiliaries,
                         result=result,
+                        index_reports=index_reports,
                     )
+            # The fan-out ran as the creation lock was released.
+            if committed.index_report is None and index_reports:
+                committed = replace(committed, index_report=index_reports[0])
+            return committed
         except vault.PathGuardError as error:
             # A caller-captured auxiliary guard (log/index) lost a race the
             # wide boundary used to prevent. The batch aborted atomically —
@@ -4135,6 +4203,7 @@ def commit_creation(
     )
     due = _due_state_block(vault_root, preflight.destination)
     sweep = _capture_sweep_block(vault_root, preflight.semantic_state, preflight.corpus)
+    candidate = _entity_candidate_block(vault_root, preflight.semantic_state, preflight.corpus)
     context = {
         "vault": str(Path(vault_root)),
         "registry_hash": preflight.semantic_state.relation_registry_hash,
@@ -4145,6 +4214,7 @@ def commit_creation(
         records_routing=delivered_routing,
         due_state=due,
         capture_sweep=sweep,
+        entity_candidate=candidate,
         relation_advisory_context=context,
         vocabulary_resolution=(
             preflight.vocabulary_binding.as_dict()

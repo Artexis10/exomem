@@ -979,6 +979,327 @@
       }
     ]
   },
+  "amended_a9": {
+    "agent_choice_digest": "bfedee2fce49dd23d2cae7e2756c7a9f8d747dc5e72c4ef7152ea5a35c064a2f",
+    "amendments": [
+      "agent_choice"
+    ],
+    "audit_passed": false,
+    "c9_padding_robustness": {
+      "base_case_id": "C2",
+      "padded_case_id": "C9",
+      "passed": false,
+      "precision_delta": null,
+      "precision_padded": null,
+      "reasons": [
+        "padded-tree precision below the 0.8 floor"
+      ],
+      "recall_base": 0.5,
+      "recall_padded": 0.5
+    },
+    "hedged_twins": {
+      "count": 0,
+      "total": 4
+    },
+    "per_case": [
+      {
+        "case_id": "C1",
+        "failure_reasons": [
+          "A9: 2 gold page(s) not served under an honest label",
+          "A9: gold fact(s) missing from served material: ['weekly limit', 'capacity ceiling']"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 3
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 1.0
+      },
+      {
+        "case_id": "T1",
+        "failure_reasons": [
+          "twin surfaced a ref outside its own gold",
+          "precision 0.00 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 3
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "C2",
+        "failure_reasons": [
+          "A9: 1 gold page(s) not served under an honest label",
+          "A9: gold fact(s) missing from served material: ['grill', 'cooking method']"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T2",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      },
+      {
+        "case_id": "C3",
+        "failure_reasons": [
+          "A9: 2 gold page(s) not served under an honest label",
+          "A9: gold fact(s) missing from served material: ['extending the reporting module']"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 1,
+          "total": 1
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T3",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 1,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": 1.0
+      },
+      {
+        "case_id": "C4",
+        "failure_reasons": [
+          "A9: 1 gold page(s) not served under an honest label"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "T4",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 2,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      },
+      {
+        "case_id": "C5",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 2,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 1.0
+      },
+      {
+        "case_id": "T5",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 1,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 1.0
+      },
+      {
+        "case_id": "C6",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 0
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T6",
+        "failure_reasons": [
+          "twin surfaced a ref outside its own gold",
+          "precision 0.00 below the 0.8 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": 0.0
+      },
+      {
+        "case_id": "C7",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 3,
+          "total": 3
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 0
+        },
+        "precision": 1.0
+      },
+      {
+        "case_id": "T7",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 1,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": 1.0
+      },
+      {
+        "case_id": "C8",
+        "failure_reasons": [
+          "A9: 1 gold page(s) not served under an honest label",
+          "A9: gold fact(s) missing from served material: ['version 3']"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T8",
+        "failure_reasons": [
+          "expected status 'resolved', observed 'unresolved'",
+          "gold recall 0.00 below the 0.9 floor"
+        ],
+        "gold": {
+          "hit": 0,
+          "total": 1
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      },
+      {
+        "case_id": "C9",
+        "failure_reasons": [
+          "A9: 1 gold page(s) not served under an honest label",
+          "A9: gold fact(s) missing from served material: ['grill', 'cooking method']"
+        ],
+        "gold": {
+          "hit": 1,
+          "total": 2
+        },
+        "hedged": false,
+        "passed": false,
+        "poison": {
+          "hit": 0,
+          "total": 1
+        },
+        "precision": null
+      },
+      {
+        "case_id": "T9",
+        "failure_reasons": [],
+        "gold": {
+          "hit": 0,
+          "total": 0
+        },
+        "hedged": false,
+        "passed": true,
+        "poison": {
+          "hit": 0,
+          "total": 2
+        },
+        "precision": null
+      }
+    ]
+  },
   "audit_passed": false,
   "blocked": {
     "count": 0,

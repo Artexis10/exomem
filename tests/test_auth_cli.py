@@ -98,6 +98,7 @@ def test_auth_sessions_json_is_secret_free_and_marks_generation_revoked(
                 "issued_at": 1_700_000_000.0,
                 "status": "active",
                 "owner_equivalent": False,
+                "ingress": "public",
             },
             {
                 "session_id": "qrstuvwxyzABCDEF",
@@ -108,6 +109,7 @@ def test_auth_sessions_json_is_secret_free_and_marks_generation_revoked(
                 "issued_at": 1_700_000_000.0,
                 "status": "generation_revoked",
                 "owner_equivalent": False,
+                "ingress": "public",
             },
         ]
     }

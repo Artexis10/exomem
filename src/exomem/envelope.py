@@ -115,15 +115,19 @@ FOUNDER_GATE: str = (
 #: confirmation parameter, because that is a tool-schema change behind the
 #: documented two-phase rollout.
 #:
+#: Additive entity creation is not on the list: the entity writer resolves
+#: before it creates, so a new identity is `proactive_capture` on a personal
+#: vault, while merge, supersession and deletion stay confirm-required.
+#:
 #: Command-free on purpose, exactly like the epistemic commitments:
 #: `commands._filter_bootstrap_payload` deletes any string naming a command the
 #: active surface cannot call, and a ceiling that vanished on a reduced surface
 #: would be a ceiling nobody was told about.
 CONFIRM_REQUIRED: str = (
-    "the confirm-required surfaces are restructure application, collection creation, "
-    "supersession commit, entity creation and deletion. Deletion has a server-side confirm parameter and "
-    "adoption apply is preview-first; supersession and entity creation have no "
-    "server-side gate today — named future work, not an implied one"
+    "confirm-required: restructure application, collection creation, supersession commit, "
+    "entity merge and deletion. Deletion has a server-side confirm parameter; adoption "
+    "apply is preview-first; supersession has no server-side gate yet: future work. On a "
+    "personal vault, additive entity creation follows proactive_capture"
 )
 
 #: The protocol the agent contract teaches, per action the agent is about to

@@ -506,6 +506,10 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # Re-marking here would be wrong; un-marking would defer requests for
         # caches this process already holds.
         log.info("optional recall cache warm-up skipped during catalog repair")
+    # Everything below is optional model preloading. Retrieval admission lost
+    # from here on is re-proved at once instead of waiting for it (the 0.96.0
+    # promotion sat `not_ready` 53 s behind a 46.7 s reranker preload).
+    readiness.finish_required_warm()
 
     def _model_step(name: str, fn) -> bool:
         t0 = time.perf_counter()

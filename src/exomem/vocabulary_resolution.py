@@ -1,9 +1,15 @@
-"""Strict write-time resolution for the Notes experiment domain projection."""
+"""Strict write-time resolution for the subject-domain projections.
+
+Notes experiments and Sources share one strict registry snapshot, one canonical
+key and one existing-spelling projection rule, so the same request resolves to
+the same identity record on either writer.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -15,6 +21,14 @@ from yaml.resolver import BaseResolver
 
 from . import source_taxonomy, vault
 from .vault import kb_root
+
+#: Families whose resolution a public receipt may carry. Each family keeps its
+#: own registry and authority; only the bounded identity record is shared.
+#: `domain` is one family across its Notes and Sources projections, and
+#: `entity_type` is the governed entity-type registry behind `Entities/`.
+#: Evidence scopes are deliberately absent: an incident or case identifier is
+#: stored byte for byte and never inherits domain aliases or slug folding.
+PUBLIC_FAMILIES = frozenset({"domain", "entity_type"})
 
 MAX_PREPARATION_CANDIDATES = 8
 MAX_PREPARATION_LABEL_CHARS = 256
@@ -133,24 +147,16 @@ def resolve_notes_domain(
             "a vocabulary decision is only valid for a nearby domain preparation",
         )
 
-    definition = taxonomy.domains.get(canonical)
-    folder = definition.path_label if definition is not None else source_taxonomy.derive_path_label(canonical)
-    _require_bounded_destination(folder)
     parent = kb_root(root) / "Notes" / "Experiments"
     parent_guard = vault.DirectoryCensusGuard.capture(
         root, parent.relative_to(root).as_posix(), max_entries=256
     )
-    existing = _existing_projection_spelling(
-        parent,
-        canonical=canonical,
-        path_label=folder,
-        aliases=definition.aliases if definition is not None else (),
-    )
+    folder = _projection_folder(taxonomy, canonical, parent)
     parent_guard.recheck(root)
     return DomainBinding(
         requested=requested_text,
         canonical=canonical,
-        destination_folder=existing or folder,
+        destination_folder=folder,
         match_kind=match_kind,
         snapshot=snapshot,
         registry_guard=registry_guard,
@@ -210,19 +216,103 @@ def _resolve_bound_notes_domain(
             canonical, match_kind = decision["canonical"], "decision-reuse"
         else:
             raise VocabularyResolutionError("STALE_VOCABULARY_BINDING", "domain decision requires fresh validation")
+    parent = kb_root(root) / "Notes" / "Experiments"
+    parent_guard = vault.DirectoryCensusGuard.capture(root, parent.relative_to(root).as_posix(), max_entries=256)
+    folder = _projection_folder(taxonomy, canonical, parent)
+    parent_guard.recheck(root)
+    return DomainBinding(requested, canonical, folder, match_kind, current_snapshot, registry_guard, parent_guard)
+
+
+@dataclass(frozen=True, slots=True)
+class SourceDomainBinding:
+    """One domain's `Sources/<Kind>/<Domain>` projection under a strict snapshot.
+
+    A capture resolves and commits inside one serialized mutation boundary, so
+    it carries only the registry guard. A census of `Sources/<Kind>/` would be
+    refused past its entry bound in any large kind folder, and by every file a
+    sync client lands there, without protecting anything the boundary does not.
+    """
+
+    taxonomy: source_taxonomy.SourceTaxonomy
+    kind: source_taxonomy.Resolution
+    domain: source_taxonomy.Resolution
+    destination_folder: str
+    match_kind: str
+    snapshot: str
+    registry_guard: vault.PathGuard
+
+    @property
+    def segments(self) -> tuple[str, ...]:
+        return (source_taxonomy.SOURCES_ROOT, self.kind.path_label, self.destination_folder)
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "family": "domain",
+            "requested": self.domain.raw,
+            "canonical": self.domain.key,
+            "destination": self.destination_folder,
+            "match_kind": self.match_kind,
+            "snapshot": self.snapshot,
+        }
+
+
+def resolve_source_domain(vault_root: Path, *, kind: object, domain: object) -> SourceDomainBinding:
+    """Resolve a capture's kind and domain against the Notes write snapshot.
+
+    Kind and domain keep their capture rules: a kind near-miss raises the
+    taxonomy's own error and a new domain stays open. Only the registry
+    authority, canonical key and projection spelling are shared with Notes.
+    """
+    root = Path(vault_root)
+    if not isinstance(domain, str) or len(domain) > 256:
+        raise VocabularyResolutionError("INVALID_DOMAIN", "domain request exceeds the bounded receipt contract")
+    taxonomy, registry_guard, snapshot = _strict_taxonomy(root)
+    kind_resolution = taxonomy.resolve_kind(kind)
+    resolved = taxonomy.resolve_domain(domain)
+    parent = kb_root(root) / source_taxonomy.SOURCES_ROOT / kind_resolution.path_label
+    return SourceDomainBinding(
+        taxonomy=taxonomy,
+        kind=kind_resolution,
+        domain=resolved,
+        destination_folder=_projection_folder(taxonomy, resolved.key, parent),
+        match_kind=_match_kind(domain, resolved),
+        snapshot=snapshot,
+        registry_guard=registry_guard,
+    )
+
+
+def capture_refusal_reason(vault_root: Path, error: VocabularyResolutionError) -> str:
+    """Say what is wrong and that the capture itself need not wait for it.
+
+    A registry fault names the registry file, so the owner can repair it; every
+    refusal says the material can be preserved now by omitting the domain.
+    """
+    return (
+        f"{registry_refusal_reason(vault_root, error)}. Domain is optional: "
+        "capture without `domain` to preserve the material now"
+    )
+
+
+def registry_refusal_reason(vault_root: Path, error: VocabularyResolutionError) -> str:
+    """The refusal reason, naming the vault-relative registry for a registry fault."""
+    if error.code != "INVALID_DOMAIN_TAXONOMY":
+        return error.reason
+    registry = source_taxonomy.registry_path(Path(vault_root)).relative_to(Path(vault_root))
+    return f"{error.reason} ({registry.as_posix()})"
+
+
+def _projection_folder(taxonomy: source_taxonomy.SourceTaxonomy, canonical: str, parent: Path) -> str:
+    """The registry path label, or the one existing equivalent spelling under `parent`."""
     definition = taxonomy.domains.get(canonical)
     folder = definition.path_label if definition is not None else source_taxonomy.derive_path_label(canonical)
     _require_bounded_destination(folder)
-    parent = kb_root(root) / "Notes" / "Experiments"
-    parent_guard = vault.DirectoryCensusGuard.capture(root, parent.relative_to(root).as_posix(), max_entries=256)
     existing = _existing_projection_spelling(
         parent,
         canonical=canonical,
         path_label=folder,
         aliases=definition.aliases if definition is not None else (),
     )
-    parent_guard.recheck(root)
-    return DomainBinding(requested, canonical, existing or folder, match_kind, current_snapshot, registry_guard, parent_guard)
+    return existing or folder
 
 
 def _strict_taxonomy(root: Path) -> tuple[source_taxonomy.SourceTaxonomy, vault.PathGuard, str]:
@@ -242,11 +332,30 @@ def _strict_taxonomy(root: Path) -> tuple[source_taxonomy.SourceTaxonomy, vault.
         ) from error
     try:
         raw, guard = vault.read_guarded_text(root, path)
-        data = yaml.load(raw, Loader=_StrictTaxonomyLoader)
     except (OSError, UnicodeError, vault.PathGuardError) as error:
         raise VocabularyResolutionError(
             "INVALID_DOMAIN_TAXONOMY", "domain taxonomy is unreadable"
         ) from error
+    taxonomy, snapshot = _strict_registry_text(raw)
+    return taxonomy, guard, snapshot
+
+
+def registry_text_snapshot(text: str | None) -> str | None:
+    """The strict snapshot of registry bytes read elsewhere; None if malformed.
+
+    `text` None means no registry file, as `_strict_taxonomy` reads a missing one.
+    """
+    if text is None:
+        return _snapshot({"registry": "missing"})
+    try:
+        return _strict_registry_text(text)[1]
+    except VocabularyResolutionError:
+        return None
+
+
+def _strict_registry_text(raw: str) -> tuple[source_taxonomy.SourceTaxonomy, str]:
+    try:
+        data = yaml.load(raw, Loader=_StrictTaxonomyLoader)
     except yaml.YAMLError as error:
         raise VocabularyResolutionError(
             "INVALID_DOMAIN_TAXONOMY", "domain taxonomy is malformed"
@@ -259,13 +368,15 @@ def _strict_taxonomy(root: Path) -> tuple[source_taxonomy.SourceTaxonomy, vault.
             "INVALID_DOMAIN_TAXONOMY", "domain taxonomy is malformed", {"findings": list(taxonomy.findings)}
         )
     _reject_equivalent_owners(taxonomy)
-    return taxonomy, guard, _snapshot({"registry": raw, "domains": _domain_snapshot(taxonomy)})
+    return taxonomy, _snapshot({"registry": raw, "domains": _domain_snapshot(taxonomy)})
 
 
 def _validate_strict_domain_registry(data: object) -> None:
-    if not isinstance(data, dict) or not isinstance(data.get("domains"), dict):
+    # A registry that declares no domain section adds no domain vocabulary;
+    # only a present but non-mapping section is malformed.
+    if not isinstance(data, dict) or not isinstance(data.get("domains", {}), dict):
         raise VocabularyResolutionError("INVALID_DOMAIN_TAXONOMY", "domain taxonomy is malformed")
-    for key, definition in data["domains"].items():
+    for key, definition in data.get("domains", {}).items():
         if not isinstance(key, str) or not isinstance(definition, dict):
             raise VocabularyResolutionError("INVALID_DOMAIN_TAXONOMY", "domain taxonomy is malformed")
         if "aliases" in definition and (
@@ -276,10 +387,10 @@ def _validate_strict_domain_registry(data: object) -> None:
 
 
 def _reject_duplicate_domain_owners(data: object) -> None:
-    assert isinstance(data, dict) and isinstance(data["domains"], dict)
+    assert isinstance(data, dict)
     canonical_owners: dict[str, str] = {}
     alias_owners: dict[str, str] = {}
-    for raw_key, entry in data["domains"].items():
+    for raw_key, entry in data.get("domains", {}).items():
         try:
             key = source_taxonomy.normalize(raw_key, axis="domain")
         except source_taxonomy.TaxonomyError as error:
@@ -309,22 +420,25 @@ def _existing_projection_spelling(
     if not parent.exists():
         return None
     equivalents: list[str] = []
-    for child in parent.iterdir():
-        if not child.is_dir():
-            continue
-        try:
-            normalized = source_taxonomy.normalize(child.name, axis="domain path")
-        except source_taxonomy.TaxonomyError:
-            normalized = ""
-        if (
-            normalized == canonical
-            or normalized in aliases
-            or _fold(child.name) == _fold(path_label)
-        ):
-            equivalents.append(child.name)
+    # A Sources kind folder can hold thousands of captures beside its domain
+    # folders; directory entries answer `is_dir` without a stat per file.
+    with os.scandir(parent) as entries:
+        for child in entries:
+            if not child.is_dir():
+                continue
+            try:
+                normalized = source_taxonomy.normalize(child.name, axis="domain path")
+            except source_taxonomy.TaxonomyError:
+                normalized = ""
+            if (
+                normalized == canonical
+                or normalized in aliases
+                or _fold(child.name) == _fold(path_label)
+            ):
+                equivalents.append(child.name)
     if len(equivalents) > 1:
         raise VocabularyResolutionError(
-            "AMBIGUOUS_DOMAIN_DESTINATION", "multiple equivalent experiment domain folders exist"
+            "AMBIGUOUS_DOMAIN_DESTINATION", "multiple equivalent domain folders exist; reconcile them first"
         )
     return equivalents[0] if equivalents else None
 
@@ -449,14 +563,42 @@ def _reject_equivalent_owners(taxonomy: source_taxonomy.SourceTaxonomy) -> None:
             aliases[alias] = key
 
 
+def entity_type_record(
+    requested: str, definition: Any, *, fingerprint: str, destination: str
+) -> dict[str, str] | None:
+    """The receipt record of one governed entity-type resolution.
+
+    The registry has already resolved `requested`; an unknown type remains the
+    writer's own refusal. This only names how the request matched and where the
+    type projects, so it adds no authority and never mints a type.
+    """
+    from .entity_types import normalize_entity_token
+
+    if requested.strip() == definition.id:
+        match_kind = "exact"
+    elif normalize_entity_token(requested) == definition.id:
+        match_kind = "normalized"
+    else:
+        match_kind = "alias"
+    record = {
+        "family": "entity_type",
+        "requested": requested,
+        "canonical": definition.id,
+        "destination": destination,
+        "match_kind": match_kind,
+        "snapshot": fingerprint,
+    }
+    return record if valid_public_resolution(record) else None
+
+
 def valid_public_resolution(value: object) -> bool:
-    """Validate the bounded domain identity record admitted to public receipts."""
+    """Validate the bounded family identity record admitted to public receipts."""
     if not isinstance(value, dict) or set(value) != {
         "family", "requested", "canonical", "destination", "match_kind", "snapshot"
     }:
         return False
     return (
-        value["family"] == "domain"
+        value["family"] in PUBLIC_FAMILIES
         and all(isinstance(value[key], str) and value[key] for key in value if key != "family")
         and all(len(value[key]) <= 256 for key in ("requested", "canonical", "destination", "match_kind"))
         and len(value["snapshot"]) == 64

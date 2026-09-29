@@ -985,7 +985,12 @@ def _freshness_key(
     if (mode in ("hybrid", "vector") and graph) or relation_filter:
         from . import epistemic_graph
 
-        parts.append((".graph.sqlite", epistemic_graph.cache_token(vault_root) or "absent"))
+        # Graph recall never stacks a second cold proof behind a running one;
+        # a relation filter's semantics require the proved sidecar.
+        token = epistemic_graph.cache_token(
+            vault_root, prove=True if relation_filter else epistemic_graph.SINGLE_FLIGHT
+        )
+        parts.append((".graph.sqlite", token or "absent"))
     if mode in ("hybrid", "keyword"):
         # Which lexical backend serves (fts5 vs python) changes bm25-lane
         # scores, so a mid-process flip must not hit entries cached under the
@@ -1241,7 +1246,10 @@ def find(
     # where a reader would look for it.
     with _span(timings, "recall_projection", source=find_types.SOURCE_INDEX):
         admission = readiness.retrieval_admission()
-        if managed_runtime and admission["state"] == "unavailable":
+        if managed_runtime and (
+            admission["state"] == "unavailable"
+            or (not admission["admitted"] and readiness.required_warm_finished())
+        ):
             # A background repair may have published the exact catalog after its
             # one promotion callback lost a race.  Re-prove once before scheduling
             # another whole-corpus rebuild; normal ready requests keep one proof.
@@ -1973,7 +1981,19 @@ def find(
     # unreranked hits for a later call that can afford the requested stage.
     active_budget = request_budget.current()
     budget_skipped_rerank = active_budget is not None and "rerank" in active_budget.skipped
-    if cache_key is not None and not degraded and not failed and not budget_skipped_rerank:
+    # A key computed while another reader's proof ran says "unproven", but the
+    # proof may have landed before candidate collection and let the graph lane
+    # run: never pin such a result under a key that claims the lane was absent.
+    unproven_graph_key = cache_key is not None and (
+        (".graph.sqlite", ("unproven",)) in cache_key[1]
+    )
+    if (
+        cache_key is not None
+        and not degraded
+        and not failed
+        and not budget_skipped_rerank
+        and not unproven_graph_key
+    ):
         with _FIND_CACHE_LOCK:
             _FIND_CACHE[cache_key] = copy.deepcopy(hits)
             if cache_checkpoints is not None:

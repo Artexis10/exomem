@@ -96,7 +96,7 @@ def build_cluster_config() -> ClusterConfig:
             cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", "250m"),
             cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", "2"),
             memory_request=os.environ.get("CELLCTL_CELL_MEMORY_REQUEST", "1Gi"),
-            memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", "1536Mi"),
+            memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", "3Gi"),
         ),
         model_env=model_env,
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),

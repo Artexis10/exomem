@@ -68,12 +68,19 @@ word alone (`rare_term`, with qualifiers at most), and that word is said as a na
 turn SHALL be `ambiguous` between those entities, formed by the same anchor-neighbourhood
 connectivity rule as any competing group, and the retrieval carry SHALL NOT be asked. A
 word is said as a name when every such entity is a person (by its own `entity_type`,
-which the activation index records), or, in a cased script, when the turn capitalises
-the word somewhere other than at a sentence start; in an uncased script only the person
-case applies. A single such entity SHALL stay a `partial` lead, and a shared word in the
+which the activation index records), unless the turn's casing says something and it
+wrote that cased-script word in lower case, or, in a cased script, when the turn
+capitalises the word somewhere other than at a sentence start; in an uncased script only
+the person case applies. A turn's casing says something only when it mixes capitalised
+and lower-case words: an all-lower-case turn, an all-caps turn and a headline whose every
+word is capitalised carry no casing signal, so no non-person group forms in them and
+persons keep their all-lower-case behaviour. A single such entity SHALL stay a `partial` lead, and a shared word in the
 names of two anchors of any other kind SHALL NOT form this ambiguity. Second, a
 qualifier: each anchor's contact SHALL be the longest contiguous run of turn tokens that
-spells its own authored name words (stopwords may sit inside a run, never at its edges).
+spells its own authored name words (stopwords may sit inside a run, never at its edges;
+punctuation and coordinators end a contiguous run: a sentence end, comma, colon,
+semicolon, parenthesis, square bracket or dash, and "and" or "or", so "X, Y" and "X and Y" are two things, not one
+run).
 When two same-kind anchors resolve without a deciding-alone kind and one's run lies
 strictly inside the other's, the narrower anchor SHALL NOT be listed, and neither SHALL a
 same-kind `partial` anchor with no retrieved contact whose run lies strictly inside the
@@ -97,11 +104,26 @@ listed. Neither rule SHALL compare anchors of different kinds.
 - **THEN** the turn is not `ambiguous` between them, and the retrieval carry may still
   serve a page the turn names
 
+#### Scenario: A lower-case person word in a cased turn is a word
+- **WHEN** a turn that mixes capitalised and lower-case words says a person entity's
+  shared first name only in lower case ("Please mark the task done")
+- **THEN** the turn is not `ambiguous` between the people who share that name
+
+#### Scenario: A headline carries no casing signal
+- **WHEN** every word of a turn is capitalised, or the turn is all caps, and it says a
+  word two organisation entities' names share
+- **THEN** the turn is not `ambiguous` between them
+
 #### Scenario: A qualifier names one sense
 - **WHEN** a turn resolves two same-kind hubs and spells, in one contiguous run, the
   shared name words together with a word only one hub's name carries
 - **THEN** that hub resolves alone, the other hub is not listed, and a same-kind
   partial hub reached only inside that run is not listed
+
+#### Scenario: Punctuation and coordinators end a contiguous run
+- **WHEN** a turn puts a comma, full stop, colon, dash, parenthesis, bracket, "and" or "or" between the shared
+  name words and the word only one hub's name carries
+- **THEN** the run does not span it and the packet is `ambiguous` between the hubs
 
 #### Scenario: A detached word of the wider name narrows nothing
 - **WHEN** the word only one hub's name carries appears elsewhere in the turn, apart

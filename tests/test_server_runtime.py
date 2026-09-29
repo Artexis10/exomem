@@ -305,6 +305,7 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
     try:
         activation._activate()
     finally:
+        activation._stop_background_workers()
         readiness.reset()
 
     assert observed_timeouts == [server_runtime.RECALL_SEED_WAIT_SECONDS]
@@ -341,6 +342,7 @@ def test_local_runtime_activation_downgrades_when_watcher_is_unavailable(
         assert managed_at_compute == [False]
         assert readiness.runtime_managed() is False
     finally:
+        activation._stop_background_workers()
         readiness.reset()
 
 
@@ -955,3 +957,34 @@ def test_shutdown_stops_the_dreamer(tmp_path, monkeypatch: pytest.MonkeyPatch) -
     finally:
         dreamer.reset_for_tests()
         readiness.reset()
+
+
+def test_stopping_background_workers_joins_the_vocabulary_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recovery watcher is a background worker like any other: it stops
+    and is joined with the rest, not left running until the process exits."""
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    for starter in (
+        "_start_derived_drain",
+        "_start_file_watcher",
+        "_start_compute_runtime",
+        "_start_graph_drain",
+        "_start_media_worker",
+        "_start_dreamer",
+    ):
+        monkeypatch.setattr(server_runtime, starter, lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(tmp_path)
+    monkeypatch.setattr(activation, "_start_recall_reembed", lambda _root: None)
+
+    activation._activate()
+    watcher = activation.vocabulary_recovery
+    assert watcher is not None and watcher.name == "exomem-vocabulary-recovery"
+    activation._stop_background_workers()
+
+    assert not watcher.is_alive()
+    assert not [
+        thread
+        for thread in threading.enumerate()
+        if thread.name == "exomem-vocabulary-recovery" and thread.is_alive()
+    ]

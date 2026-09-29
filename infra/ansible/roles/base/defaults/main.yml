@@ -1,5 +1,8 @@
 ---
 base_packages:
+  # age decrypts an operator import stream on the node itself, so no
+  # intermediate machine ever holds the plaintext (cloud-operator-import.md).
+  - age
   - apparmor
   - ca-certificates
   - cryptsetup

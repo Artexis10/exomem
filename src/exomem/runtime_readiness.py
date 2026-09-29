@@ -278,7 +278,7 @@ def _public_graph_sync(value: object) -> dict[str, Any] | None:
         return None
     state = value.get("state")
     generation = value.get("generation")
-    if state not in {"current", "recovery_required", "unavailable"}:
+    if state not in {"current", "recovery_required", "unavailable", "unproven"}:
         return None
     if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
         return None

@@ -22,7 +22,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import Context, ContextVar, copy_context
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
@@ -825,6 +825,7 @@ def vault_creation_lock(
     if not thread_lock.acquire(timeout=remaining):
         raise VaultLockTimeout("VAULT_LOCK_TIMEOUT", "timed out acquiring vault lock")
     _HELD_LOCKS.keys = {key}
+    _HELD_LOCKS.after_release = []
     try:
         lock_path = _private_lock_directory() / f"{digest}.lock"
         with _InterprocessFileLock(lock_path, deadline=deadline):
@@ -832,6 +833,65 @@ def vault_creation_lock(
     finally:
         _HELD_LOCKS.keys = set()
         thread_lock.release()
+        _run_after_release(_HELD_LOCKS.__dict__.pop("after_release", []))
+
+
+def _defer_until_creation_lock_release(work: Callable[[], Any]) -> bool:
+    """Queue `work` for the moment this thread's creation lock is released.
+
+    Returns False, and queues nothing, when the thread holds no creation lock:
+    the caller runs `work` inline as before. The work runs on this same thread
+    in a copy of the current context, so context-carried state (a writer's
+    semantic parent states, the in-flight call's span token) is what it would
+    have seen inline.
+    """
+    pending = getattr(_HELD_LOCKS, "after_release", None)
+    if not getattr(_HELD_LOCKS, "keys", None) or pending is None:
+        return False
+    context = copy_context()
+    pending.append(lambda: _run_in_captured_context(context, work))
+    return True
+
+
+def _run_in_captured_context(context: Context, work: Callable[[], Any]) -> None:
+    """Run `work` in the context captured at commit; keep what it sets.
+
+    Inline, the fan-out's own context writes landed in the writer's context:
+    the graph dispatch registers a rebuild there, and the writer's mutation
+    boundary starts it on exit. Every variable the work changes is copied
+    back into the context the lock is released in, so that is unchanged.
+    """
+    before = dict(context.items())
+    try:
+        context.run(work)
+    finally:
+        for var, value in context.items():
+            if var not in before or before[var] is not value:
+                var.set(value)
+
+
+def _run_after_release(pending: list[Callable[[], Any]]) -> None:
+    """Run released-lock work in order; the first failure propagates after all ran.
+
+    A failure never masks one already propagating out of the locked body: the
+    committed batch is still fanned out, and the body's own error wins.
+    """
+    import sys
+
+    first: BaseException | None = None
+    for work in pending:
+        try:
+            work()
+        except Exception as error:  # noqa: BLE001 - every committed batch still fans out
+            if first is None:
+                first = error
+            else:
+                log.warning("post-release fan-out failed: %s", type(error).__name__)
+    if first is not None:
+        if sys.exc_info()[1] is not None:
+            log.warning("post-release fan-out failed: %s", type(first).__name__)
+            return
+        raise first
 
 
 @dataclass
@@ -5393,23 +5453,27 @@ def _batch_atomic_write_locked(
         graph_epoch_paths = {graph_floor_path, graph_checkpoint_path}
         fanout_replaced = [path for path in replaced if path not in graph_epoch_paths]
         created_paths = [path for path in created_paths if path not in graph_epoch_paths]
-        post_commit_batch_fanout(
-            vault_root,
-            fanout_replaced,
-            index_reports,
-            semantic_states,
-            created_paths=created_paths,
-            publication_intents=publication_intents,
-        )
-    # Closes the fan-out half of the umbrella and opens the terminal half. The
-    # mark is stamped whether or not the fan-out ran: when it did not -- the
-    # fast-ack route, or a caller that asked for no fan-out -- a near-zero
-    # `derived.fanout` is the honest answer and says which route the write took.
-    # Placing it outside the branch is what makes the two spans a partition of
-    # `derived.canonical_to_committed` rather than two intervals that sometimes
-    # leave a gap nobody can name.
-    call_spans.mark("derived_fanout_complete")
-    call_spans.record_span_since("derived.fanout", "canonical_files_committed")
+
+        def fanout() -> None:
+            post_commit_batch_fanout(
+                vault_root,
+                fanout_replaced,
+                index_reports,
+                semantic_states,
+                created_paths=created_paths,
+                publication_intents=publication_intents,
+            )
+            _close_fanout_span()
+
+        # Under a creation lock the lexical upsert may not take its own
+        # publication namespace (`VAULT_LOCK_NESTED`), so it deferred on every
+        # semantic write, the batch was judged incomplete, a full-index receipt
+        # was minted and retrieval admission revoked. The fan-out runs as the
+        # lock is released instead, still inside the caller's mutation boundary.
+        if not _defer_until_creation_lock_release(fanout):
+            fanout()
+    else:
+        _close_fanout_span()
     if cleanup_retained:
         raise BatchWriteError(
             "BATCH_CLEANUP_INCOMPLETE",
@@ -5425,6 +5489,20 @@ def _batch_atomic_write_locked(
             deferred_predecessor,
         )
     return [write.path for write in caller_writes]
+
+
+def _close_fanout_span() -> None:
+    """Close the fan-out half of the umbrella and open the terminal half.
+
+    Stamped whether or not a fan-out ran: when it did not -- the fast-ack
+    route, or a caller that asked for no fan-out -- a near-zero
+    `derived.fanout` is the honest answer and says which route the write took.
+    Stamped after a fan-out deferred to a creation lock's release, too, so the
+    two spans stay a partition of `derived.canonical_to_committed` rather than
+    two intervals that sometimes leave a gap nobody can name.
+    """
+    call_spans.mark("derived_fanout_complete")
+    call_spans.record_span_since("derived.fanout", "canonical_files_committed")
 
 
 def _batch_state_target(vault_root: Path, target: Path) -> bool:

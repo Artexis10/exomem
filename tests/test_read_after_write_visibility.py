@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,33 @@ def _wait_for_repair_idle(vault_root: Path, timeout: float = 30.0) -> None:
         wake.wait(min(0.01, remaining))
 
 
+@contextmanager
+def _publication_barrier_held_elsewhere(store):
+    """Hold the lexical publication barrier on another thread for the block."""
+    held = threading.Event()
+    release = threading.Event()
+    errors: list[BaseException] = []
+
+    def holder() -> None:
+        try:
+            with store._publication_lock():
+                held.set()
+                release.wait(30)
+        except BaseException as error:  # noqa: BLE001 - surfaced below
+            errors.append(error)
+            held.set()
+
+    thread = threading.Thread(target=holder, name="publication-holder", daemon=True)
+    thread.start()
+    assert held.wait(30), "the publication barrier holder never started"
+    assert not errors, errors
+    try:
+        yield
+    finally:
+        release.set()
+        thread.join(30)
+
+
 @pytest.fixture(autouse=True)
 def _fts5_state(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "fts5")
@@ -138,7 +166,13 @@ def test_deferred_upsert_stays_visible_while_targeted_repair_is_pending(
 
     marker = "visibility-during-deferred-upsert"
     try:
-        _governed_transition(tmp_path, marker)
+        # The writer's inline upsert gets only the 50 ms foreground wait on the
+        # publication barrier. Another holder (a publish, a watcher batch) makes
+        # it decline and hand exactly this page to the targeted repair. This
+        # used to be reached through the writer's own creation lock refusing
+        # the barrier as nested; the fan-out now runs after that lock releases.
+        with _publication_barrier_held_elsewhere(store):
+            _governed_transition(tmp_path, marker)
         assert repair_started.wait(30), "governed write did not drive the deferred-upsert path"
         assert deferred == [[page]]
 

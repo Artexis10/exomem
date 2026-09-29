@@ -51,6 +51,12 @@ hybrid mode for the same prompt, ~1.5 s over REST, ~2.4 s via the CLI). The log
 line names the lane that answered and the hit count so that fall-through is
 visible instead of indistinguishable from success.
 
+When `EXOMEM_LOCAL_TOKEN_FILE` names a local client token (`exomem auth
+issue-local`) and a local port resolves (`EXOMEM_LOCAL_PORT` here, else in
+`service.env`), the REST rung first posts to the managed service's local
+listener on `127.0.0.1` with that token and logs `lane=local`. For one release a
+failed local request still falls through to the lifted-key request below.
+
 A key this hook lifts out of the managed install's `service.env` travels only
 to loopback: an `EXOMEM_HOST` that points anywhere else disables the REST rung
 for a file-sourced key (a key the user exported into the environment keeps
@@ -557,16 +563,22 @@ def _open_no_redirect(req: urllib.request.Request, timeout: float):
 
 
 def _fetch_via_rest(
-    prompt: str, api_key: str, limit: int = 3, timeout: float = REST_TIMEOUT_SECONDS
+    prompt: str,
+    api_key: str,
+    limit: int = 3,
+    timeout: float = REST_TIMEOUT_SECONDS,
+    base_url: str | None = None,
 ) -> list[dict] | None:
     """One POST to the local REST facade's `/api/ask_memory` (hybrid mode, compact
     detail). Returns the compact hit list, or `None` on ANY failure — connection
-    error, timeout, non-200, malformed JSON, `success: false` — never raises."""
-    host = _rest_host()
-    port = _rest_port()
-    if port is None:
-        return None
-    url = f"http://{host}:{port}/api/ask_memory"
+    error, timeout, non-200, malformed JSON, `success: false` — never raises.
+    `base_url` is the local listener's loopback origin when the local rung asks."""
+    if base_url is None:
+        port = _rest_port()
+        if port is None:
+            return None
+        base_url = f"http://{_rest_host()}:{port}"
+    url = f"{base_url}/api/ask_memory"
     body = json.dumps(
         {"query": prompt, "detail": "compact", "limit": limit, "mode": INJECT_MODE}
     ).encode("utf-8")
@@ -668,15 +680,22 @@ def _resolve_rest_key() -> tuple[str, str]:
     from_env = os.environ.get("EXOMEM_REST_API_KEY", "").strip()
     if from_env:
         return from_env, "env"
+    value = _service_env_value("EXOMEM_REST_API_KEY")
+    return (value, "file") if value else ("", "")
+
+
+def _service_env_value(name: str) -> str:
+    """The first `NAME=` value in the managed install's `service.env`, else "".
+    Never raises; the value is never logged."""
     path = _service_env_path()
     if path is None:
-        return "", ""
+        return ""
     try:
         text = path.read_text(encoding="utf-8").lstrip("\ufeff")
     except Exception:  # noqa: BLE001 - hook must never break prompt submission
-        return "", ""
+        return ""
     for line in text.splitlines():
-        match = re.match(r"^\s*EXOMEM_REST_API_KEY\s*=\s*(.*)$", line)
+        match = re.match(rf"^\s*{re.escape(name)}\s*=\s*(.*)$", line)
         if not match:
             continue
         value = match.group(1).strip()
@@ -684,9 +703,39 @@ def _resolve_rest_key() -> tuple[str, str]:
             value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
         elif len(value) >= 2 and value[0] == value[-1] == "'":
             value = value[1:-1]
-        value = value.strip()
-        return (value, "file") if value else ("", "")
-    return "", ""
+        return value.strip()
+    return ""
+
+
+def _local_port() -> int | None:
+    """The managed service's local listener port: this env, else `service.env`."""
+    value = os.environ.get("EXOMEM_LOCAL_PORT", "").strip() or _service_env_value(
+        "EXOMEM_LOCAL_PORT"
+    )
+    if not value.isascii() or not value.isdigit():
+        return None
+    port = int(value)
+    return port if 1 <= port <= 65535 else None
+
+
+def _resolve_local_credential() -> tuple[str, int | None]:
+    """`(token, port)` for the local listener rung, or `("", None)`.
+
+    The token comes only from the file `EXOMEM_LOCAL_TOKEN_FILE` names (an
+    `exomem auth issue-local` output); it is never logged. The rung it enables
+    always targets literal loopback, never `EXOMEM_HOST`.
+    """
+    path = os.environ.get("EXOMEM_LOCAL_TOKEN_FILE", "").strip()
+    if not path:
+        return "", None
+    try:
+        token = Path(path).expanduser().read_text(encoding="ascii").strip()
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
+        return "", None
+    if not token or any(character.isspace() for character in token):
+        return "", None
+    port = _local_port()
+    return (token, port) if port is not None else ("", None)
 
 
 def _rest_api_key() -> str:
@@ -714,8 +763,9 @@ def _bounded(call, budget: float):
 
 def _gather_with_lane(rest_call, cli_call):
     """Transport ladder decision, plus the name of the rung that answered:
-    "rest", "cli", or "none" when the ladder fell through to the reminder-only
-    floor. REST runs first when a key resolves; CLI only when REST wasn't
+    "local", "rest", "cli", or "none" when the ladder fell through to the
+    reminder-only floor. The local listener runs first when a local token and
+    port resolve, then REST when a key resolves; CLI only when REST wasn't
     attempted or failed AND `EXOMEM_RETRIEVE_INJECT_CLI` is truthy. A resolved
     transport that answers with nothing useful is still the answer, so CLI is
     never a second opinion on REST.
@@ -738,6 +788,23 @@ def _gather_with_lane(rest_call, cli_call):
     failed and the ladder moves on, while the abandoned request dies with the
     hook process."""
     deadline = time.monotonic() + INJECT_BUDGET_SECONDS
+    local_token, local_port = _resolve_local_credential()
+    if local_token and local_port is not None:
+        remaining = deadline - time.monotonic()
+        if remaining >= _MIN_RUNG_SECONDS:
+            answer = _bounded(
+                lambda: rest_call(
+                    local_token,
+                    min(REST_TIMEOUT_SECONDS, remaining),
+                    f"http://127.0.0.1:{local_port}",
+                ),
+                remaining,
+            )
+            if answer is not None:
+                return answer, "local"
+        # For one release a failed local rung still falls through to the
+        # lifted-key rung below, so a service whose supervisor predates the
+        # local listener keeps answering.
     api_key, source = _resolve_rest_key()
     if api_key and (source == "env" or _rest_host() in _LOOPBACK_HOSTS):
         remaining = deadline - time.monotonic()
@@ -757,10 +824,18 @@ def _gather_with_lane(rest_call, cli_call):
     return None, "none"
 
 
+def _local_origin(base_url: str | None) -> dict:
+    """The keyword a REST call takes only when the local rung asks: the lifted-key
+    rung calls the fetchers exactly as it always has."""
+    return {"base_url": base_url} if base_url else {}
+
+
 def _gather_hits_with_lane(prompt: str) -> tuple[list[dict], str]:
     """Stub mode's rungs on the shared ladder. `[]` is the reminder-only floor."""
     hits, lane = _gather_with_lane(
-        lambda api_key, timeout: _fetch_via_rest(prompt, api_key, timeout=timeout),
+        lambda api_key, timeout, base_url=None: _fetch_via_rest(
+            prompt, api_key, timeout=timeout, **_local_origin(base_url)
+        ),
         lambda timeout: _fetch_via_cli(prompt, timeout=timeout),
     )
     return (hits if hits is not None else []), lane
@@ -771,8 +846,8 @@ def _gather_packet_with_lane(
 ) -> tuple[dict | None, str]:
     """Working-set mode's rungs on the same ladder, under the same budget."""
     return _gather_with_lane(
-        lambda api_key, timeout: _fetch_packet_via_rest(
-            prompt, api_key, continuity, timeout, attribution
+        lambda api_key, timeout, base_url=None: _fetch_packet_via_rest(
+            prompt, api_key, continuity, timeout, attribution, **_local_origin(base_url)
         ),
         lambda timeout: _fetch_packet_via_cli(prompt, continuity, timeout, attribution),
     )
@@ -891,6 +966,7 @@ def _fetch_packet_via_rest(
     continuity: str = "",
     timeout: float = REST_TIMEOUT_SECONDS,
     attribution: dict | None = None,
+    base_url: str | None = None,
 ) -> dict | None:
     """One POST to the local REST facade's `/api/activate_context`.
 
@@ -904,16 +980,18 @@ def _fetch_packet_via_rest(
     (`_attribution_ladder`), because a plugin can update before the service it
     talks to and the packet must not degrade for that window.
     """
-    port = _rest_port()
-    if port is None:
-        return None
+    if base_url is None:
+        port = _rest_port()
+        if port is None:
+            return None
+        base_url = f"http://{_rest_host()}:{port}"
     body: dict = {"turn": prompt, "max_chars": _working_set_max_chars()}
     if continuity:
         body["continuity"] = continuity
     started = time.monotonic()
     for extra in _attribution_ladder(attribution):
         req = urllib.request.Request(
-            f"http://{_rest_host()}:{port}/api/activate_context",
+            f"{base_url}/api/activate_context",
             data=json.dumps({**body, **extra}).encode("utf-8"),
             method="POST",
             headers={
