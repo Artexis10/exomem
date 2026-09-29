@@ -286,11 +286,16 @@ Every case SHALL pre-register:
 - must-include and must-exclude facts;
 - the expected status and the expected `generation.carried_by`.
 
-The group SHALL be scored with and without its conversations. The arm without them is the mechanism-removal control.
+The group SHALL be scored on four arms:
+
+- the turn alone, which is the mechanism-removal control;
+- the turn with `recent` and `refs`, as a hook sends them;
+- the turn with a fixture-authored `focus`, as a remote agent sends it;
+- the turn with all three.
 
 The pre-registered floors, per case and per anchor kind, SHALL be:
 
-- gold recall of at least 0.85 with the conversation;
+- gold recall of at least 0.85 on every arm that passes a conversation;
 - zero poison;
 - zero `resolved` false activation on twins;
 - zero drowning failures;
