@@ -469,6 +469,12 @@ _DECLARED_UNBOUNDED_JOINS = {
         "WorkerRuntime.migrate",
         "self.child.wait",
     ): "enclosed by asyncio.wait_for with the remaining migration/handoff deadline",
+    (
+        "epistemic_graph.py",
+        "EpistemicGraphIndex._open_read_snapshot",
+        "in_flight.wait",
+    ): "single-flight graph proof: bounded by the one proof the waiter would otherwise "
+    "run itself; the owner sets the Event in finally, and request recall never waits",
 }
 
 

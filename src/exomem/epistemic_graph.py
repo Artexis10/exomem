@@ -222,10 +222,6 @@ _PROOFS_IN_FLIGHT: dict[str, tuple[threading.Event, int]] = {}
 #: `prove` mode for a request path: prove inline when no proof is running for
 #: the sidecar, refuse as `unproven` when another reader's proof already is.
 SINGLE_FLIGHT = "single_flight"
-#: How long a blocking reader waits for another reader's proof before proving
-#: the sidecar itself, as it did before single-flight: sharing a proof must
-#: never turn a bounded read into an unbounded wait on another thread.
-PROOF_WAIT_SECONDS = 30.0
 
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
@@ -2381,10 +2377,13 @@ class EpistemicGraphIndex:
                             outcome_out.append("unproven")
                         conn.close()
                         return None
-                    if in_flight is not None and in_flight.wait(timeout=PROOF_WAIT_SECONDS):
+                    if in_flight is not None:
+                        # Bounded by one proof this reader would otherwise run
+                        # itself; the owner sets the Event in its `finally`. A
+                        # timer here re-opens stacking on exactly the vaults
+                        # whose proof is slow (#1454).
+                        in_flight.wait()
                         continue
-                    # Unclaimed, self-owned, or the running proof outlived the
-                    # wait budget: prove here.
                     try:
                         decline: list[str] = []
                         current = self._snapshot_sources_match_disk(
