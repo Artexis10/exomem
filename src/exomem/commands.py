@@ -7225,8 +7225,8 @@ def op_edit_memory(
     `RELATION_DISPOSITION_STALE`/`_MISSING`: repeat the identical operation with
     `validate_only=true`, then commit unchanged with `transition_token`,
     `relation_disposition="reviewed_none"`, the returned `relation_review_hash`
-    (not the page content hash) and a `relation_review_reason`. Details:
-    references/writing.md.
+    (not the page content hash) and a `relation_review_reason`.
+    See references/writing.md.
 
     Args:
         operation: Nested edit selected by `kind`.
@@ -7715,8 +7715,8 @@ def op_episode_memory(
 
     Durable changes: `prepare` a candidate, set its `disposition`, `resume` to
     run routed leaves (refused with `episode_workflow_disabled` unless enabled),
-    then `coverage` and attest via `resume` + `postcommit`. Details:
-    references/operations.md (episode_memory).
+    then `coverage` and attest via `resume` + `postcommit`.
+    See references/operations.md (episode_memory).
 
     Args:
         action: `record` writes; `inspect`, `candidates`, `coverage` read.
@@ -9757,8 +9757,7 @@ def op_maintain_memory(
 
     structured-files and tag-variants apply needs the preview's `plan_id` and `why`.
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
-    Manuals for structured-files, curation, tag-variants, sidecar collapse:
-    references/vault-care.md.
+    Mode manuals are in references/vault-care.md.
 
     Args:
         mode: Maintenance mode.
