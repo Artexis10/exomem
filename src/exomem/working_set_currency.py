@@ -24,6 +24,7 @@ HISTORICAL = "historical"
 _ISO_DATE = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)")
 _RECOMMENDATION_KINDS = frozenset({"recommendation", "next_step", "suggestion", "action"})
 _OUTCOME_KINDS = frozenset({"outcome", "result", "done", "completed"})
+_OUTCOME_CATEGORIES = frozenset({"outcome", "result"})
 _CURRENT_CATEGORIES = frozenset({"decision"})
 #: Words an action and its outcome must share for them to be the SAME action.
 MIN_SHARED_ACTION_TERMS = 3
@@ -49,7 +50,7 @@ def _is_recommendation(item: "LaneItem") -> bool:
 
 
 def _is_outcome(item: "LaneItem") -> bool:
-    return _label(item, "kind") in _OUTCOME_KINDS
+    return _label(item, "kind") in _OUTCOME_KINDS or _label(item, "category") in _OUTCOME_CATEGORIES
 
 
 def _action_terms(text: str) -> frozenset[str]:

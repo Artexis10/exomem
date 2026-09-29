@@ -186,3 +186,12 @@ def test_unrelated_or_older_outcome_leaves_recommendation_current():
                   kind="outcome", updated="2026-09-01")
     units = {u["ref"]: u for u in _packet([rec, older, other])["units"]}
     assert "history" not in units["rec"]
+
+
+def test_outcome_recognised_by_category_alone():
+    rec = _item("rec", "Call the admissions office about the deposit deadline",
+                category="action", kind="observation", updated="2026-08-01")
+    out = _item("out", "Called the admissions office about the deposit deadline; accepted",
+                category="outcome", kind="observation", updated="2026-08-15")
+    units = {u["ref"]: u for u in _packet([rec, out])["units"]}
+    assert units["rec"]["superseded_by_outcome"] == "out"
