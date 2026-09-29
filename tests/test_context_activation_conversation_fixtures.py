@@ -56,11 +56,15 @@ ENGLISH_SET_DIGEST = "a49d85f49b18c2ce8f0349933ed01ceb4fb5ca176dca066700c9c2f936
 
 #: The pinned digest of this group. Editing any fixture field, gold list
 #: included, changes it, and that voids every run manifest that names the old one.
-CONVERSATION_SET_DIGEST = "374056f5fc22d9a75249b83162d141a5b293b2fc5fc68071ebcad88a2fd5170f"
+CONVERSATION_SET_DIGEST = "1c81d3e957b975c1ee72ff2e16fe6ba401179679101bdbb35edb7172a82a13e9"
 
 RICH = [case for case in CASES if case.group == "rich_turn" and case.kind in POSITIVE_KINDS]
 MULTI = [case for case in CASES if case.group == "multi_turn" and case.kind in POSITIVE_KINDS]
-ATTACHMENTS = [case for case in CASES if case.group == "attachment" and case.kind in POSITIVE_KINDS]
+ATTACHMENTS = [
+    case
+    for case in CASES
+    if case.group == "attachment" and case.kind in POSITIVE_KINDS and case.case_id != "V29"
+]
 PROJECT_WORDS = re.compile(r"\b(work|personal|project|projects|alpha|beta)\b", re.IGNORECASE)
 ANAPHORS = re.compile(
     r"\b(he|she|it|they|him|her|his|hers|its|their|theirs|them|that|this|those|these|"
@@ -150,7 +154,12 @@ def test_every_rich_and_multi_turn_case_has_exactly_one_negative_twin() -> None:
             assert twin.conversation != case.conversation
         else:
             assert twin.turn != case.turn
-            assert twin.conversation == case.conversation
+            # Post-hoc correction (design.md): a content-free twin keeps the case's
+            # conversation but its focus, if any, names nothing.
+            assert {k: v for k, v in (twin.conversation or {}).items() if k != "focus"} == {
+                k: v for k, v in (case.conversation or {}).items() if k != "focus"
+            }
+            assert (twin.conversation or {}).get("focus") in (None, "closing pleasantries")
             assert not ANAPHORS.search(twin.turn) or case.kind.startswith("rich"), twin.case_id
         assert set(twin.gold).isdisjoint(case.poison), twin.case_id
 
@@ -539,3 +548,17 @@ def test_conversation_case_is_a_frozen_value() -> None:
     assert isinstance(case, ConversationCase)
     with pytest.raises(dataclasses.FrozenInstanceError):
         case.turn = "x"  # type: ignore[misc]
+
+
+def test_a_content_free_twin_carries_no_focus_that_names_the_earlier_subject() -> None:
+    """Post-hoc correction: a twin tests a content-free turn, so its focus must not
+    be a confound. The ruling that focus is current-turn evidence stays pinned by
+    V29, whose focus names the subject and whose arms (c) and (d) resolve it."""
+    for case in CASES:
+        if case.twin_mode == "empty_turn" and (case.conversation or {}).get("focus"):
+            assert case.conversation["focus"] == "closing pleasantries", case.case_id
+    v29 = case_by_id("V29")
+    assert v29.group == "attachment" and v29.arms == ("a", "c", "d")
+    assert v29.expected_status == "resolved" and dict(v29.expected_origin) == {"e_ottilie_marsh": "focus"}
+    assert v29.expectation("a")["status"] == "unresolved"
+    assert "Ottilie Marsh" in v29.conversation["focus"]

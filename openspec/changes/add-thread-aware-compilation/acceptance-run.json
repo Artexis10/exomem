@@ -1,6 +1,6 @@
 {
   "fixture_set": "context-activation-conversation-v1",
-  "fixture_digest": "374056f5fc22d9a75249b83162d141a5b293b2fc5fc68071ebcad88a2fd5170f",
+  "fixture_digest": "1c81d3e957b975c1ee72ff2e16fe6ba401179679101bdbb35edb7172a82a13e9",
   "encoding": "o200k_base (rebuilt from npm js-tiktoken; sha256 446a9538cb6c348e...)",
   "arm_a_mechanism_removal": {"red": true, "multi_turn_failed": "9 of 13", "note": "same as baseline-arm-a.json"},
   "gold_recall_below_floor": {"b": [], "c": [], "d": []},

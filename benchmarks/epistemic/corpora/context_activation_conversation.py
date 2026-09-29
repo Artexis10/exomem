@@ -475,6 +475,17 @@ def _twin(case: ConversationCase, case_id: str, mode: str, **values) -> Conversa
     )
 
 
+#: The focus a content-free twin carries after the post-hoc correction (see
+#: design.md): it names nothing in the corpus, so the twin tests a content-free
+#: turn and not the ruled "focus is current-turn evidence" semantics.
+_QUIET_FOCUS = "closing pleasantries"
+
+
+def _quiet(case: ConversationCase) -> dict:
+    """The case's conversation with its focus replaced by one that names nothing."""
+    return {**(case.conversation or {}), "focus": _QUIET_FOCUS}
+
+
 # -- Rich single turns: two to five sentences, no conversation ---------------- #
 
 _RICH = (
@@ -1115,48 +1126,56 @@ _MULTI_TWINS = (
     ),
     _twin(
         _CARRY_1, "W17", "empty_turn",
+        conversation=_quiet(_CARRY_1),
         turn="Thanks, all done for today.",
         poison=("e_ottilie_marsh", "f_spring_round"),
         must_exclude=("scored the entries and prepares the follow-up cycle", "weights that were applied to the next round"),
     ),
     _twin(
         _CARRY_2, "W18", "empty_turn",
+        conversation=_quiet(_CARRY_2),
         turn="Good morning, I am back at my desk.",
         poison=("e_marigold_tenby",),
         must_exclude=("keeps the marshal roster and the radio list",),
     ),
     _twin(
         _SWITCH_1, "W19", "empty_turn",
+        conversation=_quiet(_SWITCH_1),
         turn="Enough for now, talk later.",
         poison=("h_kestrel", "h_harbor_lantern"),
         must_exclude=("holds two analyst seats open until the March review", "caps the signal-repair spend at forty thousand"),
     ),
     _twin(
         _SWITCH_2, "W20", "empty_turn",
+        conversation=_quiet(_SWITCH_2),
         turn="Right, I am heading out for lunch.",
         poison=("h_larkspur", "e_bastien_quill"),
         must_exclude=("eight volunteer marshals", "trains new volunteers on the tide tables"),
     ),
     _twin(
         _SWITCH_3, "W21", "empty_turn",
+        conversation=_quiet(_SWITCH_3),
         turn="Lovely, see you after the break.",
         poison=("r_cormorant_winch", "h_nightjar"),
         must_exclude=("grease the drum before every haul", "two cutover waves"),
     ),
     _twin(
         _DROWN_1, "W22", "empty_turn",
+        conversation=_quiet(_DROWN_1),
         turn="Anyway, what a grey afternoon.",
         poison=("h_harbor_lantern", "e_wilhelmina_pryce"),
         must_exclude=("caps the signal-repair spend at forty thousand", "pilots new units with her Thursday class"),
     ),
     _twin(
         _DROWN_2, "W23", "empty_turn",
+        conversation=_quiet(_DROWN_2),
         turn="Fine, I will look in on Monday.",
         poison=("h_kestrel", "r_cormorant_winch"),
         must_exclude=("holds two analyst seats open until the March review", "grease the drum before every haul"),
     ),
     _twin(
         _DROWN_3, "W24", "empty_turn",
+        conversation=_quiet(_DROWN_3),
         turn="Cheers, there is plenty of chat for one day.",
         poison=("h_saltmarsh", "e_perpetua_holt"),
         must_exclude=("six fixed transects", "approves any spend above five hundred"),
@@ -1197,6 +1216,25 @@ _ATTACHMENT_2 = _case(
     must_exclude=("waiting on the roofer's quote",),
     status="resolved",
     origin={"h_nightjar": "focus", "e_lysander_crake": "focus"},
+    arms=("a", "c", "d"),
+    arm_expectations={"a": dict(_ABSENT)},
+)
+# Added post hoc (design.md, "Post-hoc fixture correction"): a content-free turn
+# whose focus DOES name an earlier subject. `focus` is current-turn evidence by
+# ruling, so arms (c) and (d) resolve it and arm (a) abstains. It keeps that
+# ruling pinned now that twins W17 to W24 carry a focus that names nothing.
+_FOCUS_NAMES_SUBJECT = _case(
+    "V29",
+    "attachment",
+    "Thanks, all done for today.",
+    group="attachment",
+    conversation={"focus": "Ottilie Marsh and the scoring notes"},
+    gold=("e_ottilie_marsh",),
+    poison=("f_spring_round",),
+    must_include=("scored the entries and prepares the follow-up cycle",),
+    must_exclude=("weights that were applied to the next round",),
+    status="resolved",
+    origin={"e_ottilie_marsh": "focus"},
     arms=("a", "c", "d"),
     arm_expectations={"a": dict(_ABSENT)},
 )
@@ -1264,6 +1302,7 @@ CASES: tuple[ConversationCase, ...] = (
     *_MULTI,
     _ATTACHMENT_1,
     _ATTACHMENT_2,
+    _FOCUS_NAMES_SUBJECT,
     _WITHHELD,
     *_RICH_TWINS,
     *_MULTI_TWINS,

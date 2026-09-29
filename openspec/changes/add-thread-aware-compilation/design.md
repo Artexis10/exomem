@@ -337,3 +337,10 @@ This change therefore specifies S2's precedence on top of the landed contract, w
 ## Migration
 
 The change is additive. Old clients and old services interoperate: the argument is optional, and the hook retries once without the field on an old service. Remote connectors pick up the field only after the owner-side schema refresh in S4.
+
+
+## Post-hoc corrections (orchestrator rulings on #1455)
+
+**Fixture correction, `context-activation-conversation-v1`.** The first acceptance run failed twins W17 to W24 on arms (c) and (d). Each twin's turn is content-free, but it carried the paired case's fixture `focus` naming the earlier subject. `focus` is current-turn evidence (ruling 1), so an exact alias in it resolves that anchor, and the twin resolved its own poison. The named focus was a confound: a twin exists to test a content-free turn. The twins' `focus` was therefore re-authored to `closing pleasantries`, which names nothing. One case, V29 (attachment group, arms a, c, d), was added: the same content-free turn with a focus that names the earlier subject, pre-registered so that arms (c) and (d) resolve it with `origin = "focus"` and arm (a) abstains. That keeps ruling 1 pinned. It is a case in the attachment group rather than a twin because the twin invariants (one twin per case, a twin never serves its case's gold) forbid a twin that resolves its case's gold. The fixtures were edited after the first scored run, so that run is void: the digest moved from `374056f5…` to `1c81d3e9…`, the arm (a) baseline and the acceptance run were re-recorded, and the eight rows left `PENDING_RULING`.
+
+**Anaphor set.** The bare pointers "one", "ones" and "other" no longer make a turn anaphoric by themselves (the shipped follow-up test, `is_follow_up`, is unchanged). They count only when a determiner, demonstrative, ordinal or "which" governs them. This removes the false positive on a numeral use ("plenty of chat for one day"), which the first acceptance run found on W24 (arm b).

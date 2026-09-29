@@ -85,6 +85,10 @@ def _titles(packet: dict) -> list[str]:
         "the second option looks better to me",
         "I prefer the first one",
         "the former was cheaper than the latter",
+        "which one is cheaper",
+        "the other one, please",
+        "that one looks better",
+        "the second one",
         "and what about the next quarter",
         "continue",
     ],
@@ -98,6 +102,9 @@ def test_an_anaphoric_turn_is_recognised(turn: str) -> None:
     [
         "how is the weather looking for Sunday afternoon",
         "tell me about the quarterly review schedule",
+        "Cheers, there is plenty of chat for one day.",
+        "one of the plans is late",
+        "no one came to the review",
     ],
 )
 def test_a_turn_with_no_anaphor_is_not_anaphoric(turn: str) -> None:

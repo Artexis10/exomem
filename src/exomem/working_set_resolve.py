@@ -369,18 +369,36 @@ ORDINALS: frozenset[str] = frozenset(
 ORDINAL_HEADS: frozenset[str] = frozenset({"one", "ones", "option", "options"})
 
 
+#: Pointing words that are only anaphors when something governs them: "that
+#: one", "the other one", "which one", but not "for one day" or "no one".
+BARE_POINTERS: frozenset[str] = frozenset({"one", "ones", "other"})
+#: What may govern a bare pointer: a determiner, a demonstrative, an ordinal.
+DETERMINERS: frozenset[str] = frozenset({"the", "a", "an", "which"})
+
+
 def is_anaphoric(tokens: Sequence[str], *, referential_cue: bool = False) -> bool:
     """Does a turn lean on something said before, of any length?
 
-    True for a referential cue, a personal pronoun or demonstrative, a shipped follow-up
-    marker (`FOLLOW_UP_MARKERS`) or an ordinal followed by "one" or "option".
+    True for a referential cue, a personal pronoun or demonstrative, a shipped
+    follow-up marker, an ordinal followed by "one" or "option", or a bare
+    pointer ("one", "ones", "other") that a determiner, demonstrative, ordinal
+    or "which" governs. A numeral use ("for one day") is not an anaphor.
     Whether the turn reached an anchor after all is the resolver's answer: the
     conversation carry it enables runs only for a turn that reached none."""
     if referential_cue:
         return True
     words = tuple(tokens)
-    if any(token in PERSONAL_ANAPHORS or token in DEMONSTRATIVES or token in FOLLOW_UP_MARKERS
-        for token in words):
+    if any(
+        token in PERSONAL_ANAPHORS
+        or token in DEMONSTRATIVES
+        or (token in FOLLOW_UP_MARKERS and token not in BARE_POINTERS)
+        for token in words
+    ):
+        return True
+    governors = DETERMINERS | DEMONSTRATIVES | ORDINALS
+    if any(
+        right in BARE_POINTERS and left in governors for left, right in zip(words, words[1:])
+    ):
         return True
     return any(
         left in ORDINALS and right in ORDINAL_HEADS for left, right in zip(words, words[1:])

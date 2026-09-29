@@ -168,7 +168,7 @@ When none or two or more competitors carry `conversation`, the turn SHALL stay `
 A turn SHALL be anaphoric when both of these hold:
 
 1. Its turn segment reaches no anchor by any worded contact kind.
-2. It speaks a cue from the effective referential vocabulary, or one of a closed, shipped anaphor set: third-person pronouns and possessives; "that", "this", "those", "these", "it"; the follow-up markers already shipped; an ordinal followed by "one" or "option"; "the former" and "the latter".
+2. It speaks a cue from the effective referential vocabulary, or one of a closed, shipped anaphor set: third-person pronouns and possessives; "that", "this", "those", "these", "it"; the follow-up markers already shipped, except the bare pointers "one", "ones" and "other"; an ordinal followed by "one" or "option"; "the former" and "the latter". A bare pointer ("one", "ones", "other") counts as an anaphor only when a determiner ("the", "a", "an"), a demonstrative, an ordinal or "which" governs it ("that one", "the other one", "the second one", "which one"); a numeral use ("for one day", "no one") does not.
 
 Length is not a criterion: an anaphoric turn MAY carry any number of other words.
 
@@ -224,6 +224,16 @@ A refs-only conversation SHALL NOT carry: a ref says what was read, not what "it
 
 - **WHEN** a short follow-up turn is carried from the caller's own session tier under the shipped follow-up rule, and the conversation's newest user entry names a different anchor
 - **THEN** the packet reports `generation.carried_by = "follow_up"`, unchanged from today
+
+#### Scenario: A numeral "one" is not an anaphor
+
+- **WHEN** a turn says "Cheers, there is plenty of chat for one day." and an earlier user entry resolved an anchor
+- **THEN** the turn is not anaphoric and nothing is carried
+
+#### Scenario: A governed pointer is an anaphor
+
+- **WHEN** a turn says "which one is cheaper?" or "the other one, please"
+- **THEN** the turn is anaphoric
 
 #### Scenario: A turn that names its own subject is not carried
 
