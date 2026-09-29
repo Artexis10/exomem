@@ -3017,6 +3017,36 @@ def _activate_main(argv: list[str]) -> int:
     parser.add_argument(
         "--workspace", default=None, help="opaque project key, recorded only as a hash"
     )
+    parser.add_argument(
+        "--focus",
+        default=None,
+        help="one line (at most 240 characters) naming the subjects now in play, "
+        "including names read from attachments; never a rewrite of the turn",
+    )
+    parser.add_argument(
+        "--recent-user",
+        action=_RecentEntryAction,
+        const="user",
+        dest="recent",
+        metavar="TEXT",
+        help="an earlier user turn; repeat, oldest first (kept in the order given)",
+    )
+    parser.add_argument(
+        "--recent-assistant",
+        action=_RecentEntryAction,
+        const="assistant",
+        dest="recent",
+        metavar="TEXT",
+        help="an earlier assistant turn; repeat, oldest first (kept in the order given)",
+    )
+    parser.add_argument(
+        "--conversation-ref",
+        action="append",
+        default=None,
+        dest="conversation_refs",
+        metavar="REF",
+        help="a page ref the conversation already read; repeatable",
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
@@ -3037,7 +3067,26 @@ def _activate_main(argv: list[str]) -> int:
         core += ["--session", args.session]
     if args.workspace:
         core += ["--workspace", args.workspace]
+    conversation: dict[str, object] = {}
+    if args.focus:
+        conversation["focus"] = args.focus
+    if args.recent:
+        conversation["recent"] = list(args.recent)
+    if args.conversation_refs:
+        conversation["refs"] = list(args.conversation_refs)
+    if conversation:
+        core += ["--conversation", json.dumps(conversation)]
     return _core_op_main(_with_json(core, args.json))
+
+
+class _RecentEntryAction(argparse.Action):
+    """`--recent-user` and `--recent-assistant` share one list, so the entries
+    keep the order they were given in across both flags."""
+
+    def __call__(self, parser, namespace, values, option_string=None):  # noqa: ANN001
+        entries = list(getattr(namespace, self.dest, None) or [])
+        entries.append({"role": self.const, "text": values})
+        setattr(namespace, self.dest, entries)
 
 
 def _simple_cli_action_names() -> frozenset[str]:

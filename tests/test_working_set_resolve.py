@@ -1042,6 +1042,9 @@ def test_evidence_vocabulary_is_closed() -> None:
         # qualifies an anchor the turn already reached, and an agent's own choice
         # of sense resolves one outright.
         "continuity",
+        # Added by `add-thread-aware-compilation`: an earlier turn or a read
+        # ref named the anchor. A qualifier, never a candidate.
+        "conversation",
         "agent_choice",
     )
     with pytest.raises(ValueError):

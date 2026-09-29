@@ -136,6 +136,7 @@ from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
 from . import workflow_skills as workflow_skills_module
 from . import working_set as working_set_module
+from . import working_set_conversation as working_set_conversation_module
 from . import working_set_heat as working_set_heat_module
 from . import working_set_index as working_set_index_module
 from . import working_set_learning as working_set_learning_module
@@ -6212,6 +6213,7 @@ def op_activate_context(
     client: str | None = None,
     session: str | None = None,
     workspace: str | None = None,
+    conversation: dict[str, Any] | None = None,
 ) -> dict:
     """Compile durable context for a raw conversational turn, without a query.
 
@@ -6256,6 +6258,29 @@ def op_activate_context(
     where that thread holds one page clearly ahead of the rest, it is carried
     as a single `partial` anchor with `generation.carried_by: "follow_up"`;
     where two are close, both are listed under `ambiguity` for `anchor`.
+
+    In a longer conversation, or when the user's words lean on attachments, also
+    pass `conversation` (every field optional; `turn` stays verbatim, never
+    rewritten): `focus`, one line (at most 240 characters) naming the subjects
+    now in play, including names or objects you read from the user's
+    attachments; `refs`, the pages you already read (at most 12); and, if you
+    wish, `recent`, earlier turns oldest first as `{role, text}` (at most 6
+    entries, user text cut at 600 characters, assistant text at 300, 2,400 in
+    all). The server enforces every bound itself and never refuses over it:
+    `generation.conversation` says `applied`, `truncated` or `absent`.
+    Each anchor carries `origin`: `turn` (the user's words reached it), `focus`,
+    or `turn_and_focus` (your `focus` reached it, alone or with the user's
+    words), or `conversation` (carried from an earlier user turn). A `focus`
+    origin is your cue, not the user's words: it is there because you named it,
+    and is matched by worded evidence only, never counts as your `anchor` choice, and
+    cannot settle an ambiguity between anchors the user's own words reached.
+    Earlier turns and refs never reach an anchor by themselves: they only
+    strengthen one the turn or your `focus` already reached, or break a tie when
+    exactly one competitor was named before (`generation.disambiguated_by`).
+    Activation reads no attachment itself and runs no media model; only the
+    names you put into `focus` count. Conversation text is used for this one
+    call and never stored, and a request carrying one is never served from
+    cache.
 
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
@@ -6355,6 +6380,9 @@ def op_activate_context(
             Only a salted hash of it is stored. Omitting both keys, a turn
             that names nothing is answered from this conversation's
             `continuity` thread alone, never from other conversations' work.
+        conversation: Optional bounded view of the conversation, see above:
+            `{focus?: str, recent?: [{role: "user"|"assistant", text: str}],
+            refs?: [str]}`. Anything else is ignored, never an error.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
@@ -6422,6 +6450,7 @@ def op_activate_context(
     # all. `session` has one other reader, the upkeep carrier below, where it
     # names the caller whose session start may carry one upkeep item.
     started = time.perf_counter()
+    bounded = working_set_conversation_module.bound(conversation)
     # A foreground request: in-process bulk passes (a whole-vault graph
     # rebuild) pause at their next unit while this runs, instead of taking the
     # GIL back after every SQLite call the request makes (5-15x per stage,
@@ -6446,6 +6475,7 @@ def op_activate_context(
                 client=client,
                 session=session,
                 workspace=workspace,
+                conversation=bounded,
             )
             # After the guard and outside the packet cache, like `continuity`:
             # at a caller's session start, at most one upkeep item, and only in
@@ -6465,6 +6495,7 @@ def op_activate_context(
                 outcome="refused" if isinstance(error, ValueError) else "error",
                 error_code=type(error).__name__,
                 duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                conversation=bounded.counts,
             )
             raise
         finally:
@@ -6472,12 +6503,17 @@ def op_activate_context(
                 request_budget_module.reset_current(bound_token)
     _carry_thread_through_abstention(packet, continuity)
     _withhold_vault_generation(vault_root, packet, purpose=purpose)
+    # Every packet reports how its conversation was bounded; the compiler has
+    # already said `absent` when it skipped the stage for the request's budget.
+    if isinstance(packet.get("generation"), dict):
+        packet["generation"].setdefault("conversation", bounded.state)
     query_log.log_activation_call(
         vault_root,
         packet=packet,
         client=client,
         session=session,
         duration_ms=round((time.perf_counter() - started) * 1000, 3),
+        conversation=bounded.counts,
     )
     return packet
 
@@ -6541,6 +6577,7 @@ def _op_activate_context_body(
     client: str | None = None,
     session: str | None = None,
     workspace: str | None = None,
+    conversation: working_set_conversation_module.Conversation | None = None,
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
@@ -6913,6 +6950,7 @@ def _op_activate_context_body(
         freshness_snapshot=snapshot,
         lexical_seconds=lexical_seconds,
         attribution=attribution,
+        conversation=conversation,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —
