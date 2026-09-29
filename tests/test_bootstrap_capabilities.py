@@ -47,6 +47,7 @@ _STRUCTURED_TOOL_LISTS = {
 _ACTION_VOCABULARY_MAPS = {
     "agent_protocol",
     "builtin_fallback",
+    "by_intent",
     "contract",
     "front_door_actions",
     "simple_actions",
@@ -365,7 +366,12 @@ def test_narrow_surface_filters_every_profile_without_deleting_useful_routes(
     )
 
     with active_surface(descriptor):
-        payloads = [commands.op_bootstrap(vault, **_bootstrap_args(profile)) for profile in PROFILES]
+        payloads = [
+            commands.op_bootstrap(
+                vault, **_bootstrap_args(profile), **({"section": "all"} if profile == "compact" else {})
+            )
+            for profile in PROFILES
+        ]
 
     for payload in payloads:
         refs = _extract_advertised_tool_refs(
@@ -381,7 +387,7 @@ def test_narrow_surface_filters_every_profile_without_deleting_useful_routes(
 
 
 def test_direct_python_bootstrap_defaults_to_canonical_full_mcp(vault: Path) -> None:
-    payload = commands.op_bootstrap(vault)
+    payload = commands.op_bootstrap(vault, section="all")
     expected = tuple(
         command.name for command in commands.product_commands_for("mcp", expose_tier2=True)
     )
@@ -397,7 +403,11 @@ def test_direct_python_bootstrap_defaults_to_canonical_full_mcp(vault: Path) -> 
 
 def test_bootstrap_guidance_uses_product_writer_not_legacy_note(vault: Path) -> None:
     for profile in GENERIC_PROFILES:
-        serialized = json.dumps(commands.op_bootstrap(vault, profile=profile))
+        serialized = json.dumps(
+            commands.op_bootstrap(
+                vault, profile=profile, **({"section": "all"} if profile == "compact" else {})
+            )
+        )
         assert "note()" not in serialized
         assert "remember()" in serialized
 
@@ -415,10 +425,10 @@ def test_active_surface_context_is_nested_and_concurrent_safe(vault: Path) -> No
     )
 
     with active_surface(outer):
-        before = commands.op_bootstrap(vault)["active_capabilities"]
+        before = commands.op_bootstrap(vault, section="all")["active_capabilities"]
         with active_surface(inner):
-            nested = commands.op_bootstrap(vault)["active_capabilities"]
-        after = commands.op_bootstrap(vault)["active_capabilities"]
+            nested = commands.op_bootstrap(vault, section="all")["active_capabilities"]
+        after = commands.op_bootstrap(vault, section="all")["active_capabilities"]
 
     assert before["profile"] == after["profile"] == "outer"
     assert nested["profile"] == "inner"
@@ -427,7 +437,7 @@ def test_active_surface_context_is_nested_and_concurrent_safe(vault: Path) -> No
         descriptor: ActiveSurfaceDescriptor,
     ) -> tuple[str, list[str], list[str]]:
         with active_surface(descriptor):
-            active = commands.op_bootstrap(vault)["active_capabilities"]
+            active = commands.op_bootstrap(vault, section="all")["active_capabilities"]
             return (
                 active["profile"],
                 active["available_product_tools"],

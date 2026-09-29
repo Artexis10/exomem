@@ -46,7 +46,7 @@ def test_a_breaching_client_is_told_what_is_slow(
 ) -> None:
     _identity(monkeypatch, "openai-mcp/1.0.0")
     _breach(watch, "openai-mcp/1.0.0")
-    out = commands.op_bootstrap(vault)
+    out = commands.op_bootstrap(vault, section="all")
     [row] = out["latency"]
     assert row["tool"] == "ask_memory" and row["deep"] is False
     assert row["samples"] == 25 and row["p90_ms"] == 3000 and row["ceiling_ms"] == 1000
@@ -59,7 +59,7 @@ def test_another_clients_breach_is_not_this_clients(
 ) -> None:
     _identity(monkeypatch, "claude-code")
     _breach(watch, "openai-mcp/1.0.0")
-    assert "latency" not in commands.op_bootstrap(vault)
+    assert "latency" not in commands.op_bootstrap(vault, section="all")
 
 
 def test_the_block_survives_the_session_projection(

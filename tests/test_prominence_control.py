@@ -834,7 +834,7 @@ def test_a_surface_without_the_preference_control_is_taught_a_route_it_can_take(
         product_commands=("bootstrap", "ask_memory", "remember"),
     )
     with active_surface(descriptor):
-        payload = commands.op_bootstrap(vault, profile="compact")
+        payload = commands.op_bootstrap(vault, profile="compact", section="all")
 
     change_with = payload["engagement"]["change_with"]
     assert change_with == prominence.custom_instructions_route()
@@ -844,7 +844,7 @@ def test_a_surface_without_the_preference_control_is_taught_a_route_it_can_take(
 
 
 def test_a_surface_that_serves_the_control_still_names_it(vault):
-    payload = commands.op_bootstrap(vault, profile="compact")
+    payload = commands.op_bootstrap(vault, profile="compact", section="all")
 
     assert payload["engagement"]["change_with"] == prominence.configuration_route()
     assert payload["engagement"]["change_with"].startswith("configure_memory:")

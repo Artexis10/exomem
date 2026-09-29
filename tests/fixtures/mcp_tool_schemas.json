@@ -848,6 +848,18 @@
           "default": null,
           "description": "Installed skill metadata digest required for the session profile. An absent or stale digest returns compact in this call with a closed unavailable reason."
         },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "With the compact profile, one named block group of the operating contract (\"index\" lists them). Absent, compact returns the core."
+        },
         "authorization_session_credential": {
           "anyOf": [
             {

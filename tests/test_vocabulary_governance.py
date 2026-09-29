@@ -61,7 +61,7 @@ def test_bootstrap_reports_current_authority_without_downgrading(vault, monkeypa
             return vocabulary_authority.AuthorityStatus(mode, 7 if mode == "v2" else None, 0)
 
     monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda _: Authority())
-    authority = commands.op_bootstrap(vault)["vocabulary_workflow"]["authority"]
+    authority = commands.op_bootstrap(vault, section="all")["vocabulary_workflow"]["authority"]
     assert authority["contract_version"] == mode
     assert authority["scoped_delegation"] is (mode == "v2")
     assert authority["status"]["route"] == {

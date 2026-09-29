@@ -435,7 +435,9 @@ def test_bootstrap_only_advertises_vocabulary_authority_status_on_the_current_pr
         lambda _self: SimpleNamespace(mode="v2"),
     )
     with capabilities.active_surface(hosted_gateway.hosted_agent_surface_descriptor(profile)):
-        authority = commands.op_bootstrap(tmp_path)["vocabulary_workflow"]["authority"]
+        # v5 is served the core; the frozen profiles keep the complete payload.
+        extra = {"section": "all"} if profile == commands.HOSTED_ALPHA_AGENT_V5_PROFILE else {}
+        authority = commands.op_bootstrap(tmp_path, **extra)["vocabulary_workflow"]["authority"]
 
     status = authority["status"]
     assert status["available"] is (profile == commands.HOSTED_ALPHA_AGENT_V5_PROFILE)

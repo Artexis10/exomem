@@ -71,6 +71,7 @@ from . import entity_types as entity_types_module
 from . import envelope as envelope_module
 from . import episode_memory as episode_memory_module
 from . import episode_workflow as episode_workflow_module
+from . import bootstrap_core as bootstrap_core_module
 from . import episode_nudge as episode_nudge_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
@@ -821,6 +822,7 @@ def op_bootstrap(
     profile: str = "compact",
     workflow: str | None = None,
     skill_contract: str | None = None,
+    section: str | None = None,
 ) -> dict:
     """Return Exomem's versioned operating contract and live session state.
 
@@ -842,6 +844,8 @@ def op_bootstrap(
         skill_contract: Installed skill metadata digest required for the session
             profile. An absent or stale digest returns compact in this call with
             a closed unavailable reason.
+        section: With the compact profile, one named block group of the operating
+            contract ("index" lists them). Absent, compact returns the core.
 
     Returns:
         A structured, versioned contract with workflow, search, save, upload,
@@ -852,6 +856,14 @@ def op_bootstrap(
             "bootstrap: profile must be 'compact', 'full', 'diagnostics', or 'session', "
             f"got {profile!r}"
         )
+    if section is not None:
+        if section not in bootstrap_core_module.accepted_sections():
+            raise ValueError(
+                "bootstrap: section must be one of "
+                f"{', '.join(bootstrap_core_module.accepted_sections())}, got {section!r}"
+            )
+        if profile != "compact":
+            raise ValueError("bootstrap: section requires profile='compact'")
 
     session_requested = profile == "session"
     session_unavailable: str | None = None
@@ -890,6 +902,13 @@ def op_bootstrap(
         capture_gate=engagement_policy["contract"]["effective_capture"],
     )
     active_descriptor = _active_bootstrap_descriptor()
+    # A released hosted profile is a published identity: it keeps the complete
+    # compact payload and its pinned parameter list, which has no `section`.
+    frozen_profile = (
+        active_descriptor.profile in hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS
+    )
+    if frozen_profile and section is not None:
+        raise ValueError("bootstrap: section is not available on this surface profile")
     active_product_names = frozenset(active_descriptor.product_commands)
     # `change_with` is seeded from the CLI string, which is right for a local
     # install and wrong for every served surface. Take it from what this surface
@@ -2156,12 +2175,24 @@ def op_bootstrap(
         **{key: compact_payload[key] for key in first if key in compact_payload},
         **compact_payload,
     }
-    if session_unavailable is not None:
-        result = compact_payload | {"session_profile_unavailable": session_unavailable}
-    elif session_requested:
-        result = _session_bootstrap_projection(compact_payload)
+    if frozen_profile or profile != "compact":
+        core_payload = None
     else:
-        result = compact_payload
+        core_payload = bootstrap_core_module.project_core(compact_payload)
+    if section is not None:
+        result = bootstrap_core_module.section_payload(compact_payload, section)
+    elif session_unavailable is not None:
+        result = (core_payload or compact_payload) | {
+            "session_profile_unavailable": session_unavailable
+        }
+    elif session_requested:
+        result = (
+            bootstrap_core_module.project_session(compact_payload, core_payload)
+            if core_payload is not None
+            else _session_bootstrap_projection(compact_payload)
+        )
+    else:
+        result = core_payload if core_payload is not None else compact_payload
     # After every projection, so the session profile's key whitelist cannot
     # drop it: the client on a reduced surface is exactly the one with no other
     # way to hear that its own recalls have gone slow. Absent when healthy, so a
