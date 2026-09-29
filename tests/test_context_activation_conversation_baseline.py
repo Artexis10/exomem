@@ -147,7 +147,7 @@ def _execute(root: Path, monkeypatch: pytest.MonkeyPatch) -> Run:
     index.rebuild()
     by_path = {anchor.path: anchor.ref for anchor in index.anchors() if anchor.path}
     index.close()
-    key_to_ref = {key: by_path.get(path, path) for key, path in manifest.key_to_path.items()}
+    key_to_ref = {key: by_path.get(path) or path for key, path in manifest.key_to_path.items()}
     packets: dict[tuple[str, str], dict[str, Any] | str] = {}
     for case in CASES:
         for arm in case.arms:
