@@ -317,8 +317,9 @@ with the case's gold facts served, and nothing is mislabelled: no non-gold
 page is served as resolved or as current state, and no poison as resolved.
 Extra honestly labelled siblings do not fail a case within the packet budget.
 Twins and C6 are scored unchanged. The digest (`bfedee2f…`) was pinned before
-the first run. On v4 A9 gives 5/18: each red positive still misses a gold
-page, and none fails for a mislabel alone. C4 fails only because its
+the first run. On v4 A9 gives 5/18 on the base runtime and 9/18 on the
+activation-quality runtime (equal to its raw score, 9/18): each red positive
+still misses a gold page, and none fails for a mislabel alone. C4 fails only because its
 colleague's entity never arrives.
 
 **Pinned reds by ruling.**
@@ -355,7 +356,11 @@ distractors like it.
 | C8, T8 | red | red | red | red | red | The gold notes are not anchors, and no word of the turn carries them |
 | T9 | pass | pass | pass | pass | pass | |
 
-Raw 5/18, A2+A4 5/18, A7 5/18, A8 5/18, A9 5/18. No amendment changes a verdict on v4: no gold
+The table above is the base runtime's. On the activation-quality runtime (recorded
+after merging the base at A9 and A10, and after the run-punctuation, casing and
+headline rules) raw, A2+A4, A7, A8 and A9 are each 9/18: T3, T4, T5 and T7 pass as
+well as the five above. Before the merge, raw and A2+A4 were 9/18 and A9 was 5/18 on the
+base's runtime; the raw and amended scores did not move with these rules. Base runtime: raw 5/18, A2+A4 5/18, A7 5/18, A8 5/18, A9 5/18. No amendment changes a verdict on v4: no gold
 note reaches a packet only as a unit, no poison is served as a hedge, and no
 positive case lists an ambiguity candidate outside its gold.
 
