@@ -325,9 +325,33 @@ def test_natural_keyed_rows_report_their_identity_kind(vault_root: Path) -> None
 
 def test_more_rows_than_the_cap_refuse_whole(vault_root: Path) -> None:
     before = _state(vault_root)
-    with pytest.raises(collections.CollectionError, match="BULK_UPSERT_TOO_MANY_ROWS"):
-        _bulk(vault_root, _rows(records.BULK_UPSERT_MAX_ROWS + 1))
+    rows = records.BULK_UPSERT_MAX_ROWS * 2 + 1
+    with pytest.raises(collections.CollectionError) as info:
+        _bulk(vault_root, _rows(rows))
+    error = info.value
+    assert error.code == "BULK_UPSERT_TOO_MANY_ROWS"
+    assert "split" in str(error) and "after_container_hash" in str(error)
+    assert error.details == {
+        "rows": rows,
+        "maximum": records.BULK_UPSERT_MAX_ROWS,
+        "batches_needed": 3,
+        "chain_with": "after_container_hash",
+    }
     assert _state(vault_root) == before
+
+
+def test_a_full_cap_batch_commits_within_the_lease_budget(vault_root: Path) -> None:
+    # The cap exists to keep one call's hold of the single writer lease near 5 s.
+    # This runs a full-cap publish and fails loudly on a gross regression; its
+    # duration in the CI log is the measurement on the runner class.
+    import time
+
+    started = time.perf_counter()
+    result = _bulk(vault_root, _rows(records.BULK_UPSERT_MAX_ROWS))
+    held = time.perf_counter() - started
+    assert result["committed"] is True
+    assert records.inspect_audit_gap(vault_root, _manifest(vault_root))["status"] == "ok"
+    assert held < 12.0, f"a {records.BULK_UPSERT_MAX_ROWS}-row call held the lease {held:.1f}s"
 
 
 def test_the_row_cap_admits_exactly_its_bound(vault_root: Path) -> None:

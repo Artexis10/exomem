@@ -956,8 +956,15 @@ def bulk_upsert_records(
     if len(rows) > BULK_UPSERT_MAX_ROWS:
         raise collections.CollectionError(
             "BULK_UPSERT_TOO_MANY_ROWS",
-            f"a bulk upsert takes at most {BULK_UPSERT_MAX_ROWS} rows",
-            {"rows": len(rows), "maximum": BULK_UPSERT_MAX_ROWS},
+            f"a bulk upsert takes at most {BULK_UPSERT_MAX_ROWS} rows per call; split the "
+            f"import into batches of at most {BULK_UPSERT_MAX_ROWS}, each chained by the "
+            "after_container_hash returned from the previous call",
+            {
+                "rows": len(rows),
+                "maximum": BULK_UPSERT_MAX_ROWS,
+                "batches_needed": -(-len(rows) // BULK_UPSERT_MAX_ROWS),
+                "chain_with": "after_container_hash",
+            },
         )
     if source is not None and type(source) is not str:
         raise collections.CollectionError("INVALID_BULK_ROWS", "source must be a string")
