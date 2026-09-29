@@ -157,8 +157,10 @@ A8_PASSING_TODAY = PASSING_TODAY | {"C8"}
 #: The same packets under amendment A9 alone (agent-choice scoring, digest
 #: pinned before this first run). Every red positive still misses a gold
 #: page: none fails for a mislabel alone, so A9 changes no verdict on the
-#: activation-quality runtime either.
-A9_PASSING_TODAY = PASSING_TODAY
+#: activation-quality runtime either. With the recall-breadth round C8's gold
+#: note is reached as a carried page, which agent-choice scoring counts, so C8
+#: passes under A9 (raw still fails it: raw precision does not count a carry).
+A9_PASSING_TODAY = PASSING_TODAY | {"C8"}
 
 #: Negative controls whose pre-registered mechanism does not change their
 #: outcome. Empty on corpus v4: C6, T1, T2 and T9 each fail with the naming
