@@ -368,3 +368,27 @@ CLAUDE.md, a contract change must update its spec. Add `サクラもち本舗` a
 - `ruff --select F` is clean, and `generate-capabilities.py --check` reports
   current.
 - CI: the required CI gate passed on run 36553480391.
+
+## Final verify at 8fc4fb12 (fa9b0031 red, b65c6de0 fix, 8fc4fb12 spec)
+
+**Verdict: APPROVE.**
+
+- **LOW 7: FIXED.** `_inside_longer_words` (`working_set_resolve.py:549-565`)
+  consumes a head only when every occurrence sits inside the longer name. In
+  `サクラとサクラもち本舗の違い`, both pages resolve.
+  `test_a_head_named_on_its_own_is_not_consumed_by_a_longer_name_in_the_turn`
+  fails against fa9b0031's source and passes at the head.
+- **LOW 8: FIXED (pinned).**
+  `test_kana_only_text_after_a_name_reads_as_the_longest_indexed_name` pins the
+  ruled reading with two twins: with the entity present, `サクラもち` wins; with
+  it absent, `サクラ` resolves.
+- **LOW 9: FIXED.** `spec.md:345-353`, the new scenario at `:522-529` and
+  `design.md:191` now describe the unsplit stretch, the cuts, position-aware
+  consumption and the kana-only ruling. The text matches the code.
+- **No regressions.** The CJK, unicode-terms, resolve, learning and
+  fresh-session suites all pass: 310 passed, 0 failed. They cover the MEDIUM 5
+  controls, the MEDIUM 6 rows and `ねこやなぎ銀行`.
+- **Gates:**
+  - `ruff --select F` is clean.
+  - `openspec validate --all --strict`: 217 passed.
+  - CI: the required gate passed (run 36562754198).
