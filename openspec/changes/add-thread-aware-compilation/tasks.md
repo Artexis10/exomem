@@ -9,7 +9,7 @@ The orchestrator ruled on the design on 2026-09-29; the rulings are recorded in 
 
 ## 1. S0: pre-registration and baseline (no product change)
 
-- [ ] 1.1 Red: `tests/test_context_activation_conversation_fixtures.py`. It proves the group holds everything below, and that editing any gold list changes the digest:
+- [x] 1.1 Red: `tests/test_context_activation_conversation_fixtures.py`. It proves the group holds everything below, and that editing any gold list changes the digest:
   - twelve rich turns and twelve multi-turn conversations;
   - one twin per case;
   - at least three drowning cases and three topic-switch cases;
@@ -18,20 +18,27 @@ The orchestrator ruled on the design on 2026-09-29; the rulings are recorded in 
   - gold, poison, must-include, must-exclude, expected status, expected `carried_by` and expected `origin`;
   - invented names only;
   - no fixture turn verbatim in any corpus page.
-- [ ] 1.2 Author the fixtures and pin their digest:
+  - Evidence: `tests/test_context_activation_conversation_fixtures.py` was written first and failed at collection (`ModuleNotFoundError: epistemic.corpora.context_activation_conversation`), then passed with 31 tests once the fixtures existed (commit d30a97e6).
+
+- [x] 1.2 Author the fixtures and pin their digest:
   - add `FixtureCase.conversation` (optional) and the group ids;
   - make the corpus additions through supported writers: entity pages, hubs, one Records collection, and one governed page withheld from a restricted audience;
   - add a new `FIXTURE_SET_ID` and digest, pinned in the test.
 
   Commit this before any scored run.
-- [ ] 1.3 Add scorer arms a to d in `benchmarks/membench/utility/context_activation.py`:
+  - Evidence: `benchmarks/epistemic/corpora/context_activation_conversation.py`, `FIXTURE_SET_ID = context-activation-conversation-v1`, digest `374056f5fc22d9a75249b83162d141a5b293b2fc5fc68071ebcad88a2fd5170f` pinned in the test; 55 cases (12 rich turns, 13 conversations, 2 attachments, the withheld pair, 26 twins). The English digest `a49d85f4…` is unchanged and asserted. The sibling `ConversationCase` carries `conversation`, so the digest-pinned English `FixtureCase` is untouched. Entity, hub, resource and Records pages use the English module's writers; the withholding scope and ceiling-0 rule are written as the governance tests write them, because `govern_memory` commit refuses on a cold fixture vault (`prepared composite does not match`). Committed before any scored run (d30a97e6).
+
+- [x] 1.3 Add scorer arms a to d in `benchmarks/membench/utility/context_activation.py`:
   - drowning counts as a case failure;
   - the withheld pair is scored for byte identity;
   - arm (a) gives the mechanism-removal verdict;
   - `origin` is checked against the expectation.
 
   Add the new test module to `tests/harness_modules.txt` if it imports `benchmarks/`.
-- [ ] 1.4 Run arm (a) on current `main` and record the baseline manifest with the fixture digest. Confirm that the incident classes fail and that the attachment cases abstain. Arms b to d are expected to be refused as unknown arguments.
+  - Evidence: `benchmarks/membench/utility/context_activation_conversation.py` scores arms a to d per case and per anchor kind with duals and no aggregate; drowning fails a case outright; the withheld pair is scored for byte identity; the arm (a) mechanism-removal verdict and the `origin` check are in; the new test modules are in `tests/harness_modules.txt`. Sibling module, not a change to `context_activation.py`, mirroring the multilingual scorer.
+
+- [x] 1.4 Run arm (a) on current `main` and record the baseline manifest with the fixture digest. Confirm that the incident classes fail and that the attachment cases abstain. Arms b to d are expected to be refused as unknown arguments.
+  - Evidence: Arm (a) on `main` fails 9 of 13 multi-turn cases (mechanism-removal arm red); promotion V13-V14, tie-break V15-V16, anaphoric carry V17-V18 and topic switch V19-V21 all fail; both attachment cases abstain; all 26 twins, the three drowning cases and the refs-only case pass; 82 conversation-bearing arm b to d requests are recorded `refused: unknown argument`. Manifest: `baseline-arm-a.json`.
 
 ## 2. S1+S4: argument, evidence and surface, shipped as one surface change
 
