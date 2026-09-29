@@ -81,3 +81,77 @@ need fixing before this merges.
 - OpenSpec 4.6 and 4.7 match the code except for the Stop-ask clause (see 1).
 - `gh pr checks 1447`: only "Conventional Commit title" ran (green, twice). The
   base is an integration branch, so the full CI suite didn't run on this PR.
+
+## Recheck at 9c254e2b
+
+Reviewed every file in `c19ba23f..9c254e2b` (2 commits, 37 files): the hook
+and its mirror, `capture_sweep.py`, `episode_workflow.py`, `context-roles.yaml`,
+`page-types.md`, the capture skill and nine stamp-only skill files, their plugin
+mirrors, both OpenSpec deltas and `tasks.md`, and seven test files.
+
+**Verdict: REQUEST_CHANGES.** One new blocker: the contact-intent detector.
+
+### Status of earlier findings
+
+- **HIGH 1: fixed.** `COVERAGE_ASK` is back to its base 381 bytes, and a new
+  test pins it by length and sha256. None of the six hook files differs from the
+  base, and all six are byte-identical to their mirrors.
+- **HIGH 2: fixed under the revised ruling.** Contact details now go in the
+  entity's `## Contact` section as `[contact]` units, and the `contact` role is
+  `anchor_defaults: []` in the `units` lane. `test_a_withheld_person_page_takes_its_contact_units_with_it`
+  shows a restricted caller gets no contact unit and no name. `personal-details`
+  is gone.
+- **MEDIUM 3: fixed.** The sink finding is now structural (`received effects`,
+  `distinct_candidates`, page `type`) with a "Keep them here" exit.
+  `entity`/`production-log` pages and pages tagged `hub` are exempt. There is a
+  test for one candidate with three effects, and a withheld page is absent from
+  the report.
+- **MEDIUM 4: fixed.** `test_the_sweep_rule_stays_within_its_wire_cap` enforces
+  the cap. The byte delta against the base: RULE is 299 → 384 characters (+85,
+  was +90) and `consider` is 219 → 237 bytes as JSON (+18, was +43). That is
+  +103 bytes per sweep advisory, down from +133. The two no longer repeat each
+  other.
+- **Low 5/6: fixed.** The spec names the threshold of three, and both missing
+  tests were added.
+
+### New
+
+**HIGH: the contact cue is a raw substring match, so it fires on unrelated
+words.** `context_roles.py:757-758` and `working_set.py:1513` use `cue in text`.
+I probed with the PR's own fixture, and each turn below either served the
+fixture's contact units (its phone and address lines) or didn't:
+
+| Turn | Contact role | Served |
+|---|---|---|
+| "What is X working on this week?" | none | no ✓ |
+| "What's X's phone?" | `turn_cue` | yes ✓ |
+| "X says we should call it done" | none | no ✓ |
+| "X, please address this issue" | `turn_cue` | **yes ✗** |
+| "X lost her headphones" | `turn_cue` | **yes ✗** |
+| "X sent the email about the class" | `turn_cue` | **yes ✗** |
+
+`address`, `phone` and `email` match inside ordinary words and phrases. The
+spec's "an intent to reach the person" isn't met. Fix: make the cues
+intent-shaped (`phone number`, `email address`, `mailing address`, `how do I
+reach`, `contact details`), match them on word boundaries, and add these three
+negatives as tests.
+
+**LOW: the carried-page path gates contact by accident.** `working_set.py:1500-1523`
+selects every `units` role for a carried page, ordered with cued roles first
+and then by priority, capped at `MAX_SELECTED_ROLES = 6`. Without a cue,
+`contact` is left out only because it is the 10th of 10 units roles. A new
+units role, or a change to the cap, would put contact units into carried
+packets. Skip an unmatched role that has no anchor defaults there, or add a
+test that pins the current behaviour.
+
+### Gates on 9c254e2b
+
+- Every skill stamp is `ae519a00…`, and the plugin mirrors of the skills,
+  `context-roles.yaml` and `page-types.md` are byte-identical.
+- Ruff F is clean, `generate-capabilities --check` is current, and
+  `openspec validate --all --strict` passes 222/222.
+- The two task lines' evidence tests exist and pass.
+- Scoped pytest (`test_episode*`, `test_capture*`, `test_scaffold*`, `*hook*`,
+  `test_entity_capture_scaffold`, `test_contact_units_on_demand`,
+  `test_context_roles`, `test_working_set*`, `test_activate_context*`,
+  `test_bootstrap_compact_budget`): 1694 passed, 1 skipped.
