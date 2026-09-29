@@ -205,6 +205,19 @@ REBUILD_STABILIZATION_MAX_ATTEMPTS = 8
 #: `graph_drain.MAX_RETRY_SECONDS`, cleared by a proof that succeeds.
 _REPUBLISH_BACKOFF: dict[str, tuple[float, float]] = {}
 _REPUBLISH_BACKOFF_LOCK = threading.Lock()
+#: The last public source-bytes proof per sidecar (#1454), keyed by the sidecar
+#: registry key and holding `(identity, verdict)`. An inherited sidecar is never
+#: at the exact live checkpoint -- adoption makes its checkpoint a delta origin,
+#: not the current one -- so without this every `available()` re-proved the
+#: whole corpus: the drain, the readiness probe and graph recall kept a 9,300
+#: file vault busy indefinitely. The identity is everything the verdict depends
+#: on: the sidecar's stored metadata, its file identity, and the current
+#: recall projection identity. A change to any of them is a new question.
+_SNAPSHOT_PROOFS: dict[str, tuple[tuple[Any, ...], bool]] = {}
+_SNAPSHOT_PROOFS_LOCK = threading.Lock()
+#: One background proof per sidecar, started for a reader that may not wait.
+_BACKGROUND_PROOFS: dict[str, threading.Thread] = {}
+BACKGROUND_PROOF_THREAD_NAME = "exomem-graph-proof"
 
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
@@ -1155,6 +1168,60 @@ def clear_publication_memos() -> None:
         _PUBLICATION_REFUSALS.clear()
 
 
+def clear_snapshot_proofs() -> None:
+    """Test seam: forget every remembered public source-bytes proof."""
+    with _SNAPSHOT_PROOFS_LOCK:
+        _SNAPSHOT_PROOFS.clear()
+
+
+def _sidecar_file_identity(live: Path) -> tuple[Any, ...]:
+    """The live sidecar and its WAL as stat identities; None for an absent file.
+
+    Sampled before a reader opens its snapshot, so a publication landing after
+    the sample keys a newer identity than the verdict was proved against. An
+    empty WAL is the same as an absent one: the first reader creates it, and
+    that is not a change to anything the proof read.
+    """
+    identity: list[Any] = []
+    for path in (live, live.with_name(live.name + "-wal")):
+        try:
+            st = path.stat()
+        except OSError:
+            identity.append(None)
+            continue
+        identity.append((st.st_ino, st.st_size, st.st_mtime_ns) if st.st_size else None)
+    return tuple(identity)
+
+
+def schedule_availability_proof(vault_root: Path) -> bool:
+    """Prove the sidecar on a background thread. True when a proof was started.
+
+    For a reader that must not wait on the O(corpus) proof: it answers without
+    the graph now, and the verdict this lands is remembered for the next one.
+    At most one proof runs per sidecar.
+    """
+    key = _sidecar_registry_key(sidecar_path(Path(vault_root)))
+    with _SNAPSHOT_PROOFS_LOCK:
+        running = _BACKGROUND_PROOFS.get(key)
+        if running is not None and running.is_alive():
+            return False
+
+        def prove() -> None:
+            try:
+                EpistemicGraphIndex(vault_root).available()
+            except Exception:  # noqa: BLE001 - an unproven graph stays unproven
+                log.debug("background graph availability proof raised", exc_info=True)
+            finally:
+                with _SNAPSHOT_PROOFS_LOCK:
+                    if _BACKGROUND_PROOFS.get(key) is threading.current_thread():
+                        _BACKGROUND_PROOFS.pop(key, None)
+
+        thread = threading.Thread(target=prove, name=BACKGROUND_PROOF_THREAD_NAME, daemon=True)
+        _BACKGROUND_PROOFS[key] = thread
+        thread.start()
+    return True
+
+
 def record_publication_recovery_state(
     vault_root: Path,
     *,
@@ -1787,9 +1854,15 @@ class EpistemicGraphIndex:
         vault_root: Path,
         *,
         mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None,
+        prove_cold_snapshots: bool = True,
     ):
+        """`prove_cold_snapshots=False` makes every public read on this index
+        refuse rather than pay the O(corpus) source-bytes proof when no
+        remembered verdict covers the sidecar -- for a request path that must
+        answer within a bound (#1454)."""
         self.vault_root = Path(vault_root)
         self.path = sidecar_path(self.vault_root)
+        self._prove_cold_snapshots = prove_cold_snapshots
         self.registry = relation_registry.load_registry(self.vault_root)
         self.entity_types = load_entity_types(self.vault_root)
         self.language_registry = semantic_language_registry.load_registry(self.vault_root)
@@ -2097,8 +2170,27 @@ class EpistemicGraphIndex:
         conn.close()
         return True
 
+    def availability_state(self) -> str:
+        """`available`, `unavailable` or `unproven`, never running the cold proof.
+
+        For probes that report rather than decide -- readiness, coordination
+        status -- and for a request that must not wait. `unproven` means the
+        sidecar passed every cheap check and only the source-bytes proof, which
+        nothing has run for its current identity, stands between it and a read.
+        """
+        outcome: list[str] = []
+        conn = self._open_read_snapshot(prove=False, outcome_out=outcome)
+        if conn is not None:
+            conn.close()
+            return "available"
+        return "unproven" if outcome else "unavailable"
+
     def _open_read_snapshot(
-        self, *, require_current_projection: bool = True
+        self,
+        *,
+        require_current_projection: bool = True,
+        prove: bool | None = None,
+        outcome_out: list[str] | None = None,
     ) -> sqlite3.Connection | None:
         """Open one validated read transaction without creating or migrating schema.
 
@@ -2142,13 +2234,22 @@ class EpistemicGraphIndex:
         failure. If a future change lets a Class B failure mark again, this
         guard becomes a liveness bug wearing a safety costume and must be
         removed rather than relied on.
+
+        Outside the exact live checkpoint a public reader's source-bytes proof
+        is remembered per sidecar identity and recall projection identity
+        (#1454). ``prove=False`` (defaulting to the index's
+        ``prove_cold_snapshots``) refuses instead of proving when nothing is
+        remembered, and appends ``"unproven"`` to ``outcome_out``.
         """
+        if prove is None:
+            prove = self._prove_cold_snapshots
         if (
             not graph_enabled()
             or (require_current_projection and freshness.external_pending(self.vault_root))
             or not self.path.exists()
         ):
             return None
+        sidecar_identity = _sidecar_file_identity(self.path)
         # Sampled before any proving starts. Everything below -- the marker
         # reads, the source-bytes proof over the whole corpus -- takes time a
         # watcher publication can land inside, and an origin adopted at the
@@ -2258,10 +2359,35 @@ class EpistemicGraphIndex:
                 and stored_checkpoint == current_checkpoint
             )
             if current and not exact_live_checkpoint:
-                current = self._snapshot_sources_match_disk(
-                    conn,
-                    resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
+                # Remembered per everything the verdict depends on (#1454):
+                # outside the exact live checkpoint an inherited sidecar never
+                # reaches the fast path, so an unremembered proof is re-paid by
+                # every reader for as long as the process lives.
+                proof_identity = (
+                    tuple(sorted(values.items())),
+                    _availability_freshness_value(current_identity),
+                    sidecar_identity,
                 )
+                with _SNAPSHOT_PROOFS_LOCK:
+                    remembered = _SNAPSHOT_PROOFS.get(registry_key)
+                if remembered is not None and remembered[0] == proof_identity:
+                    current = remembered[1]
+                elif not prove:
+                    if outcome_out is not None:
+                        outcome_out.append("unproven")
+                    conn.close()
+                    return None
+                else:
+                    decline: list[str] = []
+                    current = self._snapshot_sources_match_disk(
+                        conn,
+                        resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
+                        reason_out=decline,
+                    )
+                    # A proof that raised proved nothing about the sidecar.
+                    if decline != ["proof_raised"]:
+                        with _SNAPSHOT_PROOFS_LOCK:
+                            _SNAPSHOT_PROOFS[registry_key] = (proof_identity, current)
             if current and stored_checkpoint is not None:
                 # The proof above (or the exact-live check) has just established
                 # that this sidecar describes the corpus this registry is
@@ -8306,7 +8432,7 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
     )
 
 
-def cache_token(vault_root: Path) -> tuple | None:
+def cache_token(vault_root: Path, *, prove: bool = True) -> tuple | None:
     """`(schema_version, extension_registry_hash, generation, instance)` or None.
 
     None whenever the sidecar is unavailable (disabled, missing, or
@@ -8314,11 +8440,16 @@ def cache_token(vault_root: Path) -> tuple | None:
     absent-sentinel so typed-mode and fallback-mode entries never collide.
     `generation` advances for in-place writes; `instance` changes when a full
     rebuild atomically replaces the SQLite file, preventing generation ABA.
+
+    `prove=False` is for a request that must not pay the cold proof of an
+    inherited sidecar (#1454): an unproven sidecar answers `("unproven",)`, a
+    key of its own, since that request serves without the graph lane.
     """
-    idx = EpistemicGraphIndex(vault_root)
-    conn = idx._open_read_snapshot()
+    idx = EpistemicGraphIndex(vault_root, prove_cold_snapshots=prove)
+    outcome: list[str] = []
+    conn = idx._open_read_snapshot(outcome_out=outcome)
     if conn is None:
-        return None
+        return ("unproven",) if outcome else None
     try:
         values = dict(
             conn.execute(

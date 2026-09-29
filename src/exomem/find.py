@@ -985,7 +985,10 @@ def _freshness_key(
     if (mode in ("hybrid", "vector") and graph) or relation_filter:
         from . import epistemic_graph
 
-        parts.append((".graph.sqlite", epistemic_graph.cache_token(vault_root) or "absent"))
+        # Graph recall alone never waits on an unproven sidecar's cold proof;
+        # a relation filter's semantics require the proved sidecar.
+        token = epistemic_graph.cache_token(vault_root, prove=bool(relation_filter))
+        parts.append((".graph.sqlite", token or "absent"))
     if mode in ("hybrid", "keyword"):
         # Which lexical backend serves (fts5 vs python) changes bm25-lane
         # scores, so a mid-process flip must not hit entries cached under the

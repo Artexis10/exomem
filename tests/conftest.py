@@ -821,6 +821,9 @@ _VAULT_WALKING_THREAD_NAMES = frozenset(
         "exomem-identity-catalogue-warm",
         "exomem-lexical-repair",
         "exomem-refs-rebuild",
+        # A graph recall that declines on an unproven inherited sidecar proves
+        # it in the background (`epistemic_graph.schedule_availability_proof`).
+        "exomem-graph-proof",
     }
 )
 #: A rebuild over most test vaults is milliseconds, and one that cannot finish
