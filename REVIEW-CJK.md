@@ -210,3 +210,90 @@ pins this loss; it should be inverted.
   shards 1-12, harness 1-4, lint, OpenSpec, Windows NTFS and E2E. The combined
   status is `pending`, and mergeable state is `blocked`. The last completed
   run, 36451406312 on 5c9a313f, was green.
+
+## Recheck at f1dacb91 (4d89f7fa red, f1dacb91 green)
+
+**Verdict: REQUEST_CHANGES.** MEDIUM 5 is fixed for the phrasings it names.
+The fix splits a name that has hiragana inside it wherever that hiragana
+starts with a particle's character, and the name's kanji or katakana head then
+wins by `exact_alias`. This is MEDIUM 3 again, from the other side.
+
+### Finding status
+
+| finding | status | evidence |
+|---|---|---|
+| HIGH 1 alias guard | FIXED | probes below; guard unchanged since 89c0df5e |
+| MEDIUM 2 `edit_memory` aliases | FIXED | restricted edit probe below |
+| MEDIUM 3 hiragana-first name | FIXED | `ねこやなぎ銀行` stays one word, also after `駅前の` (`test_cjk_readiness.py:704`) |
+| LOW 4 one walk per write | FIXED | `test_one_create_walks_the_entities_once_however_many_aliases` passes |
+| MEDIUM 5 particle glued to more kana | FIXED | `working_set_resolve.py:655-659`; 4d89f7fa records 7 red before f1dacb91 |
+| LOW `learned_aliases` unguarded | OPEN, tracked | task 6.12 now requires `claimed_names` |
+| LOW refusal wording and stale PR body | not rechecked | cosmetic |
+
+### Probes (throwaway tests over `ja_vault`, head f1dacb91)
+
+- **A particle at the name's end.** `ハヤブサ号` + each of が, の, は, を, に,
+  と, も, both bare and followed by `まだ話してない` or `もう一度見て`, resolves
+  only the car. `青木陽介` + each particle + `まだ来ない` resolves only the
+  person (21 + 7 cases pass).
+- **Katakana names.** An entity `テッサリーワークス` resolves in
+  `テッサリーワークスはもう閉まった？`, `…のもう一つの店` and
+  `駅前のテッサリーワークスに行く`.
+- **Mixed Latin and CJK.** `Harlow Wagonはもう車検に出した？`, `Exomemはどう？`,
+  `Exomemのもう一つの問題` and `ExomemとHarlow Wagonの件` all resolve.
+- **Withheld = absent.** With `月影プロジェクト` withheld at ceiling 0, a
+  restricted caller's `edit_memory` alias `月影プロジェクト` commits, just as its
+  absent twin `星影プロジェクト` does at create. The restricted activation
+  `月影プロジェクトはもう終わった？` resolves only the caller's own page and
+  never names the withheld one. The owner is refused with `ENTITY_EXISTS`,
+  and the candidate named is the withheld page.
+
+### NEW MEDIUM 6: a hiragana run inside a name is split at its first kana
+
+`_leading_particle` (`working_set_resolve.py:681-684`) matches any run that
+starts with a single-character particle: の, は, が, も, と, に, で, か, や, へ
+or だ. Many hiragana words start with one of these. Once a kanji or katakana
+stretch is open, the rule ends it at such a run, so a name written
+kanji/katakana + hiragana + kanji loses its edge. Its head becomes a word.
+
+Each row pairs an entity (the full name) with a note titled by the head:
+
+| turn | 89c0df5e | f1dacb91 |
+|---|---|---|
+| `サクラもち本舗に行く` | full name resolved (`exact_alias`) | `サクラ` resolved (`exact_alias`), full name `partial` |
+| `ミドリがめ商会の請求書` | full name resolved | `ミドリ` resolved, full name `partial` |
+| `青空かえで銀行の口座` | full name resolved | `青空` resolved, full name `partial` |
+| `木村はるかの予定を確認して` | full name `partial`, head absent | `木村` resolved, full name `partial` |
+
+In every row the page the user named is `partial`, and a different page
+resolves. At 89c0df5e, three of the four resolved the right page. Personal
+names (surname + a hiragana given name) and shop names fall into this pattern
+constantly. `embedded_words` also shows the greedy match at work: in
+`ハヤブサ号のもう一台` the longest particle is `のも`, which leaves `う一台`.
+That is harmless here, but it is the same mechanism.
+
+**Direction (not verified).** A leading-particle split should not beat an
+indexed name that continues through the run. Two options:
+- emit the unsplit stretch too, and let an exact match of the longer name
+  consume the head as containment already does;
+- split only when the text after the particle does not continue a known
+  name.
+
+Add the four rows above as red twins beside
+`test_a_name_followed_by_a_particle_glued_to_more_kana_resolves`.
+
+### Tests and gates (head f1dacb91)
+
+- `test_cjk_readiness`, `test_working_set_unicode_terms`,
+  `test_working_set_resolve`, `test_working_set_learning`,
+  `test_learning_fresh_session_journey`, `test_link`, `test_edit_operations`
+  and `test_activation_lexical_term_budget`: **385 passed, 1 failed**. The
+  failure is `test_the_bounded_query_corroborates_in_rank_order_and_stops_at_k`,
+  and it fails the same way on untouched `origin/main`. This is the SQLite-plan
+  environment failure from round one.
+- `ruff --select F`: clean. `generate-capabilities.py --check`: current.
+  Privacy gate: clean (4710 files). `openspec validate --all --strict`:
+  217 passed.
+- **CI:** run 36497983471 on the head: the required CI gate passed, and so did
+  core shards 1-12, harness shards 1-4, lint, OpenSpec, Windows NTFS, E2E,
+  package build, onboarding and the TUI. Conditional jobs were skipped.
