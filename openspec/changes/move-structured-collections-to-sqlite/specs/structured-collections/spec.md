@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: One embedded collection store is the single source of truth
-Each vault SHALL have exactly one embedded SQLite collection store that is the only canonical source for Records and Planning collections: their manifests, items, item versions, per-row provenance, held candidates, and audit transitions. The store SHALL enforce collection-scoped item identity and declared natural-key uniqueness with database constraints, SHALL commit every mutation, including every row of a bulk mutation, in one transaction under the existing single-writer lease, and SHALL make its transaction, audit-effect, item-version, provenance and manifest-history tables append-only. Knowledge notes, entities, sources, evidence and episodes SHALL remain Markdown and SHALL NOT be stored in it. The `dataset` storage strategy SHALL remain a file-canonical, query-only adapter and SHALL NOT be imported into the store. Records and Planning SHALL keep their distinct semantic profiles, typed schemas, natural keys, provenance, audit and governance; only the storage engine changes. The store SHALL require SQLite 3.38 or newer and a local filesystem where WAL journaling takes effect, and readiness SHALL refuse collection writes, never falling back to file-canonical writes, when either fails.
+Each vault SHALL have exactly one embedded SQLite collection store that is the only canonical source for structured collections of every collection type, built-in (Records, Planning) or declared: their type declarations, manifests, items, item versions, per-row provenance, held candidates, and audit transitions. The store SHALL enforce collection-scoped item identity and declared natural-key uniqueness with database constraints, SHALL commit every mutation, including every row of a bulk mutation, in one transaction under the existing single-writer lease, and SHALL make its transaction, audit-effect, item-version, provenance and manifest-history tables append-only. Knowledge notes, entities, sources, evidence and episodes SHALL remain Markdown and SHALL NOT be stored in it. The `dataset` storage strategy SHALL remain a file-canonical, query-only adapter and SHALL NOT be imported into the store. Records, Planning and declared types SHALL keep their distinct kinds, typed schemas, natural keys, provenance, audit and governance; only the storage engine changes. The store SHALL require SQLite 3.38 or newer and a local filesystem where WAL journaling takes effect, and readiness SHALL refuse collection writes, never falling back to file-canonical writes, when either fails.
 
 #### Scenario: Natural-key uniqueness is a constraint
 - **WHEN** two writers race to append items whose declared natural keys serialize equally under different identities
@@ -199,6 +199,104 @@ Inspection after rebaseline SHALL report audit status `acknowledged_gap`, never 
 - **WHEN** the caller cannot receive every item and exact gap diagnostic required for the checkpoint
 - **THEN** rebaseline refuses without revealing or accepting guessed gap codes
 
+### Requirement: Collection types are declared data over one mechanism
+The substrate SHALL implement structured collections as one generic mechanism parameterized by a collection type declaration. A declaration SHALL state:
+- an immutable type name, item type and placement layer;
+- a kind from a closed vocabulary (initially `observed`, `intended`, `procedural`, `reference`);
+- typed fields with the existing field types and limits, whether collections may extend them, and a natural key;
+- an optional lifecycle: one state field, its states, initial state, allowed transitions, served states, and declarative per-state field constraints;
+- optional named product-owned validators from a closed registry;
+- a surfacing rule, a default audience (`owner` or `policy`), presentation recipes and saved views.
+
+A declaration SHALL NOT carry code, model instructions, or unbounded patterns. Records and Planning SHALL be built-in declarations shipped with the product, changed only by release. Only built-in declarations MAY carry wire aliases for legacy property, receipt and error names. A collection manifest SHALL name its type, with `semantic_profile: records` and `semantic_profile: planning` accepted as aliases for the built-in types. The kind SHALL change only version semantics and compiler surfacing: identity, natural keys, guards, transactions, audit, governance, projection, edit-back, query, snapshots and migration SHALL be the same code for every type.
+
+#### Scenario: A built-in type is a declaration, not a code path
+- **WHEN** the Records and Planning declarations are loaded
+- **THEN** both collection types resolve through the same type registry and generic operations as any declared type, and no mechanism branches on their names
+
+#### Scenario: A declaration with code or an unknown kind is refused
+- **WHEN** a proposed declaration names an unknown kind, an unknown key, an undeclared natural-key field, an unreachable state, or a placement that collides with a reserved layer or non-empty directory
+- **THEN** validation reports field-addressed findings and nothing is saved
+
+#### Scenario: Only built-ins carry wire aliases
+- **WHEN** a declared type proposes a `wire` block or the name of a built-in type
+- **THEN** it is refused, with `BUILTIN_COLLECTION_TYPE` for a built-in name
+
+### Requirement: Declared collection types get every collection capability without code
+A collection type saved through `schema_memory` SHALL be usable by the very next operation, with no code change, restart or release. Its collections SHALL immediately have:
+- store-canonical items with natural-key uniqueness, generation and row-version guards, request-identity exactly-once and content replay;
+- one audit transition per mutation, with a rendered history page;
+- row-level governance with its default audience, with withheld indistinguishable from absent;
+- Markdown views under its placement layer, with governed edit-back and held corrections;
+- recall exclusion and hosted placement pinning as a structured layer;
+- bulk upsert, query with saved views, snapshots and migration;
+- context-compiler surfacing through the roles of its kind.
+
+Lifecycle transitions SHALL be validated against the declared state machine, per-state constraints and named validators.
+
+#### Scenario: A type declared in conversation is usable immediately
+- **WHEN** an agent saves a new `procedural` type and a first collection of it, then adds an item and edits its view in an ordinary editor
+- **THEN** the add commits with a receipt and audit transition, the view appears under the type's placement, the edit becomes a governed update, and the item is excluded from ordinary recall
+
+#### Scenario: An illegal lifecycle transition refuses
+- **WHEN** a transition names a target state that the declared state machine does not allow from the item's current state
+- **THEN** it refuses with field-addressed diagnostics and nothing is written
+
+### Requirement: Collection types are authored, versioned and migrated through schema_memory
+`schema_memory` SHALL accept `subject: "collection-types"` with the operations `inventory`, `inspect`, `validate`, `diff`, `save-collection-type`, `history` and `restore`, and SHALL refuse `infer`.
+- `diff` SHALL classify a proposal as `new`, `compatible`, `migrating`, `release-widening` or `refused`, and SHALL preview per-collection item impact with the first failing items and field paths.
+- `save-collection-type` SHALL require `why`, SHALL require the current declaration hash when the type exists and forbid it when it does not, and SHALL refuse any proposal with findings.
+- A `migrating` change SHALL carry a closed set of migration steps (`rename_field`, `map_values`, `default_value`, `drop_field`, `convert`, `recompute_natural_key`). The new type version, derived manifest versions, and every affected item rewritten with its own audit effect SHALL commit in one store transaction.
+- A save SHALL refuse wholly if any item would fail validation or collide on a recomputed natural key, and SHALL require the caller's complete authorized view of every collection of the type.
+- Changing the name, item type, kind or placement SHALL be refused.
+- A `release-widening` change SHALL be saved only by the owner principal.
+- Item identities SHALL never change, so references, including version-pinned ones, remain valid.
+- Type versions SHALL be append-only and `restore` SHALL re-save a prior version under the same rules.
+- The type SHALL be rendered as a read-only view whose edits are held as a type proposal, never applied.
+
+#### Scenario: A compatible change touches no item
+- **WHEN** a type gains an optional field
+- **THEN** `diff` reports `compatible`, and the save records a new type version without rewriting any item
+
+#### Scenario: A migrating change is atomic
+- **WHEN** a type renames a field and makes another required with a default
+- **THEN** every item of every collection of the type is rewritten with an audit effect in one transaction, or, if one item would fail, nothing changes and the failing item is named
+
+#### Scenario: Stale declaration refuses
+- **WHEN** a save carries a declaration hash from before another save of the same type
+- **THEN** it refuses as stale and nothing changes
+
+#### Scenario: Kind cannot be changed in place
+- **WHEN** a proposal changes an existing type's kind
+- **THEN** `diff` classifies it `refused` and the save refuses
+
+### Requirement: Kind selects version semantics and surfacing
+Every change to an item SHALL be a new row version with one audit effect regardless of kind. The kind SHALL select:
+- the effect label and history wording: `correction` for `observed`, `replan` for `intended`, `revision` superseding the previous revision for `procedural`, `edit` for `reference`, plus `transition` and `type_migration` for every kind;
+- the default served version: for `procedural` and `reference`, the current version of items in served states only; for `intended`, items in active lifecycle states; for `observed`, current items newest-observation first;
+- the compiler roles that may serve its items: `observed` → `current_state`, `recent_change`, `baseline`, `evidence`; `intended` → `active_plans`; `procedural` → `methods`; `reference` → `resources`.
+
+A declaration MAY narrow its kind's roles and SHALL NOT name others.
+
+#### Scenario: A procedural edit is a revision
+- **WHEN** a current recipe's steps are edited
+- **THEN** the item's new row version is labelled a revision that supersedes the previous one, and only the new revision is served
+
+#### Scenario: An observed edit is a correction
+- **WHEN** a recorded execution's duration is changed
+- **THEN** the new row version is labelled a correction of that observation, and storage, guards, audit and governance behave exactly as for the recipe
+
+### Requirement: Links may pin an item version
+A `link` field MAY declare a target collection type and `pin: version`. Its value SHALL then be the item reference with an `@<row_version>` suffix. Writes SHALL verify that the pinned version exists and is authorized for the writer. Resolution SHALL read that historical version and project it exactly as the item itself is projected, so a withheld target reads as absent. Natural keys, payload hashes, filters and grouping SHALL use the full pinned value or its `item` and `version` parts. Later revisions and type migrations SHALL NOT change what an existing pinned reference names.
+
+#### Scenario: Outcomes compare across recipe revisions
+- **WHEN** executions pin revisions 2 and 3 of one recipe and a query groups average duration by `recipe.version`
+- **THEN** each revision's executions aggregate separately, and a later revision 4 leaves both groups unchanged
+
+#### Scenario: Pinned reference to a withheld item reads as absent
+- **WHEN** the caller may not read the pinned recipe
+- **THEN** the execution's link projects as withheld, with no title, version values or existence revealed
+
 ## MODIFIED Requirements
 
 ### Requirement: Human-owned collection manifests
@@ -342,6 +440,31 @@ Queries SHALL read the collection store. A direct edit of a view SHALL become vi
 #### Scenario: Inspection reports a held candidate without adopting it
 - **WHEN** a collection has a held candidate
 - **THEN** inspection reports it under coverage with its reference and diagnostics summary, the item count excludes it, and nothing is rewritten
+
+### Requirement: Separate semantic profiles over shared mechanics
+The collection substrate SHALL keep collection mechanics independent from semantic meaning. Every collection type, built-in or declared, SHALL reuse identity, schema, storage, mutation, query, audit, rendering, and edit-back mechanics through one type-neutral implementation rather than a fork. `records` SHALL be the built-in type of kind `observed`, meaning observed facts or events, and `planning` the built-in type of kind `intended`, meaning intended future state.
+
+Every manifest and view of a collection SHALL be contained by the exact portable `Knowledge Base/<placement>/` path segments of its type: `Records` for `records`, `Planning` for `planning`, and the declared placement for a declared type. These placement rules SHALL be checked after symlink-safe resolution and make structured-only recall classification deterministic. They do not constrain ordinary templates or links to governed artifacts elsewhere in the vault. A typed facade SHALL refuse collections of another facade's type.
+
+#### Scenario: Future Planning manifest resolves through the same loader
+- **WHEN** a valid manifest declares `semantic_profile: planning` or `collection_type: planning`
+- **THEN** the generic collection loader inspects its identity, schema, storage, links, templates, and views through the same contracts used for every type, without applying Records semantics
+
+#### Scenario: Records operations do not mutate Planning
+- **WHEN** a Planning collection is supplied to the Records facade's query, create, append, or update path
+- **THEN** the Records facade refuses the operation, leaving the store and Planning views unchanged
+
+#### Scenario: Planning operations do not mutate Records
+- **WHEN** a Records collection is supplied to the Planning facade's query, create, add, update, or triage path
+- **THEN** the Planning facade refuses the operation, leaving the store and Records views unchanged
+
+#### Scenario: Unknown profile does not become Records
+- **WHEN** a manifest names a collection type or semantic profile that is not registered
+- **THEN** the substrate reports it as unsupported and does not silently apply Records, Planning or any other type's semantics
+
+#### Scenario: Records source outside the Records layer refuses
+- **WHEN** a manifest or view path of any type resolves outside the exact placement layer of its type through case, separator, dot-segment, or symlink aliases
+- **THEN** validation refuses before reading item contents
 
 ## REMOVED Requirements
 

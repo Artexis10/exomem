@@ -1,8 +1,8 @@
 ## 1. Design and ruling
 
-- [x] 1.1 `proposal.md`, `design.md`, spec deltas (`structured-collections`, `planning`, `records`, `human-owned-structured-files`, `governance-kernel`, `machine-local-state-placement`, `hosted-vault-portability`), `tasks.md`.
+- [x] 1.1 `proposal.md`, `design.md`, spec deltas (`structured-collections`, `planning`, `records`, `human-owned-structured-files`, `governance-kernel`, `machine-local-state-placement`, `hosted-vault-portability`, `context-roles`), `tasks.md`. Addendum: one generic mechanism with declared collection types (`design.md` §14).
 - [x] 1.2 Storage-engine spike with invented data: `benchmarks/collections_sqlite_spike/` (append, bulk, governed query, snapshot, view publish at 1,000 and 10,000 rows).
-- [ ] 1.3 Owner rulings R1–R7 (`design.md`, "Needs ruling") applied to the design and deltas.
+- [ ] 1.3 Owner rulings R1–R10 (`design.md`, "Needs ruling") applied to the design and deltas.
 
 ## 2. Store core
 
@@ -72,7 +72,20 @@
 - [ ] 12.1 `record_memory` / `plan_memory` describe text and docstrings; `docs/records.md` (which also still says "exactly five actions") and Planning docs; scaffold guidance stays generic (`tests/test_scaffold_no_leak.py`).
 - [ ] 12.2 Regenerate tool schemas, plugin tree, hosted render, v5 candidate and `docs/capabilities.md` per `CONTRIBUTING.md`. Frozen hosted candidates and `hosted_legacy_profile_schemas.json` are byte-identical; `minimum_records_reader_version` stays 2.
 
-## 13. Deliver
+## 13. Collection types (one mechanism)
 
-- [ ] 13.1 Gates: privacy gate, `ruff --select F`, `openspec validate --all --strict`, `generate-capabilities.py --check`, scoped pytest per touched module.
-- [ ] 13.2 After merge: synchronize the deltas into the canonical specs and archive this change with `openspec archive`.
+- [ ] 13.1 Red: declaration validation (closed findings per `design.md` §14.1); built-in `records` and `planning` declarations load through the same registry; `BUILTIN_COLLECTION_TYPE`; no mechanism branches on type names. This is a contract test that greps for `semantic_profile ==` and profile-name literals outside the facades and legacy import.
+- [ ] 13.2 Type registry in the store (`collection_types`, `collection_type_versions`), package-data built-in declarations with wire maps, named-validator registry (`planning.hierarchy.v1`, `references.acyclic.v1`), and `collection_type:` manifests with `semantic_profile` aliases.
+- [ ] 13.3 Generic operations `collections.ops.*`, including `transition` against the declared state machine. `record_memory` and `plan_memory` become facades, with golden wire tests showing receipts, codes and inspect shapes byte-equal before and after.
+- [ ] 13.4 `schema_memory(subject="collection-types")`: `inventory`, `inspect`, `validate`, `diff` (change classes and impact preview), `save-collection-type`, `history`, `restore`; `infer` refused; egress action classes; the owner-only `release-widening`. Red first: compatible save touches no item; migrating save is atomic or names the failing item; stale hash refuses; kind change refused.
+- [ ] 13.5 Kind semantics: effect labels, served-version defaults, history wording (red first for procedural revision versus observed correction on identical storage).
+- [ ] 13.6 Pinned version links (`pin: version`): write validation, resolution from `item_versions`, projection as the item, and query `.item` / `.version` parts. Red first: the Recipes/Executions grouping in `design.md` §14.8, and a withheld pinned target reading as absent.
+- [ ] 13.7 Compiler: the generic `collections` lane, `collection_kinds` on roles, `item` anchors from the type registry, type cues and caps, `collection_types_hash` in `generation`. A shipped `context-roles.yaml` revision keeps `records` / `planning` lane aliases. Red first: the two turns in §14.8 serve the current recipe revision and the newest executions respectively.
+- [ ] 13.8 Governance: subject-level default-deny from `default_audience: owner`; explain source; type-registry hash in the compile fingerprint. Red first, per the `governance-kernel` scenarios.
+- [ ] 13.9 The registry replaces hard-coded layers in `recall_policy`, `hosted_gateway` (plus `test_target_constrained_mutations_are_actually_constrained`), `structured_collections._require_profile_layer`, and bootstrap `semantic_profiles`.
+- [ ] 13.10 An end-to-end journey with invented data: declare `recipes` in conversation, add, revise by view edit, log executions pinning revisions, query by version, activate both turns, then migrate the type (compatible, then migrating).
+
+## 14. Deliver
+
+- [ ] 14.1 Gates: privacy gate, `ruff --select F`, `openspec validate --all --strict`, `generate-capabilities.py --check`, scoped pytest per touched module.
+- [ ] 14.2 After merge: synchronize the deltas into the canonical specs and archive this change with `openspec archive`.

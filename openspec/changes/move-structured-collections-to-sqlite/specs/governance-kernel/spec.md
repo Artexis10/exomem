@@ -1,3 +1,25 @@
+## ADDED Requirements
+
+### Requirement: Collection type default audience is a subject-level default-deny
+Every item of a collection type whose declaration sets `default_audience: owner` SHALL be evaluated with a subject-level default-deny that follows exactly the existing scope `default_deny` rule:
+- an audience that no standing rule names for a scope matching the item receives the minimum disclosure;
+- the owner is never subject to it;
+- authored standing rules and grants that name an audience release the item as they would under a default-deny scope.
+
+A type with `default_audience: policy` SHALL add no default. A type declaration SHALL NOT write, synthesize or remove any policy file, and policy SHALL remain canonical only in `_Governance`. The collection type registry hash SHALL be an input to the governance compile fingerprint, so a changed default is never served from a stale decision. Explain output SHALL name `collection-type:<name>` as the default-deny source. Widening a type's default from `owner` to `policy` SHALL be saved only by the owner principal.
+
+#### Scenario: A declared type is private by default
+- **WHEN** a new type is saved with the default audience and no authored rule names a delegated audience for its items
+- **THEN** that audience's queries, inventory, counts and pinned-link projections treat every item of the type as absent, while the owner sees them
+
+#### Scenario: An authored rule shares a declared type
+- **WHEN** the owner authors a standing rule naming an audience over a scope whose paths match the type's placement
+- **THEN** that audience receives the items up to the rule's ceiling, and explain names both the rule and the type default
+
+#### Scenario: A non-owner cannot widen the default
+- **WHEN** a non-owner principal saves a type change from `owner` to `policy`
+- **THEN** the save refuses and the default is unchanged
+
 ## MODIFIED Requirements
 
 ### Requirement: Governance granularity follows canonical representation

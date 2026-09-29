@@ -1,3 +1,20 @@
+## ADDED Requirements
+
+### Requirement: Planning is a built-in collection type and plan_memory is its typed facade
+`planning` SHALL be a built-in collection type of kind `intended`, placement `Planning`, carrying the core Planning fields, lifecycle vocabulary, six horizon views and the product-owned `planning.hierarchy.v1` validator, with default audience `policy`. `plan_memory` SHALL be a typed facade over the generic collection operations: `add` to `add`, `update` to `update`, `triage` to `transition` with its allowed field changes, and `inspect`, `query`, `create`, `validate`, `revise` and `rebaseline` to their generic operations. Its arguments, `plan_id` naming, `_plan_receipt` receipts, `STALE_PLAN_ITEM`, `STALE_PLAN_CONTAINER` and `PLAN_ID_CONFLICT` codes, and exact inspection shape SHALL be unchanged. It SHALL refuse collections of any other type.
+
+#### Scenario: Planning wire is unchanged by the facade
+- **WHEN** add, update, triage and inspect are issued against a Planning collection before and after the facade is introduced
+- **THEN** arguments, receipts, error codes and the exact inspect key set are identical
+
+#### Scenario: Hierarchy rules run as a named validator
+- **WHEN** a work item is added with a parent that is not an initiative
+- **THEN** the `planning.hierarchy.v1` validator refuses it with the same Planning refusal as today
+
+#### Scenario: plan_memory refuses a declared type
+- **WHEN** a collection of a declared type is supplied to `plan_memory`
+- **THEN** it refuses as an unsupported collection for the Planning facade, and nothing changes
+
 ## MODIFIED Requirements
 
 ### Requirement: Human-owned Planning collections

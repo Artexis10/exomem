@@ -13,6 +13,12 @@ The owner has decided: **knowledge stays Markdown** (Notes, Entities, Sources, E
 
 ## What Changes
 
+- **One collection mechanism; types are data.** Records and Planning become two built-in *collection types* of one generic mechanism.
+  - A user or agent can declare a new type in conversation through `schema_memory(subject="collection-types")`, without code: kind, fields, natural key, lifecycle, surfacing rule and default audience. Its collections immediately get storage, keys and guards, audit, row-level governance, views with edit-back, and context-compiler surfacing.
+  - The **kind** (`observed`, `intended`, `procedural`, `reference`) is the only semantic switch. It selects version semantics (correction, replan, revision, edit) and the compiler roles that serve the items. Everything else is identical code.
+  - `record_memory` and `plan_memory` become typed facades over generic operations, with an unchanged wire.
+  - Links may pin an item version.
+  - The worked example is a procedural `recipes` type paired with an observed "Recipe Executions" Records collection that pins the recipe revision each run followed.
 - **One collection store per vault.** It is a SQLite database holding collections, manifests, items, item versions, provenance, held candidates, and an append-only transaction and audit table. It uses WAL, `synchronous=FULL`, `STRICT` tables and append-only triggers. Uniqueness, natural keys and guards become constraints and counters, not file scans.
 - **Guards become generations.** Each collection has a generation counter and each row a row version. The wire keeps the same field names (`expected_container_hash`, `expected_item_version`, `snapshot`, `after_container_hash`) and the same 64-hex shape, but the values are derived from generation and row version instead of from file bytes.
 - **Exactly-once lives in the store.** The request identity and the recorded receipt commit in the same transaction as the write. Content replay by payload hash stays.
@@ -36,18 +42,19 @@ None. The store is a storage change inside existing capabilities.
 
 ### Modified Capabilities
 
-- `structured-collections`: canonical store, projection, edit-back, audit table and history page, snapshots, migration, latency budget; modified storage, mutation, idempotency, audit, manual-edit and rebaseline requirements.
-- `planning`: canonical storage and audit wording; manual edits become governed updates or held corrections.
-- `records`: held candidates live in the store and are rendered as views.
+- `structured-collections`: one generic mechanism with declared collection types (authoring, versioning, migration, kinds, pinned links); canonical store, projection, edit-back, audit table and history page, snapshots, migration, latency budget; modified storage, mutation, idempotency, audit, manual-edit and rebaseline requirements.
+- `planning`: Planning is a built-in type and `plan_memory` its typed facade; canonical storage and audit wording; manual edits become governed updates or held corrections.
+- `records`: Records is a built-in type and `record_memory` its typed facade; held candidates live in the store and are rendered as views.
 - `human-owned-structured-files`: views materialize after commit; managed presentation and authored body are projections.
-- `governance-kernel`: governance granularity follows the row, not the file; Planning mutation still requires the complete authorized state.
+- `governance-kernel`: governance granularity follows the row, not the file; Planning mutation still requires the complete authorized state; a type's `owner` default audience is a subject-level default-deny.
+- `context-roles`: one generic `collections` lane serving items by kind; roles gain `collection_kinds`; an `item` anchor kind; `collection_types_hash` in packets.
 - `machine-local-state-placement`: a new `external-canonical` placement class for the live store.
 - `hosted-vault-portability`: export carries the collection store snapshot as canonical data.
 
 ## Impact
 
-- **Code:** `records.py`, `record_formats.py`, `record_governance.py`, `record_memory.py`, `records_disposition.py`, `structured_collections.py`, `structured_files.py`, `collection_profiles.py`, `planning.py`, `plan_memory.py`, `plan_progress.py`, `due_state.py`, `audit.py` (outcome bindings), `working_set_index.py`, `file_watcher.py` (edit-back hook), `state_paths.py` and `reserved_paths.py` (placement), `service_upgrade.py` (declared migration), `hosted_portability.py` and `hosted_restore.py`. A new `collection_store` package holds the schema, writer, query, projector, edit-back, importer, exporter and snapshot code.
-- **Tools:** `record_memory` and `plan_memory` keep their names, actions and argument sets. `design.md` §8 lists every contract change. Released frozen hosted candidates (the `hosted-alpha-agent-v1` to `v4` profiles pinned by `hosted_legacy_profile_schemas.json`, and the `minimum_records_reader_version: 2` candidate lock in `hosted_plugins.py`) do not change.
+- **Code:** `records.py`, `record_formats.py`, `record_governance.py`, `record_memory.py`, `records_disposition.py`, `structured_collections.py`, `structured_files.py`, `collection_profiles.py`, `planning.py`, `plan_memory.py`, `plan_progress.py`, `due_state.py`, `audit.py` (outcome bindings), `working_set_index.py`, `file_watcher.py` (edit-back hook), `state_paths.py` and `reserved_paths.py` (placement), `service_upgrade.py` (declared migration), `hosted_portability.py` and `hosted_restore.py`. A new `collection_store` package holds the schema, type registry, generic operations, writer, query, projector, edit-back, importer, exporter and snapshot code. Built-in declarations ship as package data. `collection_profiles.py`, `_SUPPORTED_PROFILES` and the `Records`/`Planning` literals in `recall_policy`, `hosted_gateway` and `working_set*` are replaced by the type registry, and `context_roles` / `working_set` gain the generic `collections` lane and `item` anchors.
+- **Tools:** `record_memory` and `plan_memory` keep their names, actions and argument sets for their built-in types. `schema_memory` gains the `collection-types` subject. Per ruling R8, `record_memory` also serves declared types, with a new `transition` action on the local surface and the v5 candidate only. `design.md` §8 lists every contract change. Released frozen hosted candidates (the `hosted-alpha-agent-v1` to `v4` profiles pinned by `hosted_legacy_profile_schemas.json`, and the `minimum_records_reader_version: 2` candidate lock in `hosted_plugins.py`) do not change.
 - **Dependencies:** none new. This uses the standard-library `sqlite3`, requires SQLite ≥ 3.38 (STRICT tables, built-in JSON), and refuses the store at readiness otherwise.
 - **Pure substrate:** no model is involved. Edit-back parses and validates deterministically; it never interprets prose.
 - **Default-off and soft-fail:** the store ships dark behind a per-vault switch until a vault is migrated. A vault on the store refuses collection writes, rather than falling back to files, if the store fails readiness. Knowledge writes are unaffected.

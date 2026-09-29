@@ -29,11 +29,13 @@ The owner's decisions for this change:
 - Markdown views are projections with governed edit-back (option 2).
 - Audit is SQLite-authoritative, with a read-only rendered history page per collection.
 - Postgres is out.
+- Collections are ONE general mechanism. Records and Planning are built-in types of it. A new type (for example Recipes) is declared in conversation through `schema_memory` without code, and immediately gets storage, keys, guards, audit, governance, views, edit-back and compiler surfacing (§14).
 
 ## Goals / Non-Goals
 
 **Goals**
-- One embedded store per vault that is the only source of truth for Records and Planning collections, their manifests, held candidates and audit.
+- One embedded store per vault that is the only source of truth for structured collections of every type (Records, Planning and declared types), their manifests, type declarations, held candidates and audit.
+- One generic collection mechanism, with types as data: kind, fields, natural key, lifecycle, surfacing and default audience are declared, not coded (§14).
 - Relational guarantees from the engine: unique natural keys, atomic multi-row writes, row versions, append-only audit, and exactly-once by request identity.
 - Obsidian keeps working: views sit at today's paths and edits made in them come back through the governed write path.
 - Unchanged external tool contracts wherever possible, with every change listed (§8). Released frozen hosted candidates stay unchanged.
@@ -47,7 +49,7 @@ The owner's decisions for this change:
 - Moving knowledge notes, sources or evidence into a database.
 - Moving the `dataset` strategy. CSV, TSV and JSON datasets stay human-owned, file-canonical and query-only.
 - A server database, replication protocol, or multi-writer store. The existing single-writer lease stays the only write authority.
-- New collection concepts: no delete action, no new item kinds, no new policy language.
+- A delete action or new policy language. New collection *types* are data (§14); new *kinds* change only by shipped revision.
 - Changing released frozen hosted candidates.
 - Server-side interpretation of edited prose. Edit-back is deterministic parsing and validation only (pure substrate).
 
@@ -85,7 +87,8 @@ store_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)
 
 collections(
   collection_id TEXT PRIMARY KEY,            -- the existing manifest exomem_id
-  profile TEXT NOT NULL CHECK (profile IN ('records','planning')),
+  type_name TEXT NOT NULL REFERENCES collection_types,   -- 'records', 'planning' or a declared type (sec. 14)
+  type_version INTEGER NOT NULL,
   manifest_path TEXT NOT NULL UNIQUE,        -- vault-relative projection path of _collection.md
   source_path TEXT NOT NULL UNIQUE,          -- projection root (items) or log file (log layout)
   layout TEXT NOT NULL CHECK (layout IN ('markdown-items','markdown-log')),
@@ -97,6 +100,11 @@ collections(
   log_frame_json TEXT,                       -- log layout only: bytes outside the item section,
                                              -- BOM, newline style, final-newline state (re-emitted exactly)
   created_txn INTEGER NOT NULL, updated_txn INTEGER NOT NULL)
+
+collection_types(name TEXT PRIMARY KEY, current_version INTEGER NOT NULL, builtin INTEGER NOT NULL)
+collection_type_versions(name, version, declaration_json TEXT NOT NULL, declaration_hash TEXT NOT NULL,
+  change_class TEXT NOT NULL, txn_id INTEGER NOT NULL,
+  PRIMARY KEY (name, version))                -- append-only (sec. 14.5)
 
 collection_manifests(                        -- manifest history, append-only
   collection_id, manifest_version, manifest_text TEXT NOT NULL,   -- exact authored text
@@ -150,6 +158,7 @@ txns(                                        -- one row per committed mutation =
 
 audit_effects(                               -- one row per changed item in a transaction
   txn_id, ordinal, row_id, item_key, effect TEXT CHECK (effect IN ('insert','update','held','resume')),
+  effect_label TEXT,                         -- kind-dependent: correction|revision|replan|edit|transition|type_migration
   version_before, version_after, hash_before, hash_after, source_ref,
   PRIMARY KEY (txn_id, ordinal))
 
@@ -165,6 +174,7 @@ projection_state(path TEXT PRIMARY KEY, collection_id, row_id, kind TEXT CHECK (
 
 **Invariants**
 - `BEFORE UPDATE` and `BEFORE DELETE` triggers make `txns`, `audit_effects`, `item_versions`, `item_sources` and `collection_manifests` append-only. `items` rows are never deleted, because Records and Planning have no delete. Archival stays a Planning lifecycle value, and value supersession is the version history.
+- `collection_type_versions` is append-only too.
 - Every write runs in one `BEGIN IMMEDIATE` transaction under the existing writer lease, which stays the cross-process authority.
 - The `txns` row is inserted last, with its final hashes. That is how the append-only trigger admits it.
 
@@ -268,10 +278,11 @@ The watcher is the human's write path, not a bypass. It uses the same leaf funct
 
 **Governance subject per row.** Each row is evaluated as the tuple:
 - `path`: its `view_path`, the same path its file has today;
-- `ref`: `exomem://record/<cid>/<key>` or `exomem://plan/<cid>/<key>`;
-- `type`: `record` or `plan`;
+- `ref`: `exomem://<item_type>/<cid>/<key>` (`record`, `plan`, or a declared type's `item_type`, such as `recipe`);
+- `type`: the type's `item_type`;
 - `tags`: the values of a schema-declared `tags` field, if any;
-- `project`: the project of the manifest.
+- `project`: the project of the manifest;
+- `default_deny`: the subject-level default from its type's `default_audience` (§14.6).
 
 The existing pure evaluator, scopes (`paths`, `refs`, `tags`, `types`, `projects`, `classes` and their excludes), standing rules, grants and org caps apply unchanged. **Row-level audience** is therefore authored exactly like any other policy, in `_Governance`, for example with a scope selecting a row's `ref` or `tag`, or a path under the projection root.
 
@@ -316,6 +327,11 @@ The same set feeds `snapshot` (§3). Withheld rows are indistinguishable from ab
 | C11 | `describe` | storage section explains the store, views and edit-back; authoring contract unchanged | text only |
 | C12 | `bulk_upsert` (PR #1452, not yet released) | one transaction and ONE transition with N `audit_effects`. `first_transition` equals `last_transition`. `BULK_UPSERT_AUDIT_DEPTH` and the chain-depth budget are removed. Everything else in #1452's ratified contract stands | pre-release |
 | C13 | size limits | `_MAX_ITEM_FILES` (2,000), `_MAX_COLLECTION_BYTES` (8 MB) and `_MAX_RECORDS` (10,000) stop bounding store collections. The new limit is `COLLECTION_ROW_LIMIT` = 100,000 rows per collection, exposed by `describe`. A log-layout view keeps its 2 MB rendering cap; a log collection past it refuses the write with a remediation to switch to the items layout | limit raised |
+| C15 | `schema_memory` | new `subject: "collection-types"` with `inventory`, `inspect`, `validate`, `diff`, `save-collection-type`, `history` and `restore`; `infer` refused (§14.5) | additive; frozen candidates unchanged |
+| C16 | `record_memory` | per ruling R8: also serves collections of declared types, with the new `action: "transition"` and an optional `collection_type` on `describe` | additive on the local surface and v5 only |
+| C17 | `plan_memory` | a facade over the generic operations (§14.7); wire unchanged | unchanged |
+| C18 | manifests | `collection_type:` names the type; `semantic_profile: records\|planning` remain accepted aliases; `link` fields may declare `target.collection_type` and `pin: version` (§14.3) | additive |
+| C19 | `activate_context` packet | `generation.collection_types_hash`; the `collections` lane replaces the `records` and `planning` lanes (both kept as aliases); `ANCHOR_KINDS` gains `item` | additive |
 | C14 | receipts | `receipt_version: 1` shapes unchanged. `audit_correlation` is the 24-hex `transition_id` of the one transaction | unchanged |
 
 **Frozen hosted candidates** are unchanged. `hosted_legacy_profile_schemas.json` pins v1–v4 and `test_hosted_legacy_profile_pin.py` re-derives the pin. `minimum_records_reader_version` stays 2: `audit_reader_version` (1 or 2) is kept per collection and reported as today, and the store has its own `schema_version` that the wire does not expose. The local surface, the v5 candidate, the command binding and the derived artifacts are regenerated only for C11 and C12.
@@ -460,10 +476,260 @@ Removing this machinery is a goal. It is deleted in the last phase, after the mi
 **Representation-migration receipts**
 - `structured_files`' JSON receipts under `_Governance/structured-files/` become store transactions. `structured_files` preview/apply becomes projection-only maintenance (filename recipes), because it no longer touches canonical data.
 
+**Hard-coded profiles**
+- The closed two-profile model: `collection_profiles.RECORDS_PROFILE` / `PLANNING_PROFILE` / `PROFILES`, `structured_collections._SUPPORTED_PROFILES`, `_require_records_layer`, and `_require_profile_layer`'s literal layers. These are replaced by the type registry, with the built-in wire names moving into `records.yaml` / `planning.yaml`.
+- The `{"Records","Planning"}` literals in `recall_policy` (`:289-298`), which now read the type registry's placements.
+- The `semantic_profile == "records"|"planning"` branches in `records.py`, `record_governance.py`, `record_formats.py`, `planning.py`, `due_state.py`, `audit.py`, `structured_files.py`, `plan_progress.py`, `working_set_index.py` and `working_set_state.py`. There are 146 `semantic_profile` occurrences across 14 modules on `main`. Each becomes a kind check, a declaration lookup or a facade map.
+- The `records` / `planning` arms of `working_set._lane` and the planning-only anchor path. These are replaced by the one generic `collections` lane and item anchors.
+
 **Related specs**
 - The `structured-collections` requirements whose subject is the file audit protocol (marker, head, activity-log event) are rewritten by the deltas in this change.
 
 `dataset` adapters, knowledge-note writers, `batch_atomic_write`, the governance evaluator and the query evaluator are not deleted. The size of the deletion is measured in the deletion task, not estimated here.
+
+### 14. One collection mechanism; Records and Planning are built-in types
+
+Today `collection_profiles.py` hard-codes exactly two profiles (`RECORDS_PROFILE`, `PLANNING_PROFILE`), and the product boundaries branch on `semantic_profile`. In the store, a **collection type** is data. The mechanism is one generic implementation:
+- identity, natural keys, guards, transactions and audit (§2–§4);
+- projection and edit-back (§5, §6);
+- row-level governance (§7);
+- query, snapshots and migration.
+
+Records and Planning are the two **built-in** types, shipped as declarations. A user or agent can declare a new type in conversation, without code, and its collections immediately get every capability above plus context-compiler surfacing.
+
+#### 14.1 What a type declaration says
+
+```yaml
+name: recipes                 # type id: lowercase, [a-z][a-z0-9-]{1,39}, unique, immutable
+version: 1                    # assigned by save; monotonically increasing
+title: Recipes
+item_type: recipe             # singular noun; also the reference namespace: exomem://recipe/<cid>/<key>
+kind: procedural              # closed vocabulary, see 14.2
+placement: Recipes            # one new segment under the Knowledge Base: Knowledge Base/Recipes/
+description: Canonical how-to for dishes; the current revision is what gets followed.
+fields:                       # the same field types and limits as manifest item_schema today
+  title:         {type: string, required: true}
+  serves:        {type: integer}
+  total_minutes: {type: integer}
+  ingredients:   {type: array, items: {type: string}, required: true}
+  steps:         {type: array, items: {type: string}, required: true}
+  tags:          {type: array, items: {type: string}}
+natural_key: [title]
+extensible: false             # may a collection of this type add its own fields?
+lifecycle:                    # optional; one state field, a closed state machine
+  field: status
+  initial: draft
+  states: [draft, current, retired]
+  transitions: {draft: [current, retired], current: [retired], retired: [current]}
+  serve_states: [current]     # only these states are surfaced by the compiler
+  constraints:                # optional declarative per-state field rules
+    - when: {status: [current]}
+      require: [ingredients, steps]
+surfacing:                    # when a turn should be served this type's items (14.4)
+  cues: ["how do i make", "recipe for", "how long does", "what do i need for"]
+  match_fields: [title, tags, ingredients]
+  anchor_kinds: [item, collection]
+  max_items: 2
+default_audience: owner       # owner | policy (14.6)
+presentation:                 # the existing recipes, now declared on the type
+  item_filename: {fields: [title]}
+  item_presentation: {summary: [serves, total_minutes], long_text: [ingredients, steps]}
+views:                        # saved views, validated against this type's vocabulary
+  - {name: serving, filters: [{column: status, op: eq, value: current}]}
+```
+
+**Validation** is closed and field-addressed, like manifest validation today.
+- Unknown keys, an unknown `kind`, a `placement` that collides with an existing layer, a reserved directory or a non-empty ordinary directory, a natural key naming undeclared fields, and an unreachable or undeclared state are all findings.
+- A declaration with any finding cannot be saved.
+- A declaration carries no code, templates-as-code, regexes beyond the bounded cue strings, or model instructions.
+
+**Collections of a type.** A collection manifest names its type (`collection_type: recipes`). `semantic_profile: records` / `planning` remain accepted aliases for the built-in types.
+- If the type is `extensible`, the manifest may add fields and, when the type declares none, its own natural key. This is how Records works today: the built-in `records` type is a thin observed ledger whose collections declare their own fields.
+- Otherwise the type fixes the schema, and each collection is one instance, for example "Weeknight recipes" and "Baking" as two collections of `recipes`.
+
+**Built-in declarations.** `records` and `planning` ship as package data (`src/exomem/_collection_types/records.yaml`, `planning.yaml`) and change only with a release.
+- `records` is `kind: observed`, `placement: Records`, `extensible: true`, with no fixed fields.
+- `planning` is `kind: intended`, `placement: Planning`, with today's core Planning fields, lifecycle vocabulary and six horizon views. Its hierarchy rules reference the named validator `planning.hierarchy.v1` (below).
+- Only built-in declarations may carry a `wire` block: legacy property and receipt names (`record_id` / `plan_id`, `_record_receipt` / `_plan_receipt`), error-code remaps (`STALE_PLAN_ITEM`, ...) and verb aliases (`add` → `append`, `triage` → `transition`). That is what keeps the two existing tools byte-compatible (14.7).
+- Saving a declaration named `records` or `planning` refuses with `BUILTIN_COLLECTION_TYPE`.
+
+**Named validators.** Some rules are not expressible declaratively, such as Planning's typed hierarchy (an initiative's parent must be an outcome, no cycles, area agreement). These are product-owned, versioned, code-owned validators in a closed registry: `planning.hierarchy.v1`, `references.acyclic.v1`. Any declaration, built-in or declared, may opt into a registered validator by name. A declared type never supplies code.
+
+#### 14.2 Kind: the only semantic switch
+
+`kind` is a closed vocabulary. It is the only field that changes behaviour beyond the schema, and it changes exactly two things: **version semantics** and **compiler surfacing**. Storage, keys, guards, transactions, audit, governance, projection and edit-back are identical for every kind.
+
+| | `observed` (Records) | `intended` (Planning) | `procedural` (Recipes) | `reference` |
+| --- | --- | --- | --- | --- |
+| Meaning of an item | a fact or event as observed | intended future state | a canonical way to do something | stable facts to look up |
+| An update to values or body is labelled | `correction` of that observation | `replan` | `revision`; revision N supersedes N−1 | `edit` |
+| Current version served | the item as last corrected; collections read newest-observation first | items in active lifecycle states | the current revision of items in `serve_states` | the current version |
+| History and view footer | "corrected on …" | status and horizon changes | "Revision N, supersedes N−1 (date, why)" | "edited on …" |
+| Default compiler roles | `current_state`, `recent_change`, `baseline`, `evidence` | `active_plans` | `methods` | `resources` |
+| A pinned reference to one of its items | an observation as it stood | a plan as it stood | the revision that was followed (the common case) | a version as cited |
+
+Every change is still a new `row_version` in `item_versions`, one `audit_effect`, and one transition, whatever the kind. The kind only chooses the label (`audit_effects.effect_label`), the history wording, the default query semantics, and which roles serve the items.
+
+A declaration may narrow its kind's roles (`surfacing.roles`, a subset). It may not name roles outside them, so a procedural type cannot present itself as `constraints` or `identity`.
+
+The vocabulary grows only by shipped revision (**Needs ruling R9**), because each kind needs a compiler mapping and version wording.
+
+#### 14.3 Pinned version references
+
+A `link` field may target a collection type and declare `pin: version`:
+- its value is `exomem://<item_type>/<collection_id>/<item_key>@<row_version>`;
+- an unpinned link, or `pin: current`, stores no version and resolves to the current row.
+
+Resolution of a pinned link reads `item_versions`, which already hold every version. The pinned target is authorized as the item itself (the same governance subject), so a withheld target projects to `None`, exactly as `_LinkProjector` does today. Write-time validation checks that the pinned version exists and was authorized for the writer. The natural key and `payload_hash` include the full pinned value, so two runs that followed different revisions are different observations. Query `group` and `filters` may use the pinned value, or its two parts: `<field>.item` and `<field>.version`.
+
+#### 14.4 Surfacing: when a turn is served a type's items
+
+Today the compiler knows exactly two collection shapes:
+- `context_roles.LANES` has a `records` lane and a `planning` lane (`context_roles.py:68`), and `working_set._lane` dispatches them with a hard-coded chain (`working_set.py:727-758`).
+- Records collections become `collection` anchors, and only Planning items become item-level (`plan`) anchors (`working_set_index._collection_candidates` / `_planning_candidates`, `working_set_index.py:1188-1287`).
+- `current_state` is the only role backed by Records (`working_set_state.current_state_for`).
+
+This change makes the compiler generic once, in a shipped registry and code revision, so that no later type needs code:
+- **One `collections` lane.** It replaces the `records` and `planning` lanes, and both names stay accepted aliases for vault overrides. The lane serves items of the collection kinds its role names.
+- **Roles gain an optional second source, `collection_kinds`, beside their existing lane.** The role vocabulary is unchanged:
+  - `current_state` → `[observed]`, which replaces lane `records`;
+  - `active_plans` → `[intended]`, which replaces lane `planning`;
+  - `methods` keeps `units` `[technique, design]` and gains `[procedural]`;
+  - `resources` gains `[reference]`.
+- **Anchors come from the type registry, not from profile literals.** `_collection_candidates` emits a `collection` anchor per collection, and item-level anchors for every type whose `surfacing` declares `match_fields`. The closed `ANCHOR_KINDS` gains `item`, and intended items keep anchor kind `plan` for compatibility.
+
+A type's `surfacing` block does not edit the registry. It scopes selection within its kind's roles:
+- `cues`: bounded, normalized strings (at most 16, each at most 64 characters) evaluated by the same deterministic cue matcher. A cue hit selects the kind's roles and makes this type a candidate source.
+- `anchor_kinds`: resolved anchors of these kinds (`item`, `collection`, `plan`, `resource`, `project`) make this type a candidate source. `match_fields` build the item anchors' terms, so a turn mentioning "lentil soup" resolves to that recipe's item anchor through the ordinary anchor resolver.
+- `max_items`: a per-type cap inside the role's existing budget.
+- Only items in `serve_states` (default: every state that is not terminal) and at the kind's current version are served. Retired recipes are never served, and an old revision is never served unless a pinned reference is being expanded.
+
+Selection stays deterministic, with no model call. Retrieval scorers may **rank** candidates, as they do today; that is permitted by the pure-substrate authority matrix. Declarations are saved only through the owner-confirmed `schema_memory` write path, and no server component authors or edits them. The packet's `generation` block gains `collection_types_hash` beside `roles_hash`, so a changed surfacing rule is visible in every packet, preserving the `context-roles` "review-gated evolution" rule.
+
+#### 14.5 Authoring, versioning and migration through `schema_memory`
+
+There is no new tool. `schema_memory` gains `subject: "collection-types"` with the same operation pattern the `context-roles` subject already uses (`commands.op_schema_memory`):
+
+| Operation | Arguments | Effect |
+| --- | --- | --- |
+| `inventory` | none | every type (built-in and declared) with version, kind, placement, collection count; authorized counts only |
+| `inspect` | `name` | the current declaration, its version history summary, derived placement and roles, and collections of the type |
+| `validate` | `proposal` | closed findings; no write |
+| `diff` | `proposal` (or `name` + held type-view reference) | findings, the change class (below), and an impact preview: per collection, how many items change or fail and the first failing items with field paths. `content_hash` of the current version |
+| `save-collection-type` | `proposal`, `why`, `expected_hash` (required when the type exists; must be absent for a new type), optional `scaffold` (create a first collection) | refuses on any finding; else one store transaction (below) |
+| `history` | `name` | versions, newest first: time, why, before and after hash, change class |
+| `restore` | `name`, `version`, `why`, `expected_hash` | re-saves that version's declaration as a new version, through the same rules |
+| `infer` | — | refused, since the server does not propose types |
+
+**Storage.** Declarations are canonical in the store:
+- `collection_types(name PRIMARY KEY, current_version, builtin INTEGER)`;
+- `collection_type_versions(name, version, declaration_json, declaration_hash, change_class, txn_id)`, which is append-only.
+
+`collections` gains `type_name` and `type_version`, replacing the `profile` column of §2. Each type is rendered as a read-only view at `Knowledge Base/_Schema/collection-types/<name>.md`. An edit to that view is never applied, because a type change can migrate items and needs its `diff` preview first. The edit is held as a type proposal that `diff` can load by reference, and the view is re-rendered.
+
+**Change classes**, computed by `diff`:
+- **compatible**: add an optional field; add a state or transition; widen an enum; change `surfacing`, `presentation`, `views`, `description`, `title` or `serve_states`; tighten `default_audience`. No item changes. Collections re-bind to the new version and views re-render.
+- **migrating**: add a required field, rename or drop a field, narrow an enum, remove a state, change a field type, or change `natural_key`. The declaration must carry a `migration` block from a closed set of steps: `rename_field`, `map_values`, `default_value`, `drop_field` (values stay in `item_versions` history), `convert` (integer↔number, string→enum via `map_values`, scalar→array), and `recompute_natural_key`.
+- **refused**: changing `name`, `item_type`, `kind` or `placement`. Identity and meaning are immutable; a different kind is a different type.
+- **release-widening**: `default_audience` `owner` → `policy`. Saved only by the owner principal (14.6).
+
+**Save is one store transaction.**
+1. Insert the new type version.
+2. For every collection of the type: a derived manifest version, then every affected item rewritten by the migration steps with a new `row_version` and an audit effect labelled `type_migration`. One transition per collection, all in the one SQLite transaction.
+3. Recompute natural keys where the key changed.
+4. Re-validate every item against the new version.
+
+If any item fails, or a recomputed natural key collides, the whole save refuses and names the items. It never partially migrates. The caller must have the complete authorized state of every collection of the type (the §7 mutation rule), so a withheld item cannot be silently migrated or revealed. Item identities (`item_key`) never change, so references, including pinned ones, remain valid; a pinned reference keeps pointing at the historical version it named. Views re-render through the projector.
+
+**Declaring a type in conversation.** The flow for "I want to keep my recipes":
+1. The agent calls `validate`, then `diff` on its drafted declaration and shows the preview.
+2. On confirmation it calls `save-collection-type` with `why`, and optionally `scaffold` to create the first collection at `Knowledge Base/Recipes/_collection.md`.
+3. The very next call can add items (14.7). The type's placement is registered as a structured layer, so its views are excluded from ordinary recall like `Records` and `Planning` (`recall_policy`) and are pinned for the hosted gateway (`hosted_gateway`). Both read the type registry instead of hard-coded layer names.
+
+#### 14.6 Default audience and governance
+
+`default_audience` composes with the existing governance kernel and adds no policy language.
+Policy stays canonical only in the vault's `_Governance` files. A type declaration therefore never writes or synthesizes a scope. Instead, the type contributes a subject attribute.
+- **`owner`** (the default for declared types): every item of the type is evaluated with **subject-level default-deny**. The kernel applies exactly the existing `Scope.default_deny` rule (`governance/decisions.py:350-410`) as if one of the item's scopes set it:
+  - an audience that no standing rule names for a scope matching the item receives `DISCLOSURE_MIN`;
+  - the owner is never subject to it;
+  - explain output reports the source as `default_deny_source: collection-type:<name>` beside `default_deny_scope_ids`.
+
+  Sharing recipes with an audience is therefore an ordinary authored standing rule over a scope that matches them, for example a `paths` selector on `Knowledge Base/Recipes/**` or a `types` selector on `recipe`. No type change is needed.
+- **`policy`** (the built-in `records` and `planning`, to keep today's behaviour): no subject-level default; authored policy applies unchanged.
+
+Row-level policy (§7) applies within every type. Tightening `policy` → `owner` is a compatible type change. Widening `owner` → `policy` is classed `release-widening` by `diff` and may be saved only by the owner principal, like the owner-only `schema_memory` operations today (`commands.py:10513-10525`). Withheld remains indistinguishable from absent for every type. The type-registry hash joins the governance compile fingerprint inputs, so a changed default re-derives decisions and never serves a stale one.
+
+#### 14.7 Generic operations; `record_memory` and `plan_memory` are typed facades
+
+The leaf API is generic: `collections.ops.{describe, validate, inspect, create, query, add, update, transition, revise, rebaseline, bulk_upsert, hold, resume, discard}`. It takes a collection and resolves its type. `transition` is the generic lifecycle move: `item_key`, `to_state`, `expected_item_version`, `why`. It is checked against the declared state machine, per-state constraints and named validators.
+
+The two existing tools become **facades**, which are declarative maps held in the built-in declarations' `wire` blocks:
+- **`record_memory` → type `records`.** Actions map one to one (`append` → `add`). The receipt, error codes, argument sets and describe text are unchanged.
+- **`plan_memory` → type `planning`.** `add` → `add`, `update` → `update`, `triage` → `transition` plus field changes, and `revise`/`rebaseline`/`inspect`/`query` → generic. Receipts, `STALE_PLAN_*` / `PLAN_ID_CONFLICT` codes and the exact inspect shape are unchanged. The Planning hierarchy is the `planning.hierarchy.v1` validator.
+
+The facades refuse a collection of the other built-in type (today's boundary scenarios hold).
+
+**Declared-type items** need an MCP surface (**Needs ruling R8**). Recommendation: `record_memory` also accepts any collection whose type is neither `planning` nor another facade's type. For declared types:
+- it uses generic names (`item_key`, receipt marker `_collection_receipt`, generic error codes);
+- it gains `action: "transition"`;
+- `describe` takes an optional `collection_type` and teaches that type from its declaration.
+
+That adds no tool, and it keeps the frozen hosted candidates unchanged: the new action and parameter appear only on the local surface and the v5 candidate. The alternative is a new generic `collection_memory` tool, with `record_memory` and `plan_memory` as pure facades. That is cleaner naming but one more tool against the fixed tool budget.
+
+#### 14.8 Worked example: Recipes (procedural) and Recipe Executions (observed)
+
+All names and values are invented.
+
+**1. Declare the type.** The user says they want to keep their recipes and log each time they cook one.
+- The agent drafts the `recipes` declaration from 14.1.
+- It runs `schema_memory(subject="collection-types", operation="diff", proposal=…)`. The result has no findings, the change class is `new`, the placement is `Knowledge Base/Recipes/`, the roles are `[methods]`, and the default audience is `owner`.
+- After confirmation it runs `save-collection-type` with `why: "keep canonical recipes"` and `scaffold: {title: "Weeknight recipes"}`.
+
+The result is one transaction holding type version 1, collection `Weeknight recipes`, the implicit scope `collection-type:recipes`, and a manifest view at `Knowledge Base/Recipes/Weeknight recipes/_collection.md`.
+
+**2. Add a recipe and revise it.**
+- `add` creates "Weeknight lentil soup": `serves: 4`, `total_minutes: 40`, six steps, status `draft`, row version 1.
+- `transition` to `current` makes row version 2 (label: transition).
+- Two weeks later the owner edits the view in Obsidian: stir in lemon juice at the end, `total_minutes: 35`. Edit-back applies a governed `update` (actor `owner:view-edit`), which is row version 3 labelled **revision**: "Revision 3, supersedes 2".
+
+The history page shows both. The item view carries the "Revision 3" footer. Version 2 remains readable through a pinned reference.
+
+**3. Log executions in a Records collection.** "Recipe Executions" is an ordinary collection of the built-in `records` type (`kind: observed`):
+
+```yaml
+collection_type: records
+title: Recipe Executions
+item_schema:
+  fields:
+    recipe:        {type: link, target: {collection_type: recipes}, pin: version, required: true}
+    cooked_on:     {type: date, required: true}
+    outcome:       {type: enum, values: [great, fine, poor], required: true}
+    minutes_taken: {type: integer}
+    notes:         {type: string}
+  natural_key: [recipe, cooked_on]
+```
+
+| cooked_on | recipe (pinned) | outcome | minutes_taken |
+| --- | --- | --- | ---: |
+| 2026-09-02 | `exomem://recipe/<cid>/<key>@2` | fine | 45 |
+| 2026-09-09 | `exomem://recipe/<cid>/<key>@2` | fine | 42 |
+| 2026-09-16 | `exomem://recipe/<cid>/<key>@3` | great | 36 |
+| 2026-09-23 | `exomem://recipe/<cid>/<key>@3` | great | 34 |
+
+The collection declares a saved view `by-revision` with `aggregate: {op: avg, column: minutes_taken, group: recipe.version}` (grouping is a saved-view feature today). `record_memory(action="query", collection="Recipe Executions", view="by-revision")` returns 43.5 for revision 2 and 35 for revision 3, and a sibling view counts `outcome` per revision the same way. Because each row pins the revision it followed, outcomes compare across versions. A later revision 4 does not rewrite the meaning of past runs. A correction to a run, such as "it was 44 minutes, not 45", is an `update` of that execution row, labelled **correction** because the type is observed.
+
+**4. Surfacing differs by kind.** The storage underneath is the same.
+- Turn: *"how do I make the lentil soup again?"* The shipped `methods` cue "how do i" and the type cue "how do i make" both select `methods`. The `match_fields` item anchor resolves "lentil soup" to the recipe. The `collections` lane with `collection_kinds: [procedural]` serves **revision 3 only**, status `current`, within `max_items: 2`. Revision 2 and retired recipes are not served.
+- Turn: *"how did the soup turn out last time?"* The cue "last time" plus the resolved recipe anchor selects `recent_change` / `current_state`. The lane with `collection_kinds: [observed]` serves the newest executions linked to that recipe (2026-09-23, great, 34 min), newest first.
+
+**5. What is identical** for the two collections: one store, row versions and generation guards, one transition per mutation on the audit table with a history page, projection and edit-back, natural-key uniqueness (`[title]` for recipes, `[recipe, cooked_on]` for executions), bulk upsert, snapshots and migration. Governance is also the same mechanism: both are row-level subjects of the same evaluator. The recipes carry subject-level default-deny from their type (`owner`), and the executions follow authored policy for `Knowledge Base/Records/…` (`policy`). The only kind-dependent behaviour is the update label (revision versus correction), which version is served, and which roles serve them.
+
+**6. Evolve the type.** Version 2 adds `last_verified: {type: date}`. `diff` says `compatible`, and the save touches no item.
+
+Version 3 renames `total_minutes` to `minutes` and makes `serves` required with `default_value: 2`. `diff` says `migrating` and previews "1 collection, 1 item changes, 0 fail". The save runs in one transaction: type version 3, a manifest version, and the recipe's row version 4 labelled `type_migration`.
+
+The pinned executions still point at revisions 2 and 3 as they were. Grouping by `recipe.version` still works, and the historical values keep their old field name in `item_versions`, reported under the version's own type version.
 
 ## Risks / Trade-offs
 
@@ -483,4 +749,7 @@ Removing this machinery is a goal. It is deleted in the last phase, after the mi
 - **R4 `log.md`.** Recommended: stop writing Records and Planning audit lines into `Knowledge Base/log.md`, and replace them with per-collection history pages (owner addendum). Confirm that no vault-wide one-line digest is wanted.
 - **R5 View normalization.** Recommended: re-render normalizes frontmatter formatting, with the body and values exact. This replaces today's byte-preservation of untouched YAML.
 - **R6 Datasets.** Recommended: the `dataset` strategy stays file-canonical and query-only.
+- **R8 Declared-type item surface.** Recommended: `record_memory` also serves collections of declared types (generic names, new `transition` action), with no new tool and frozen candidates unchanged. The alternative is a new generic `collection_memory` tool, with `record_memory` and `plan_memory` as pure facades.
+- **R9 Kind vocabulary.** Recommended first set: `observed`, `intended`, `procedural`, `reference`. Each needs a compiler-role mapping and version wording, so the set grows only by shipped revision. Candidates for later: `constraint` (→ `constraints`) and `precedent` (→ `precedents`).
+- **R10 Declared placement.** Recommended: one new top-level Knowledge Base segment per type (`Knowledge Base/Recipes/`), refused if it collides with a reserved layer or a non-empty ordinary directory. The alternative, nesting under a shared `Knowledge Base/Collections/<Type>/`, avoids top-level growth but moves no built-in type.
 - **R7 Legacy window.** Recommended: keep file mode and the reverse exporter for two minor releases after the store ships, then run the §13 deletion.

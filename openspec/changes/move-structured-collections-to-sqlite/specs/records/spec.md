@@ -1,3 +1,20 @@
+## ADDED Requirements
+
+### Requirement: Records is a built-in collection type and record_memory is its typed facade
+`records` SHALL be a built-in collection type of kind `observed`, placement `Records`, extensible by each collection's own item schema, with default audience `policy`. `record_memory` SHALL be a typed facade: its actions SHALL map onto the generic collection operations through the built-in declaration's wire map (`append` to `add`, and every other action one to one). Its argument sets, `record_id` naming, `_record_receipt` receipts, error codes and `describe` contract SHALL be unchanged for Records collections. Until the owner rules otherwise on the declared-type surface, `record_memory` SHALL also serve collections of declared types that no facade owns. For those it SHALL use generic item naming, a `_collection_receipt` marker and generic error codes, SHALL accept `action: "transition"` for declared lifecycles, and `describe` SHALL teach a named type from its declaration. It SHALL refuse Planning collections.
+
+#### Scenario: Records wire is unchanged by the facade
+- **WHEN** the same append, update and query are issued against a Records collection before and after the facade is introduced
+- **THEN** arguments, receipts, error codes and query envelopes are identical in shape
+
+#### Scenario: A declared type's item is added through record_memory
+- **WHEN** an agent appends to a collection of a declared `recipes` type and later transitions it to `current`
+- **THEN** both commit through the generic operations with `_collection_receipt` receipts, and the transition is checked against the declared state machine
+
+#### Scenario: Frozen hosted candidates do not see declared-type actions
+- **WHEN** the released hosted candidate schemas are compared with their pinned digests
+- **THEN** they are byte-identical, and only the local surface and the v5 candidate list `transition` and the `collection_type` describe argument
+
 ## MODIFIED Requirements
 
 ### Requirement: Refused Record writes are held, inspectable and resumable
