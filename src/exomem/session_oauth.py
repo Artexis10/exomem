@@ -28,6 +28,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.routing import Route
 from typing_extensions import override
 
+from . import local_ingress
 from .auth_sessions import (
     ACCESS_TOKEN_TTL_SECONDS,
     InvalidRefreshToken,
@@ -87,6 +88,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         *,
         session_authority: SessionAuthority,
         github_cleanup_transport: httpx.AsyncBaseTransport | None = None,
+        local_verifier: Any = None,
         **kwargs: Any,
     ):
         if kwargs.get("upstream_revocation_endpoint") is not None:
@@ -97,6 +99,8 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         super().__init__(**kwargs)
         self._session_authority = session_authority
         self._github_cleanup_transport = github_cleanup_transport
+        #: Set only on a supervisor-owned worker: arms the local-ingress gate.
+        self._local_verifier = local_verifier
         self.revocation_options = RevocationOptions(enabled=True)
 
     @override
@@ -158,7 +162,12 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         )
 
     @override
-    async def load_access_token(self, token: str) -> ExomemSessionAccessToken | None:
+    async def load_access_token(self, token: str) -> AccessToken | None:
+        if local_ingress.current_grant() is not None:
+            # Local ingress: the gate already verified this request's bearer
+            # against the local audience. Only that exact bearer is accepted,
+            # so an OAuth session presented there is refused.
+            return local_ingress.access_token_for(token)
         # This is the only place a presented credential reaches validation, so
         # its absence from the log is what distinguishes "the client sent a
         # token we rejected" from "the client sent no token at all". Both
@@ -257,7 +266,19 @@ class ExomemSessionOAuthProxy(OAuthProxy):
 
     @override
     def get_middleware(self) -> list:
+        # The local-ingress gate must run before FastMCP authentication, and
+        # this list is the only one FastMCP installs ahead of it.
+        local_gate = (
+            [
+                Middleware(
+                    local_ingress.LocalIngressMiddleware, verifier=self._local_verifier
+                )
+            ]
+            if self._local_verifier is not None
+            else []
+        )
         return [
+            *local_gate,
             Middleware(SessionStoreUnavailableMiddleware),
             *super().get_middleware(),
         ]

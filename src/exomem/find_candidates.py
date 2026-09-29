@@ -701,8 +701,23 @@ def collect_candidates(
                             or find_results.stem_tokens_present(page, query_norm)
                         ):
                             graph_seeds.append(p)
-            graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
-            if graph_index.available():
+            # A request never stacks the O(corpus) cold proof of an inherited
+            # sidecar (#1454): it proves inline when no proof is running, and
+            # serves without the lane while another reader's proof is.
+            graph_index = epistemic_graph.EpistemicGraphIndex(
+                vault_root, prove_cold_snapshots=epistemic_graph.SINGLE_FLIGHT
+            )
+            graph_state = graph_index.availability_state(prove=epistemic_graph.SINGLE_FLIGHT)
+            if graph_state == "unproven":
+                if degraded_out is not None:
+                    degraded_out.append("graph")
+                if capture_trace:
+                    lane_statuses["graph"] = {
+                        "status": "warming",
+                        "reason": "graph_unproven",
+                        "backend": "epistemic_graph",
+                    }
+            elif graph_state == "available":
                 # Hybrid: seeds with a sidecar file node get typed expansion; seeds
                 # outside the indexed scope (e.g. an out-of-KB page under
                 # scope="vault" — rebuild_all only walks the KB tree) have no node

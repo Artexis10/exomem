@@ -63,7 +63,7 @@ is made**, or **an observed outcome or event is reported** — capture it:
   tentative events stay quiet. Durable interpretations may be preserved with
   explicit attribution and uncertainty; they are not established facts or
   observed events. Eligibility never creates an Entity, collection, or
-  schema: an affiliation relation uses `link_acceptance`; entity creation or substantial curation
+  schema: an affiliation relation uses `link_acceptance`; a new Entity follows `proactive_capture`; merge or substantial curation
   uses confirmed `restructure_execution`; concise observations and narrow additive
   facts follow `proactive_capture` and its active disposition.
 
@@ -174,6 +174,22 @@ returned; an identical retry writes nothing. A Stop hook's episode check or an
 `episode_due` block in an activation packet asks for one; skip it when nothing
 durable happened. At `off`, record only when the user asks; at `light`, also
 when a hook's episode check asks.
+
+**Episode candidates, where the service runs them.** When
+`episode_memory(action="candidates")` reports `execution: enabled`, the same
+decomposition can run as typed candidates against the recorded recap. `prepare`
+each durable change with its route, its home (an existing page's `target`, or a
+new page's `title`), the pages you inspected as other homes with their scope in
+a line and the `content_hash` you read, and your reason; then give every
+candidate a `disposition`, including honest `no_capture`, `deferred` or
+`rejected`. Review that plan against the recap before `resume`: every
+identified candidate is decided, and no independently useful synthesis is
+appended to a narrower page because it ranked highly. After `resume`, make the
+final pass once: `action="coverage"` puts the input ref beside each receipt and
+its readback; read the input, compare, prepare anything omitted or misrouted,
+then attest with `resume` and `postcommit=true`. A committed note or a Saved
+marker is not coverage, and the server never claims your candidates exhaust
+the input.
 
 ## Activation conventions and learning from corrections
 

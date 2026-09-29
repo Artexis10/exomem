@@ -1323,6 +1323,8 @@ def carry_named_groups(
                 corroboration_tokens=list(rare),
                 corroboration_groups=[list(pair) for pair in component],
                 recall_checkpoint=recall_checkpoint,
+                # The first lexical pass's budget (main): the rarest units only.
+                term_budget=lexical_term_budget(),
                 exclude_navigation=True,
                 exclude_raw_material=True,
             )

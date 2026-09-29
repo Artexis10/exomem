@@ -2466,3 +2466,29 @@ def test_fullwidth_halfwidth_and_ethiopic_sentence_ends_end_the_window() -> None
     assert working_set_runtime.adjacent_rare_pairs(
         "the lisbon harbour run", ("lisbon", "harbour")
     ) == (("harbour", "lisbon"),)
+
+
+def test_the_carry_query_keeps_the_lexical_stage_term_budget(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The carry ran the turn's every content word against the whole
+    knowledge base, where the first lexical pass keeps the rarest twelve. The
+    hook sends a turn verbatim, and a long prompt made the carry the costliest
+    stage of an abstaining turn (117-324 ms live)."""
+    from exomem import lexstore
+
+    budgets: list[object] = []
+    real = lexstore.search_bm25_result
+
+    def spy(*args, **kwargs):
+        budgets.append(kwargs.get("term_budget"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lexstore, "search_bm25_result", spy)
+    carried = working_set._carry_by_retrieval(carry_vault, turn=CARRY_TURN)
+    assert [path for path, _score in carried] == [CARRY_PAGE]
+    assert budgets and all(
+        budget is not None
+        and budget.max_units == working_set_runtime.ACTIVATION_LEXICAL_MAX_TERMS
+        for budget in budgets
+    )

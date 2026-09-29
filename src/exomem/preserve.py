@@ -343,8 +343,16 @@ def preserve(
     max_decoded_bytes: int = MAX_DECODED_BYTES,
     max_stream_bytes: int = MAX_UPLOAD_BYTES,
     adoption_seed: Mapping[str, object] | None = None,
+    text_origin: str = "upload",
 ) -> PreserveResult:
-    """Capture an artifact to Evidence/<scope>/<category>/<filename>."""
+    """Capture an artifact to Evidence/<scope>/<category>/<filename>.
+
+    `text_origin` says who supplied `text`: `upload` for an uploader's own
+    extraction, `client` for a transcription an AI client derived from the
+    original, which the page then records against the original's exact bytes.
+    """
+    if text_origin not in ("upload", "client"):
+        raise ValueError("text_origin must be 'upload' or 'client'")
     missing: list[str] = []
     reasons: list[str] = []
 
@@ -517,7 +525,9 @@ def preserve(
             )
         else:
             if text_clean:
-                extracted_by = "upload"   # the uploader/sandbox supplied the text
+                # The uploader/sandbox supplied the text, or an AI client
+                # transcribed the original it was handed.
+                extracted_by = "client-transcription" if text_origin == "client" else "upload"
             elif want_stub:
                 extracted_by = "pending"  # the worker will fill it
             else:
@@ -558,6 +568,15 @@ def preserve(
                 governance_artifact_size=artifact_size,
                 tree="Evidence",
                 adoption_receipt=adoption_receipt,
+                transcription_of=(
+                    {
+                        "sha256": artifact_hash,
+                        "size": artifact_size,
+                        "content_type": content_type_effective,
+                    }
+                    if text_clean and text_origin == "client"
+                    else None
+                ),
             )
             sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
             writes.append(
@@ -706,6 +725,7 @@ def preserve_stream(
     today: dt.date | None = None,
     max_bytes: int = MAX_UPLOAD_BYTES,
     adoption_seed: Mapping[str, object] | None = None,
+    text_origin: str = "upload",
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
 
@@ -730,6 +750,7 @@ def preserve_stream(
         today=today,
         max_stream_bytes=max_bytes,
         adoption_seed=adoption_seed,
+        text_origin=text_origin,
     )
 
 
@@ -949,6 +970,7 @@ def _render_sidecar(
     governance_frame_timestamp_ms: int | None = None,
     tree: str = "Evidence",
     adoption_receipt: Mapping[str, object] | None = None,
+    transcription_of: Mapping[str, object] | None = None,
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -1050,6 +1072,14 @@ def _render_sidecar(
             lines.append(f"binary_size: {binary_size}")
     if adoption_receipt is not None:
         lines.extend(_render_adoption_receipt_lines(adoption_receipt))
+    if transcription_of is not None:
+        # A client transcription is derived from exactly these bytes; the
+        # binding outlives any later re-extraction of the page.
+        lines.append("transcription:")
+        lines.append("  origin: client")
+        lines.append(f"  sha256: {transcription_of['sha256']}")
+        lines.append(f"  size: {transcription_of['size']}")
+        lines.append(f"  content_type: {yaml_scalar(transcription_of['content_type'] or '')}")
     if parent_media:
         lines.append(f"parent_media: {parent_media}")
     if frame_ts is not None:

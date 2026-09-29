@@ -395,9 +395,72 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   missed. The adoption proof fails closed on it (the drain gate counts only queued
   pages), but the serving graph can carry the stale edge. Keep an affected page's stored
   title until its own receipt drains, or widen on it when the pass changes it.
+  Since 9.2, a replayed page whose rows such a drain already rewrote proves current and
+  is dropped, so the whole-vault replay no longer heals its old-title dependants by
+  accident.
 - [ ] 8.10 **Open, not fixed here.** The carry's exactness check counts a Knowledge Base
   page that is on disk with no row (or a differing row) and not queued as explained, so a
   drain can derive an edge to it. If that page is deleted, or retitled and back, before
   its own receipt drains, adoption can accept a sidecar with an extra edge. Its receipt
   repairs it, so this matters only when that receipt is lost. Count such a page as
   explained only when it has a pending graph receipt.
+
+## 9. Replayed paths outside the recall delta (0.96.0 live latency)
+
+- [x] 9.1 Red tests: a replayed receipt whose bytes match the stored row rebuilds
+  nothing; a replayed stale page is drained incrementally; a replayed page the registry
+  does not vouch for still falls back; every case is compared edge for edge with a fresh
+  rebuild.
+- [x] 9.2 Prove caller paths outside the delta against the stored rows and the live
+  registry before `caller_path_outside_delta`; drop current paths, queue and drain stale
+  ones for a standalone caller, and fall back only when unprovable.
+- [x] 9.3 Scoped suites and gates green.
+  Evidence: `tests/test_graph_replay_currency.py` (5 tests; 4 red on 53ac15a2, the
+  unprovable-case guard green on both). Scoped graph, standby, index_sync and drain
+  suites: 774 passed, 13 skipped, 2 failed, both reproduced on 53ac15a2 on this host
+  (a latency median under load, and the rebuild-lock test that fails in this tmp dir).
+  `tests/test_graph_value_benchmark.py` hit the 60 s thread timeout in the scoped run
+  at load 37 and passes alone (163 passed).
+- [x] 9.4 Review corrections: the replay's repair runs through
+  `index_sync.drain_graph_work(paths=...)`, so a standing full marker, an unsettled
+  epoch and receipt CAS apply to it; the proof judges a path under the vault's own
+  spelling; created paths outside the delta are proved and filtered with the written
+  ones; the replay oracle also compares `graph_nodes` (kind, path, title) and
+  `graph_dependencies`, and its retitle fixture links each title from its own page.
+  Evidence: `tests/test_graph_replay_currency.py` (11 passed; the alias and
+  created-path tests red before the fix). Scoped graph, standby, index_sync, bounded
+  join and drain suites: 936 passed, 13 skipped.
+  Recheck follow-up: a caller that can report pending (a mutation request, a direct
+  mutation guard, a parent handoff) no longer drains the replay's scope while a full
+  marker stands or the epoch refuses per-path repair, since either runs a whole-vault
+  pass on its thread; it returns queued and the drain daemon pays the debt once. A
+  refresh that ran a whole-vault pass dispatches as `graph_rebuild_completed`, and a
+  queued deferral without a checkpoint as `graph_repair_queued_for_drain`, not
+  `incremental_completed`. Evidence: the marker and epoch request tests and the
+  standalone code test, red on 544662fa and green after the fix. Scoped graph, standby,
+  index_sync, bounded join, drain, records-recall, trash-exclusion, media-worker and
+  durable-closure suites: 1154 passed, 13 skipped.
+  Recheck 2: under a durable checkpoint the acknowledgement covers, that request
+  deferral entered the checkpoint-deferred block and was reported as a completed
+  whole-vault rebuild. A deferred and queued report from a caller that can carry
+  pending now dispatches as `deferred`/`graph_repair_queued`, a coverage code,
+  whatever the acknowledgement covers. With no checkpoint the dispatch cannot be
+  `deferred`, so it stays `completed`/`graph_repair_queued_for_drain`, which is not
+  treated as pending coverage. Evidence: the acknowledged-checkpoint request test
+  (marker and epoch), red on 99aae8b6 and green after the fix.
+  Recheck 3: the proof made reconcile's deliberate refresh of unchanged pages a no-op,
+  so unit drift and parser upgrades stopped repairing. The deferred full-index replay
+  now passes an explicit `replayed` flag through `index_sync.upsert_after_write` to the
+  graph refresh, and only it takes the proof; every other caller keeps the
+  `caller_path_outside_delta` fallback at its original place. A replayed page is also
+  judged stale when its stored semantic-unit rows differ from its current projection
+  generation or parser version. The refresh report is typed `dict[str, Any]`, which
+  clears the targeted mypy check. Evidence: the non-replay and unit-generation replay
+  tests, red on 41a103bd and green after the fix; the three
+  `test_semantic_unit_reconcile.py` failures and the three freshness tests pass again
+  with their original setup.
+- [ ] 9.5 **Follow-up, not built here.** `writer_lease._durable_graph_outcome` reports
+  `graph_sync: completed` whenever the acknowledgement covers the committed checkpoint,
+  even when the graph is unavailable and a graph receipt is still queued (a request
+  replay deferral, or the external-pending door). Report `pending` while graph
+  receipts for the committed generation remain queued or availability is withdrawn.

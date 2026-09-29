@@ -398,3 +398,22 @@ movement was all recorded, is 7.2. It is not reopened here. It was built and mea
 `fix/graph-convergence-contract` and parked by ruling on availability and latency
 regressions. The incident is new evidence for revisiting that ruling, which is a separate
 decision.
+
+## Addendum: replayed paths outside the recall delta (0.96.0)
+
+On the live 0.96.0 worker, the periodic reconcile replayed deferred full-index receipts
+through the graph's standalone refresh. Each replayed page had changed long before the
+graph's stored checkpoint, so it lay outside the recall delta, and the refresh fell back
+with `caller_path_outside_delta`. For a standalone caller that meant an in-process
+whole-vault rebuild, 59-101 s each, four in five minutes, one per isolated receipt, with
+concurrent requests at 4-5 s p95 under the GIL.
+
+The gate existed because a caller path outside the delta could mean the registry missed
+the change, and the refresh's topology proof only covers the delta. The page itself says
+which case it is. When the registry records the page exactly as the disk has it, the
+registry is not behind for it. Then either the stored row already carries the page's
+current source hash, and the replay is a no-op, or the row is stale while the change is
+recorded. The second case is the ordinary queued-work case, which the drain repairs with
+its own widening. Only a page the registry does not vouch for keeps the whole-vault
+fallback. No schema change: the file rows already store the source hash, and the
+registry already holds each page's stat signature.

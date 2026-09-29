@@ -142,6 +142,11 @@ Supported relations:
 - `cites`
 - `tests`
 - `owns`
+- `located_at`
+- `operates`
+- `supplies`
+- `produces`
+- `member_of`
 
 Unsupported relation names and malformed relation entries are validation
 errors. Duplicate block IDs are warnings because the file remains readable, but

@@ -154,6 +154,12 @@ A7_PASSING_TODAY = PASSING_TODAY
 #: units satisfies the status, and its units count in precision).
 A8_PASSING_TODAY = PASSING_TODAY | {"C8"}
 
+#: The same packets under amendment A9 alone (agent-choice scoring, digest
+#: pinned before this first run). Every red positive still misses a gold
+#: page: none fails for a mislabel alone, so A9 changes no verdict on the
+#: activation-quality runtime either.
+A9_PASSING_TODAY = PASSING_TODAY
+
 #: Negative controls whose pre-registered mechanism does not change their
 #: outcome. Empty on corpus v4: C6, T1, T2 and T9 each fail with the naming
 #: gate removed. (Under the kill switch every negative control passes, as it
@@ -221,6 +227,8 @@ class Run:
     amended_a7: audit.AuditReport
     #: The same packets under amendment A8 alone (a carried gold page counts).
     amended_a8: audit.AuditReport
+    #: The same packets under amendment A9 alone (agent-choice scoring).
+    amended_a9: audit.AuditReport
     #: gold note key -> every unit ref any role lane serves from its page.
     note_units: dict[str, tuple[str, ...]]
 
@@ -285,6 +293,7 @@ def _compute(workdir: Path) -> Run:
     amended = product.score_trees(trees, raw, amendments=product.REPORTED_AMENDMENTS)
     amended_a7 = product.score_trees(trees, raw, amendments=product.AMBIGUITY_AMENDMENTS)
     amended_a8 = product.score_trees(trees, raw, amendments=product.CARRIED_GOLD_AMENDMENTS)
+    amended_a9 = product.score_trees(trees, raw, amendments=product.AGENT_CHOICE_AMENDMENTS)
     base = next(tree for tree in trees if tree.distractor_count == 0)
     return Run(
         trees,
@@ -296,6 +305,7 @@ def _compute(workdir: Path) -> Run:
         amended,
         amended_a7,
         amended_a8,
+        amended_a9,
         _note_units(base),
     )
 
@@ -501,6 +511,7 @@ def test_current_runtime_amended_outcomes_are_recorded_beside_the_raw_ones(run: 
     assert {s.case_id for s in run.amended.per_case if s.passed} == AMENDED_PASSING_TODAY
     assert {s.case_id for s in run.amended_a7.per_case if s.passed} == A7_PASSING_TODAY
     assert {s.case_id for s in run.amended_a8.per_case if s.passed} == A8_PASSING_TODAY
+    assert {s.case_id for s in run.amended_a9.per_case if s.passed} == A9_PASSING_TODAY
     assert {s.case_id for s in run.report.per_case if s.passed} == PASSING_TODAY
     raw = {s.case_id: s for s in run.report.per_case}
     for amended in run.amended.per_case:
@@ -712,6 +723,7 @@ def test_the_recorded_report_is_the_current_product_run(run: Run) -> None:
         amended=run.amended,
         amended_a7=run.amended_a7,
         amended_a8=run.amended_a8,
+        amended_a9=run.amended_a9,
     )
     target = os.environ.get(RECORD_ENV)
     if target:

@@ -26,7 +26,7 @@ from exomem.vault import in_excluded_scan_dir, walk_vault_md
 
 
 def _completed_full_upsert_report(
-    vault_root: Path, paths: list[Path]
+    vault_root: Path, paths: list[Path], **_kwargs: object
 ) -> index_sync.IndexSyncReport:
     root = vault_root.resolve()
     rels = tuple(path.resolve().relative_to(root).as_posix() for path in paths)

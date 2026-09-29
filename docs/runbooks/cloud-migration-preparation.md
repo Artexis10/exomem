@@ -140,6 +140,9 @@ The values worksheet must resolve these current chart inputs:
   CIDRs, and the unguessable trusted-ingress source value;
 - `cloudIngress.hostname` equal to the gateway hostname, ACME contact and DNS
   token reference; all Secret references from the inventory above;
+- `edge.apiServerCidrs`: the K3s server's advertise address as a `/32`, the
+  address `kubectl get endpoints kubernetes` lists. The edge namespace's
+  NetworkPolicy lets Traefik reach the API server only there, on 6443;
 - the initial cell image digest in the control database's Cloud settings,
   separately from `cellImageRepository`, which is the admission repository;
 - the captured existing platform values, including the intentionally stopped

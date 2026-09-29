@@ -821,6 +821,10 @@ _VAULT_WALKING_THREAD_NAMES = frozenset(
         "exomem-identity-catalogue-warm",
         "exomem-lexical-repair",
         "exomem-refs-rebuild",
+        # Not a vault walk by design, but its readiness probe can reach one
+        # (`available()` -> `_disk_vault_freshness`), and it stops only when
+        # its runtime stops it: one still alive here leaked from its test.
+        "exomem-vocabulary-recovery",
     }
 )
 #: A rebuild over most test vaults is milliseconds, and one that cannot finish

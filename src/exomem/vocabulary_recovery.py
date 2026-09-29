@@ -6,11 +6,57 @@ proof that no other work exists. Every claim rechecks current disclosure.
 
 from __future__ import annotations
 
+import os
+import threading
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import deferred_index
+
+#: One wake-up per vault for the runtime's recovery watcher. A graph publication
+#: sets it; nothing on the publication path waits for, or learns about, the
+#: drain it triggers.
+_PUBLICATION_SIGNALS: dict[str, threading.Event] = {}
+_SIGNALS_LOCK = threading.Lock()
+
+
+def _signal_key(root: Path) -> str:
+    return os.path.abspath(os.fspath(root))
+
+
+def publication_signal(root: Path) -> threading.Event:
+    """Register the watcher's wake-up for `root`, replacing any earlier one."""
+    event = threading.Event()
+    with _SIGNALS_LOCK:
+        _PUBLICATION_SIGNALS[_signal_key(root)] = event
+    return event
+
+
+def release_publication_signal(root: Path, event: threading.Event) -> None:
+    with _SIGNALS_LOCK:
+        key = _signal_key(root)
+        if _PUBLICATION_SIGNALS.get(key) is event:
+            del _PUBLICATION_SIGNALS[key]
+
+
+def publication_waiting(root: Path) -> bool:
+    """Whether a watcher is registered for `root`."""
+    return _signal_key(root) in _PUBLICATION_SIGNALS
+
+
+def note_graph_published(root: Path) -> None:
+    """Wake the watcher after a graph publication. Never waits and never raises.
+
+    Called inside the publishing transaction, so it only sets an event: no lock,
+    no I/O and no thread start. The watcher proves the snapshot readable itself.
+    """
+    try:
+        event = _PUBLICATION_SIGNALS.get(_signal_key(root))
+        if event is not None:
+            event.set()
+    except Exception:  # noqa: BLE001 - optional guidance never affects a publication
+        pass
 
 
 @dataclass(frozen=True)

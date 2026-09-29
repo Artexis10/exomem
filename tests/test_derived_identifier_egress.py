@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from exomem import commands, epistemic_graph, writer_lease
+from exomem import commands, epistemic_graph, graph_sync, writer_lease
 from exomem import find as find_module
 from exomem.governance import egress
 from exomem.governance.principal import (
@@ -117,6 +117,7 @@ def _twins(
     base: dict[str, str],
     withheld: dict[str, str],
     audience: str,
+    scope: str = "Notes/Withheld/**",
 ) -> dict[str, Path]:
     """Build B (no withheld page), A (`withheld`) and C (a neutral withheld page)."""
     neutral = {
@@ -125,9 +126,9 @@ def _twins(
         )
     }
     return {
-        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience),
-        "A": _materialize(tmp_path / "A" / "vault", {**base, **withheld}, audience),
-        "C": _materialize(tmp_path / "C" / "vault", {**base, **neutral}, audience),
+        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience, scope),
+        "A": _materialize(tmp_path / "A" / "vault", {**base, **withheld}, audience, scope),
+        "C": _materialize(tmp_path / "C" / "vault", {**base, **neutral}, audience, scope),
     }
 
 
@@ -606,6 +607,122 @@ def test_a_restricted_writer_resolves_links_as_if_the_withheld_page_were_absent(
     assert _text(written["A"]) == _text(written["B"])
     assert _text(written["C"]) == _text(written["B"])
     assert "[[Knowledge Base/Notes/beta]]" in written["B"]["body"]
+
+
+_CANDIDATE_NAME = "Zed Corp"
+_CANDIDATE_SCOPE = "Notes/Insights/hidden-*,Entities/Organizations/Zed*,Notes/Withheld/**"
+
+
+_ANCHOR = f"{KB}/Entities/Organizations/General Context.md"
+
+
+def _note(content: str) -> str:
+    return (
+        f"{content}\n\n## Observations\n\n"
+        "- [operating constraint] Keep retries bounded #reliability\n\n"
+        "## Relations\n\n- relates_to [[General Context]]\n"
+    )
+
+
+def _settle_graph(vault: Path) -> None:
+    """Join every graph flight the previous write started.
+
+    The block reads the published dependency index, so the write under test
+    must see the owner's earlier writes there, as
+    `test_write_time_entity_candidate` arranges with the same join.
+    """
+    for _ in range(5):
+        if graph_sync.await_active_rebuild(vault, timeout=30) is None:
+            return
+
+
+def _remember_reviewed(
+    vault: Path, principal: RequestPrincipal | None, *, title: str, slug: str, content: str
+) -> dict[str, Any]:
+    """`remember` one note that relates to the anchor, then let the graph settle.
+
+    Called under the principal's scope directly rather than through `_call`:
+    `_call` clears the find and egress caches first, and a write that starts
+    from cold caches reads the dependency index as warming and withholds the
+    block in every variant, which would make the twin comparison vacuous.
+    """
+    scope = library_scope() if principal is None else request_scope(principal)
+    with scope:
+        answer = writer_lease.invoke_command(
+            _COMMANDS["remember"], vault,
+            content=_note(content), title=title, slug=slug, note_type="insight",
+        )
+    answer = json.loads(json.dumps(answer, sort_keys=True, default=str))
+    _settle_graph(vault)
+    return answer
+
+
+def _candidate_world(vault: Path, variant: str, scenario: str) -> None:
+    """The owner's own writes: the visible linker, then A's withheld state."""
+    if scenario != "withheld-only-linker":
+        _remember_reviewed(
+            vault, None, title="Open First", slug="open-first",
+            content=f"Met [[{_CANDIDATE_NAME}]] at the fair.",
+        )
+    if variant != "A":
+        return
+    if scenario == "withheld-entity":
+        with library_scope():
+            writer_lease.invoke_command(
+                _COMMANDS["connect_memory"], vault, operation="create-entity",
+                entity_type="organization", name=_CANDIDATE_NAME, summary="Withheld body text.",
+            )
+        _settle_graph(vault)
+    else:
+        _remember_reviewed(
+            vault, None, title="Hidden First", slug="hidden-first",
+            content=f"Withheld mention of [[{_CANDIDATE_NAME}]].",
+        )
+
+
+@pytest.mark.parametrize(
+    "scenario", ["withheld-only-linker", "withheld-second-linker", "withheld-entity"]
+)
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writers_entity_candidate_is_decided_over_its_view(
+    tmp_path: Path, audience: str, scenario: str
+) -> None:
+    """The write-time block fires, or stays silent, exactly as in the twin.
+
+    A withheld page that links the name, or a withheld Entity that carries it,
+    must neither create a block the twin would not emit (leaking that exactly
+    one unseen page names the identity) nor suppress one the twin would.
+    """
+    from exomem import capture_sweep
+
+    anchor = {
+        _ANCHOR: _page(
+            "General Context", "Shared context.", type="entity", title="General Context",
+            entity_type="organization", status="active",
+        )
+    }
+    vaults = _twins(tmp_path, anchor, {}, audience, _CANDIDATE_SCOPE)
+    written = {}
+    for variant, vault in vaults.items():
+        _candidate_world(vault, variant, scenario)
+        capture_sweep.reset_state()
+        answer = _remember_reviewed(
+            vault, _principal(audience), title="Open Second", slug="open-second",
+            content=f"Second visit to [[{_CANDIDATE_NAME}]].",
+        )
+        written[variant] = {
+            "path": answer["path"],
+            "entity_candidate": answer.get("entity_candidate"),
+        }
+
+    assert _text(written["A"]) == _text(written["B"]), scenario
+    assert _text(written["C"]) == _text(written["B"]), scenario
+    assert "hidden-" not in _text(written["A"])
+    if scenario == "withheld-only-linker":
+        assert written["B"]["entity_candidate"] is None
+    else:
+        (identity,) = written["B"]["entity_candidate"]["identities"]
+        assert identity["pages"] == sorted([f"{NOTES}/Insights/open-first.md", written["B"]["path"]])
 
 
 @pytest.mark.parametrize("detail", ["compact", "legacy"])

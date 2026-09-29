@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -246,6 +246,30 @@ def snapshot_interval_seconds_from_env(env: Mapping[str, str] | None = None) -> 
         return 60.0
 
 
+#: Called on every snapshotter tick, before the snapshot is saved: periodic
+#: telemetry elsewhere (the boundary hold summary) flushes a due window here
+#: rather than waiting for its next event, which may never come.
+_FLUSH_HOOKS: list[Callable[[], None]] = []
+_FLUSH_HOOKS_LOCK = threading.Lock()
+
+
+def register_flush_hook(hook: Callable[[], None]) -> None:
+    """Run `hook` on every snapshotter tick; registering twice is a no-op."""
+    with _FLUSH_HOOKS_LOCK:
+        if hook not in _FLUSH_HOOKS:
+            _FLUSH_HOOKS.append(hook)
+
+
+def run_flush_hooks() -> None:
+    with _FLUSH_HOOKS_LOCK:
+        hooks = tuple(_FLUSH_HOOKS)
+    for hook in hooks:
+        try:
+            hook()
+        except Exception:  # noqa: BLE001 - metrics must never break the caller
+            log.debug("metrics flush hook failed", exc_info=True)
+
+
 _SNAPSHOTTER_LOCK = threading.Lock()
 _snapshotter_thread: threading.Thread | None = None
 _snapshotter_stop: threading.Event | None = None
@@ -263,6 +287,7 @@ def start_snapshotter(state_dir: Path | str, interval_seconds: float) -> threadi
 
         def _loop() -> None:
             while not stop_event.wait(interval_seconds):
+                run_flush_hooks()
                 save_snapshot(state_dir)
 
         thread = threading.Thread(

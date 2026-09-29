@@ -566,6 +566,26 @@ def test_upload_text_field_writes_searchable_sidecar(vault, monkeypatch: pytest.
     assert any("invoice.png.md" in h.path for h in hits), [h.path for h in hits]
 
 
+def test_upload_of_a_markdown_file_is_preserved_byte_for_byte(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A `.md` artifact is written as bytes; the graph epoch must accept UTF-8
+    # bytes as the Markdown the graph scan will read, not fail the whole upload.
+    payload = "# Packing list\n\n- tent\n- lantern \u2014 spare batteries\n".encode("utf-8")
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    r = client.post(
+        "/upload",
+        files={"file": ("packing-list.md", payload, "text/markdown")},
+        data={"scope": "Yolo", "category": "01 - Check-in"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["path"].endswith("packing-list.md")
+    assert body["hash"] == hashlib.sha256(payload).hexdigest()
+    assert (vault / body["path"]).read_bytes() == payload
+
+
 def test_upload_get_serves_prefilled_form(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     r = client.get("/upload?scope=Yolo&category=01%20-%20Check-in")

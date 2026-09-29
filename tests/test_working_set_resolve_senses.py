@@ -21,6 +21,8 @@ Pure logic over facts: no vault, no index.
 
 from __future__ import annotations
 
+import pytest
+
 from exomem import working_set_resolve as resolve_module
 
 
@@ -324,3 +326,183 @@ def test_a_turn_naming_both_hubs_keeps_both() -> None:
 
     assert {anchor.path for anchor in resolution.anchors} == {SOLAR.path, SOLAR_MONITORING.path}
     assert resolution.status == "ambiguous"
+
+
+SOLAR_COUNTS = {"solar": 2, "array": 2, "monitoring": 1, "hub": 2}
+SOLAR_RETRIEVED = (SOLAR.path, SOLAR_MONITORING.path)
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Check the solar array, monitoring can wait.",
+        "The solar array. Monitoring is next week.",
+        "The solar array: monitoring is next week.",
+        "The solar array - monitoring is next week.",
+        "The solar array — monitoring is next week.",
+        "The solar array and monitoring are both late.",
+        "The solar array or monitoring, whichever is first.",
+        "Check the solar array (monitoring can wait).",
+        "Check the solar array [monitoring can wait].",
+    ],
+)
+def test_clause_punctuation_and_coordinators_end_a_contiguous_run(turn: str) -> None:
+    """Recheck probes: a comma, a full stop, a colon, a dash or "and"/"or" between
+    the shared words and the qualifier makes two things, not one name."""
+
+    resolution = _resolve(turn, (SOLAR, SOLAR_MONITORING), counts=SOLAR_COUNTS, retrieved=SOLAR_RETRIEVED)
+
+    assert resolution.status == "ambiguous"
+    assert {anchor.path for anchor in resolution.anchors} == {SOLAR.path, SOLAR_MONITORING.path}
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "The kitchen renovation? Budget talk can wait.",
+        "Update the kitchen renovation, budget is fine.",
+        "the kitchen renovation and the budget for it",
+    ],
+)
+def test_kitchen_punctuation_and_coordinator_controls_keep_both_hubs(turn: str) -> None:
+    resolution = _resolve(
+        turn, (KITCHEN, KITCHEN_BUDGET), counts=KITCHEN_COUNTS, retrieved=(KITCHEN.path, KITCHEN_BUDGET.path)
+    )
+
+    assert resolution.status == "ambiguous"
+    assert {anchor.path for anchor in resolution.anchors} == {KITCHEN.path, KITCHEN_BUDGET.path}
+
+
+def test_an_unpunctuated_run_with_a_hyphenated_word_still_narrows() -> None:
+    resolution = _resolve(
+        "Where does the kitchen-renovation budget stand?",
+        (KITCHEN, KITCHEN_BUDGET),
+        counts=KITCHEN_COUNTS,
+        retrieved=(KITCHEN.path, KITCHEN_BUDGET.path),
+    )
+
+    assert resolution.status == "resolved"
+
+
+MARK_E = _row("people/mark-ellison.md", "Mark Ellison", kind="entity", entity_type="person")
+MARK_F = _row("people/mark-fenwick.md", "Mark Fenwick", kind="entity", entity_type="person")
+MARK_COUNTS = {"mark": 2, "ellison": 1, "fenwick": 1}
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Please mark the task done.",
+        "I left a pencil mark on the draft plan.",
+    ],
+)
+def test_a_lower_case_person_word_in_a_cased_turn_is_not_a_name(turn: str) -> None:
+    """Ruling: once the turn's casing says something, a lower-case word is a word."""
+
+    resolution = _resolve(turn, (MARK_E, MARK_F), counts=MARK_COUNTS)
+
+    assert resolution.status != "ambiguous"
+    assert resolution.ambiguity == ()
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Mark called about the invoice.",
+        "Please ask Mark about the invoice.",
+        "mark sent the invoice over.",
+    ],
+)
+def test_a_capitalised_or_all_lower_case_person_word_still_asks(turn: str) -> None:
+    resolution = _resolve(turn, (MARK_E, MARK_F), counts=MARK_COUNTS)
+
+    assert resolution.status == "ambiguous"
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Notes From The Harbour Walk",
+        "WE ORDERED THE ROLLS FROM HARBOUR AGAIN",
+    ],
+)
+def test_a_headline_or_all_caps_turn_carries_no_casing_signal(turn: str) -> None:
+    resolution = _resolve(turn, (BAKERY, CLINIC), counts=HARBOUR_COUNTS)
+
+    assert resolution.status == "unresolved"
+    assert resolution.ambiguity == ()
+
+
+def test_a_headline_turn_still_asks_between_people() -> None:
+    resolution = _resolve("Notes From Mark About The Invoice", (MARK_E, MARK_F), counts=MARK_COUNTS)
+
+    assert resolution.status == "ambiguous"
+
+
+def test_an_uncased_person_name_in_a_mixed_script_turn_still_asks() -> None:
+    resolution = _resolve(
+        "Please tell 山田 about the invoice.", (YAMADA_T, YAMADA_H), counts=YAMADA_COUNTS
+    )
+
+    assert resolution.status == "ambiguous"
+
+
+def test_a_slash_does_not_end_a_run() -> None:
+    """A slash is left alone: "kitchen/renovation" stays one run of name words."""
+
+    resolution = _resolve(
+        "Where does the kitchen/renovation budget stand?",
+        (KITCHEN, KITCHEN_BUDGET),
+        counts=KITCHEN_COUNTS,
+        retrieved=(KITCHEN.path, KITCHEN_BUDGET.path),
+    )
+
+    assert resolution.status == "resolved"
+
+
+# --------------------------------------------------------------------------- #
+# A CJK word glued to a Latin one is still a word of the run
+# --------------------------------------------------------------------------- #
+#
+# `name_contact` counts the words a token holds without a space around them
+# (`analysis.words`), so the name spans that decide narrowing have to see them
+# too. Otherwise "rolloutの計画" leaves the rollout hub's run at "tide model",
+# strictly inside the other hub's "alpha tide model", and narrowing drops the
+# hub the turn named.
+
+TIDE_ROLLOUT = _row("hubs/tide-model-rollout.md", "Tide model rollout", kind="hub")
+ALPHA_TIDE = _row("hubs/alpha-tide-model.md", "Alpha tide model", kind="hub")
+TIDE_HUBS = (TIDE_ROLLOUT, ALPHA_TIDE)
+TIDE_COUNTS = {"tide": 2, "model": 2, "rollout": 1, "alpha": 1}
+TIDE_RETRIEVED = (TIDE_ROLLOUT.path, ALPHA_TIDE.path)
+
+
+def _tide(turn: str):
+    return _resolve(turn, TIDE_HUBS, counts=TIDE_COUNTS, retrieved=TIDE_RETRIEVED)
+
+
+def test_a_latin_twin_of_two_overlapping_hub_names_stays_ambiguous() -> None:
+    resolution = _tide("check alpha tide model rollout please")
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {
+        TIDE_ROLLOUT.path,
+        ALPHA_TIDE.path,
+    }
+
+
+def test_a_cjk_word_glued_to_the_last_latin_word_does_not_narrow_the_turn() -> None:
+    resolution = _tide("check alpha tide model rolloutの計画")
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {
+        TIDE_ROLLOUT.path,
+        ALPHA_TIDE.path,
+    }
+
+
+def test_the_qualifier_still_narrows_when_no_word_is_glued() -> None:
+    resolution = _tide("Could you check the tide model rollout for me?")
+
+    assert resolution.status == "resolved"
+    assert [anchor.path for anchor in resolution.anchors] == [TIDE_ROLLOUT.path]

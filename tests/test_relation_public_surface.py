@@ -59,7 +59,7 @@ def test_connect_relation_resolution_reaches_the_shared_vocabulary_leaf(
     )
 
     assert result["exact_matches"][0]["canonical"] == "part_of"
-    assert len(result["core_vocabulary"]) == 28
+    assert len(result["core_vocabulary"]) == 33
     assert result["selected_relation"] is None
     assert result["proposed_relation"] is None
 

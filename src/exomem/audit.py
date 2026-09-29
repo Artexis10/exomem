@@ -2016,6 +2016,12 @@ def _check_unregistered_entity_types(
                 "schema_version": entity_types_module.EXTENSION_SCHEMA_VERSION,
                 "entity_types": {**current_extensions, type_id: definition},
             }
+            if registry.facets:
+                # A proposal replaces the whole document; keep declared facets.
+                proposal["facets"] = {
+                    facet_type: {facet.name: facet.as_dict() for facet in declared}
+                    for facet_type, declared in registry.facets.items()
+                }
             validation = entity_types_module.validate_proposal(proposal)
             if not validation:
                 proposal_cache[cache_key] = (candidate_entry, proposal, None)

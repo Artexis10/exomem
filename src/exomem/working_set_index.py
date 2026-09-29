@@ -346,10 +346,8 @@ def normalize(value: object) -> str:
     than "every working-set comparison key": `collection_claims.
     normalize_text` and `structure_promotion._terms` (used for
     `claims_match` and Records current-state routing) keep their own,
-    separate basic-Latin term splitter and do not call this function, so
-    neither is reached yet by a non-Latin turn or a typographic apostrophe —
-    a recorded, deliberate limit (see `SCHEMA_VERSION`'s v7 note), not an
-    oversight, and its own change to lift.
+    separate term splitter (`text_scripts.vocabulary_words` for non-ASCII
+    text) and do not call this function.
 
     Locale-specific case rules are never applied: `str.casefold()` treats a
     Turkish dotted capital İ and a plain I as different letters, which is

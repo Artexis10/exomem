@@ -4807,3 +4807,27 @@ def test_a_write_waits_for_the_graph_handoff_as_well_as_the_corpus(
         readiness.reset()
 
     assert calls == ["called"], "the write stayed refused after adoption ran"
+
+
+def test_idempotency_store_holds_no_sqlite_handle_after_construction(tmp_path: Path) -> None:
+    """Opening a store must not leave WAL sidecars that a later GC pass deletes.
+
+    Connections left to the collector close at an arbitrary moment, so the
+    state directory changed under any observer (a byte-for-byte snapshot of an
+    ambient root, for one) between two reads.
+    """
+    import gc
+
+    state = tmp_path / "state"
+    database = state / "idempotency.sqlite"
+    gc.disable()
+    try:
+        IdempotencyStore(database)
+        before = sorted(item.name for item in state.iterdir())
+        gc.collect()
+        after = sorted(item.name for item in state.iterdir())
+    finally:
+        gc.enable()
+
+    assert "idempotency.sqlite-wal" not in before
+    assert before == after

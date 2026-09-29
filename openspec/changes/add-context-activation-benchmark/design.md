@@ -180,6 +180,17 @@ in its place, and the recorded report carries both columns.
   (`agent_choice_digest`: the rule text and the source applying it) was pinned
   before its first run on product packets. Reported beside the raw score and
   every other amendment.
+- **A10 — Invalid twins (2026-09-28).** A negative twin whose turn a
+  pre-registered fixture page genuinely answers is a fixture-design defect:
+  serving that page is correct behaviour, and pinning it as a product red
+  would push the compiler to be wrong. The frozen fixture pages are not
+  touched. Pre-registered list, with page and reason: T1
+  (`t1_fitness_goal_note`, C1's poison, a step-count goal) and, latent, T2
+  and T9 (`t2_camera_gear_note`, C2's and C9's poison, the photography gear;
+  the carry does not reach it today). Under A10 these twins are reported
+  "invalid, excluded"; raw scores them as-is. Its digest
+  (`invalid_twins_digest`) was pinned before its first run. Reported beside
+  the raw score and every other amendment.
 - **R3 and R4 — Reds kept (2026-09-28).** C2 and C9 stay red: a shared tag is
   not corroboration on a real vault, and semantic corroboration is future
   sensed-model work. C3 stays red: it relies on workspace context a cold run
