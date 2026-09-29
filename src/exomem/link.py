@@ -18,7 +18,15 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import entity_candidates, indexes, memory_refs, semantic_writes, tag_variants, temporal
+from . import (
+    entity_candidates,
+    indexes,
+    memory_refs,
+    semantic_writes,
+    tag_variants,
+    temporal,
+    vocabulary_resolution,
+)
 from .entity_types import (
     ENTITY_WRITER_OPTIONAL_FRONTMATTER,
     MAX_FACET_TEXT_CHARS,
@@ -65,6 +73,8 @@ class LinkResult:
     slug: str = ""
     # The explicit shared-name decision this creation committed under, if any.
     identity_decision: dict | None = None
+    # How the requested entity type resolved and where it projects.
+    vocabulary_resolution: dict[str, str] | None = None
 
     def as_dict(self) -> dict:
         value: dict[str, object] = {
@@ -78,6 +88,8 @@ class LinkResult:
             value["creation"] = self.creation
         if self.identity_decision is not None:
             value["identity_decision"] = self.identity_decision
+        if self.vocabulary_resolution is not None:
+            value["vocabulary_resolution"] = self.vocabulary_resolution
         return value
 
 
@@ -795,6 +807,7 @@ def link(
             ["entity_type"],
             f"entity_type {entity_type!r} is not active. Active ids: {list(registry.active_ids)}",
         )
+    requested_type = entity_type
     entity_type = definition.id
     slug_warnings: list[str] = []
     filename_slug: str | None = None
@@ -902,6 +915,12 @@ def link(
         if accepted_decision is not None:
             reason += " A distinct identity needs its own `slug`."
         raise LinkError("ENTITY_EXISTS", ["name"], reason)
+    type_resolution = vocabulary_resolution.entity_type_record(
+        requested_type,
+        definition,
+        fingerprint=registry.fingerprint,
+        destination=rel_entity.rsplit("/", 2)[-2],
+    )
     rel_entity_no_ext = rel_entity.removesuffix(".md")
     resolver = find_module.writer_resolver_snapshot(vault_root)
     resolver.add_pending(rel_entity_no_ext, title=display_name)
@@ -1043,6 +1062,7 @@ def link(
             preflight.as_dict(),
             slug=filename_slug or "",
             identity_decision=accepted_decision,
+            vocabulary_resolution=type_resolution,
         )
     committed = semantic_writes.commit_creation(
         vault_root,
@@ -1058,4 +1078,5 @@ def link(
         committed.as_dict(),
         slug=filename_slug or "",
         identity_decision=accepted_decision,
+        vocabulary_resolution=type_resolution,
     )

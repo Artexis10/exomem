@@ -44,6 +44,7 @@ from . import (
     semantic_units,
     sidecar_store,
     traversal_profiles,
+    vocabulary_recovery,
 )
 from . import find as find_module
 from . import vault as vault_module
@@ -3245,6 +3246,8 @@ class EpistemicGraphIndex:
         if published is not None:
             _retire_covered_full_marker(self.vault_root, paid_marker)
             self._forget_rebuilt_graph_failures()
+            # After the swap, not inside the private copy's transaction.
+            self._note_graph_published()
             return published
         if epoch_error is not None:
             raise epoch_error
@@ -3705,6 +3708,7 @@ class EpistemicGraphIndex:
                 ):
                     return False
                 graph_sync.replace_sidecar(temporary, self.path, vault_root=self.vault_root)
+            self._note_graph_published()
             return True
         finally:
             _release_publication_hold(publication_hold)
@@ -4468,6 +4472,16 @@ class EpistemicGraphIndex:
                 )
         finally:
             conn.close()
+        self._note_graph_published()
+
+    def _note_graph_published(self) -> None:
+        """Wake the vocabulary recovery watcher once a publication is readable.
+
+        Only sets an event. An index pointed at a private rebuild copy writes
+        nothing readers see, so it stays silent; the swap signals instead.
+        """
+        if self.path == sidecar_path(self.vault_root):
+            vocabulary_recovery.note_graph_published(self.vault_root)
 
     def _publish_available_marker_in_transaction(
         self,
@@ -4504,6 +4518,9 @@ class EpistemicGraphIndex:
             )
         if graph_checkpoint is not None:
             self._write_graph_sync_acknowledgement(conn, graph_checkpoint)
+        # No publication signal here: this transaction may be writing a private
+        # rebuild that is swapped into place later, or refused. Each caller
+        # signals once its commit or swap has made the marker readable.
 
     @staticmethod
     def _write_graph_sync_acknowledgement(
@@ -5839,6 +5856,8 @@ class EpistemicGraphIndex:
                 resolver_fingerprint=resolver_fingerprint,
                 before_commit=publish_incremental if graph_checkpoint is not None else None,
             )
+            if graph_checkpoint is not None:
+                self._note_graph_published()
             if graph_checkpoint is None:
                 if self._mark_incremental_available(
                     before,
@@ -6290,6 +6309,8 @@ class EpistemicGraphIndex:
                 # the next drain repairs it against the projection that moved.
                 log.info("deferred graph drain did not publish; projection moved under the pass")
                 return {**report, "moved": 1}
+            if published:
+                self._note_graph_published()
         return {
             **pass_report,
             "published": published,
