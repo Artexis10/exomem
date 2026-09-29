@@ -1149,7 +1149,7 @@ def test_cooldown_gate_short_circuits_second_transport_attempt(
     assert call_count["n"] == 1
 
 
-def test_global_cooldown_suppresses_nearby_sessions(
+def test_reminder_only_mode_gives_each_session_its_one_reminder(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -1158,8 +1158,10 @@ def test_global_cooldown_suppresses_nearby_sessions(
     first = _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "tab-a"}, home)
     second = _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "tab-b"}, home)
 
+    # Once per session, not once per client: a fresh tab has not seen the reminder
+    # another tab got, so the client-wide cooldown no longer gates this mode.
     assert "additionalContext" in first
-    assert second.strip() == ""
+    assert "additionalContext" in second
 
 
 def test_global_cooldown_can_be_disabled(

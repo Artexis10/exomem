@@ -355,7 +355,7 @@ def test_the_shipped_hook_walks_a_working_set_session(tmp_path: Path) -> None:
         assert "`anchor`" in lines[3] and "activate_context" in lines[3]
         # The reminder FOLLOWS, because nothing resolved and ordinary recall may
         # still be wanted.
-        assert second.rstrip().endswith("skip silently.")
+        assert second.rstrip().endswith("skip.")
         assert REMINDER_HEAD in second
         assert second.index(HEADER_HEAD) < second.index(REMINDER_HEAD)
         # None of the pages only recall surfaced.

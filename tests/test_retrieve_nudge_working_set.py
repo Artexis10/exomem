@@ -1906,15 +1906,16 @@ def test_a_referential_prompt_bypasses_both_cooldowns(
     assert context
 
 
-@pytest.mark.parametrize("mode", ["1", "off"])
-def test_stub_and_reminder_modes_keep_the_client_wide_cooldown(
+@pytest.mark.parametrize("mode", ["1"])
+def test_stub_mode_keeps_the_client_wide_cooldown(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     mode: str,
 ) -> None:
-    """Unchanged byte for byte: those modes fetch no packet, so a fresh
-    client-wide stamp silences them exactly as before."""
+    """Unchanged byte for byte: stub mode fetches no packet, so a fresh
+    client-wide stamp silences it exactly as before. Reminder-only mode is the
+    exception (`shrink-bootstrap`): once per session, no client-wide gate."""
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", mode)
     home = tmp_path / "home"
     _fresh_client_wide_stamp(home)
