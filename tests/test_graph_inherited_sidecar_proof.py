@@ -449,3 +449,36 @@ def test_waiters_on_a_raised_proof_claim_one_new_proof(
     assert all(results[f"waiter-{i}"] is True for i in range(3)), results
     assert peak == 1, f"{peak} proofs ran at once after a raised proof"
     assert len(calls) == 2, f"waiters re-proved {len(calls) - 1} times: {calls}"
+
+
+def test_a_blocking_reader_proves_itself_when_the_running_proof_outlives_the_budget(
+    inherited_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = inherited_vault
+    monkeypatch.setattr(epistemic_graph, "PROOF_WAIT_SECONDS", 0.3)
+    release = threading.Event()
+    entered = threading.Event()
+    callers: list[str] = []
+    real_proof = EpistemicGraphIndex._snapshot_sources_match_disk
+
+    def held(inner_self: EpistemicGraphIndex, conn: object, **kwargs: object) -> bool:
+        callers.append(threading.current_thread().name)
+        if threading.current_thread().name == "slow":
+            entered.set()
+            release.wait(HELD_PROOF_SECONDS)
+        return real_proof(inner_self, conn, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_snapshot_sources_match_disk", held, raising=True)
+    slow = threading.Thread(target=lambda: EpistemicGraphIndex(root).available(), name="slow")
+    slow.start()
+    try:
+        assert entered.wait(10.0)
+        started = time.monotonic()
+        assert EpistemicGraphIndex(root).available() is True
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        slow.join(30.0)
+
+    assert elapsed < RECALL_BOUND_SECONDS, f"a blocking reader waited {elapsed:.1f}s"
+    assert threading.current_thread().name in callers

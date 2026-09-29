@@ -222,6 +222,10 @@ _PROOFS_IN_FLIGHT: dict[str, tuple[threading.Event, int]] = {}
 #: `prove` mode for a request path: prove inline when no proof is running for
 #: the sidecar, refuse as `unproven` when another reader's proof already is.
 SINGLE_FLIGHT = "single_flight"
+#: How long a blocking reader waits for another reader's proof before proving
+#: the sidecar itself, as it did before single-flight: sharing a proof must
+#: never turn a bounded read into an unbounded wait on another thread.
+PROOF_WAIT_SECONDS = 30.0
 
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
@@ -2369,7 +2373,7 @@ class EpistemicGraphIndex:
                                 self_owned = True
                             else:
                                 in_flight = claim[0]
-                    if covered:
+                    if covered and remembered is not None:
                         current = remembered[1]
                         break
                     if not prove or (in_flight is not None and prove == SINGLE_FLIGHT):
@@ -2377,9 +2381,10 @@ class EpistemicGraphIndex:
                             outcome_out.append("unproven")
                         conn.close()
                         return None
-                    if in_flight is not None:
-                        in_flight.wait()
+                    if in_flight is not None and in_flight.wait(timeout=PROOF_WAIT_SECONDS):
                         continue
+                    # Unclaimed, self-owned, or the running proof outlived the
+                    # wait budget: prove here.
                     try:
                         decline: list[str] = []
                         current = self._snapshot_sources_match_disk(
