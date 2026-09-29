@@ -363,6 +363,26 @@ conclusion, another project's standing page, a second standing page in the
 same project, a turn resolving nothing in the project) stay out, each pinned
 in the new test module.
 
+Review round (independent review of this branch): a referent only recency
+supplied is skipped inside the precedent reach (and a recency-only project is
+not read for conclusions); the entity's conclusion pages are date-sorted before
+the cut; a standing unit is capped at `MAX_UNIT_CHARS` (a pointer past it, no
+900-character allowance); the resolved anchor's material ranks ahead of items
+carried beside it (`provenance.carried`, rendered as a `carried` line in the
+hook for three bytes). Injected size, the hook's rendered block, median / p95,
+base is `origin/main`:
+
+| set | base bytes | head bytes | base tokens | head tokens |
+|-----|------|------|------|------|
+| corpus (16 fixtures) | 729 / 1118 | 749 / 1118 | 187 / 280 | 202.5 / 280 |
+| continuity (4 cases) | 1046 / 1262 | 1046 / 1262 | 262 / 353 | 262.5 / 353 |
+| project with a standing page (2 turns) | 433.5 / 482 | 615.5 / 749 | 106.5 / 118 | 154.5 / 191 |
+
+The project fixture is the case the new rules add to: about 180 bytes and 48
+tokens more per turn that resolves the project, for the standing method unit and
+the entity's conclusion. The corpus grows by a carried page's line where a turn
+names a second page.
+
 Activation latency, three interleaved base/head pairs (base is the previous
 head), 16 fixtures times five rounds, cold caches per call, ceil-rank
 percentiles: working-set p95 moved by +6.5%, -3.5% and +0.5%; total p95 by

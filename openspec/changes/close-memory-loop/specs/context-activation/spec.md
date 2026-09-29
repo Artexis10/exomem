@@ -278,6 +278,12 @@ whatever the turn resolved.
   the resolved anchor is unchanged and the page is never reported `resolved`
 - **AND** a turn that names nothing beyond what it resolved carries nothing extra
 
+#### Scenario: The named anchor keeps its own material ahead of a carried page's
+- **WHEN** a turn resolves an anchor and carries a newer page beside it, and both have
+  units under the same role
+- **THEN** the resolved anchor's units are ranked ahead of the carried page's within the
+  role's item cap, and each carried unit's provenance says `carried: true`
+
 #### Scenario: Several pages named apart are each carried
 - **WHEN** a turn that resolved no anchor names two pages by two phrases, each phrase
   answering to exactly one page
@@ -326,8 +332,10 @@ units SHALL be eligible under `precedents` whether or not they share a word with
 turn and whether or not they fit within the entity's capped list of typed links. The
 index SHALL record inbound wikilinks past that cap under a relation of their own that
 never counts toward the anchor's neighbourhood (resolution reads what it always
-read). At most six such pages beyond the neighbourhood are read, newest first, and
-their units are subject to the lane and packet budgets and to the same egress guard.
+read). At most six such pages beyond the neighbourhood are read, chosen newest first
+over every holder (never the alphabetically first), and their units are subject to the
+lane and packet budgets and to the same egress guard. An anchor that only recency
+supplied is skipped, whichever route selected `precedents`.
 
 #### Scenario: A topic-specific conclusion past the link cap is served
 - **WHEN** a turn resolves a person entity that more pages link to than the link cap
@@ -341,12 +349,19 @@ A page SHALL declare itself the standing precedent of its project with frontmatt
 resolves an anchor in that project (a project anchor, or a page anchor whose own
 frontmatter names the project), the compiler SHALL serve that page's units under
 `precedents`, at most one page per project and two standing pages per packet, at most
-two units per page, ahead of the role's other units and outside its item cap, charged to
-the packet's character budget. Several declarations in one project resolve to the most
+two units per page, each unit no longer than 360 characters (a longer one is a
+`unit_too_long` pointer), ahead of the role's other units and outside its item cap,
+charged to the packet's character budget. An anchor, or a project, that only recency
+supplied ("where were we") is not read for conclusions or a standing page. Several declarations in one project resolve to the most
 recently updated. Another project's standing page, and a turn that resolved nothing in
 the project, serve none. The reach runs inside the `precedents` lane, behind that lane's
 own request-budget gate and under its timing span, so it adds no stage of its own and
 is skipped with the lane when the request budget cannot afford it.
+
+#### Scenario: A referent that only recency supplied serves neither
+- **WHEN** an entity or a project is the packet's referent through recency alone, and
+  `precedents` is selected by another route (a turn cue such as "before")
+- **THEN** neither the entity's conclusion pages nor the project's standing page is served
 
 #### Scenario: The methodology page constrains a turn that never names it
 - **WHEN** a turn resolves an entity whose project declares a standing page and the

@@ -1001,11 +1001,11 @@
       {
         "case_id": "C1",
         "failure_reasons": [
-          "A9: 2 gold page(s) not served under an honest label",
-          "A9: gold fact(s) missing from served material: ['weekly limit', 'capacity ceiling']"
+          "A9: 1 gold page(s) not served under an honest label",
+          "A9: gold fact(s) missing from served material: ['capacity ceiling']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 2,
           "total": 3
         },
         "hedged": false,
@@ -1014,7 +1014,7 @@
           "hit": 0,
           "total": 1
         },
-        "precision": 1.0
+        "precision": 0.6666666666666666
       },
       {
         "case_id": "T1",
@@ -1074,13 +1074,13 @@
           "A9: gold fact(s) missing from served material: ['extending the reporting module']"
         ],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 2
         },
         "hedged": false,
         "passed": false,
         "poison": {
-          "hit": 1,
+          "hit": 0,
           "total": 1
         },
         "precision": null
@@ -1227,30 +1227,28 @@
       },
       {
         "case_id": "C8",
-        "failure_reasons": [
-          "A9: 1 gold page(s) not served under an honest label",
-          "A9: gold fact(s) missing from served material: ['version 3']"
-        ],
+        "failure_reasons": [],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
         "hedged": false,
-        "passed": false,
+        "passed": true,
         "poison": {
           "hit": 0,
           "total": 2
         },
-        "precision": null
+        "precision": 0.0
       },
       {
         "case_id": "T8",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.00 below the 0.9 floor"
+          "twin surfaced a ref outside its own gold",
+          "precision 0.00 below the 0.8 floor"
         ],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
         "hedged": false,
@@ -1259,7 +1257,7 @@
           "hit": 0,
           "total": 2
         },
-        "precision": null
+        "precision": 0.0
       },
       {
         "case_id": "C9",
