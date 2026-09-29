@@ -10,8 +10,8 @@
 - [x] 1.3 Assert the readiness probe never calls the proof and reports
       `unproven`, then the remembered verdict.
 - [x] 1.4 Assert graph recall returns within a bound with the graph lane
-      degraded while a proof is held, and uses the graph once the background
-      proof lands.
+      degraded while another reader's proof is held, uses the graph once that
+      proof lands, and that a lone cold reader keeps the graph lane.
 - [x] 1.5 Run the new tests against the unfixed code and record each failure.
 
 ## 2. Fix
@@ -21,8 +21,9 @@
 - [x] 2.2 Add the no-prove read mode and `availability_state()`.
 - [x] 2.3 Readiness/coordination status uses the no-prove read; admit
       `unproven` in the public readiness payload.
-- [x] 2.4 Graph recall and the find cache key use the no-prove read and
-      schedule a single background proof.
+- [x] 2.4 One proof per sidecar at a time: blocking readers share it, and graph
+      recall and the find cache key prove inline unless another reader's proof
+      is running.
 
 ## 3. Verification
 

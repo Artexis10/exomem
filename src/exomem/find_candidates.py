@@ -701,16 +701,14 @@ def collect_candidates(
                             or find_results.stem_tokens_present(page, query_norm)
                         ):
                             graph_seeds.append(p)
-            # A request never pays the O(corpus) cold proof of an inherited
-            # sidecar (#1454): every read on this index refuses instead, and an
-            # unproven graph is proved in the background while this recall
-            # proceeds without the lane.
+            # A request never stacks the O(corpus) cold proof of an inherited
+            # sidecar (#1454): it proves inline when no proof is running, and
+            # serves without the lane while another reader's proof is.
             graph_index = epistemic_graph.EpistemicGraphIndex(
-                vault_root, prove_cold_snapshots=False
+                vault_root, prove_cold_snapshots=epistemic_graph.SINGLE_FLIGHT
             )
-            graph_state = graph_index.availability_state()
+            graph_state = graph_index.availability_state(prove=epistemic_graph.SINGLE_FLIGHT)
             if graph_state == "unproven":
-                epistemic_graph.schedule_availability_proof(vault_root)
                 if degraded_out is not None:
                     degraded_out.append("graph")
                 if capture_trace:

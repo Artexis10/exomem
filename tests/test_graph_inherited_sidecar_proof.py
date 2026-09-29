@@ -164,9 +164,7 @@ def _count_proofs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         calls.append(threading.current_thread().name)
         return real_proof(inner_self, conn, **kwargs)
 
-    monkeypatch.setattr(
-        EpistemicGraphIndex, "_snapshot_sources_match_disk", counted, raising=True
-    )
+    monkeypatch.setattr(EpistemicGraphIndex, "_snapshot_sources_match_disk", counted, raising=True)
     return calls
 
 
@@ -287,7 +285,25 @@ def test_the_readiness_probe_reports_a_remembered_decline_without_proving(
     assert len(proofs) == 1
 
 
-def test_graph_recall_does_not_wait_on_an_unproven_sidecar(
+def test_a_cold_single_reader_recall_still_uses_the_graph_lane(
+    inherited_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no proof running, recall proves inline once, like a one-shot CLI."""
+    root = inherited_vault
+    lexstore.ensure_fresh(root)
+    proofs = _count_proofs(monkeypatch)
+
+    for _ in range(3):
+        degraded: list[str] = []
+        hits = find_module.find(
+            root, query="generated note", mode="hybrid", graph=True, degraded_out=degraded
+        )
+        assert hits
+        assert "graph" not in degraded, "a lone cold reader lost the graph lane"
+    assert len(proofs) == 1, f"one reader proved an unchanged sidecar {len(proofs)} times"
+
+
+def test_graph_recall_does_not_wait_on_another_readers_proof(
     inherited_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = inherited_vault
@@ -296,15 +312,24 @@ def test_graph_recall_does_not_wait_on_an_unproven_sidecar(
     find_module.find(root, query="generated note", mode="hybrid", graph=False)
 
     release = threading.Event()
+    entered = threading.Event()
     callers: list[str] = []
     real_proof = EpistemicGraphIndex._snapshot_sources_match_disk
 
     def held(inner_self: EpistemicGraphIndex, conn: object, **kwargs: object) -> bool:
         callers.append(threading.current_thread().name)
+        entered.set()
         release.wait(HELD_PROOF_SECONDS)
         return real_proof(inner_self, conn, **kwargs)
 
     monkeypatch.setattr(EpistemicGraphIndex, "_snapshot_sources_match_disk", held, raising=True)
+
+    # Another reader -- the drain, in a cell -- is already proving the sidecar.
+    prover = threading.Thread(
+        target=lambda: EpistemicGraphIndex(root).available(), name="other-reader-proof"
+    )
+    prover.start()
+    assert entered.wait(10.0), "the other reader never started its proof"
 
     degraded: list[str] = []
     try:
@@ -315,24 +340,52 @@ def test_graph_recall_does_not_wait_on_an_unproven_sidecar(
         elapsed = time.monotonic() - started
     finally:
         release.set()
+        prover.join(30.0)
 
     assert elapsed < RECALL_BOUND_SECONDS, f"graph recall waited {elapsed:.1f}s on the proof"
     assert hits, "recall must still answer without the graph lane"
     assert "graph" in degraded, "the skipped graph lane must be reported as degraded"
-    assert threading.current_thread().name not in callers, (
-        "the proof ran on the request thread"
-    )
+    assert callers == ["other-reader-proof"], f"the proof was stacked: {callers}"
 
-    # The proof recall deferred runs in the background, and once it lands the
-    # graph lane participates again without another proof.
-    deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline:
-        if EpistemicGraphIndex(root).availability_state() == "available":
-            break
-        time.sleep(0.05)
+    # Once the running proof lands, the graph lane participates again without
+    # another proof.
     assert EpistemicGraphIndex(root).availability_state() == "available"
-    proved = len(callers)
     degraded.clear()
     find_module.find(root, query="generated note", mode="hybrid", graph=True, degraded_out=degraded)
     assert "graph" not in degraded
-    assert len(callers) == proved
+    assert callers == ["other-reader-proof"]
+
+
+def test_a_blocking_reader_shares_a_running_proof(
+    inherited_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = inherited_vault
+    release = threading.Event()
+    entered = threading.Event()
+    callers: list[str] = []
+    real_proof = EpistemicGraphIndex._snapshot_sources_match_disk
+
+    def held(inner_self: EpistemicGraphIndex, conn: object, **kwargs: object) -> bool:
+        callers.append(threading.current_thread().name)
+        entered.set()
+        release.wait(HELD_PROOF_SECONDS)
+        return real_proof(inner_self, conn, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_snapshot_sources_match_disk", held, raising=True)
+    results: dict[str, bool] = {}
+
+    def check(name: str) -> None:
+        results[name] = EpistemicGraphIndex(root).available()
+
+    first = threading.Thread(target=check, args=("first",), name="first")
+    first.start()
+    assert entered.wait(10.0)
+    second = threading.Thread(target=check, args=("second",), name="second")
+    second.start()
+    time.sleep(0.2)
+    release.set()
+    first.join(30.0)
+    second.join(30.0)
+
+    assert results == {"first": True, "second": True}
+    assert callers == ["first"], f"a second blocking reader re-proved: {callers}"

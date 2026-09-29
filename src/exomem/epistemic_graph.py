@@ -215,9 +215,13 @@ _REPUBLISH_BACKOFF_LOCK = threading.Lock()
 #: recall projection identity. A change to any of them is a new question.
 _SNAPSHOT_PROOFS: dict[str, tuple[tuple[Any, ...], bool]] = {}
 _SNAPSHOT_PROOFS_LOCK = threading.Lock()
-#: One background proof per sidecar, started for a reader that may not wait.
-_BACKGROUND_PROOFS: dict[str, threading.Thread] = {}
-BACKGROUND_PROOF_THREAD_NAME = "exomem-graph-proof"
+#: The proof running now per sidecar, so concurrent readers share it rather
+#: than each paying the O(corpus) proof: a blocking reader waits for its
+#: verdict, a `SINGLE_FLIGHT` reader serves without the graph instead.
+_PROOFS_IN_FLIGHT: dict[str, threading.Event] = {}
+#: `prove` mode for a request path: prove inline when no proof is running for
+#: the sidecar, refuse as `unproven` when another reader's proof already is.
+SINGLE_FLIGHT = "single_flight"
 
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
@@ -1193,35 +1197,6 @@ def _sidecar_file_identity(live: Path) -> tuple[Any, ...]:
     return tuple(identity)
 
 
-def schedule_availability_proof(vault_root: Path) -> bool:
-    """Prove the sidecar on a background thread. True when a proof was started.
-
-    For a reader that must not wait on the O(corpus) proof: it answers without
-    the graph now, and the verdict this lands is remembered for the next one.
-    At most one proof runs per sidecar.
-    """
-    key = _sidecar_registry_key(sidecar_path(Path(vault_root)))
-    with _SNAPSHOT_PROOFS_LOCK:
-        running = _BACKGROUND_PROOFS.get(key)
-        if running is not None and running.is_alive():
-            return False
-
-        def prove() -> None:
-            try:
-                EpistemicGraphIndex(vault_root).available()
-            except Exception:  # noqa: BLE001 - an unproven graph stays unproven
-                log.debug("background graph availability proof raised", exc_info=True)
-            finally:
-                with _SNAPSHOT_PROOFS_LOCK:
-                    if _BACKGROUND_PROOFS.get(key) is threading.current_thread():
-                        _BACKGROUND_PROOFS.pop(key, None)
-
-        thread = threading.Thread(target=prove, name=BACKGROUND_PROOF_THREAD_NAME, daemon=True)
-        _BACKGROUND_PROOFS[key] = thread
-        thread.start()
-    return True
-
-
 def record_publication_recovery_state(
     vault_root: Path,
     *,
@@ -1854,12 +1829,13 @@ class EpistemicGraphIndex:
         vault_root: Path,
         *,
         mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None,
-        prove_cold_snapshots: bool = True,
+        prove_cold_snapshots: bool | str = True,
     ):
-        """`prove_cold_snapshots=False` makes every public read on this index
-        refuse rather than pay the O(corpus) source-bytes proof when no
-        remembered verdict covers the sidecar -- for a request path that must
-        answer within a bound (#1454)."""
+        """`prove_cold_snapshots` is the default `prove` mode of every public
+        read on this index when no remembered verdict covers the sidecar: True
+        proves (waiting for a proof already running), False refuses, and
+        `SINGLE_FLIGHT` proves unless another reader's proof is running, then
+        refuses -- for a request path that must not stack proofs (#1454)."""
         self.vault_root = Path(vault_root)
         self.path = sidecar_path(self.vault_root)
         self._prove_cold_snapshots = prove_cold_snapshots
@@ -2170,16 +2146,17 @@ class EpistemicGraphIndex:
         conn.close()
         return True
 
-    def availability_state(self) -> str:
-        """`available`, `unavailable` or `unproven`, never running the cold proof.
+    def availability_state(self, *, prove: bool | str = False) -> str:
+        """`available`, `unavailable` or `unproven`.
 
-        For probes that report rather than decide -- readiness, coordination
-        status -- and for a request that must not wait. `unproven` means the
-        sidecar passed every cheap check and only the source-bytes proof, which
-        nothing has run for its current identity, stands between it and a read.
+        By default it never runs the cold proof: for probes that report rather
+        than decide -- readiness, coordination status. A request passes
+        `SINGLE_FLIGHT`. `unproven` means the sidecar passed every cheap check
+        and only the source-bytes proof stands between it and a read: nothing
+        has run it for the current identity, or another reader is running it.
         """
         outcome: list[str] = []
-        conn = self._open_read_snapshot(prove=False, outcome_out=outcome)
+        conn = self._open_read_snapshot(prove=prove, outcome_out=outcome)
         if conn is not None:
             conn.close()
             return "available"
@@ -2189,7 +2166,7 @@ class EpistemicGraphIndex:
         self,
         *,
         require_current_projection: bool = True,
-        prove: bool | None = None,
+        prove: bool | str | None = None,
         outcome_out: list[str] | None = None,
     ) -> sqlite3.Connection | None:
         """Open one validated read transaction without creating or migrating schema.
@@ -2237,9 +2214,11 @@ class EpistemicGraphIndex:
 
         Outside the exact live checkpoint a public reader's source-bytes proof
         is remembered per sidecar identity and recall projection identity
-        (#1454). ``prove=False`` (defaulting to the index's
-        ``prove_cold_snapshots``) refuses instead of proving when nothing is
-        remembered, and appends ``"unproven"`` to ``outcome_out``.
+        (#1454), and one proof runs at a time per sidecar. ``prove`` defaults to
+        the index's ``prove_cold_snapshots``: False refuses instead of proving
+        when nothing is remembered, ``SINGLE_FLIGHT`` refuses only while another
+        reader's proof is running, and True waits for that proof. A refusal
+        appends ``"unproven"`` to ``outcome_out``.
         """
         if prove is None:
             prove = self._prove_cold_snapshots
@@ -2368,26 +2347,53 @@ class EpistemicGraphIndex:
                     _availability_freshness_value(current_identity),
                     sidecar_identity,
                 )
+                in_flight: threading.Event | None = None
+                mine: threading.Event | None = None
                 with _SNAPSHOT_PROOFS_LOCK:
                     remembered = _SNAPSHOT_PROOFS.get(registry_key)
-                if remembered is not None and remembered[0] == proof_identity:
+                    covered = remembered is not None and remembered[0] == proof_identity
+                    if not covered and prove:
+                        in_flight = _PROOFS_IN_FLIGHT.get(registry_key)
+                        if in_flight is None:
+                            mine = threading.Event()
+                            _PROOFS_IN_FLIGHT[registry_key] = mine
+                if covered:
                     current = remembered[1]
-                elif not prove:
+                elif not prove or (in_flight is not None and prove == SINGLE_FLIGHT):
                     if outcome_out is not None:
                         outcome_out.append("unproven")
                     conn.close()
                     return None
                 else:
-                    decline: list[str] = []
-                    current = self._snapshot_sources_match_disk(
-                        conn,
-                        resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
-                        reason_out=decline,
-                    )
-                    # A proof that raised proved nothing about the sidecar.
-                    if decline != ["proof_raised"]:
+                    reused = False
+                    if in_flight is not None:
+                        # A blocking reader shares the running proof rather
+                        # than stacking a second one, and reuses its verdict
+                        # when it answered the same question.
+                        in_flight.wait()
                         with _SNAPSHOT_PROOFS_LOCK:
-                            _SNAPSHOT_PROOFS[registry_key] = (proof_identity, current)
+                            remembered = _SNAPSHOT_PROOFS.get(registry_key)
+                        if remembered is not None and remembered[0] == proof_identity:
+                            current = remembered[1]
+                            reused = True
+                    if not reused:
+                        try:
+                            decline: list[str] = []
+                            current = self._snapshot_sources_match_disk(
+                                conn,
+                                resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
+                                reason_out=decline,
+                            )
+                            # A proof that raised proved nothing about the sidecar.
+                            if decline != ["proof_raised"]:
+                                with _SNAPSHOT_PROOFS_LOCK:
+                                    _SNAPSHOT_PROOFS[registry_key] = (proof_identity, current)
+                        finally:
+                            if mine is not None:
+                                with _SNAPSHOT_PROOFS_LOCK:
+                                    if _PROOFS_IN_FLIGHT.get(registry_key) is mine:
+                                        _PROOFS_IN_FLIGHT.pop(registry_key, None)
+                                mine.set()
             if current and stored_checkpoint is not None:
                 # The proof above (or the exact-live check) has just established
                 # that this sidecar describes the corpus this registry is
@@ -8432,7 +8438,7 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
     )
 
 
-def cache_token(vault_root: Path, *, prove: bool = True) -> tuple | None:
+def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     """`(schema_version, extension_registry_hash, generation, instance)` or None.
 
     None whenever the sidecar is unavailable (disabled, missing, or
@@ -8441,9 +8447,10 @@ def cache_token(vault_root: Path, *, prove: bool = True) -> tuple | None:
     `generation` advances for in-place writes; `instance` changes when a full
     rebuild atomically replaces the SQLite file, preventing generation ABA.
 
-    `prove=False` is for a request that must not pay the cold proof of an
-    inherited sidecar (#1454): an unproven sidecar answers `("unproven",)`, a
-    key of its own, since that request serves without the graph lane.
+    `prove` is the index's cold-proof mode (#1454). A request passes
+    `SINGLE_FLIGHT`: it proves inline unless another reader's proof is running,
+    and then an unproven sidecar answers `("unproven",)`, a key of its own,
+    since that request serves without the graph lane.
     """
     idx = EpistemicGraphIndex(vault_root, prove_cold_snapshots=prove)
     outcome: list[str] = []

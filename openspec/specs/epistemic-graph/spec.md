@@ -326,9 +326,12 @@ projection identity, and external-pending.
 
 Status and readiness probes SHALL NOT run the proof. They SHALL report the
 remembered verdict, or `unproven` when no verdict covers the current identity.
-Graph recall SHALL NOT wait on the proof. When the sidecar is unproven, recall
-SHALL start at most one background proof per sidecar and proceed without the
-graph lane, reporting that lane as degraded. The graph drain SHALL act on a
+At most one proof SHALL run per sidecar at a time. A blocking reader that
+finds a proof running SHALL wait for it and reuse its verdict rather than
+start a second proof. Graph recall SHALL prove inline when no proof is
+running, so a lone cold reader keeps the graph lane, and SHALL NOT wait on
+another reader's running proof: it proceeds without the graph lane for that
+request and reports that lane as degraded. The graph drain SHALL act on a
 declined verdict by scheduling one whole-vault rebuild through the existing
 marker path, and SHALL NOT re-prove the sidecar on each pass.
 
@@ -354,5 +357,10 @@ marker path, and SHALL NOT re-prove the sidecar on each pass.
 
 #### Scenario: Graph recall is bounded
 
-- **WHEN** graph recall runs while the inherited sidecar is unproven or its proof is in flight
-- **THEN** recall returns without the graph lane, reports `graph` as degraded, and the proof runs off the request thread
+- **WHEN** graph recall runs while another reader's proof of the inherited sidecar is in flight
+- **THEN** recall returns without the graph lane, reports `graph` as degraded, and no second proof starts
+
+#### Scenario: A lone cold reader keeps the graph lane
+
+- **WHEN** graph recall runs over an inherited sidecar no proof has covered and no proof is running
+- **THEN** recall proves the sidecar inline once, remembers the verdict, and serves with the graph lane

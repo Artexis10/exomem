@@ -28,10 +28,11 @@ never remembered, and four callers repeated it indefinitely:
   proof.
 - The readiness/coordination probe reports the remembered verdict, or a new
   `unproven` graph state, and never runs the proof.
-- Graph recall is bounded. An unproven sidecar starts one background proof, and
-  the recall proceeds without the graph lane, reporting `graph` as degraded.
-  The result-cache key uses the same no-prove read. A relation filter still
-  requires the proved sidecar.
+- One proof runs at a time per sidecar. Graph recall proves inline when no proof
+  is running, so a lone cold reader such as the CLI keeps the graph lane; while
+  another reader's proof runs, recall proceeds without the graph lane for that
+  request and reports `graph` as degraded. The result-cache key uses the same
+  single-flight read. A relation filter still requires the proved sidecar.
 - The graph drain uses the remembered verdict. A declined proof schedules one
   whole-vault rebuild through the existing marker path and is not re-proved on
   each pass.

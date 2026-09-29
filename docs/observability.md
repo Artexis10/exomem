@@ -61,9 +61,11 @@ current.
 Readiness and coordination status add a fourth state, `unproven`: the sidecar
 passed every cheap check, but it was inherited from an earlier process and
 nothing has yet run the source-bytes proof for its current identity. Status
-probes never run that proof themselves. The graph drain or the first graph recall
-runs it once in the background and remembers the verdict. Until then, recall
-serves without the graph lane and reports `graph` as degraded.
+probes never run that proof themselves. The first reader that needs it -- the
+graph drain or a graph recall -- runs it once and remembers the verdict; only
+one proof runs at a time. A recall that arrives while another reader's proof is
+running serves without the graph lane for that request and reports `graph` as
+degraded.
 
 Use `maintain_memory(mode="reconcile", rebuild_graph=true)` for an unavailable
 derived graph lineage. This recovery concerns rebuildable sidecar state only;
