@@ -135,3 +135,37 @@ the behaviour with a test.
 - Ruff F is clean, capabilities are current, and OpenSpec strict passes 222/222.
 - Scoped pytest (the requested globs plus contact, roles, working-set and
   activation): 1694 passed, 1 skipped.
+
+## Recheck at 47650b57
+
+**Verdict: APPROVE.** The HIGH is fixed.
+
+I reviewed all 8 files the fix touched: the new `context_intents.py`,
+`context_roles.py`, `working_set.py`, `context-roles.yaml` and its mirror, the
+OpenSpec delta, `tasks.md` and the tests. The `contact` role now declares an
+`intent`, not cues. Selection needs a contact-intent shape over whole tokens (a
+contact noun tied to the person, a whole contact phrase, or a reach verb aimed
+at the person). An intent role is never an anchor default. On carried pages it
+is selected only on a match, so the rank-based LOW is fixed too.
+
+**Probe** (PR fixture, `op_activate_context`):
+
+- **No contact units, all 12 correct:** the three earlier failures, "call it
+  done", "address this issue", "phonetic transcription", "the email thread about
+  the budget", "numbered list", "contact lens", a turn about the person's work,
+  and "sent the email about the class".
+- **Contact units served, all 7 correct:** "what is X's phone", "What's X's
+  phone?", "email X about the class", "e-mail X …", "how do I reach X",
+  "X's address", "Maren's phone".
+- **Non-English:** the tokenizer handles Unicode ("teléfono", "cuál"), but the
+  lexicon is English-only. German and Spanish contact questions select nothing,
+  so they fail closed and nothing leaks.
+
+**LOW (follow-up, not blocking):** a bare `number` after a possessive still
+fires. "her number one priority" and "X's number of classes" both served
+contact units. Dropping `number` from `CONTACT_NOUNS` fixes it: `phone number`
+and `cell/mobile number` are still covered as phrases.
+
+**Gates:** the mirror is byte-identical, the hooks are unchanged, ruff F is
+clean, capabilities are current, and OpenSpec strict passes 222/222. Contact,
+roles, no-leak, activation and working-set tests: 1087 passed.
