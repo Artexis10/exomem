@@ -5,7 +5,9 @@ candidates. The core/section split (openspec change `shrink-bootstrap`) applies
 to every other surface only, so a client on a released profile is served exactly
 what it was served before the split.
 
-The digests below were recorded on the base before the split was written. Only
+The digests below were recorded on the base (integration/wave-bcd) before the split
+was applied, and re-recorded from the untouched base when it advanced (efe52086):
+the pin says this change alters no released profile, not that no one ever does. Only
 values that legitimately move between releases are normalised away: the
 server's own version and the tool-surface fingerprints, which the tool-schema
 lane edits independently.
@@ -29,28 +31,28 @@ LEVELS = ("off", "light", "balanced", "maximal")
 #: profile -> level -> sha256 of the normalised compact payload.
 GOLDEN: dict[str, dict[str, str]] = {
     "hosted-alpha-agent-v1": {
-        "off": "aa0e7818973c0483fa7bd587bf4a0875997c99dea131098d24190f0a3b8f1d32",
-        "light": "e16171701b4ca1460545026d0b4c213f7fdc8d19de5c1a72fa057cdbf2d7ce8b",
-        "balanced": "b0c50696b0adc1b2527a6f95883ac471ac2e438cd4c1a061cb40782a6d39ec26",
-        "maximal": "a29193ca7a34d4b0d6ac815129b9163fb235fac11824fd9e5ca139c904a23c00",
+        "off": "2be2e4fc7b0f2df1ae7ce5e4b00ef00e539e867c0a60ac6789d58ba5ffeb72bb",
+        "light": "a8b86e762cfc4c91dc6fc1264594056b3af0c6cdb004a5fcc8163178fc53f072",
+        "balanced": "628982b4aa3922cd9d7490d1554cb813475c2c80b8c5c7e9f88e49ef45510707",
+        "maximal": "cce587e5241fb1bda5a3399d61fc36b133593ba4ea70969b5b3b839a9d1f666d",
     },
     "hosted-alpha-agent-v2": {
-        "off": "68d2a13d0e33fa75db2a71159300913b7b939e4e8606fb8c8249b3e0b2a1df02",
-        "light": "756e12ff2c1027a41ace64c45c0ff8ff9a1b7cace8815c37a25fe491aa81ecb3",
-        "balanced": "03e8bcb49a7bc8866fd66794dddcd0f849e041024868dd2a3f29c6dac4e168b2",
-        "maximal": "06f06ac45cc07245d2d113ceed683ae9a57a7616be0740a1b51d0cc12ec91c63",
+        "off": "d62f2fa37e85120bf3a5ff624ff38006e62a22481a14b95a5b09b05a5bc1692b",
+        "light": "181f1b5ce82f7de8caf6198c826d795ac58904d89039d7a589847818467d4d7c",
+        "balanced": "37c1c3bddabfe2be453ef430ac5c5798006a839826aed5737915fb799065cf22",
+        "maximal": "9cb8a290eb1dad908ae525df7b447a4432871a4e62a3ec63b4f5b6ac63337843",
     },
     "hosted-alpha-agent-v3": {
-        "off": "0e59ddfc97a422016522f893ede192eefaf69a7cab949db83e769f1554222890",
-        "light": "ea2313c46cef67a2b361562958f9a64b62fceb9c4fdcca08b19fbe25c99ab817",
-        "balanced": "80c4f7f7812bfcfd454d1ee5f7b9ef35b5857bf0729d1aa74dbb2a784aa60721",
-        "maximal": "248d9dadddad994a027e3abeffd7cf0bb68b739a5fbec908cff632d1b660c705",
+        "off": "b80f29ff8d18815f582fa99c83152ee1cccca8ed49f8ad5afc23d542f0084c0b",
+        "light": "e2c1dae68fc930f7a27d0b4569ea9319662f3b21426aba64c664e7a781f3d948",
+        "balanced": "78e03c039a417120eb5da46bac3bdd15d0ec483fee3543ce50cf6337f95374e3",
+        "maximal": "f902ce970997395e43cbea7ae0514762904a5ba12ce2e355733f669872c1e5e8",
     },
     "hosted-alpha-agent-v4": {
-        "off": "b6595039c5bc010d04ca29923d2c591d14c2e0474169a9760214337c79e8e8d6",
-        "light": "4a69fd6fdc1a8dc33ef2987381a7766a657bad77363b5834d0d62aa5633e55ae",
-        "balanced": "56044cffb080311e5131680a42556c2ce566dbd618597c990d1e246a1dc7707c",
-        "maximal": "3c73fac0d2b31d91280b95ca3e7a72b635ebcf5f8bb6f245f8069a89c7b6536e",
+        "off": "d5a967117267a44c35bd30344bde89e638c85f4745278a60fa497ebd3661c6dd",
+        "light": "6953349500e403a5a3687eab84d11ca59646f9855b467fcc4bcaf9537f25f979",
+        "balanced": "b1ffd3f46470a692bf61de2b7d79246258d72bd419290efc6652b9cbac102de4",
+        "maximal": "cc9584123d6d3426a13c0f19b7fb36602170e023dff2d9745700dbd38154937e",
     },
 }
 
