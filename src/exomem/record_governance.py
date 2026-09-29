@@ -929,7 +929,7 @@ def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
     tombstones = egress.lifecycle.tombstoned_paths(root)
 
     def allowed(relative: str) -> bool:
-        return not access.refuse_if_excluded(root, relative) and (
+        return not _access_refused(root, relative) and (
             egress.release_level_for_path_only(
                 root, relative, policy=policy, tombstones=tombstones
             )
@@ -943,9 +943,25 @@ def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
 #: vault root. Both are read once per pass because the plane does not move
 #: while the pass runs; per-path they cost a governance-root probe and a stat of
 #: every tombstone and event file, which made one append O(items).
-_AUTHORIZATION_PASS: ContextVar[tuple[Path, Any, frozenset[str]] | None] = ContextVar(
-    "exomem_records_authorization_pass", default=None
+_AUTHORIZATION_PASS: ContextVar[tuple[Path, Any, frozenset[str], dict[str, bool]] | None] = (
+    ContextVar("exomem_records_authorization_pass", default=None)
 )
+
+
+def _access_refused(root: Path, relative: str) -> bool:
+    """`access.refuse_if_excluded`, decided once per path within an authorization pass.
+
+    The access policy is re-validated on every call, and one Records append asks the
+    same question about every item three times (visibility, pre-commit, snapshot).
+    """
+    active = _AUTHORIZATION_PASS.get()
+    if active is None or active[0] != Path(root):
+        return access.refuse_if_excluded(root, relative)
+    memo = active[3]
+    refused = memo.get(relative)
+    if refused is None:
+        refused = memo[relative] = access.refuse_if_excluded(root, relative)
+    return refused
 
 
 @contextmanager
@@ -957,7 +973,7 @@ def authorization_pass(vault_root: Path) -> Iterator[None]:
         yield
         return
     token = _AUTHORIZATION_PASS.set(
-        (root, egress.policy_module.load(root), egress.lifecycle.tombstoned_paths(root))
+        (root, egress.policy_module.load(root), egress.lifecycle.tombstoned_paths(root), {})
     )
     try:
         yield
@@ -968,7 +984,7 @@ def authorization_pass(vault_root: Path) -> Iterator[None]:
 def _authorize(
     root: Path, relative: str, *, receipt: bool = False, policy: Any | None = None
 ) -> bool:
-    if access.refuse_if_excluded(root, relative):
+    if _access_refused(root, relative):
         return False
     tombstones: frozenset[str] | None = None
     active = _AUTHORIZATION_PASS.get()
@@ -2898,6 +2914,16 @@ def require_mutation_visibility(
     caller that holds one walks those entries instead of scanning the tree again.
     """
     root = Path(vault_root)
+    with authorization_pass(root):
+        _require_mutation_visibility(root, manifest, planned_paths, census)
+
+
+def _require_mutation_visibility(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    planned_paths: Iterable[str],
+    census: Sequence[vault.DirectoryCensusGuard] | None,
+) -> None:
     allowed = full_release_filter(root)
     if not all(allowed(path) for path in (manifest.path, manifest.storage.source, *planned_paths)):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")

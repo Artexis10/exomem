@@ -1166,12 +1166,19 @@ class PathGuard:
         probes per item file on every round.
         """
         root = Path(vault_root)
+        # Plain string joins: a round rechecks thousands of leaves and pathlib
+        # construction was most of each one.
+        root_text = os.fspath(root)
         for expected in self.ancestors:
             if verified_ancestors is not None and expected in verified_ancestors:
                 continue
-            path = root if expected.relative_path == "." else root / expected.relative_path
+            path = (
+                root_text
+                if expected.relative_path == "."
+                else os.path.join(root_text, expected.relative_path)
+            )
             try:
-                info = path.lstat()
+                info = os.lstat(path)
             except OSError as error:
                 raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed") from error
             if (
@@ -1184,9 +1191,9 @@ class PathGuard:
             if verified_ancestors is not None:
                 verified_ancestors.add(expected)
         for relative in self.missing_parents:
-            if os.path.lexists(root / relative):
+            if os.path.lexists(os.path.join(root_text, relative)):
                 raise PathGuardError("PATH_GUARD_CHANGED", "missing guard ancestor appeared")
-        leaf = root / self.target
+        leaf = os.path.join(root_text, self.target)
         if self.leaf_policy == "absent":
             if os.path.lexists(leaf):
                 raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf appeared")
@@ -1194,7 +1201,7 @@ class PathGuard:
         if self.leaf_identity is None:
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf disappeared")
         try:
-            info = leaf.lstat()
+            info = os.lstat(leaf)
         except FileNotFoundError as error:
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf disappeared") from error
         except OSError as error:
@@ -1232,7 +1239,7 @@ class PathGuard:
                     or hashlib.sha256(data).hexdigest() != self.expected_content_hash
                 ):
                     raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
-            elif _leaf_hash(leaf, self.leaf_identity) != self.expected_content_hash:
+            elif _leaf_hash(Path(leaf), self.leaf_identity) != self.expected_content_hash:
                 # Compatibility for callers that predate bounded snapshots.
                 raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
 
@@ -5315,7 +5322,8 @@ def _batch_atomic_write_locked(
             )
             _after_batch_destination_published(final)
             workspace.recheck()
-        recheck_path_guards(Path(vault_root), (*read_only_guards, *all_completion_guards))
+        if read_only_guards or all_completion_guards:
+            recheck_path_guards(Path(vault_root), (*read_only_guards, *all_completion_guards))
         for workspace in workspace_by_parent.values():
             workspace.recheck()
         for guard in final_guards.values():
