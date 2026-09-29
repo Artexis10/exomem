@@ -29,7 +29,7 @@ from . import (
     upload_tokens,
 )
 from . import commands as commands_module
-from .command_surface import canonical_request_id
+from .command_surface import canonical_request_id, compact_input_schema
 from .governance import authorization_request, authorization_transport
 from .server_transfer import TransferConfig
 
@@ -521,6 +521,8 @@ def register_rest_facade(
                 request_schema["additionalProperties"] = False
             if required:
                 request_schema["required"] = required
+            # Same published shape as the MCP tool: no advertised optional null.
+            request_schema = compact_input_schema(request_schema)
             summary = (cmd.description or cmd.name).strip().splitlines()[0]
             success_schema, command_schemas = _openapi_success_schema(cmd)
             response_schemas.update(command_schemas)
