@@ -125,11 +125,14 @@ The system SHALL resolve and enrich existing entities before creating duplicates
   way, the page's own names excepted, and a page the caller may not see reads
   as absent
 - **AND** an alias another page answers to because the name is genuinely shared
-  is admitted by an explicit `distinct` `identity_decision` bound to that
-  alias's candidate fingerprint (the refusal names it), on create and on an
-  `edit_memory` `aliases` patch alike; a stale or foreign fingerprint is
-  refused, and a restricted caller is never refused or asked for a name only a
-  withheld page answers to
+  is admitted by an explicit `distinct` `identity_decision` (the refusal names
+  its fingerprint), on create and on an `edit_memory` `aliases` patch alike.
+  One decision covers the title and every claimed alias in the write: its
+  fingerprint binds the union of their claimants (the title's candidates and
+  each alias's claimants with their content versions), so a claimant that
+  appears or changes, or a decision made for only some of the names, is
+  refused as stale; a restricted caller is never refused or asked for a name
+  only a withheld page answers to
 
 #### Scenario: A useful reusable relationship is missing
 

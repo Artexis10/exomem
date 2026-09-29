@@ -7378,32 +7378,26 @@ def _refuse_claimed_aliases(
     claimed = entity_candidates_module.claimed_names(vault_root, aliases, exclude_path=rel)
     if not claimed:
         return
-    fingerprints = {
-        alias: entity_candidates_module.alias_claim_fingerprint(
-            vault_root, alias, exclude_path=rel
-        )
-        for alias in claimed
-    }
-    decision = None
-    if identity_decision is not None:
-        try:
-            decision = link_module._identity_decision(identity_decision)  # noqa: SLF001
-        except link_module.LinkError as error:
-            raise ValueError(f"{error.code}: {error.reason}") from error
-    for alias, paths in claimed.items():
-        if decision is not None and decision["candidate_fingerprint"] == fingerprints[alias]:
-            continue
-        if decision is not None:
-            raise ValueError(
-                "STALE_IDENTITY_DECISION: what this alias resolves to changed since the "
-                "decision, or the decision was made for another name; decide again "
-                f"(candidate_fingerprint: {fingerprints[alias]})"
-            )
+    fingerprint = entity_candidates_module.claim_set_fingerprint(
+        vault_root, list(claimed), exclude_path=rel
+    )
+    if identity_decision is None:
+        alias, paths = next(iter(claimed.items()))
         raise ValueError(
             f"ENTITY_EXISTS: another page already answers to the alias {alias!r} "
             f"({', '.join(paths)}); pick a name only this page answers to, or pass "
             "identity_decision {outcome: distinct} with this candidate_fingerprint if it "
-            f"is a different identity (candidate_fingerprint: {fingerprints[alias]})"
+            f"is a different identity (candidate_fingerprint: {fingerprint})"
+        )
+    try:
+        decision = link_module._identity_decision(identity_decision)  # noqa: SLF001
+    except link_module.LinkError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+    if decision["candidate_fingerprint"] != fingerprint:
+        raise ValueError(
+            "STALE_IDENTITY_DECISION: what these aliases resolve to changed since the "
+            "decision, or the decision was made for other names; decide again "
+            f"(candidate_fingerprint: {fingerprint})"
         )
 
 

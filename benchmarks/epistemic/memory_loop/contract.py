@@ -360,11 +360,10 @@ def _shared_alias_decision(root: Path, path: str, aliases: list[str]) -> dict[st
     claimed = entity_candidates.claimed_names(root, aliases, exclude_path=path)
     if not claimed:
         return None
-    alias = next(iter(claimed))
     return {
         "outcome": "distinct",
-        "candidate_fingerprint": entity_candidates.alias_claim_fingerprint(
-            root, alias, exclude_path=path
+        "candidate_fingerprint": entity_candidates.claim_set_fingerprint(
+            root, list(claimed), exclude_path=path
         ),
     }
 
