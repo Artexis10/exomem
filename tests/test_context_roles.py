@@ -573,3 +573,21 @@ def test_an_entity_reached_by_recency_alone_is_not_read_for_linked_conclusions()
     assert "precedents" in {item["id"] for item in named}
     assert "precedents" not in {item["id"] for item in prior}
     assert "identity" in {item["id"] for item in prior}
+
+
+def test_a_project_reached_by_recency_alone_is_not_read_for_conclusions() -> None:
+    from exomem import working_set_resolve
+
+    registry = context_roles.load_roles()
+    analysis = working_set_resolve.analyze_turn("where were we")
+
+    named = context_roles.select_roles(registry, anchor_kinds=("project",), analysis=analysis)
+    prior = context_roles.select_roles(
+        registry,
+        anchor_kinds=("project",),
+        analysis=analysis,
+        prior_only_kinds=frozenset({"project"}),
+    )
+
+    assert "precedents" in {item["id"] for item in named}
+    assert "precedents" not in {item["id"] for item in prior}

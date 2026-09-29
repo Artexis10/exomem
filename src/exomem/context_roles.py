@@ -727,11 +727,11 @@ def _narrowed(
 
 
 #: Anchor kinds whose defaults are honoured only when the turn's own words
-#: reached an anchor of that kind. An entity is the subject of many pages, so
-#: reading every conclusion linked to it answers a turn that names it; a
-#: referent supplied by recency alone ("where were we") names nothing, and
-#: serving all of the entity's linked pages would buy recall with precision.
-NAMED_ONLY_DEFAULT_KINDS: frozenset[str] = frozenset({"entity"})
+#: reached an anchor of that kind. An entity or a project is the subject of
+#: many pages, so reading every conclusion linked to it answers a turn that
+#: names it; a referent supplied by recency alone ("where were we") names
+#: nothing, and serving all of those pages would buy recall with precision.
+NAMED_ONLY_DEFAULT_KINDS: frozenset[str] = frozenset({"entity", "project"})
 
 #: The unit categories that are a page's settled conclusions.
 CONCLUSION_CATEGORIES: frozenset[str] = frozenset({"decision", "insight", "finding"})

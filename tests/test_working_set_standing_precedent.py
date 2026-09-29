@@ -16,7 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from exomem import lexstore, working_set, working_set_index, working_set_runtime
+from exomem import (
+    lexstore,
+    working_set,
+    working_set_index,
+    working_set_resolve,
+    working_set_runtime,
+)
 
 ENTITY = "Knowledge Base/Entities/People/Ilse Vandermeer.md"
 CONCLUSION = "Knowledge Base/Notes/Decisions/zz-tide-panel-priority-subset.md"
@@ -296,3 +302,89 @@ def test_a_unit_too_long_to_serve_whole_becomes_a_pointer_never_a_half_claim() -
 
     assert packet["units"] == []
     assert [p["reason"] for p in packet["pointers"]] == ["unit_too_long"]
+
+
+# -- a referent that only recency supplied is not read for conclusions ------- #
+
+
+def _recency_referent(vault: Path, turn: str) -> dict:
+    """The entity becomes the fresh session's referent by recency alone."""
+    from exomem import commands, working_set_heat
+
+    working_set_heat.reset_for_tests()
+    working_set_runtime.reset_caches_for_tests()
+    commands.op_activate_context(
+        vault, turn="Let's pick this up.", anchor=ENTITY, session="earlier", workspace="bench"
+    )
+    working_set_runtime.reset_caches_for_tests()
+    return commands.op_activate_context(vault, turn=turn, session="fresh", workspace="bench")
+
+
+def test_a_recency_only_entity_gets_neither_conclusions_nor_the_standing_page(
+    study_vault: Path,
+) -> None:
+    """The referent recency supplied is read through identity only. (That the
+    cue 'before' selects `precedents` by another route is pinned below, where
+    the reach is handed a `turn_cue` selection directly: a turn with that much
+    content does not resolve by recency.)"""
+    packet = _recency_referent(study_vault, "where were we")
+
+    anchors = [a for a in packet["anchors"] if a["status"] == "resolved"]
+    assert anchors and set(anchors[0]["evidence"]) == {"recency"}
+    assert not ({CONCLUSION, STANDING} & _paths(packet))
+
+
+def test_a_recency_only_project_gets_no_standing_page_on_a_bare_referential_turn(
+    study_vault: Path,
+) -> None:
+    from exomem import commands, working_set_heat
+
+    working_set_heat.reset_for_tests()
+    working_set_runtime.reset_caches_for_tests()
+    commands.op_activate_context(
+        study_vault,
+        turn="Let's pick this up.",
+        anchor="project:harbor-study",
+        session="earlier",
+        workspace="bench",
+    )
+    working_set_runtime.reset_caches_for_tests()
+    packet = commands.op_activate_context(
+        study_vault, turn="where were we", session="fresh", workspace="bench"
+    )
+
+    assert STANDING not in _paths(packet)
+
+
+def test_reach_precedents_skips_an_anchor_reached_by_recency_alone(study_vault: Path) -> None:
+    from exomem import context_roles
+
+    index = working_set_index.WorkingSetIndex(study_vault)
+    row = next(r for r in index.anchors() if r.path == ENTITY)
+
+    def anchor(evidence: tuple[str, ...]):
+        return working_set_resolve.ResolvedAnchor(
+            anchor_id=row.anchor_id,
+            path=row.path,
+            ref=None,
+            title=row.title,
+            kind="entity",
+            lifecycle="active",
+            status="resolved",
+            evidence=evidence,
+            categories=(),
+            neighbourhood=frozenset(),
+        )
+
+    roles = [{"id": "precedents", "source": "turn_cue", "lane": "units"}]
+    registry = context_roles.load_roles(study_vault)
+
+    def reach(evidence):
+        return working_set.reach_precedents(
+            study_vault, resolved=[anchor(evidence)], roles=roles, registry=registry, index=index
+        )
+
+    named = reach(("exact_alias",))
+    prior = reach(("recency",))
+    assert CONCLUSION in named[0] and STANDING in named[1]
+    assert prior == (frozenset(), frozenset())

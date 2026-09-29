@@ -820,6 +820,12 @@ def reach_precedents(
     precedent: set[str] = set()
     standing: list[str] = []
     for anchor in resolved:
+        # An anchor only a prior (recency) supplied was not named by the turn:
+        # reading its conclusions and its project's standing page would serve
+        # what the turn never asked about, whichever route selected the role.
+        evidence = set(getattr(anchor, "evidence", ()) or ())
+        if evidence and evidence <= working_set_resolve.PRIOR_CONTACT_KINDS:
+            continue
         row = rows.get(str(getattr(anchor, "anchor_id", "") or ""))
         keys: list[str] = []
         anchor_id = str(getattr(anchor, "anchor_id", "") or "")
