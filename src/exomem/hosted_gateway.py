@@ -165,6 +165,8 @@ def _mcp_tool_contract(
     # published; only the current profile follows the compacted live surface.
     if descriptor.profile not in hosted_legacy_schemas.LEGACY_PROFILE_CONTRACTS:
         contract["inputSchema"] = command_surface.compact_input_schema(contract["inputSchema"])
+    elif command.name == "ask_memory":
+        contract["outputSchema"] = hosted_legacy_schemas.legacy_ask_memory_output_schema()
     return contract
 
 

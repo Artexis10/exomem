@@ -28,8 +28,8 @@ TOTAL_BUDGET = 90_000
 
 #: Per-tool ceilings in bytes. Their sum is deliberately under TOTAL_BUDGET.
 TOOL_CEILINGS: dict[str, int] = {
-    "edit_memory": 6500,
-    "remember": 5175,
+    "edit_memory": 6675,
+    "remember": 5200,
     "replace_memory": 4600,
     "manage_memory_file": 4325,
     "connect_memory": 4300,
@@ -37,11 +37,11 @@ TOOL_CEILINGS: dict[str, int] = {
     "record_memory": 4275,
     "ask_memory": 4125,
     "schema_memory": 4000,
-    "maintain_memory": 3850,
     "observe_memory": 3850,
+    "maintain_memory": 3825,
     "adoption_studio": 3400,
+    "capture_source": 3400,
     "review_memory": 3375,
-    "capture_source": 3350,
     "activate_context": 3300,
     "triage_memory": 3100,
     "govern_memory": 3025,

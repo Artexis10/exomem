@@ -103,3 +103,14 @@ LEGACY_PROFILE_PARAMS: Mapping[str, Mapping[str, tuple[str, ...]]]
 LEGACY_PROFILE_CONTRACTS: Mapping[str, Mapping[str, LegacyCommandContract]]
 
 SOURCE_REVISION, LEGACY_PROFILE_PARAMS, LEGACY_PROFILE_CONTRACTS = _load()
+
+
+def legacy_ask_memory_output_schema() -> dict[str, Any]:
+    """The `ask_memory` output schema historical profiles publish at runtime.
+
+    Recall's live output schema was shortened to its two shapes; a historical
+    profile's gateway contract, and therefore the digest a command-binding
+    consumer pins, must keep the schema those profiles were released with.
+    """
+    resource = files("exomem").joinpath("hosted_legacy_ask_output_schema.json")
+    return json.loads(resource.read_text(encoding="utf-8"))

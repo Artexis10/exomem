@@ -7111,8 +7111,8 @@ def op_remember(
             insight, failure or pattern only warns.
         bridge_of: Source paths or stable refs for a cross-domain bridge;
             requires bridge_scope and bridge_review.
-        suggestions: Also return `suggestions` (pages to link; read under
-            `response_detail='full'`); costs one retrieval pass.
+        suggestions: Off by default. `suggestions=true` also returns pages to link
+            (read under `response_detail='full'`); costs one retrieval pass.
         validate_only: Return an immutable creation draft without writing.
         draft_token: From validate_only.
         relation_disposition: Reviewed relation outcome for commit.
@@ -7223,9 +7223,12 @@ def op_edit_memory(
     legacy unresolved citation alone.
 
     `RELATION_DISPOSITION_STALE`/`_MISSING`: repeat the identical operation with
-    `validate_only=true`, then commit unchanged with `transition_token`,
-    `relation_disposition="reviewed_none"`, the returned `relation_review_hash`
-    (not the page content hash) and a `relation_review_reason`.
+    `validate_only=true`, then commit unchanged with
+    `transition_token=<returned transition_token>`,
+    `relation_disposition="reviewed_none"`,
+    `relation_review_hash=<returned relation_review_hash>` (not the page
+    content hash) and a `relation_review_reason`. Or author a relation in the body:
+    `## Relations` then `- supports [[Knowledge Base/Notes/Research/example-target]]`.
     See references/writing.md.
 
     Args:
@@ -7538,7 +7541,8 @@ def op_capture_source(
 
     Args:
         content: Raw text. Supply this or `files`, not both.
-        source_type: Alias of source_kind; supply either.
+        source_type: Alias of source_kind; supply either. Open vocabulary, not a closed
+            set.
         url: Required for kinds that declare it, such as article, paper, video.
         tags: Secondary labels; not for kind, domain or project.
         compile_guidance: Return a compilation proposal.
@@ -9765,7 +9769,8 @@ def op_maintain_memory(
         dry_run: Report without writing. Default true for fix/backfill-ids,
             false for reconcile.
         rebuild_embeddings: fix only.
-        rebuild_graph: reconcile only; rebuild derived graph from Markdown.
+        rebuild_graph: reconcile only; quarantine unavailable derived graph lineage and
+            rebuild it from Markdown.
         detail: Audit output detail.
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
         collection: Planning or Records collection for structured-files.
@@ -11274,9 +11279,9 @@ def op_manage_memory_file(
         reason: Required for reclassify.
         confirm: Required for delete.
         expected_dead_inbound: Links expected to die in the same workflow.
-        validate_only: Validate a Markdown create/append without writing.
-        draft_token: From validate_only; replay an overwrite preview's token
-            unchanged on commit.
+        validate_only: Validate a Markdown create or append without writing.
+        draft_token: The overwrite preview's `draft_token`, replayed unchanged on
+            commit.
         semantic_transition_token: Append token from validate_only.
         relation_disposition: Reviewed relation outcome for semantic create/append.
         relation_review_hash: Draft or transition hash the review covers.

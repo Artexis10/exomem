@@ -550,7 +550,7 @@
         },
         "source_type": {
           "type": "string",
-          "description": "Alias of source_kind; supply either."
+          "description": "Alias of source_kind; supply either. Open vocabulary, not a closed set."
         },
         "url": {
           "type": "string",
@@ -987,7 +987,7 @@
     }
   },
   "edit_memory": {
-    "description": "Edit an existing memory page with an auditable reason.\n\nFor small corrections, section, batch string or opinion-row edits, or one\nfrontmatter field; substantial rewrites go to `replace_memory`.\n\nA source-changing edit validates the full final `sources` list against\nauthorized governed Source or Evidence material; unrelated edits leave a\nlegacy unresolved citation alone.\n\n`RELATION_DISPOSITION_STALE`/`_MISSING`: repeat the identical operation with\n`validate_only=true`, then commit unchanged with `transition_token`,\n`relation_disposition=\"reviewed_none\"`, the returned `relation_review_hash`\n(not the page content hash) and a `relation_review_reason`.\nSee references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Alternatively add `## Decision`, a blank line, and a substantive body. Core keys, aliases and the rich example: call bootstrap(profile=\"full\").",
+    "description": "Edit an existing memory page with an auditable reason.\n\nFor small corrections, section, batch string or opinion-row edits, or one\nfrontmatter field; substantial rewrites go to `replace_memory`.\n\nA source-changing edit validates the full final `sources` list against\nauthorized governed Source or Evidence material; unrelated edits leave a\nlegacy unresolved citation alone.\n\n`RELATION_DISPOSITION_STALE`/`_MISSING`: repeat the identical operation with\n`validate_only=true`, then commit unchanged with\n`transition_token=<returned transition_token>`,\n`relation_disposition=\"reviewed_none\"`,\n`relation_review_hash=<returned relation_review_hash>` (not the page\ncontent hash) and a `relation_review_reason`. Or author a relation in the body:\n`## Relations` then `- supports [[Knowledge Base/Notes/Research/example-target]]`.\nSee references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Alternatively add `## Decision`, a blank line, and a substantive body. Core keys, aliases and the rich example: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1808,7 +1808,7 @@
         },
         "rebuild_graph": {
           "default": false,
-          "description": "reconcile only; rebuild derived graph from Markdown.",
+          "description": "reconcile only; quarantine unavailable derived graph lineage and rebuild it from Markdown.",
           "type": "boolean"
         },
         "detail": {
@@ -2029,7 +2029,7 @@
         },
         "validate_only": {
           "default": false,
-          "description": "Validate a Markdown create/append without writing.",
+          "description": "Validate a Markdown create or append without writing.",
           "type": "boolean"
         },
         "draft_id": {
@@ -2040,7 +2040,7 @@
         },
         "draft_token": {
           "type": "string",
-          "description": "From validate_only; replay an overwrite preview's token unchanged on commit."
+          "description": "The overwrite preview's `draft_token`, replayed unchanged on commit."
         },
         "semantic_transition_token": {
           "type": "string",
@@ -3042,7 +3042,7 @@
         },
         "suggestions": {
           "default": false,
-          "description": "Also return `suggestions` (pages to link; read under `response_detail='full'`); costs one retrieval pass.",
+          "description": "Off by default. `suggestions=true` also returns pages to link (read under `response_detail='full'`); costs one retrieval pass.",
           "type": "boolean"
         },
         "project_category": {

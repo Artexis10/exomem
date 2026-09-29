@@ -437,8 +437,8 @@ def test_entity_type_resolution_schema_and_dispatch_match_across_surfaces(
         if tool.name == "triage_memory"
     )
     decision_schema = triage_schema["properties"]["decision"]
-    assert decision_schema["anyOf"][0]["additionalProperties"] is False
-    assert set(decision_schema["anyOf"][0]["required"]) == {
+    assert decision_schema["additionalProperties"] is False
+    assert set(decision_schema["required"]) == {
         "item_ref",
         "fingerprint",
         "family",
