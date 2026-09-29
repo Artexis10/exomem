@@ -725,6 +725,38 @@ def test_a_name_with_hiragana_inside_beats_its_head_split_at_a_particle_characte
     assert "exact_alias" in packet["anchors"][0]["evidence"]
 
 
+def test_a_head_named_on_its_own_is_not_consumed_by_a_longer_name_in_the_turn(
+    ja_vault: Path,
+) -> None:
+    """The head is consumed only where every occurrence lies inside the longer
+    name: a turn naming both `サクラ` and `サクラもち本舗` resolves both pages."""
+    entity = _create_entity(ja_vault, "サクラもち本舗", "The shop written in full.")
+    note = f"{KB}/Products/サクラ.md"
+    _write(ja_vault / note, _page("サクラ", "サクラについてのメモ。"))
+    working_set_index.WorkingSetIndex(ja_vault).update()
+    _fresh_session()
+    packet = _activate(ja_vault, "サクラとサクラもち本舗の違い")
+    assert set(_resolved(packet)) == {entity, note}, packet["anchors"]
+
+
+@pytest.mark.parametrize(
+    ("with_longer", "winner"), [(True, "サクラもち"), (False, "サクラ")]
+)
+def test_kana_only_text_after_a_name_reads_as_the_longest_indexed_name(
+    ja_vault: Path, with_longer: bool, winner: str
+) -> None:
+    """A known kana-only ambiguity, pinned: in `サクラもちがうって言ってた` the
+    longest indexed name wins (サクラもち), and without that entity the head
+    (サクラ + も + 違う) resolves."""
+    entity = _create_entity(ja_vault, "サクラもち", "The shop written with もち.") if with_longer else None
+    note = f"{KB}/Products/サクラ.md"
+    _write(ja_vault / note, _page("サクラ", "サクラについてのメモ。"))
+    working_set_index.WorkingSetIndex(ja_vault).update()
+    _fresh_session()
+    packet = _activate(ja_vault, "サクラもちがうって言ってた")
+    assert _resolved(packet) == [entity if winner == "サクラもち" else note], packet["anchors"]
+
+
 @pytest.mark.parametrize(
     ("turn", "expected"),
     [
