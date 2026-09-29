@@ -715,6 +715,7 @@ def test_edit_memory_rest_and_openapi_use_discriminated_primary_shape(
         "path",
         "why",
         "operation",
+        "identity_decision",
         "response_detail",
         "validate_only",
     }

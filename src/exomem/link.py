@@ -896,19 +896,32 @@ def link(
     fingerprint = entity_candidates.candidate_fingerprint(
         name=display_name, entity_type=entity_type, resolution=identity_resolution
     )
+    aliases_clean = _clean_aliases(display_name, aliases)
+    # An alias is a name the page answers to: one any other page already
+    # answers to would make a turn naming it resolve both. One lookup for all
+    # of them, read as the resolver reads names (`claimed_names`).
+    claimed = entity_candidates.claimed_names(vault_root, aliases_clean) if aliases_clean else {}
+    alias_fingerprints = {
+        alias: entity_candidates.alias_claim_fingerprint(vault_root, alias) for alias in claimed
+    }
+    title_decided = decision is not None and (
+        identity_resolution["status"] != "no_match"
+        and decision["candidate_fingerprint"] == fingerprint
+    )
+    alias_decided = decision is not None and (
+        decision["candidate_fingerprint"] in alias_fingerprints.values()
+    )
     accepted_decision: dict | None = None
-    if decision is not None:
-        if identity_resolution["status"] == "no_match" or (
-            decision["candidate_fingerprint"] != fingerprint
-        ):
-            raise LinkError(
-                "STALE_IDENTITY_DECISION",
-                ["identity_decision"],
-                "what this name resolves to changed since the decision; decide again "
-                "against the returned candidates",
-                candidates,
-                None if identity_resolution["status"] == "no_match" else fingerprint,
-            )
+    if decision is not None and not (title_decided or alias_decided):
+        raise LinkError(
+            "STALE_IDENTITY_DECISION",
+            ["identity_decision"],
+            "what this name resolves to changed since the decision; decide again "
+            "against the returned candidates",
+            candidates,
+            None if identity_resolution["status"] == "no_match" else fingerprint,
+        )
+    if title_decided:
         accepted_decision = {
             **decision,
             "distinct_from": [str(item.get("ref") or item["path"]) for item in candidates],
@@ -947,18 +960,34 @@ def link(
             candidates,
             fingerprint,
         )
-    aliases_clean = _clean_aliases(display_name, aliases)
-    # An alias is a name the page answers to: one any other page already
-    # answers to would make a turn naming it resolve both. One lookup for all
-    # of them, read as the resolver reads names (`claimed_names`).
-    claimed = entity_candidates.claimed_names(vault_root, aliases_clean) if aliases_clean else {}
+    if claimed and alias_decided:
+        # The decision covers the alias whose fingerprint it carries; any other
+        # claimed alias still refuses below.
+        decided_alias = next(
+            alias
+            for alias, value in alias_fingerprints.items()
+            if value == decision["candidate_fingerprint"]
+        )
+        claimed = {alias: found for alias, found in claimed.items() if alias != decided_alias}
+        alias_candidates = entity_candidates.resolve_entity_candidate(
+            vault_root, name=decided_alias
+        )["candidates"]
+        accepted_decision = {
+            **decision,
+            "distinct_from": [
+                str(item.get("ref") or item["path"]) for item in alias_candidates
+            ],
+        }
     if claimed:
         alias = next(iter(claimed))
         raise LinkError(
             "ENTITY_EXISTS",
             ["aliases"],
-            f"another page already answers to the alias {alias!r}",
+            f"another page already answers to the alias {alias!r}; pass "
+            "identity_decision {outcome: distinct} with this candidate_fingerprint if "
+            "it is a different identity",
             [{"alias": name, "path": path} for name, found in claimed.items() for path in found],
+            alias_fingerprints[alias],
         )
     folder = kb_root(vault_root) / "Entities" / definition.folder
     entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"

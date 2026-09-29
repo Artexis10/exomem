@@ -4207,6 +4207,7 @@ def op_edit(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    identity_decision: dict | None = None,
 ) -> dict:
     """Lightweight in-place edit of a page (body, tags, a surgical snippet,
     a batch, an opinion row, or one frontmatter field).
@@ -4370,7 +4371,7 @@ def op_edit(
             )
         elif field is not None:
             if field == "aliases":
-                _refuse_claimed_aliases(vault_root, path, value)
+                _refuse_claimed_aliases(vault_root, path, value, identity_decision)
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root,
                 path=path,
@@ -7357,12 +7358,17 @@ def op_remember(
 
 
 
-def _refuse_claimed_aliases(vault_root: Path, path: str, value: object) -> None:
+def _refuse_claimed_aliases(
+    vault_root: Path, path: str, value: object, identity_decision: dict | None = None
+) -> None:
     """Refuse an `aliases` patch naming what another page already answers to.
 
     The same guard `create-entity` runs (`entity_candidates.claimed_names`):
     an alias another page holds would make a turn naming it resolve both. The
-    page's own title and current aliases are never a collision.
+    page's own title and current aliases are never a collision. A genuinely
+    shared name is admitted by an explicit `distinct` `identity_decision`
+    bound to that alias's candidate fingerprint; a page the caller may not see
+    never claims an alias, so a restricted caller is neither refused nor asked.
     """
     names = [value] if isinstance(value, str) else value if isinstance(value, list) else []
     aliases = [str(item).strip() for item in names if isinstance(item, str) and str(item).strip()]
@@ -7370,12 +7376,34 @@ def _refuse_claimed_aliases(vault_root: Path, path: str, value: object) -> None:
         return
     rel = path if path.endswith(".md") else f"{path}.md"
     claimed = entity_candidates_module.claimed_names(vault_root, aliases, exclude_path=rel)
-    if claimed:
-        alias, paths = next(iter(claimed.items()))
+    if not claimed:
+        return
+    fingerprints = {
+        alias: entity_candidates_module.alias_claim_fingerprint(vault_root, alias)
+        for alias in claimed
+    }
+    decision = None
+    if identity_decision is not None:
+        try:
+            decision = link_module._identity_decision(identity_decision)  # noqa: SLF001
+        except link_module.LinkError as error:
+            raise ValueError(f"{error.code}: {error.reason}") from error
+    for alias, paths in claimed.items():
+        if decision is not None and decision["candidate_fingerprint"] == fingerprints[alias]:
+            continue
+        if decision is not None:
+            raise ValueError(
+                "STALE_IDENTITY_DECISION: what this alias resolves to changed since the "
+                "decision, or the decision was made for another name; decide again "
+                f"(candidate_fingerprint: {fingerprints[alias]})"
+            )
         raise ValueError(
             f"ENTITY_EXISTS: another page already answers to the alias {alias!r} "
-            f"({', '.join(paths)}); pick a name only this page answers to"
+            f"({', '.join(paths)}); pick a name only this page answers to, or pass "
+            "identity_decision {outcome: distinct} with this candidate_fingerprint if it "
+            f"is a different identity (candidate_fingerprint: {fingerprints[alias]})"
         )
+
 
 def op_edit_memory(
     vault_root: Path,
@@ -7383,6 +7411,7 @@ def op_edit_memory(
     why: str,
     operation: edit_operations_module.EditOperation = None,  # type: ignore[assignment]
     validate_only: bool = False,
+    identity_decision: _IdentityDecisionArgument = None,
     **legacy: Any,
 ) -> dict:
     """Edit an existing memory page with an auditable reason.
@@ -7422,6 +7451,10 @@ def op_edit_memory(
         validate_only: Preview the edit without committing it. Accepted here or
             as `operation.validate_only`; giving it in both places is fine when
             they agree. Same meaning as on `remember` and `replace_memory`.
+        identity_decision: `{outcome: "distinct", candidate_fingerprint}` for an
+            `aliases` patch naming a name another page already answers to, when
+            the name is genuinely shared; the fingerprint comes from that
+            refusal. Not needed for names only withheld pages answer to.
 
     The previous flat keyword arguments remain accepted by direct Python/runtime
     callers for one compatibility release, but are deprecated and intentionally
@@ -7430,6 +7463,8 @@ def op_edit_memory(
     arguments: dict[str, Any] = {"path": path, "why": why, **legacy}
     if operation is not None:
         arguments["operation"] = operation
+    if identity_decision is not None:
+        arguments["identity_decision"] = identity_decision
     if validate_only:
         arguments["validate_only"] = True
     normalized = edit_operations_module.normalize_edit_arguments(arguments)
@@ -13087,7 +13122,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                     schema_default=param.schema_default,
                 )
                 for param in params
-                if param.name in {"path", "why", "operation", "validate_only"}
+                if param.name in {"path", "why", "operation", "validate_only", "identity_decision"}
             )
         if response_detail is not None:
             response_detail_help = (

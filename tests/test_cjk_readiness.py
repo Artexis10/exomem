@@ -843,3 +843,159 @@ def test_japanese_activation_stays_inside_the_latency_budget(ja_vault: Path) -> 
         _activate(ja_vault, turn)
         worst = max(worst, time.perf_counter() - started)
     assert worst < 1.0, worst
+
+
+# --------------------------------------------------------------------------- #
+# A claimed alias composes with the identity `distinct` decision
+# --------------------------------------------------------------------------- #
+#
+# `memory-loop` "Contextual name resolution preserves genuine ambiguity": two
+# real referents may share one surface name. An alias another page holds is
+# refused UNLESS the write carries an explicit `distinct` decision bound to
+# that name's candidate fingerprint -- the mechanism a shared title uses.
+
+_FINGERPRINT = re.compile(r"candidate_fingerprint: ([0-9a-f]{64})")
+
+
+def _alias_refusal(vault: Path, name: str, alias: str) -> str:
+    """The fingerprint a refused create names for `alias`."""
+    message = _refused(vault, name, [alias])
+    found = _FINGERPRINT.search(message)
+    assert found, message
+    return found.group(1)
+
+
+def _create_sharing(vault: Path, name: str, alias: str, **kwargs) -> dict:
+    return commands.op_connect_memory(
+        vault,
+        operation="create-entity",
+        entity_type="organization",
+        name=name,
+        summary="A second, unrelated referent that answers to the same name.",
+        aliases=[alias],
+        **kwargs,
+    )
+
+
+def _patch_aliases(vault: Path, path: str, aliases: list[str], **decision) -> dict:
+    text = (vault / path).read_text(encoding="utf-8")
+    return writer_lease.invoke_command(
+        _command("edit_memory"),
+        vault,
+        path=path,
+        why="the name is genuinely shared",
+        operation={
+            "kind": "patch_frontmatter",
+            "field": "aliases",
+            "value": aliases,
+            "expected_hash": content_hash(text),
+        },
+        **decision,
+    )
+
+
+def test_a_refused_alias_names_the_fingerprint_that_would_decide_it(ja_vault: Path) -> None:
+    _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["テッサリー"])
+    fingerprint = _alias_refusal(ja_vault, "Corvane Motors", "テッサリー")
+    assert len(fingerprint) == 64
+
+
+def test_a_claimed_alias_is_accepted_with_a_matching_distinct_decision(ja_vault: Path) -> None:
+    tessary = _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["テッサリー"])
+    before = (ja_vault / tessary).read_bytes()
+    fingerprint = _alias_refusal(ja_vault, "Corvane Motors", "テッサリー")
+
+    created = _create_sharing(
+        ja_vault,
+        "Corvane Motors",
+        "テッサリー",
+        identity_decision={"outcome": "distinct", "candidate_fingerprint": fingerprint},
+    )
+
+    assert created["path"] == CORVANE
+    assert "テッサリー" in (ja_vault / CORVANE).read_text(encoding="utf-8")
+    decision = created["identity_decision"]
+    assert decision["outcome"] == "distinct"
+    assert decision["candidate_fingerprint"] == fingerprint
+    assert (ja_vault / tessary).read_bytes() == before
+
+
+def test_a_stale_alias_decision_is_refused(ja_vault: Path) -> None:
+    _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["テッサリー"])
+    fingerprint = _alias_refusal(ja_vault, "Corvane Motors", "テッサリー")
+    # What the alias resolves to changes: a second page now answers to it.
+    _create_sharing(
+        ja_vault,
+        "Northgate Tools",
+        "テッサリー",
+        identity_decision={"outcome": "distinct", "candidate_fingerprint": fingerprint},
+    )
+    working_set_index.WorkingSetIndex(ja_vault).update()
+
+    with pytest.raises(ValueError, match="STALE_IDENTITY_DECISION"):
+        _create_sharing(
+            ja_vault,
+            "Corvane Motors",
+            "テッサリー",
+            identity_decision={"outcome": "distinct", "candidate_fingerprint": fingerprint},
+        )
+    assert not (ja_vault / CORVANE).exists()
+
+
+def test_a_title_decision_cannot_authorize_an_alias_claim(ja_vault: Path) -> None:
+    """The fingerprint binds the name it was made for, not the write."""
+    _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["テッサリー"])
+    with pytest.raises(ValueError, match="STALE_IDENTITY_DECISION"):
+        _create_sharing(
+            ja_vault,
+            "Corvane Motors",
+            "テッサリー",
+            identity_decision={"outcome": "distinct", "candidate_fingerprint": "0" * 64},
+        )
+    assert not (ja_vault / CORVANE).exists()
+
+
+def test_edit_memory_takes_the_same_alias_decision(ja_vault: Path) -> None:
+    _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["テッサリー"])
+    corvane = _create_entity(ja_vault, "Corvane Motors", "The carmaker.")
+    with pytest.raises(ValueError, match="ENTITY_EXISTS") as refused:
+        _patch_aliases(ja_vault, corvane, ["テッサリー"])
+    found = _FINGERPRINT.search(str(refused.value))
+    assert found, str(refused.value)
+    fingerprint = found.group(1)
+    assert "テッサリー" not in (ja_vault / corvane).read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="STALE_IDENTITY_DECISION"):
+        _patch_aliases(
+            ja_vault,
+            corvane,
+            ["テッサリー"],
+            identity_decision={"outcome": "distinct", "candidate_fingerprint": "f" * 64},
+        )
+
+    _patch_aliases(
+        ja_vault,
+        corvane,
+        ["テッサリー"],
+        identity_decision={"outcome": "distinct", "candidate_fingerprint": fingerprint},
+    )
+    assert "テッサリー" in (ja_vault / corvane).read_text(encoding="utf-8")
+
+
+def test_a_withheld_page_never_claims_an_alias_so_no_decision_is_needed(
+    ja_vault: Path,
+) -> None:
+    """Withheld = absent: the restricted caller is neither refused nor asked to
+    decide. The owner, who sees the page, is still refused without one."""
+    corvane = _create_entity(ja_vault, "Corvane Motors", "The carmaker.")
+    write_scope(ja_vault, paths=SECRET, name="Hidden")
+    write_rule(ja_vault, ceiling=0)
+    _reset_caches()
+
+    with request_scope(_external()):
+        result = _create_sharing(ja_vault, "Northgate Tools", "月影プロジェクト")
+    assert "月影プロジェクト" in (ja_vault / result["path"]).read_text(encoding="utf-8")
+
+    _reset_caches()
+    with pytest.raises(ValueError, match="ENTITY_EXISTS"):
+        _patch_aliases(ja_vault, corvane, ["月影プロジェクト"])

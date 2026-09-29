@@ -320,7 +320,14 @@ def _records_manifest(seed: RecordsSeed) -> str:
     )
 
 
-def _edit_frontmatter(root: Path, path: str, field_name: str, value: object, why: str) -> None:
+def _edit_frontmatter(
+    root: Path,
+    path: str,
+    field_name: str,
+    value: object,
+    why: str,
+    identity_decision: dict[str, str] | None = None,
+) -> None:
     from exomem import commands, writer_lease
     from exomem.vault import content_hash
 
@@ -337,7 +344,27 @@ def _edit_frontmatter(root: Path, path: str, field_name: str, value: object, why
             "value": value,
             "expected_hash": content_hash(text),
         },
+        **({"identity_decision": identity_decision} if identity_decision else {}),
     )
+
+
+def _shared_alias_decision(root: Path, path: str, aliases: list[str]) -> dict[str, str] | None:
+    """A `distinct` decision for the alias another page already answers to.
+
+    The seed declares the shared name on purpose (two real referents), so the
+    write says so the way any client does: the decision the refusal names,
+    bound to that alias's candidate fingerprint. None when nothing is shared.
+    """
+    from exomem import entity_candidates
+
+    claimed = entity_candidates.claimed_names(root, aliases, exclude_path=path)
+    if not claimed:
+        return None
+    alias = next(iter(claimed))
+    return {
+        "outcome": "distinct",
+        "candidate_fingerprint": entity_candidates.alias_claim_fingerprint(root, alias),
+    }
 
 
 def _compiled_note(root: Path, seed: NoteSeed) -> str:
@@ -437,7 +464,14 @@ def build_world_in_process(root: Path, spec: PreCapture) -> dict[str, str]:
             )
         key_to_path[seed.key] = created.path
         if seed.aliases:
-            _edit_frontmatter(root, created.path, "aliases", list(seed.aliases), "record the name it is also called by")
+            _edit_frontmatter(
+                root,
+                created.path,
+                "aliases",
+                list(seed.aliases),
+                "record the name it is also called by",
+                identity_decision=_shared_alias_decision(root, created.path, list(seed.aliases)),
+            )
     for seed in spec.notes:
         key_to_path[seed.key] = _compiled_note(root, seed)
     for seed in spec.records:

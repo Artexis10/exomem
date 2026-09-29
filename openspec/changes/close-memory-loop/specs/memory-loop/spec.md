@@ -124,6 +124,12 @@ The system SHALL resolve and enrich existing entities before creating duplicates
 - **AND** an `edit_memory` write of the `aliases` field is refused the same
   way, the page's own names excepted, and a page the caller may not see reads
   as absent
+- **AND** an alias another page answers to because the name is genuinely shared
+  is admitted by an explicit `distinct` `identity_decision` bound to that
+  alias's candidate fingerprint (the refusal names it), on create and on an
+  `edit_memory` `aliases` patch alike; a stale or foreign fingerprint is
+  refused, and a restricted caller is never refused or asked for a name only a
+  withheld page answers to
 
 #### Scenario: A useful reusable relationship is missing
 

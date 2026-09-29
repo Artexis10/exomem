@@ -145,7 +145,7 @@ LEGACY_EDIT_FIELDS = frozenset(
 )
 
 _TOP_LEVEL_EDIT_FIELDS = frozenset(
-    {"path", "why", "operation", "response_detail", "validate_only"}
+    {"path", "why", "operation", "response_detail", "validate_only", "identity_decision"}
 )
 
 #: `validate_only` is a modifier every operation kind carries, not a mode

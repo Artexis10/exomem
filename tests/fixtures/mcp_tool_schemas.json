@@ -2535,6 +2535,34 @@
           "description": "Preview the edit without committing it. Accepted here or as `operation.validate_only`; giving it in both places is fine when they agree. Same meaning as on `remember` and `replace_memory`.",
           "type": "boolean"
         },
+        "identity_decision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "outcome": {
+                  "enum": [
+                    "distinct"
+                  ]
+                },
+                "candidate_fingerprint": {
+                  "description": "candidate_fingerprint returned for this name.",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "outcome",
+                "candidate_fingerprint"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",

@@ -51,6 +51,20 @@ def candidate_fingerprint(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def alias_claim_fingerprint(vault_root: Path, alias: str) -> str:
+    """The fingerprint a `distinct` decision on an alias claim must carry.
+
+    Bound to the alias and to what it resolves to for THIS caller (withheld
+    pages read as absent), under its own entity-type marker so a decision made
+    for a title never authorizes an alias.
+    """
+    return candidate_fingerprint(
+        name=alias,
+        entity_type="alias",
+        resolution=resolve_entity_candidate(vault_root, name=alias),
+    )
+
+
 def _aliases(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value,)
