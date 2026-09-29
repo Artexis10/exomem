@@ -699,6 +699,51 @@ def test_a_name_followed_by_a_particle_glued_to_more_kana_resolves(
 
 
 @pytest.mark.parametrize(
+    ("full", "head", "turn"),
+    [
+        ("サクラもち本舗", "サクラ", "サクラもち本舗に行く"),
+        ("ミドリがめ商会", "ミドリ", "ミドリがめ商会の請求書"),
+        ("青空かえで銀行", "青空", "青空かえで銀行の口座"),
+        ("木村はるか", "木村", "木村はるかの予定を確認して"),
+    ],
+)
+def test_a_name_with_hiragana_inside_beats_its_head_split_at_a_particle_character(
+    ja_vault: Path, full: str, head: str, turn: str
+) -> None:
+    """The head of a kanji/katakana + hiragana + kanji name is not the name:
+    a hiragana run that merely starts with a particle character (もち, がめ,
+    かえで, はるか) is not an edge when an indexed name continues through it."""
+    entity = _create_entity(ja_vault, full, "The name the user wrote in full.")
+    note = f"{KB}/Products/{head}.md"
+    _write(ja_vault / note, _page(head, f"{head}についてのメモ。"))
+    working_set_index.WorkingSetIndex(ja_vault).update()
+    _fresh_session()
+    assert full in working_set_resolve.analyze_turn(turn).words
+    packet = _activate(ja_vault, turn)
+    assert _resolved(packet) == [entity], (packet.get("abstention"), packet["anchors"])
+    assert note not in _resolved(packet)
+    assert "exact_alias" in packet["anchors"][0]["evidence"]
+
+
+@pytest.mark.parametrize(
+    ("turn", "expected"),
+    [
+        ("ハヤブサ号のもう一台", {"ハヤブサ号", "ハヤブサ号のもう一台"}),
+        ("青木陽介はいつ来る？", {"青木陽介"}),
+    ],
+)
+def test_a_glued_particle_still_ends_the_name_and_the_greedy_match_is_pinned(
+    turn: str, expected: set[str]
+) -> None:
+    """のもう is split at the longest particle のも (leaving う一台), so the
+    unsplit stretch is emitted beside the head; a name that ends at a particle
+    keeps its head as a word."""
+    words = set(working_set_resolve.analyze_turn(turn).words)
+    assert expected <= words
+    assert "もう一台" not in words
+
+
+@pytest.mark.parametrize(
     "turn", ["ねこやなぎ銀行の口座を解約したい", "駅前のねこやなぎ銀行で口座を作った"]
 )
 def test_a_hiragana_name_after_a_particle_run_stays_one_name(turn: str) -> None:
