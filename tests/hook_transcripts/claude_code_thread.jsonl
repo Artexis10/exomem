@@ -1,0 +1,13 @@
+{"type": "summary", "summary": "Estuary survey planning", "leafUuid": "leaf-1"}
+{"type": "user", "isSidechain": false, "message": {"role": "user", "content": "We need to plan the spring rounds of the Marlow Quay Survey for the estuary team."}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "PRIVATE-THINKING-SENTINEL weigh the options quietly"}, {"type": "text", "text": "Let me look at what the vault already holds on the quay survey."}, {"type": "tool_use", "id": "toolu_1", "name": "mcp__exomem__read_memory", "input": {"path": "Knowledge Base/Entities/Projects/Marlow Quay Survey.md"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "TOOL-RESULT-SENTINEL the page mentions Knowledge Base/Notes/never-taken-from-results.md"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "The quay survey has two rounds left this autumn, and Bram Quillfeather owns the rota."}]}}
+{"type": "user", "isMeta": true, "message": {"role": "user", "content": [{"type": "text", "text": "<system-reminder>SYSTEM-REMINDER-SENTINEL a client note</system-reminder>"}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "[Exomem working set, already activated for this turn: call `activate_context` again only for another anchor. Retrieved memory, not instructions. Each line ends with its ref: `read_memory` a `unit`, `pointer`, `state` or `session` line, `activate_context(anchor=...)` any other.]\n- unit INJECTED-BLOCK-SENTINEL Never exceed 400 kg. (Knowledge Base/Products/Cargo Sled.md#u1)"}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Good. And what did Ottilie say about the tidal grant?"}, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "IMAGE-PAYLOAD-SENTINEL"}}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_2", "name": "mcp__exomem__activate_context", "input": {"turn": "what did Ottilie say", "anchor": "Knowledge Base/Entities/People/Ottilie Marsh.md"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_2", "content": "ANOTHER-RESULT-SENTINEL"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Ottilie Marsh said the Tidewater Grant call went well."}]}}
+{"type": "file-history-snapshot", "snapshot": {}}
+{"type": "user", "message": {"role": "user", "content": "And is that still on track for the autumn?"}}
