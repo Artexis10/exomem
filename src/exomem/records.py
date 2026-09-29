@@ -1998,8 +1998,7 @@ def _inspect_audit_chain(
             else snapshot.snapshot
         )
         try:
-            for path_guard in snapshot.path_guards:
-                path_guard.recheck(root)
+            vault.recheck_path_guards(root, snapshot.path_guards)
             for directory_guard in snapshot.directory_guards:
                 directory_guard.recheck(root)
         except vault.PathGuardError:

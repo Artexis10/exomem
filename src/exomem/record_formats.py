@@ -548,8 +548,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 "INVALID_RECORD_ITEM_PATH", "item inventory changed while it was read"
             )
         try:
-            for path_guard in path_guards:
-                path_guard.recheck(self.vault_root)
+            vault.recheck_path_guards(self.vault_root, path_guards)
             for directory_guard in directory_guards:
                 directory_guard.recheck(self.vault_root)
         except vault.PathGuardError as error:

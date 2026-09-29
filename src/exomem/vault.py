@@ -1155,9 +1155,20 @@ class PathGuard:
             expected_generation=self.expected_generation,
         )
 
-    def recheck(self, vault_root: Path) -> None:
+    def recheck(
+        self, vault_root: Path, verified_ancestors: set[PathIdentity] | None = None
+    ) -> None:
+        """Re-prove the guard.
+
+        `verified_ancestors` lets a caller that rechecks many guards in one round
+        (`recheck_path_guards`) prove each distinct ancestor directory once: they
+        share almost all of their chain, and re-stat'ing it per guard was six
+        probes per item file on every round.
+        """
         root = Path(vault_root)
         for expected in self.ancestors:
+            if verified_ancestors is not None and expected in verified_ancestors:
+                continue
             path = root if expected.relative_path == "." else root / expected.relative_path
             try:
                 info = path.lstat()
@@ -1170,19 +1181,22 @@ class PathGuard:
                 or _is_reparse(info)
             ):
                 raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed")
+            if verified_ancestors is not None:
+                verified_ancestors.add(expected)
         for relative in self.missing_parents:
             if os.path.lexists(root / relative):
                 raise PathGuardError("PATH_GUARD_CHANGED", "missing guard ancestor appeared")
         leaf = root / self.target
-        exists = os.path.lexists(leaf)
         if self.leaf_policy == "absent":
-            if exists:
+            if os.path.lexists(leaf):
                 raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf appeared")
             return
-        if not exists or self.leaf_identity is None:
+        if self.leaf_identity is None:
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf disappeared")
         try:
             info = leaf.lstat()
+        except FileNotFoundError as error:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf disappeared") from error
         except OSError as error:
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf changed") from error
         if (
@@ -1221,6 +1235,13 @@ class PathGuard:
             elif _leaf_hash(leaf, self.leaf_identity) != self.expected_content_hash:
                 # Compatibility for callers that predate bounded snapshots.
                 raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+
+
+def recheck_path_guards(vault_root: Path, guards: Iterable[PathGuard]) -> None:
+    """Recheck many guards as one round, proving each shared ancestor once."""
+    verified: set[PathIdentity] = set()
+    for guard in guards:
+        guard.recheck(vault_root, verified)
 
 
 def stat_generation(info: os.stat_result) -> tuple[int, int, int]:
@@ -3943,8 +3964,7 @@ def _prepare_path_guards(
     created_dirs: list[Path | _CreatedDirectory] | None = None,
 ) -> tuple[PathGuard, ...]:
     original = tuple(guards)
-    for guard in original:
-        guard.recheck(vault_root)
+    recheck_path_guards(vault_root, original)
     missing = sorted(
         {relative for guard in original for relative in guard.missing_parents},
         key=lambda value: (len(Path(value).parts), value),
@@ -3960,6 +3980,12 @@ def _prepare_path_guards(
         )
         prepared: list[PathGuard] = []
         for guard in original:
+            if not guard.missing_parents:
+                # Nothing was created for this guard, so re-capturing would only
+                # re-read what the recheck above just proved -- and would replace
+                # the caller's original capture with a later one.
+                prepared.append(guard)
+                continue
             rebound = PathGuard.capture(
                 vault_root,
                 guard.target,
@@ -4849,8 +4875,13 @@ def _batch_atomic_write_locked(
     ):
         raise PathGuardError("PATH_GUARD_INVALID", "unsupported required guard")
     read_only_guards = tuple(guard for guard in all_required_guards if isinstance(guard, PathGuard))
+    # The same census is routinely handed in twice (once from the snapshot and once
+    # from the new-item path); each is a full directory scan, rechecked before every
+    # destination replace. An identical guard proves nothing a second time.
     directory_guards = tuple(
-        guard for guard in all_required_guards if isinstance(guard, DirectoryCensusGuard)
+        dict.fromkeys(
+            guard for guard in all_required_guards if isinstance(guard, DirectoryCensusGuard)
+        )
     )
     all_completion_guards = tuple(completion_guards)
     if any(
@@ -4899,12 +4930,14 @@ def _batch_atomic_write_locked(
             bound_guards[position] = guard
         read_only_guards = prepared[len(write_guards) :]
         try:
-            for guard in (
-                *read_only_guards,
-                *(item for item in bound_guards if item is not None),
-                *all_completion_guards,
-            ):
-                guard.recheck(root)
+            recheck_path_guards(
+                root,
+                (
+                    *read_only_guards,
+                    *(item for item in bound_guards if item is not None),
+                    *all_completion_guards,
+                ),
+            )
             for guard in directory_guards:
                 guard.recheck(root, allowed_changes=(write.path for write in writes))
         except BaseException:
@@ -5224,11 +5257,13 @@ def _batch_atomic_write_locked(
             if vault_root is not None:
                 root = Path(vault_root)
                 _validate_batch_write_access(root, writes[index:])
-                for guard in read_only_guards:
-                    guard.recheck(root)
-                for guard in bound_guards[index:]:
-                    if guard is not None:
-                        guard.recheck(root)
+                recheck_path_guards(
+                    root,
+                    (
+                        *read_only_guards,
+                        *(guard for guard in bound_guards[index:] if guard is not None),
+                    ),
+                )
                 for guard in directory_guards:
                     guard.recheck(root, allowed_changes=allowed_census_changes)
             if writes[index].create_only and os.path.lexists(final):
@@ -5280,10 +5315,7 @@ def _batch_atomic_write_locked(
             )
             _after_batch_destination_published(final)
             workspace.recheck()
-        for guard in read_only_guards:
-            guard.recheck(Path(vault_root))
-        for guard in all_completion_guards:
-            guard.recheck(Path(vault_root))
+        recheck_path_guards(Path(vault_root), (*read_only_guards, *all_completion_guards))
         for workspace in workspace_by_parent.values():
             workspace.recheck()
         for guard in final_guards.values():

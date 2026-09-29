@@ -2838,7 +2838,12 @@ def precommit_authorize_mutation(
     """
     root = Path(vault_root)
     paths = {manifest.path, manifest.storage.source, *planned_paths}
-    require_mutation_visibility(root, manifest, planned_paths=paths)
+    require_mutation_visibility(
+        root,
+        manifest,
+        planned_paths=paths,
+        census=None if snapshot is None else snapshot.directory_guards,
+    )
     if snapshot is not None:
         paths.update(version.path for version in snapshot.source_versions)
         paths.update(path for path, kind, _digest in snapshot.source_inventory if kind == "file")
@@ -2859,13 +2864,32 @@ def require_mutation_visibility(
     manifest: collections.CollectionManifest,
     *,
     planned_paths: Iterable[str] = (),
+    census: Sequence[vault.DirectoryCensusGuard] | None = None,
 ) -> None:
-    """Refuse before parsing when a mutation cannot see the entire CAS set."""
+    """Refuse before parsing when a mutation cannot see the entire CAS set.
+
+    `census` is the directory censuses a snapshot already captured and proved; a
+    caller that holds one walks those entries instead of scanning the tree again.
+    """
     root = Path(vault_root)
     allowed = full_release_filter(root)
     if not all(allowed(path) for path in (manifest.path, manifest.storage.source, *planned_paths)):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     if manifest.storage.strategy != "markdown-items":
+        return
+    if census is not None and _census_covers_every_directory(census):
+        candidates = 0
+        for directory in census:
+            for entry in directory.entries:
+                candidates += 1
+                if candidates > 2_000:
+                    raise collections.CollectionError(
+                        "RECORD_ITEM_LIMIT", "collection has too many item entries"
+                    )
+                if not allowed(entry.relative_path):
+                    raise collections.CollectionError(
+                        "COLLECTION_NOT_FOUND", "collection was not found"
+                    )
         return
     pending = [vault.DirectoryCensusGuard.capture(root, manifest.storage.source, max_entries=2_000)]
     candidates = 0
@@ -2885,6 +2909,22 @@ def require_mutation_visibility(
                 pending.append(
                     vault.DirectoryCensusGuard.capture(root, entry.relative_path, max_entries=2_000)
                 )
+
+
+def _census_covers_every_directory(census: Sequence[vault.DirectoryCensusGuard]) -> bool:
+    """Whether every child directory named by a census has a census of its own.
+
+    A snapshot read through an authorizing adapter omits the censuses of directories
+    it could not see. Walking that partial set would skip entries a mutation must
+    refuse on, so an incomplete census is never reused.
+    """
+    captured = {directory.target for directory in census}
+    return all(
+        entry.relative_path in captured
+        for directory in census
+        for entry in directory.entries
+        if stat.S_ISDIR(entry.mode)
+    )
 
 
 def require_candidate_manifest_visibility(vault_root: Path, manifest_path: str) -> None:

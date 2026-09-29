@@ -250,3 +250,54 @@ def test_out_of_band_edit_makes_a_guarded_append_stale(
             expected_container_hash=guard,
         )
     assert error.value.code == "STALE_RECORD"
+
+
+# --- guard rechecks: a leaf is stat'd a small constant number of times per append ------------
+
+
+def _stat_calls_for_append(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, size: int) -> int:
+    import os
+    import threading as _threading
+
+    from exomem import record_item_cache
+
+    monkeypatch.setattr(record_item_cache, "RACY_WINDOW_NS", 0)
+    record_item_cache.clear()
+    vault = tmp_path / f"stat-{size}-{len(list(tmp_path.iterdir()))}"
+    vault.mkdir()
+    _seed(vault, size)
+    _age(vault)
+    records.append_record(vault, COLLECTION, item=ledger_item(slug="warm"), why="warm")
+
+    caller = _threading.get_ident()
+    calls = {"n": 0}
+    real_lstat, real_stat = os.lstat, os.stat
+
+    def counting(real):
+        def inner(*args, **kwargs):
+            if _threading.get_ident() == caller:
+                calls["n"] += 1
+            return real(*args, **kwargs)
+
+        return inner
+
+    with monkeypatch.context() as patch:
+        # Path.lstat and Path.stat route through these on this interpreter.
+        patch.setattr(os, "lstat", counting(real_lstat))
+        patch.setattr(os, "stat", counting(real_stat))
+        records.append_record(
+            vault, COLLECTION, item=ledger_item(slug="measured"), why="measure"
+        )
+    return calls["n"]
+
+
+def test_append_stats_each_item_a_bounded_number_of_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Marginal filesystem probes per extra item stay small: ancestors are verified once a round."""
+    _stat_calls_for_append(tmp_path, monkeypatch, 3)  # warm process-wide memo caches
+    small = _stat_calls_for_append(tmp_path, monkeypatch, 3)
+    large = _stat_calls_for_append(tmp_path, monkeypatch, 30)
+    per_item = (large - small) / 27
+    # Before: ~10 guard rounds x (6 ancestors + 2 leaf probes) plus censuses, ~700 per item.
+    assert per_item < 40, f"{per_item:.0f} marginal stat calls per item per append"
