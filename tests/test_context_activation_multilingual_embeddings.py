@@ -373,17 +373,20 @@ def test_known_limit_a_rare_word_plus_the_band_resolves_an_adjacent_turns_page(m
     assert off[grill][0] == "partial" and "vector_band" not in off[grill][1], off.get(grill)
 
 
-def test_known_limit_the_band_completes_an_ambiguity_between_two_named_senses(measured: Measured) -> None:
-    """KNOWN LIMIT (step-4 ruling, 2026-09-25). T4 names "Alex", whom two
-    entities share, beside a deployment issue. With the band, both senses
-    reach resolution and the packet reports them as `ambiguous`, which is
-    T4's own expected status; without it the turn abstains `unresolved`. The
-    band adds contact to senses the turn already named; it names none."""
+def test_a_bare_shared_first_name_is_ambiguous_with_and_without_the_band(measured: Measured) -> None:
+    """T4 names "Alex", whom two entities share, beside a deployment issue.
+    Since the activation-quality round a bare name two people share is asked
+    about on its own (`working_set_resolve._bare_name_groups`), so the turn is
+    `ambiguous` between both senses on the off arm as well, which is T4's own
+    expected status. It was a known limit while only the band completed the
+    ambiguity (the off arm abstained `unresolved`); the band no longer adds
+    anything here, and it must not change the senses either arm names."""
     on = measured.english_packets["on"]["T4"]
+    off = measured.english_packets["off"]["T4"]
     assert measured.english["T4"]["on"].observed_status == "ambiguous", on["anchors"]
-    assert measured.english["T4"]["off"].observed_status == "unresolved"
+    assert measured.english["T4"]["off"].observed_status == "ambiguous", off["anchors"]
     gold = {measured.english_key_to_path[key] for key in english_set.fixture_by_id("T4").gold}
-    ref_to_path = {item["ref"]: item["path"] for item in on["anchors"]}
-    senses = {ref_to_path.get(item["ref"], item["ref"]) for item in on["ambiguity"]}
-    assert senses == gold, (senses, gold)
-
+    for packet in (on, off):
+        ref_to_path = {item["ref"]: item["path"] for item in packet["anchors"]}
+        senses = {ref_to_path.get(item["ref"], item["ref"]) for item in packet["ambiguity"]}
+        assert senses == gold, (senses, gold)
