@@ -456,6 +456,14 @@ FindHit = retrieval_models.PageHit
 RetrievalHit = retrieval_models.RetrievalHit
 FindEnvelope = retrieval_models.FindEnvelope
 RecallResult = retrieval_models.RecallResult
+#: `ask_memory` publishes the two shapes it can return (hits, or one envelope)
+#: and nothing deeper. The typed union it replaced was 16 KB on every turn and
+#: nothing branches on it; the runtime payload is unchanged, and
+#: `tests/test_mcp_output_schema_conformance.py` still validates it.
+_RecallOutput = Annotated[
+    RecallResult,
+    WithJsonSchema({"anyOf": [{"type": "array"}, {"type": "object"}]}, mode="serialization"),
+]
 
 
 class SearchResult(TypedDict):
@@ -6022,7 +6030,7 @@ def op_ask_memory(
     include_timings: bool = False,
     explain: bool = False,
     purpose: str | None = None,
-) -> RecallResult:
+) -> _RecallOutput:
     """Recall durable knowledge from Exomem with product defaults.
 
     This is the normal first read: search compiled knowledge, sources,
@@ -13123,11 +13131,9 @@ def _build_product_commands() -> tuple[Command, ...]:
             )
         if response_detail is not None:
             response_detail_help = (
-                "Successful committed mutation detail: full (default), compact "
-                "acknowledgement (opt-in), or legacy raw leaf result."
+                "Success detail: full (default), compact, or legacy."
                 if response_detail == "full"
-                else "Successful committed mutation detail: compact (default), full "
-                "diagnostics, or legacy raw leaf result."
+                else "Success detail: compact (default), full, or legacy."
             )
             params = (
                 *params,

@@ -22,8 +22,9 @@ FROZEN = (
     "hosted-alpha-agent-v2",
     "hosted-alpha-agent-v3",
     "hosted-alpha-agent-v4",
+    "hosted-alpha-agent-v4-command-binding-v1",
 )
-LIVE = ("hosted-alpha-agent-v4-command-binding-v1", "hosted-alpha-agent-v5")
+LIVE = ("hosted-alpha-agent-v5",)
 
 
 def _rendered(candidate: str) -> bytes:

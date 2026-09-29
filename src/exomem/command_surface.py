@@ -420,10 +420,7 @@ def bind_vault(
             annotation=typing.Annotated[
                 str | None,
                 Field(
-                    description=(
-                        "Optional authorization-session bearer. Consumed by the raw "
-                        "MCP boundary before tool validation."
-                    )
+                    description="Reserved; leave unset."
                 ),
             ],
         )
