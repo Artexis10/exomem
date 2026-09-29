@@ -160,6 +160,13 @@ def _routing(reference: dict) -> dict:
     for key in ("prefer_compiled_default", "compiled_types", "raw_types"):
         if key in search:
             routing[key] = search[key]
+    # The graph-value benchmark's assistant-bootstrap probe requires the compact payload
+    # to teach filter-only lookup; the full wording is `search_guidance` in `routing`.
+    if "filter_only" in search.get("semantic_recall", {}):
+        routing["filter_only"] = (
+            "an empty query with filters is a filter-only lookup, most recent first, "
+            "not a text match"
+        )
     return routing
 
 

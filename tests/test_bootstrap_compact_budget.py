@@ -25,7 +25,7 @@ from exomem import commands
 #:
 #: Ruled at 15,000 bytes at `maximal` on the worst-case surface. It replaces a ceiling of
 #: 63,300 that had been raised five times to fit whatever had been added. The core was
-#: measured at 14,339 bytes (claude-code, maximal) when this was set: about 660 bytes of
+#: measured at 14,407 bytes (claude-code, maximal) when this was set: about 590 bytes of
 #: margin, deliberately above the 512-byte warning band below. The old history is not
 #: reproduced here; the arithmetic that matters is `openspec/changes/shrink-bootstrap`.
 #:

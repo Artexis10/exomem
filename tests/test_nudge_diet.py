@@ -131,11 +131,29 @@ def test_the_retrieval_reminder_is_once_per_session_at_balanced(tmp_path):
     env = {"EXOMEM_PROMINENCE": "balanced"}
     first = _context(_run("exomem_retrieve_nudge.py", {"prompt": PROMPT, "session_id": "s-r"}, tmp_path, **env))
     second = _context(_run("exomem_retrieve_nudge.py", {"prompt": PROMPT, "session_id": "s-r"}, tmp_path, **env))
-    other = _context(_run("exomem_retrieve_nudge.py", {"prompt": PROMPT, "session_id": "s-other"}, tmp_path, **env))
 
     assert first == retrieve.REMINDER
     assert second == ""
-    assert other == retrieve.REMINDER
+
+
+def test_the_client_wide_cooldown_still_suppresses_a_second_tab(tmp_path):
+    """A fresh session opened inside the client-wide window is not told again what
+    another session was just told; it stays eligible and is reminded after the window."""
+    env = {"EXOMEM_PROMINENCE": "balanced"}
+    _run("exomem_retrieve_nudge.py", {"prompt": PROMPT, "session_id": "tab-a"}, tmp_path, **env)
+    quiet = _context(_run("exomem_retrieve_nudge.py", {"prompt": PROMPT, "session_id": "tab-b"}, tmp_path, **env))
+    later = _context(
+        _run(
+            "exomem_retrieve_nudge.py",
+            {"prompt": PROMPT, "session_id": "tab-b"},
+            tmp_path,
+            EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC="0",
+            **env,
+        )
+    )
+
+    assert quiet == ""
+    assert later == retrieve.REMINDER
 
 
 def test_maximal_follows_the_full_reminder_with_a_pointer_on_every_prompt(tmp_path):
@@ -168,7 +186,8 @@ def test_a_lifecycle_event_rearms_both_full_texts(tmp_path):
 
     checkpoint._rearm_nudges(tmp_path, session)
 
-    # Only the two once-per-session stamps go; the episode counter is not re-armed.
+    # The two once-per-session stamps and the client-wide one go (a session that just
+    # compacted is fresh again); the episode counter is not re-armed.
     assert {p.name for p in state.iterdir()} == {f"episode_{session}"}
     again = _context(
         _run(

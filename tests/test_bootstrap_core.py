@@ -11,7 +11,6 @@ applies to.
 from __future__ import annotations
 
 import json
-import logging
 import pathlib
 import tempfile
 from collections.abc import Callable
@@ -21,7 +20,7 @@ import pytest
 from exomem import bootstrap_core, capabilities, commands, prominence, workflow_skills
 
 #: Core ceiling at maximal on the worst-case surface. Ruled 15,000; measured
-#: 14,339 (claude-code, maximal) when set, i.e. about 660 bytes of margin.
+#: 14,407 (claude-code, maximal) when set, i.e. about 590 bytes of margin.
 CORE_BYTE_CEILING = 15_000
 CORE_HEADROOM_WARNING_BYTES = 512
 
@@ -49,7 +48,6 @@ def _root() -> pathlib.Path:
 
 
 def _bootstrap(monkeypatch, level: str, surface: str | None, **kwargs) -> dict:
-    logging.disable(logging.CRITICAL)
     monkeypatch.setenv("EXOMEM_PROMINENCE", level)
     monkeypatch.delenv("EXOMEM_SURFACE", raising=False)
     hosted = surface if surface and surface.startswith("hosted-") else None
@@ -100,6 +98,10 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
         CARRYING,
         lambda core: "Route stated intent to Planning and observed outcome to Records"
         in core["engagement"]["contract"]["capture"],
+    ),
+    "filter-only-lookup": (
+        prominence.CANON,
+        lambda core: "filter-only" in core["routing"]["filter_only"],
     ),
     "canonical-write-loop": (
         prominence.CANON,

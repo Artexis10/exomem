@@ -405,6 +405,9 @@ def _rearm_nudges(home: Path, session_id: str) -> None:
     for name in (
         re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:128],
         "retrieve_" + re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:120],
+        # The client-wide stamp too: it only dedupes a FRESH session, and a session
+        # that just compacted is one again.
+        "retrieve_global",
     ):
         try:
             (state_dir / name).unlink()

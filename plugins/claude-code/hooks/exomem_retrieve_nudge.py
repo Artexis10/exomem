@@ -1768,16 +1768,23 @@ def main() -> int:
         # Reminder-only: the full reminder once per session (the checkpoint hook
         # clears the marker on compaction, which rewrites the context it lived in).
         # `maximal` follows it with a pointer on every later prompt; the other
-        # levels stay silent. The client-wide cooldown is not consulted: a fresh
-        # session's one reminder is not the one another tab already saw.
+        # levels stay silent. The client-wide cooldown still applies to the FULL
+        # reminder, so a second tab opened inside the window does not repeat what
+        # another session was just told; that session stays eligible and is reminded
+        # once the window passes.
         reminded_ok, reminded = _cooldown_ok(session_id, 10**9)
+        global_ok, global_stamp = _global_cooldown_ok(global_cooldown)
         if reminded_ok:
+            if not global_ok:
+                return 0
             text = REMINDER
         elif _prominence() == "maximal":
             text = REMINDER_POINTER
         else:
             return 0
         _touch(reminded)
+        if text == REMINDER and global_cooldown > 0:
+            _touch(global_stamp)
         _log(prompt, "off", 0)
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import pathlib
 import tempfile
 
@@ -72,7 +71,6 @@ def normalised_digest(payload: dict) -> str:
 
 
 def legacy_compact(monkeypatch: pytest.MonkeyPatch, profile: str, level: str) -> dict:
-    logging.disable(logging.CRITICAL)
     monkeypatch.setenv("EXOMEM_PROMINENCE", level)
     monkeypatch.delenv("EXOMEM_SURFACE", raising=False)
     root = pathlib.Path(tempfile.mkdtemp())

@@ -150,7 +150,7 @@ def test_dynamic_types_register_create_resolve_and_traverse_on_three_doors(
 
     # Every door serves the same registry, with vault-rooted families and no
     # organization classification forced onto a site or a machine.
-    for door, payload in doors.all("bootstrap", {"profile": "compact"}).items():
+    for door, payload in doors.all("bootstrap", {"profile": "compact", "section": "entities"}).items():
         types = {item["id"]: item for item in payload["entity_registry"]["types"]}
         assert types["site"]["family"] == "site", door
         assert types["site"]["facets"] == {"region": "single text"}, door
