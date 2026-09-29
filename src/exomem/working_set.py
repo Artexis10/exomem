@@ -435,6 +435,7 @@ def build_packet(
             0 if item.level == "unit" else 1,
             order.get(item.role, len(order)),
             0 if item.provenance.get("standing") else 1,
+            1 if item.provenance.get("carried") else 0,
             _lifecycle_rank(item.lifecycle),
             -_date_rank(item.updated),
             item.ref,
@@ -2879,6 +2880,10 @@ def _named_beside(
         )
     except BudgetExhausted:
         return (), (), ()
+    # Marked so the packet ranks the resolved anchors' material ahead of what
+    # was carried beside them, and so a reader can tell "you named this
+    # anchor" from "this was carried because you named it".
+    items = tuple(replace(item, provenance={**item.provenance, "carried": True}) for item in items)
     return tuple(anchor.as_dict() for anchor in carried), items, missing
 
 

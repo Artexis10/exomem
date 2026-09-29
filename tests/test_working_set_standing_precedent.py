@@ -464,3 +464,50 @@ def test_a_standing_unit_gets_no_allowance_past_the_preferred_size() -> None:
     capped = packet_of(standing)
     assert capped["units"] == []
     assert [p["reason"] for p in capped["pointers"]] == ["unit_too_long"]
+
+
+# -- the named anchor keeps its own material ahead of a carried page's -------- #
+
+NAMED_PAGE = "Knowledge Base/Notes/Research/vesper-dredge-schedule.md"
+
+
+def test_a_newer_carried_page_does_not_take_the_resolved_anchors_slots(
+    study_vault: Path,
+) -> None:
+    """The named anchor wins its material, not only its place in `anchors`.
+
+    Under `MAX_ITEMS_PER_ROLE` a newer beside-carried page's units used to sort
+    ahead of the resolved entity's older conclusions."""
+    for n in range(working_set.RETRIEVAL_CARRY_MIN_PAGES):
+        _write(
+            study_vault,
+            f"Knowledge Base/Notes/Research/unrelated-shelf-{n:03d}.md",
+            f"---\ntype: note\nstatus: active\nupdated: 2026-01-01\n---\n\n"
+            f"# Unrelated shelf {n:03d}\n\nAn unrelated shelf note number {n:03d}.\n",
+        )
+    _write(
+        study_vault,
+        NAMED_PAGE,
+        "---\ntype: note\nstatus: active\nupdated: 2026-09-28\n---\n\n"
+        "# Vesper dredge schedule\n\n## Summary\n\n"
+        + "".join(
+            f"- [decision] The vesper dredge schedule was fixed for lane {n}. ^v{n}\n"
+            for n in range(6)
+        ),
+    )
+    _reindex(study_vault)
+
+    packet = working_set.compile_packet(
+        study_vault,
+        turn=TURN + " Also, what did we settle about the vesper dredge schedule?",
+        max_chars=8000,
+    )
+
+    assert _resolved(packet) == [ENTITY]
+    assert packet["generation"].get("also_carried") == "retrieval"
+    precedents = [u for u in packet["units"] if u["role"] == "precedents"]
+    own = [u for u in precedents if u["provenance"]["path"] != NAMED_PAGE]
+    assert own, packet["units"]
+    assert CONCLUSION in _paths(packet), [u["provenance"]["path"] for u in precedents]
+    carried = [u for u in precedents if u["provenance"]["path"] == NAMED_PAGE]
+    assert all(u["provenance"].get("carried") for u in carried)
