@@ -1177,6 +1177,15 @@ def candidates_for(
     turn_terms_folded = frozenset(
         folded for term in turn_terms if (folded := _fold_lexical_term(term)) is not None
     )
+    # Terms only an embedded word supplies (`analysis.words`: a Latin word glued
+    # to Japanese). They hold no position in `analysis.tokens`, so a name span
+    # over the tokens cannot see them, and a contact that rests on one has no
+    # span to narrow by (`name_span` below).
+    embedded_terms = turn_terms_folded - frozenset(
+        folded
+        for term in frozenset(analysis.tokens) - stopwords
+        if (folded := _fold_lexical_term(term)) is not None
+    )
     # A single turn TOKEN is a phrase too (`phrases` also feeds unigram
     # `exact_alias` matches), so its de-possessived spelling joins the
     # phrase set alongside the verbatim one -- "dana's" must reach a plain
@@ -1404,7 +1413,7 @@ def candidates_for(
                 name_span=_name_span(
                     analysis.tokens, stopwords, name_terms_folded, analysis.run_breaks
                 )
-                if name_contact
+                if name_contact and not name_contact & embedded_terms
                 else None,
                 entity_type=row.entity_type,
                 name_capitalised=bool(name_contact & analysis.capitalised),
