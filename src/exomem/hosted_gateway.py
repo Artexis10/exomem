@@ -17,7 +17,7 @@ from typing import Any, NamedTuple
 from fastmcp.tools import FunctionTool
 from fastmcp.utilities import json_schema
 
-from . import __version__, capabilities
+from . import __version__, capabilities, command_surface, hosted_legacy_schemas
 from . import commands as commands_module
 from .governance import authorization_sessions, authorization_transport
 from .hosted_runtime import (
@@ -161,6 +161,10 @@ def _mcp_tool_contract(
     schema = contract.get("inputSchema")
     if isinstance(schema, dict) and "$defs" in schema:
         contract["inputSchema"] = json_schema.compress_schema(schema, dereference=True)
+    # A historical profile is a released identity and keeps the schema bytes it
+    # published; only the current profile follows the compacted live surface.
+    if descriptor.profile not in hosted_legacy_schemas.LEGACY_PROFILE_CONTRACTS:
+        contract["inputSchema"] = command_surface.compact_input_schema(contract["inputSchema"])
     return contract
 
 

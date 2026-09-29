@@ -710,6 +710,7 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
             )
 
         register_adoption_mcp(mcp, vault_root=runtime.vault_root)
+        _compact_published_input_schemas(mcp)
 
     # Retain hosted lifetime ownership for exactly as long as the composed
     # server object can serve requests. Process exit releases the underlying FD.
@@ -760,6 +761,22 @@ def _gated_adoption_egress(vault_root: Path, command_name: str, payload: Any) ->
             result = egress_module.postfilter(command_name, payload, vault_root)
             egress_module.emit_boundary_receipt(collector)
             return result
+
+
+def _compact_published_input_schemas(mcp: FastMCP) -> None:
+    """Publish optional parameters without the redundant null structure.
+
+    Runs once after every tool is registered, so registry-generated, legacy and
+    hand-registered tools are shrunk identically. Validation is unaffected: it
+    is built from each function signature, not from the published schema.
+    """
+    from fastmcp.tools import FunctionTool
+
+    from .command_surface import compact_input_schema
+
+    for component in mcp.local_provider._components.values():
+        if isinstance(component, FunctionTool):
+            component.parameters = compact_input_schema(component.parameters)
 
 
 def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:

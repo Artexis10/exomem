@@ -739,6 +739,44 @@ def mcp_request_context(
         _MCP_REQUEST_ID.reset(token)
 
 
+_SCHEMA_MAPPING_KEYS = ("properties", "$defs", "patternProperties")
+_SCHEMA_VALUE_KEYS = ("items", "additionalProperties", "not", "if", "then", "else")
+_SCHEMA_LIST_KEYS = ("anyOf", "oneOf", "allOf", "prefixItems")
+
+
+def compact_input_schema(schema: object) -> object:
+    """Stop advertising "this optional parameter may be null".
+
+    An optional parameter is already absent from `required`, so `"default":
+    null` and a `{"type": "null"}` arm restate it on every property of every
+    tool. This changes only the published JSON: argument validation is built
+    from the Python signature, so an explicit null is still accepted.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    out: dict = {}
+    for key, value in schema.items():
+        if key in _SCHEMA_MAPPING_KEYS and isinstance(value, dict):
+            out[key] = {name: compact_input_schema(item) for name, item in value.items()}
+        elif key in _SCHEMA_VALUE_KEYS:
+            out[key] = compact_input_schema(value)
+        elif key in _SCHEMA_LIST_KEYS and isinstance(value, list):
+            out[key] = [compact_input_schema(item) for item in value]
+        else:
+            out[key] = value
+    if "default" in out and out["default"] is None:
+        del out["default"]
+    arms = out.get("anyOf")
+    if isinstance(arms, list) and {"type": "null"} in arms:
+        rest = [arm for arm in arms if arm != {"type": "null"}]
+        if len(rest) == 1 and isinstance(rest[0], dict):
+            del out["anyOf"]
+            out = {**rest[0], **out}
+        else:
+            out["anyOf"] = rest
+    return out
+
+
 def _annotate_description(annotation: object, description: str) -> object:
     if (
         not description
