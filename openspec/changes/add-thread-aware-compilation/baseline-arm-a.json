@@ -17,13 +17,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "h_harbor_lantern": null
+          "h_harbor_lantern": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 154,
       "passed": true,
@@ -60,14 +60,14 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "e_corvin_ashdown": null,
-          "r_pennywhistle_plotter": null
+          "e_corvin_ashdown": "turn",
+          "r_pennywhistle_plotter": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 263,
       "passed": true,
@@ -112,13 +112,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "h_quarrel": null
+          "h_quarrel": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 136,
       "passed": true,
@@ -154,13 +154,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "e_ottilie_marsh": null
+          "e_ottilie_marsh": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 85,
       "passed": true,
@@ -208,14 +208,14 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "e_perpetua_holt": null,
-          "h_tidewater": null
+          "e_perpetua_holt": "turn",
+          "h_tidewater": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 102,
       "passed": false,
@@ -263,14 +263,14 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "e_lysander_crake": null,
-          "h_brindle": null
+          "e_lysander_crake": "turn",
+          "h_brindle": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 132,
       "passed": false,
@@ -320,13 +320,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "h_copperfield": null
+          "h_copperfield": "turn"
         },
         "status": "ambiguous"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 85,
       "passed": false,
@@ -371,13 +371,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "h_ironbark_lease": null
+          "h_ironbark_lease": "turn"
         },
         "status": "ambiguous"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 85,
       "passed": false,
@@ -415,19 +415,20 @@
         "status unresolved != partial",
         "carried_by None != 'conversation'",
         "gold not served: ['e_ottilie_marsh']",
-        "must-include fact missing: ['scored the entries and prepares the follow-up cycle']"
+        "must-include fact missing: ['scored the entries and prepares the follow-up cycle']",
+        "origin: {e_ottilie_marsh: None != 'conversation'}"
       ],
       "kind": "anaphoric_carry",
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
           "e_ottilie_marsh": null
         },
         "status": "unresolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "mismatch",
       "other_resolved": [],
       "packet_chars": 0,
       "passed": false,
@@ -468,19 +469,20 @@
         "status unresolved != partial",
         "carried_by None != 'conversation'",
         "gold not served: ['e_marigold_tenby']",
-        "must-include fact missing: ['keeps the marshal roster and the radio list']"
+        "must-include fact missing: ['keeps the marshal roster and the radio list']",
+        "origin: {e_marigold_tenby: None != 'conversation'}"
       ],
       "kind": "anaphoric_carry",
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
           "e_marigold_tenby": null
         },
         "status": "unresolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "mismatch",
       "other_resolved": [],
       "packet_chars": 0,
       "passed": false,
@@ -521,19 +523,20 @@
         "status unresolved != partial",
         "carried_by None != 'conversation'",
         "gold not served: ['h_kestrel']",
-        "must-include fact missing: ['holds two analyst seats open until the March review']"
+        "must-include fact missing: ['holds two analyst seats open until the March review']",
+        "origin: {h_kestrel: None != 'conversation'}"
       ],
       "kind": "topic_switch",
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
           "h_kestrel": null
         },
         "status": "unresolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "mismatch",
       "other_resolved": [],
       "packet_chars": 0,
       "passed": false,
@@ -567,13 +570,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "h_brindle": null
+          "h_brindle": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 154,
       "passed": true,
@@ -616,19 +619,20 @@
         "status unresolved != partial",
         "carried_by None != 'conversation'",
         "gold not served: ['h_larkspur']",
-        "must-include fact missing: ['eight volunteer marshals']"
+        "must-include fact missing: ['eight volunteer marshals']",
+        "origin: {h_larkspur: None != 'conversation'}"
       ],
       "kind": "topic_switch",
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
           "h_larkspur": null
         },
         "status": "unresolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "mismatch",
       "other_resolved": [],
       "packet_chars": 0,
       "passed": false,
@@ -669,19 +673,20 @@
         "status unresolved != partial",
         "carried_by None != 'conversation'",
         "gold not served: ['r_cormorant_winch']",
-        "must-include fact missing: ['grease the drum before every haul']"
+        "must-include fact missing: ['grease the drum before every haul']",
+        "origin: {r_cormorant_winch: None != 'conversation'}"
       ],
       "kind": "topic_switch",
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
           "r_cormorant_winch": null
         },
         "status": "unresolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "mismatch",
       "other_resolved": [],
       "packet_chars": 19,
       "passed": false,
@@ -723,13 +728,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "e_wilhelmina_pryce": null
+          "e_wilhelmina_pryce": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 94,
       "passed": true,
@@ -773,13 +778,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "r_cormorant_winch": null
+          "r_cormorant_winch": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 185,
       "passed": true,
@@ -823,13 +828,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "e_perpetua_holt": null
+          "e_perpetua_holt": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 86,
       "passed": true,
@@ -871,7 +876,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -907,7 +912,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -951,7 +956,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -996,19 +1001,20 @@
         "status unresolved != partial",
         "carried_by None != 'conversation'",
         "gold not served: ['h_kestrel']",
-        "must-include fact missing: ['holds two analyst seats open until the March review']"
+        "must-include fact missing: ['holds two analyst seats open until the March review']",
+        "origin: {h_kestrel: None != 'conversation'}"
       ],
       "kind": "withheld_ref",
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
           "h_kestrel": null
         },
         "status": "unresolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "mismatch",
       "other_resolved": [],
       "packet_chars": 0,
       "passed": false,
@@ -1022,6 +1028,50 @@
           "recall": 0.0
         },
         "resource": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "V29",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "attachment",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 1,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 0,
+          "poison_served": 0,
+          "recall": 0.0
+        },
+        "note": {
           "gold": 0,
           "gold_served": 0,
           "other_served": 0,
@@ -1051,14 +1101,14 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "e_bastien_quill": null,
-          "h_saltmarsh": null
+          "e_bastien_quill": "turn",
+          "h_saltmarsh": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 206,
       "passed": true,
@@ -1111,13 +1161,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "e_wilhelmina_pryce": null
+          "e_wilhelmina_pryce": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 94,
       "passed": true,
@@ -1162,14 +1212,14 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "h_mistral": null,
-          "r_cormorant_winch": null
+          "h_mistral": "turn",
+          "r_cormorant_winch": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 359,
       "passed": true,
@@ -1215,14 +1265,14 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "c_pontoon_haul": null,
-          "e_perpetua_holt": null
+          "c_pontoon_haul": "turn",
+          "e_perpetua_holt": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 225,
       "passed": true,
@@ -1275,13 +1325,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "h_nightjar": null
+          "h_nightjar": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 145,
       "passed": true,
@@ -1318,14 +1368,14 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "e_marigold_tenby": null,
-          "h_larkspur": null
+          "e_marigold_tenby": "turn",
+          "h_larkspur": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 231,
       "passed": true,
@@ -1370,13 +1420,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "h_kestrel": null
+          "h_kestrel": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 171,
       "passed": true,
@@ -1418,7 +1468,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -1454,7 +1504,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -1498,7 +1548,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -1534,7 +1584,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -1572,13 +1622,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "e_perpetua_holt": null
+          "e_perpetua_holt": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 102,
       "passed": true,
@@ -1622,13 +1672,13 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
-          "e_lysander_crake": null
+          "e_lysander_crake": "turn"
         },
         "status": "resolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "match",
       "other_resolved": [],
       "packet_chars": 132,
       "passed": true,
@@ -1670,7 +1720,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "ambiguous"
       },
@@ -1700,7 +1750,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "ambiguous"
       },
@@ -1730,7 +1780,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -1774,7 +1824,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -1810,7 +1860,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -1846,7 +1896,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -1882,7 +1932,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -1926,7 +1976,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -1970,7 +2020,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2014,7 +2064,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2058,7 +2108,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2102,7 +2152,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2138,7 +2188,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2183,19 +2233,20 @@
         "status unresolved != partial",
         "carried_by None != 'conversation'",
         "gold not served: ['h_kestrel']",
-        "must-include fact missing: ['holds two analyst seats open until the March review']"
+        "must-include fact missing: ['holds two analyst seats open until the March review']",
+        "origin: {h_kestrel: None != 'conversation'}"
       ],
       "kind": "absent_ref",
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {
           "h_kestrel": null
         },
         "status": "unresolved"
       },
-      "origin_verdict": "not_emitted",
+      "origin_verdict": "mismatch",
       "other_resolved": [],
       "packet_chars": 0,
       "passed": false,
@@ -2235,7 +2286,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2279,7 +2330,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2315,7 +2366,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2359,7 +2410,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2403,7 +2454,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2439,7 +2490,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2483,7 +2534,7 @@
       "observed": {
         "carried_by": null,
         "disambiguated_by": null,
-        "generation_conversation": null,
+        "generation_conversation": "absent",
         "origin": {},
         "status": "unresolved"
       },
@@ -2509,423 +2560,12 @@
     "a"
   ],
   "compiler": {
-    "accepts_conversation_argument": false,
+    "accepts_conversation_argument": true,
     "embeddings": "disabled",
     "revision": "main before add-thread-aware-compilation"
   },
   "conversation_arms": {
-    "refused": [
-      {
-        "arm": "b",
-        "case_id": "V13",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V13",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V13",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V14",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V14",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V14",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V15",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V15",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V16",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V16",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V17",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V17",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V17",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V18",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V18",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V18",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V19",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V19",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V19",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V20",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V20",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V20",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V21",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V21",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V21",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V22",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V22",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V22",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V23",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V23",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V23",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V24",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V24",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V24",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V25",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V25",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V26",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V26",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "V27",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V27",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "V28",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "V28",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W13",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "W13",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W13",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W14",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "W14",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W14",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W15",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W15",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W16",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W16",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W17",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "W17",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W17",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W18",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "W18",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W18",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W19",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "W19",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W19",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W20",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "W20",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W20",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W21",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "W21",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W21",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W22",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "W22",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W22",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W23",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "W23",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W23",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W24",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "W24",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W24",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W25",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W25",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "c",
-        "case_id": "W26",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W26",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "b",
-        "case_id": "W28",
-        "result": "refused: unknown argument"
-      },
-      {
-        "arm": "d",
-        "case_id": "W28",
-        "result": "refused: unknown argument"
-      }
-    ],
+    "refused": [],
     "sent_no_conversation_so_identical_to_arm_a": [
       {
         "arm": "b",
@@ -3217,16 +2857,17 @@
       }
     ]
   },
-  "corpus_hash": "d0bc519b26b0bc4ed2ce1718bf52a83342f8ab3ce70bbba1eebb9966420c9dfc",
+  "corpus_hash": "49bd66dfb1186d24ae6a26ada964deb30013045d87435251e0e11f86ad061a22",
   "corpus_hash_note": "sha256 over the corpus pages with the product writers' minted ids and audit trailers removed; the exact-bytes hash differs on every build",
   "corpus_id": "context-activation-conversation-corpus-v1",
-  "fixture_set_digest": "374056f5fc22d9a75249b83162d141a5b293b2fc5fc68071ebcad88a2fd5170f",
+  "fixture_set_digest": "1c81d3e957b975c1ee72ff2e16fe6ba401179679101bdbb35edb7172a82a13e9",
   "fixture_set_id": "context-activation-conversation-v1",
   "manifest": "context-activation-conversation-baseline-arm-a",
   "verdicts": {
     "attachment_cases_abstain_on_arm_a": {
       "V26": true,
-      "V27": true
+      "V27": true,
+      "V29": true
     },
     "drowning_cases_failing_on_arm_a": [],
     "incident_classes_failing_on_arm_a": {
@@ -3271,7 +2912,7 @@
       "multi_turn_cases": 13,
       "red": true
     },
-    "origin_label": "not_emitted",
+    "origin_label": "emitted",
     "twins_failing_on_arm_a": [],
     "withheld_pair_byte_identical_on_arm_a": true
   }
