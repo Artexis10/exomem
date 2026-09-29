@@ -92,15 +92,20 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
         "gold recall 0.33 below the 0.9 floor",
         "missing required fact(s): ['weekly limit', 'capacity ceiling']",
     ),
-    # The retrieval carry is live on this corpus and carries T1's own
-    # fitness-goal note: a page outside the twin's empty gold.
+    # The retrieval carry is live on this corpus and carries the step-count
+    # fitness-goal page (C1's pre-registered poison): outside T1's empty gold.
     "T1": ("twin surfaced a ref outside its own gold", "precision 0.00 below the 0.8 floor"),
+    # Stays red by ruling (R3): the grill resolves only partially, and a
+    # shared tag is not corroboration on a real vault. Semantic corroboration
+    # is future sensed-model work.
     "C2": (
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.50 below the 0.9 floor",
     ),
     # The plan anchor now reports its item (close-memory-loop 6.12), and the
-    # turn's words reach the other workstream's item, never this one's.
+    # turn's words reach the other workstream's item, never this one's. Stays
+    # red by ruling (R4): "the next roadmap item" relies on workspace context a
+    # cold run lacks; a keyed variant belongs in the continuity group.
     "C3": (
         "expected status 'resolved', observed 'unresolved'",
         "1 poison anchor(s) surfaced",
@@ -120,6 +125,7 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.00 below the 0.9 floor",
     ),
+    # As C2, on the padded tree (R3).
     "C9": (
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.50 below the 0.9 floor",
@@ -130,6 +136,17 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
 #: outcome. On corpus v4 neither amendment changes a verdict: no gold note
 #: reaches a packet only as a unit, and no poison is served as a hedge.
 AMENDED_PASSING_TODAY = PASSING_TODAY
+
+#: The same packets under amendment A7 alone (ambiguity candidates in a
+#: positive case's precision). C7's real packet names only its gold hubs as
+#: ambiguity, so A7 changes no verdict on corpus v4.
+A7_PASSING_TODAY = PASSING_TODAY
+
+#: The same packets under amendment A8 alone (a carried gold page with its
+#: units satisfies the status, and its units count in precision). No verdict
+#: changes: C4's carried failure note still leaves the colleague's entity
+#: unreached, and the other carried pages are outside their case's gold.
+A8_PASSING_TODAY = PASSING_TODAY
 
 #: Negative controls whose pre-registered mechanism does not change their
 #: outcome. Empty on corpus v4: C6, T1, T2 and T9 each fail with the naming
@@ -194,6 +211,10 @@ class Run:
     #: The same packets under the reported amendments (A2, A4), kept beside
     #: ``report``, never in its place.
     amended: audit.AuditReport
+    #: The same packets under amendment A7 alone, its own column.
+    amended_a7: audit.AuditReport
+    #: The same packets under amendment A8 alone (a carried gold page counts).
+    amended_a8: audit.AuditReport
     #: gold note key -> every unit ref any role lane serves from its page.
     note_units: dict[str, tuple[str, ...]]
 
@@ -256,9 +277,20 @@ def _compute(workdir: Path) -> Run:
         removals[mechanism] = packets
         removal_reports[mechanism] = product.score_trees(trees, packets)
     amended = product.score_trees(trees, raw, amendments=product.REPORTED_AMENDMENTS)
+    amended_a7 = product.score_trees(trees, raw, amendments=product.AMBIGUITY_AMENDMENTS)
+    amended_a8 = product.score_trees(trees, raw, amendments=product.CARRIED_GOLD_AMENDMENTS)
     base = next(tree for tree in trees if tree.distractor_count == 0)
     return Run(
-        trees, raw, report, reversed_raw, removals, removal_reports, amended, _note_units(base)
+        trees,
+        raw,
+        report,
+        reversed_raw,
+        removals,
+        removal_reports,
+        amended,
+        amended_a7,
+        amended_a8,
+        _note_units(base),
     )
 
 
@@ -461,6 +493,8 @@ def test_current_runtime_amended_outcomes_are_recorded_beside_the_raw_ones(run: 
     the raw score. On corpus v4 they change no verdict."""
 
     assert {s.case_id for s in run.amended.per_case if s.passed} == AMENDED_PASSING_TODAY
+    assert {s.case_id for s in run.amended_a7.per_case if s.passed} == A7_PASSING_TODAY
+    assert {s.case_id for s in run.amended_a8.per_case if s.passed} == A8_PASSING_TODAY
     assert {s.case_id for s in run.report.per_case if s.passed} == PASSING_TODAY
     raw = {s.case_id: s for s in run.report.per_case}
     for amended in run.amended.per_case:
@@ -666,7 +700,12 @@ def test_the_negative_controls_are_load_bearing_on_corpus_v4(run: Run) -> None:
 
 def test_the_recorded_report_is_the_current_product_run(run: Run) -> None:
     live = product.recorded_report(
-        run.trees, run.report, removals=run.removal_reports, amended=run.amended
+        run.trees,
+        run.report,
+        removals=run.removal_reports,
+        amended=run.amended,
+        amended_a7=run.amended_a7,
+        amended_a8=run.amended_a8,
     )
     target = os.environ.get(RECORD_ENV)
     if target:

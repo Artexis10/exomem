@@ -84,3 +84,75 @@ def test_a_turn_about_one_item_serves_that_item_page(planned: Path) -> None:
     assert [(anchor["kind"], anchor["ref"]) for anchor in resolved] == [("plan", page)]
     assert {unit["ref"] for unit in packet["units"] if unit["role"] == "active_plans"} <= {page}
     assert MANIFEST not in {anchor["ref"] for anchor in packet["anchors"]}
+
+
+def test_an_agent_choice_naming_the_collection_selects_every_item(planned: Path) -> None:
+    working_set_runtime.reset_caches_for_tests()
+    pages = _item_pages(planned)
+    packet = commands.op_activate_context(planned, turn="What is on this list?", anchor=MANIFEST)
+
+    resolved = [anchor for anchor in packet["anchors"] if anchor["status"] == "resolved"]
+    assert {anchor["ref"] for anchor in resolved} == set(pages.values())
+    assert {anchor["path"] for anchor in resolved} == {MANIFEST}
+    assert packet["ambiguity"] == []
+
+
+def test_items_filed_together_stay_complementary(planned: Path) -> None:
+    working_set_runtime.reset_caches_for_tests()
+    pages = _item_pages(planned)
+    packet = commands.op_activate_context(
+        planned,
+        turn="First resurface the harbour slipway, then replace the lighthouse lantern.",
+    )
+
+    resolved = [anchor for anchor in packet["anchors"] if anchor["status"] == "resolved"]
+    assert {anchor["ref"] for anchor in resolved} == set(pages.values())
+    assert packet["abstained"] is False
+    assert packet["ambiguity"] == []
+
+
+def test_an_unreadable_item_page_reports_its_home(
+    planned: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The item lookup fails; the plan anchors fall back to their collection,
+    exactly as before the item page was known."""
+
+    from exomem import record_formats
+
+    real = record_formats.load_adapter
+
+    def failing(vault_root, manifest, *, authorize_path=None, **kwargs):
+        adapter = real(vault_root, manifest, authorize_path=authorize_path, **kwargs)
+        if manifest.path == MANIFEST and kwargs == {}:
+            class Unreadable:
+                def read(self):
+                    raise OSError("item pages unreadable")
+
+            return Unreadable()
+        return adapter
+
+    monkeypatch.setattr(record_formats, "load_adapter", failing)
+    rows = working_set_index._planning_item_pages(planned, _manifest_of(planned))
+    assert rows == {}
+    monkeypatch.undo()
+
+    monkeypatch.setattr(working_set_index, "_planning_item_pages", lambda *_a, **_k: {})
+    index = working_set_index.WorkingSetIndex(planned)
+    try:
+        index.rebuild()
+        plans = [row for row in index.anchors() if row.kind == "plan"]
+    finally:
+        index.close()
+
+    assert len(plans) == len(ITEMS)
+    assert {working_set_resolve.anchor_ref(row) for row in plans} == {MANIFEST}
+
+
+def _manifest_of(vault: Path):
+    from exomem import structured_collections
+
+    return next(
+        manifest
+        for manifest in structured_collections.discover_collections(vault)
+        if manifest.path == MANIFEST
+    )

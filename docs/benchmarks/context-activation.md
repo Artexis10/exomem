@@ -256,13 +256,16 @@ T3, T4, T5 and T7 now pass, raw and amended:
 | Case | Raw | What changed |
 |------|-----|--------------|
 | T3 | pass | A plan anchor reports its item's own page; the collection stays its home (task 6.12) |
-| T4 | pass | A bare first name two unlinked people share is `ambiguous`, and the carry is not asked |
+| T4 | pass | A bare first name two unlinked people share is `ambiguous`, and the carry is not asked; a shared word forms that question only for people, or when a cased turn capitalises it away from a sentence start |
 | T5 | pass | A unit the anchor's own lede already says is not served again as a fragment |
-| T7 | pass | The qualifier "feature implementation" narrows the two AI-search senses to one |
+| T7 | pass | The contiguous run "AI search feature" strictly contains the run naming the market hub, so the turn narrows to the feature hub; a word of the wider name said elsewhere narrows nothing |
 | C3 | red | The item ref is served, and the turn's words reach the other workstream's item (now a partial poison anchor) |
 
-The other red cases keep their round-2 reasons. C8's carry now names the
-current head alone (retired revisions no longer count toward a word's rarity),
+Under amendments A2+A4, A7 and A8 alone, the passing set is the raw one: A8
+credits C4's carried failure note, but the colleague's entity is still never
+reached (recall 0.50). The other red cases keep their round-2 reasons. C8's
+carry now names the current head alone (retired revisions, by status or by
+`superseded_by`, no longer count toward a word's rarity),
 but no units-lane role reads a `current state` observation off a carried page.
 A carried page is `retrieval_carried`, never `resolved` (design D3), and its
 units are fragments (D9), so no positive case whose gold is an ordinary note
@@ -284,6 +287,36 @@ floor of 100. The fixtures and thresholds are unchanged. Every amended score
 A4 removes a hedged poison hit and nothing else: it never marks a case as
 hedging, so it cannot waive a status mismatch (integrity review F1).
 
+**Known gap in the raw scorer (disclosed, not fixed).** Raw precision counts
+resolved anchors, units and pointers, never ambiguity candidates, and a
+listed candidate turns the status into `ambiguous`. So a C7 packet holding
+its gold hubs as `partial` anchors, with the gold facts in the rendered
+ambiguity, passes with a wrong page added as an ambiguity candidate. The same
+packet without that candidate fails on status. This predates round 2, and the
+raw scorer stays frozen. Amendment A7 (opt-in) puts every ambiguity candidate
+of a positive case into the precision denominator, like a served anchor. It
+is reported in its own column. On v4 the real C7 packet lists only its two
+gold hubs, so A7 changes no verdict.
+
+**Amendment A8 (opt-in): a carried gold page counts.** When a positive case's
+gold page is served `retrieval_carried` together with at least one of its own
+units, the expected `resolved` status is read as satisfied. Every `#unit-`
+fragment of a bound gold page is credited to that page in precision as well as
+recall; A2 amended recall only. Units of any other page stay distinct. The
+reason: the product labels carried context honestly, and what matters to the
+user is whether the agent receives the right page and fact. A8 is reported in
+its own column. On v4 it moves only C4: status and precision are satisfied,
+but C4 stays red on recall (0.50), because the colleague's entity is never
+reached.
+
+**Pinned reds by ruling.**
+- **C2 and C9 (R3).** The grill resolves only partially. A shared tag is not
+  corroboration on a real vault, and semantic corroboration is future
+  sensed-model work.
+- **C3 (R4).** Besides the Planning identity (A3), "the next roadmap item"
+  relies on workspace context a cold run lacks. The keyed variant belongs in
+  the continuity group; it waits on the corpus v5 ruling.
+
 The ordinary notes are realistic, topic-diverse pages, and several share words
 with the fixture turns on purpose. One is a deliberately hard lexical
 distractor: "Oven temperature conversions" was written with T6's turn in view,
@@ -291,27 +324,28 @@ and carries its distinctive words (temperature, Fahrenheit, Celsius). It makes
 T6 harder, not easier, and it is kept by ruling (F5): a vault in real use has
 distractors like it.
 
-| Case | Raw | Amended | Why it fails today |
-|------|-----|---------|--------------------|
-| C1 | red | red | Resolves the subscriptions collection; the two gold notes never arrive (recall 1/3) |
-| T1 | red | red | The carry reaches T1's own fitness-goal note, outside its empty gold |
-| C2, C9 | red | red | The grill stays `partial`; the turn abstains (recall 1/2) |
-| T2 | pass | pass | |
-| C3 | red | red | Product red (A3, close-memory-loop 6.12): the plan anchor is the collection, not the item |
-| T3 | red | red | Product red (A3): resolves the other workstream's collection |
-| C4 | red | red | The carry brings the failure note; nothing reaches the colleague's entity |
-| T4 | red | red | Product red (A5): a bare first name stays `partial`; the carry also reaches C4's failure note |
-| C5 | pass | pass | |
-| T5 | red | red | The scanner cart's own resource unit is served; D9 counts the fragment as foreign, and A2 amends recall only |
-| C6 | pass | pass | |
-| T6 | red | red | The carry reaches an ordinary note on oven temperature conversions |
-| C7 | pass | pass | |
-| T7 | red | red | Product red (A5): the scoped turn also resolves the market hub |
-| C8, T8 | red | red | The gold notes are not anchors, and no word of the turn carries them |
-| T9 | pass | pass | |
+| Case | Raw | A2+A4 | A7 | A8 | Why it fails today |
+|------|-----|-------|----|----|--------------------|
+| C1 | red | red | red | red | Resolves the subscriptions collection; the two gold notes never arrive (recall 1/3) |
+| T1 | red | red | red | red | The carry reaches the step-count fitness-goal page, a fixture page bound as C1's poison, outside T1's empty gold (see the corpus v5 ruling request) |
+| C2, C9 | red | red | red | red | The grill stays `partial`; the turn abstains (recall 1/2). Pinned by ruling R3 |
+| T2 | pass | pass | pass | pass | |
+| C3 | red | red | red | red | Product red (A3, close-memory-loop 6.12): the plan anchor is the collection, not the item. Also relies on workspace context a cold run lacks (R4) |
+| T3 | red | red | red | red | Product red (A3): resolves the other workstream's collection |
+| C4 | red | red | red | red | The carry brings the failure note; nothing reaches the colleague's entity (under A8 only recall 0.50 remains) |
+| T4 | red | red | red | red | Product red (A5): a bare first name stays `partial`; the carry also reaches C4's failure note |
+| C5 | pass | pass | pass | pass | |
+| T5 | red | red | red | red | The scanner cart's own resource unit is served; D9 counts the fragment as foreign, and A2 amends recall only |
+| C6 | pass | pass | pass | pass | |
+| T6 | red | red | red | red | The carry reaches an ordinary note on oven temperature conversions |
+| C7 | pass | pass | pass | pass | |
+| T7 | red | red | red | red | Product red (A5): the scoped turn also resolves the market hub |
+| C8, T8 | red | red | red | red | The gold notes are not anchors, and no word of the turn carries them |
+| T9 | pass | pass | pass | pass | |
 
-Raw 5/18, amended 5/18. Neither amendment changes a verdict on v4: no gold
-note reaches a packet only as a unit, and no poison is served as a hedge.
+Raw 5/18, A2+A4 5/18, A7 5/18, A8 5/18. No amendment changes a verdict on v4: no gold
+note reaches a packet only as a unit, no poison is served as a hedge, and no
+positive case lists an ambiguity candidate outside its gold.
 
 Mechanism removal on v4. The kill switch fails every positive case. C5 fails
 without governed current state and C7 without competing-sense abstention.
@@ -328,23 +362,32 @@ referent and for the `recent_context` block. The earlier session's acts go
 through supported doors (an `anchor` pick, an `episode_memory` record, an
 `edit_memory` commit), then one fresh `activate_context` call is made.
 
-The current group is v2 (digest `b208a986…`, pinned in a commit before its
-first run). It keeps v1's cases and gold and tightens the scorer after the
-integrity review. Every served anchor, whatever its status, and every
-ambiguity candidate must be one of the referents, so the right page plus a
-wrong one fails; the keyless K3 must serve nothing at all, partial anchors and
-ambiguity included. The digest also covers a sha256 of the scorer module's
-source. The result is in
-`docs/benchmarks/context-activation-continuity-2026-09-v2.json`. v1 (digest
-`de5e7900…`, 4/4, `context-activation-continuity-2026-09.json`) is kept as
-history; its scorer passed packets that v2 fails.
+The current group is v3 (digest `8c6eb814…`, pinned in a commit before its
+first run). It keeps v1's cases and gold. Everything a packet serves must
+belong to a referent page: anchors of every status, ambiguity candidates,
+units, pointers and current-state entries. A unit or state entry of the
+referent page is fine; one of any other page fails. The keyless K3 must serve
+nothing at all. Refs are compared on canonical page identity, read back from
+the vault before the fresh turn: a memory ref, a path, a path without the
+knowledge-base prefix, and a `#fragment` of any of them all name the same
+page. So a hot-page ambiguity that lists a page by path matches its anchor.
+The digest also covers a sha256 of the scorer module's source. The result is
+in `docs/benchmarks/context-activation-continuity-2026-09-v3.json`.
+
+History, kept as recorded:
+- v1 (`de5e7900…`, 4/4, `context-activation-continuity-2026-09.json`) did not
+  check extra served pages.
+- v2 (`b208a986…`, 4/4, `context-activation-continuity-2026-09-v2.json`)
+  checked anchors and ambiguity only, on one exact ref spelling. Its scorer
+  passed packets carrying a unit, pointer or state entry of a wrong page,
+  which v3 fails.
 
 | Case | Scenario | Result |
 |------|----------|--------|
-| K1 | "continue" from a fresh session in the earlier session's workspace, after newer work in another workspace | v2 pass (v1 pass) |
-| K2 | "where were we" after a recorded episode | v2 pass (v1 pass) |
-| K3 | a keyless bare "continue" | v2 pass (v1 pass): abstains, names nothing, still lists the page |
-| K4 | "continue" after an edit of an ordinary, non-anchor note | v2 pass (v1 pass): carried on recency |
+| K1 | "continue" from a fresh session in the earlier session's workspace, after newer work in another workspace | v3 pass (v2, v1 pass): serves only the bench, its units and its state |
+| K2 | "where were we" after a recorded episode | v3 pass (v2, v1 pass): serves only the entity and its unit |
+| K3 | a keyless bare "continue" | v3 pass (v2, v1 pass): abstains, serves nothing, still lists the page |
+| K4 | "continue" after an edit of an ordinary, non-anchor note | v3 pass (v2, v1 pass): carried on recency, only its own units |
 
 The group is not one of the eighteen and does not enter their verdict.
 

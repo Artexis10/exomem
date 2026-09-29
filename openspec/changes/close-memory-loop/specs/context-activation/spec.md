@@ -64,20 +64,26 @@ within that interval.
 Resolution SHALL let the turn's own words decide between same-kind senses in two cases
 beyond the resolved-anchor ambiguity rule. First, a bare shared name: when no anchor
 resolves and two or more entity anchors are `partial` on one and the same authored name
-word alone (`rare_term`, with qualifiers at most), the turn SHALL be `ambiguous` between
-those entities, formed by the same anchor-neighbourhood connectivity rule as any
-competing group, and the retrieval carry SHALL NOT be asked; a single such entity SHALL
-stay a `partial` lead, and a shared word in the names of two anchors of any other kind
-SHALL NOT form this ambiguity. Second, a qualifier: when two same-kind anchors resolve
-without a deciding-alone kind and the authored name words the turn reached on one are a
-strict subset of those it reached on the other, the narrower anchor SHALL NOT be listed,
-and neither SHALL a same-kind `partial` anchor reached only through a strict subset of
-the chosen anchor's name words; where no such subset exists every sense the turn reached
-SHALL stay listed. Neither rule SHALL compare anchors of different kinds.
+word alone (`rare_term`, with qualifiers at most), and that word is said as a name, the
+turn SHALL be `ambiguous` between those entities, formed by the same anchor-neighbourhood
+connectivity rule as any competing group, and the retrieval carry SHALL NOT be asked. A
+word is said as a name when every such entity is a person (by its own `entity_type`,
+which the activation index records), or, in a cased script, when the turn capitalises
+the word somewhere other than at a sentence start; in an uncased script only the person
+case applies. A single such entity SHALL stay a `partial` lead, and a shared word in the
+names of two anchors of any other kind SHALL NOT form this ambiguity. Second, a
+qualifier: each anchor's contact SHALL be the longest contiguous run of turn tokens that
+spells its own authored name words (stopwords may sit inside a run, never at its edges).
+When two same-kind anchors resolve without a deciding-alone kind and one's run lies
+strictly inside the other's, the narrower anchor SHALL NOT be listed, and neither SHALL a
+same-kind `partial` anchor with no retrieved contact whose run lies strictly inside the
+chosen anchor's run. A word of the wider name said outside that run SHALL narrow nothing,
+and where no run strictly contains another every sense the turn reached SHALL stay
+listed. Neither rule SHALL compare anchors of different kinds.
 
 #### Scenario: A bare first name two people share is a question
 - **WHEN** a turn says only a first name that two unlinked person entities share, and
-  nothing in the turn resolves
+  nothing in the turn resolves, even though the turn also names a carryable note
 - **THEN** the packet is `ambiguous`, lists both people under `ambiguity`, and carries
   no retrieved page
 
@@ -85,11 +91,22 @@ SHALL stay listed. Neither rule SHALL compare anchors of different kinds.
 - **WHEN** the same turn reaches a single person entity on that name word
 - **THEN** the packet abstains `unresolved` with that entity as a `partial` anchor
 
+#### Scenario: An ordinary noun two businesses are named after is not a name
+- **WHEN** a turn says, in lower case or only as a sentence's first word, a word that
+  two organisation entities' names share
+- **THEN** the turn is not `ambiguous` between them, and the retrieval carry may still
+  serve a page the turn names
+
 #### Scenario: A qualifier names one sense
-- **WHEN** a turn resolves two same-kind hubs on their shared name words and also says
-  a word only one hub's name carries
+- **WHEN** a turn resolves two same-kind hubs and spells, in one contiguous run, the
+  shared name words together with a word only one hub's name carries
 - **THEN** that hub resolves alone, the other hub is not listed, and a same-kind
-  partial hub reached only through words of the chosen hub's name is not listed
+  partial hub reached only inside that run is not listed
+
+#### Scenario: A detached word of the wider name narrows nothing
+- **WHEN** the word only one hub's name carries appears elsewhere in the turn, apart
+  from the run that spells the shared words
+- **THEN** the packet is `ambiguous` between the hubs
 
 #### Scenario: The shared words alone stay ambiguous
 - **WHEN** a turn says only the words both hub names share
@@ -128,14 +145,22 @@ the anchor SHALL report its home as before.
 
 ### Requirement: Retired revisions do not make a page's name ordinary
 The retrieval carry SHALL measure how distinctive a turn's word is without counting
-pages whose own status retires them (the statuses the carry already refuses to serve),
-so a page revised several times stays nameable by the words its retired revisions
-share. Current pages SHALL still count, and the corpus page total SHALL be unchanged.
+retired pages, by the same test the carry applies to its own candidates: a page whose
+own status retires it, or whose `superseded_by` names its replacement. A page revised
+several times thus stays nameable by the words its retired revisions share. The
+`superseded_by` test MAY be applied only to a word counted at most one carry window
+above the distinctiveness cap, since no other word can become distinctive. Current pages
+SHALL still count, and the corpus page total SHALL be unchanged.
 
 #### Scenario: A page revised three times is still carried
 - **WHEN** a turn names a page by a phrase that its three superseded revisions also
   carry, and no other current page carries it
 - **THEN** the carry admits the current page alone
+
+#### Scenario: A revision retired only by its successor pointer is not counted
+- **WHEN** the three revisions keep `status: active` but each names the current page in
+  `superseded_by`
+- **THEN** the carry still admits the current page alone
 
 #### Scenario: Current namesakes still make a phrase ordinary
 - **WHEN** four current pages carry the same phrase

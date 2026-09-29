@@ -1492,3 +1492,152 @@ def test_run_audit_passes_amendments_through() -> None:
     report = run_audit({"T7": packet}, manifest=validate_manifest(MANIFEST), amendments={HEDGED_POISON})
     t7 = next(score for score in report.per_case if score.case_id == "T7")
     assert t7.poison_hit == 0
+
+
+# -- Amendment A7: ambiguity candidates count toward a positive case's precision
+
+
+def _c7_with_ambiguity(*candidates: str) -> ActivationPacket:
+    """C7's gold as partial hubs, its facts in the rendered ambiguity, and
+    `candidates` listed as the ambiguity (the integrity recheck's probe)."""
+    return ActivationPacket(
+        anchors=_partial("c7_hub_feature", "c7_hub_market", "c7_hub_search_ux"),
+        ambiguity=candidates,
+        ambiguity_text=("AI search feature", "AI search market"),
+        abstained=True,
+        abstention_reason="ambiguous",
+    )
+
+
+def test_raw_scoring_still_passes_c7_with_a_wrong_ambiguity_candidate() -> None:
+    """Disclosed, not fixed: the raw scorer is pre-registered and frozen."""
+    assert score_case(_c7_with_ambiguity("zz_wrong_page"), fixture_by_id("C7")).passed
+
+
+def test_a7_a_wrong_ambiguity_candidate_fails_c7_on_precision() -> None:
+    from membench.utility.context_activation import AMBIGUITY_PRECISION
+
+    amended = _amended(_c7_with_ambiguity("zz_wrong_page"), "C7", amendments={AMBIGUITY_PRECISION})
+    assert not amended.passed
+    assert amended.precision == 0.0
+    assert "precision 0.00 below the 0.8 floor" in amended.failure_reasons
+
+
+def test_a7_gold_ambiguity_candidates_keep_c7_passing() -> None:
+    from membench.utility.context_activation import AMBIGUITY_PRECISION
+
+    packet = _c7_with_ambiguity("c7_hub_feature", "c7_hub_market")
+    raw = score_case(packet, fixture_by_id("C7"))
+    amended = _amended(packet, "C7", amendments={AMBIGUITY_PRECISION})
+    assert raw.passed and amended.passed
+    assert amended.precision == 1.0
+
+
+def test_a7_leaves_twins_to_their_own_rules() -> None:
+    """On a twin an ambiguity candidate outside its gold is already a false
+    activation; A7 changes nothing there."""
+    from membench.utility.context_activation import AMBIGUITY_PRECISION
+
+    packet = ActivationPacket(ambiguity=("zz_wrong_page",), abstained=True, abstention_reason="ambiguous")
+    raw = score_case(packet, fixture_by_id("T7"))
+    amended = _amended(packet, "T7", amendments={AMBIGUITY_PRECISION})
+    assert (amended.precision, amended.failure_reasons) == (raw.precision, raw.failure_reasons)
+
+
+# -- Amendment A8: a carried gold page counts (positive cases only) ------------
+
+#: Unit parents as a frozen map spells them: the page's own ref -> its key.
+A8_PARENTS = {
+    "page-c4-failure": "c4_failure_note",
+    "page-c4-entity": "c4_entity_profile",
+    "page-t4-a": "t4_shared_first_name_entity_a",
+}
+
+
+def _carried(ref: str, *unit_refs: str, extra_units: tuple = ()) -> ActivationPacket:
+    return ActivationPacket(
+        anchors=(Anchor(ref=ref, title=ref, kind="page", status="retrieval_carried"),),
+        units=(
+            *(
+                Unit(ref=f"{unit_ref}#unit-{i}", role="precedents", text="It failed on the Mac build.")
+                for i, unit_ref in enumerate(unit_refs)
+            ),
+            *extra_units,
+        ),
+        abstained=True,
+        abstention_reason="unresolved",
+    )
+
+
+def _a8(packet: ActivationPacket, case_id: str):
+    from membench.utility.context_activation import CARRIED_GOLD
+
+    return _amended(
+        packet,
+        case_id,
+        amendments={CARRIED_GOLD},
+        key_to_ref={"c4_failure_note": "page-c4-failure", "c4_entity_profile": "page-c4-entity"},
+        unit_parents={"page-c4-failure": "page-c4-failure", "page-c4-entity": "page-c4-entity"},
+    )
+
+
+def test_a8_a_carried_gold_page_with_its_units_satisfies_status_and_precision() -> None:
+    packet = _carried("page-c4-failure", "page-c4-failure")
+    raw = score_case(packet, fixture_by_id("C4"), key_to_ref={"c4_failure_note": "page-c4-failure"})
+    amended = _a8(packet, "C4")
+    assert not raw.status_match and raw.precision == 0.0
+    assert amended.status_match and amended.precision == 1.0
+    # The entity is still never reached: recall stays the honest 0.50.
+    assert amended.failure_reasons == ("gold recall 0.50 below the 0.9 floor",)
+
+
+def test_a8_full_gold_through_a_carried_page_and_its_entity_unit_passes() -> None:
+    packet = _carried("page-c4-failure", "page-c4-failure", "page-c4-entity")
+    assert _a8(packet, "C4").passed
+
+
+def test_a8_a_carried_gold_page_without_its_units_earns_no_status() -> None:
+    packet = _carried("page-c4-failure")
+    assert not _a8(packet, "C4").status_match
+
+
+def test_a8_a_carried_page_outside_the_gold_earns_nothing() -> None:
+    packet = _carried("page-elsewhere", "page-elsewhere")
+    amended = _a8(packet, "C4")
+    assert not amended.status_match
+    assert amended.precision == 0.0
+
+
+def test_a8_units_of_a_non_gold_page_stay_distinct_in_precision() -> None:
+    packet = _carried(
+        "page-c4-failure",
+        "page-c4-failure",
+        extra_units=(Unit(ref="page-elsewhere#unit-9", role="precedents", text="t"),),
+    )
+    assert _a8(packet, "C4").precision == 0.5
+
+
+def test_a8_leaves_twins_to_their_own_rules() -> None:
+    from membench.utility.context_activation import CARRIED_GOLD
+
+    packet = _carried("page-t4-a", "page-t4-a")
+    raw = score_case(packet, fixture_by_id("T4"), key_to_ref={"t4_shared_first_name_entity_a": "page-t4-a"})
+    amended = _amended(
+        packet,
+        "T4",
+        amendments={CARRIED_GOLD},
+        key_to_ref={"t4_shared_first_name_entity_a": "page-t4-a"},
+        unit_parents={"page-t4-a": "page-t4-a"},
+    )
+    assert (amended.status_match, amended.precision, amended.failure_reasons) == (
+        raw.status_match,
+        raw.precision,
+        raw.failure_reasons,
+    )
+
+
+def test_a8_requires_a_frozen_parent_map() -> None:
+    from membench.utility.context_activation import CARRIED_GOLD
+
+    with pytest.raises(ValueError, match="unit_parents"):
+        _amended(ActivationPacket(), "C4", amendments={CARRIED_GOLD})
