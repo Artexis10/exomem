@@ -742,7 +742,9 @@ _SCHEMA_LIST_KEYS = ("anyOf", "oneOf", "allOf", "prefixItems")
 
 
 def compact_input_schema(schema: object) -> object:
-    """Stop advertising "this optional parameter may be null".
+    """Drop schema keywords that restate JSON Schema defaults.
+
+    Stops advertising "this optional parameter may be null".
 
     An optional parameter is already absent from `required`, so `"default":
     null` and a `{"type": "null"}` arm restate it on every property of every
@@ -763,6 +765,9 @@ def compact_input_schema(schema: object) -> object:
             out[key] = value
     if "default" in out and out["default"] is None:
         del out["default"]
+    # `additionalProperties: true` is the JSON Schema default.
+    if out.get("additionalProperties") is True:
+        del out["additionalProperties"]
     arms = out.get("anyOf")
     if isinstance(arms, list) and {"type": "null"} in arms:
         rest = [arm for arm in arms if arm != {"type": "null"}]

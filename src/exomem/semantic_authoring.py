@@ -497,7 +497,7 @@ def render_tool_guidance(
     # operations, so neither needs the selection rule or the worked example
     # that a whole-page writer does; both keep the minimum, the lifecycle and
     # final-unit rules, and the refusal remediation.
-    whole_page = tool in {"remember", "replace_memory", "manage_memory_file"}
+    whole_page = tool in {"remember", "replace_memory"}
     guidance = " ".join(
         part
         for part in (
