@@ -65,3 +65,99 @@ The end-to-end test redeems over REST `/api/preserve_artifacts`. Redeeming over 
 6. **`.md` upload returning 500 `GraphEpochIncoherent`:** **fixed** in `919497f`. A staged UTF-8 stream is admitted using its SHA-256, and red-first tests cover both the public and held paths. The PR body records the remaining gap: a `.md` that is not valid UTF-8 still returns 500 and writes nothing.
 
 Note: rename or squash the `fa5311e wip:` commit before merge. Task 6.1 is open, so the change is correctly unarchived.
+
+## Recheck at 7b689dec (e58c8ae5 + 7b689dec)
+
+**Verdict: APPROVE for the code, with one merge condition.** M1, L1, L2, I1
+and I2 are fixed. The `fa5311e wip:` commit is still on the branch, and
+renaming it needs a history rewrite, which this lane does not do. Merge by
+squash, or have the owner rewrite it first. The new concerns are Low or
+informational.
+
+### Findings
+
+- **M1: FIXED.** `client_artifacts.py:1673-1681` refuses the call before
+  staging when transcriptions are supplied and `files` repeats a `file_id`
+  (labels are stripped first). Transcriptions are now keyed by position,
+  not by label (`:1682-1703`, used at `:1556` and `:1562`).
+  - Red-first: the test (`tests/test_attachment_custody.py:483`) is in the
+    **same commit** as the fix. Against e58c8ae5^'s source it fails with
+    `DID NOT RAISE OpError`.
+  - Probes:
+    - A duplicate label with one transcription, the second label padded
+      with whitespace: refused, `INVALID_PRESERVE`.
+    - Duplicates with no transcriptions, or with `transcriptions=[]`: both
+      `stored`.
+    - A transcription naming no file: refused, and the hold is not
+      consumed.
+- **L1: FIXED.** On failure, `_release_staged` (`client_artifacts.py:383-403`)
+  and `held_uploads.restore` (`held_uploads.py:331-353`) put the claimed bytes
+  back as the same hold. The budget path at `client_artifacts.py:367-372` does
+  the same. Both lanes are tested (`test_attachment_custody.py:511`, `:534`),
+  and the rule is documented at `commands.py:8060`.
+  - Probe: after a filename collision (`ARTIFACT_EXISTS`), the handle
+    redeemed under a new name as `stored`. A third use was refused with
+    `HELD_UPLOAD_UNAVAILABLE`.
+  - `already_stored` spends the hold, as documented.
+- **L2: FIXED.** `redeem()` sweeps (`held_uploads.py:275`). Each binding is
+  capped at 16 holds or 256 MiB (`:48-50`, `:204-206`). The byte cap is
+  checked per chunk before the write (`:219-220`), so a breach leaves no
+  `.part` file (tested at `:604`).
+- **I1: FIXED.** `held_uploads.py:99-106` uses `lstat`, requires a directory,
+  refuses one owned by another user and resets the mode to 0700. Tested at
+  `:621`.
+- **I2: FIXED.** `test_a_hold_is_redeemed_over_the_mcp_transport`
+  (`test_attachment_custody.py:692`) redeems through `tools/call
+  preserve_artifacts` on `/mcp`. It is coverage only, so it also passes on the
+  parent.
+- **wip commit: NOT FIXED.** `fa5311ee wip: checkpoint in-progress correction
+  round` is still in `5dc83545..7b689dec`.
+
+### Tests
+
+- Test files: the seven original files plus `test_attachment_source_ingestion`,
+  `test_mcp_schema_fidelity`, `test_tool_surface_contract`,
+  `test_tool_surface_fingerprint`, `test_hosted_agent_surface` and
+  `test_connector_guardrails`.
+  - **366 passed, 0 failed** (pinned uv 0.11.28, temporary `XDG_STATE_HOME`).
+  - The original seven files now collect 249 tests, up from 241.
+- Of the new tests, 7 fail against e58c8ae5^'s source: M1, the two restores,
+  the redeem sweep, the count cap, the byte cap and the directory mode.
+
+### Gates and derived artifacts
+
+| gate | result |
+|---|---|
+| `generate-capabilities.py --check` | current |
+| `hosted-plugin.py check` | pass |
+| `hosted-plugin.py check --candidate hosted-alpha-agent-v5 --platform all` | pass: the committed v5 locks match regeneration |
+| `ruff check --select F src tests` | clean |
+| `validate-public-artifacts.py --repository` | clean |
+
+The schema baseline (`tests/fixtures/mcp_tool_schemas.json`),
+`tool_surface_contract.json` and the pending digest agree with the fidelity,
+contract and fingerprint tests. I did not run a separate regenerate-and-diff of
+the baseline.
+
+### CI
+
+36 check runs on `7b689dec`: 27 succeeded, 9 were skipped (conditional) and
+none failed. The required CI gate passed (run 36495224312). So did core shards
+1-12, harness shards 1-4, lint, capabilities, OpenSpec, build, E2E, onboarding,
+TUI, Windows NTFS and the Conventional Commit title.
+
+### NEW CONCERNs
+
+1. **Low: the quota check can be raced.** `held_uploads.py:204` reads usage
+   once, before streaming, without a lock. With the count cap at 2, eight
+   concurrent `hold()` calls from one session left four holds; the exact count
+   depends on timing. The byte cap at `:219` has the same snapshot race. Each
+   hold is still bounded by `upload_max_bytes`, and the caller is the
+   authenticated local session.
+2. **Low: `restore` skips the quota.** `held_uploads.py:331-353` restores
+   without checking the cap, and `_usage` (`:144`) does not count a hold that
+   has been claimed and is in flight. Probe: cap 1, claim, hold another file,
+   fail the first; two live holds remain.
+3. **Info: the quota refusal returns 400.** `server_transfer.py:332-335` maps
+   `HELD_UPLOAD_QUOTA` to 400. A 429 or 507 would tell the client to retry
+   later.
