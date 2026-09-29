@@ -310,25 +310,20 @@ For a caller other than the owner under a governed policy:
 
 ### Requirement: Remote agents are told how to pass the conversation
 
-The server instructions SHALL keep asking the agent to pass the user's message verbatim as `turn`. They SHALL add one sentence, pinned below. The tool description and the shipped skill scaffold SHALL state:
+The tool description of `activate_context` SHALL state, and the shipped skill scaffold SHALL echo:
 
-- the field bounds;
-- that every field is optional;
-- that `turn` stays verbatim.
+- that in a longer conversation, or when the user's words lean on attachments, the agent also passes `conversation`, with `focus` one line naming the subjects now in play (including names or objects it read from attachments) and `refs` the pages it already read;
+- the field bounds, and that every field is optional;
+- that `turn` stays verbatim and is never rewritten or replaced by a summary;
+- that `focus`-origin anchors are the agent's cues (`origin = "focus"`), not the user's words, and that activation reads no attachment itself.
 
-None of them SHALL ask the agent to summarise the conversation into `turn`, or to paste whole earlier turns. The pinned sentence is:
+The server instructions SHALL keep asking for the user's message verbatim as `turn` and SHALL carry only a short pointer to the tool description, within the 900-character bound the existing server-instructions test enforces. That bound SHALL NOT be raised. No surface SHALL ask the agent to summarise the conversation into `turn` or to paste whole earlier turns.
 
-"In a longer conversation, or when the user's words lean on attachments, also pass `conversation`: `focus`, one line naming the subjects now in play, including names you read from attachments, and `refs`, the pages you already read; never rewrite `turn`."
-
-The tool description SHALL additionally state that `focus` may carry names or objects the agent read from the user's attachments, that such cues are matched as the agent's words (`origin = "focus"`) and never as the user's, and that activation reads no attachment itself.
-
-The server instructions SHALL stay within the length budget the existing server-instructions test enforces.
-
-#### Scenario: Instructions carry the conversation sentence
+#### Scenario: Instructions point at the tool and stay short
 
 - **WHEN** a client reads the server instructions at `initialize`
-- **THEN** they contain the pinned sentence
-- **AND** they still ask for the message verbatim
+- **THEN** they still ask for the message verbatim and point at `conversation`
+- **AND** they are at most 900 characters
 
 ### Requirement: Pre-registered conversation benchmark group
 
