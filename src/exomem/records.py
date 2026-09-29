@@ -28,6 +28,12 @@ log = logging.getLogger(__name__)
 _MAX_WHY_BYTES = 512
 _MAX_VALUE_BYTES = 32 * 1024
 _MAX_ITEM_FILES = 2_000
+BULK_UPSERT_MAX_ROWS = 500
+# The audit chain walk refuses beyond this depth (`chain-depth`), and a bulk
+# upsert writes one event per written row, so it must fit inside the budget.
+_MAX_AUDIT_CHAIN_DEPTH = 2048
+_BULK_ROW_KEYS = frozenset({"item", "body", "source"})
+_BULK_SOURCE_LANES = ("Sources", "Evidence")
 _SYSTEM_FIELDS = frozenset({"type", "collection_id", "record_id", "schema_version", "item_version"})
 _RECEIPT_MARKER = "exomem.records-mutation"
 _RECEIPT_VERSION = 1
@@ -701,6 +707,577 @@ def _validate_artifact_delivery(
                 expected=expected,
             )
     return page_guard
+
+
+@dataclass(slots=True)
+class _BulkPlan:
+    """One accepted row that will write: an insert or an in-place update."""
+
+    index: int
+    kind: str
+    key: str
+    values: dict[str, Any]
+    body: str | None
+    existing: record_formats.Record | None
+    source: str | None
+    rationale: str
+
+
+def _bulk_reject(index: int, code: str, message: str, **extra: Any) -> dict[str, Any]:
+    return {"index": index, "outcome": "rejected", "code": code, "message": message, **extra}
+
+
+def _bulk_error_row(index: int, error: collections.CollectionError, **extra: Any) -> dict[str, Any]:
+    details = error.details if isinstance(error.details, Mapping) else {}
+    fields = details.get("issues")
+    return _bulk_reject(
+        index,
+        error.code,
+        str(error),
+        **({"fields": list(fields)} if isinstance(fields, list) else {}),
+        **extra,
+    )
+
+
+def _bulk_source_link(relative: str) -> str:
+    return f"[[{relative.removesuffix('.md')}]]"
+
+
+def _bulk_sources_field(manifest: collections.CollectionManifest) -> bool:
+    spec = manifest.schema.fields.get("sources")
+    return bool(
+        spec is not None
+        and spec.type == "array"
+        and spec.items is not None
+        and spec.items.type == "link"
+    )
+
+
+def _resolve_bulk_source(
+    root: Path,
+    reference: object,
+    allowed: Callable[[str], bool],
+    cache: dict[str, tuple[str, vault.PathGuard] | None],
+) -> tuple[str, vault.PathGuard] | None:
+    """Resolve one provenance reference to a preserved, released Sources/Evidence page.
+
+    An absent page, a page outside the preserved lanes and a page the audience may
+    not read all return None, so the refusal cannot tell them apart.
+    """
+    if type(reference) is not str or not reference or len(reference.encode("utf-8")) > 1024:
+        return None
+    if reference in cache:
+        return cache[reference]
+    resolved: tuple[str, vault.PathGuard] | None = None
+    try:
+        page_path, relative = vault.resolve_under_vault(
+            root, reference, must_exist=True, must_be_file=True
+        )
+        lanes = tuple(f"{vault.kb_prefix()}{lane}/" for lane in _BULK_SOURCE_LANES)
+        if relative == reference and relative.startswith(lanes) and allowed(relative):
+            _text, guard = vault.read_guarded_text(root, page_path)
+            resolved = (relative, guard)
+    except (
+        vault.VaultPathError,
+        vault.PathGuardError,
+        OSError,
+        UnicodeDecodeError,
+    ):
+        resolved = None
+    cache[reference] = resolved
+    return resolved
+
+
+def _bulk_used_depth(root: Path, manifest: collections.CollectionManifest) -> int:
+    """Events this collection already holds: an upper bound of its reachable chain."""
+    history = _audit_events(root, semantic_profile=manifest.semantic_profile)
+    return sum(1 for event in history.events if event["collection_id"] == manifest.collection_id)
+
+
+def _container_hash_from_inventory(
+    manifest: collections.CollectionManifest,
+    manifest_hash: str,
+    inventory: Mapping[str, tuple[str, str]],
+) -> str:
+    pairs = [(manifest.manifest_version.path, manifest_hash)] + [
+        (f"{kind}:{path}", digest) for path, kind, digest in sorted(
+            (path, kind, digest) for path, (kind, digest) in inventory.items()
+        )
+    ]
+    return hashlib.sha256(
+        json.dumps(pairs, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def bulk_upsert_records(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    why: str,
+    expected_container_hash: str,
+    source: str | None = None,
+    on_reject: str = "abort",
+) -> dict[str, Any]:
+    """Append or update up to `BULK_UPSERT_MAX_ROWS` items under one container guard.
+
+    Every row is planned against one snapshot; the accepted rows are published as
+    ordinary chained `append`/`update` audit events, their item files, one
+    manifest write and one combined log write in ONE atomic batch, so the audit
+    protocol is unchanged. `abort` writes nothing when any row is rejected and
+    still reports every row's would-be outcome; `skip` commits the accepted rows.
+    """
+    root = Path(vault_root)
+    _validate_why(why)
+    if on_reject not in {"abort", "skip"}:
+        raise collections.CollectionError(
+            "INVALID_BULK_ROWS", "on_reject must be abort or skip"
+        )
+    if not isinstance(rows, list | tuple):
+        raise collections.CollectionError("INVALID_BULK_ROWS", "rows must be a list of objects")
+    if not rows:
+        raise collections.CollectionError("BULK_UPSERT_EMPTY", "rows must not be empty")
+    if len(rows) > BULK_UPSERT_MAX_ROWS:
+        raise collections.CollectionError(
+            "BULK_UPSERT_TOO_MANY_ROWS",
+            f"a bulk upsert takes at most {BULK_UPSERT_MAX_ROWS} rows",
+            {"rows": len(rows), "maximum": BULK_UPSERT_MAX_ROWS},
+        )
+    if source is not None and type(source) is not str:
+        raise collections.CollectionError("INVALID_BULK_ROWS", "source must be a string")
+    supplied_manifest = record_governance.resolve_collection_for_mutation(root, collection)
+    if supplied_manifest.storage.strategy == "dataset":
+        record_formats.load_adapter(root, supplied_manifest).refuse_mutation("bulk_upsert")
+    batch_id = uuid.uuid4().hex[:12]
+    total = len(rows)
+    with writer_lease.active_manager().mutation_guard(root, operation="record_bulk_upsert"):
+        manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
+        record_governance.require_mutation_visibility(root, manifest)
+        adapter = record_formats.load_adapter(root, manifest)
+        if not adapter.mutable:
+            adapter.refuse_mutation("bulk_upsert")
+        _require_activity_log(root)
+        is_log = manifest.storage.strategy == "markdown-log"
+        directory_guards: tuple[vault.DirectoryCensusGuard, ...] = ()
+        if is_log:
+            source_path = root / manifest.storage.source
+            source_bytes, source_guard = _read_record_bytes(root, manifest.storage.source)
+            snapshot = adapter.read_bytes(  # type: ignore[attr-defined]
+                source_bytes, manifest_version=manifest.manifest_version
+            )
+            current_hash = hashlib.sha256(source_bytes).hexdigest()
+        else:
+            snapshot = adapter.read()
+            directory_guards = snapshot.directory_guards
+            current_hash = snapshot.snapshot
+            source_path = root / manifest.storage.source
+            source_bytes = b""
+            source_guard = None
+        _expect_hash(expected_container_hash, current_hash, "container")
+
+        by_key: dict[str, list[record_formats.Record]] = {}
+        for record in snapshot.records:
+            by_key.setdefault(record.identity.key, []).append(record)
+        allowed = record_governance.full_release_filter(root)
+        source_cache: dict[str, tuple[str, vault.PathGuard] | None] = {}
+        has_sources_field = _bulk_sources_field(manifest)
+        seen: dict[str, int] = {}
+        outcomes: list[dict[str, Any]] = []
+        plans: list[_BulkPlan] = []
+        source_guards: dict[str, vault.PathGuard] = {}
+
+        for index, raw in enumerate(rows):
+            if (
+                not isinstance(raw, Mapping)
+                or set(raw) - _BULK_ROW_KEYS
+                or not isinstance(raw.get("item"), Mapping)
+            ):
+                outcomes.append(
+                    _bulk_reject(
+                        index,
+                        "INVALID_BULK_ROW",
+                        "a row is an object of item, optional body and optional source",
+                    )
+                )
+                continue
+            body = raw.get("body")
+            reference = raw["source"] if "source" in raw and raw["source"] is not None else source
+            try:
+                _refuse_excluded_authored_names(raw["item"])
+                if body is not None:
+                    _validate_body(body)
+                    if body and is_log:
+                        raise collections.CollectionError(
+                            "UNREPRESENTABLE_RECORD_BODY",
+                            "markdown-log storage cannot represent item bodies",
+                        )
+                if reference is None:
+                    outcomes.append(
+                        _bulk_reject(
+                            index, "SOURCE_REQUIRED", "a row needs a preserved source reference"
+                        )
+                    )
+                    continue
+                resolved = _resolve_bulk_source(root, reference, allowed, cache=source_cache)
+                if resolved is None:
+                    outcomes.append(
+                        _bulk_reject(
+                            index,
+                            "SOURCE_NOT_FOUND",
+                            "source is not a preserved Sources or Evidence page",
+                            source=reference,
+                        )
+                    )
+                    continue
+                source_rel, source_guard_row = resolved
+                item = dict(raw["item"])
+                if has_sources_field:
+                    link = _bulk_source_link(source_rel)
+                    listed = item.get("sources")
+                    if listed is None:
+                        item["sources"] = [link]
+                    elif isinstance(listed, list) and link not in listed:
+                        item["sources"] = [*listed, link]
+                values = _validate_values(manifest, item)
+            except collections.CollectionError as error:
+                outcomes.append(_bulk_error_row(index, error))
+                continue
+            derived = collections.derived_item_key(manifest, values)
+            key = _validate_item_key(derived or str(uuid.uuid4()))
+            identity = "natural-key" if derived else "generated"
+            base = {
+                "index": index,
+                "item_key": key,
+                "identity": identity,
+                "source": source_rel,
+            }
+            if derived is not None and key in seen:
+                outcomes.append(
+                    _bulk_reject(
+                        index,
+                        "DUPLICATE_ROW_KEY",
+                        "an earlier row in this request already holds this natural key",
+                        duplicate_of=seen[key],
+                        **{k: v for k, v in base.items() if k != "index"},
+                    )
+                )
+                continue
+            twins = _natural_key_twins(manifest, snapshot, key, values)
+            if twins:
+                outcomes.append(
+                    _bulk_reject(
+                        index,
+                        "RECORD_NATURAL_KEY_CONFLICT",
+                        "an existing item already holds this natural key under another identity",
+                        item_keys=twins,
+                        **{k: v for k, v in base.items() if k != "index"},
+                    )
+                )
+                continue
+            existing = by_key.get(key, [])
+            if len(existing) > 1 or (existing and existing[0].ambiguous):
+                outcomes.append(
+                    _bulk_reject(
+                        index,
+                        "AMBIGUOUS_RECORD",
+                        "record key is ambiguous",
+                        **{k: v for k, v in base.items() if k != "index"},
+                    )
+                )
+                continue
+            current_record = existing[0] if existing else None
+            effective_body = (
+                body
+                if body is not None
+                else (current_record.body if current_record is not None else "")
+            )
+            if current_record is not None and _payload_hash(
+                manifest, key, current_record.values, current_record.body
+            ) == _payload_hash(manifest, key, values, effective_body):
+                if derived is not None:
+                    seen[key] = index
+                outcomes.append({**base, "outcome": "unchanged"})
+                continue
+            rationale = f"{why} | bulk {batch_id} {index + 1}/{total}" + (
+                "" if has_sources_field else f" src {source_rel}"
+            )
+            if len(rationale.encode("utf-8")) > _MAX_WHY_BYTES or "\n" in rationale:
+                outcomes.append(
+                    _bulk_reject(
+                        index,
+                        "AUDIT_RATIONALE_TOO_LONG",
+                        "the audit rationale for this row exceeds its bound",
+                        **{k: v for k, v in base.items() if k != "index"},
+                    )
+                )
+                continue
+            if derived is not None:
+                seen[key] = index
+            source_guards[source_rel] = source_guard_row
+            plans.append(
+                _BulkPlan(
+                    index=index,
+                    kind="update" if current_record is not None else "insert",
+                    key=key,
+                    values=values,
+                    body=body,
+                    existing=current_record,
+                    source=source_rel,
+                    rationale=rationale,
+                )
+            )
+            outcomes.append(
+                {**base, "outcome": "updated" if current_record is not None else "inserted"}
+            )
+
+        counts = {"inserted": 0, "updated": 0, "unchanged": 0, "rejected": 0}
+        for row in outcomes:
+            counts[row["outcome"]] += 1
+
+        def _report(*, committed: bool, after_hash: str, **extra: Any) -> dict[str, Any]:
+            return {
+                "operation": "bulk_upsert",
+                "collection_id": manifest.collection_id,
+                "batch_id": batch_id,
+                "committed": committed,
+                "on_reject": on_reject,
+                "rows": outcomes,
+                "counts": counts,
+                "before_container_hash": current_hash,
+                "after_container_hash": after_hash,
+                **extra,
+            }
+
+        if not plans or (counts["rejected"] and on_reject == "abort"):
+            return _report(committed=False, after_hash=current_hash)
+
+        inserts = sum(1 for plan in plans if plan.kind == "insert")
+        if not is_log and len(snapshot.records) + inserts > _MAX_ITEM_FILES:
+            raise collections.CollectionError(
+                "COLLECTION_ITEM_LIMIT",
+                "the batch would take the collection past its item ceiling",
+                {"items": len(snapshot.records), "adding": inserts, "maximum": _MAX_ITEM_FILES},
+            )
+        used = _bulk_used_depth(root, manifest)
+        if used + len(plans) > _MAX_AUDIT_CHAIN_DEPTH:
+            raise collections.CollectionError(
+                "BULK_UPSERT_AUDIT_DEPTH",
+                "the batch would carry the audit chain past its depth budget",
+                {
+                    "events_used": used,
+                    "events_needed": len(plans),
+                    "budget": _MAX_AUDIT_CHAIN_DEPTH,
+                },
+            )
+
+        # --- chain the events in memory; only the final state is ever published ---
+        resolver = _presentation_relationship_resolver(root, manifest, snapshot)
+        parent = manifest.audit_head or "baseline"
+        prev_text = manifest_text
+        prev_manifest_hash = manifest.manifest_version.hash
+        inventory: dict[str, tuple[str, str]] = {
+            path: (kind, digest) for path, kind, digest in snapshot.source_inventory
+        }
+        log_bytes = source_bytes
+        shifts: list[tuple[int, int]] = []
+        prev_container = current_hash
+        item_writes: list[vault.PlannedWrite] = []
+        updated_paths: set[str] = set()
+        reserved: set[str] = set()
+        new_item_guards: dict[int, vault.DirectoryCensusGuard] = {}
+        audit_bodies: list[str] = []
+        by_index = {row["index"]: row for row in outcomes}
+
+        def _shift(pos: int, *, is_end: bool) -> int:
+            return pos + sum(d for p, d in shifts if p < pos or (p == pos and not is_end))
+
+        for plan in plans:
+            transition = _transition_id()
+            next_text = record_formats.render_manifest_audit_head(
+                prev_text, transition, semantic_profile=manifest.semantic_profile
+            )
+            next_manifest_hash = hashlib.sha256(next_text.encode("utf-8")).hexdigest()
+            record = plan.existing
+            if plan.kind == "insert":
+                body = plan.body or ""
+                if is_log:
+                    replacement = record_formats.render_markdown_log_item(
+                        manifest, plan.values, plan.key, _newline(source_bytes), transition
+                    )
+                    encoded = replacement.encode("utf-8")
+                    offset = snapshot.insertion_offset
+                    if offset is None:
+                        raise collections.CollectionError(
+                            "INVALID_STORAGE_DESCRIPTOR", "log insertion is missing"
+                        )
+                    at = _shift(offset, is_end=False)
+                    log_bytes = log_bytes[:at] + encoded + log_bytes[at:]
+                    shifts.append((offset, len(encoded)))
+                    item_hash = hashlib.sha256(encoded).hexdigest()
+                    canonical = manifest.storage.source
+                    next_container = hashlib.sha256(log_bytes).hexdigest()
+                else:
+                    target, guards = _new_item_path(
+                        root, manifest, plan.key, plan.values, snapshot, frozenset(reserved)
+                    )
+                    for guard in guards:
+                        new_item_guards[id(guard)] = guard
+                    canonical = target.relative_to(root).as_posix()
+                    reserved.add(canonical)
+                    replacement = record_formats.render_markdown_item(
+                        manifest,
+                        plan.values,
+                        plan.key,
+                        body,
+                        transition,
+                        resolve_relationship=resolver,
+                    )
+                    item_hash = hashlib.sha256(replacement.encode("utf-8")).hexdigest()
+                    item_writes.append(
+                        vault.PlannedWrite(
+                            target,
+                            replacement,
+                            create_only=True,
+                            guard=vault.PathGuard.capture(root, canonical, leaf_policy="absent"),
+                        )
+                    )
+                    inventory[canonical] = ("file", item_hash)
+                    next_container = _container_hash_from_inventory(
+                        manifest, next_manifest_hash, inventory
+                    )
+                operation = "append"
+                before_item_hash = None
+                payload_hash: str | None = _payload_hash(manifest, plan.key, plan.values, body)
+            else:
+                assert record is not None
+                canonical = record.source.path
+                if is_log:
+                    replacement = record_formats.render_markdown_log_item(
+                        manifest, plan.values, plan.key, _newline(source_bytes), transition
+                    )
+                    encoded = replacement.encode("utf-8")
+                    start = _shift(record.span.start, is_end=False)
+                    end = _shift(record.span.end, is_end=True)
+                    log_bytes = log_bytes[:start] + encoded + log_bytes[end:]
+                    shifts.append((record.span.start, len(encoded) - (record.span.end - record.span.start)))
+                    item_hash = hashlib.sha256(encoded).hexdigest()
+                    next_container = hashlib.sha256(log_bytes).hexdigest()
+                else:
+                    item_bytes, item_guard = _read_record_bytes(root, canonical)
+                    if hashlib.sha256(item_bytes).hexdigest() != record.source.hash:
+                        raise collections.CollectionError(
+                            "STALE_RECORD", "record changed while resolving update"
+                        )
+                    changes = {
+                        name: value
+                        for name, value in plan.values.items()
+                        if name not in record.values or record.values[name] != value
+                    }
+                    delete_fields = tuple(
+                        name for name in record.values if name not in plan.values
+                    )
+                    replacement = record_formats.render_markdown_item_update(
+                        item_bytes.decode("utf-8"),
+                        changes,
+                        transition,
+                        semantic_profile=manifest.semantic_profile,
+                        delete_fields=delete_fields,
+                        body=plan.body,
+                    )
+                    replacement = record_formats.splice_record_presentation(
+                        replacement, manifest, plan.values
+                    )
+                    replacement = record_formats.splice_item_presentation(
+                        replacement, manifest, plan.values, resolve_relationship=resolver
+                    )
+                    item_hash = hashlib.sha256(replacement.encode("utf-8")).hexdigest()
+                    item_writes.append(
+                        vault.PlannedWrite(root / canonical, replacement, guard=item_guard)
+                    )
+                    updated_paths.add(canonical)
+                    inventory[canonical] = ("file", item_hash)
+                    next_container = _container_hash_from_inventory(
+                        manifest, next_manifest_hash, inventory
+                    )
+                operation = "update"
+                before_item_hash = record.source.hash
+                payload_hash = None
+            audit_bodies.append(
+                _audit_body(
+                    transition_id=transition,
+                    parent_id=parent,
+                    operation=operation,
+                    manifest=manifest,
+                    item_key=plan.key,
+                    canonical_path=canonical,
+                    before_manifest_hash=prev_manifest_hash,
+                    after_manifest_hash=next_manifest_hash,
+                    before_item_hash=before_item_hash,
+                    after_item_hash=item_hash,
+                    before_container_hash=prev_container,
+                    after_container_hash=next_container,
+                    payload_hash=payload_hash,
+                    why=plan.rationale,
+                )
+            )
+            by_index[plan.index]["transition_id"] = transition
+            parent = transition
+            prev_text = next_text
+            prev_manifest_hash = next_manifest_hash
+            prev_container = next_container
+
+        profile = profile_for(manifest.semantic_profile)
+        log_plan = vault.plan_log_writes_many(
+            root,
+            date_iso=dt.date.today().isoformat(),
+            op="record_memory" if profile.name == "records" else "plan_memory",
+            rel_path_no_ext=manifest.storage.source.removesuffix(".md"),
+            bodies=audit_bodies,
+            operation_token=f"{profile.name}:{manifest.collection_id}:bulk:{batch_id}",
+        )
+        if log_plan.warning is not None:
+            raise collections.CollectionError(
+                "RECORD_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
+            )
+        writes = [
+            *(
+                [vault.PlannedWrite(source_path, log_bytes.decode("utf-8"), guard=source_guard)]
+                if is_log
+                else item_writes
+            ),
+            vault.PlannedWrite(root / manifest.path, prev_text, guard=manifest_guard),
+            *log_plan.writes,
+        ]
+        record_governance.precommit_authorize_mutation(
+            root,
+            manifest,
+            snapshot,
+            planned_paths=tuple(write.path.relative_to(root).as_posix() for write in writes),
+        )
+        try:
+            vault.batch_atomic_write(
+                writes,
+                vault_root=root,
+                required_guards=(
+                    *directory_guards,
+                    *(
+                        guard
+                        for guard in snapshot.path_guards
+                        if guard.target not in updated_paths
+                    ),
+                    *source_guards.values(),
+                ),
+            )
+        except vault.BatchWriteError:
+            raise
+        except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
+            raise _publication_error(error) from error
+        return _report(
+            committed=True,
+            after_hash=prev_container,
+            first_transition=by_index[plans[0].index]["transition_id"],
+            last_transition=by_index[plans[-1].index]["transition_id"],
+        )
 
 
 def update_record(
@@ -3860,7 +4437,9 @@ def _new_item_path(
     key: str,
     values: Mapping[str, Any],
     snapshot: record_formats.AdapterSnapshot,
+    reserved: frozenset[str] = frozenset(),
 ) -> tuple[Path, tuple[vault.DirectoryCensusGuard, ...]]:
+    """Choose a new item path; `reserved` holds paths a batch has already claimed."""
     source = root / manifest.storage.source
     source_guard = next(
         (guard for guard in snapshot.directory_guards if guard.target == manifest.storage.source),
@@ -3869,11 +4448,15 @@ def _new_item_path(
     if source_guard is None or source_guard.directory_identity is None:
         raise collections.CollectionError("SOURCE_NOT_FOUND", "item directory could not be read")
     if manifest.item_filename is not None:
-        occupied_paths = {record.source.path for record in snapshot.records} | {
-            f"{manifest.storage.source.rstrip('/')}/{entry.relative_path}"
-            for entry in source_guard.entries
-            if not stat.S_ISDIR(entry.mode)
-        }
+        occupied_paths = (
+            {record.source.path for record in snapshot.records}
+            | {
+                f"{manifest.storage.source.rstrip('/')}/{entry.relative_path}"
+                for entry in source_guard.entries
+                if not stat.S_ISDIR(entry.mode)
+            }
+            | set(reserved)
+        )
         relative = collections.render_item_path(
             manifest,
             values,
@@ -3886,7 +4469,7 @@ def _new_item_path(
     target_name = target.name.casefold()
     if any(
         Path(entry.relative_path).name.casefold() == target_name for entry in source_guard.entries
-    ):
+    ) or any(Path(path).name.casefold() == target_name for path in reserved):
         raise collections.CollectionError("RECORD_ID_CONFLICT", "item path already exists")
     return target, (source_guard,)
 

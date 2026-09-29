@@ -11756,6 +11756,7 @@ def op_record_memory(
         "query",
         "create",
         "append",
+        "bulk_upsert",
         "update",
         "revise",
         "rebaseline",
@@ -11793,6 +11794,9 @@ def op_record_memory(
     refresh_presentation: bool | None = None,
     held: str | None = None,
     hold: bool | None = None,
+    rows: list[dict[str, Any]] | None = None,
+    source: str | None = None,
+    on_reject: Literal["abort", "skip"] | None = None,
 ) -> dict[str, Any]:
     """Capture, inspect, and govern durable observed state in one Records command.
 
@@ -11802,8 +11806,8 @@ def op_record_memory(
     if none fits, describe and propose a concise collection before explicit create.
 
     Args:
-        action: Exactly one of describe, validate, inspect, query, create, append, update, revise, rebaseline, or discard.
-        collection: Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, rebaseline, and discard.
+        action: Exactly one of describe, validate, inspect, query, create, append, bulk_upsert, update, revise, rebaseline, or discard.
+        collection: Optional for inventory inspect; required for targeted inspect, query, revision validate, append, bulk_upsert, update, revise, rebaseline, and discard.
         manifest_path: Proposed manifest path for create-mode validate or create.
         manifest_text: Complete proposed manifest text for validate, create, or revise.
         why: Audit reason for create, append, update, revise, or rebaseline.
@@ -11826,7 +11830,7 @@ def op_record_memory(
         item: Values for append; shallow overrides when resuming a held candidate.
         item_key: The item's internal UUID identity, required for update. Omit it on
             append and identity derives from the collection's declared natural key.
-        expected_container_hash: Exact current container hash for append, update, revise, or rebaseline.
+        expected_container_hash: Exact current container hash for append, bulk_upsert, update, revise, or rebaseline.
         expected_manifest_hash: Exact current manifest hash for revise or rebaseline.
         acknowledged_gap_codes: Exact inspect-reported gap codes for rebaseline.
         body: Optional Markdown body for append.
@@ -11842,6 +11846,13 @@ def op_record_memory(
         hold: Set false to refuse an invalid candidate without holding it. A refused
             append or update otherwise preserves the complete candidate as a held
             file under the collection and returns its reference beside the refusal.
+        rows: bulk_upsert only: 1 to 500 objects of `item`, optional `body` and
+            optional `source`, all committed under the one expected_container_hash.
+            Each row reports inserted, updated, unchanged or rejected.
+        source: bulk_upsert only: default provenance, the path of a preserved Sources
+            or Evidence page, for rows that name none.
+        on_reject: bulk_upsert only: abort (default) writes nothing if any row is
+            rejected and reports every would-be outcome; skip commits the rest.
     """
     return record_memory_module.record_memory(
         vault_root,
@@ -11878,6 +11889,9 @@ def op_record_memory(
         refresh_presentation=refresh_presentation,
         held=held,
         hold=hold,
+        rows=rows,
+        source=source,
+        on_reject=on_reject,
     )
 
 

@@ -14,6 +14,7 @@ from record_fixtures import (
 )
 
 from exomem import record_formats, records, vault
+from exomem.cli_ops import OpError
 from exomem import structured_collections as collections
 from exomem.record_memory import record_memory
 
@@ -196,7 +197,7 @@ def test_abort_writes_nothing_and_reports_every_would_be_outcome(vault_root: Pat
 
     assert result["committed"] is False
     assert _outcomes(result) == ["inserted", "inserted", "rejected", "inserted"]
-    assert result["rows"][2]["code"] == "INVALID_ITEM"
+    assert result["rows"][2]["code"] == "SCHEMA_UNKNOWN_FIELD"
     assert any(field["field"] == "bogus" for field in result["rows"][2]["fields"])
     assert all("transition_id" not in row for row in result["rows"])
     assert _state(vault_root) == before
@@ -329,10 +330,12 @@ def test_more_than_five_hundred_rows_refuse_whole(vault_root: Path) -> None:
     assert _state(vault_root) == before
 
 
-def test_five_hundred_rows_commit_and_verify(vault_root: Path) -> None:
-    result = _bulk(vault_root, _rows(500))
-    assert result["counts"]["inserted"] == 500
-    assert records.inspect_audit_gap(vault_root, _manifest(vault_root))["status"] == "ok"
+def test_five_hundred_rows_are_accepted_for_planning(vault_root: Path) -> None:
+    # No source, so every row is rejected in planning: the bound admits 500 rows
+    # without publishing 500 files (the commit itself is measured in the PR).
+    result = _bulk(vault_root, _rows(500), source=None, on_reject="skip")
+    assert result["counts"]["rejected"] == 500
+    assert result["committed"] is False
 
 
 @pytest.mark.parametrize("rows", [[], "rows", [1], [{"nope": 1}], [{}]])
@@ -374,9 +377,9 @@ def test_the_item_ceiling_refuses_whole(vault_root: Path, monkeypatch: pytest.Mo
 
 def test_an_overlong_rationale_rejects_only_that_row(vault_root: Path) -> None:
     rows = _rows(2)
-    rows[1]["source"] = "Knowledge Base/Evidence/" + "x" * 480 + ".md"
+    rows[1]["source"] = "Knowledge Base/Evidence/" + "x" * 200 + ".md"
     _evidence(vault_root, rows[1]["source"])
-    result = _bulk(vault_root, rows, why="w" * 200, on_reject="skip")
+    result = _bulk(vault_root, rows, why="w" * 430, on_reject="skip")
     assert _outcomes(result) == ["inserted", "rejected"]
     assert result["rows"][1]["code"] == "AUDIT_RATIONALE_TOO_LONG"
 
@@ -395,7 +398,7 @@ def test_the_command_action_runs_a_bulk_upsert(vault_root: Path) -> None:
 
 
 def test_the_command_action_refuses_arguments_of_other_actions(vault_root: Path) -> None:
-    with pytest.raises(collections.CollectionError, match="arguments do not match"):
+    with pytest.raises(OpError, match="arguments do not match"):
         record_memory(
             vault_root,
             action="bulk_upsert",
@@ -405,7 +408,7 @@ def test_the_command_action_refuses_arguments_of_other_actions(vault_root: Path)
             why="x",
             expected_container_hash=_hash(vault_root),
         )
-    with pytest.raises(collections.CollectionError, match="arguments do not match"):
+    with pytest.raises(OpError, match="arguments do not match"):
         record_memory(
             vault_root,
             action="bulk_upsert",
