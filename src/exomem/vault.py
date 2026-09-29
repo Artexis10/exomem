@@ -9,6 +9,7 @@ list_directory, etc.).
 from __future__ import annotations
 
 import errno
+import functools
 import hashlib
 import json
 import logging
@@ -1034,9 +1035,10 @@ class PathGuard:
     ancestors: tuple[PathIdentity, ...]
     missing_parents: tuple[str, ...]
     leaf_identity: PathIdentity | None
-    leaf_policy: Literal["absent", "stable", "content"]
+    leaf_policy: Literal["absent", "stable", "content", "generation"]
     expected_content_hash: str | None
     expected_content_size: int | None = field(default=None, init=False)
+    expected_generation: tuple[int, int, int] | None = field(default=None, init=False)
 
     @classmethod
     def capture(
@@ -1044,13 +1046,24 @@ class PathGuard:
         vault_root: Path,
         target: str,
         *,
-        leaf_policy: Literal["absent", "stable", "content"],
+        leaf_policy: Literal["absent", "stable", "content", "generation"],
         expected_content_hash: str | None = None,
         expected_content_size: int | None = None,
+        expected_generation: tuple[int, int, int] | None = None,
     ) -> PathGuard:
         parts = _safe_guard_target(target)
-        if leaf_policy not in {"absent", "stable", "content"}:
+        if leaf_policy not in {"absent", "stable", "content", "generation"}:
             raise PathGuardError("PATH_GUARD_INVALID", "unsupported leaf policy")
+        if (leaf_policy == "generation") != (expected_generation is not None) or (
+            expected_generation is not None
+            and (
+                len(expected_generation) != 3
+                or any(type(part) is not int for part in expected_generation)
+            )
+        ):
+            raise PathGuardError(
+                "PATH_GUARD_INVALID", "a generation guard requires exactly its stat generation"
+            )
         if leaf_policy == "content" and not re.fullmatch(
             r"[0-9a-f]{64}", expected_content_hash or ""
         ):
@@ -1110,7 +1123,7 @@ class PathGuard:
             raise PathGuardError("PATH_GUARD_UNSAFE", "guard leaf is unsafe")
         if leaf_policy == "absent" and leaf_info is not None:
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf must be absent")
-        if leaf_policy in {"stable", "content"} and leaf_info is None:
+        if leaf_policy in {"stable", "content", "generation"} and leaf_info is None:
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf must exist")
         guard = cls(
             target,
@@ -1121,6 +1134,7 @@ class PathGuard:
             expected_content_hash,
         )
         object.__setattr__(guard, "expected_content_size", expected_content_size)
+        object.__setattr__(guard, "expected_generation", expected_generation)
         guard.recheck(root)
         return guard
 
@@ -1138,6 +1152,7 @@ class PathGuard:
             leaf_policy=self.leaf_policy,
             expected_content_hash=self.expected_content_hash,
             expected_content_size=self.expected_content_size,
+            expected_generation=self.expected_generation,
         )
 
     def recheck(self, vault_root: Path) -> None:
@@ -1177,6 +1192,14 @@ class PathGuard:
             or _is_reparse(info)
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf changed")
+        if self.leaf_policy == "generation":
+            # The leaf's identity was just proved above; the generation is the
+            # size and the two timestamps the kernel bumps on any write. The
+            # capturer only mints this policy for a leaf whose timestamps were
+            # already outside the filesystem's granularity window (see
+            # `record_item_cache`), so equality here is equality of content.
+            if stat_generation(info) != self.expected_generation:
+                raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
         if self.leaf_policy == "content":
             # Content guards created by the bounded reader never reopen this
             # path through Path.  Re-open descriptor-rooted and cap the read at
@@ -1198,6 +1221,17 @@ class PathGuard:
             elif _leaf_hash(leaf, self.leaf_identity) != self.expected_content_hash:
                 # Compatibility for callers that predate bounded snapshots.
                 raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+
+
+def stat_generation(info: os.stat_result) -> tuple[int, int, int]:
+    """The (size, mtime, ctime) triple that moves whenever a file's bytes are written."""
+    return info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+#: Whether `st_ctime_ns` is the inode-change time. On Windows it is the creation
+#: time and does not move on a write, so a generation proves nothing there and
+#: callers must keep hashing content.
+STAT_GENERATION_TRUSTED = os.name != "nt"
 
 
 def _same_captured_identity(first: PathIdentity, second: PathIdentity) -> bool:
@@ -3071,6 +3105,17 @@ def read_bytes_without_pinning(path: Path) -> bytes:
 
 def _is_registered_internal_state_artifact(relative: str) -> bool:
     """Whether one full vault-relative entry is private Exomem state."""
+    return _classified_reserved(relative, kb_dirname(), id(reserved_paths._REGISTRY))
+
+
+@functools.lru_cache(maxsize=65_536)
+def _classified_reserved(relative: str, _kb: str, _registry_id: int) -> bool:
+    """Memoised on the whole input the classifier reads, so a changed registry or
+    knowledge-base directory name is a different key rather than a stale answer.
+
+    Every directory census classifies every entry, and a census runs about twenty
+    times per Records append; uncached that was 600k pattern matches at 1,000 items.
+    """
     return (
         reserved_paths.classify_logical(relative).disposition
         is reserved_paths.PathDisposition.RESERVED
@@ -3921,6 +3966,7 @@ def _prepare_path_guards(
                 leaf_policy=guard.leaf_policy,
                 expected_content_hash=guard.expected_content_hash,
                 expected_content_size=guard.expected_content_size,
+                expected_generation=guard.expected_generation,
             )
             prepared.append(rebound)
         return tuple(prepared)

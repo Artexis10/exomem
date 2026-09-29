@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import memory_refs, query_data, vault
+from . import memory_refs, query_data, record_item_cache, vault
 from . import structured_collections as collections
 from .collection_profiles import profile_for
 
@@ -470,7 +470,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
             if not self._require_authorized(relative):
                 continue
             try:
-                data, file_guard = vault.read_bounded_guarded_bytes(
+                data, digest, file_guard = record_item_cache.read_item(
                     self.vault_root,
                     relative,
                     limit=_MAX_ITEM_BYTES,
@@ -480,7 +480,6 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     "SOURCE_NOT_FOUND", "canonical item file could not be read"
                 ) from error
             rel = relative
-            digest = hashlib.sha256(data).hexdigest()
             path_guards.append(file_guard)
             total_bytes += len(data)
             if total_bytes > _MAX_COLLECTION_BYTES:
@@ -494,7 +493,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 continue
             text = _decode_item_bytes(data)
             try:
-                frontmatter, body, marker = vault.parse_frontmatter(text, strict=True)
+                frontmatter, body, marker = record_item_cache.parsed_frontmatter(digest, text)
             except vault.FrontmatterError as error:
                 raise collections.CollectionError(error.code, error.reason) from error
             profile = profile_for(self.manifest.semantic_profile)
