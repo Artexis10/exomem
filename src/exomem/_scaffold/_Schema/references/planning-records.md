@@ -160,3 +160,8 @@ Examples:
   keep/edit/supersede/archive.
 - "This new strategy replaces the old one" -> use supersession so history stays
   visible.
+
+## Tool parameter notes
+
+- `plan_memory`: `inspect`, `validate` and `query` are read-only; `create`, `add`, `update`, `triage`, `revise`, `rebaseline` are guarded writes. A plan's UUID is durable identity, not its filename. New collections can declare human filenames and managed presentation blocks; an existing UUID collection moves only through a read-only `maintain_memory(mode="structured-files")` preview followed by exact-plan apply. Never infer completion or horizon changes from elapsed time.
+- `record_memory`: `item_key` is the item's internal UUID (required for update; on append identity derives from the collection's declared natural key). `expected_container_hash` guards append, update, revise and rebaseline; `expected_manifest_hash` guards revise and rebaseline; `acknowledged_gap_codes` are the exact inspect-reported codes for rebaseline. `delivery` is a receipt-gated artifact-delivery envelope for append only: field mappings are vault-schema-neutral and never set item values or create or loosen a collection. `expand_children` expands the one unambiguous child container; `expand_child` names an exact declared child. `held` resumes a held candidate on append/update (`item`/`changes` supply overrides, null removes a field) or names the one to remove on discard; a refused append/update is held unless `hold=false`.

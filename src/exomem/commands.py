@@ -474,13 +474,6 @@ class SearchResult(TypedDict):
 
 
 class ClientArtifactFile(TypedDict):
-    """Client-neutral temporary remote file handle.
-
-    Used by ``capture_source`` for raw material and ``preserve_artifacts`` for
-    proof-bearing artifacts. The handle carries no destination: the lane is the
-    command's, never the transport's.
-    """
-
     download_url: str
     file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
     mime_type: NotRequired[Annotated[str, Field(max_length=255)]]
@@ -581,7 +574,6 @@ _ClientArtifactFiles = Annotated[
     Field(
         min_length=1,
         max_length=8,
-        description="One to eight temporary client file handles.",
     ),
 ]
 #: The same handles where the parameter is optional. Deliberately not
@@ -608,8 +600,6 @@ _OptionalClientArtifactFiles = Annotated[
 
 
 class ClientTranscription(TypedDict):
-    """A transcription an AI client derived from one supplied original."""
-
     file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
     text: Annotated[str, StringConstraints(min_length=1, max_length=100_000)]
 
@@ -621,10 +611,7 @@ _OptionalClientTranscriptions = Annotated[
     Field(
         max_length=8,
         description=(
-            "Optional transcriptions of supplied originals, each {file_id, text}. "
-            "Each is saved on its original's Evidence page, bound to the "
-            "original's bytes, and only when that original is stored. Files "
-            "must have unique file_id values when transcriptions are supplied."
+            "{file_id, text}; unique file_id; saved once the original is stored."
         ),
     ),
 ]
@@ -7996,90 +7983,39 @@ def op_episode_memory(
 ) -> dict:
     """Record what a conversation worked on, decided and left open, for the next session on any client.
 
-    Call `record` once when a conversation reaches a decision or a stopping
-    point, and skip it when nothing durable happened. You write the recap:
-    short one-line items, never a transcript. It is kept as a bounded Source
-    under `Sources/Episodes/`, and the newest recap of each conversation leads
-    the `recent_context` block `activate_context` serves on every client.
-    Recording again under the same `episode` with changed content adds a
-    revision and retires the previous one; an identical retry writes nothing.
+    Record once at a decision or stopping point; skip when nothing durable
+    happened. One-line items, no transcript. The newest recap per
+    conversation leads `activate_context`'s `recent_context`. Re-recording under
+    the same `episode` adds a revision; an identical retry writes nothing.
 
-    A recorded episode can also carry typed candidates for its durable
-    changes: `prepare` one candidate's destination, set its `disposition`
-    (including honest no_capture, deferred or rejected ones), and `resume`
-    to execute the routed ones. A leaf is one typed step for an existing
-    writer, of a kind its route owns: focused_note creates a note, entity an
-    entity, relation_only accepts a relation, existing_page and semantic_unit
-    edit or supersede, and records appends one item to a Records collection
-    (append-record: {collection, item, item_key?, body?, why,
-    expected_container_hash}). It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
-    service enables episode execution. After it runs, make one final
-    `coverage` pass: compare the input it names with each receipt and its
-    readback, prepare anything omitted or misrouted, then attest with
-    `resume` and `postcommit`. A committed note is not coverage.
+    Durable changes: `prepare` a candidate, set its `disposition`, `resume` to
+    run routed leaves (refused with `episode_workflow_disabled` unless enabled),
+    then `coverage` and attest via `resume` + `postcommit`. Details:
+    references/operations.md (episode_memory).
 
     Args:
-        action: `record` writes a recap revision; `inspect` reads this
-            episode's revision history back; `candidates` reads its
-            candidates; `prepare`, `disposition` and `resume` plan and
-            execute them; `coverage` reads the final pass's evidence.
-        episode: The `ep-` key a previous record returned, or the one a hook
-            named. Omit it on a conversation's first record and reuse the
-            returned key for the rest of that conversation. Required for
-            every other action.
-        subject: What the conversation was about, one line, at most 120
-            characters.
-        summary: One line on where it stands, at most 180 characters.
-        worked_on: Up to 5 one-line items, 200 characters each.
-        decided: Up to 5 one-line items, 200 characters each.
-        open: Up to 5 one-line items left open, 200 characters each. At least
-            one of `worked_on`, `decided` or `open` is required.
-        said: Up to 3 verbatim user statements worth keeping, 300 characters
-            each.
-        about: Up to 3 `exomem://` refs of pages the conversation concerned.
-            Recording marks them as this conversation's latest work, so a
-            following "continue" resumes them.
-            Refs you cannot see are dropped and counted in `about_skipped`.
-        client: Optional lowercase client label, e.g. `claude-code` or
-            `chatgpt`.
-        candidate: For `prepare`/`disposition`: a stable key you choose for
-            one durable change, reused when you revise it.
-        proposal: For `prepare`: {route, target?, title?, alternatives,
-            evidence, reason, leaves: [{leaf_key, effect_revision, kind,
-            args}]}. The destination is your call: `alternatives` lists up to
-            8 pages you inspected as possible homes, each {target: its
-            `exomem://` ref, scope: its declared scope in a line, version: the
-            `content_hash` you read}; an open page has no priority among them.
-            existing_page and semantic_unit name the `target` every leaf
-            writes. A changed leaf needs the next `effect_revision`; a
-            committed one cannot change.
-        disposition: For `disposition`: routed, no_capture, uncertain,
-            rejected, deferred or awaiting_authority.
-        reason: For `disposition`: why, in one or two sentences.
-        input_revision: For `resume`: the input revision your coverage
-            review covered, the current one.
-        journal_digest: For `resume`: the `journal_digest` your last
-            candidates, prepare or disposition result returned. A resume
-            after any later change is refused with EPISODE_REVISION_CONFLICT.
-        order: For `resume`: leaf ids to run, in this order.
-        max_leaves: For `resume`: at most this many leaves this pass, 1 to
-            16 (default 8); the rest stay pending.
-        postcommit: For `resume`: true attests your review of the committed
-            results instead of executing anything.
+        action: `record` writes; `inspect`, `candidates`, `coverage` read.
+        episode: The `ep-` key a record returned; omit on a conversation's
+            first record, required otherwise.
+        subject: One line, max 120 characters.
+        summary: One line, max 180.
+        worked_on: Max 5 items, 200 characters each.
+        decided: Max 5 items, 200 characters each.
+        open: Max 5 items, 200 characters each. One of the three lists is required.
+        said: Max 3 verbatim user statements, 300 characters.
+        about: Max 3 `exomem://` refs.
+        candidate: Your stable key for one change.
+        proposal: For `prepare`; alternatives are up to 8 inspected pages
+            {target, scope, version: the `content_hash` you read}. A changed
+            leaf needs the next `effect_revision`; a committed one cannot change.
+        input_revision: For `resume`: the revision your coverage covered.
+        journal_digest: For `resume`: from your last candidates/prepare/
+            disposition result; stale refuses with EPISODE_REVISION_CONFLICT.
+        max_leaves: For `resume`: 1 to 16.
+        postcommit: For `resume`: true attests review instead of executing.
 
-    Returns: record -> {episode, revision, source: {ref, path, title},
-        idempotent, recovery, ledger, about_skipped}; inspect -> {episode,
-        revisions: [{revision, recovery}], latest_source_ref,
-        coverage_current}; candidates/prepare/disposition -> {episode,
-        input_revision, candidates: [{candidate_key, route, disposition,
-        pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete,
-        execution}; resume adds {status, executed, replayed, stale,
-        diverged, reconciled, blocked, deferred, publication}; coverage adds
-        {input: {input_revision, ref, recovery}, receipts: [{candidate_key,
-        leaf_id, operation_id, receipt_digest, path, readback}]}. Every
-        candidates result carries coverage: {attempted, pending,
-        covered_through_input_revision, next}. Newlines, credential-shaped text and anything
-        over a cap are refused with nothing written.
+    Newlines, credential-shaped text and over-cap items are refused; nothing is
+    written.
     """
     recap = {
         "subject": subject,
@@ -8204,23 +8140,19 @@ def op_preserve_evidence(
 ) -> dict:
     """Preserve text evidence as append-only proof material.
 
-    Use for receipts, letters, transcripts, warranty records, legal/dispute
-    material, and other factual artifacts. For binary files supplied as client
-    file handles, use `preserve_artifacts`; otherwise use `transfer_artifact`
+    For receipts, letters, transcripts, legal or dispute records and other
+    factual text. Binary files use `preserve_artifacts` or `transfer_artifact`
     plus `/upload`. Bytes never pass through the model.
 
-    The outcome carries a terminal `state`: `stored`, or `already_stored` when
-    those exact bytes are already under that destination, in which case nothing
-    is written and the outcome names the existing path and ref.
+    Terminal `state`: `stored`, or `already_stored` when those exact bytes are
+    already there (nothing written; existing path and ref named).
 
     Args:
-        scope: Incident, case, project, or domain key. One path segment, never
-            a path. A separator or reserved character is refused, not rewritten.
-        category: Evidence category within the scope. One path segment, not a
-            path; nest with this argument rather than with `/` in `scope`.
-        filename: Artifact filename, including extension.
+        scope: Incident, case, project or domain key; one path segment.
+        category: Evidence category; one path segment.
+        filename: Filename, including extension.
         content: UTF-8 text to preserve as received.
-        description: Optional sidecar description.
+        description: Sidecar description.
     """
     return op_preserve(
         vault_root,
@@ -8240,34 +8172,21 @@ def op_preserve_artifacts(
     adoption: _OptionalArtifactAdoption = None,
     transcriptions: _OptionalClientTranscriptions = (),  # noqa: B006 - read-only
 ) -> dict:
-    """Preserve client-provided binary file handles as append-only Evidence.
+    """Preserve client binary file handles as append-only Evidence.
 
-    Use this canonical binary-preservation command when the client can supply
-    file handles: a chat client's attachments, or the handle `exomem attach`
-    prints on a local client (single use: storing its file spends it, while a
-    refused or failed file leaves it redeemable until it expires). When a
-    shared file is evidence, preserve the original first and put any
-    transcription in `transcriptions`, never instead. Exomem retrieves each handle server-side and returns one terminal
-    state per file — `stored`, `already_stored`, or
-    `failed`. `already_stored` means those exact bytes are already under that
-    destination, so nothing was written and the outcome names the existing path
-    and ref; retrying a lost response with the same identity replays the batch
-    rather than duplicating it. No binary data is passed as base64 through
-    model-visible arguments. Clients without file handles keep using
-    `transfer_artifact(operation="upload")` followed by `/upload`.
+    For attachments or single-use `exomem attach` handles; otherwise
+    `transfer_artifact(operation="upload")` then `/upload`. Preserve the
+    original; a transcription never replaces it.
+
+    Each handle ends `stored`, `already_stored` (same bytes present; nothing
+    written) or `failed`; a retried lost response replays the batch. No base64
+    through model-visible arguments.
 
     Args:
-        scope: Incident, case, project, or domain key. One path segment, never
-            a path. A separator or reserved character is refused, not rewritten.
-        category: Evidence category within the scope. One path segment, not a
-            path; nest with this argument rather than with `/` in `scope`.
-        files: Ordered temporary file handles. Each object requires `download_url`
-            and `file_id`; `mime_type` and `file_name` are optional.
-        adoption: Optional explicit adoption identity selecting exactly one
-            supplied handle. This establishes eligibility, not write consent;
-            agent-initiated use obeys proactive_capture.
-        transcriptions: Optional {file_id, text} transcriptions of supplied
-            files, recorded on each stored original's page.
+        scope: Case or project key; one path segment.
+        category: One path segment.
+        adoption: Selects one handle; eligibility, not write consent
+            (proactive_capture applies).
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -9991,23 +9910,15 @@ def op_adopt_vault(
     semantic_max_bytes: int = semantic_census.DEFAULT_MAX_BYTES,
     semantic_example_limit: int = semantic_census.DEFAULT_EXAMPLE_LIMIT,
 ) -> dict:
-    """Adopt an existing vault safely without replacing originals.
+    """Adopt an existing vault without replacing originals.
 
-    Default mode scans only. Copy/compile modes write under the governed
-    Knowledge Base layer and preserve original path/hash provenance.
+    Default mode scans only; copy/compile modes write under the governed
+    Knowledge Base with original path/hash provenance.
 
     Args:
-        path: Vault subtree to scan.
+        path: Subtree to scan.
         mode: scan-only, save-manifest, copy-as-sources, or compile-selected.
-        max_depth: Folder tree depth cap.
-        include_hidden: Include hidden files/directories.
-        samples: Filename sample count per folder.
-        pack_limit: Max suggested knowledge packs.
-        manifest_path: Optional manifest destination.
-        selected_paths: Explicit legacy files for copy/compile modes.
-        semantic_max_files: Maximum Markdown files read by the semantic census.
-        semantic_max_bytes: Maximum total Markdown bytes read by the semantic census.
-        semantic_example_limit: Maximum bounded semantic examples per grouping.
+        selected_paths: Legacy files for copy/compile modes.
     """
     from . import due_state as due_state_module
 
@@ -10087,55 +9998,38 @@ def op_adoption_studio(
 ) -> dict:
     """Run a governed, resumable Adoption Studio session over existing material.
 
-    Adoption Studio turns a messy legacy vault into governed Exomem knowledge
-    without ever rewriting, moving, or deleting an original file. It is a durable,
-    canonical-file-backed run with a preview-exact-actions contract: you see the
-    precise imports before anything is written, and `apply` commits exactly that
-    plan or refuses. One required `action` multiplexes the whole lifecycle; the
-    read-only default (`status`) is safe and `start` is explicitly guarded.
+    Never rewrites, moves or deletes originals. `plan` previews the exact
+    imports and `apply` commits exactly that plan or refuses. `status` is the
+    read-only default; `start` is guarded.
 
-    Lifecycle actions: `start` scans a subtree read-only and snapshots a candidate
-    inventory; `select` materializes a folder-rule selection server-side; `plan`
-    previews exact targets, titles, hashes, and frontmatter; `apply` copies the
-    validated subset into governed Sources with provenance in one atomic batch;
-    `cancel` closes a pre-apply run; `finish` proves recall and hands you a first
-    question. Agent actions ride the run afterwards: `work-item` returns bounded
-    read-only context, `propose` submits structured proposals, and
-    `apply-proposal` approves one through an existing governed leaf.
+    Lifecycle: `start` scans read-only; `select` picks files by folder rule;
+    `plan` previews; `apply` copies the subset into Sources in one atomic batch;
+    `cancel` closes a pre-apply run; `finish` proves recall. Afterwards
+    `work-item` reads bounded context, `propose` submits proposals,
+    `apply-proposal` approves one. Details: references/operations.md
+    (adoption_studio).
 
     Args:
-        action: Required. One of start, status, select, plan, apply, cancel,
-            finish, work-item, propose, or apply-proposal.
-        run_id: Stable adoption run id from `start`; required by every action
-            except `start` and the run-listing form of `status`.
-        path: For `start`, the vault subtree to scan. Defaults to the vault root.
-        include_hidden: For `start`, include hidden files/directories in the scan.
-        initialize_kb: For `start`, bootstrap the Knowledge Base scaffold first
-            when it does not exist yet (otherwise `start` refuses with
-            KB_NOT_INITIALIZED).
-        include: For `select`, folder or file paths whose eligible files are
-            selected (server materializes the concrete set).
-        exclude: For `select`, folder or file paths to remove from the selection.
-        overrides: For `select`, explicit per-file paths to force-select.
-        include_junk: For `select`, include junk (e.g. zero-byte) files that are
-            otherwise demoted. Default false.
-        plan_id: For `apply`, the plan id echoed from `plan`/`status`; a mismatch
-            or a changed selection is refused with PLAN_STALE.
-        retry_failed: For `apply`, re-plan and re-apply only the failed subset.
-        only_paths: For `apply`, restrict the (retry) apply to these originals.
-        why: Required approver rationale for `apply-proposal`; also records the
-            reason on `cancel`.
-        write_manifest: For `finish`, write an optional run manifest under
-            `Knowledge Base/_Adoption/`. Default true.
-        sources: For `work-item`, explicit source paths to include instead of the
-            first `max_sources` applied imports.
-        max_sources: For `work-item`, the maximum sources returned. Default 5.
-        max_chars_per_source: For `work-item`, the per-source excerpt cap. Default 2000.
-        proposals: For `propose`, the list of structured proposal objects to submit.
-        ref: For `apply-proposal`, the `exomem://review/adoption/<id>` proposal ref.
-        expected_fingerprint: For `apply-proposal`, the reviewed fingerprint that
-            must still match, or the write is refused.
-        expected_hash: For `apply-proposal`, the target page hash for relation and
+        action: Lifecycle step.
+        run_id: From `start`; required except for `start` and run-listing `status`.
+        path: For `start`, subtree to scan (default: vault root).
+        include_hidden: For `start`, include hidden files.
+        initialize_kb: For `start`, bootstrap a missing Knowledge Base
+            (otherwise KB_NOT_INITIALIZED).
+        include: For `select`, paths whose eligible files are selected.
+        exclude: For `select`, paths to deselect.
+        overrides: For `select`, files to force-select.
+        include_junk: For `select`, include demoted junk files.
+        plan_id: For `apply`, from `plan`/`status`; a mismatch or changed
+            selection refuses with PLAN_STALE.
+        retry_failed: For `apply`, re-apply only failures.
+        only_paths: For `apply`, restrict to these originals.
+        why: Required for `apply-proposal`; also the `cancel` reason.
+        sources: For `work-item`, source paths instead of the first imports.
+        ref: For `apply-proposal`, the `exomem://review/adoption/<id>` ref.
+        expected_fingerprint: For `apply-proposal`, the reviewed fingerprint;
+            a mismatch refuses.
+        expected_hash: For `apply-proposal`, target page hash for relation and
             reconciliation-relate approvals.
     """
     action = (action or "").strip()
@@ -12066,52 +11960,34 @@ def op_record_memory(
 ) -> dict[str, Any]:
     """Capture, inspect, and govern durable observed state in one Records command.
 
-    Records hold observed events and current state, not future Planning intent,
-    received Sources, proof-bearing Evidence, or compiled Note conclusions. Route
-    a sufficiently identified observation to one compatible existing collection;
-    if none fits, describe and propose a concise collection before explicit create.
+    Records hold observed events and current state, not Planning intent, Sources,
+    Evidence or Notes. Route an observation to one compatible collection; if none
+    fits, describe and propose one before an explicit create.
 
     Args:
-        action: Exactly one of describe, validate, inspect, query, create, append, update, revise, rebaseline, or discard.
-        collection: Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, rebaseline, and discard.
-        manifest_path: Proposed manifest path for create-mode validate or create.
-        manifest_text: Complete proposed manifest text for validate, create, or revise.
-        why: Audit reason for create, append, update, revise, or rebaseline.
-        scaffold: Create the initial canonical source for create.
-        view: Saved query view; cannot be combined with inline shaping.
-        filters: Query predicates.
-        columns: Query columns.
-        sort_by: Query sort column.
-        descending: Sort query results descending.
-        limit: Bounded query limit.
-        aggregate: Optional query aggregate.
-        date_from: Inclusive query date lower bound.
-        date_to: Inclusive query date upper bound.
-        date_column: Query date property.
-        expand_children: Expand the one unambiguous child container for backward compatibility.
-        expand_child: Exact declared child table/container to project and expand.
-        continuation: Snapshot-bound query continuation.
-        include_agent_history: Include bounded agent mutation history.
-        output_format: json, markdown, or csv query output.
-        item: Values for append; shallow overrides when resuming a held candidate.
-        item_key: The item's internal UUID identity, required for update. Omit it on
-            append and identity derives from the collection's declared natural key.
-        expected_container_hash: Exact current container hash for append, update, revise, or rebaseline.
-        expected_manifest_hash: Exact current manifest hash for revise or rebaseline.
-        acknowledged_gap_codes: Exact inspect-reported gap codes for rebaseline.
-        body: Optional Markdown body for append.
-        delivery: Optional receipt-gated artifact-delivery validation envelope
-            for append. Field mappings are vault-schema-neutral and never set
-            item values or create/loosen a collection.
-        changes: Targeted values for update.
-        expected_item_version: Exact current item version for update.
-        refresh_presentation: Guardedly rebuild the managed Markdown presentation during update.
-        held: Reference to a held candidate: resumes it on append or update, with
-            item or changes supplying overrides and a null value removing a field;
-            names the candidate to remove on discard.
-        hold: Set false to refuse an invalid candidate without holding it. A refused
-            append or update otherwise preserves the complete candidate as a held
-            file under the collection and returns its reference beside the refusal.
+        action: Operation.
+        collection: Required except for inventory inspect.
+        manifest_path: For create-mode validate or create.
+        manifest_text: Full manifest, for validate, create, revise.
+        why: Audit reason for every write except discard.
+        scaffold: Create the initial source on create.
+        view: Saved query view; excludes inline shaping.
+        date_from: Inclusive lower bound.
+        date_to: Inclusive upper bound.
+        expand_children: Expand the one unambiguous child.
+        expand_child: Exact declared child container.
+        item: Values for append; overrides when resuming a held one.
+        item_key: Item UUID; required for update.
+        expected_container_hash: For append, update, revise, rebaseline.
+        expected_manifest_hash: For revise, rebaseline.
+        acknowledged_gap_codes: Inspect gap codes, for rebaseline.
+        delivery: Receipt-gated delivery envelope for append; never sets item
+            values or creates a collection.
+        expected_item_version: For update.
+        refresh_presentation: Rebuild the managed Markdown presentation.
+        held: Held candidate ref: resumes it on append/update (null removes a
+            field); on discard, names it.
+        hold: False refuses an invalid candidate; otherwise it is held and its ref returned.
     """
     return record_memory_module.record_memory(
         vault_root,
