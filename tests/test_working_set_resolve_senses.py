@@ -380,3 +380,66 @@ def test_an_unpunctuated_run_with_a_hyphenated_word_still_narrows() -> None:
     )
 
     assert resolution.status == "resolved"
+
+
+MARK_E = _row("people/mark-ellison.md", "Mark Ellison", kind="entity", entity_type="person")
+MARK_F = _row("people/mark-fenwick.md", "Mark Fenwick", kind="entity", entity_type="person")
+MARK_COUNTS = {"mark": 2, "ellison": 1, "fenwick": 1}
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Please mark the task done.",
+        "I left a pencil mark on the draft plan.",
+    ],
+)
+def test_a_lower_case_person_word_in_a_cased_turn_is_not_a_name(turn: str) -> None:
+    """Ruling: once the turn's casing says something, a lower-case word is a word."""
+
+    resolution = _resolve(turn, (MARK_E, MARK_F), counts=MARK_COUNTS)
+
+    assert resolution.status != "ambiguous"
+    assert resolution.ambiguity == ()
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Mark called about the invoice.",
+        "Please ask Mark about the invoice.",
+        "mark sent the invoice over.",
+    ],
+)
+def test_a_capitalised_or_all_lower_case_person_word_still_asks(turn: str) -> None:
+    resolution = _resolve(turn, (MARK_E, MARK_F), counts=MARK_COUNTS)
+
+    assert resolution.status == "ambiguous"
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Notes From The Harbour Walk",
+        "WE ORDERED THE ROLLS FROM HARBOUR AGAIN",
+    ],
+)
+def test_a_headline_or_all_caps_turn_carries_no_casing_signal(turn: str) -> None:
+    resolution = _resolve(turn, (BAKERY, CLINIC), counts=HARBOUR_COUNTS)
+
+    assert resolution.status == "unresolved"
+    assert resolution.ambiguity == ()
+
+
+def test_a_headline_turn_still_asks_between_people() -> None:
+    resolution = _resolve("Notes From Mark About The Invoice", (MARK_E, MARK_F), counts=MARK_COUNTS)
+
+    assert resolution.status == "ambiguous"
+
+
+def test_an_uncased_person_name_in_a_mixed_script_turn_still_asks() -> None:
+    resolution = _resolve(
+        "Please tell 山田 about the invoice.", (YAMADA_T, YAMADA_H), counts=YAMADA_COUNTS
+    )
+
+    assert resolution.status == "ambiguous"

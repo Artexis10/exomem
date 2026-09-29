@@ -284,6 +284,13 @@ class TurnAnalysis:
     #: name words spans one (`_name_span`). `tokens_of` drops punctuation, so
     #: the positions are derived from the raw text and `tokens` is unchanged.
     run_breaks: frozenset[int] = frozenset()
+    #: Does the raw turn's casing say anything? True only for a turn that mixes
+    #: capitalised and lower-case words: an all-lower-case turn, an all-caps
+    #: one and a headline with every word capitalised carry no signal.
+    cased_turn: bool = False
+    #: Words the raw turn writes with a capital anywhere, a sentence start
+    #: included, folded like the lexical terms. Empty when `cased_turn` is false.
+    capitalised_anywhere: frozenset[str] = frozenset()
 
 
 #: A follow-up is short: at most this many tokens. "what about the second
@@ -408,6 +415,9 @@ class CandidateFacts:
     #: Did the turn capitalise a shared name word away from a sentence start
     #: (`TurnAnalysis.capitalised`)? Never serialised.
     name_capitalised: bool = False
+    #: Did a turn whose casing says something write the shared name word
+    #: without a capital anywhere (`TurnAnalysis.capitalised_anywhere`)?
+    name_lower_case: bool = False
 
     @property
     def deciding_kinds(self) -> frozenset[str]:
@@ -440,6 +450,7 @@ class ResolvedAnchor:
     name_span: tuple[int, int] | None = None
     entity_type: str = ""
     name_capitalised: bool = False
+    name_lower_case: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -773,6 +784,8 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         ),
         capitalised=_capitalised_terms(turn),
         run_breaks=_run_breaks(text, tokens),
+        cased_turn=_casing_signal(turn),
+        capitalised_anywhere=_capitalised_terms(turn, anywhere=True),
     )
 
 
@@ -813,16 +826,36 @@ _SENTENCE_END = re.compile(r"[.!?;\n\r\u2026]+")
 _RAW_WORD = re.compile(r"[^\W_][\w'\u2019-]*")
 
 
-def _capitalised_terms(turn: str) -> frozenset[str]:
-    """Words the raw turn writes with a capital other than as a sentence's
-    first word, folded as lexical terms are (`TurnAnalysis.capitalised`)."""
+def _casing_signal(turn: str) -> bool:
+    """Does the raw turn's casing carry information?
+
+    Only a turn that writes some cased word with a capital AND some cased word
+    without one does. An all-lower-case turn, an all-caps turn and a headline
+    whose every word is capitalised mark no word as a name.
+    """
     raw = unicodedata.normalize("NFKC", str(turn or ""))
-    if not any(character.islower() for character in raw):
+    upper = lower = False
+    for word in _RAW_WORD.findall(raw):
+        if not _is_cased(word[:1]):
+            continue
+        if word[:1].isupper():
+            upper = True
+        else:
+            lower = True
+    return upper and lower
+
+
+def _capitalised_terms(turn: str, *, anywhere: bool = False) -> frozenset[str]:
+    """Words the raw turn writes with a capital other than as a sentence's
+    first word, folded as lexical terms are (`TurnAnalysis.capitalised`).
+    `anywhere` counts a sentence's first word too."""
+    raw = unicodedata.normalize("NFKC", str(turn or ""))
+    if not _casing_signal(raw):
         return frozenset()
     out: set[str] = set()
     for sentence in _SENTENCE_END.split(raw):
         for position, word in enumerate(_RAW_WORD.findall(sentence)):
-            if position == 0 or not word[:1].isupper():
+            if (position == 0 and not anywhere) or not word[:1].isupper():
                 continue
             for token in tokens_of(normalize(word)):
                 folded = _fold_lexical_term(token)
@@ -1169,6 +1202,12 @@ def candidates_for(
                 else None,
                 entity_type=row.entity_type,
                 name_capitalised=bool(name_contact & analysis.capitalised),
+                name_lower_case=bool(
+                    name_contact
+                    and analysis.cased_turn
+                    and all(_is_cased(term) for term in name_contact)
+                    and not name_contact & analysis.capitalised_anywhere
+                ),
             )
         )
     out.sort(key=_candidate_order)
@@ -1878,6 +1917,7 @@ def resolve(
                 name_span=candidate.name_span,
                 entity_type=candidate.entity_type,
                 name_capitalised=candidate.name_capitalised,
+                name_lower_case=candidate.name_lower_case,
             )
         )
     if recency_resolves:
@@ -2014,14 +2054,17 @@ def _spoken_as_name(term: str, members: Sequence[ResolvedAnchor]) -> bool:
     """Was the shared word `term` said as a NAME, not as an ordinary word?
 
     Every member a person: a first name is a name however it is written, in
-    any script. Otherwise only a cased script can tell, and only by a capital
+    any script, unless the turn's casing says something (some words
+    capitalised, some not) and it wrote this word in lower case, so "please
+    mark the task done" never asks between two people named Mark, while an
+    all-lower-case turn ("priya sent it") still does. Otherwise only a cased script can tell, and only by a capital
     the turn gave the word away from a sentence start ("we ordered from
     Harbour again", not "the harbour was busy" or "Harbour traffic was
     heavy"). An uncased script (CJK) carries no such mark, so there a shared
     word forms the group for people only.
     """
     if all(member.entity_type == PERSON_ENTITY_TYPE for member in members):
-        return True
+        return not any(member.name_lower_case for member in members)
     return _is_cased(term) and any(member.name_capitalised for member in members)
 
 

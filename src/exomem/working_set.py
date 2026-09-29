@@ -1323,6 +1323,9 @@ def discount_superseded_pages(
     own candidates. Only for a stem that could still turn out distinctive —
     counted above `cap` by at most `RETRIEVAL_CARRY_FETCH` pages — so the
     reads stay bounded by the same window the carry reads its hits through.
+    The bound is real: a stem counted more than `cap + RETRIEVAL_CARRY_FETCH`
+    pages is left as counted, so a name whose surplus revisions are retired
+    only by `superseded_by` still blocks the carry.
     `paths_for(stems, limit)` lists the pages behind each count.
     """
     out = {stem: int(count) for stem, count in frequencies.items()}
