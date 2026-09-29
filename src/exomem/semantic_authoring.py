@@ -493,20 +493,27 @@ def render_tool_guidance(
     portable = contract.portable_categories
     identity = contract_identity(contract)
     missing = findings["missing_semantic_unit"]
+    # observe_memory takes the unit's fields separately and edit_memory takes
+    # operations, so neither needs the selection rule or the worked example
+    # that a whole-page writer does; both keep the minimum, the lifecycle and
+    # final-unit rules, and the refusal remediation.
+    whole_page = tool in {"remember", "replace_memory", "manage_memory_file"}
     guidance = " ".join(
-        (
+        part
+        for part in (
             minimum["rule"],
             minimum["lifecycle_rule"],
             minimum["final_unit_rule"],
             f"Under `{compact['canonical_section']}`, write `{compact['syntax']}` with one "
             f"primary {compact['category']['vocabulary']}-vocabulary category; "
             f"rich form is `{rich['heading_syntax']}` with a substantive body.",
-            portable["short_selection_rule"],
-            f"Role example: {portable['examples']['role']}",
+            portable["short_selection_rule"] if whole_page else "",
+            f"Role example: {portable['examples']['role']}" if whole_page else "",
             f"`missing_semantic_unit`: {missing['compact_remediation']} "
             f"{missing['rich_remediation']}",
             'Core keys, aliases and the rich example: call bootstrap(profile="full").',
         )
+        if part
     )
     if tool in {"remember", "replace_memory", "observe_memory", "edit_memory"}:
         pass
