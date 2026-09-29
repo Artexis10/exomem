@@ -3881,7 +3881,8 @@ class _FairCaptureQueue:
         with self._condition:
             return bool(self._line)
 
-    def join(self) -> object:
+    def enter_line(self) -> object:
+        """Take a place at the back of the line; never blocks."""
         ticket = object()
         with self._condition:
             self._line.append(ticket)
@@ -5495,7 +5496,7 @@ class LeaseManager:
                         _CAPTURE_WAITERS_FULL_REMEDIATION,
                     )
                 holds_slot = True
-                ticket = queue.join()
+                ticket = queue.enter_line()
             while True:
                 if ticket is not None and not queue.wait_turn(ticket, deadline):
                     raise refuse(
@@ -5537,7 +5538,7 @@ class LeaseManager:
                         holds_slot = True
                     absorbed += 1
                     if ticket is None:
-                        ticket = queue.join()
+                        ticket = queue.enter_line()
                     time.sleep(min(_CAPTURE_RETRY_FLOOR_SECONDS, remaining))
                     continue
                 if absorbed:
