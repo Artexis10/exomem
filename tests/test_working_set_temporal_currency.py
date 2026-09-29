@@ -195,3 +195,84 @@ def test_outcome_recognised_by_category_alone():
                 category="outcome", kind="observation", updated="2026-08-15")
     units = {u["ref"]: u for u in _packet([rec, out])["units"]}
     assert units["rec"]["superseded_by_outcome"] == "out"
+
+
+# Canonical current-state page --------------------------------------------
+
+
+def _canonical_hit(ref, path, content, *, updated, line, category="fact", context=None):
+    return SimpleNamespace(
+        unit_ref=ref, parent_path=path, parent_title=path, content=content, excerpt=content,
+        context=context, category=category, kind=category, parent_updated=updated,
+        parent_superseded_by=[], relations=[], source_span={"start_line": line, "end_line": line},
+    )
+
+
+def _project_anchor(neighbourhood, path="Knowledge Base/Projects/harbour-portal.md"):
+    return SimpleNamespace(
+        ref="project:harbour-portal", path=path, kind="project", title="Harbour portal",
+        neighbourhood=frozenset(neighbourhood), evidence=frozenset({"exact_alias"}),
+    )
+
+
+def _patch_units(monkeypatch, hits):
+    from exomem import find as find_module
+
+    monkeypatch.setattr(find_module, "FreshnessSnapshot", lambda root: SimpleNamespace(
+        recall_checkpoint=lambda scope: None))
+    monkeypatch.setattr(find_module, "_find_semantic_units", lambda *a, **k: list(hits))
+
+
+def test_project_anchor_serves_its_canonical_page_leading_unit(monkeypatch, tmp_path):
+    old = "Knowledge Base/Notes/harbour-portal-kickoff.md"
+    canon = "Knowledge Base/Notes/harbour-portal-operating-state.md"
+    _patch_units(monkeypatch, [
+        _canonical_hit("k1", old, "Scope still under negotiation", updated="2026-02-01", line=3),
+        _canonical_hit("c2", canon, "Invoices go out monthly", updated="2026-09-10", line=9,
+                       context="2026-09-10"),
+        _canonical_hit("c1", canon,
+                       "Executed consultancy agreement between Northwind Ltd and Tidewater Co",
+                       updated="2026-09-10", line=2, context="2026-09-01"),
+    ])
+    out = working_set_state.current_state_for(
+        tmp_path, anchors=(_project_anchor({old, canon}),), state_fields=("state",),
+        date_fields=("as_of",))
+    assert len(out) == 1
+    assert out[0]["statement"].startswith("Executed consultancy agreement")
+    assert out[0]["as_of"] == "2026-09-01"  # the unit's own time, not the page's
+    assert out[0]["source"] == "canonical_page"
+
+
+def test_hub_named_current_page_wins_over_the_newest(monkeypatch, tmp_path):
+    named = "Knowledge Base/Notes/harbour-portal-operating-state.md"
+    newer = "Knowledge Base/Notes/harbour-portal-scratch.md"
+    _patch_units(monkeypatch, [
+        _canonical_hit("n1", named, "Retainer agreement is signed", updated="2026-08-01", line=1),
+        _canonical_hit("s1", newer, "Maybe renegotiate", updated="2026-09-20", line=1),
+    ])
+    anchor = _project_anchor({named, newer})
+    hub = tmp_path / anchor.path
+    hub.parent.mkdir(parents=True)
+    hub.write_text(
+        "---\ntitle: Harbour portal\ncurrent_state_page: \"[[harbour-portal-operating-state]]\"\n---\n\nHub.\n",
+        encoding="utf-8",
+    )
+    out = working_set_state.current_state_for(
+        tmp_path, anchors=(anchor,), state_fields=("state",), date_fields=("as_of",))
+    assert out[0]["statement"] == "Retainer agreement is signed"
+
+
+def test_canonical_state_is_charged_to_the_budget_and_precedes_history(monkeypatch, tmp_path):
+    entry = {"anchor": "a", "source": "canonical_page", "as_of": "2026-09-01",
+             "statement": "Executed agreement between Northwind Ltd and Tidewater Co"}
+    history = _item("h", "Considered a different agreement", lifecycle="historical",
+                    updated="2026-01-01")
+    packet = working_set.build_packet(
+        items=(history,), anchors=(), roles=(), current_state=(entry,), ambiguity=(),
+        missing=(), max_chars=4000,
+        generation={"freshness_key": "k", "index_generation": 1, "roles_hash": "a",
+                    "roles_source": "shipped"},
+        status="resolved",
+    )
+    assert packet["current_state"][0]["statement"] == entry["statement"]
+    assert packet["budget"]["used_chars"] >= len(entry["statement"]) + len(history.text)

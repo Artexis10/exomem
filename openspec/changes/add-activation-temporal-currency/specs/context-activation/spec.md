@@ -49,3 +49,23 @@ naming the recommendation, and the recommendation SHALL carry `history: true` an
 #### Scenario: Recommended action already done
 - **WHEN** a recommendation dated 2026-08-01 and an outcome dated 2026-08-15 record the same action
 - **THEN** the outcome ranks first and the recommendation is marked superseded by it
+
+### Requirement: A resolved project or entity serves its canonical current-state page
+When a project, entity or hub anchor resolves and its neighbourhood holds a canonical
+current-state page (the page the anchor's own page names in `current_state_page`, else
+the newest page carrying `fact` or `config` units), `current_state[]` SHALL carry that
+page's leading unit with `source: canonical_page` and the unit's OWN observed time as
+`as_of`. The entry SHALL be charged to the packet budget and, being budgeted before
+units, SHALL take precedence over history units. The anchor-resolution weakness rule
+above applies to it unchanged.
+
+#### Scenario: Settled relationship is served, not left uncertain
+- **WHEN** a turn names a recurring project whose newest state page opens with "Executed
+  consultancy agreement between Northwind Ltd and Tidewater Co"
+- **THEN** `current_state[]` carries that sentence with `source: canonical_page` and the
+  unit's own date, ahead of older history units
+
+#### Scenario: The hub names the current page
+- **WHEN** the anchor's page names a page in `current_state_page` and a newer page also
+  carries state units
+- **THEN** the named page's leading unit is served

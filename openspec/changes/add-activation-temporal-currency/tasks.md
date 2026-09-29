@@ -5,3 +5,4 @@
 - [x] 1.3 Hold back or age-label current state from weakly resolved anchors.
 - [x] 1.4 Mark a recommendation superseded by a later outcome for the same action.
 - [ ] 1.5 Benchmark negative controls stay load-bearing, continuity stays 4/4, activation p95 within +10%.
+- [x] 1.6 Serve a resolved project or entity's canonical current-state page's leading unit under `current_state`.

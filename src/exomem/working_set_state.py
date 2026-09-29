@@ -47,6 +47,99 @@ STATEMENT_MAX_CHARS = 200
 STATEFUL_KINDS = frozenset({"resource", "collection", "plan"})
 
 
+#: Anchor kinds whose current state is a page, not a collection row: the
+#: settled facts of a project or entity live in its canonical current-state page.
+CANONICAL_KINDS = frozenset({"project", "entity", "hub"})
+CANONICAL = "canonical_page"
+#: Frontmatter key on the anchor's own page that names its current-state page.
+CURRENT_PAGE_FIELD = "current_state_page"
+CANONICAL_CATEGORIES = ("fact", "config")
+CANONICAL_UNIT_LIMIT = 64
+
+
+def _named_current_page(vault_root: Path, anchor: Any) -> str:
+    """The neighbourhood page the anchor's own page names as current, if any."""
+    from . import find_corpus
+
+    rel = str(getattr(anchor, "path", "") or "")
+    if not rel.endswith(".md"):
+        return ""
+    page = find_corpus.CACHE.get(vault_root / rel, vault_root)
+    frontmatter = getattr(page, "frontmatter", None)
+    named = frontmatter.get(CURRENT_PAGE_FIELD) if isinstance(frontmatter, dict) else None
+    if not isinstance(named, str):
+        return ""
+    target = normalize(named.strip().strip("[]").split("|")[0])
+    for path in sorted(getattr(anchor, "neighbourhood", ()) or ()):
+        stem = path.rsplit("/", 1)[-1].removesuffix(".md")
+        if target and target in (normalize(path), normalize(stem)):
+            return path
+    return ""
+
+
+def _from_canonical_page(vault_root: Path, anchor: Any) -> dict[str, Any] | None:
+    """The leading current-state unit of the anchor's canonical page.
+
+    The canonical page is the one its own page names as current, else the newest
+    page in the neighbourhood carrying current-state units. The entry carries the
+    unit's OWN observed time, never the page's.
+    """
+    neighbourhood = set(getattr(anchor, "neighbourhood", ()) or ())
+    if not neighbourhood:
+        return None
+    from . import find as find_module
+    from . import ranking_config, structured_filters
+    from . import working_set_currency
+
+    try:
+        snapshot = find_module.FreshnessSnapshot(vault_root)
+        plan = structured_filters.compile_filter(
+            None,
+            shortcuts=structured_filters.FilterShortcuts(categories=CANONICAL_CATEGORIES),
+        )
+        hits = find_module._find_semantic_units(
+            vault_root, query="", limit=CANONICAL_UNIT_LIMIT, scope="kb", plan=plan,
+            snapshot=snapshot, prefer_active=True, config=ranking_config.DEFAULT_RANKING,
+            mode="keyword", degraded_out=None, failed_out=None,
+            allowed_parent_paths=neighbourhood,
+            recall_checkpoint=snapshot.recall_checkpoint("kb"), repair=False,
+            max_catalog_candidates=CANONICAL_UNIT_LIMIT,
+        )
+    except Exception:  # noqa: BLE001 - an unreadable unit index costs this entry only
+        log.debug("current state: canonical page lookup failed", exc_info=True)
+        return None
+    pages: dict[str, list[Any]] = {}
+    for hit in hits:
+        if getattr(hit, "parent_superseded_by", None):
+            continue
+        pages.setdefault(str(getattr(hit, "parent_path", "") or ""), []).append(hit)
+    pages.pop("", None)
+    if not pages:
+        return None
+    named = _named_current_page(vault_root, anchor)
+    if named in pages:
+        chosen = named
+    else:
+        chosen = max(
+            pages, key=lambda path: (str(getattr(pages[path][0], "parent_updated", "") or ""), path)
+        )
+
+    def _line(hit: Any) -> int:
+        span = getattr(hit, "source_span", None) or {}
+        return int(span.get("start_line", 0) or 0)
+
+    lead = min(pages[chosen], key=_line)
+    content = str(getattr(lead, "content", "") or getattr(lead, "excerpt", "") or "").strip()
+    if not content:
+        return None
+    return {
+        "anchor": _anchor_ref(anchor),
+        "source": CANONICAL,
+        "as_of": working_set_currency.own_time(content, getattr(lead, "context", None)),
+        "statement": content[:STATEMENT_MAX_CHARS],
+    }
+
+
 def current_state_for(
     vault_root: Path,
     *,
@@ -86,6 +179,11 @@ def current_state_for(
     manifests = _records_manifests(root, index_generation, index_token)
     out: list[dict[str, Any]] = []
     for anchor in anchors:
+        if getattr(anchor, "kind", "") in CANONICAL_KINDS:
+            entry = _from_canonical_page(root, anchor)
+            if entry is not None:
+                out.append(entry)
+            continue
         if getattr(anchor, "kind", "") not in STATEFUL_KINDS:
             continue
         entry = (
