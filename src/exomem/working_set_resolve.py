@@ -546,6 +546,25 @@ def _continua_runs(token: str) -> list[tuple[int, str, str]]:
     return runs
 
 
+def _inside_longer_words(word: str, longer: Iterable[str], tokens: Sequence[str]) -> bool:
+    """Whether every occurrence of `word` in the turn's tokens lies inside an
+    occurrence of a longer word of `longer` (`_contained_names`' rule): a turn
+    that also writes the head on its own has not consumed it."""
+    others = [other for other in longer if other != word and word in other]
+    seen = False
+    for token in tokens:
+        spans = [
+            (start, start + len(other))
+            for other in others
+            for start in _occurrences(token, other)
+        ]
+        for start in _occurrences(token, word):
+            seen = True
+            if not any(low <= start and start + len(word) <= high for low, high in spans):
+                return False
+    return seen
+
+
 def _contained_names(
     analysis: TurnAnalysis, rows: Sequence[AnchorFacts], term_counts: Mapping[str, int]
 ) -> frozenset[str]:
@@ -1082,7 +1101,7 @@ def candidates_for(
     consumed_words = frozenset(
         word
         for word in embedded_only
-        if any(other != word and word in other for other in matched_words)
+        if _inside_longer_words(word, matched_words, analysis.tokens)
     )
     for row in rows:
         names = {normalize(row.title), *row.aliases} - {""}
