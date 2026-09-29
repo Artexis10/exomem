@@ -44,6 +44,7 @@ from . import (
     semantic_units,
     sidecar_store,
     traversal_profiles,
+    vocabulary_recovery,
 )
 from . import find as find_module
 from . import vault as vault_module
@@ -374,6 +375,26 @@ class RelationEdgeResult:
 
     status: str
     edges: tuple[tuple[str, str], ...] = ()
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class DependencySourcesResult:
+    """Outcome of a bare-name link-dependency lookup.
+
+    `status` carries the same never-false-empty contract as
+    `RelationFilterResult`/`RelationEdgeResult`: "available" is authoritative (an
+    empty `sources` is a real "no page links this bare spelling"), "warming"
+    means the sidecar is missing or stale, "temporarily_unavailable" means the
+    graph index is disabled. `sources` is exact for the queried spelling and
+    conservative by construction (`capture-identities-at-write-time` design D5):
+    it sees only pages that wrote the SAME bare, unfoldered target, casefolded,
+    and misses a folder-qualified or differently-normalised spelling of the same
+    identity, which the `entity_recurrence` audit family still covers.
+    """
+
+    status: str
+    sources: frozenset[str] = frozenset()
     reason: str | None = None
 
 
@@ -3225,6 +3246,8 @@ class EpistemicGraphIndex:
         if published is not None:
             _retire_covered_full_marker(self.vault_root, paid_marker)
             self._forget_rebuilt_graph_failures()
+            # After the swap, not inside the private copy's transaction.
+            self._note_graph_published()
             return published
         if epoch_error is not None:
             raise epoch_error
@@ -3685,6 +3708,7 @@ class EpistemicGraphIndex:
                 ):
                     return False
                 graph_sync.replace_sidecar(temporary, self.path, vault_root=self.vault_root)
+            self._note_graph_published()
             return True
         finally:
             _release_publication_hold(publication_hold)
@@ -4448,6 +4472,16 @@ class EpistemicGraphIndex:
                 )
         finally:
             conn.close()
+        self._note_graph_published()
+
+    def _note_graph_published(self) -> None:
+        """Wake the vocabulary recovery watcher once a publication is readable.
+
+        Only sets an event. An index pointed at a private rebuild copy writes
+        nothing readers see, so it stays silent; the swap signals instead.
+        """
+        if self.path == sidecar_path(self.vault_root):
+            vocabulary_recovery.note_graph_published(self.vault_root)
 
     def _publish_available_marker_in_transaction(
         self,
@@ -4484,6 +4518,9 @@ class EpistemicGraphIndex:
             )
         if graph_checkpoint is not None:
             self._write_graph_sync_acknowledgement(conn, graph_checkpoint)
+        # No publication signal here: this transaction may be writing a private
+        # rebuild that is swapped into place later, or refused. Each caller
+        # signals once its commit or swap has made the marker readable.
 
     @staticmethod
     def _write_graph_sync_acknowledgement(
@@ -5162,7 +5199,15 @@ class EpistemicGraphIndex:
         *,
         created_paths: Iterable[Path] = (),
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
-    ) -> dict[str, int]:
+        replayed: bool = False,
+    ) -> dict[str, Any]:
+        """Refresh `paths` incrementally, or fall back as the gates require.
+
+        `replayed` is set only by the deferred-receipt replay. It admits the
+        currency proof for its paths outside the recall delta; every other
+        caller -- reconcile and explicit repair refresh unchanged pages on
+        purpose, to reproject them -- keeps the whole-vault fallback.
+        """
         if not graph_enabled():
             # Feature-off does not authorize a stale sidecar to retain sensitive
             # raw Record rows.  Purge only an already-existing sidecar; do not
@@ -5244,7 +5289,7 @@ class EpistemicGraphIndex:
                     reason="external_event_covers_these_paths",
                     graph_checkpoint=graph_checkpoint,
                 )
-                report = {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+                report: dict[str, Any] = {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
                 if queued:
                     report["queued"] = 1
                     report["external_pending"] = 1
@@ -5253,7 +5298,47 @@ class EpistemicGraphIndex:
                 paths,
                 created_paths=created_paths,
                 graph_checkpoint=graph_checkpoint,
+                replayed=replayed,
             )
+        drain_scope = report.pop("_drain_after_release", None)
+        if drain_scope:
+            # Proved stale replayed pages, queued with the delta: repair them BY
+            # the drain, O(changed), now that the hold is released. Its rules
+            # then come from one place -- a standing full marker drains the queue
+            # with it, an unsettled epoch refuses per-path repair, and covered
+            # receipts clear by compare-and-swap -- instead of a copy here that
+            # served reads as current past outstanding whole-vault debt. A parent
+            # handoff keeps its registration, so it takes the queued deferral.
+            scope = set(drain_scope)
+            marker_stands = deferred_index.graph_full_rebuild_pending(self.vault_root) is not None
+            if _caller_can_carry_pending(self.vault_root, self._mutation_coordinator) and (
+                marker_stands or not self.epoch_admits_incremental_repair()
+            ):
+                # Either way the drain would pay a whole-vault pass -- the
+                # marker's convergence, or the fallback after an epoch refuses
+                # per-path repair -- and on this caller's thread. A caller that
+                # can report pending leaves it to the drain daemon: the receipts
+                # are already durable, and availability is already withdrawn.
+                log.info(
+                    "graph replay left its repair to the drain marker_stands=%s",
+                    marker_stands,
+                )
+                return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
+            if not _parent_receipted_graph_handoff_active(
+                self.vault_root, self._mutation_coordinator.state_root
+            ):
+                from . import index_sync
+
+                index_sync.drain_graph_work(self.vault_root, paths=scope)
+                if not deferred_index.snapshot_graph(self.vault_root, limit=1, paths=scope):
+                    # A standing marker drained through its whole-vault pass.
+                    report = {"indexed_files": 0, "nodes": 0, "edges": 0}
+                    if marker_stands:
+                        report["whole_vault"] = 1
+                    return report
+                log.info("graph replay drain left its repair queued; rebuilding")
+            report["_rebuild_after_release"] = 1
+            report["_durable_before_rebuild"] = 1
         if report.pop("_rebuild_after_release", False):
             durable_before_rebuild = bool(report.pop("_durable_before_rebuild", False))
             if _parent_receipted_graph_handoff_active(
@@ -5271,7 +5356,8 @@ class EpistemicGraphIndex:
                     if graph_checkpoint is not None
                     else _durable_generation(self.vault_root)
                 ):
-                    return self._rebuild_all_off_boundary(accept_stabilized_build=True)
+                    rebuilt = self._rebuild_all_off_boundary(accept_stabilized_build=True)
+                return {**rebuilt, "whole_vault": 1}
             except graph_sync.GraphRebuildInProgress:
                 # A defer-disposition fallback has already persisted these exact
                 # paths. A rebuild-disposition fallback knows only that the
@@ -5332,7 +5418,8 @@ class EpistemicGraphIndex:
         *,
         created_paths: Iterable[Path] = (),
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
-    ) -> dict[str, int]:
+        replayed: bool = False,
+    ) -> dict[str, Any]:
         # The affected set, widened as the pass learns more. It starts as what
         # the caller named, which is already the checkpoint's changed and
         # created paths, and grows to the recall delta and the resolver-affected
@@ -5522,6 +5609,78 @@ class EpistemicGraphIndex:
             snapshot.close()
             self._mark_unavailable()
             return fallback("delta_target_moved")
+        # A replayed deferred receipt names a page whose change landed long
+        # before the stored checkpoint, so it lies outside the recall delta.
+        # Prove each such path against the stored rows before paying for the
+        # vault: a path the registry records as the disk has it is either
+        # already reflected (a no-op) or recorded work the drain repairs. Only
+        # a path the registry does not vouch for still rebuilds from disk. Any
+        # other caller keeps the fallback below the resolver lookup.
+        delta_paths = set(delta.changed | delta.deleted)
+        created_paths = list(created_paths)
+        # A fan-out names its batch's created pages beside the written ones; a
+        # created page outside the delta is replayed too, and proved the same way.
+        outside = list(
+            dict.fromkeys(
+                Path(path) for path in (*paths, *created_paths) if str(path) not in delta_paths
+            )
+        )
+        if outside and replayed:
+            # Proved before the resolver is needed: a replay the rows already
+            # reflect owes nothing, whether or not a resolver is resident.
+            snapshot.close()
+            currency = self._replayed_path_currency(outside)
+            if currency is None:
+                self._mark_unavailable()
+                return fallback("caller_path_outside_delta")
+            current, stale = currency
+            if stale:
+                deferred_scope.update(stale)
+                deferred_scope.update(
+                    rel
+                    for candidate in delta_paths
+                    if (rel := _vault_rel(self.vault_root, Path(candidate))) is not None
+                )
+                log.info(
+                    "graph incremental refresh proved replayed paths stale; draining them "
+                    "current=%d stale=%d graph_checkpoint=%s",
+                    len(current),
+                    len(stale),
+                    graph_checkpoint.checkpoint_sha256 if graph_checkpoint is not None else None,
+                )
+                if graph_checkpoint is not None:
+                    # A checkpoint caller already gets the queued deferral.
+                    self._mark_unavailable()
+                    return fallback("caller_path_outside_delta")
+                self._mark_unavailable()
+                if not self._queue_graph_repair(
+                    deferred_scope, reason="replayed_path_stale", graph_checkpoint=None
+                ):
+                    return fallback("caller_path_outside_delta")
+                return {
+                    "indexed_files": 0,
+                    "nodes": 0,
+                    "edges": 0,
+                    "_drain_after_release": sorted(deferred_scope),
+                }
+            log.info(
+                "graph incremental refresh proved replayed paths current count=%d "
+                "delta_paths=%d",
+                len(current),
+                len(delta_paths),
+            )
+            if not delta_paths:
+                # Nothing moved since the stored checkpoint and the caller's
+                # pages are already what the rows say: the replay owes nothing.
+                return {"indexed_files": 0, "nodes": 0, "edges": 0}
+            paths = [path for path in paths if str(path) in delta_paths]
+            # Proved current, so neither a created page outside the delta: left
+            # in, it is a created path without a delta row to vouch for it.
+            created_paths = [path for path in created_paths if str(path) in delta_paths]
+            snapshot = self._open_read_snapshot(require_current_projection=False)
+            if snapshot is None:
+                return fallback("graph_snapshot_unavailable")
+
         created_rels = {
             rel
             for path in created_paths
@@ -5604,12 +5763,12 @@ class EpistemicGraphIndex:
         )
         # Caller paths outside the exact retained suffix mean publication was
         # skipped, failed, or this is a duplicate callback whose global safety
-        # cannot be proved path-locally. Rebuild from disk instead of blessing
-        # the event checkpoint.
+        # cannot be proved path-locally -- or a deliberate reprojection of an
+        # unchanged page. Rebuild from disk instead of blessing the event
+        # checkpoint. A replay's proved-current paths were already dropped.
         if any(str(path) not in delta_paths for path in paths):
             self._mark_unavailable()
             return fallback("caller_path_outside_delta")
-
         refresh_paths = set(delta_paths)
         topology_versions: dict[str, GraphSourceSignature] = {}
         resolver_versions: dict[str, GraphSourceSignature] = {}
@@ -5697,6 +5856,8 @@ class EpistemicGraphIndex:
                 resolver_fingerprint=resolver_fingerprint,
                 before_commit=publish_incremental if graph_checkpoint is not None else None,
             )
+            if graph_checkpoint is not None:
+                self._note_graph_published()
             if graph_checkpoint is None:
                 if self._mark_incremental_available(
                     before,
@@ -5719,6 +5880,135 @@ class EpistemicGraphIndex:
             if pass_started and not stable:
                 self._mark_unavailable()
         return fallback("unreachable")
+
+    def _stored_units_current(
+        self, conn: sqlite3.Connection, rel: str, path: Path, raw: bytes, page: Any
+    ) -> bool | None:
+        """Whether the page's stored semantic-unit rows are its current projection.
+
+        The file row's source hash says only that the bytes were indexed; unit
+        rows also carry the projection generation and parser version, which a
+        registry change or parser upgrade moves without touching the bytes.
+        None when the page cannot be parsed for the comparison.
+        """
+        try:
+            state = semantic_index.current_parent_index_state(
+                self.vault_root, path, source=raw.decode("utf-8")
+            )
+            expected = {
+                (
+                    _unit_node(page, unit, state).node_key,
+                    state.parent_generation,
+                    state.parser_version,
+                )
+                for unit in state.document.units
+                if unit.unit_ref is not None
+            }
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+        stored: set[tuple[str, object, object]] = set()
+        for node_key, raw_metadata in conn.execute(
+            "SELECT node_key, metadata FROM graph_nodes WHERE path = ? AND kind != 'file'",
+            (rel,),
+        ):
+            try:
+                metadata = json.loads(raw_metadata)
+            except (TypeError, ValueError):
+                return False
+            if isinstance(metadata, dict) and metadata.get("record_type") == "semantic_unit":
+                stored.add(
+                    (
+                        str(node_key),
+                        metadata.get("parent_generation"),
+                        metadata.get("parser_version"),
+                    )
+                )
+        return stored == expected
+
+    def _replayed_path_currency(
+        self, paths: list[Path]
+    ) -> tuple[list[str], list[str]] | None:
+        """Split caller paths outside the recall delta into current and stale, or None.
+
+        None when any one cannot be proved: the registry is not live, or does not
+        record the path exactly as the disk has it (the registry may be behind,
+        and the refresh's topology proof covers only the delta), or the page has
+        rows it should not have. Otherwise a page is current when its stored file
+        row carries the source hash of its current bytes, or when it has no row
+        and is not an indexed page; stale when its row is missing, different, or
+        belongs to a page that is gone -- recorded work the drain repairs.
+        """
+        from . import find_corpus
+
+        entries = freshness.live_recall_entries(self.vault_root, "vault")
+        if entries is None:
+            return None
+        conn = self._open_read_snapshot(require_current_projection=False)
+        if conn is None:
+            return None
+        kb = self.vault_root / kb_dirname()
+        listings: dict[Path, frozenset[str] | None] = {}
+        current: list[str] = []
+        stale: list[str] = []
+        try:
+            for path in paths:
+                rel = _vault_rel(self.vault_root, path)
+                if rel is None:
+                    return None
+                # Judged under the vault's own spelling: recall policy, the
+                # registry and the corpus walk all key on it, and a caller's
+                # alias spelling would make a stale page read as a non-page.
+                path = self.vault_root / rel
+                exists = os.path.lexists(path)
+                admitted = exists and recall_policy.is_recall_candidate(self.vault_root, path)
+                if exists and not admitted:
+                    # The registry never lists a page recall does not admit, and
+                    # the graph holds no rows for one.
+                    recorded_matches = True
+                else:
+                    recorded = entries.get(str(path))
+                    try:
+                        on_disk = freshness.stat_signature(path) if exists else None
+                    except OSError:
+                        return None
+                    recorded_matches = recorded == on_disk
+                if not recorded_matches:
+                    return None
+                row = conn.execute(
+                    "SELECT source_hash FROM graph_nodes WHERE path = ? AND kind = 'file'",
+                    (rel,),
+                ).fetchone()
+                indexed = (
+                    admitted
+                    and rel.startswith(kb_prefix())
+                    and find_corpus.walk_md_admits(kb, path, listings)
+                )
+                if indexed:
+                    try:
+                        raw = vault_module.read_bytes_without_pinning(path)
+                    except OSError:
+                        return None
+                    page = find_module._parse_page(
+                        path, 0.0, self.vault_root, content=raw, resolved_relative=rel
+                    )
+                    if page is None:
+                        return None
+                    if row is None or str(row[0]) != page.snapshot_hash:
+                        stale.append(rel)
+                        continue
+                    units_current = self._stored_units_current(conn, rel, path, raw, page)
+                    if units_current is None:
+                        return None
+                    (current if units_current else stale).append(rel)
+                elif row is None:
+                    current.append(rel)
+                elif not exists:
+                    stale.append(rel)
+                else:
+                    return None
+        finally:
+            conn.close()
+        return current, stale
 
     def _refresh_paths_pass(
         self,
@@ -6019,6 +6309,8 @@ class EpistemicGraphIndex:
                 # the next drain repairs it against the projection that moved.
                 log.info("deferred graph drain did not publish; projection moved under the pass")
                 return {**report, "moved": 1}
+            if published:
+                self._note_graph_published()
         return {
             **pass_report,
             "published": published,
@@ -6796,6 +7088,41 @@ class EpistemicGraphIndex:
             seen.add(edge)
             edges.append(edge)
         return RelationEdgeResult(status="available", edges=tuple(edges))
+
+    def dependency_sources_for_bare_name(self, name: str) -> DependencySourcesResult:
+        """Pages whose body links this bare (unfoldered) name, via the raw
+        dependency index (`capture-identities-at-write-time` design D5).
+
+        `name` is a wikilink's last path segment, never a folder-qualified
+        target — the same conservative lookup keys `_dependency_lookup_keys`
+        would derive for a raw target with no folder, so this answers exactly
+        the question "which pages wrote `[[name]]` or `[[<kb-folder>/name]]`",
+        nothing deeper. It is a single keyed read over the already-maintained
+        `graph_dependencies` table, never a vault walk, and shares the
+        never-false-empty status contract `relation_participants` and
+        `relation_edges` use.
+        """
+        keys = _dependency_lookup_keys(name)
+        if not keys:
+            return DependencySourcesResult(status="available")
+        if not graph_enabled():
+            return DependencySourcesResult(
+                status="temporarily_unavailable", reason="graph_index_disabled"
+            )
+        if not self.path.exists():
+            return DependencySourcesResult(status="warming")
+        conn = self._open_read_snapshot()
+        if conn is None:
+            return DependencySourcesResult(status="warming")
+        try:
+            rows = self._dependency_sources_for_keys(conn, keys)
+        except sqlite3.Error:
+            return DependencySourcesResult(status="warming")
+        finally:
+            conn.close()
+        return DependencySourcesResult(
+            status="available", sources=frozenset(source for source, _raw in rows)
+        )
 
     def relation_review_batch(
         self,
@@ -8850,14 +9177,19 @@ def upsert_after_write(
     written_paths: list[Path],
     *,
     created_paths: Iterable[Path] = (),
+    replayed: bool = False,
 ) -> GraphDispatchResult:
-    """Dispatch graph work without allowing a required checkpoint to vanish."""
+    """Dispatch graph work without allowing a required checkpoint to vanish.
+
+    `replayed` marks the deferred-receipt replay; see `refresh_paths`.
+    """
     if not written_paths:
         return GraphDispatchResult.not_required()
     required = graph_sync.read_checkpoint(vault_root)
     mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None
     try:
         created = list(created_paths)
+        replay: dict[str, bool] = {"replayed": True} if replayed else {}
         from .writer_lease import active_manager
 
         mutation_coordinator = active_manager()._mutation_coordinator_for(vault_root)
@@ -8930,9 +9262,11 @@ def upsert_after_write(
                 )
                 return _join_registered_standalone(vault_root, result, mutation_coordinator)
             report = (
-                index.refresh_paths(written_paths, created_paths=created, graph_checkpoint=required)
+                index.refresh_paths(
+                    written_paths, created_paths=created, graph_checkpoint=required, **replay
+                )
                 if created
-                else index.refresh_paths(written_paths, graph_checkpoint=required)
+                else index.refresh_paths(written_paths, graph_checkpoint=required, **replay)
             )
             if report.get("deferred"):
                 if report.get("queued") and _caller_can_carry_pending(
@@ -9011,10 +9345,20 @@ def upsert_after_write(
                 )
             return GraphDispatchResult("completed", "incremental_completed", required)
         report = (
-            index.refresh_paths(written_paths, created_paths=created)
+            index.refresh_paths(written_paths, created_paths=created, **replay)
             if created
-            else index.refresh_paths(written_paths)
+            else index.refresh_paths(written_paths, **replay)
         )
+        if (
+            required is not None
+            and report.get("deferred")
+            and report.get("queued")
+            and _caller_can_carry_pending(vault_root, mutation_coordinator)
+        ):
+            # The queue owns this repair whatever the acknowledgement covers: a
+            # covered checkpoint below would report a rebuild that never ran for
+            # a graph that is unavailable with its receipt still queued.
+            return GraphDispatchResult("deferred", "graph_repair_queued", required)
         if required is not None and report.get("deferred"):
             if graph_sync.registered_checkpoint(
                 vault_root, state_root=mutation_coordinator.state_root
@@ -9032,6 +9376,13 @@ def upsert_after_write(
                 _registered_or_failure(vault_root, required, index, mutation_coordinator),
                 mutation_coordinator,
             )
+        if report.get("whole_vault"):
+            # Said as what ran: a whole-vault pass is not an incremental one.
+            return GraphDispatchResult("completed", "graph_rebuild_completed", required)
+        if report.get("deferred") and report.get("queued"):
+            # No checkpoint to report pending against; the code names the
+            # durable queue that owns the repair instead of claiming it done.
+            return GraphDispatchResult("completed", "graph_repair_queued_for_drain", required)
         return GraphDispatchResult("completed", "incremental_completed", required)
     except OpError as error:
         _handle_graph_dispatch_failure(

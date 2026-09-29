@@ -29,6 +29,7 @@ from . import (
     privacy_log,
     project_keys,
     schema,
+    vocabulary_recovery,
 )
 from .dotenv_guard import working_directory_dotenv
 from .governance import authorization_session_lifecycle, projection_runtime
@@ -147,6 +148,9 @@ class LocalRuntimeActivation:
         self.file_watcher: Any | None = None
         self.derived_drain: Any | None = None
         self.vocabulary_recovery: Any | None = None
+        # The recovery watcher runs until told to stop, so it has its own stop
+        # event: every path that stops the other workers stops it too.
+        self._vocabulary_stop = threading.Event()
         self.recall_reembed: Any | None = None
         self.dreamer: Any | None = None
 
@@ -322,6 +326,17 @@ class LocalRuntimeActivation:
                 _stop_dreamer()
             except Exception:  # noqa: BLE001 - shutdown still has to join activation
                 log.warning("dreamer runtime shutdown failed", exc_info=True)
+        self._vocabulary_stop.set()
+        self._join_vocabulary_recovery()
+
+    def _join_vocabulary_recovery(self) -> None:
+        """Join the recovery watcher, bounded; it exits within one poll."""
+        thread = self.vocabulary_recovery
+        if not isinstance(thread, threading.Thread) or thread is threading.current_thread():
+            return
+        thread.join(timeout=VOCABULARY_WATCHER_JOIN_SECONDS)
+        if thread.is_alive():
+            log.warning("vocabulary recovery watcher did not stop before its deadline")
 
     def _start_component(self, label: str, starter: Callable[[Path], Any]) -> None:
         try:
@@ -342,8 +357,8 @@ class LocalRuntimeActivation:
     def _start_vocabulary_recovery(self, vault_root: Path) -> None:
         """Drain queued recovery in the background, not on a client review call."""
         thread = threading.Thread(
-            target=drain_vocabulary_recovery,
-            args=(vault_root, self._shutdown),
+            target=watch_vocabulary_recovery,
+            args=(vault_root, self._vocabulary_stop),
             name="exomem-vocabulary-recovery",
             daemon=True,
         )
@@ -396,6 +411,10 @@ class LocalRuntimeActivation:
                 self._stop_background_workers()
                 if thread is not None and thread is not threading.current_thread():
                     await anyio.to_thread.run_sync(thread.join)
+                # Activation may have started the watcher after the stop above;
+                # it saw the stop event already set, so this join is short.
+                self._vocabulary_stop.set()
+                await anyio.to_thread.run_sync(self._join_vocabulary_recovery)
                 # A discarded standby must not leave the catalogue it built
                 # behind; a no-op for any worker that is not an unpromoted one.
                 # Off the loop: it may wait, bounded, for a build to stop, and
@@ -660,6 +679,20 @@ def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:
 #: it will run (`seamless-managed-worker-handoff` D12).
 VOCABULARY_DRAIN_WAIT_SECONDS = 120.0
 VOCABULARY_DRAIN_PASSES = 256
+#: How long a publication-triggered drain waits for the projection to report
+#: current once the published snapshot is readable.
+VOCABULARY_REDRAIN_READY_SECONDS = 10.0
+#: The signal fires after the commit or swap, but a snapshot can still be slow
+#: to prove readable. Each readiness probe can walk the vault, so one
+#: publication probes at most `VOCABULARY_REDRAIN_MAX_POLLS` times, backing off
+#: from one second, doubling to a one-minute cap: about two minutes, eight
+#: probes. After that only the next publication wakes the watcher.
+VOCABULARY_REDRAIN_MAX_POLLS = 8
+VOCABULARY_REDRAIN_FIRST_BACKOFF_SECONDS = 1.0
+VOCABULARY_REDRAIN_MAX_BACKOFF_SECONDS = 60.0
+#: How long shutdown waits for the watcher. It polls its stop event every
+#: quarter second, so this bounds only a recovery pass already in flight.
+VOCABULARY_WATCHER_JOIN_SECONDS = 5.0
 
 
 def drain_vocabulary_recovery(
@@ -763,6 +796,103 @@ def _warm_embedding_matrix(vault_root: Path) -> None:
         log.info("embedding matrix warm skipped", exc_info=True)
         return
     log.info("embedding matrix warm done in %.0f ms", (time.perf_counter() - started) * 1000.0)
+
+
+def redrain_backoffs(
+    *,
+    first_backoff: float = VOCABULARY_REDRAIN_FIRST_BACKOFF_SECONDS,
+    max_backoff: float = VOCABULARY_REDRAIN_MAX_BACKOFF_SECONDS,
+    max_polls: int = VOCABULARY_REDRAIN_MAX_POLLS,
+) -> tuple[float, ...]:
+    """The waits between one publication's readiness probes."""
+    delays: list[float] = []
+    delay = first_backoff
+    for _ in range(max(0, max_polls - 1)):
+        delays.append(min(delay, max_backoff))
+        delay *= 2
+    return tuple(delays)
+
+
+def redrain_after_publish(
+    vault_root: Path,
+    shutdown: threading.Event,
+    *,
+    ready_seconds: float = VOCABULARY_REDRAIN_READY_SECONDS,
+    wake: threading.Event | None = None,
+    first_backoff: float = VOCABULARY_REDRAIN_FIRST_BACKOFF_SECONDS,
+    max_backoff: float = VOCABULARY_REDRAIN_MAX_BACKOFF_SECONDS,
+    max_polls: int = VOCABULARY_REDRAIN_MAX_POLLS,
+) -> int | None:
+    """Drain once after a graph publication, when there is work and it can land.
+
+    Returns None when nothing is queued. Otherwise probes, with backoff and a
+    bounded count, for the read snapshot the publication made, then runs the
+    same bounded drain activation runs. A later publication (`wake`) ends the
+    current backoff and restarts the schedule, since it is a new snapshot to
+    wait for. Claims are compare-and-set, so this never repeats a job the
+    activation drain or an explicit review already completed.
+    """
+    from . import epistemic_graph
+
+    if not vocabulary_recovery.page(vault_root, limit=1):
+        return None
+    graph = epistemic_graph.EpistemicGraphIndex(vault_root)
+    schedule = redrain_backoffs(
+        first_backoff=first_backoff, max_backoff=max_backoff, max_polls=max_polls
+    )
+    step = 0
+    while not shutdown.is_set():
+        try:
+            readable = graph.available()
+        except Exception:  # noqa: BLE001 - a background drain never breaks the runtime
+            readable = False
+        if readable:
+            return drain_vocabulary_recovery(vault_root, shutdown, wait_seconds=ready_seconds)
+        if step >= len(schedule):
+            return 0
+        if _wait_for_backoff(schedule[step], shutdown, wake):
+            step = 0
+        else:
+            step += 1
+    return 0
+
+
+def _wait_for_backoff(
+    seconds: float, shutdown: threading.Event, wake: threading.Event | None
+) -> bool:
+    """Wait out one backoff; True when a new publication ended it early."""
+    deadline = time.monotonic() + seconds
+    while not shutdown.is_set():
+        if wake is not None and wake.is_set():
+            wake.clear()
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        shutdown.wait(min(0.25, remaining))
+    return False
+
+
+def watch_vocabulary_recovery(vault_root: Path, shutdown: threading.Event) -> None:
+    """Drain at activation, then again after every graph publication.
+
+    Graph churn withdraws the read snapshot a write's guidance needs, which
+    strands its recovery job until something drains the queue. Publications
+    only set an event, so many coalesce into one drain and none waits for it.
+    """
+    published = vocabulary_recovery.publication_signal(vault_root)
+    try:
+        drain_vocabulary_recovery(vault_root, shutdown)
+        while not shutdown.is_set():
+            if not published.wait(timeout=0.5):
+                continue
+            published.clear()
+            try:
+                redrain_after_publish(vault_root, shutdown, wake=published)
+            except Exception:  # noqa: BLE001 - the next publication retries
+                log.warning("vocabulary recovery redrain failed", exc_info=True)
+    finally:
+        vocabulary_recovery.release_publication_signal(vault_root, published)
 
 
 def _start_metrics_persistence() -> None:

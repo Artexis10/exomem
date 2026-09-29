@@ -10,9 +10,9 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import anyio
 import mcp.types
 from fastmcp import FastMCP
 from starlette.background import BackgroundTask
@@ -100,6 +100,11 @@ HEALTH_SNAPSHOT_TTL_SECONDS = 5.0
 # filesystem): /health then answers 503 instead of serving a stale 200.
 HEALTH_REFRESH_WEDGED_SECONDS = 120.0
 
+# Readiness measurements get their own workers. anyio's default limiter is
+# shared with every synchronous tool call, so slow calls would queue readiness
+# behind them and make a busy cell look NotReady.
+_READINESS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="exomem-readiness")
+
 
 def _read_liveness_facts() -> dict[str, object]:
     """Blocking reads behind `/health`: install provenance and state placement."""
@@ -186,18 +191,9 @@ def register_health_routes(
     if traffic_monitor is None:
         traffic_monitor = runtime_readiness_module.get_silent_traffic_monitor()
 
-    # Two readiness proofs at a time, apart from the request thread pool.
-    # Created on first use, inside the serving event loop.
-    readiness_limiter: list[anyio.CapacityLimiter] = []
-
-    def _readiness_limiter() -> anyio.CapacityLimiter:
-        if not readiness_limiter:
-            readiness_limiter.append(anyio.CapacityLimiter(2))
-        return readiness_limiter[0]
-
     # The proof in flight, by tool-surface digest. A probe that arrives while
     # one runs answers from it: waiters queued without bound behind the
-    # limiter, and a client that gave up still left its proof queued, so a 30 s
+    # readiness workers, and a client that gave up still left its proof queued, so a 30 s
     # stall replayed 30 proofs back to back. A finished proof is never reused.
     readiness_flights: dict[object, asyncio.Future] = {}
 
@@ -205,15 +201,15 @@ def register_health_routes(
         flight = readiness_flights.get(digest)
         if flight is not None and not flight.done():
             return flight
-        flight = asyncio.ensure_future(
-            anyio.to_thread.run_sync(
-                functools.partial(
-                    runtime_readiness_module.runtime_readiness,
-                    mcp_tool_surface_sha256=digest,
-                    traffic=traffic,
-                ),
-                limiter=_readiness_limiter(),
-            )
+        # The proof runs on the readiness workers, apart from anyio's default
+        # limiter that every synchronous tool call shares.
+        flight = asyncio.get_running_loop().run_in_executor(
+            _READINESS_EXECUTOR,
+            functools.partial(
+                runtime_readiness_module.runtime_readiness,
+                mcp_tool_surface_sha256=digest,
+                traffic=traffic,
+            ),
         )
         readiness_flights[digest] = flight
 
@@ -280,12 +276,11 @@ def register_health_routes(
                 mcp_app._exomem_tool_surface_sha256 = digest
             except Exception:  # noqa: BLE001 - readiness must stay structured
                 digest = None
-        # Off the event loop: the retrieval proof and coordination status take
-        # reserved-state locks, and one probe held the loop 5.8 s on one at the
-        # 0.96.0 promotion, timing out the liveness polls queued behind it. A
-        # limiter of its own keeps probes from queueing behind request work.
-        # Shielded: one caller going away must not cancel the proof the others
-        # are waiting on.
+        # Off the event loop, on the readiness workers: the retrieval proof and
+        # coordination status take reserved-state locks, and one probe held the
+        # loop 5.8 s on one at the 0.96.0 promotion, timing out the liveness
+        # polls queued behind it. Shielded: one caller going away must not
+        # cancel the proof the others are waiting on.
         snapshot = await asyncio.shield(_readiness_flight(digest, traffic))
         status_code = 200 if snapshot["status"] == "ready" else 503
         return JSONResponse(

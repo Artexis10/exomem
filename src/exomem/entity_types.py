@@ -35,6 +35,52 @@ ENTITY_WRITER_OPTIONAL_FRONTMATTER = (
     "decision_status",
 )
 SUPPORTED_OPTIONAL_FRONTMATTER = frozenset(ENTITY_WRITER_OPTIONAL_FRONTMATTER)
+#: Vault-declared facets (`facets:` in the extension registry, keyed by an
+#: active type id, core or vault-defined). Bounded: a facet is a name, one
+#: cardinality and one value kind; a type declares at most 16.
+MAX_ENTITY_FACETS = 16
+MAX_FACET_VALUES = 16
+MAX_FACET_TEXT_CHARS = 256
+FACET_CARDINALITIES = ("single", "multi")
+FACET_VALUE_KINDS = ("text", "wikilink", "date")
+_FACET_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+#: Frontmatter keys the entity writer, graph, recall or lifecycle already own.
+#: A facet can never shadow one, so a declared facet cannot change what an
+#: existing key means.
+RESERVED_ENTITY_FRONTMATTER = frozenset(
+    {
+        "type",
+        "exomem_id",
+        "id",
+        "title",
+        "name",
+        "summary",
+        "entity_type",
+        "status",
+        "created",
+        "updated",
+        "captured",
+        "tags",
+        "aliases",
+        "sources",
+        "evidence",
+        "evidences",
+        "evidence_paths",
+        "supersedes",
+        "superseded_by",
+        "related",
+        "replaced_by",
+        "project",
+        "projects",
+        "scope",
+        "category",
+        "categories",
+        "kind",
+        "note_type",
+        "facets",
+        *ENTITY_WRITER_OPTIONAL_FRONTMATTER,
+    }
+)
 _RESERVED_PATH_CHARS = frozenset('<>:"/\\|?*')
 _RESERVED_WINDOWS_NAMES = frozenset(
     {"con", "prn", "aux", "nul"}
@@ -58,6 +104,18 @@ class EntityTypeDefinition:
     status: str = "active"
     replaced_by: str | None = None
     core: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class EntityFacetDefinition:
+    """One vault-declared facet a type's entities may carry in frontmatter."""
+
+    name: str
+    cardinality: str
+    value: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"cardinality": self.cardinality, "value": self.value}
 
 
 # Backward-compatible core-only tuple. These five definitions remain unchanged.
@@ -202,6 +260,11 @@ class EntityTypeRegistry:
     by_id: Mapping[str, EntityTypeDefinition] = field(default_factory=dict)
     by_folder: Mapping[str, EntityTypeDefinition] = field(default_factory=dict)
     by_alias: Mapping[str, EntityTypeDefinition] = field(default_factory=dict)
+    facets: Mapping[str, tuple[EntityFacetDefinition, ...]] = field(default_factory=dict)
+
+    def facets_for(self, type_id: str) -> tuple[EntityFacetDefinition, ...]:
+        """The facets declared for one active canonical type id."""
+        return self.facets.get(type_id, ())
 
     @property
     def active_definitions(self) -> tuple[EntityTypeDefinition, ...]:
@@ -275,6 +338,7 @@ def _registry(
     core: Mapping[str, EntityTypeDefinition],
     extensions: Mapping[str, EntityTypeDefinition] | None = None,
     findings: tuple[dict[str, str], ...] = (),
+    facets: Mapping[str, tuple[EntityFacetDefinition, ...]] | None = None,
 ) -> EntityTypeRegistry:
     extension_map = dict(extensions or {})
     active = [
@@ -317,6 +381,9 @@ def _registry(
         by_id=MappingProxyType(by_id),
         by_folder=MappingProxyType(by_folder),
         by_alias=MappingProxyType(by_alias),
+        facets=MappingProxyType(
+            {type_id: declared for type_id, declared in (facets or {}).items() if type_id in by_id}
+        ),
     )
 
 
@@ -461,7 +528,7 @@ def _parse_extension_data(
             findings=(_finding("invalid_registry", "registry", "must be an object"),),
         )
     for key in sorted(
-        set(data) - {"schema_version", "entity_types"}, key=lambda value: str(value)
+        set(data) - {"schema_version", "entity_types", "facets"}, key=lambda value: str(value)
     ):
         findings.append(_finding("unknown_field", str(key), "unknown registry field"))
     if data.get("schema_version") != EXTENSION_SCHEMA_VERSION:
@@ -640,15 +707,7 @@ def _parse_extension_data(
                 )
             alias_keys.add(alias_key)
         parent = _optional(raw_value.get("parent"))
-        if parent is not None and parent not in core.core:
-            local.append(
-                _finding(
-                    "invalid_parent",
-                    f"{span}.parent",
-                    "must name a core entity type",
-                    entity_type=type_id,
-                )
-            )
+        # A vault-defined parent is checked once every definition is parsed.
         status = str(raw_value.get("status") or "active").strip().casefold()
         if status not in _STATUSES:
             local.append(
@@ -683,6 +742,29 @@ def _parse_extension_data(
             if token:
                 token_owners[token] = type_id
 
+    # A parent is a core type or an active, parentless vault-defined type, so a
+    # family is always one level deep and its root is a real registered kind.
+    for type_id, definition in tuple(extensions.items()):
+        parent = definition.parent
+        if parent is None or parent in core.core:
+            continue
+        root = extensions.get(parent)
+        if (
+            parent == type_id
+            or root is None
+            or root.parent is not None
+            or root.status != "active"
+        ):
+            findings.append(
+                _finding(
+                    "invalid_parent",
+                    f"entity_types.{type_id}.parent",
+                    "must name a core entity type or an active vault-defined type "
+                    "that has no parent",
+                    entity_type=type_id,
+                )
+            )
+            extensions.pop(type_id)
     canonical = set(core.core) | set(extensions)
     for type_id, definition in tuple(extensions.items()):
         if definition.replaced_by and definition.replaced_by not in canonical:
@@ -695,6 +777,14 @@ def _parse_extension_data(
                 )
             )
             extensions.pop(type_id)
+    declared_facets = _parse_facets(
+        data.get("facets"),
+        active={
+            *core.core,
+            *(type_id for type_id, item in extensions.items() if item.status == "active"),
+        },
+        findings=findings,
+    )
     ordered_findings = tuple(
         sorted(findings, key=lambda item: (item["path"], item["code"], item["detail"]))
     )
@@ -704,7 +794,119 @@ def _parse_extension_data(
         core.core,
         extensions,
         ordered_findings,
+        declared_facets,
     )
+
+
+def _parse_facets(
+    raw: Any,
+    *,
+    active: set[str],
+    findings: list[dict[str, str]],
+) -> dict[str, tuple[EntityFacetDefinition, ...]]:
+    """Validate `facets: {type_id: {name: {cardinality, value}}}`.
+
+    A type whose declaration has any finding keeps no facets at all, so a
+    partly valid declaration never widens what the writer accepts.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        findings.append(_finding("invalid_facets", "facets", "must be an object"))
+        return {}
+    declared: dict[str, tuple[EntityFacetDefinition, ...]] = {}
+    for raw_type, raw_facets in raw.items():
+        type_id = str(raw_type)
+        span = f"facets.{type_id}"
+        local: list[dict[str, str]] = []
+        if type_id not in active:
+            local.append(
+                _finding(
+                    "unknown_facet_type",
+                    span,
+                    "must name an active canonical entity type id",
+                    entity_type=type_id,
+                )
+            )
+        if not isinstance(raw_facets, dict) or not raw_facets:
+            local.append(
+                _finding("invalid_facets", span, "must be a non-empty object", entity_type=type_id)
+            )
+            findings.extend(local)
+            continue
+        if len(raw_facets) > MAX_ENTITY_FACETS:
+            local.append(
+                _finding(
+                    "too_many_facets",
+                    span,
+                    f"at most {MAX_ENTITY_FACETS} facets per type",
+                    entity_type=type_id,
+                )
+            )
+        definitions: list[EntityFacetDefinition] = []
+        for raw_name, raw_definition in raw_facets.items():
+            name = str(raw_name)
+            facet_span = f"{span}.{name}"
+            if not _FACET_NAME_RE.fullmatch(name):
+                local.append(
+                    _finding(
+                        "invalid_facet_name",
+                        facet_span,
+                        "must match ^[a-z][a-z0-9_]{0,39}$",
+                        entity_type=type_id,
+                    )
+                )
+                continue
+            if name in RESERVED_ENTITY_FRONTMATTER or name.startswith("exomem"):
+                local.append(
+                    _finding(
+                        "reserved_facet_name",
+                        facet_span,
+                        "names a field the entity writer already owns",
+                        entity_type=type_id,
+                    )
+                )
+                continue
+            if not isinstance(raw_definition, dict):
+                local.append(
+                    _finding("invalid_facet", facet_span, "must be an object", entity_type=type_id)
+                )
+                continue
+            for unknown in sorted(set(raw_definition) - {"cardinality", "value"}, key=str):
+                local.append(
+                    _finding(
+                        "unknown_field",
+                        f"{facet_span}.{unknown}",
+                        "unknown facet field",
+                        entity_type=type_id,
+                    )
+                )
+            cardinality = raw_definition.get("cardinality", "single")
+            value = raw_definition.get("value", "text")
+            if cardinality not in FACET_CARDINALITIES:
+                local.append(
+                    _finding(
+                        "invalid_facet_cardinality",
+                        f"{facet_span}.cardinality",
+                        f"must be one of {list(FACET_CARDINALITIES)}",
+                        entity_type=type_id,
+                    )
+                )
+            if value not in FACET_VALUE_KINDS:
+                local.append(
+                    _finding(
+                        "invalid_facet_value",
+                        f"{facet_span}.value",
+                        f"must be one of {list(FACET_VALUE_KINDS)}",
+                        entity_type=type_id,
+                    )
+                )
+            definitions.append(EntityFacetDefinition(name, str(cardinality), str(value)))
+        if local:
+            findings.extend(local)
+            continue
+        declared[type_id] = tuple(definitions)
+    return declared
 
 
 def _safe_folder(value: str) -> bool:

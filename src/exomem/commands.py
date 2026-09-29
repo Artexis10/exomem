@@ -257,6 +257,55 @@ _DomainVocabularyDecisionArgument = Annotated[
         }
     ),
 ]
+#: create-entity's shared-name decision: `distinct` bound to the fingerprint a
+#: preparation or a same-name refusal returned. Nothing else is decidable here;
+#: reuse means not creating, and merging is governed restructuring.
+_IdentityDecisionArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["outcome", "candidate_fingerprint"],
+                    "properties": {
+                        "outcome": {"enum": ["distinct"]},
+                        "candidate_fingerprint": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$",
+                            "description": "candidate_fingerprint returned for this name.",
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+#: create-entity's vault-declared facets: declared names only, a string for a
+#: `single` facet and a list for a `multi` one (see `_Schema/entity-types.yaml`
+#: `facets`). The writer re-validates against the registry.
+_EntityFacetsArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "maxProperties": 16,
+                    "additionalProperties": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}, "maxItems": 16},
+                        ]
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
 _VocabularyDecisionArgument = Annotated[
     dict[str, Any] | None,
     WithJsonSchema(
@@ -1524,20 +1573,29 @@ def op_bootstrap(
         "source_taxonomy": source_taxonomy_projection,
         "entity_registry": {
             "types": [
-                ({
-                    "id": definition.id,
-                    "folder": definition.folder,
-                    "family": entity_type_registry.family_of(definition.id) or definition.id,
-                } if profile == "compact" else {
-                    "id": definition.id,
-                    "folder": definition.folder,
-                    "family": (
-                        entity_type_registry.family_of(definition.id) or definition.id
-                    ),
-                    "aliases": list(definition.aliases),
-                    "label": definition.label,
-                    "capture_guidance": definition.capture_guidance,
-                })
+                {
+                    **({
+                        "id": definition.id,
+                        "folder": definition.folder,
+                        "family": entity_type_registry.family_of(definition.id) or definition.id,
+                    } if profile == "compact" else {
+                        "id": definition.id,
+                        "folder": definition.folder,
+                        "family": (
+                            entity_type_registry.family_of(definition.id) or definition.id
+                        ),
+                        "aliases": list(definition.aliases),
+                        "label": definition.label,
+                        "capture_guidance": definition.capture_guidance,
+                    }),
+                    # Only a type with vault-declared facets carries this key.
+                    **({
+                        "facets": {
+                            facet.name: f"{facet.cardinality} {facet.value}"
+                            for facet in entity_type_registry.facets_for(definition.id)
+                        }
+                    } if entity_type_registry.facets_for(definition.id) else {}),
+                }
                 for definition in entity_type_registry.active_definitions
             ],
             "capture_rule": (
@@ -4068,6 +4126,17 @@ def op_get(
         else:
             out["body_truncated"] = bool(out.get("body_truncated", False))
         out["body_chars"] = len(str(out.get("body", "")))
+    if "body" in out and not frontmatter_only:
+        # Pull-first sensing (default off): what released later notes did to
+        # this page. Absent when there is nothing to say, or when the snapshot
+        # read is not the one the projection modelled; never ranks anything.
+        from . import sensed_model
+
+        status = sensed_model.status_for(
+            vault_root, str(out["path"]), content_hash=result.content_hash
+        )
+        if status is not None:
+            out["epistemic_status"] = status
     return _attach_memory_ref(vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref)
 
 
@@ -4554,6 +4623,8 @@ def op_link(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    identity_decision: _IdentityDecisionArgument = None,
+    facets: _EntityFacetsArgument = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -4585,15 +4656,26 @@ def op_link(
             `## Relations` as conservative `relates_to` edges. Same path
             conventions as `note.sources`.
         (per-type fields): see the bullet list above.
+        identity_decision: `{outcome: "distinct", candidate_fingerprint}` when
+            the name already denotes other active entities and this is a
+            different identity; the fingerprint comes from the preparation
+            or refusal for this exact name.
+        facets: Values for facets the registry declares for this type: a
+            string for a single facet, a list for a multi one. Undeclared
+            names are refused.
 
     Returns:
-        {path, warnings}.
+        {path, warnings}, or a non-mutating `identity_preparation` when the
+        name already denotes active entities of other types only.
 
     Errors:
         ENTITY_TYPE_UNKNOWN (entity_type not in the active registry);
         INVALID_LINK (bad decision_status, missing required);
         ENTITY_EXISTS (update/link the returned active entity instead);
-        ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first).
+        ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first);
+        STALE_IDENTITY_DECISION (the candidates changed; decide again);
+        ENTITY_FACET_UNDECLARED / INVALID_ENTITY_FACET (facets outside the
+        type's declaration).
     """
     try:
         result = link_module.link(
@@ -4615,11 +4697,15 @@ def op_link(
             decided=decided,
             project=project,
             decision_status=decision_status,
+            identity_decision=identity_decision,
+            facets=facets,
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
         if e.candidates:
             suffix += f" (candidates: {e.candidates})"
+        if e.candidate_fingerprint is not None:
+            suffix += f" (candidate_fingerprint: {e.candidate_fingerprint})"
         raise ValueError(f"{e.code}: {e.reason}{suffix}") from e
     return result.as_dict()
 
@@ -6311,9 +6397,12 @@ def op_activate_context(
             # After the guard and outside the packet cache, like `continuity`:
             # at a caller's session start, at most one upkeep item, and only in
             # the process whose background worker proposed it. Never raises.
+            from . import sensed_model
             from . import upkeep as upkeep_module
 
             upkeep_module.for_packet(vault_root, packet, session=session)
+            # Also outside the cache: each resolved anchor page's sensed status.
+            sensed_model.for_packet(vault_root, packet)
         except Exception as error:
             query_log.log_activation_call(
                 vault_root,
@@ -7671,6 +7760,9 @@ def op_capture_source(
         projects=projects,
     )
     out: dict = {"source": source}
+    if "vocabulary_resolution" in source:
+        # The terminal reads the identity record from the leaf's top level.
+        out["vocabulary_resolution"] = source["vocabulary_resolution"]
     if compile_guidance:
         try:
             out["compile_guidance"] = op_propose_compilation(
@@ -7743,6 +7835,7 @@ _EpisodeProposalArgument = Annotated[
                                             "accept-relation",
                                             "edit",
                                             "supersede",
+                                            "append-record",
                                         ]
                                     },
                                     "args": {"type": "object"},
@@ -7762,7 +7855,9 @@ _EpisodeProposalArgument = Annotated[
 def op_episode_memory(
     vault_root: Path,
     source_schema: object,
-    action: Literal["record", "inspect", "candidates", "prepare", "disposition", "resume"],
+    action: Literal[
+        "record", "inspect", "candidates", "prepare", "disposition", "resume", "coverage"
+    ],
     episode: str | None = None,
     subject: str | None = None,
     summary: str | None = None,
@@ -7801,14 +7896,19 @@ def op_episode_memory(
     to execute the routed ones. A leaf is one typed step for an existing
     writer, of a kind its route owns: focused_note creates a note, entity an
     entity, relation_only accepts a relation, existing_page and semantic_unit
-    edit or supersede. It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
-    service enables episode execution.
+    edit or supersede, and records appends one item to a Records collection
+    (append-record: {collection, item, item_key?, body?, why,
+    expected_container_hash}). It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
+    service enables episode execution. After it runs, make one final
+    `coverage` pass: compare the input it names with each receipt and its
+    readback, prepare anything omitted or misrouted, then attest with
+    `resume` and `postcommit`. A committed note is not coverage.
 
     Args:
         action: `record` writes a recap revision; `inspect` reads this
             episode's revision history back; `candidates` reads its
             candidates; `prepare`, `disposition` and `resume` plan and
-            execute them.
+            execute them; `coverage` reads the final pass's evidence.
         episode: The `ep-` key a previous record returned, or the one a hook
             named. Omit it on a conversation's first record and reuse the
             returned key for the rest of that conversation. Required for
@@ -7832,7 +7932,12 @@ def op_episode_memory(
             one durable change, reused when you revise it.
         proposal: For `prepare`: {route, target?, title?, alternatives,
             evidence, reason, leaves: [{leaf_key, effect_revision, kind,
-            args}]}. A changed leaf needs the next `effect_revision`; a
+            args}]}. The destination is your call: `alternatives` lists up to
+            8 pages you inspected as possible homes, each {target: its
+            `exomem://` ref, scope: its declared scope in a line, version: the
+            `content_hash` you read}; an open page has no priority among them.
+            existing_page and semantic_unit name the `target` every leaf
+            writes. A changed leaf needs the next `effect_revision`; a
             committed one cannot change.
         disposition: For `disposition`: routed, no_capture, uncertain,
             rejected, deferred or awaiting_authority.
@@ -7855,7 +7960,11 @@ def op_episode_memory(
         input_revision, candidates: [{candidate_key, route, disposition,
         pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete,
         execution}; resume adds {status, executed, replayed, stale,
-        diverged, reconciled, blocked, deferred, publication}. Newlines, credential-shaped text and anything
+        diverged, reconciled, blocked, deferred, publication}; coverage adds
+        {input: {input_revision, ref, recovery}, receipts: [{candidate_key,
+        leaf_id, operation_id, receipt_digest, path, readback}]}. Every
+        candidates result carries coverage: {attempted, pending,
+        covered_through_input_revision, next}. Newlines, credential-shaped text and anything
         over a cap are refused with nothing written.
     """
     recap = {
@@ -7883,6 +7992,7 @@ def op_episode_memory(
         "record": (set(recap), set()),
         "inspect": (set(), set()),
         "candidates": (set(), set()),
+        "coverage": (set(), set()),
         "prepare": ({"candidate", "proposal"}, {"candidate", "proposal"}),
         "disposition": (
             {"candidate", "disposition", "reason"},
@@ -7896,7 +8006,7 @@ def op_episode_memory(
     if allowed is None:
         raise ValueError(
             "EPISODE_INVALID: action must be record, inspect, candidates, prepare, "
-            "disposition or resume"
+            "disposition, resume or coverage"
         )
     supplied = {**recap, **workflow}
     if any(value is not None and name not in allowed for name, value in supplied.items()):
@@ -7923,6 +8033,8 @@ def op_episode_memory(
         )
     if action == "candidates":
         return episode_workflow_module.inspect(vault_root, episode=episode)
+    if action == "coverage":
+        return episode_workflow_module.coverage(vault_root, episode=episode)
     if action == "prepare":
         return episode_workflow_module.prepare(
             vault_root, episode=episode, candidate=candidate, proposal=proposal
@@ -9439,6 +9551,9 @@ def op_connect_memory(
     expected_fingerprint: str | None = None,
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
+    identity_decision: _IdentityDecisionArgument = None,
+    facets: _EntityFacetsArgument = None,
+    entity_family: str | None = None,
 ) -> dict | list[dict]:
     """Connect memory through links, typed graph context, or entities.
 
@@ -9507,6 +9622,15 @@ def op_connect_memory(
             the queue read and this call also refuses.
         vocabulary_ref: Optional vocabulary decision correlated with this typed application.
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
+        identity_decision: create-entity only. When the name already denotes
+            other active entities, `{outcome: "distinct", candidate_fingerprint}`
+            from that preparation or refusal commits a separate identity;
+            omit it to reuse a candidate or abstain.
+        facets: create-entity only. Values for the facets the registry
+            declares for entity_type (string for single, list for multi).
+        entity_family: Parent family from the entity registry. On
+            resolve-entity it matches every leaf type in that family; on
+            context and graph-context it keeps only entity neighbours of it.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -9550,6 +9674,9 @@ def op_connect_memory(
             "expected_hash": None,
             "why": None,
             "expected_fingerprint": None,
+            "identity_decision": None,
+            "facets": None,
+            "entity_family": None,
         }
         invalid = sorted(
             name
@@ -9665,6 +9792,7 @@ def op_connect_memory(
             traversal_profile=traversal_profile,
             limit=limit,
             max_body_chars=max_body_chars,
+            entity_type_families=[entity_family] if entity_family else None,
         )
     if operation == "inbound-links":
         target_path = target or path
@@ -9675,7 +9803,11 @@ def op_connect_memory(
         if not name:
             raise ValueError("INVALID_TARGET: resolve-entity requires `name`")
         return entity_candidates_module.resolve_entity_candidate(
-            vault_root, name=name, entity_type=entity_type, limit=limit
+            vault_root,
+            name=name,
+            entity_type=entity_type,
+            entity_family=entity_family,
+            limit=limit,
         )
     if operation == "create-entity":
         missing = [
@@ -9704,6 +9836,8 @@ def op_connect_memory(
             decided=decided,
             project=project,
             decision_status=decision_status,
+            identity_decision=identity_decision,
+            facets=facets,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "

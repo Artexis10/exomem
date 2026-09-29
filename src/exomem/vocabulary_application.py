@@ -413,6 +413,28 @@ def _writer_terminal(value: Mapping[str, Any]) -> _WriterTerminal:
     return _WriterTerminal(value=value, seal=_SEAL)
 
 
+def refuse_identity_preparation(leaf_result: object) -> None:
+    """Refuse a reviewed create-entity the writer answered with a shared-name decision.
+
+    The entity writer wrote nothing: the name already denotes other active
+    entities and it wants an explicit `distinct` decision. A reviewed
+    application binds only the type, name and summary, so it cannot carry that
+    decision; it refuses with the fingerprint before the application is
+    recorded, exactly as an adoption does, and the item stays retryable.
+    """
+    if not isinstance(leaf_result, Mapping):
+        return
+    preparation = leaf_result.get("identity_preparation")
+    if not isinstance(preparation, Mapping):
+        return
+    raise ValueError(
+        "IDENTITY_DECISION_REQUIRED: the name already denotes other active "
+        "entities; create it through connect_memory with an explicit "
+        "identity_decision (candidate_fingerprint: "
+        f"{preparation.get('candidate_fingerprint')})"
+    )
+
+
 def _resulting_versions(vault_root, binding: ApplicationBinding, terminal: Mapping[str, Any]) -> dict[str, str]:
     """Read the canonical postcondition; never trust caller result fields."""
     from . import get_page, vocabulary_review

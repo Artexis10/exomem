@@ -18,17 +18,25 @@ context: |
   Frozen, deterministic content transducers (ASR, OCR, CLIP, pinned-weight frozen
   captioners, voice-embedding speaker-ID) may TRANSCRIBE across modalities —
   default-off wherever they emit prose, and an unpinned or instruction-following
-  generative model is out of bounds in EVERY modality pairing. Frozen verifiers
-  (e.g. an NLI stance classifier) may LABEL into provenance-marked review queues
-  only — pinned model digest, versioned label map, off the synchronous write path,
-  no vault text in instruction position — and their output never enters canon,
-  decisions, retrieval, ranking, or policy. A model serving two roles is bound by
-  each role's rule for that output. The one pre-existing claim-polarity seam
-  (default-off, wired-but-unverified) predates this lane and violates its guards;
-  it may not be enabled as a verifier until re-laned to meet them or removed.
+  generative model is out of bounds in EVERY modality pairing except as an
+  instrument under the next rule. Instruments (frozen verifiers such as the NLI
+  stance classifier, and admitted generative models) may LABEL: each answers one
+  closed repository question with probabilities over a closed label set plus
+  abstain, never sampled text — pinned identity (an opt-in API placement is
+  identified by provider/model/snapshot and flagged unpinned_weights), a versioned
+  template with vault text only in delimited data slots, a versioned label map,
+  inference only in a disposable supervised worker, off the synchronous write
+  path — into an append-only readings ledger. The deterministic dreamer models
+  over readings and the graph; readings may originate sensed families surfaced
+  pull-first for review, never suppress or reorder structural families, and never
+  enter canon, decisions, retrieval, ranking, or policy except through a governed
+  write the agent authors citing the reading (owner rulings R1-R7, 2026-09-28;
+  change add-sensed-epistemic-model). A model serving two roles is bound by each
+  role's rule for that output.
   The agent alone judges conversation and authors proposals; mutation happens only
   through governed leaves. Same-modal text-to-text generation server-side stays
-  banned: a server-side reasoning LLM is NEVER added. No confidence/authority
+  banned: a server-side reasoning LLM is NEVER added (an LLM instrument emitting
+  closed-label probabilities measures; it does not reason or write). No confidence/authority
   floats on notes. Epistemic surfaces (conflict, staleness) MEASURE and SURFACE
   for review; they never auto-decay notes or rank their authority.
 

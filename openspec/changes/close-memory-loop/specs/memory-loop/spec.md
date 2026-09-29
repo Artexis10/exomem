@@ -105,6 +105,12 @@ The system SHALL resolve and enrich existing entities before creating duplicates
 - **THEN** the agent proposes or applies permitted hydration of that identity instead of creating a duplicate
 - **AND** ambiguous or incidental mentions do not cause automatic identity assignment
 
+#### Scenario: A vault-rooted family resolves by its parent
+
+- **WHEN** a vault registers an equipment type with no parent and a subtype whose parent is that equipment type
+- **THEN** exact resolution, resolution by the equipment family and family-filtered traversal reach the subtype's entities with the same ref and path on MCP, CLI and REST
+- **AND** neither type is classified as an organization
+
 #### Scenario: A useful reusable relationship is missing
 
 - **WHEN** no current registered relation truthfully expresses a supported reusable distinction
@@ -145,6 +151,12 @@ The system SHALL support separately evidenced operator organizations, physical s
 - **THEN** the agent records supported roles/facets or relationships on that identity without creating three organizations
 - **AND** an incidental trading name does not automatically create a separate brand
 
+#### Scenario: Roles are declared facets of one identity
+
+- **WHEN** the vault's entity registry declares a multi-valued roles facet for organizations and one organization is producer, operator and supplier
+- **THEN** creating that organization records all three roles on the one identity
+- **AND** a facet the registry does not declare for the type is refused without a write
+
 #### Scenario: A brand has an independently useful identity
 
 - **WHEN** evidence establishes a durable brand whose ownership or usage can change independently of an existing organization
@@ -161,6 +173,14 @@ Exact names and aliases that have multiple real-world referents SHALL return bou
 - **THEN** the resolver preserves both candidates and the agent can select the evidence-supported identity for each claim
 - **AND** insufficient context leaves the claim unresolved without a write to an arbitrary target
 - **AND** later activation preserves the same ambiguity rather than treating the alias as globally owned by one node
+
+#### Scenario: A justified distinct identity is an explicit decision
+
+- **WHEN** the agent creates a site whose exact name an active organization already carries
+- **THEN** the entity writer returns the bounded candidates and a fingerprint over them without writing anything
+- **AND** only a `distinct` decision bound to that fingerprint commits the site, leaving the organization's page, title and aliases unchanged
+- **AND** a decision made against candidates that have since changed is refused as stale
+- **AND** a same-type exact duplicate without such a decision is still refused
 
 ### Requirement: Supplier topology preserves evidence for each relationship
 
@@ -208,7 +228,7 @@ Normal writes SHALL share family-aware resolution over existing canonical vocabu
 
 Resolution SHALL preserve each family's validation and authority rules. Mutation receipts SHALL expose requested token, resolved canonical identity and final destination. Existing serialized write boundaries SHALL revalidate the chosen identity and destination before commitment across clients. Existing provenance and duplicate trees SHALL NOT be silently moved or merged.
 
-The first Notes-domain slice SHALL use a strict write-side registry snapshot and bind canonical metadata, identity, destination projection and agent disposition into immutable preparation. Read/bootstrap fallback SHALL NOT authorize a write under an unreadable or ambiguous registry. Validation, committed, replayed, compact and full responses SHALL preserve the bounded `vocabulary_resolution` fields `family`, `requested`, `canonical`, `destination`, `match_kind` and `snapshot`. The family SHALL be `domain`, shared across its projection adapters. Evidence incident/case/project scopes SHALL NOT inherit subject-domain alias or slug semantics.
+The first Notes-domain slice SHALL use a strict write-side registry snapshot and bind canonical metadata, identity, destination projection and agent disposition into immutable preparation. Read/bootstrap fallback SHALL NOT authorize a write under an unreadable or ambiguous registry. Validation, committed, replayed, compact and full responses SHALL preserve the bounded `vocabulary_resolution` fields `family`, `requested`, `canonical`, `destination`, `match_kind` and `snapshot`. The family SHALL be `domain`, shared across its Notes and Sources projection adapters. The governed entity-type registry SHALL report the additive family `entity_type` under its existing authority. Evidence incident/case/project scopes SHALL NOT inherit subject-domain alias or slug semantics.
 
 #### Scenario: Existing canonical spelling receives a case variant
 
@@ -267,6 +287,24 @@ The first Notes-domain slice SHALL use a strict write-side registry snapshot and
 - **WHEN** a committed Notes write is recovered from its graph receipt before the ordinary idempotency completion record exists
 - **THEN** replay preserves the original bounded vocabulary resolution without repeating the effect
 - **AND** resuming a prepared relation artifact retains the registry and directory guards through atomic commitment
+
+#### Scenario: A source capture shares the Notes domain resolution
+
+- **WHEN** a source is captured with a reviewed domain alias, with a case variant of one existing projection folder, or under an unreadable or ambiguous registry
+- **THEN** it resolves to the canonical key and receipt record a Notes experiment would, reuses the unique existing folder spelling, or refuses with typed registry information while a capture without a domain still succeeds
+- **AND** a refused capture leaves no destination directory behind
+
+#### Scenario: Evidence scopes keep exact identifiers
+
+- **WHEN** evidence is preserved under an incident or case scope that equals a reviewed domain alias or differs only by case from another scope
+- **THEN** each scope and category is stored byte for byte in its own folder
+- **AND** no domain alias, slug folding or vocabulary receipt applies
+
+#### Scenario: An entity type reports its resolution without new authority
+
+- **WHEN** an entity is created with a registered type's id, label, folder or alias
+- **THEN** its receipt carries family `entity_type`, the requested token, the canonical type and its folder
+- **AND** an unregistered type is still refused by the entity-type registry
 
 ### Requirement: Activation earns acceptance through useful bounded context
 

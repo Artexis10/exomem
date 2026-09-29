@@ -39,7 +39,7 @@ def test_resolver_returns_complete_core_and_honest_outcomes() -> None:
     )
 
     vocabulary = {item["key"]: item for item in result["core_vocabulary"]}
-    assert len(vocabulary) == 28
+    assert len(vocabulary) == 33
     assert vocabulary["part_of"]["inverse"] == "contains"
     assert result["honest_outcomes"] == {
         "relates_to": "available when a meaningful generic connection is justified",

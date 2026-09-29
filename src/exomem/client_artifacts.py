@@ -667,9 +667,8 @@ def _destination(vault_root: Path, *parts: str) -> str:
 def _source_destination(
     vault_root: Path, source_fields: Mapping[str, object]
 ) -> str:
-    from . import source_taxonomy
+    from . import source_taxonomy, vocabulary_resolution
 
-    taxonomy = source_taxonomy.load_taxonomy(vault_root)
     try:
         raw_kind = source_fields.get("source_type") or source_taxonomy.FALLBACK_KIND
         raw_domain = source_fields.get("domain")
@@ -677,11 +676,22 @@ def _source_destination(
             raw_domain is not None and not isinstance(raw_domain, str)
         ):
             raise source_taxonomy.TaxonomyError("source classification is invalid")
+        if raw_domain is not None:
+            # The same binding `add` commits under, so the pre-fetch destination
+            # and the committed one cannot differ in spelling.
+            binding = vocabulary_resolution.resolve_source_domain(
+                vault_root, kind=raw_kind, domain=raw_domain
+            )
+            return _destination(vault_root, *binding.segments)
+        taxonomy = source_taxonomy.load_taxonomy(vault_root)
         kind = taxonomy.resolve_kind(raw_kind)
-        domain = taxonomy.resolve_domain(raw_domain) if raw_domain is not None else None
     except source_taxonomy.TaxonomyError as error:
         raise SafeFetchError("INVALID_SOURCE", str(error)) from error
-    return _destination(vault_root, *source_taxonomy.source_segments(kind, domain))
+    except vocabulary_resolution.VocabularyResolutionError as error:
+        raise SafeFetchError(
+            error.code, vocabulary_resolution.capture_refusal_reason(vault_root, error)
+        ) from error
+    return _destination(vault_root, *source_taxonomy.source_segments(kind))
 
 
 def _receipt_error(code: str, reason: str) -> SafeFetchError:
@@ -1054,6 +1064,7 @@ def _capture_source_adoption(
             return _finish_adoption(outcomes)
 
         manager = active_manager()
+        payload: dict | None = None
         try:
             with manager.mutation_guard(
                 vault_root,
@@ -1097,7 +1108,10 @@ def _capture_source_adoption(
             outcomes[selected_index] = _failed(
                 artifact.file_id, SafeFetchError(error.code, error.reason)
             )
-        return _finish_adoption(outcomes)
+        finished = _finish_adoption(outcomes)
+        if isinstance(payload, dict) and "vocabulary_resolution" in payload:
+            finished["vocabulary_resolution"] = payload["vocabulary_resolution"]
+        return finished
     finally:
         if artifact is not None:
             try:
@@ -1288,6 +1302,7 @@ def capture_source_artifacts(
     batch_deadline = _monotonic() + _BATCH_DEADLINE_SECONDS
     staged: dict[int, StagedArtifact] = {}
     outcomes: list[dict | None] = [None] * len(files)
+    resolution: dict | None = None
     for index, file in enumerate(files):
         if not isinstance(file, Mapping):
             outcomes[index] = _failed("", SafeFetchError("INVALID_FILE", "file handle is invalid"))
@@ -1337,6 +1352,9 @@ def capture_source_artifacts(
                     )
                 mark_active_mutation_committed()
                 payload = result.as_dict()
+                # Every file shares one domain request; the first commit's
+                # record is the one that chose the destination.
+                resolution = resolution or payload.get("vocabulary_resolution")
                 # `stored_path` and `media_id` are required by the bounded
                 # artifact-receipt projection a compact terminal applies; a row
                 # missing either is replaced wholesale with
@@ -1374,10 +1392,13 @@ def capture_source_artifacts(
 
     resolved = [outcome for outcome in outcomes if outcome is not None]
     stored = sum(1 for outcome in resolved if outcome.get("outcome") == "stored")
-    return {
+    out: dict = {
         "files": resolved,
         "summary": {"stored": stored, "failed": len(resolved) - stored},
     }
+    if resolution is not None:
+        out["vocabulary_resolution"] = resolution
+    return out
 
 
 def preserve_artifacts(

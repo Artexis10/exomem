@@ -17,7 +17,7 @@ from typing import Any
 
 from . import curation
 from . import episode_model as model
-from .episode_reconciliation import reconcile_curation_leaf
+from .episode_reconciliation import current_coverage, reconcile_curation_leaf
 from .vault import (
     BatchWriteError,
     ContentHashMismatchError,
@@ -341,19 +341,11 @@ class EpisodeStore:
                 )
             }
         if action == "attest_postcommit":
-            for candidate in state["candidates"]:
-                for leaf in candidate["leaves"]:
-                    if leaf["outcome"] != "committed":
-                        continue
-                    check = model._copy(state)
-                    original = model._owned(check, candidate["candidate_id"], leaf["leaf_id"])
-                    original["outcome"], original["outcome_proof"] = "uncertain", None
-                    verified = reconcile_curation_leaf(
-                        self.vault_root, check, candidate["candidate_id"], leaf["leaf_id"]
-                    )
-                    current = model._owned(verified, candidate["candidate_id"], leaf["leaf_id"])
-                    if current["outcome_proof"] != leaf["outcome_proof"]:
-                        raise _error("EPISODE_OUTCOME_UNCERTAIN", "current commit proof differs")
+            # Historical commitment per leaf, current coverage per path: a
+            # later leaf may edit what an earlier one wrote, and only the last
+            # leaf on each path answers to the live page.
+            if not all(current_coverage(self.vault_root, state).values()):
+                raise _error("EPISODE_OUTCOME_UNCERTAIN", "current commit proof differs")
         return {}
 
     @staticmethod

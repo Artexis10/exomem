@@ -104,6 +104,61 @@ The corpus must be built through normal supported writers into actual canonical 
   Respect the authorized inexpensive subscription model and bounded run budget;
   never silently fall back to API billing.
 
+## Amendments
+
+Rulings from the programme orchestrator after the first real-compiler run. The
+fixtures (turns, gold, poison) and the pre-registered thresholds stay frozen.
+Every scoring amendment is reported beside the raw pre-registered score, never
+in its place, and the recorded report carries both columns.
+
+- **A1 — Corpus v4 (2026-09-28).** The corpus is repaired and gets a new
+  identity, `context-activation-corpus-v4`; the v3 report stays as history.
+  The corpus vault registers its own observation categories in its
+  semantic-language registry and maps them onto context roles in its own
+  role override, through the supported schema writers, as a real vault
+  would. The gold notes' categories are not edited. About 115 ordinary,
+  topic-diverse Notes pages that share vocabulary with the fixture turns bring the
+  vault to about 150 indexed pages. They are authored as a user's editor writes them, while every
+  gold, poison and canonical structure stays writer-built. Reason: a corpus
+  the product refuses (37 indexed pages against the carry's floor of 100,
+  unregistered categories) measures the corpus, not the compiler. The
+  dogfood vault has 4,672 pages and a registry.
+- **A2 — Unit-to-parent recall (2026-09-28).** A served unit whose
+  ref names a keyed page (`<page ref>#unit-…`) counts toward recall of that
+  page's canonical identity, through a parent map frozen from canonical
+  readback before activation. It adds nothing to precision, and nothing to
+  poison accounting. Reported beside the raw D9 score, which keeps every
+  fragment distinct.
+- **A3 — Planning identity is not amended (2026-09-28).** Serving the
+  collection when the turn is about an item is a product defect: the item is
+  what the agent needs. C3 and T3 stay red with that reason pinned; the
+  product task is close-memory-loop 6.12.
+- **A4 — Hedged poison (2026-09-28).** Follows the hedging rule this spec
+  pre-registered before any result. On a twin, a poison anchor served
+  `partial` beside a `partial` anchor from the twin's own gold is a hedge,
+  not poison. A poison anchor served `resolved`, through any other channel,
+  or as a lone `partial` with no correct candidate beside it stays poison.
+  Reported beside the raw score. A4 removes only the poison hit; it never
+  marks the case as hedging, so it cannot waive a status mismatch.
+- **A5 — Product reds kept (2026-09-28).** T4 (a bare first name stays
+  `partial`, so the turn abstains `unresolved` rather than `ambiguous`) and
+  T7 (the scoped turn also resolves the market hub) are product defects,
+  pinned red and routed to the identity and activation work. No amendment.
+- **A6 — Continuity group (2026-09-28).** Every one of the eighteen cases is
+  cold, and the scorer excludes `recent_context`. A separate keyed group of
+  fresh-session cases, with gold for the recent-context block and its
+  referents, is pre-registered with a pinned digest before its first run, and
+  reported whatever it shows. It is not one of the eighteen and does not
+  enter their verdict.
+- **A7 — Ambiguity candidates in precision (2026-09-28).** The raw scorer
+  leaves ambiguity candidates out of precision, so a positive case can list a
+  wrong page as a candidate beside its gold and still pass (C7). Disclosed,
+  and the raw scorer stays frozen. The opt-in amendment puts every ambiguity
+  candidate of a non-twin case into the precision denominator, like a served
+  anchor. It is reported in its own column beside the raw and A2+A4 scores.
+  Twins are unchanged: a candidate outside a twin's gold is already a false
+  activation.
+
 ## Risks / Trade-offs
 
 - The variant loophole: fixtures added under a released family could enter a scored
