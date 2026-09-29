@@ -6,7 +6,7 @@ That fits a terse coding session in Claude Code or Codex, where "continue" is co
 
 - **Lost thread subject.** A follow-up about a topic established earlier in the same thread abstained `unresolved`, then activated unrelated context. The subject lived in an earlier turn (or in the assistant's reply), not in the current one or in any resolved anchor.
 - **Half a decision.** A turn weighing two domains surfaced one domain and missed the other, because the second domain reached only `partial` on the current turn's words.
-- **Thread-bound referents.** "That", "the second option" and "her results" resolve only against the thread. The current-turn compiler has nothing to resolve them against, and the keyless follow-up carry can only replay what an earlier packet already resolved.
+- **Thread-bound referents.** "That", "the second option" and "her results" resolve only against the thread. The current-turn compiler has nothing to resolve them against, and the keyless follow-up carry can only replay what an earlier packet already resolved. (This change resolves pronoun and demonstrative referents against the user's earlier turns. An ordinal over an assistant-authored list, such as "the second option", is left to the agent's `focus` or `anchor`: the server does no coreference.)
 
 Hooked clients (Claude Code, Codex) can read a local transcript. Remote clients (ChatGPT, the claude.ai connector) can pass only what the agent puts into the tool call, and the server instructions currently tell the agent to pass the message verbatim and nothing else. The context-activation benchmark consists of short, cold single turns plus a small continuity group, so it has never measured this failure class.
 
