@@ -59,9 +59,17 @@ On a natural-keyed collection, two rows in one request that derive the same iden
 
 Planning finishes before any write. In `abort` mode a single rejected row means zero writes; the response carries every row's outcome (rows that would have been accepted read `inserted`/`updated`/`unchanged` with `committed: false` on the batch), so one round trip finds every problem. In `skip` mode the accepted rows go into ONE `batch_atomic_write` and the rejected rows are reported; a crash mid-publication rolls the whole batch back per `transactional-vault-writes`. The response has a top-level `committed` boolean and `counts` per outcome, so "partial" is never inferred. Unchanged rows never write. If every row is `unchanged` or rejected, nothing is written and the audit head does not advance.
 
-### 7. One receipt
+### 7. One batch receipt over per-item chained events (ruled: option A)
 
-One audit transition (`operation: "bulk_upsert"`) is appended to the collection's audit chain and one log entry to `Knowledge Base/log.md`. The transition body carries the batch payload hash (over the ordered row payload hashes and the resolved provenance refs), the row count, counts per outcome, the per-row verified provenance refs, and the before/after container hashes. It does NOT carry row values (a provenance ref is a page path, not a row value). Each written item file carries the transition id in its own audit marker, exactly as a single append's does, so item-level audit correlation and `_replay_audit_correlation` keep working unchanged. The per-item marker count and audit source size caps (`_MAX_AUDIT_MARKERS`, `_MAX_AUDIT_SOURCE_BYTES`) are checked once for the projected batch; a batch that would breach them refuses `BULK_UPSERT_TOO_LARGE` before planning.
+The audit protocol is unchanged. It is strictly one event per item (one `item_key`, `canonical_path` and `after_item_hash`; every item marker must match its event; the chain walk is capped at 2048 events; each event is one `log.md` entry), so a single bulk event would need a new event version and reader-compatibility work. That is deferred (option B, a follow-up only if depth or log size matters in practice).
+
+Instead each written row gets an ordinary `append` or `update` event, chained in input order. Their intermediate manifest and container hashes are computed in memory in sequence, so every event's before/after hashes chain exactly as N serial calls' would, but only the final state is ever published: the item files, ONE manifest write whose audit head is the last event, and ONE combined `log.md` write carrying N entries (`vault.plan_log_writes_many`). Publication is a single `batch_atomic_write`, so the chain on disk is either the old chain or the whole new one.
+
+Each event's rationale is `<why> | bulk <batch_id> <i>/<n>` plus, when the collection declares no `sources` link field, ` src <ref>`; it must fit the existing 512-byte rationale bound or that row is rejected `AUDIT_RATIONALE_TOO_LONG`. Events carry no row values.
+
+The response carries ONE batch receipt: `batch_id`, `rows`, `counts`, `committed`, `first_transition`, `last_transition`, and per-row `{index, outcome, item_key, transition_id?, source?, code?, fields?}`.
+
+**Chain-depth budget.** The chain walk refuses beyond 2048 events, so a bulk consumes one event per written row. Before planning writes, the batch computes the collection's used depth (events for this collection across the live log and archives, an upper bound of the reachable chain) and refuses `BULK_UPSERT_AUDIT_DEPTH` naming used, needed and budget when used + needed > 2048. It never half-writes. `describe` states the budget.
 
 ### 8. Idempotency and exactly-once
 
@@ -70,19 +78,19 @@ No new argument. Two existing layers compose:
 1. **Transport idempotency.** The command dispatcher already binds `mutation_request_id` and the implicit retry scope to every mutation; a retry under the same transport identity (REST `Idempotency-Key`) returns the recorded result without re-executing. `bulk_upsert` is an ordinary mutating command and inherits this unchanged.
 2. **Content replay.** On a natural-keyed collection identical payloads are `unchanged`, so replaying a committed batch writes nothing and reports every row `unchanged`, with no key and after the store's TTL. On an insert-only collection there is no content replay, so retry safety there rests on layer 1 alone (documented).
 
-Exactly-once: a batch either commits under `batch_atomic_write` (one transition, all planned files) or leaves no file, no audit entry and no manifest change. A crash between "commit" and "response" is resolved by either layer above.
+Exactly-once: a batch either commits under `batch_atomic_write` (all events, all planned files) or leaves no file, no audit event and no manifest change. A crash between "commit" and "response" is resolved by either layer above.
 
 ### 9. Withheld-as-absent
 
-The writer refuses a mutation the caller's release filter would not allow (`require_mutation_visibility`, `precommit_authorize_mutation`), planned over the union of every path the batch would touch. Existing items the caller cannot read are treated as absent for outcome purposes: a natural-key collision with a withheld item is reported `rejected` `RECORD_NATURAL_KEY_CONFLICT` with no `item_keys` (a single append does the same for a twin it may not disclose), never as `updated` or `unchanged`, so the outcome cannot reveal whether a hidden row exists or what it holds. The response's counts and row echoes never include values from any item the caller cannot read.
+The writer already refuses any mutation unless the caller's release filter allows the manifest, the source, and EVERY item entry of the collection (`require_mutation_visibility`, `COLLECTION_NOT_FOUND`), and `precommit_authorize_mutation` re-checks the union of every path to be written. A mutating caller therefore never holds a partial view: a hidden item makes the whole collection read as absent. Bulk runs those same two gates once, before planning, and once over the union of all planned paths before publication. So a hidden natural-key twin cannot exist for a caller that reaches planning, and no outcome, count or echo can reveal one. The earlier draft's "rejected without `item_keys`" case is dropped as unreachable.
 
 ### 10. Limits
 
-500 rows per call (a proposal; the constant is `BULK_UPSERT_MAX_ROWS`, exposed by `describe`). Each row obeys the existing per-value (32 KiB) and body limits; the request is also bounded in total bytes. The existing collection ceiling (`_MAX_ITEM_FILES`, 2,000) applies to the projected post-batch item count, so a batch that would cross it refuses whole with `COLLECTION_ITEM_LIMIT`. A larger source is sent as several batches, each chained from the previous response's container hash: still 1/500th of the round trips.
+500 rows per call (a proposal; the constant is `BULK_UPSERT_MAX_ROWS`, exposed by `describe`). Each row obeys the existing per-value (32 KiB) and body limits; the request is also bounded in total bytes. The existing collection ceiling (`_MAX_ITEM_FILES`, 2,000) applies to the projected post-batch item count, so a batch that would cross it refuses whole with `COLLECTION_ITEM_LIMIT`, and the chain-depth budget (decision 7) refuses whole with `BULK_UPSERT_AUDIT_DEPTH`. A larger source is sent as several batches, each chained from the previous response's container hash: still 1/500th of the round trips.
 
 ### 11. Held candidates
 
-Bulk does not hold. A rejected row is reported with its diagnostics and is not written to the held-candidate store, because 500 held files from one call is exactly the noise that store was designed to avoid, and the caller already holds the complete rows. A caller wanting one row held or resumed uses `append` for it.
+Bulk does not hold (ruled). A rejected row is reported with its diagnostics and is not written to the held-candidate store, because 500 held files from one call is exactly the noise that store was designed to avoid, and the caller already holds the complete rows. A caller wanting one row held or resumed uses `append` for it.
 
 ### 12. Tool surface
 
