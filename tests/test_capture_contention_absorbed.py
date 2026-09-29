@@ -143,6 +143,30 @@ def test_concurrent_remembers_all_commit_once_with_no_busy_reaching_the_client(
     assert all((vault / path).is_file() for path in paths)
 
 
+def test_four_concurrent_captures_commit_at_the_default_worker_count(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Half the default sync workers may wait, so four captures at once all commit."""
+    monkeypatch.delenv("EXOMEM_SYNC_WORKERS", raising=False)
+    writer, holder = _managers(vault.parent / "state")
+    remember = _command("remember")
+    kwargs = [_remember_kwargs(vault, number) for number in range(4)]
+    with _Contention(monkeypatch, holder, vault, refusals=4) as contention:
+        results = _run_concurrently(
+            [
+                lambda kw=kw: writer.invoke(
+                    remember, (vault,), kw, implicit_idempotency_scope="principal:test"
+                )
+                for kw in kwargs
+            ],
+            contention,
+        )
+
+    paths = [result["path"] for result in results]
+    assert len(set(paths)) == 4
+    assert all((vault / path).is_file() for path in paths)
+
+
 def test_concurrent_episode_records_all_commit_once_with_no_busy_reaching_the_client(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

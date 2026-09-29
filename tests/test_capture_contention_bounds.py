@@ -48,7 +48,7 @@ def test_waiters_are_capped_below_the_sync_workers(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "20")
-    cap = max(1, runtime_resources.resolve_policy().sync_workers // 4)
+    cap = max(1, runtime_resources.resolve_policy().sync_workers // 2)
     assert cap < runtime_resources.resolve_policy().sync_workers
     manager = _manager(tmp_path)
     release = threading.Event()
@@ -130,6 +130,45 @@ def test_absorbed_retries_do_not_count_as_client_visible_busy(
     assert bumps.count("exomem_mutation_busy_total") == 1
 
 
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "1e400", "1e18"])
+def test_a_non_finite_or_huge_wait_setting_never_crashes_a_queued_waiter(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("EXOMEM_SYNC_WORKERS", "16")
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", value)
+    assert writer_lease._capture_wait_seconds() <= 600.0
+    manager = _manager(tmp_path)
+    head = manager._capture_queue.enter_line()
+    releaser = threading.Timer(0.3, manager._capture_queue.leave, args=(head,))
+    releaser.start()
+    try:
+        assert _run(manager, lambda: "ok") == "ok"
+    finally:
+        releaser.join()
+
+
+def test_the_pre_boundary_warm_swallows_errors_but_not_assertion_errors(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import reserved_paths
+
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda root: False)
+    monkeypatch.setattr(reserved_paths, "_identity_coordination_active", lambda root: False)
+
+    def failing(error: BaseException):
+        def build(root):
+            raise error
+
+        return build
+
+    monkeypatch.setattr(reserved_paths, "_baseline_identity_catalogue", failing(RuntimeError("walk")))
+    reserved_paths.warm_identity_catalogue_before_boundary(tmp_path)  # never refuses a write
+
+    monkeypatch.setattr(reserved_paths, "_baseline_identity_catalogue", failing(AssertionError("bug")))
+    with pytest.raises(AssertionError):
+        reserved_paths.warm_identity_catalogue_before_boundary(tmp_path)
+
+
 def test_warm_runs_after_the_replay_check() -> None:
     import inspect
 
@@ -184,7 +223,7 @@ def test_a_read_completes_while_captures_wait(tmp_path, monkeypatch: pytest.Monk
                 await anyio.to_thread.run_sync(lambda: "read")
             elapsed = time.monotonic() - started
             release.set()
-        assert sum(1 for o in outcomes if isinstance(o, OpError)) >= 6
+        assert sum(1 for o in outcomes if isinstance(o, OpError)) >= 4
         return elapsed
 
     assert anyio.run(scenario) < 2

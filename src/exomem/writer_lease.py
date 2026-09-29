@@ -3789,6 +3789,7 @@ def _is_receipt_vault_root(root: Path) -> bool:
 # other actions are curated edits a caller may want refused promptly.
 _CAPTURE_ABSORBED_COMMANDS = frozenset({"observe_memory", "remember", "episode_memory"})
 _CAPTURE_WAIT_SECONDS = 40.0
+_CAPTURE_WAIT_CEILING_SECONDS = 600.0
 _CAPTURE_RETRY_FLOOR_SECONDS = 0.05
 _CAPTURE_WAITERS_FULL_REMEDIATION = (
     "The write did not commit. Other captures are already waiting on the boundary and "
@@ -3815,7 +3816,7 @@ def _capture_write_absorbs_contention(command_name: str, kwargs: Mapping[str, An
 
 
 # A waiting capture parks one of the process's sync workers (anyio's limiter,
-# shared with search and activation). Only a fraction may be parked, so a long
+# shared with search and activation). Only half may be parked, so a long
 # holder cannot turn every worker into a sleeping capture and starve reads.
 _CAPTURE_WAITERS_LOCK = threading.Lock()
 _capture_waiters = 0
@@ -3824,7 +3825,7 @@ _capture_waiters = 0
 def _capture_waiter_cap() -> int:
     from . import runtime_resources
 
-    return max(1, runtime_resources.resolve_policy().sync_workers // 4)
+    return max(1, runtime_resources.resolve_policy().sync_workers // 2)
 
 
 def _take_capture_waiter_slot() -> bool:
@@ -3854,7 +3855,9 @@ def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
         wait = float(os.environ.get("EXOMEM_CAPTURE_WAIT_SECONDS", _CAPTURE_WAIT_SECONDS))
     except ValueError:
         wait = _CAPTURE_WAIT_SECONDS
-    wait = max(0.0, wait)
+    if not math.isfinite(wait):
+        wait = _CAPTURE_WAIT_SECONDS
+    wait = min(max(0.0, wait), _CAPTURE_WAIT_CEILING_SECONDS)
     budget = request_budget.current()
     if budget is not None:
         wait = min(

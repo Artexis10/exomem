@@ -189,15 +189,17 @@ own request budget: the wait MUST end early enough that the last attempt,
 the delivery reserve and one guard acquire timeout still fit inside it).
 Waiting writes SHALL attempt in arrival order within one process, and a write
 arriving while others wait SHALL join behind them. Waiting parks a shared
-synchronous worker, so no more than a quarter of the workers (at least one)
-MAY wait at once; a capture past that cap is refused at once. The retry MUST run
+synchronous worker, so no more than half of the workers (at least one)
+MAY wait at once (the waiter cap; four at the default eight); a capture past
+that cap is refused at once with `cause: capture_waiters_full`. The retry MUST run
 under the same idempotency identity, so the write commits exactly once, and
 MUST NOT re-run any attempt that observed a commit. A client MUST NOT receive
-`MUTATION_BUSY` for a capture write whose holder is still inside its allowance
-and whose wait has not run out.
+`MUTATION_BUSY` for a capture write whose holder is still inside its allowance,
+whose wait has not run out, and that arrived within the waiter cap; absorption
+holds up to the cap and no further.
 
-A refusal remains only for a holder already past its allowance, or a wait that
-ran out. It SHALL keep `MUTATION_BUSY` with `committed: false` and add a
+A refusal remains only for a holder already past its allowance, a wait that
+ran out, or a capture past the waiter cap. It SHALL keep `MUTATION_BUSY` with `committed: false` and add a
 `cause` (`holder_overdue`, `capture_wait_exhausted` or
 `capture_waiters_full`), the time waited, and a
 remediation that says the write did not commit and may be retried with the same
@@ -206,8 +208,8 @@ immediate refusal.
 
 #### Scenario: Concurrent captures during a held boundary all commit once
 
-- **WHEN** several `remember` or `episode_memory` writes meet a boundary held by
-  another write
+- **WHEN** no more captures than the waiter cap allows (`remember`,
+  `episode_memory`) meet a boundary held by another write
 - **AND** the holder releases within its allowance
 - **THEN** every write commits exactly once
 - **AND** no `MUTATION_BUSY` reaches any caller
