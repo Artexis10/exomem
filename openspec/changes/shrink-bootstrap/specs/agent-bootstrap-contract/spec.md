@@ -7,7 +7,7 @@ For every surface whose bootstrap contract is not published as a frozen hosted p
 #### Scenario: The core carries the incident-preventing rules at every level that owes them
 
 - **WHEN** compact bootstrap is served at any engagement level on any non-frozen surface
-- **THEN** it carries the recall-before-answering rule at `balanced` and `maximal`, the capture loop, the episode-recording pass at `balanced` and `maximal`, the epistemic commitments, the delegation ceiling, the due-state restraint and the rule that a withheld result is indistinguishable from an absent one
+- **THEN** it carries the recall-before-answering rule at `balanced` and `maximal`, the capture loop, the episode-recording pass at `balanced` and `maximal`, the epistemic commitments, the delegation ceiling, and the due-state restraint
 
 #### Scenario: A section returns what compact used to return
 
@@ -41,14 +41,15 @@ The compact core SHALL stay at or under its ruled byte ceiling at every engageme
 
 ### Requirement: Injected agent context stays inside a per-item byte budget
 
-Every text Exomem injects into a coding agent's context without the agent asking for it, namely the Stop-hook capture and episode checks, the `UserPromptSubmit` retrieval reminder, the working-set block, the continuation checkpoint and the skill carrier, SHALL stay at or under a ruled byte ceiling per item, asserted by test. A hook nudge SHALL keep the rule it exists to carry (the capture trigger and the live-policy pointer, the `episode_memory` record call with its key and its do-nothing escape, and the `ask_memory` recall with its skip escape and its not-found-in-scope reading) and MAY point at the core operating contract for the long form instead of restating it. The working-set block SHALL be omitted when its rendered items are unchanged since the last one injected in the session. The hook scripts under `src/exomem/_hooks/` and their plugin mirrors SHALL remain byte-identical.
+Every text Exomem injects into a coding agent's context without the agent asking for it, namely the Stop-hook capture and episode checks, the `UserPromptSubmit` retrieval reminder and the continuation checkpoint, SHALL stay at or under a ruled byte ceiling per item, asserted by test. The capture check and the retrieval reminder SHALL send their full text once per session and again after a session lifecycle event (a compaction rewrites the context the text lived in), and a short line on later fires; at `balanced` the retrieval reminder SHALL be silent between, and at `maximal` it SHALL be a short pointer on every later prompt. A short nudge SHALL keep the rule it exists to carry (the capture trigger with the live-policy pointer, the `episode_memory` record call with its key and its do-nothing escape, and the `ask_memory` recall with its skip escape and its not-found-in-scope reading). The hook scripts under `src/exomem/_hooks/` and their plugin mirrors SHALL remain byte-identical.
 
 #### Scenario: A nudge cannot regrow into the old text
 
-- **WHEN** a hook constant exceeds its byte ceiling or drops a rule named in the manifest
+- **WHEN** a hook constant exceeds its byte ceiling or drops a rule named in its test
 - **THEN** the budget test fails naming the constant
 
-#### Scenario: An unchanged working set is not re-injected
+#### Scenario: The full text is sent once, then a short line
 
-- **WHEN** a gated prompt's activated packet renders the same item refs as the last block injected in this session
-- **THEN** the hook emits no working-set block for a non-referential prompt
+- **WHEN** the Stop capture check fires three times in one session
+- **THEN** the first fire carries the full text and the next two carry the short check
+- **AND** after a compaction the next fire carries the full text again

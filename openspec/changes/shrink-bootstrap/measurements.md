@@ -136,3 +136,56 @@ Same, at maximal (recall before every turn, 45 Stops nudged before):
 Resent per turn, not in the totals above (cached by most clients, but resident in the window): tool schemas 169,911 (about 110,000 after design decision 10, -35%) and skill front matter 3,041 (about 1,600 after). Over 50 turns that is 8.5 MB resent before and 5.5 MB after; the dieted bootstrap and nudges are about 1% and 0.5% of that. The window occupancy that a cold session pays is what matters to attention, so the ordering by size is: tool schemas (170 KB) > bootstrap or skill (22 to 63 KB) > Stop nudges over a session (30 to 69 KB) > retrieval reminders > checkpoint.
 
 The "after" figures are design estimates from the target sizes in `design.md`; Phase 2 replaces them with measurements.
+
+## 6. As built (Phase 2 measurements, same method and tree as sections 1 to 5)
+
+Reproduce: `scripts/bootstrap-byte-breakdown.py --sections`, `scripts/context-footprint.py`. Hosted v1 to v4 are unchanged byte for byte (digest-pinned by `tests/test_bootstrap_frozen_profiles.py`); their "after" is their "before".
+
+### 6.1 Compact bootstrap, bytes (before to after core), by surface and level
+
+| surface | off | light | balanced | maximal |
+|---|---:|---:|---:|---:|
+| default (generic MCP) | 60,481 to 11,747 | 60,765 to 12,031 | 62,698 to 13,973 | 63,055 to 14,330 |
+| claude-code | 60,490 to 11,756 | 60,774 to 12,040 | 62,707 to 13,982 | 63,064 to 14,339 |
+| hosted-alpha-agent-v5 | 59,025 to 11,570 | 59,309 to 11,854 | 60,960 to 13,514 | 61,203 to 13,757 |
+| hosted-alpha-agent-v1 (frozen) | 51,906 | 52,190 | 53,841 | 54,084 |
+| hosted-alpha-agent-v3 (frozen) | 56,448 | 56,732 | 58,383 | 58,626 |
+| hosted-alpha-agent-v4 (frozen) | 58,760 | 59,044 | 60,695 | 60,938 |
+
+Worst case (claude-code, maximal) 14,339 against the ruled 15,000 ceiling: 661 bytes of margin, above the 512-byte warning band. `bootstrap(section="all")` returns the complete pre-core payload (63,055 at default/maximal). Section sizes at maximal: authoring 18,992; routing 11,375; entities 7,454; adoption 6,510; records_planning 5,360; epistemics 3,138; envelope 1,917; diagnostics_reading 1,128.
+
+`profile="session"` (default surface): 18,726 / 19,010 / 20,943 / 21,300 at off / light / balanced / maximal, against 22,008 at maximal before. It is rebased on the core (core `engagement` and `server`, plus the section index) but does not get much smaller: the tests pin the live state a skill-holding client is served (workflow contracts, relation vocabulary, entity registry, source taxonomy, vocabulary workflow, the post-write handling the skill does not carry), and that state is most of its size.
+
+### 6.2 Fifty-turn coding session, bytes injected
+
+Model as in section 5. "Before" uses the base constants (capture 1,841, episode 495, retrieval 861); "after" uses what shipped: the full capture text once and again after one compaction then a 341-byte short line, the episode ask at 384, the retrieval reminder at 358 once (and once more after a compaction) and, at maximal, a 195-byte pointer per prompt. Stop cadence B was not shipped (below), so Stop fire counts are unchanged.
+
+Balanced:
+
+| item | Claude Code before | after | Codex or generic before | after |
+|---|---:|---:|---:|---:|
+| session carrier (skill + session, or compact) | 51,826 | 37,050 | 62,698 | 13,973 |
+| continuation checkpoint (1 compaction, cap) | 4,096 | 2,048 | 4,096 | 2,048 |
+| Stop nudges | 30,090 | 10,035 | 30,090 | 10,035 |
+| retrieval reminders | 6,027 | 716 | 6,027 | 716 |
+| **total** | **92,039** | **49,849** | **102,911** | **26,772** |
+
+Maximal:
+
+| item | Claude Code before | after | Codex or generic before | after |
+|---|---:|---:|---:|---:|
+| session carrier | 52,183 | 37,407 | 63,055 | 14,330 |
+| continuation checkpoint (cap) | 4,096 | 2,048 | 4,096 | 2,048 |
+| Stop nudges | 69,385 | 18,775 | 69,385 | 18,775 |
+| retrieval reminders | 38,745 | 9,101 | 38,745 | 9,101 |
+| **total** | **164,409** | **67,331** | **175,281** | **44,254** |
+
+The Claude Code carrier stays large because the skill (16,107 bytes now, from 30,175) and the session profile are both loaded. Tool schemas (170 KB) are untouched here: that lane was split out by ruling, and the only schema change in this change is the new `section` parameter on `bootstrap` (+229 bytes).
+
+### 6.3 What was not done, and why
+
+- **Stop cadence B (one nudge per episode window).** Gated on the no-nudge benchmark showing initiation parity. That needs a live-agent run (`close-memory-loop` task 6.1, open), which is not available here, so parity is unproven and, per the ruling, option A shipped.
+- **Working-set silent-when-unchanged.** Opt-in and off by default, not part of the ruling; not implemented.
+- **Checkpoint id and transcript-binding lines** stay in the model-facing text: existing tests pin them.
+- **"Withheld is absent" sentence.** Dropped by ruling: server-enforced.
+- **Pre-existing finding, not from this change:** on hosted v4 and v5 the surface filter drops the whole `recall` contract (it opens with the `activate_context` carrier, and hosted does not export `activate_context`), so hosted clients receive no recall-before-answering text in the bootstrap. The core manifest test skips that rule on hosted surfaces and says why. v1 to v4 are frozen; v5 could be fixed by making the recall line surface-aware. Needs a ruling.
