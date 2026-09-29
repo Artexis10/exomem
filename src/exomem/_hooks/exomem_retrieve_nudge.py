@@ -91,6 +91,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -767,14 +768,22 @@ def _gather_hits_with_lane(prompt: str) -> tuple[list[dict], str]:
 
 
 def _gather_packet_with_lane(
-    prompt: str, continuity: str, attribution: dict | None = None
+    prompt: str,
+    continuity: str,
+    attribution: dict | None = None,
+    conversation: dict | None = None,
 ) -> tuple[dict | None, str]:
-    """Working-set mode's rungs on the same ladder, under the same budget."""
+    """Working-set mode's rungs on the same ladder, under the same budget.
+
+    Without a conversation the fetchers are called exactly as they always were."""
+    extra = {"conversation": conversation} if conversation else {}
     return _gather_with_lane(
         lambda api_key, timeout: _fetch_packet_via_rest(
-            prompt, api_key, continuity, timeout, attribution
+            prompt, api_key, continuity, timeout, attribution, **extra
         ),
-        lambda timeout: _fetch_packet_via_cli(prompt, continuity, timeout, attribution),
+        lambda timeout: _fetch_packet_via_cli(
+            prompt, continuity, timeout, attribution, **extra
+        ),
     )
 
 
@@ -870,6 +879,264 @@ def _attribution_ladder(attribution: dict | None) -> list[dict]:
     return ladder
 
 
+# --- working-set mode: the conversation tail read from the local transcript -------
+
+#: The transcript's final bytes, and the wall time reading and parsing them may
+#: take inside the injection budget. A parse that overruns, an unreadable file
+#: or any error yields NO conversation, never a partial one.
+CONVERSATION_TAIL_BYTES = 64 * 1024
+CONVERSATION_BUDGET_SECONDS = 0.05
+#: The service's own bounds (`conversation-aware-activation`), applied here too
+#: so the request stays small. The service enforces them again.
+_CONVERSATION_MAX_ENTRIES = 6
+_CONVERSATION_USER_CHARS = 600
+_CONVERSATION_ASSISTANT_CHARS = 300
+_CONVERSATION_TOTAL_CHARS = 2400
+_CONVERSATION_MAX_REFS = 12
+#: What Exomem itself injects, recognised by its fixed data headers. A block
+#: carrying one is never conversation: feeding the hook's own previous
+#: injection back would be a self-reinforcing loop.
+_INJECTED_MARKERS = ("[Exomem working set", "[Exomem retrieval check]", "KB routing stubs.")
+#: Text a client wraps around its own system and hook messages.
+_CLIENT_WRAPPERS = ("<system-reminder>", "<command-name>", "<command-message>", "<local-command")
+#: The Exomem tools whose ARGUMENTS name a page the conversation touched.
+_READ_TOOL_SUFFIX = "read_memory"
+_ANCHOR_TOOL_SUFFIX = "activate_context"
+
+
+def _safe_regular_fd(path: Path) -> int:
+    """Open a regular file without following a symlink. The same open the
+    continuation checkpoint hook uses (this script cannot import it)."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if os.name != "nt":
+        flags |= getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _transcript_tail_lines(path: str) -> list[str]:
+    """The transcript's final `CONVERSATION_TAIL_BYTES` as lines, a first
+    partial line discarded."""
+    fd = _safe_regular_fd(Path(path).expanduser())
+    try:
+        size = os.fstat(fd).st_size
+        offset = max(0, size - CONVERSATION_TAIL_BYTES)
+        os.lseek(fd, offset, os.SEEK_SET)
+        raw = os.read(fd, CONVERSATION_TAIL_BYTES)
+    finally:
+        os.close(fd)
+    lines = raw.decode("utf-8", "replace").splitlines()
+    if offset > 0 and lines:
+        lines = lines[1:]
+    return [line for line in lines if line.strip()]
+
+
+def _is_injected_or_wrapped(text: str) -> bool:
+    head = text.lstrip()
+    return any(marker in text for marker in _INJECTED_MARKERS) or head.startswith(_CLIENT_WRAPPERS)
+
+
+def _text_blocks(content) -> list[str] | None:
+    """The text of a message's content, or `None` when a block makes it not a
+    human/assistant TEXT turn (a tool result). Media and thinking are dropped."""
+    if isinstance(content, str):
+        return [content]
+    if not isinstance(content, list):
+        return []
+    texts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "tool_result":
+            return None
+        if kind in {"text", "input_text", "output_text"} and isinstance(block.get("text"), str):
+            texts.append(block["text"])
+    return texts
+
+
+def _tool_refs(name: str, arguments) -> list[str]:
+    """Refs a tool call's ARGUMENTS name: `read_memory` paths and `anchor`
+    values. Never anything parsed out of a result."""
+    if not isinstance(arguments, dict):
+        return []
+    tool = name.rsplit("__", 1)[-1] if "__" in name else name
+    ref = ""
+    if tool.endswith(_READ_TOOL_SUFFIX):
+        ref = arguments.get("path")
+    elif tool.endswith(_ANCHOR_TOOL_SUFFIX):
+        ref = arguments.get("anchor")
+    return [ref.strip()] if isinstance(ref, str) and ref.strip() else []
+
+
+def _claude_records(lines: list[str], deadline: float) -> list[tuple[str, str]]:
+    """Claude Code JSONL, as `(kind, text)` events in order: `user` (a
+    human-typed turn), `assistant` (a text turn) and `ref`. An unrecognised
+    line is skipped."""
+    events: list[tuple[str, str]] = []
+    for line in lines:
+        if time.monotonic() > deadline:
+            raise TimeoutError("conversation parse budget spent")
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("type") not in {"user", "assistant"}:
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if record["type"] == "assistant":
+            for block in content if isinstance(content, list) else ():
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    for ref in _tool_refs(str(block.get("name") or ""), block.get("input")):
+                        events.append(("ref", ref))
+            texts = _text_blocks(content) or []
+            text = "\n".join(part.strip() for part in texts if part.strip())
+            if text and not _is_injected_or_wrapped(text):
+                events.append(("assistant", text))
+        else:
+            if record.get("isMeta") or record.get("isSidechain"):
+                continue
+            texts = _text_blocks(content)
+            if not texts:
+                continue
+            human = [
+                part.strip()
+                for part in texts
+                if part.strip() and not _is_injected_or_wrapped(part)
+            ]
+            if human:
+                events.append(("user", "\n".join(human)))
+    return events
+
+
+def _codex_records(lines: list[str], deadline: float) -> list[tuple[str, str]]:
+    """Codex rollout JSONL (`response_item` records), as the same events."""
+    events: list[tuple[str, str]] = []
+    for line in lines:
+        if time.monotonic() > deadline:
+            raise TimeoutError("conversation parse budget spent")
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        payload = record.get("payload") if isinstance(record, dict) else None
+        if not isinstance(record, dict) or record.get("type") != "response_item":
+            continue
+        if not isinstance(payload, dict):
+            continue
+        kind = payload.get("type")
+        if kind == "function_call":
+            arguments = payload.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    arguments = {}
+            name = f"{payload.get('namespace') or ''}{payload.get('name') or ''}"
+            for ref in _tool_refs(name, arguments):
+                events.append(("ref", ref))
+        elif kind == "message" and payload.get("role") in {"user", "assistant"}:
+            texts = _text_blocks(payload.get("content")) or []
+            parts = [
+                part.strip() for part in texts if part.strip() and not _is_injected_or_wrapped(part)
+            ]
+            if parts:
+                events.append((payload["role"], "\n".join(parts)))
+    return events
+
+
+def _cut_at_word(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    head = text[: limit + 1]
+    space = max((i for i, ch in enumerate(head) if ch.isspace()), default=-1)
+    return (head[:space] if space > 0 else head[:limit]).rstrip()
+
+
+def _conversation_from_transcript(path: str, prompt: str) -> dict | None:
+    """The bounded conversation for one prompt, from the client's transcript, or
+    `None`: no path, an unreadable file, an unrecognised format, a spent budget
+    or any error. Never partial, never raises, writes nothing.
+
+    `recent` is the human user turns and each turn's FINAL assistant text,
+    oldest first, before the current prompt; `refs` the pages Exomem read calls
+    and `anchor` arguments named in the tail, newest first. No `focus`: this
+    hook runs no model."""
+    if not path:
+        return None
+    deadline = time.monotonic() + CONVERSATION_BUDGET_SECONDS
+    try:
+        lines = _transcript_tail_lines(path)
+        if time.monotonic() > deadline:
+            return None
+        events = _codex_records(lines, deadline)
+        if not events:
+            events = _claude_records(lines, deadline)
+        entries: list[dict] = []
+        pending = ""
+        refs: list[str] = []
+        for kind, text in events:
+            if kind == "ref":
+                if text in refs:
+                    refs.remove(text)
+                refs.append(text)
+            elif kind == "assistant":
+                pending = text
+            else:
+                if pending:
+                    entries.append({"role": "assistant", "text": pending})
+                    pending = ""
+                entries.append({"role": "user", "text": text})
+        if pending:
+            entries.append({"role": "assistant", "text": pending})
+        current = prompt.strip()
+        if entries and entries[-1]["role"] == "user" and entries[-1]["text"].strip() == current:
+            entries.pop()
+        for entry in entries:
+            limit = (
+                _CONVERSATION_USER_CHARS if entry["role"] == "user" else _CONVERSATION_ASSISTANT_CHARS
+            )
+            entry["text"] = _cut_at_word(entry["text"], limit)
+        entries = entries[-_CONVERSATION_MAX_ENTRIES:]
+        while entries and sum(len(e["text"]) for e in entries) > _CONVERSATION_TOTAL_CHARS:
+            entries.pop(0)
+        newest_first = list(reversed(refs))[:_CONVERSATION_MAX_REFS]
+        if not entries and not newest_first:
+            return None
+        conversation: dict = {}
+        if entries:
+            conversation["recent"] = entries
+        if newest_first:
+            conversation["refs"] = newest_first
+        return conversation
+    except Exception:  # noqa: BLE001 - the hook must never break prompt submission
+        return None
+
+
+def _conversation_ladder(
+    attribution: dict | None, conversation: dict | None
+) -> list[tuple[dict | None, dict]]:
+    """`(conversation, attribution)` pairs to try, in order: everything first;
+    then once without the conversation, for a service that predates it; then the
+    attribution ladder's own reductions. Without a conversation this is exactly
+    `_attribution_ladder`."""
+    ladder = _attribution_ladder(attribution)
+    steps: list[tuple[dict | None, dict]] = []
+    if conversation:
+        steps.append((conversation, ladder[0]))
+    steps.extend((None, extra) for extra in ladder)
+    return steps
+
+
 # --- working-set mode: the compiler's packet, not a hit list ---------------------
 
 
@@ -891,6 +1158,7 @@ def _fetch_packet_via_rest(
     continuity: str = "",
     timeout: float = REST_TIMEOUT_SECONDS,
     attribution: dict | None = None,
+    conversation: dict | None = None,
 ) -> dict | None:
     """One POST to the local REST facade's `/api/activate_context`.
 
@@ -903,6 +1171,10 @@ def _fetch_packet_via_rest(
     an unknown field with a 400; the request is then made again with less
     (`_attribution_ladder`), because a plugin can update before the service it
     talks to and the packet must not degrade for that window.
+
+    `conversation` rides in the body. A service that does not know it refuses
+    it the same way, and the request is then made once more without it, with
+    the same attribution (`_conversation_ladder`).
     """
     port = _rest_port()
     if port is None:
@@ -911,7 +1183,11 @@ def _fetch_packet_via_rest(
     if continuity:
         body["continuity"] = continuity
     started = time.monotonic()
-    for extra in _attribution_ladder(attribution):
+    for sent, extra in _conversation_ladder(attribution, conversation):
+        if sent:
+            body["conversation"] = sent
+        else:
+            body.pop("conversation", None)
         req = urllib.request.Request(
             f"http://{_rest_host()}:{port}/api/activate_context",
             data=json.dumps({**body, **extra}).encode("utf-8"),
@@ -932,7 +1208,7 @@ def _fetch_packet_via_rest(
                 return None
             payload = json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as error:
-            if extra and error.code == 400:
+            if (extra or sent) and error.code == 400:
                 continue
             return None
         except Exception:  # noqa: BLE001 - hook must never break prompt submission
@@ -946,6 +1222,7 @@ def _fetch_packet_via_cli(
     continuity: str = "",
     timeout: float = CLI_TIMEOUT_SECONDS,
     attribution: dict | None = None,
+    conversation: dict | None = None,
 ) -> dict | None:
     """The opt-in CLI rung, over the same leaf the REST route reaches.
 
@@ -962,12 +1239,19 @@ def _fetch_packet_via_cli(
     started = time.monotonic()
     extras = [
         [
-            flag
-            for name in ("client", "session", "workspace")
-            if step.get(name)
-            for flag in (f"--{name}", str(step[name]))
+            *(
+                ["--conversation", json.dumps(sent, ensure_ascii=False)]
+                if sent
+                else []
+            ),
+            *(
+                flag
+                for name in ("client", "session", "workspace")
+                if step.get(name)
+                for flag in (f"--{name}", str(step[name]))
+            ),
         ]
-        for step in _attribution_ladder(attribution)
+        for sent, step in _conversation_ladder(attribution, conversation)
     ]
     for extra in extras:
         # `--` before the turn: the turn is a user's words and those words are
@@ -1330,13 +1614,44 @@ def _recency_referent_lines(packet: dict) -> list[str]:
     ]
 
 
+#: What an anchor's `origin` says about who supplied the cue. `turn` (and
+#: `turn_and_focus`, where the user's own words reached it) render as today.
+_ORIGIN_LABELS = {
+    "conversation": "taken from earlier in this conversation, not from the turn's own words",
+    "focus": "named by the agent, not from the user's own words",
+}
+
+
+def _origin_label(entry: dict) -> str:
+    return _ORIGIN_LABELS.get(str(entry.get("origin") or ""), "")
+
+
+def _origin_lines(packet: dict) -> list[str]:
+    """One line per anchor whose cue the user did not speak (`origin` is
+    `conversation` or `focus`), so the agent never mistakes it for the user's
+    words. Absent for every packet whose anchors are all `turn`."""
+    lines: list[str] = []
+    for anchor in packet.get("anchors") or ():
+        if not isinstance(anchor, dict) or not _origin_label(anchor):
+            continue
+        title = str(anchor.get("title") or anchor.get("ref") or "").strip()
+        lines.append(
+            _packet_line("referent", f"{title} — {_origin_label(anchor)}", str(anchor.get("ref") or ""))
+        )
+    return lines
+
+
 def _packet_lines(packet: dict) -> list[str]:
     """Recent context first, then where a recency referent came from, then
     current state, units and pointers — the packet's own order.
 
     That order is the packet's priority order, so it is also the order the
     ceiling cuts from the end of."""
-    lines: list[str] = [*_recent_lines(packet), *_recency_referent_lines(packet)]
+    lines: list[str] = [
+        *_recent_lines(packet),
+        *_recency_referent_lines(packet),
+        *_origin_lines(packet),
+    ]
     for entry in packet.get("current_state") or ():
         if not isinstance(entry, dict):
             continue
@@ -1428,7 +1743,11 @@ def _format_ambiguity_block(packet: dict, max_chars: int) -> str:
     lines = [
         _packet_line(
             "ambiguous",
-            str(entry.get("title") or entry.get("ref") or ""),
+            " — ".join(
+                part
+                for part in (str(entry.get("title") or entry.get("ref") or ""), _origin_label(entry))
+                if part
+            ),
             str(entry.get("ref") or ""),
         )
         for entry in packet.get("ambiguity") or ()
@@ -1718,6 +2037,10 @@ def main() -> int:
                 prompt,
                 _read_activation_token(session_id),
                 attribution(session_id, str(data.get("cwd") or "")),
+                _conversation_from_transcript(
+                    str(data.get("transcript_path") or data.get("transcriptPath") or ""),
+                    prompt,
+                ),
             )
             packet = packet if isinstance(packet, dict) else {}
             hit_count = len(packet.get("anchors") or ())
