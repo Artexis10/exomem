@@ -48,6 +48,7 @@ Three facts shape the design:
 6. Fold `claude/keyless-thread-continuity` into this change, and specify S2's precedence on top of it. See D9 for what the branch turned out to contain.
 7. The branch name stands, and authorship is fixed by squash merge.
 8. **New:** clients may put attachment-derived cues into `focus` (D8).
+9. **Instructions (ruling on #1455):** the 900-character bound on `SERVER_INSTRUCTIONS` stands; the owner is cutting injected bytes everywhere. The guidance lives in `activate_context`'s tool description. The instructions carry only a pointer, `In a long thread or with attachments, also pass \`conversation\` (see the tool).`, made room for by dropping the intro sentence and a redundant clause, with no rule lost. This supersedes the pinned sentence and the D5 fallback below.
 
 
 ### D1. The signal: one optional `conversation` object with three bounded fields
@@ -167,6 +168,8 @@ The plugin mirror stays byte-identical, pinned by `tests/test_plugin_sync.py`.
 **Codex.** The same script serves Codex. The checkpoint hook's event adapter already accepts an optional `transcript_path` for Codex events. Whether Codex's `UserPromptSubmit` delivers it, and in what rollout format, is verified in S3 against a recorded fixture. Where it is absent, Codex hooks send no conversation, and the gap is reported rather than papered over.
 
 ### D5. Server-instruction wording for remote agents
+
+**Superseded by ruling 9:** the pinned sentence below is not added to `SERVER_INSTRUCTIONS`; the tool description carries it and the instructions carry the short pointer.
 
 One sentence is appended to `SERVER_INSTRUCTIONS`. The first sentence keeps "the user's message verbatim":
 

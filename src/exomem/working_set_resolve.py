@@ -47,6 +47,7 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "usage_prior",
     "recency",
     "continuity",
+    "conversation",
     "agent_choice",
 )
 
@@ -110,6 +111,12 @@ TIE_BREAK_KINDS: frozenset[str] = frozenset({"usage_prior"})
 #: the soundness rule's `deciding` set for the same reason, so it can never be
 #: the second kind that promotes somebody else.
 PRIOR_CONTACT_KINDS: frozenset[str] = frozenset({"recency"})
+
+#: The two kinds that say "an earlier packet, or an earlier turn, already named
+#: this subject". Each resolves an anchor the current turn reached by one contact
+#: kind, never alone and never with qualifiers only, and the two together count
+#: once (`_status_for_evidence` reads the set, not a count).
+NAMED_BEFORE_KINDS: frozenset[str] = frozenset({"continuity", "conversation"})
 
 #: Kinds that resolve an anchor by themselves. `exact_alias` because the turn
 #: spelled the anchor's own name; `agent_choice` because the agent IS the
@@ -273,6 +280,12 @@ class TurnAnalysis:
     #: prior RESOLVE anything, and is read only to carry the caller's own
     #: thread as a `partial` anchor (`is_follow_up`).
     follow_up: bool = False
+    #: Does this turn lean on something said before, whatever its length? A
+    #: pronoun or possessive, a demonstrative, a shipped follow-up marker, an
+    #: ordinal followed by "one" or "option", or a referential cue
+    #: (`is_anaphoric`). Read only by the conversation carry, and only for a
+    #: turn whose own words reached no anchor.
+    anaphoric: bool = False
 
 
 #: A follow-up is short: at most this many tokens. "what about the second
@@ -338,6 +351,39 @@ def is_follow_up(
         referential_cue
         or opener
         or any(token in FOLLOW_UP_MARKERS or token in filler for token in words)
+    )
+
+
+#: The closed anaphor set beyond the shipped follow-up markers and the vault's
+#: referential cues (`TurnAnalysis.referential_cue`): personal pronouns and
+#: possessives, and the demonstratives, kept as the two grammatical classes they
+#: are. "the former" and "the latter" are follow-up markers already.
+PERSONAL_ANAPHORS: frozenset[str] = frozenset(
+    {"he", "she", "him", "her", "hers", "his", "it", "its", "they", "them", "their", "theirs"}
+)
+DEMONSTRATIVES: frozenset[str] = frozenset({"this", "that", "those", "these"})
+#: An ordinal followed by one of these points at an item of an earlier list.
+ORDINALS: frozenset[str] = frozenset(
+    {"first", "second", "third", "fourth", "fifth", "sixth", "last", "next", "other"}
+)
+ORDINAL_HEADS: frozenset[str] = frozenset({"one", "ones", "option", "options"})
+
+
+def is_anaphoric(tokens: Sequence[str], *, referential_cue: bool = False) -> bool:
+    """Does a turn lean on something said before, of any length?
+
+    True for a referential cue, a personal pronoun or demonstrative, a shipped follow-up
+    marker (`FOLLOW_UP_MARKERS`) or an ordinal followed by "one" or "option".
+    Whether the turn reached an anchor after all is the resolver's answer: the
+    conversation carry it enables runs only for a turn that reached none."""
+    if referential_cue:
+        return True
+    words = tuple(tokens)
+    if any(token in PERSONAL_ANAPHORS or token in DEMONSTRATIVES or token in FOLLOW_UP_MARKERS
+        for token in words):
+        return True
+    return any(
+        left in ORDINALS and right in ORDINAL_HEADS for left, right in zip(words, words[1:])
     )
 
 
@@ -426,6 +472,9 @@ class Resolution:
     status: str
     anchors: tuple[ResolvedAnchor, ...]
     ambiguity: tuple[dict[str, Any], ...] = ()
+    #: `conversation` when an ambiguous turn was settled by exactly one
+    #: competitor the earlier conversation had named; empty otherwise.
+    disambiguated_by: str = ""
 
     @property
     def resolved_anchors(self) -> tuple[ResolvedAnchor, ...]:
@@ -737,6 +786,7 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         follow_up=is_follow_up(
             tokens, referential_cue=referential_cue, filler=vocabulary.filler
         ),
+        anaphoric=is_anaphoric(tokens, referential_cue=referential_cue),
     )
 
 
@@ -1534,7 +1584,7 @@ def _status_for_evidence(evidence: frozenset[str], *, recency_resolves: bool = F
         return "resolved"
     if "rare_term" in deciding and (deciding & CONTACT_KINDS) - {"rare_term"}:
         return "resolved"
-    if "continuity" in deciding and deciding & CONTACT_KINDS:
+    if deciding & NAMED_BEFORE_KINDS and deciding & CONTACT_KINDS:
         return "resolved"
     if recency_resolves and "recency" in evidence:
         return "resolved"
@@ -1747,13 +1797,25 @@ def resolve(
     has_named_anchor = any(DECIDING_ALONE_KINDS & set(anchor.evidence) for anchor in resolved)
     ambiguity: list[dict[str, Any]] = []
     demoted_refs: set[str] = set()
+    disambiguated_by = ""
     for kind, group in groups:
         group_has_named = any(DECIDING_ALONE_KINDS & set(member.evidence) for member in group)
         if group_has_named or not has_named_anchor:
             # A real competing sense (a group the turn itself named two
             # members of), or -- with no named anchor anywhere to carry the
-            # packet instead -- today's unchanged behaviour.
-            ambiguity.extend(_ambiguity_dicts(kind, group))
+            # packet instead -- today's unchanged behaviour. The earlier
+            # conversation breaks the tie only when it is unambiguous:
+            # exactly one competitor carries it. None or several keep the
+            # ambiguity exactly as without a conversation.
+            named_before = {
+                anchor_ref(member) for member in group if "conversation" in member.evidence
+            }
+            if len(named_before) == 1:
+                demoted_refs.update(anchor_ref(member) for member in group)
+                demoted_refs.difference_update(named_before)
+                disambiguated_by = "conversation"
+            else:
+                ambiguity.extend(_ambiguity_dicts(kind, group))
         else:
             # None of this group's members is a named anchor, and a named
             # anchor exists elsewhere to carry the packet: demote the whole
@@ -1771,7 +1833,9 @@ def resolve(
     if ambiguity:
         return Resolution(status="ambiguous", anchors=tuple(anchors), ambiguity=tuple(ambiguity))
     if resolved:
-        return Resolution(status="resolved", anchors=tuple(anchors))
+        return Resolution(
+            status="resolved", anchors=tuple(anchors), disambiguated_by=disambiguated_by
+        )
     return Resolution(status="unresolved", anchors=tuple(anchors))
 
 
