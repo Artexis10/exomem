@@ -187,7 +187,13 @@ Each one either fails towards `ambiguous` or sits outside the ruled wording.
 
 ### Runs
 
-Local scoped suite still running; numbers follow in the next push.
+| Run | Result |
+|------|------|
+| Real-compiler, continuity, and all `working_set_*` and `activation*` modules, 6983ad9 | 1,434 passed, 1 failed, 21 skipped |
+
+The one failure is the base's own `test_activation_lexical_term_budget::…stops_at_k` (SQLite query plan). The 21 skips are `onnx` missing.
+
+**NC-B follow-up, 30d9ad9: FIXED.** It adds `()[]` to `_CLAUSE_BREAK` (`working_set_resolve.py:796`). "solar array (monitoring can wait)" and "[monitoring can wait]" → `ambiguous`. "(solar array monitoring)" still narrows, the slash is deliberately left alone, and `test_working_set_resolve_senses.py` plus `test_working_set_bare_name_carry.py` give 45 passed.
 
 | Check | Result |
 |------|------|
