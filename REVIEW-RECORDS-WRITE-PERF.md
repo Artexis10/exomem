@@ -61,8 +61,10 @@ re-read. Add it to `test_record_write_scaling.py`.
   refusals are captured before the shared snapshot is reused (`:1524`).
 
 ## Verification
-- Probes: 8 tests, 2 failed (the Medium), 6 passed, on the PR head.
-- Local suites (scaling, records, governance, egress, lifecycle, vault; 83 modules): RESULT_LINE
+- Probes (`REVIEW-RECORDS-WRITE-PERF-probes.py`; copy into `tests/` on the PR branch to run): 8 tests, 2 failed (the Medium), 6 passed, on the PR head.
+- Local suites (scaling, records, governance, egress, lifecycle, vault; 83 modules): 2399 passed, 40 skipped, 2 failed in 482 s. The 2 failures
+  (`test_governance_overhead.py` receipt-append and scrubber timing budgets) fail identically on
+  untouched `origin/main` in this container: environment timing, not this PR.
 - `gh pr checks 1457` equivalent (GitHub API): 36 checks — all run jobs green (12 core
   shards, 4 harness shards, Windows held-fs, E2E, lint, OpenSpec, required gate); 9 skipped
   by path filter, including the cross-OS matrix.
