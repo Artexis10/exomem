@@ -56,6 +56,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "EXOMEM_RETRIEVE_INJECT_CLI",
         "EXOMEM_REST_API_KEY",
         "EXOMEM_REST_PORT",
+        "EXOMEM_LOCAL_TOKEN_FILE",
+        "EXOMEM_LOCAL_PORT",
         "EXOMEM_HOST",
         "EXOMEM_SERVICE_ENV",
         "EXOMEM_PROMINENCE",

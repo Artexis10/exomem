@@ -93,6 +93,9 @@ class StagedArtifact:
     sha256: str
     content_type: str | None
     filename: str
+    #: The claimed hold behind a local client's held upload, so a command that
+    #: stores nothing can put it back.
+    held: object | None = None
 
 
 @dataclass(frozen=True)
@@ -343,10 +346,80 @@ def _yaml_page_path_safe(value: str) -> bool:
     )
 
 
-def stage_artifact(
-    file: Mapping[str, object], budget: FetchBudget, *, batch_deadline: float | None = None
+def _redeem_held(
+    file: Mapping[str, object], budget: FetchBudget, *, vault_root: Path | None, lane: str | None
 ) -> StagedArtifact:
-    """Download one handle to a private temporary file before vault mutation."""
+    """Claim a local client's held upload instead of fetching anything."""
+    from . import held_uploads
+
+    file_id = _file_id(file)
+    if vault_root is None:
+        raise SafeFetchError("HELD_UPLOAD_UNAVAILABLE", held_uploads.UNAVAILABLE_REASON)
+    try:
+        held = held_uploads.redeem(
+            vault_root,
+            str(file.get("download_url")),
+            lane=lane,
+            admit=budget.validate_content_length,
+        )
+    except held_uploads.HeldUploadError as error:
+        raise SafeFetchError(error.code, error.reason) from None
+    try:
+        budget.consume(held.size)
+        content_type = held.content_type or _content_type(file.get("mime_type"))
+    except BaseException:
+        held_uploads.restore(vault_root, held)
+        raise
+    filename = (
+        str(file.get("file_name") or "").strip()
+        or held.filename
+        or fallback_filename(held.sha256, content_type)
+    )
+    return StagedArtifact(
+        file_id, held.path, held.size, held.sha256, content_type, filename, held=held
+    )
+
+
+def _release_staged(
+    vault_root: Path, staged: Mapping[int, StagedArtifact], outcomes: list[dict | None]
+) -> None:
+    """Remove staged bytes, putting back each claimed hold whose file was not stored.
+
+    A hold is spent only by storing its file (or finding it already stored); a
+    per-file failure after the claim leaves the handle redeemable until expiry.
+    """
+    from . import held_uploads
+
+    for index, artifact in staged.items():
+        outcome = outcomes[index] if index < len(outcomes) else None
+        try:
+            if artifact.held is not None and (
+                outcome is None or outcome.get("outcome") != "stored"
+            ):
+                held_uploads.restore(vault_root, artifact.held)
+            else:
+                artifact.path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def stage_artifact(
+    file: Mapping[str, object],
+    budget: FetchBudget,
+    *,
+    batch_deadline: float | None = None,
+    vault_root: Path | None = None,
+    lane: str | None = None,
+) -> StagedArtifact:
+    """Download one handle to a private temporary file before vault mutation.
+
+    A local client's held upload (`exomem-held:`) is claimed from machine-local
+    state instead; it never reaches the network code below.
+    """
+    from .held_uploads import is_held_reference
+
+    if is_held_reference(file.get("download_url")):
+        return _redeem_held(file, budget, vault_root=vault_root, lane=lane)
     file_id = _file_id(file)
     current_url = str(file.get("download_url") or "")
     redirects = 0
@@ -667,9 +740,8 @@ def _destination(vault_root: Path, *parts: str) -> str:
 def _source_destination(
     vault_root: Path, source_fields: Mapping[str, object]
 ) -> str:
-    from . import source_taxonomy
+    from . import source_taxonomy, vocabulary_resolution
 
-    taxonomy = source_taxonomy.load_taxonomy(vault_root)
     try:
         raw_kind = source_fields.get("source_type") or source_taxonomy.FALLBACK_KIND
         raw_domain = source_fields.get("domain")
@@ -677,11 +749,22 @@ def _source_destination(
             raw_domain is not None and not isinstance(raw_domain, str)
         ):
             raise source_taxonomy.TaxonomyError("source classification is invalid")
+        if raw_domain is not None:
+            # The same binding `add` commits under, so the pre-fetch destination
+            # and the committed one cannot differ in spelling.
+            binding = vocabulary_resolution.resolve_source_domain(
+                vault_root, kind=raw_kind, domain=raw_domain
+            )
+            return _destination(vault_root, *binding.segments)
+        taxonomy = source_taxonomy.load_taxonomy(vault_root)
         kind = taxonomy.resolve_kind(raw_kind)
-        domain = taxonomy.resolve_domain(raw_domain) if raw_domain is not None else None
     except source_taxonomy.TaxonomyError as error:
         raise SafeFetchError("INVALID_SOURCE", str(error)) from error
-    return _destination(vault_root, *source_taxonomy.source_segments(kind, domain))
+    except vocabulary_resolution.VocabularyResolutionError as error:
+        raise SafeFetchError(
+            error.code, vocabulary_resolution.capture_refusal_reason(vault_root, error)
+        ) from error
+    return _destination(vault_root, *source_taxonomy.source_segments(kind))
 
 
 def _receipt_error(code: str, reason: str) -> SafeFetchError:
@@ -1054,6 +1137,7 @@ def _capture_source_adoption(
             return _finish_adoption(outcomes)
 
         manager = active_manager()
+        payload: dict | None = None
         try:
             with manager.mutation_guard(
                 vault_root,
@@ -1097,7 +1181,10 @@ def _capture_source_adoption(
             outcomes[selected_index] = _failed(
                 artifact.file_id, SafeFetchError(error.code, error.reason)
             )
-        return _finish_adoption(outcomes)
+        finished = _finish_adoption(outcomes)
+        if isinstance(payload, dict) and "vocabulary_resolution" in payload:
+            finished["vocabulary_resolution"] = payload["vocabulary_resolution"]
+        return finished
     finally:
         if artifact is not None:
             try:
@@ -1288,6 +1375,7 @@ def capture_source_artifacts(
     batch_deadline = _monotonic() + _BATCH_DEADLINE_SECONDS
     staged: dict[int, StagedArtifact] = {}
     outcomes: list[dict | None] = [None] * len(files)
+    resolution: dict | None = None
     for index, file in enumerate(files):
         if not isinstance(file, Mapping):
             outcomes[index] = _failed("", SafeFetchError("INVALID_FILE", "file handle is invalid"))
@@ -1297,7 +1385,9 @@ def capture_source_artifacts(
             if not isinstance(file.get("download_url"), str) or not file["download_url"].strip():
                 raise SafeFetchError("INVALID_FILE", "download_url is required")
             _content_type(file.get("mime_type"))
-            staged[index] = stage_artifact(file, budget, batch_deadline=batch_deadline)
+            staged[index] = stage_artifact(
+                file, budget, batch_deadline=batch_deadline, vault_root=vault_root, lane="source"
+            )
         except SafeFetchError as error:
             file_id = str(file.get("file_id") or "") if isinstance(file, Mapping) else ""
             outcomes[index] = _failed(file_id, error)
@@ -1337,6 +1427,9 @@ def capture_source_artifacts(
                     )
                 mark_active_mutation_committed()
                 payload = result.as_dict()
+                # Every file shares one domain request; the first commit's
+                # record is the one that chose the destination.
+                resolution = resolution or payload.get("vocabulary_resolution")
                 # `stored_path` and `media_id` are required by the bounded
                 # artifact-receipt projection a compact terminal applies; a row
                 # missing either is replaced wholesale with
@@ -1366,18 +1459,17 @@ def capture_source_artifacts(
                     artifact.file_id, SafeFetchError(error.code, error.reason)
                 )
     finally:
-        for artifact in staged.values():
-            try:
-                artifact.path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        _release_staged(vault_root, staged, outcomes)
 
     resolved = [outcome for outcome in outcomes if outcome is not None]
     stored = sum(1 for outcome in resolved if outcome.get("outcome") == "stored")
-    return {
+    out: dict = {
         "files": resolved,
         "summary": {"stored": stored, "failed": len(resolved) - stored},
     }
+    if resolution is not None:
+        out["vocabulary_resolution"] = resolution
+    return out
 
 
 def preserve_artifacts(
@@ -1387,9 +1479,17 @@ def preserve_artifacts(
     category: str,
     files: list[Mapping[str, object]],
     adoption: Mapping[str, object] | None = None,
+    transcriptions: list[Mapping[str, object]] | tuple = (),
 ) -> dict:
-    """Stage remote files first, then preserve each append-only artifact under a narrow guard."""
+    """Stage remote files first, then preserve each append-only artifact under a narrow guard.
+
+    A transcription is written only with its original: as the extracted text
+    of the original's own page, in the same write that stores the bytes. An
+    original that is already stored or that fails records no transcription.
+    """
     if adoption is not None:
+        if transcriptions:
+            _refuse_transcriptions("transcriptions are not accepted with an adoption")
         return _preserve_evidence_adoption(
             vault_root,
             scope=scope,
@@ -1401,6 +1501,7 @@ def preserve_artifacts(
     # the call, so `files=[]` with `scope="a/b"` must refuse rather than report
     # a successful batch of nothing.
     _validate_destination(scope, category)
+    transcribed = _transcriptions_by_file(transcriptions, files)
     if not isinstance(files, list) or not files:
         return _batch_result([])
     if len(files) > MAX_FILES:
@@ -1424,7 +1525,9 @@ def preserve_artifacts(
             if not isinstance(file.get("download_url"), str) or not file["download_url"].strip():
                 raise SafeFetchError("INVALID_FILE", "download_url is required")
             _content_type(file.get("mime_type"))
-            staged[index] = stage_artifact(file, budget, batch_deadline=batch_deadline)
+            staged[index] = stage_artifact(
+                file, budget, batch_deadline=batch_deadline, vault_root=vault_root, lane="evidence"
+            )
         except SafeFetchError as error:
             file_id = str(file.get("file_id") or "") if isinstance(file, Mapping) else ""
             outcomes[index] = _failed(file_id, error)
@@ -1471,7 +1574,13 @@ def preserve_artifacts(
                         "content_type": artifact.content_type,
                         "warnings": [],
                     }
+                    if index in transcribed:
+                        outcomes[index]["transcription"] = {
+                            "state": "not_recorded",
+                            "reason": "the original was already preserved; its page is unchanged",
+                        }
                     continue
+                transcription = transcribed.get(index)
                 with manager.mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
@@ -1487,6 +1596,11 @@ def preserve_artifacts(
                             stream=stream,
                             content_type=artifact.content_type,
                             max_bytes=MAX_FILE_BYTES,
+                            **(
+                                {"text": transcription, "text_origin": "client"}
+                                if transcription
+                                else {}
+                            ),
                         )
                 mark_active_mutation_committed()
                 payload = result.as_dict()
@@ -1539,9 +1653,73 @@ def preserve_artifacts(
                     "content_type": payload.get("content_type"),
                     "warnings": warnings,
                 }
+                if transcription:
+                    outcomes[index]["transcription"] = {
+                        "state": "recorded",
+                        "page": payload.get("sidecar_path"),
+                    }
             except (PreserveError, SafeFetchError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
     finally:
-        for artifact in staged.values():
-            artifact.path.unlink(missing_ok=True)
+        _release_staged(vault_root, staged, outcomes)
     return _batch_result(outcomes)
+
+
+#: A transcription is a page of text, not a document dump.
+MAX_TRANSCRIPTION_CHARS = 100_000
+
+
+def _refuse_transcriptions(reason: str) -> None:
+    raise OpError(
+        "INVALID_PRESERVE",
+        reason,
+        "Name each transcription by the `file_id` of one supplied file.",
+        details={"field": "transcriptions", "reason": reason},
+    )
+
+
+def _transcriptions_by_file(
+    transcriptions: object, files: object
+) -> dict[int, str]:
+    """Validate transcriptions against the supplied files, before anything is staged.
+
+    Each transcription is bound to the position of the one file its `file_id`
+    names, never to the label itself: a label is caller-editable, so when
+    transcriptions are supplied every file's `file_id` must be unique.
+    """
+    if not transcriptions:
+        return {}
+    if not isinstance(transcriptions, (list, tuple)) or len(transcriptions) > MAX_FILES:
+        _refuse_transcriptions(f"transcriptions must be a list of at most {MAX_FILES} objects")
+    supplied: dict[str, int] = {}
+    for index, file in enumerate(files if isinstance(files, (list, tuple)) else ()):
+        if isinstance(file, Mapping) and isinstance(file.get("file_id"), str):
+            label = file["file_id"].strip()
+            if label in supplied:
+                _refuse_transcriptions(
+                    "file_id values must be unique when transcriptions are supplied"
+                )
+            supplied[label] = index
+    by_file: dict[int, str] = {}
+    for item in transcriptions:
+        file_id = item.get("file_id") if isinstance(item, Mapping) else None
+        text = item.get("text") if isinstance(item, Mapping) else None
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != {"file_id", "text"}
+            or not isinstance(file_id, str)
+            or not isinstance(text, str)
+            or not text.strip()
+            or len(text) > MAX_TRANSCRIPTION_CHARS
+        ):
+            _refuse_transcriptions(
+                "each transcription is {file_id, text} with non-empty text of at most "
+                f"{MAX_TRANSCRIPTION_CHARS:,} characters"
+            )
+        file_id = file_id.strip()
+        if file_id not in supplied:
+            _refuse_transcriptions("a transcription names no supplied file")
+        if supplied[file_id] in by_file:
+            _refuse_transcriptions("a file has more than one transcription")
+        by_file[supplied[file_id]] = text
+    return by_file

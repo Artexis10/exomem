@@ -366,6 +366,39 @@ def _deduplicated(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
     return tuple(out)
 
 
+def _folded_prose(text: str) -> str:
+    return " ".join(str(text or "").casefold().split())
+
+
+def _without_lede_repeats(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
+    """Drop a unit the anchor page's own lede already says (close-memory-loop,
+    activation quality).
+
+    The identity lane serves a resolved anchor's page in its own words, at
+    page level and by the page's own ref (`provenance.source == "profile"`).
+    A role lane reading that page can select the very observation the lede
+    opens with, as a unit fragment of the same page: one sentence printed
+    twice, charged twice, and reported as a second reference where there is
+    one page. The page-level item already carries it, so the fragment goes.
+    Only a unit of THAT page whose whole text the lede contains; any other
+    unit of the page, and the same sentence on another page, are kept.
+    """
+    ledes: dict[str, list[str]] = {}
+    for item in ordered:
+        if item.level == "page" and item.path and item.provenance.get("source") == "profile":
+            ledes.setdefault(item.path, []).append(_folded_prose(item.text))
+    if not ledes:
+        return tuple(ordered)
+    out: list[LaneItem] = []
+    for item in ordered:
+        if item.level == "unit" and item.path in ledes:
+            text = _folded_prose(item.text)
+            if text and any(text in lede for lede in ledes[item.path]):
+                continue
+        out.append(item)
+    return tuple(out)
+
+
 def build_packet(
     *,
     items: Sequence[LaneItem],
@@ -406,7 +439,7 @@ def build_packet(
     # the first role in registry priority order that reached it — the most
     # specific lens that asked. A `level`-less or ref-less item is left
     # alone: its identity is not its ref.
-    ordered = _deduplicated(sorted(items, key=_sort_key))
+    ordered = _without_lede_repeats(_deduplicated(sorted(items, key=_sort_key)))
     units: list[dict[str, Any]] = []
     deferred: list[tuple[LaneItem, str]] = []
     per_role: dict[str, int] = {}
@@ -873,6 +906,8 @@ def _planning_lane(
             LaneItem(
                 role=role.id,
                 level="page",
+                # The item's own page where the index knows it (task 6.12),
+                # the internal item id otherwise.
                 ref=str(getattr(anchor, "ref", None) or getattr(anchor, "anchor_id", "")),
                 path=str(getattr(anchor, "path", "") or ""),
                 title=str(getattr(anchor, "title", "") or ""),
@@ -1271,6 +1306,38 @@ def _eligible_agent_page(vault_root: Path, ref: str) -> str | None:
     if not _is_current_page(vault_root, path):
         return None
     return path
+
+
+def discount_superseded_pages(
+    vault_root: Path,
+    frequencies: Mapping[str, int],
+    paths_for: Callable[[Sequence[str], int], Mapping[str, Sequence[str]]],
+    *,
+    cap: int,
+) -> dict[str, int]:
+    """`frequencies` with pages `_is_current_page` retires taken back out.
+
+    The catalogue already leaves out a retiring STATUS (`RETIRED_PAGE_STATUSES`);
+    a `superseded_by` pointer on an otherwise active page is not a catalogue
+    column, so it is judged here, page by page, the way the carry judges its
+    own candidates. Only for a stem that could still turn out distinctive —
+    counted above `cap` by at most `RETRIEVAL_CARRY_FETCH` pages — so the
+    reads stay bounded by the same window the carry reads its hits through.
+    The bound is real: a stem counted more than `cap + RETRIEVAL_CARRY_FETCH`
+    pages is left as counted, so a name whose surplus revisions are retired
+    only by `superseded_by` still blocks the carry.
+    `paths_for(stems, limit)` lists the pages behind each count.
+    """
+    out = {stem: int(count) for stem, count in frequencies.items()}
+    near = [stem for stem, count in out.items() if cap < count <= cap + RETRIEVAL_CARRY_FETCH]
+    if not near:
+        return out
+    limit = cap + RETRIEVAL_CARRY_FETCH
+    listed = paths_for(near, limit)
+    for stem in near:
+        retired = sum(1 for path in listed.get(stem, ()) if not _is_current_page(vault_root, path))
+        out[stem] = max(0, out[stem] - retired)
+    return out
 
 
 def rare_document_cap(corpus_pages: int) -> int:

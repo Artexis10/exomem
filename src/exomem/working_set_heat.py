@@ -63,6 +63,11 @@ SEED_MAX = 256
 MAX_FOLD_PATHS = 2048
 #: Sessions whose last served thread is remembered, least recently seen dropped.
 SESSIONS_MAX = 512
+#: How stale a session's `seen_ns` may grow before a mark that changes nothing
+#: else rewrites it. The seen time only orders workspace siblings and evicts
+#: past `SESSIONS_MAX`; rewriting it on every turn cost each activation a
+#: sidecar write and the next one a full reload of the ring.
+SESSION_SEEN_REFRESH_NS = 300 * 1_000_000_000
 #: A gap this long between deliberate or selection events ends a working
 #: session. Overnight splits one, a lunch break does not.
 SESSION_GAP_NS = 6 * 3600 * 1_000_000_000
@@ -1068,6 +1073,12 @@ def _connect(vault_root: Path, *, rebuilt: bool = False) -> sqlite3.Connection |
         return None
     try:
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        # Per connection, not stored in the file: set only where the schema is
+        # created, every later connection committed at FULL and fsynced its WAL
+        # on each activation's session mark (~50 ms a turn on WSL). Recorded
+        # telemetry, best-effort: in WAL mode a power loss costs at most the
+        # last few committed rows and never corrupts the file.
+        conn.execute("PRAGMA synchronous=NORMAL")
         _ensure_schema(conn)
     except sqlite3.OperationalError:
         log.debug("heat sidecar busy", exc_info=True)
@@ -1284,6 +1295,16 @@ def note_session(vault_root: Path, mark: SessionMark) -> bool:
     end a conversation's thread."""
     if not mark.session:
         return True
+    if not mark.paths:
+        stored = load(vault_root).sessions.get(mark.session)
+        if (
+            stored is not None
+            and stored.workspace == mark.workspace
+            and stored.client == mark.client
+            and 0 <= int(mark.seen_ns) - stored.seen_ns < SESSION_SEEN_REFRESH_NS
+        ):
+            # Nothing but the seen time would change, and it is fresh enough.
+            return True
     paths = json.dumps(sorted({str(path) for path in mark.paths}))
 
     def work(conn: sqlite3.Connection) -> None:

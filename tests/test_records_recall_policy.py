@@ -136,3 +136,34 @@ def test_canonical_alias_seam_suppresses_a_windows_short_name(tmp_path: Path, mo
     )
 
     assert not recall_policy.is_recall_candidate(tmp_path, note)
+
+
+def test_a_collection_manifest_is_parsed_once_per_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every graph-context read admits its seeds through this check, and a
+    Records or Planning seed re-parsed its whole manifest (YAML composed three
+    times, audit validation, stable hash) on every activation: ~30 ms a call
+    on the bench corpus."""
+    from exomem import structured_collections
+
+    records = tmp_path / "Knowledge Base" / "Records" / "Health"
+    records.mkdir(parents=True)
+    manifest = records / "_collection.md"
+    manifest.write_text(_manifest(), encoding="utf-8")
+    (records / "items").mkdir()
+    parses: list[str] = []
+    real = structured_collections.parse_manifest_bytes
+
+    def counting(*args, **kwargs):
+        parses.append("parse")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(structured_collections, "parse_manifest_bytes", counting)
+    assert recall_policy.is_recall_candidate(tmp_path, manifest)
+    assert recall_policy.is_recall_candidate(tmp_path, manifest)
+    assert parses == ["parse"]
+    # New bytes are a new answer.
+    manifest.write_text(_manifest().replace("semantic_profile: records", "semantic_profile: notes"), encoding="utf-8")
+    assert not recall_policy.is_recall_candidate(tmp_path, manifest)
+    assert parses == ["parse", "parse"]

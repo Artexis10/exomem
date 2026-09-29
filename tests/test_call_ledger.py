@@ -1007,3 +1007,28 @@ def test_principal_kind_is_part_of_the_hashed_row(ledger_dir: Path, monkeypatch)
     row = _rows(ledger_dir)[0]
     tampered = dict(row, principal_kind="owner")
     assert call_ledger.row_hash(tampered) != row["row_hash"]
+
+
+def test_a_local_ingress_call_is_labelled_owner_local(ledger_dir: Path, monkeypatch) -> None:
+    import fastmcp.server.dependencies as dependencies
+
+    from exomem import local_ingress
+
+    token = local_ingress.LocalIngressAccessToken(
+        token="synthetic-local-token",
+        client_id="home",
+        scopes=list(local_ingress.LOCAL_SCOPES),
+        claims={"sub": "local:synthetic", "iss": local_ingress.LOCAL_ISSUER},
+    )
+    grant = local_ingress.LocalGrant(
+        bearer="synthetic-local-token", access_token=token, client_id="home", session_id="s"
+    )
+    monkeypatch.setattr(dependencies, "get_access_token", lambda: token)
+    bound = local_ingress._GRANT.set(grant)
+    try:
+        _drive("browse_memory", {}, _ok)
+    finally:
+        local_ingress._GRANT.reset(bound)
+    row = _rows(ledger_dir)[0]
+    assert row["principal_kind"] == "owner-local"
+    assert "synthetic-local-token" not in (ledger_dir / "ledger.jsonl").read_text(encoding="utf-8")

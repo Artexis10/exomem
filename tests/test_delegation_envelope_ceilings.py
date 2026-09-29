@@ -109,13 +109,34 @@ def test_the_served_contract_states_the_server_side_gap_rather_than_implying_it_
     ].lower()
 
     assert "supersession" in clause
-    assert "entity creation" in clause
+    assert "entity merge" in clause
     assert "no server-side" in clause
     assert "future work" in clause
     # Command-free, exactly like the epistemic commitments: this clause matters
     # most on the reduced surfaces where `_filter_bootstrap_payload` deletes any
     # string naming an unavailable command.
     assert "(" not in clause and "_memory" not in clause
+
+
+def test_the_served_contract_routes_additive_entity_creation_to_proactive_capture(
+    config, tmp_path: Path
+) -> None:
+    """Ruling R1: a new identity is additive capture, not a confirmed restructure.
+
+    Resolve-before-create already refuses an exact duplicate, so a confirmation
+    per new identity costs a question and prevents nothing a later merge cannot
+    undo. Merge, supersession and deletion stay confirm-required.
+    """
+    root = tmp_path / "served-vault"
+    (root / "Knowledge Base").mkdir(parents=True)
+
+    envelope = commands.op_bootstrap(root, profile="compact")["engagement"]["envelope"]
+    clause = " ".join(envelope["confirm_required"].lower().split())
+
+    assert "on a personal vault, additive entity creation follows proactive_capture" in clause
+    assert "entity creation and deletion" not in clause
+    assert "entity creation have no" not in clause
+    assert envelope["classes"]["restructure_execution"]["ceiling"] == "confirm-required"
 
 
 # -------------------------------------------------------- tier 2: deletion's gate

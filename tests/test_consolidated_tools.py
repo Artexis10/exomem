@@ -111,6 +111,7 @@ def test_edit_memory_discovery_is_one_discriminated_operation(
         "path",
         "why",
         "operation",
+        "identity_decision",
         "response_detail",
         "validate_only",
     }

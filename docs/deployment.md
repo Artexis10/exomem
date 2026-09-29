@@ -1046,6 +1046,71 @@ with the replica that answers.
 | A remote token may be stolen | `exomem auth revoke <session-id>` for one session (`exomem auth sessions` lists them, marking the owner-equivalent ones), or `exomem auth revoke --all`. To drop owner power only, without signing anyone out, remove `EXOMEM_OWNER_OAUTH_SUBJECT` and restart; this works even while an HA coordinator is down. |
 | The GitHub account is taken over, or you move to another account | Set `EXOMEM_GITHUB_USER_ID` and `EXOMEM_GITHUB_USERNAME` to the new account, and set `EXOMEM_OWNER_OAUTH_SUBJECT` to its id (or remove it), restart, and **always** run `exomem auth revoke --all`. Changing the allowed account only suspends the former account's sessions: they would come back, with owner power if the binding names that account again, the moment it is re-allowed. `revoke --all` ends them for good; every client then signs in once more. |
 
+### Same-machine clients: the local listener
+
+On a managed Linux/WSL install, both Cloudflare tunnels deliver public traffic
+to the public listener on `127.0.0.1:8765`, so a loopback address does not mean
+a local caller. Same-machine clients get their own door instead: a second
+listener, on `127.0.0.1` only, that accepts nothing but per-client local tokens.
+
+It is off by default. Turn it on with one line in `service.env` and a restart of
+the service unit (the supervisor itself, not just an upgrade handoff):
+
+```bash
+EXOMEM_LOCAL_PORT=8764
+```
+
+`python -m exomem.service_upgrade --runtime-dir <runtime dir> --status` then
+reports `local_port`. A malformed value, the public
+port, or a port already in use leaves the local listener closed with a logged
+reason; the public listener is never affected. Both listeners share one ingress,
+so an upgrade pauses and drains them together.
+
+The local listener refuses, before anything reaches the worker, any request
+that came through Cloudflare (`cf-ray` or `cf-connecting-ip`), any request with
+an `Origin` header, any `Host` other than literal `127.0.0.1` or `[::1]` (not
+`localhost`), and every path except `/mcp`, `/api/*`, `/upload` and `/health*`.
+It accepts only local tokens: an OAuth session, the REST key and the upload
+token are all refused there, and a local token is refused on the public path.
+
+Issue one token per client, into a new file that only you can read:
+
+```bash
+exomem auth issue-local --client home --output ~/.config/exomem/home.token
+```
+
+The command needs the same environment as `exomem auth sessions`
+(`EXOMEM_JWT_SIGNING_KEY`, `EXOMEM_GITHUB_USER_ID` and `EXOMEM_GITHUB_USERNAME`)
+and prints only the session id. Local tokens do not expire. `exomem auth
+sessions` lists them with `ingress: local`; `exomem auth revoke <session-id>`
+ends one, and `exomem auth revoke --all` ends them with every other session.
+A request with a local token acts as the owner and is recorded as
+`principal_kind: owner-local`; access log lines carry `ingress=local` and the
+client label, never the token. Tokens give attribution and revocation, not
+isolation: any process running as your user that can read the file can use it.
+
+A client then points at `http://127.0.0.1:8764/mcp` with
+`Authorization: Bearer <token file contents>`. Two helpers use the token file:
+
+- The retrieve hook's REST rung tries the local listener first when
+  `EXOMEM_LOCAL_TOKEN_FILE` names the file and `EXOMEM_LOCAL_PORT` is set (in the
+  hook's environment or `service.env`). For one release it still falls back to
+  the key it lifts from `service.env` when the local request fails.
+- `exomem attach <file> --scope <scope> --category <category>` sends a file's
+  bytes to the local `/upload` and prints the handle the service returns. It
+  reads `EXOMEM_LOCAL_TOKEN_FILE` and `EXOMEM_LOCAL_PORT`, or `--token-file` and
+  `--port`. Without `--scope` and `--category` the service holds the bytes
+  outside the vault and prints a `file` handle for `preserve_artifacts` (or,
+  with `--lane source`, `capture_source`). A held handle is redeemable once,
+  within an hour, and only by a request using the same local token, so point
+  the client's MCP connection at the local listener with that token.
+
+The owner REST key and the static upload token keep working on the public path.
+Their use on a Cloudflare-transited request is logged as
+`event=owner_credential_transit`, so a later release can refuse them there once
+no remote client uses them. It is kept out of `/metrics.json`, which is served
+without authentication.
+
 ## Deploying a new version
 
 For an opt-in managed Linux/WSL service, `bash scripts/upgrade.sh` stages a new

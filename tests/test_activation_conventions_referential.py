@@ -62,6 +62,22 @@ PREVIOUS_FILLER = frozenset(
 )
 
 
+#: The Japanese seed (task 6.3): a pointing-back Japanese turn is one unspaced
+#: run, read as its cue and filler (`working_set_resolve._spell_out_cues`).
+JAPANESE_CUES = (
+    "続けて", "続けよう", "続けましょう", "続き", "前回の続き", "再開",
+    "どこまでやった", "どこまで進んだ", "どこまでだった", "何をしていた", "何してた",
+    "次は何", "進捗",
+)
+JAPANESE_FILLER = frozenset(
+    {
+        "ください", "お願い", "お願いします", "して", "しよう", "しましょう", "する",
+        "っけ", "かな", "ね", "よ", "か", "は", "を", "の", "から", "で", "です", "ですか",
+        "じゃあ", "では", "さて", "それでは", "作業", "仕事", "それ", "これ", "さっき", "今日", "昨日",
+    }
+)
+
+
 def _save(vault: Path, referential: dict, *, why: str = "learned from a correction") -> dict:
     current = ac.load_conventions(vault)
     return commands.op_schema_memory(
@@ -117,11 +133,11 @@ def _fresh_registry():
 
 def test_the_shipped_seed_equals_the_previous_referential_lists() -> None:
     shipped = ac.shipped_conventions().conventions
-    assert shipped.referential_cues == PREVIOUS_CUES
-    assert shipped.referential_filler == PREVIOUS_FILLER
+    assert shipped.referential_cues == PREVIOUS_CUES + JAPANESE_CUES
+    assert shipped.referential_filler == PREVIOUS_FILLER | JAPANESE_FILLER
     raw = yaml.safe_load(ac.shipped_conventions_text())["referential"]
-    assert tuple(raw["cues"]) == PREVIOUS_CUES
-    assert frozenset(raw["filler"]) == PREVIOUS_FILLER
+    assert tuple(raw["cues"]) == PREVIOUS_CUES + JAPANESE_CUES
+    assert frozenset(raw["filler"]) == PREVIOUS_FILLER | JAPANESE_FILLER
 
 
 def _string_collections(tree: ast.AST) -> list[tuple[int, list[str]]]:

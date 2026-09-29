@@ -396,7 +396,7 @@ def log_activation_call(
     Recorded: the door, the observed MCP client (which wins for any use) and
     the declared label, the transport, a vault-keyed session hash, a vault
     hash, a principal hash and the principal's kind (`owner`, `owner-oauth`,
-    `principal` or `unresolved`), the outcome and abstention reason, how the packet was carried, the
+    `owner-local`, `principal` or `unresolved`), the outcome and abstention reason, how the packet was carried, the
     resolved anchor refs (omitted in content-private hosted mode), the recent
     entries counted per reason, continuity, and whether `episode_due` rode
     along. Never recorded: the turn or any hash of it, unit, statement or

@@ -2,12 +2,20 @@
 
 The caller owns upstream clients and closes the old one only after finite
 requests drain and standalone GET streams detach.
+
+The same ingress serves the public listener and, when configured, a
+loopback-only local listener (`add-authenticated-local-ingress`). Every inbound
+`x-exomem-internal-*` header is dropped whichever listener received it; only a
+request the local listener admitted is forwarded with the local stamp and this
+manager's proof.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -18,6 +26,69 @@ import httpx
 ASGIMessage = dict[str, Any]
 Receive = Callable[[], Awaitable[ASGIMessage]]
 Send = Callable[[ASGIMessage], Awaitable[None]]
+
+logger = logging.getLogger(__name__)
+
+#: Headers a client may never supply: the manager is their only author.
+INTERNAL_HEADER_PREFIX = b"x-exomem-internal-"
+INGRESS_STAMP_HEADER = b"x-exomem-internal-ingress"
+INGRESS_PROOF_HEADER = b"x-exomem-internal-ingress-proof"
+#: How a manager hands its per-process proof to the workers it spawns. A worker
+#: without it honours no stamp, which keeps a new worker inert under a manager
+#: that predates stripping.
+INGRESS_KEY_ENV = "EXOMEM_INTERNAL_INGRESS_KEY"
+#: Set by `LocalListener` on the ASGI scope, which a client cannot write.
+LOCAL_INGRESS_SCOPE_KEY = "exomem.local_ingress"
+
+_TRANSIT_HEADERS = frozenset({b"cf-ray", b"cf-connecting-ip"})
+#: Literal loopback only: `localhost` is a name /etc/hosts decides, and any
+#: other name is how a rebinding page would arrive.
+_LOOPBACK_HOST = re.compile(rb"(?:127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?")
+_LOCAL_EXACT_PATHS = frozenset({b"/mcp", b"/upload", b"/health"})
+_LOCAL_PREFIXES = frozenset({b"api", b"health"})
+
+
+def _local_path_allowed(raw_path: bytes) -> bool:
+    """Whether a raw request path is one of the local listener's routes.
+
+    Judged on the raw bytes the ingress forwards, not the decoded path: any
+    escape, backslash, empty or dot segment is refused rather than normalised,
+    so what is checked here is exactly what the worker routes.
+    """
+    if not raw_path.startswith(b"/") or b"%" in raw_path or b"\\" in raw_path:
+        return False
+    if any(byte < 0x21 or byte > 0x7E for byte in raw_path):
+        return False
+    segments = raw_path[1:].split(b"/")
+    if any(segment in (b"", b".", b"..") for segment in segments):
+        return False
+    if raw_path in _LOCAL_EXACT_PATHS:
+        return True
+    return len(segments) >= 2 and segments[0] in _LOCAL_PREFIXES
+
+
+def local_refusal(scope: ASGIMessage) -> str | None:
+    """Why a request may not use the local listener, or None when it may.
+
+    `transit` (it came through Cloudflare), `origin` (a browser sent it),
+    `host` (not literally loopback) or `path` (outside the allowlist). The
+    worker applies the same predicate to a stamped request.
+    """
+    hosts: list[bytes] = []
+    for name, value in scope.get("headers") or ():
+        lowered = name.lower()
+        if lowered in _TRANSIT_HEADERS:
+            return "transit"
+        if lowered == b"origin":
+            return "origin"
+        if lowered == b"host":
+            hosts.append(value)
+    if len(hosts) != 1 or _LOOPBACK_HOST.fullmatch(hosts[0]) is None:
+        return "host"
+    raw_path = scope.get("raw_path") or str(scope.get("path") or "").encode("latin-1")
+    if not _local_path_allowed(raw_path):
+        return "path"
+    return None
 
 _HOP_HEADERS = frozenset(
     {
@@ -78,6 +149,14 @@ def _headers(headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
     }
     removed = _HOP_HEADERS | connection_tokens
     return [(name, value) for name, value in headers if name.lower() not in removed]
+
+
+def _request_headers(headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
+    return [
+        (name, value)
+        for name, value in _headers(headers)
+        if not name.lower().startswith(INTERNAL_HEADER_PREFIX)
+    ]
 
 
 def _request_id(body: bytes) -> object:
@@ -147,8 +226,15 @@ async def _wait_disconnect(receive: Receive, body_complete: asyncio.Event) -> No
 class ServiceIngress:
     """ASGI proxy with bounded handoff admission and finite-operation ownership."""
 
-    def __init__(self, limits: IngressLimits | None = None) -> None:
+    def __init__(
+        self, limits: IngressLimits | None = None, *, ingress_key: str | None = None
+    ) -> None:
         self.limits = limits or IngressLimits()
+        self._local_stamp: tuple[tuple[bytes, bytes], ...] = (
+            ((INGRESS_STAMP_HEADER, b"local"), (INGRESS_PROOF_HEADER, ingress_key.encode("ascii")))
+            if ingress_key
+            else ()
+        )
         self._client: httpx.AsyncClient | None = None
         self._paused = True
         self._closed = False
@@ -161,6 +247,10 @@ class ServiceIngress:
         self._queued_bytes = 0
         self._get_slots = 0
         self._streams: set[_Stream] = set()
+
+    @property
+    def stamps_local(self) -> bool:
+        return bool(self._local_stamp)
 
     @property
     def stats(self) -> dict[str, int]:
@@ -346,7 +436,9 @@ class ServiceIngress:
         query = scope.get("query_string") or b""
         target = raw_path + (b"?" + query if query else b"")
         url = client.base_url.copy_with(raw_path=target)
-        headers = _headers(scope.get("headers") or [])
+        headers = _request_headers(scope.get("headers") or [])
+        if scope.get(LOCAL_INGRESS_SCOPE_KEY) is True:
+            headers.extend(self._local_stamp)
         body_complete = asyncio.Event()
         if body is not None:
             body_complete.set()
@@ -558,3 +650,31 @@ def _is_sse(response: httpx.Response) -> bool:
 async def _consumed_body(response: httpx.Response) -> AsyncIterator[bytes]:
     if response.content:
         yield response.content
+
+
+class LocalListener:
+    """ASGI door for same-machine clients on the managed service's loopback port.
+
+    Refused requests are answered here and never reach the worker; admitted
+    ones are marked on the scope so the shared ingress stamps them. Lifespan
+    is not delegated: closing this door must never close the shared ingress.
+    """
+
+    def __init__(self, ingress: ServiceIngress) -> None:
+        if not ingress.stamps_local:
+            raise ValueError("the local listener needs an ingress configured with a proof key")
+        self.ingress = ingress
+
+    async def __call__(self, scope: ASGIMessage, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return
+        reason = local_refusal(scope)
+        if reason is not None:
+            # Content-free: the reason code only, never a header, path or body.
+            logger.warning("event=local_ingress_refused where=listener reason=%s", reason)
+            body = json.dumps(
+                {"error": "local_ingress_refused", "reason": reason}, separators=(",", ":")
+            ).encode()
+            await _reply(send, 404 if reason == "path" else 403, body, b"application/json")
+            return
+        await self.ingress({**scope, LOCAL_INGRESS_SCOPE_KEY: True}, receive, send)
