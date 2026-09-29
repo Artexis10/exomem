@@ -5,7 +5,7 @@ The orchestrator ruled on the design on 2026-09-29; the rulings are recorded in 
 ## 0. Design ruling
 
 - [x] 0.1 The orchestrator ruled on `focus` as current-turn evidence with origin labels, assistant entries in `recent`, the call-ledger hash, the latency scope, S1+S4 as one surface change, the branch name, and the attachment cues. The artifacts are amended to match, and `openspec validate --all --strict` passes.
-- [ ] 0.2 The orchestrator rules on retiring `claude/keyless-thread-continuity` unmerged (design D9). Until then, task 3.0 stands.
+- [x] 0.2 The orchestrator ruled on 2026-09-29 to retire `claude/keyless-thread-continuity` unmerged, which withdraws ruling 6's fold-in (design D9). The build lane neither merges nor deletes it; the owner retires it after this change merges.
 
 ## 1. S0: pre-registration and baseline (no product change)
 
@@ -98,13 +98,7 @@ The orchestrator ruled on the design on 2026-09-29; the rulings are recorded in 
 
 ## 3. S2: the conversation carry and the precedence ladder
 
-- [ ] 3.0 Re-run the D9 audit of `claude/keyless-thread-continuity` against current `main`:
-  - compare the branch's test functions with main's;
-  - diff `working_set_resolve.py`;
-  - find the `:stranger` salt;
-  - trial-merge in a scratch worktree.
-
-  If a behaviour or test exists only on the branch, merge the branch into the build branch first, resolving every conflict toward `main`'s later contract (authenticated threads, the `withheld` exception). Include that merge in this PR's review. If nothing is residual and the orchestrator has ruled on 0.2, follow that ruling.
+- [ ] 3.0 Build on the keyless-thread contract already on `main`. Do not merge, cherry-pick, rebase or delete `claude/keyless-thread-continuity` (design D9). Before starting S2, confirm that `tests/test_working_set_keyless_continuity.py` passes unchanged on the build branch.
 - [ ] 3.1 Red: anaphoric turns and the carry.
   - The anaphor set covers pronouns, possessives, demonstratives, the shipped follow-up markers, an ordinal plus "one" or "option", and "former" or "latter".
   - A long anaphoric turn is carried from the newest user entry that resolves an anchor, with `origin = "conversation"`.

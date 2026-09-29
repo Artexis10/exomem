@@ -45,7 +45,7 @@ Three facts shape the design:
 3. The call ledger records `conversation` as name, length and sha256, the same as `turn`. There is no call-ledger contract change (D3).
 4. The 1 s bound is the CI gate as pinned (D7). Live-cell latency is a separate lane, which this change must not regress.
 5. S1 and S4 ship together, with one connector refresh (D7).
-6. Fold `claude/keyless-thread-continuity` into this change, and specify S2's precedence on top of it. See D9 for what the branch turned out to contain.
+6. Specify S2's precedence on top of the keyless-thread contract. The instruction to fold in `claude/keyless-thread-continuity` was withdrawn on 2026-09-29, once the D9 audit showed the branch was already superseded on `main`. The branch is retired unmerged.
 7. The branch name stands, and authorship is fixed by squash merge.
 8. **New:** clients may put attachment-derived cues into `focus` (D8).
 
@@ -292,7 +292,10 @@ S1 and S4 ship as one surface change, so the owner refreshes the connectors once
   On the spec, the branch's side is the *earlier* wording. It lacks the authenticated-thread clause, the `withheld` exception and the rewritten-thread scenario.
 - **Consequence.** Merging the branch as-is would at best be a no-op after conflict resolution toward `main`, and at worst would reintroduce the unauthenticated thread contract.
 
-This change therefore specifies S2's precedence on top of the landed contract, which is what the branch intended. Task 3.0 makes the build lane re-verify the audit before S2 and merge only a residual, if one appears. Whether the branch should instead be retired unmerged is raised to the orchestrator.
+This change therefore specifies S2's precedence on top of the landed contract, which is what the branch intended. **Ruling (2026-09-29).** Retire the branch unmerged, and withdraw ruling 6's fold-in.
+
+- The build lane SHALL NOT merge, cherry-pick or rebase `claude/keyless-thread-continuity`, and SHALL NOT delete it. The owner retires the branch after this change merges.
+- S2 builds on the keyless-thread contract as it stands on `main`.
 
 ## Rejected alternatives
 
