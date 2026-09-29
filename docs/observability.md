@@ -58,6 +58,15 @@ rebuild. The public write terminal reports successful convergence as
 `graph_sync="completed"`; graph status reports whether the derived graph is
 current.
 
+Readiness and coordination status add a fourth state, `unproven`: the sidecar
+passed every cheap check, but it was inherited from an earlier process and
+nothing has yet run the source-bytes proof for its current identity. Status
+probes never run that proof themselves. The first reader that needs it -- the
+graph drain or a graph recall -- runs it once and remembers the verdict; only
+one proof runs at a time. A recall that arrives while another reader's proof is
+running serves without the graph lane for that request and reports `graph` as
+degraded.
+
 Use `maintain_memory(mode="reconcile", rebuild_graph=true)` for an unavailable
 derived graph lineage. This recovery concerns rebuildable sidecar state only;
 it neither changes Markdown nor selects, promotes, deprecates, or authors a
