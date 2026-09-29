@@ -1,9 +1,9 @@
 ## ADDED Requirements
 
 ### Requirement: Records accept a governed bulk upsert under one guard
-`record_memory` SHALL accept `action: "bulk_upsert"` taking `collection`, `why`, `expected_container_hash` (required), `rows` (1 to 500 objects of `item`, optional `body` and optional `source`), an optional batch `source`, an optional `on_reject` of `abort` (default) or `skip`, and an optional `idempotency_key`. The action SHALL run inside one writer-lease mutation guard, compare `expected_container_hash` once against one read of the collection, plan every row against that one snapshot, and publish all planned files, the manifest audit head and the log entry in one atomic batch. It SHALL refuse a collection without a complete declared natural key, and the `dataset` strategy, and SHALL refuse a batch whose projected item count would exceed the collection's item ceiling or whose audit size would exceed its caps, before planning any row.
+`record_memory` SHALL accept `action: "bulk_upsert"` taking `collection`, `why`, `expected_container_hash` (required), `rows` (1 to 500 objects of `item`, optional `body` and optional `source`), an optional batch `source` and an optional `on_reject` of `abort` (default) or `skip`. The action SHALL run inside one writer-lease mutation guard, compare `expected_container_hash` once against one read of the collection, plan every row against that one snapshot, and publish all planned files, the manifest audit head and the log entry in one atomic batch. It SHALL refuse the `dataset` strategy, and SHALL refuse a batch whose projected item count would exceed the collection's item ceiling or whose audit size would exceed its caps, before planning any row.
 
-Each row SHALL be validated as a single append is validated (schema, representability, undeclared fields, value and body limits) with every failing field path named. Row identity SHALL derive from the declared natural key. A row whose identity is absent SHALL be `inserted`; one whose identity is held with an identical payload SHALL be `unchanged` and write nothing; one whose identity is held with a different payload SHALL be `updated`, its values replaced wholesale and its body replaced only when the row supplies one. A row whose natural key is held under another identity, whose record is ambiguous, whose values are invalid, whose provenance fails, or which repeats an earlier row's identity in the same request SHALL be `rejected` with a code and field paths. The response SHALL carry one outcome per input row in input order, per-outcome counts, a `committed` boolean and the audit correlation, and SHALL never leave a row's outcome unstated.
+Each row SHALL be validated as a single append is validated (schema, representability, undeclared fields, value and body limits) with every failing field path named. Row identity SHALL derive from the declared natural key. A collection without a complete declared natural key SHALL NOT be refused: bulk SHALL run insert-only there, giving each row a generated identity and reporting `inserted` or `rejected` but never `updated` or `unchanged`, and the response and `describe` SHALL state that re-running the same rows duplicates them. A row whose identity is absent SHALL be `inserted`; one whose identity is held with an identical payload SHALL be `unchanged` and write nothing; one whose identity is held with a different payload SHALL be `updated`, its values replaced wholesale and its body replaced only when the row supplies one. A row whose natural key is held under another identity, whose record is ambiguous, whose values are invalid, whose provenance fails, or which repeats an earlier row's natural-key identity in the same request SHALL be `rejected` with a code and field paths. The response SHALL carry one outcome per input row in input order, per-outcome counts, a `committed` boolean and the audit correlation, and SHALL never leave a row's outcome unstated.
 
 #### Scenario: Twenty-four rows commit under one guard
 - **WHEN** a client submits 24 valid rows for a collection with a declared natural key with the collection's current container hash
@@ -30,6 +30,10 @@ Each row SHALL be validated as a single append is validated (schema, representab
 - **WHEN** two rows in one request derive the same identity
 - **THEN** the later row is `rejected` `DUPLICATE_ROW_KEY` naming the earlier row's index, and neither silently overwrites the other
 
+#### Scenario: No natural key runs insert-only
+- **WHEN** a collection with no complete declared natural key receives a valid batch, and then the same batch again
+- **THEN** the first call reports every row `inserted` with `identity: "generated"`, the second inserts them again, and no row is ever `updated` or `unchanged`
+
 #### Scenario: Oversized batch refuses
 - **WHEN** a request carries 501 rows, or would raise the collection past its item ceiling
 - **THEN** it refuses whole with a bounded-size code before any row is validated for writing
@@ -50,30 +54,34 @@ In `abort` mode, if any row is `rejected` the action SHALL write nothing, SHALL 
 - **THEN** no planned item, manifest change or log entry remains, and the caller may retry the identical request
 
 ### Requirement: Every bulk row carries verified provenance
-Each row SHALL name a preserved Evidence or Source page through `source` or the batch `source`. The reference SHALL be resolved through the ordinary reader and the requesting audience's release filter at planning, and re-guarded at publication. A row with no reference SHALL be `rejected` `SOURCE_REQUIRED`. A reference that does not exist and one that is withheld from the audience SHALL produce an identical rejection (`SOURCE_NOT_FOUND`) with identical details. The reference SHALL be recorded on the row through the collection's declared link-array `sources` field, appended when absent; a collection with no such field SHALL refuse `bulk_upsert` rows as `SOURCE_FIELD_UNDECLARED`.
+Each row SHALL name a preserved Evidence or Source page through `source` or the batch `source`. The reference SHALL be resolved through the ordinary reader and the requesting audience's release filter at planning, and re-guarded at publication. A row with no reference SHALL be `rejected` `SOURCE_REQUIRED`. A reference that does not exist and one that is withheld from the audience SHALL produce an identical rejection (`SOURCE_NOT_FOUND`) with identical details. When the collection declares a link-array `sources` field the verified reference SHALL be appended to it when absent. When it declares none the row SHALL NOT be rejected, and the verified reference SHALL be recorded per row index in the audit receipt instead.
 
 #### Scenario: Every row points at preserved Evidence
 - **WHEN** 24 rows are committed with a batch `source` naming a preserved Evidence page
 - **THEN** each written item's `sources` field links that page
+
+#### Scenario: No sources field records provenance in the receipt
+- **WHEN** rows are committed to a collection that declares no `sources` link field
+- **THEN** every row is written, and the audit receipt lists each row index with its verified source reference
 
 #### Scenario: Withheld source reads as absent
 - **WHEN** one row names a page that the requesting audience may not read and another names a page that does not exist
 - **THEN** both rows are rejected with the same code and details, and nothing distinguishes them
 
 ### Requirement: Bulk upsert leaves one receipt and is idempotent on retry
-A committed batch SHALL append exactly one audit transition (`operation: "bulk_upsert"`) to the collection's audit chain and exactly one log entry. The transition SHALL carry the ordered batch payload hash, the row count, the count per outcome, the `idempotency_key` when supplied, and the before and after container hashes, and SHALL NOT carry row values. Each written item SHALL carry the transition id in its own audit marker. A retry with the same `idempotency_key` and the same payload SHALL return the recorded result with `replayed: true` and write nothing, even after the container hash has changed; the same key with a different payload SHALL refuse `IDEMPOTENCY_KEY_REUSED`. A retry without a key SHALL be safe because every already-committed row is `unchanged`.
+A committed batch SHALL append exactly one audit transition (`operation: "bulk_upsert"`) to the collection's audit chain and exactly one log entry. The transition SHALL carry the ordered batch payload hash, the row count, the count per outcome, each row's verified provenance reference by row index, and the before and after container hashes, and SHALL NOT carry row values. Each written item SHALL carry the transition id in its own audit marker. `bulk_upsert` SHALL add no idempotency argument: a retry under the same transport idempotency identity SHALL return the recorded result without a second write, and on a naturally keyed collection a retry without one SHALL be safe because every already-committed row is `unchanged`.
 
 #### Scenario: One receipt for the batch
 - **WHEN** a batch commits
-- **THEN** exactly one transition and one log entry name it, they carry counts and hashes but no row values, and each written item's marker names that transition
+- **THEN** exactly one transition and one log entry name it, they carry counts, hashes and provenance refs but no row values, and each written item's marker names that transition
 
 #### Scenario: Retry after a lost response
-- **WHEN** the caller retries the identical request with the same idempotency key after the response was lost
-- **THEN** the recorded result is returned with `replayed: true`, no second transition is written and no file changes
+- **WHEN** the caller retries the identical request under the same transport idempotency identity after the response was lost
+- **THEN** the recorded result is returned, no second transition is written and no file changes
 
-#### Scenario: Key reuse with different rows refuses
-- **WHEN** the same key is sent with a different row set
-- **THEN** the call refuses `IDEMPOTENCY_KEY_REUSED` and writes nothing
+#### Scenario: Keyless retry on a natural-keyed collection
+- **WHEN** the identical request is sent again with no transport identity and the refreshed container hash
+- **THEN** every row is `unchanged` and no transition is written
 
 ### Requirement: Bulk upsert inherits exactly-once and withheld-as-absent
 A batch SHALL be authorised over the union of every path it would touch before any write, and SHALL commit exactly once or leave no file, manifest change or audit entry. A natural-key collision with an item the audience may not read SHALL be reported as `rejected` with the natural-key conflict code and no item references, and no outcome, count or echo SHALL reveal the existence or content of an item the audience may not read.
@@ -87,7 +95,7 @@ A batch SHALL be authorised over the union of every path it would touch before a
 - **THEN** a retry, with or without the key, adds no second transition and no duplicate item
 
 ### Requirement: Describe teaches bulk upsert
-`record_memory(action="describe")` SHALL document `bulk_upsert`: the row shape, the 500-row bound, the required natural key and container-hash guard, the four outcomes, `abort` versus `skip`, provenance, idempotency, and that a changed payload for a held identity is `updated` (unlike `append`), using a generic example with invented field names and no personal or product identity.
+`record_memory(action="describe")` SHALL document `bulk_upsert`: the row shape, the 500-row bound, the container-hash guard, the four outcomes, `abort` versus `skip`, provenance, retry behaviour, that a changed payload for a held identity is `updated` (unlike `append`), and that a collection without a natural key runs insert-only so re-runs duplicate, using a generic example with invented field names and no personal or product identity.
 
 #### Scenario: A generic client bulk-loads from describe alone
 - **WHEN** a client authors a batch only from the `describe` example against a fresh sample collection

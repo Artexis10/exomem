@@ -14,7 +14,7 @@ Already true and reused: natural-key identity (`collections.derived_item_key`, `
 
 ### 1. A new action, not a longer `append`
 
-`append` has a one-item contract (`item`, `item_key`, `held`, a single result). Overloading it with a list would make every existing argument rule conditional. `bulk_upsert` gets its own field set: `collection`, `rows`, `why`, `expected_container_hash`, `source`, `on_reject`, `idempotency_key`. It is validated by the same `_ACTION_FIELDS` / `_REQUIRED_FIELDS` machinery, so surplus and missing fields refuse in one message as today.
+`append` has a one-item contract (`item`, `item_key`, `held`, a single result). Overloading it with a list would make every existing argument rule conditional. `bulk_upsert` gets its own field set: `collection`, `rows`, `why`, `expected_container_hash`, `source`, `on_reject`. It is validated by the same `_ACTION_FIELDS` / `_REQUIRED_FIELDS` machinery, so surplus and missing fields refuse in one message as today.
 
 ### 2. Request shape
 
@@ -26,12 +26,11 @@ record_memory(
   expected_container_hash="...",   # required; ONE guard for the whole batch
   source="Evidence/....md",        # optional batch default provenance ref
   on_reject="abort" | "skip",      # default "abort"
-  idempotency_key="...",           # optional, 8-128 chars of [A-Za-z0-9._:-]
   rows=[ { "item": {...}, "body": "...", "source": "Evidence/....md" }, ... ]  # 1..500
 )
 ```
 
-Each row is `{item, body?, source?}`. `item_key` is not accepted per row: identity is the declared natural key, so a collection without a complete natural key refuses `bulk_upsert` (`BULK_UPSERT_NEEDS_NATURAL_KEY`). That is what makes the action an upsert rather than a blind append, and it removes the UUID-guessing failure class. A row's provenance is `row.source` or, absent that, the batch `source`; a row with neither is rejected `SOURCE_REQUIRED`.
+Each row is `{item, body?, source?}`. `item_key` is not accepted per row: identity is the declared natural key when the collection has a complete one. A collection WITHOUT a complete natural key is not refused: bulk runs **insert-only** there, each row gets a fresh UUID identity, the outcome is `inserted` or `rejected` and never `updated` or `unchanged`, and re-running the same rows duplicates them. `describe` and the response (`identity: "natural-key" | "generated"`) say so. A row's provenance is `row.source` or, absent that, the batch `source`; a row with neither is rejected `SOURCE_REQUIRED`.
 
 ### 3. One guard, checked once, inside the lease
 
@@ -48,13 +47,13 @@ For each row, in input order: schema and representability validation, size limit
 | item holds identity, different payload | `updated` (item file replaced) |
 | twin holds the natural key under another identity, ambiguous record, invalid values, provenance failure | `rejected` with `code` and field paths |
 
-Two rows in one request that derive the same identity are a caller error: the later one is `rejected` `DUPLICATE_ROW_KEY` naming the earlier row's index, never a silent last-write-wins.
+On a natural-keyed collection, two rows in one request that derive the same identity are a caller error: the later one is `rejected` `DUPLICATE_ROW_KEY` naming the earlier row's index, never a silent last-write-wins.
 
 `updated` replaces the item's values wholesale with the row's values, and its body only when the row supplies one; it does not merge. This differs from single `append`, which refuses a different payload for a held identity (`RECORD_ID_CONFLICT`). That difference is the point of "upsert" and is stated in `describe`.
 
 ### 5. Provenance
 
-`row.source` (or the batch `source`) must resolve, through the ordinary reader and release filter for the calling audience, to a preserved Evidence or Source page. An unresolvable reference and a withheld one produce the identical rejection (`SOURCE_NOT_FOUND`) with identical details, so the response cannot be used to probe for hidden pages. The reference is bound into the row: if the collection declares a link-array field named `sources` the server appends the reference to it when absent; if there is no such field the row is rejected `SOURCE_FIELD_UNDECLARED` at validation, before any write. A batch may not fabricate provenance: the reference is only ever a page that exists at commit time, and it is re-checked (path guard) at publication like a single append's delivery evidence.
+`row.source` (or the batch `source`) must resolve, through the ordinary reader and release filter for the calling audience, to a preserved Evidence or Source page. An unresolvable reference and a withheld one produce the identical rejection (`SOURCE_NOT_FOUND`) with identical details, so the response cannot be used to probe for hidden pages. When the collection declares a link-array field named `sources`, the server appends the verified reference to it when absent. When it declares none the row is NOT rejected: the verified reference is recorded per row index in the audit receipt instead (decision 7). A batch may not fabricate provenance: the reference is only ever a page that exists at commit time, and it is re-checked (path guard) at publication like a single append's delivery evidence.
 
 ### 6. Atomic by default; skip mode is still one atomic write
 
@@ -62,14 +61,14 @@ Planning finishes before any write. In `abort` mode a single rejected row means 
 
 ### 7. One receipt
 
-One audit transition (`operation: "bulk_upsert"`) is appended to the collection's audit chain and one log entry to `Knowledge Base/log.md`. The transition body carries the batch payload hash (over the ordered row payload hashes and the resolved provenance refs), the row count, counts per outcome, the batch idempotency key when one was given, and the before/after container hashes. It does NOT carry row values. Each written item file carries the transition id in its own audit marker, exactly as a single append's does, so item-level audit correlation and `_replay_audit_correlation` keep working unchanged. The per-item marker count and audit source size caps (`_MAX_AUDIT_MARKERS`, `_MAX_AUDIT_SOURCE_BYTES`) are checked once for the projected batch; a batch that would breach them refuses `BULK_UPSERT_TOO_LARGE` before planning.
+One audit transition (`operation: "bulk_upsert"`) is appended to the collection's audit chain and one log entry to `Knowledge Base/log.md`. The transition body carries the batch payload hash (over the ordered row payload hashes and the resolved provenance refs), the row count, counts per outcome, the per-row verified provenance refs, and the before/after container hashes. It does NOT carry row values (a provenance ref is a page path, not a row value). Each written item file carries the transition id in its own audit marker, exactly as a single append's does, so item-level audit correlation and `_replay_audit_correlation` keep working unchanged. The per-item marker count and audit source size caps (`_MAX_AUDIT_MARKERS`, `_MAX_AUDIT_SOURCE_BYTES`) are checked once for the projected batch; a batch that would breach them refuses `BULK_UPSERT_TOO_LARGE` before planning.
 
 ### 8. Idempotency and exactly-once
 
-Two independent layers, both required:
+No new argument. Two existing layers compose:
 
-1. **Content replay.** Because identity is natural-key-derived and identical payloads are `unchanged`, replaying a committed batch writes nothing and reports every row `unchanged`. This holds with no key at all and after the idempotency store's TTL.
-2. **Explicit key.** When `idempotency_key` is supplied it is bound, with the collection and the batch payload hash, into the receipt. A retry with the same key and same payload returns the recorded result with `replayed: true` and writes nothing, even when the container hash has moved since. The same key with a different payload refuses `IDEMPOTENCY_KEY_REUSED`. This composes with the transport idempotency store; it is the durable, vault-resident record of it, so it survives a store eviction.
+1. **Transport idempotency.** The command dispatcher already binds `mutation_request_id` and the implicit retry scope to every mutation; a retry under the same transport identity (REST `Idempotency-Key`) returns the recorded result without re-executing. `bulk_upsert` is an ordinary mutating command and inherits this unchanged.
+2. **Content replay.** On a natural-keyed collection identical payloads are `unchanged`, so replaying a committed batch writes nothing and reports every row `unchanged`, with no key and after the store's TTL. On an insert-only collection there is no content replay, so retry safety there rests on layer 1 alone (documented).
 
 Exactly-once: a batch either commits under `batch_atomic_write` (one transition, all planned files) or leaves no file, no audit entry and no manifest change. A crash between "commit" and "response" is resolved by either layer above.
 
@@ -91,10 +90,10 @@ Bulk does not hold. A rejected row is reported with its diagnostics and is not w
 
 ## Risks / Trade-offs
 
-- **Blast radius of one wrong batch.** Upsert can overwrite. Mitigation: the container-hash guard, `abort` default, per-row outcomes with the updated identities named, and the audit transition. A dry-run is `validate`-shaped and deliberately deferred (see Open Questions).
+- **Blast radius of one wrong batch.** Upsert can overwrite. Mitigation: the container-hash guard, `abort` default, per-row outcomes with the updated identities named, and the audit transition. No dry-run action (ruled).
 - **Larger single transaction.** One `batch_atomic_write` of up to ~500 item files. Bounded by N and by the existing item ceiling; measured before the constant is ratified.
 - **Behavioural difference from `append`.** `updated` for a changed payload. Named in `describe` and the spec so agents do not expect `RECORD_ID_CONFLICT`.
 
 ## Open Questions
 
-Listed in the PR under "Needs ruling": API shape, `N`, provenance binding, upsert-replace semantics, explicit `idempotency_key` versus transport key only, dry-run.
+None: ruled on PR #1452 (N = 500 ratified and measured after building; abort default, no dry-run; provenance falls back to the receipt; transport key plus content replay only; insert-only without a natural key).
