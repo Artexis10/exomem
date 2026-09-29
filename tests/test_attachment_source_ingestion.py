@@ -517,7 +517,7 @@ def test_capture_source_routes_file_handles_to_sources(
     blob = staged_dir / "transcript.txt"
     blob.write_bytes(b"Speaker A: the pier reopened.")
 
-    def _fake_stage(file, budget, *, batch_deadline=None):
+    def _fake_stage(file, budget, *, batch_deadline=None, **_kwargs):
         return client_artifacts.StagedArtifact(
             file_id=str(file["file_id"]),
             path=blob,
@@ -1019,7 +1019,7 @@ def test_capture_source_accepts_files_through_the_mcp_surface(
     blob = tmp_path / "transcript.txt"
     blob.write_bytes(b"Speaker A: the pier reopened.")
 
-    def _fake_stage(file, budget, *, batch_deadline=None):
+    def _fake_stage(file, budget, *, batch_deadline=None, **_kwargs):
         return client_artifacts.StagedArtifact(
             file_id=str(file["file_id"]),
             path=blob,
