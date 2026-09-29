@@ -21,6 +21,8 @@ Pure logic over facts: no vault, no index.
 
 from __future__ import annotations
 
+import pytest
+
 from exomem import working_set_resolve as resolve_module
 
 
@@ -324,3 +326,57 @@ def test_a_turn_naming_both_hubs_keeps_both() -> None:
 
     assert {anchor.path for anchor in resolution.anchors} == {SOLAR.path, SOLAR_MONITORING.path}
     assert resolution.status == "ambiguous"
+
+
+SOLAR_COUNTS = {"solar": 2, "array": 2, "monitoring": 1, "hub": 2}
+SOLAR_RETRIEVED = (SOLAR.path, SOLAR_MONITORING.path)
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Check the solar array, monitoring can wait.",
+        "The solar array. Monitoring is next week.",
+        "The solar array: monitoring is next week.",
+        "The solar array - monitoring is next week.",
+        "The solar array — monitoring is next week.",
+        "The solar array and monitoring are both late.",
+        "The solar array or monitoring, whichever is first.",
+    ],
+)
+def test_clause_punctuation_and_coordinators_end_a_contiguous_run(turn: str) -> None:
+    """Recheck probes: a comma, a full stop, a colon, a dash or "and"/"or" between
+    the shared words and the qualifier makes two things, not one name."""
+
+    resolution = _resolve(turn, (SOLAR, SOLAR_MONITORING), counts=SOLAR_COUNTS, retrieved=SOLAR_RETRIEVED)
+
+    assert resolution.status == "ambiguous"
+    assert {anchor.path for anchor in resolution.anchors} == {SOLAR.path, SOLAR_MONITORING.path}
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "The kitchen renovation? Budget talk can wait.",
+        "Update the kitchen renovation, budget is fine.",
+        "the kitchen renovation and the budget for it",
+    ],
+)
+def test_kitchen_punctuation_and_coordinator_controls_keep_both_hubs(turn: str) -> None:
+    resolution = _resolve(
+        turn, (KITCHEN, KITCHEN_BUDGET), counts=KITCHEN_COUNTS, retrieved=(KITCHEN.path, KITCHEN_BUDGET.path)
+    )
+
+    assert resolution.status == "ambiguous"
+    assert {anchor.path for anchor in resolution.anchors} == {KITCHEN.path, KITCHEN_BUDGET.path}
+
+
+def test_an_unpunctuated_run_with_a_hyphenated_word_still_narrows() -> None:
+    resolution = _resolve(
+        "Where does the kitchen-renovation budget stand?",
+        (KITCHEN, KITCHEN_BUDGET),
+        counts=KITCHEN_COUNTS,
+        retrieved=(KITCHEN.path, KITCHEN_BUDGET.path),
+    )
+
+    assert resolution.status == "resolved"

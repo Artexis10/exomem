@@ -279,6 +279,11 @@ class TurnAnalysis:
     #: Empty for a turn with no lower-case letter, where capitals carry no
     #: signal.
     capitalised: frozenset[str] = frozenset()
+    #: Token indices where the raw turn punctuates a clause boundary (sentence
+    #: end, comma, colon, semicolon, dash) just before that token: no run of
+    #: name words spans one (`_name_span`). `tokens_of` drops punctuation, so
+    #: the positions are derived from the raw text and `tokens` is unchanged.
+    run_breaks: frozenset[int] = frozenset()
 
 
 #: A follow-up is short: at most this many tokens. "what about the second
@@ -767,7 +772,39 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
             tokens, referential_cue=referential_cue, filler=vocabulary.filler
         ),
         capitalised=_capitalised_terms(turn),
+        run_breaks=_run_breaks(text, tokens),
     )
+
+
+#: Clause punctuation, for `_run_breaks`: sentence ends, comma, colon,
+#: semicolon, and dashes (an en or em dash, or a hyphen standing alone between
+#: spaces; a hyphen inside a word is part of the word), in the cased scripts'
+#: and the CJK forms.
+_CLAUSE_BREAK = re.compile(
+    r"[.,:;!?\n\r\u2026\u2013\u2014\u3001\u3002\uff01\uff0c\uff0e\uff1a\uff1b\uff1f]+"
+    r"|(?:^|\s)-+(?=\s|$)"
+)
+#: The coordinators the tokeniser's stopwords already carry: "X and Y" is two
+#: things, so neither ends up inside one run of name words.
+_RUN_COORDINATORS: frozenset[str] = frozenset({"and", "or"})
+
+
+def _run_breaks(text: str, tokens: Sequence[str]) -> frozenset[int]:
+    """Token indices with clause punctuation just before them in `text`.
+
+    Tokenises each punctuation-delimited segment with `tokens_of`; when that
+    does not reproduce `tokens` exactly the positions cannot be trusted and
+    none are reported (a run then breaks only at coordinators).
+    """
+    breaks: set[int] = set()
+    seen: list[str] = []
+    for segment in _CLAUSE_BREAK.split(text):
+        if seen:
+            breaks.add(len(seen))
+        seen.extend(tokens_of(segment))
+    if tuple(seen) != tuple(tokens):
+        return frozenset()
+    return frozenset(index for index in breaks if 0 < index < len(tokens))
 
 
 #: Where a sentence ends, for `_capitalised_terms`: the full stops, question
@@ -1125,7 +1162,9 @@ def candidates_for(
                 evidence=frozenset(evidence),
                 exact_alias_phrases=matched_phrases,
                 name_contact=name_contact,
-                name_span=_name_span(analysis.tokens, stopwords, name_terms_folded)
+                name_span=_name_span(
+                    analysis.tokens, stopwords, name_terms_folded, analysis.run_breaks
+                )
                 if name_contact
                 else None,
                 entity_type=row.entity_type,
@@ -1148,13 +1187,20 @@ def candidates_for(
 
 
 def _name_span(
-    tokens: Sequence[str], stopwords: frozenset[str], name_terms: frozenset[str]
+    tokens: Sequence[str],
+    stopwords: frozenset[str],
+    name_terms: frozenset[str],
+    breaks: frozenset[int] = frozenset(),
 ) -> tuple[int, int] | None:
     """The longest contiguous run of `tokens` spelling `name_terms` words.
 
     Stopwords may sit inside a run ("bank of the north") but never start or
-    end one, and any other word breaks it. Ties go to the earliest run, so
-    the span is deterministic. `None` when no token is a name word.
+    end one, and any other word breaks it. So does clause punctuation
+    (`breaks`: token indices with a boundary just before them) and a
+    coordinator ("and", "or"): "the solar array, monitoring" and "the solar
+    array and monitoring" are two things, not one name. Ties go to the
+    earliest run, so the span is deterministic. `None` when no token is a
+    name word.
     """
     best: tuple[int, int] | None = None
     best_words = 0
@@ -1162,6 +1208,10 @@ def _name_span(
     last_name = -1
     words = 0
     for index, token in enumerate(tokens):
+        if index in breaks or token in _RUN_COORDINATORS:
+            start = None
+            if token in _RUN_COORDINATORS:
+                continue
         folded = None if token in stopwords else _fold_lexical_term(token)
         if folded is not None and folded in name_terms:
             if start is None:

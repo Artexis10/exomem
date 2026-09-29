@@ -73,7 +73,10 @@ the word somewhere other than at a sentence start; in an uncased script only the
 case applies. A single such entity SHALL stay a `partial` lead, and a shared word in the
 names of two anchors of any other kind SHALL NOT form this ambiguity. Second, a
 qualifier: each anchor's contact SHALL be the longest contiguous run of turn tokens that
-spells its own authored name words (stopwords may sit inside a run, never at its edges).
+spells its own authored name words (stopwords may sit inside a run, never at its edges;
+punctuation and coordinators end a contiguous run: a sentence end, comma, colon,
+semicolon or dash, and "and" or "or", so "X, Y" and "X and Y" are two things, not one
+run).
 When two same-kind anchors resolve without a deciding-alone kind and one's run lies
 strictly inside the other's, the narrower anchor SHALL NOT be listed, and neither SHALL a
 same-kind `partial` anchor with no retrieved contact whose run lies strictly inside the
@@ -102,6 +105,11 @@ listed. Neither rule SHALL compare anchors of different kinds.
   shared name words together with a word only one hub's name carries
 - **THEN** that hub resolves alone, the other hub is not listed, and a same-kind
   partial hub reached only inside that run is not listed
+
+#### Scenario: Punctuation and coordinators end a contiguous run
+- **WHEN** a turn puts a comma, full stop, colon, dash, "and" or "or" between the shared
+  name words and the word only one hub's name carries
+- **THEN** the run does not span it and the packet is `ambiguous` between the hubs
 
 #### Scenario: A detached word of the wider name narrows nothing
 - **WHEN** the word only one hub's name carries appears elsewhere in the turn, apart
