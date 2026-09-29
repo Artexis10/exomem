@@ -1,0 +1,358 @@
+## ADDED Requirements
+
+### Requirement: One embedded collection store is the single source of truth
+Each vault SHALL have exactly one embedded SQLite collection store that is the only canonical source for Records and Planning collections: their manifests, items, item versions, per-row provenance, held candidates, and audit transitions. The store SHALL enforce collection-scoped item identity and declared natural-key uniqueness with database constraints, SHALL commit every mutation, including every row of a bulk mutation, in one transaction under the existing single-writer lease, and SHALL make its transaction, audit-effect, item-version, provenance and manifest-history tables append-only. Knowledge notes, entities, sources, evidence and episodes SHALL remain Markdown and SHALL NOT be stored in it. The `dataset` storage strategy SHALL remain a file-canonical, query-only adapter and SHALL NOT be imported into the store. Records and Planning SHALL keep their distinct semantic profiles, typed schemas, natural keys, provenance, audit and governance; only the storage engine changes. The store SHALL require SQLite 3.38 or newer and a local filesystem where WAL journaling takes effect, and readiness SHALL refuse collection writes, never falling back to file-canonical writes, when either fails.
+
+#### Scenario: Natural-key uniqueness is a constraint
+- **WHEN** two writers race to append items whose declared natural keys serialize equally under different identities
+- **THEN** exactly one commits and the other refuses with the natural-key conflict naming the holder, and no read can ever observe two live items with that natural key
+
+#### Scenario: A multi-row mutation is one transaction
+- **WHEN** a bulk mutation of 500 rows fails validation or crashes part way
+- **THEN** either all of its accepted rows, their versions, provenance and audit effects are durable, or none are
+
+#### Scenario: Audit history cannot be rewritten in place
+- **WHEN** any code path attempts to update or delete a committed transaction, audit effect, item version, provenance entry or manifest version
+- **THEN** the store aborts the statement and the history is unchanged
+
+#### Scenario: Datasets stay files
+- **WHEN** a collection declares the `dataset` strategy
+- **THEN** its CSV, TSV or JSON file remains canonical and query-only, and the store holds no rows for it
+
+#### Scenario: Unsupported engine refuses rather than degrades
+- **WHEN** the runtime SQLite is older than 3.38 or WAL journaling cannot be enabled on the state root
+- **THEN** readiness reports the collection store unavailable with a remediation, collection writes refuse, and knowledge writes are unaffected
+
+### Requirement: Guards are collection generations and row versions
+Each collection SHALL carry a generation that increments exactly once per committed transaction touching it, and each item a row version that increments exactly once per change to that item. The wire guard and version fields (`expected_container_hash`, `before_container_hash`, `after_container_hash`, `expected_item_version`, `item_version`, `before_item_hash`, `after_item_hash`) SHALL keep their names and 64-lowercase-hex shape and SHALL be domain-separated SHA-256 digests of the collection generation and audit head, and of the item row version and payload hash, respectively. A guard check SHALL be decided inside the mutation transaction without reading or hashing any other item. A query `snapshot` SHALL be a digest over the caller's authorized row identities and versions and the manifest version, so a change to a row withheld from the caller SHALL NOT change that caller's snapshot or invalidate its continuation.
+
+#### Scenario: Stale container guard refuses
+- **WHEN** a mutation carries a container hash from before another committed transaction on the collection
+- **THEN** it refuses as stale and nothing is written
+
+#### Scenario: Stale item guard refuses
+- **WHEN** an update carries an item version from before that item's latest change
+- **THEN** it refuses as stale and the newer item is preserved
+
+#### Scenario: Guard cost is independent of collection size
+- **WHEN** a guarded append runs against a collection of 10,000 items
+- **THEN** the guard is decided from the collection row and the target item only
+
+#### Scenario: Hidden change leaves a released continuation valid
+- **WHEN** only an item withheld from the caller changes between two pages of the caller's query
+- **THEN** the caller's snapshot is unchanged and the continuation resumes
+
+### Requirement: Collection views are Markdown projections of the store
+The substrate SHALL render every collection manifest, item, log-layout collection, and held candidate as a Markdown view at the same vault-relative path the file-canonical layout used, using the existing item, log, filename and managed-presentation renderers and keeping the visible system identity properties. Views SHALL NOT be canonical. Rendering SHALL happen after commit, off the mutation's acknowledgement path, from durable pending-projection state recorded in the same transaction as the mutation, so a crash after commit re-renders on restart. A projection failure SHALL NOT turn a committed mutation into a refusal; it SHALL be retried and reported. Views SHALL be normalized on re-render: values and the authored body SHALL be emitted exactly, while YAML formatting that is not data need not be preserved. Audit markers and manifest audit heads SHALL NOT be rendered.
+
+#### Scenario: A committed append appears as a view
+- **WHEN** an append commits
+- **THEN** the item's view appears at the path its filename recipe names with its values, body and managed presentation, and the mutation's receipt did not wait for it
+
+#### Scenario: Projection resumes after a crash
+- **WHEN** the process stops after a commit but before the view is written
+- **THEN** on restart the pending view is rendered and inspection reported it as pending until then
+
+#### Scenario: Obsidian sees ordinary Markdown
+- **WHEN** a user opens a collection directory in an ordinary Markdown editor
+- **THEN** the manifest and every item are readable Markdown files with typed properties and bodies, without a plugin or database tool
+
+### Requirement: Edited views return through the governed write path
+When a view file changes and its bytes differ from the last rendered bytes, the file watcher on the writer-lease holder SHALL, after the file has been quiet for a settle window, classify the edit deterministically without interpreting prose. A formatting-only edit SHALL be re-rendered without a transaction. A valid change to declared values or body, made against the item's current row version, SHALL be applied as an ordinary governed `update` (or Planning `update` or `triage`) through the same leaf functions, validation, governance precommit, audit transition and receipt as a tool call, with actor `owner:view-edit`, a reason naming the view, and a request identity derived from the view path, base row version and file hash so that a replay is a no-op; the view SHALL then be re-rendered. A valid manifest edit SHALL be applied as a governed `revise`. An edit that is ambiguous, schema-breaking, violates Planning lifecycle or hierarchy rules, changes a system property, conflicts with a newer row version, deletes or moves a view, adds an unbound file under a projection root, or is a file-sync conflict copy SHALL become a held view correction carrying the human's bytes and field-addressed diagnostics, and SHALL NEVER silently overwrite or discard either the store row or the human's edit. A later valid edit of the same view SHALL supersede its held correction. History pages SHALL be read-only: edits to them SHALL be ignored and re-rendered.
+
+#### Scenario: A value edit in Obsidian becomes an audited update
+- **WHEN** a user changes one declared field in an item view and saves
+- **THEN** after the settle window the store holds the new value, one audit transition names the view edit, and the view is re-rendered
+
+#### Scenario: Replaying the same edit adds nothing
+- **WHEN** the watcher processes the same edited bytes twice, including across a restart
+- **THEN** exactly one transition exists for that edit
+
+#### Scenario: Edit against a stale view is held
+- **WHEN** an agent update commits and, before the view is re-rendered, the user edits the old view
+- **THEN** the user's bytes are kept in a held `VIEW_CONFLICT` correction naming both versions, the agent's committed value is unchanged, and the view is re-rendered to the current row
+
+#### Scenario: Schema-breaking edit is held
+- **WHEN** a user adds an undeclared property or writes a value of the wrong type in a view
+- **THEN** the row is unchanged, a held `VIEW_INVALID` correction carries the edit and its field-addressed diagnostics, and inspection and attention report it
+
+#### Scenario: Deleting a view does not delete the item
+- **WHEN** a user deletes an item view file
+- **THEN** the item remains in the store, a held `VIEW_DELETED` correction is reported, and the view is re-rendered
+
+#### Scenario: Typing does not create a flood of held corrections
+- **WHEN** an editor autosaves several intermediate invalid states and then a valid one
+- **THEN** only the valid state is applied and no held correction remains for that view
+
+### Requirement: Collection audit is an append-only store table with a rendered history view
+Every committed collection mutation SHALL be exactly one audit transition in the store, carrying its 24-lowercase-hex transition identifier, the operation, the actor, the sanitized reason, the before and after collection generation and manifest version, the commit time, the recorded receipt, and a hash chain over its predecessor, with one content-free audit effect per changed item naming its row, effect, and before and after versions and hashes. A bulk mutation SHALL be one transition with one effect per written row. Audit transitions SHALL copy no item values. The transition SHALL commit in the same transaction as the change it describes, so no committed change can lack its transition. Records and Planning mutations SHALL NOT write audit events to `Knowledge Base/log.md`. The substrate SHALL render, per collection, a read-only history page generated from the audit table, newest first and readable like an activity log: date, operation, actor, reason, and links to the changed item views. The page SHALL be bounded, with older transitions on per-year pages. It SHALL disclose no more than the collection-level release of its path, omitting effects on items that audience could not read.
+
+#### Scenario: Change and audit are atomic
+- **WHEN** a mutation commits or is interrupted at any point
+- **THEN** either both the change and its transition are durable, or neither is
+
+#### Scenario: A bulk batch is one transition
+- **WHEN** a bulk upsert writes 24 rows
+- **THEN** one transition with 24 effects is recorded, and the collection audit status remains `ok`
+
+#### Scenario: History page reads like a log
+- **WHEN** a user opens a collection's history page after several mutations
+- **THEN** it lists them newest first with operation, actor, reason and links to the changed items, and contains no item values
+
+#### Scenario: Editing the history page changes nothing
+- **WHEN** a user edits a history page
+- **THEN** no audit transition changes and the page is re-rendered from the table
+
+#### Scenario: Activity log no longer grows with Records writes
+- **WHEN** a Records or Planning mutation commits
+- **THEN** `Knowledge Base/log.md` is not read or rewritten by it
+
+### Requirement: Collection store snapshots are consistent and portable
+The substrate SHALL produce consistent snapshots of the collection store only through the SQLite online backup API into a staging file that is switched to a single-file journal mode, integrity-checked and atomically renamed. It SHALL publish such a snapshot as a replica inside the vault after committed transactions, coalesced off the acknowledgement path, and synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export. The replica SHALL NEVER be opened for writing in place. A host acquiring the writer lease SHALL adopt the replica when it continues the same store further than the local store, and SHALL refuse collection writes with a divergence error, while serving reads and knowledge writes, when the local store holds transactions the replica lacks. Restore SHALL validate integrity, schema version and store identity, and SHALL surface any difference between the restored rows and existing views as held view corrections rather than overwriting either.
+
+#### Scenario: Backup of the vault is consistent
+- **WHEN** restic or a vault copy captures the vault while agents are writing
+- **THEN** the captured replica opens, passes `integrity_check`, and reflects a committed state
+
+#### Scenario: Takeover adopts the newer replica
+- **WHEN** a second host acquires the writer lease and the vault replica is ahead of its local store for the same store identity
+- **THEN** it adopts the replica before accepting collection writes
+
+#### Scenario: Divergence fails closed
+- **WHEN** the local store holds transactions absent from the replica
+- **THEN** collection writes refuse with the divergence error and operator attention is raised
+
+### Requirement: Collection store migration is verifiable and reversible
+A vault SHALL move from file-canonical collections to the store only through a declared offline migration that imports every Records and Planning collection and proves a round trip before the store becomes canonical. The proof requires all of the following: item counts equal; every row, rendered and parsed back, yields equal values, body, identity and natural key; payload hashes equal the legacy derivation; the imported legacy audit chain has the same head and length; manifest text is byte-equal; and the legacy audit status is preserved, never upgraded. Import SHALL rewrite no vault file and SHALL record the current file bytes as the current views. A vault with duplicate identities, schema violations or unsupported versions SHALL NOT migrate until they are fixed. The migration SHALL run under the managed standby-upgrade handoff: pre-import on the standby without ownership, re-verification of changed collections after the previous worker exits, and atomic publication, so that writes pause only for the ordinary bounded handoff. The substrate SHALL provide a preview-first reverse export that renders the store into the legacy file layout with a content-free checkpoint transition per collection, so the legacy inspector reports `acknowledged_gap` for any collection written in store mode.
+
+#### Scenario: Import proves its round trip
+- **WHEN** a vault with Records and Planning collections is migrated
+- **THEN** every check of the round-trip proof passes for every collection before the store is published, and no vault file changed
+
+#### Scenario: A failed proof leaves files canonical
+- **WHEN** any collection fails a round-trip check
+- **THEN** the vault stays file-canonical, the store is not published, and the report names the collection and the failed check
+
+#### Scenario: Writes during pre-import are not lost
+- **WHEN** an agent writes to a collection while the standby is pre-importing
+- **THEN** that collection is re-imported and re-verified at handoff
+
+#### Scenario: Reverse export restores files
+- **WHEN** a migrated vault is exported back to files
+- **THEN** collections never written in store mode are byte-equal to their pre-migration files, and written collections are legacy-valid and report `acknowledged_gap`
+
+### Requirement: Collection store writes meet a latency budget
+With the store canonical, the release acceptance harness SHALL measure, and the delivery SHALL meet: a guarded single append p95 under 20 ms end to end at 10,000 items; a 500-row bulk upsert under 1 s end to end; and structured query results identical to the file-canonical path on the parity corpus, with query latency no worse than the file path at every measured size. The acknowledgement path SHALL NOT include reading other items, hashing the collection, rendering or publishing views, index synchronization of views, or reading or rewriting `Knowledge Base/log.md`.
+
+#### Scenario: Append stays flat as the collection grows
+- **WHEN** guarded appends are measured at 1,000 and 10,000 items
+- **THEN** both p95 values are under 20 ms
+
+#### Scenario: Bulk upsert of 500 rows
+- **WHEN** 500 valid rows are submitted in one bulk upsert against a 10,000-item collection
+- **THEN** the call completes in under 1 s
+
+#### Scenario: Query parity
+- **WHEN** the parity corpus queries run against the file path and the store
+- **THEN** rows, order, totals, aggregates and rendered output are equal
+
+### Requirement: Declared storage strategies are view layouts over the collection store
+The substrate SHALL support three declared storage strategies. For `markdown-log` and `markdown-items` the strategy SHALL name the layout of the collection's Markdown views, one chronological log file of item blocks or one Markdown file per item, while the canonical data of both SHALL live in the collection store. The `dataset` strategy (CSV, TSV, or JSON) SHALL remain file-canonical and query-only. Any cache, index, export, summary, replica, or generated view SHALL be derived from the canonical source it represents.
+
+Chronological-log child rows SHALL declare a bounded `container_field` in addition to their delimiter and fields; that container SHALL be a declared array-of-object item-schema field, so adapters do not impose domain field names. For the log layout, the store SHALL keep the view's frame, meaning the bytes outside the declared item section, its UTF-8 BOM, its newline style and its final-newline state, and SHALL re-emit them byte-identically. Markdown parsing of views and legacy files SHALL accept exactly one leading UTF-8 BOM for frontmatter parsing. A log-layout view SHALL stay within its rendering size cap, and a write that would exceed it SHALL refuse with a remediation to use the items layout.
+
+#### Scenario: Log layout renders one readable history file
+- **WHEN** a log-layout collection is queried or safely mutated
+- **THEN** the store is canonical and its log view shows every item as a readable block in declared order, and no generated dataset is promoted implicitly
+
+#### Scenario: File-per-item collection uses ordinary properties
+- **WHEN** an items-layout collection stores a record
+- **THEN** the record's view is an ordinary Markdown file with stable item and collection identifiers plus typed YAML properties and an optional readable body
+
+#### Scenario: Dataset stays directly editable
+- **WHEN** a dataset-backed collection uses CSV, TSV, or JSON
+- **THEN** its rows remain readable and editable with ordinary tools, Exomem queries them from the file, and dataset append/update refuses rather than reserializing the file
+
+### Requirement: Imported legacy audit gaps can be explicitly rebaselined
+
+The collection substrate SHALL provide an explicit `rebaseline` mutation that acknowledges an audit gap imported from legacy file-canonical history. Rebaseline SHALL require `expected_manifest_hash`, `expected_container_hash`, the exact inspect-reported `acknowledged_gap_codes`, and a concise `why`. It SHALL revalidate the complete collection, recheck the acknowledgement and guards inside the store transaction, write no item content, and commit a content-free checkpoint transition. On a collection with no gap it SHALL refuse because the acknowledgement cannot match.
+
+Rebaseline SHALL record a lifecycle transition and return receipt version 2 with `operation: rebaseline`, the prior head, `continuity: false`, sorted exact acknowledged gap codes, a deterministic `gap_fingerprint` over canonical JSON containing the prior head, codes, and guarded before-manifest/container hashes, a `checkpoint_snapshot_hash` over canonical JSON containing the sorted authorized pre-checkpoint manifest and item identities and versions, before/after manifest and container hashes, and sanitized rationale. It SHALL copy no item values. Rebaseline receipt v2 requires non-empty codes, both fingerprints, continuity false, one manifest affected path, and `outcome: committed`.
+
+For both lifecycle operations, `payload_hash` is SHA-256 over `exomem-record-lifecycle-request:v2\0` plus canonical JSON `{action, collection_id, before_manifest_hash, before_container_hash, proposed_manifest_hash, acknowledged_gap_codes, rationale}`. Gap fingerprints use `exomem-record-gap:v2\0`; checkpoint fingerprints use `exomem-record-checkpoint:v2\0`. Canonical JSON is UTF-8 with sorted object keys, no whitespace, and `ensure_ascii=false`. Transition IDs are independent 24-hex values.
+
+Inspection after rebaseline SHALL report audit status `acknowledged_gap`, never `ok`, and SHALL preserve a bounded permanent discontinuity containing `provenance_continuity: false`, the prior head, acknowledged gap codes, rationale, checkpoint transition, and both fingerprints. Later valid mutations SHALL extend the chain without erasing or relabelling that history. Rebaseline SHALL use the same authorize-before-read and complete-authorization rules as revision. It SHALL refuse schema violations, unauthorized items, stale guards, or acknowledgements that do not exactly match current gaps. It SHALL NOT invent missing transitions.
+
+#### Scenario: Imported legacy gap becomes an acknowledged checkpoint
+- **WHEN** a migrated collection reports an imported legacy gap and the caller rebaselines those exact gaps with current guards
+- **THEN** no item content changes, the audit status becomes `acknowledged_gap`, and inspect/query/history expose the permanent discontinuity and `provenance_continuity: false`
+
+#### Scenario: A store-native collection has nothing to rebaseline
+- **WHEN** a store-native collection with `ok` status receives a rebaseline
+- **THEN** it refuses because no gap matches the acknowledgement, and no transition is written
+
+#### Scenario: Gap drift invalidates acknowledgement
+- **WHEN** the collection changes after inspect but before rebaseline
+- **THEN** the expected hashes fail closed and no checkpoint is written
+
+#### Scenario: Hidden gap cannot be acknowledged by inference
+- **WHEN** the caller cannot receive every item and exact gap diagnostic required for the checkpoint
+- **THEN** rebaseline refuses without revealing or accepting guessed gap codes
+
+## MODIFIED Requirements
+
+### Requirement: Human-owned collection manifests
+The system SHALL represent each explicit structured collection with a human-readable Markdown manifest view at its `_collection.md` path under the governed Knowledge Base, whose canonical text and version history live in the collection store. The manifest SHALL carry a stable collection identifier, title, semantic profile, schema version, storage strategy and source, item-schema reference or inline schema, lifecycle, and optional templates, views, governance classification, and links. The manifest SHALL be the collection contract, not a copy of its items, and the `records` and `planning` profiles SHALL use this same contract. Editing the manifest view SHALL be a governed revision through the edited-view write path, never an out-of-band change.
+
+#### Scenario: Manifest remains understandable without Exomem
+- **WHEN** a user opens a collection manifest view in an ordinary editor
+- **THEN** its identity, purpose, source, schema, templates, links, and storage strategy are readable without a plugin or database tool
+
+#### Scenario: Unknown manifest version refuses safely
+- **WHEN** Exomem encounters a manifest version or storage format version it does not support
+- **THEN** it refuses mutation and reports the unsupported version without changing the stored manifest or items
+
+#### Scenario: Duplicate collection identity is ambiguous
+- **WHEN** two releasable live manifests declare the same stable collection identifier
+- **THEN** discovery and mutation refuse the duplicate identity rather than choosing one by path order, while any withheld candidate remains indistinguishable from absence
+
+#### Scenario: UUID discovery authorizes before parsing identity
+- **WHEN** a caller resolves a collection UUID without supplying a manifest path
+- **THEN** Exomem authorizes each candidate collection before its identity-bearing contents contribute to the result, and treats any derived catalog only as lookup acceleration
+
+#### Scenario: Manifest view edit is a governed revision
+- **WHEN** a user makes a valid edit to a manifest view
+- **THEN** the store records a governed revise transition and a new manifest version, and an invalid edit becomes a held view correction
+
+### Requirement: Guarded Markdown collection mutation
+Append and targeted update for `markdown-log` and `markdown-items` collections SHALL accept structured item data rather than an arbitrary whole-file replacement. Mutations SHALL resolve their exact target inside one collection-store transaction under the existing same-vault writer lease, validate before writing, honor the expected container and item guards where applicable, and refuse stale or ambiguous targets. A caught error or process interruption SHALL roll the whole transaction back. Dataset mutation remains outside this delivery.
+
+#### Scenario: Stale container hash refuses
+- **WHEN** another transaction, including one applied from an edited view, committed on the collection after an agent read
+- **THEN** a mutation carrying the prior expected container hash refuses as stale and leaves the store unchanged
+
+#### Scenario: Stale item version refuses
+- **WHEN** the intended item changed after an agent read even if its identifier still resolves
+- **THEN** targeted update refuses as stale rather than overwriting the newer item
+
+#### Scenario: Interruption leaves no partial mutation
+- **WHEN** the process is interrupted during a mutation
+- **THEN** after restart the store holds either the complete committed mutation with its transition or no trace of it
+
+#### Scenario: Untouched log bytes are preserved
+- **WHEN** one item block of a log-layout collection is appended or updated
+- **THEN** the re-rendered log view keeps the frame outside the item section, including notation, legend, whitespace, UTF-8 BOM, final-newline state, and CRLF/LF style, byte-identical, and every other item block renders unchanged
+
+#### Scenario: Windows replacement failure rolls back safely
+- **WHEN** an open-file or case-insensitive-path collision makes a view replacement fail on Windows-compatible semantics
+- **THEN** the committed store transaction is unaffected, the prior view file stays intact, and the view remains pending and is retried and reported
+
+#### Scenario: Same-vault mutations serialize
+- **WHEN** two cooperating agent mutations target the same vault concurrently
+- **THEN** they serialize through the writer lease and the store transaction, and cannot publish a torn or silently lost update
+
+#### Scenario: Separate vaults do not contend
+- **WHEN** mutations target different vault roots
+- **THEN** collection serialization does not introduce a global cross-vault lock
+
+### Requirement: Idempotent append and conflict-safe update
+The substrate SHALL make exact append retries idempotent where a stable item identity is available. When a caller omits the item identity and every field of the manifest's declared natural key is present in the validated values, the substrate SHALL derive the identity deterministically from the collection identity and the natural-key serialisation the read path already uses, and stamp it explicitly like any other item key; an explicit identity SHALL still win, and a payload that lacks a natural-key field SHALL receive a random identity as before. Reusing one identity with different content SHALL refuse as an identity conflict. An append whose derived or supplied identity differs from an existing item's while its serialised natural key equals that item's SHALL refuse as a natural-key conflict naming every such existing item; the store's natural-key uniqueness constraint SHALL enforce this. Targeted update SHALL change only the resolved item and SHALL never fall back from a missing identifier to fuzzy text matching. A mutation carrying a transport request identity SHALL record that identity and its terminal receipt in the same transaction as the write; a retry with the same identity SHALL return the recorded receipt without writing, and the same identity with a different request SHALL refuse. Both profiles SHALL inherit these rules through the shared mechanics.
+
+#### Scenario: Exact append retry produces one item
+- **WHEN** a client retries the same append with the same collection, item identity, and normalized payload
+- **THEN** the substrate returns the committed item without adding a duplicate
+
+#### Scenario: Re-stated append without identity replays
+- **WHEN** a client appends the same observation twice without supplying an item identity and the payloads are identical
+- **THEN** the second append returns the committed item as a replay and the collection holds one item
+
+#### Scenario: Reused identity with different content refuses
+- **WHEN** an append supplies an existing item identity with materially different content, or omits the identity and the derived identity already exists with different content
+- **THEN** it refuses with a record identity conflict and preserves the existing item
+
+#### Scenario: Natural-key twin of an older item refuses
+- **WHEN** an append's natural-key values equal those of an existing item whose identity was minted before derivation existed
+- **THEN** it refuses with a natural-key conflict that names the existing item and writes nothing
+
+#### Scenario: Planning titles stop duplicating
+- **WHEN** a Planning collection declares `[title]` as its natural key and an agent adds a work item whose title already exists
+- **THEN** the add replays when the payload is identical and refuses otherwise, so the agent updates the existing item instead of filing a twin
+
+#### Scenario: Missing identifier does not select a similar item
+- **WHEN** targeted update names an identifier that no longer exists
+- **THEN** it refuses as missing or stale and does not update an item with similar text or fields
+
+#### Scenario: Commit before a lost response replays exactly once
+- **WHEN** a mutation commits and the process stops before the transport ledger records the result, and the client retries with the same request identity
+- **THEN** the store returns the recorded receipt and no second transition exists
+
+### Requirement: Auditable agent mutations and receipts
+
+Every agent mutation SHALL require a concise reason and SHALL return a bounded receipt containing collection identity, item identity (null for create and lifecycle operations), operation-specific required before and after item/manifest/container hashes, affected view paths, committed outcome, and a transition correlation. The receipt SHALL be recorded with the transition in the collection store. Each collection SHALL keep a reader version of 1 for collections whose history contains only create/append/update transitions, and 2 once a `revise` or `rebaseline` has committed, and every later mutation SHALL preserve version 2. The reader version SHALL be reported as today, but no manifest marker or item audit marker SHALL be written.
+
+The collection store SHALL hold exactly one audit transition per committed mutation, as specified by the audit-table requirement. Transitions imported from the legacy activity log SHALL be kept verbatim and chained ahead of native transitions. Inspection SHALL verify the transition hash chain from the collection's audit head, and SHALL distinguish `baseline`, `ok`, positive `gap`, bounded `history_incomplete`, and `acknowledged_gap`. For store-native history, `gap` and `acknowledged_gap` SHALL arise only from imported legacy history, and `history_incomplete` only from governance. Inspection SHALL never repair or invent history. Operational journals and governance receipts SHALL retain their existing distinct roles.
+
+#### Scenario: Successful normal update records one audit event
+- **WHEN** a guarded item update commits
+- **THEN** the response includes the transition correlation and hashes, and the store holds exactly one matching transition and effect
+
+#### Scenario: Failed validation records no committed audit event
+- **WHEN** schema validation or a guard refuses a mutation
+- **THEN** no item change and no transition is written
+
+#### Scenario: Abrupt interruption exposes an audit gap
+- **WHEN** a file-canonical collection was interrupted before migration after an item replacement but before its activity-log event, and is then imported
+- **THEN** the imported history reports that positive gap, and neither import nor the store invents or hides an event; after migration an interruption can no longer separate a change from its transition
+
+#### Scenario: Pre-publication interruption leaves no canonical-looking scaffold
+- **WHEN** a simulated `BaseException` interrupts collection creation
+- **THEN** the store transaction rolls back, no manifest view, directory, or staging file is left behind, the original exception is re-raised unchanged, and an exact retry is not wedged by tool-owned residue
+
+#### Scenario: Human audit-mapping reformat remains mutable
+- **WHEN** a migrated manifest view still carries, or a user reformats, a legacy `record_audit` or `plan_audit` mapping
+- **THEN** edit-back treats it as formatting, no transition is recorded for it, the next render omits it, and later mutations proceed
+
+#### Scenario: Normal mutation after revision preserves the reader floor
+- **WHEN** a collection commits a revise transition and later an append or update
+- **THEN** the reported reader version remains 2 and inspection reports the same healthy history before and after restart
+
+#### Scenario: Normal mutation after rebaseline preserves discontinuity
+- **WHEN** a collection with an imported legacy gap commits a rebaseline and later an append or update
+- **THEN** the reported reader version remains 2, and inspection before and after restart reports `acknowledged_gap` with the same permanent discontinuity
+
+#### Scenario: Successful Planning triage uses the shared audit engine
+- **WHEN** a guarded Planning triage mutation commits
+- **THEN** the response and the store's transition carry one matching Planning-profile transition, with no `record_audit` or `plan_audit` property written anywhere
+
+### Requirement: Manual-edit visibility and report-only inspection
+Queries SHALL read the collection store. A direct edit of a view SHALL become visible only through the edited-view write path: as a governed transition once applied, or as a held view correction. Collection inspection SHALL report pending views, held view corrections, held candidates and coverage counts, schema violations, missing templates, imported legacy audit gaps, and stale saved-view provenance, without rewriting the store or any view, and without counting held candidates or corrections as items. Generic derived-index repair SHALL remain owned by `maintain_memory(mode="reconcile", dry_run=false)`.
+
+#### Scenario: Direct edit appears on next query
+- **WHEN** a user changes a valid item view in an ordinary editor
+- **THEN** the next query after the settle window reflects the change, and the collection history shows the view-edit transition
+
+#### Scenario: Inspect reports but does not repair canonical ambiguity
+- **WHEN** a user copies an item view so that two files carry the same item identity, or makes an edit that would collide with another item's natural key
+- **THEN** the store is unchanged, `record_memory(action="inspect")` reports the held view correction with its reference and diagnostics summary, nothing is repaired automatically, and `maintain_memory` may repair only derived indexes
+
+#### Scenario: Inspect reports an undeclared manual field
+- **WHEN** a human adds a property that is not declared by the collection schema to an item view
+- **THEN** the row is unchanged and inspection reports a held view correction naming the field
+
+#### Scenario: Inspection reports a held candidate without adopting it
+- **WHEN** a collection has a held candidate
+- **THEN** inspection reports it under coverage with its reference and diagnostics summary, the item count excludes it, and nothing is rewritten
+
+## REMOVED Requirements
+
+### Requirement: Three portable canonical storage strategies
+
+**Reason**: Markdown logs and Markdown item files are no longer canonical for Records and Planning; the recursive file-inventory snapshot and its census guard are deleted.
+
+**Migration**: Replaced by "Declared storage strategies are view layouts over the collection store"; datasets are unchanged.
+
+### Requirement: Valid out-of-band edits can be explicitly rebaselined
+
+**Reason**: View edits now become governed transitions or held corrections, so out-of-band edits can no longer create store-native audit gaps.
+
+**Migration**: Replaced by "Imported legacy audit gaps can be explicitly rebaselined", with the same arguments, digests and v2 receipt, for gaps imported from file-canonical history.
