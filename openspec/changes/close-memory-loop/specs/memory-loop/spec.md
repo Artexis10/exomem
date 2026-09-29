@@ -342,7 +342,15 @@ a declared particle (the rest of that run joining the next stretch), and a
 word of another script glued to an
 unspaced run, SHALL be read as a word of the turn, so a name equal to it grants
 exact-alias evidence as a spaced token does; any other hiragana belongs to the
-stretch around it, and a name inside a longer stretch stays contained. Because the band is an aggregate over the whole anchor
+stretch around it, and a name inside a longer stretch stays contained. The
+unsplit stretch, and each cut of it just before a declared particle inside a
+hiragana run, SHALL be words of the turn too, and a word whose every occurrence
+lies inside a longer word that an indexed name equals SHALL be consumed by it,
+so a name written through such a run (`サクラもち本舗`, `木村はるか`) resolves
+instead of its head, while a head the turn also writes on its own is not
+consumed. Kana-only text that can be read either way (`サクラもちがうって言ってた`)
+is a known ambiguity: the longest indexed name wins, and the head resolves when
+no such name exists. Because the band is an aggregate over the whole anchor
 catalogue, withheld anchors included, under a non-empty governed policy it SHALL
 run only for owner-bound principals: every other principal SHALL receive
 semantic evidence `audience_restricted` and no `vector_band` contact, decided
@@ -511,6 +519,14 @@ fast abstention or compiler-only timing.
 - **AND** a name written partly in hiragana (`ねこやなぎ銀行の口座`,
   `駅前のねこやなぎ銀行`) keeps its own edge: a shorter anchor named by its
   kanji tail (`銀行`) is only contained
+- **AND** a name written kanji or katakana, then hiragana that starts with a
+  particle character, then more of the name (`サクラもち本舗に行く`,
+  `木村はるかの予定`) resolves as itself, and an anchor named by its head
+  (`サクラ`, `木村`) is consumed, unless the turn also names the head on its
+  own (`サクラとサクラもち本舗の違い` resolves both)
+- **AND** kana-only text that reads either way (`サクラもちがうって言ってた`)
+  resolves the longest indexed name (`サクラもち`), and the head (`サクラ`)
+  when no such name exists: a known ambiguity, pinned rather than resolved
 - **AND** a pointing-back Japanese turn made only of a declared cue and filler
   (`続けてください`) is referential, while one that also says something of its
   own (`続きを読んで`) is not
