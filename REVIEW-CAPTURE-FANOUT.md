@@ -140,9 +140,7 @@ the behaviour with a test.
 
 **Verdict: APPROVE.** The HIGH is fixed.
 
-I reviewed all 8 files the fix touched: the new `context_intents.py`,
-`context_roles.py`, `working_set.py`, `context-roles.yaml` and its mirror, the
-OpenSpec delta, `tasks.md` and the tests. The `contact` role now declares an
+I reviewed all 8 files the fix touched. The `contact` role now declares an
 `intent`, not cues. Selection needs a contact-intent shape over whole tokens (a
 contact noun tied to the person, a whole contact phrase, or a reach verb aimed
 at the person). An intent role is never an anchor default. On carried pages it
@@ -150,13 +148,12 @@ is selected only on a match, so the rank-based LOW is fixed too.
 
 **Probe** (PR fixture, `op_activate_context`):
 
-- **No contact units, all 12 correct:** the three earlier failures, "call it
-  done", "address this issue", "phonetic transcription", "the email thread about
-  the budget", "numbered list", "contact lens", a turn about the person's work,
-  and "sent the email about the class".
-- **Contact units served, all 7 correct:** "what is X's phone", "What's X's
-  phone?", "email X about the class", "e-mail X …", "how do I reach X",
-  "X's address", "Maren's phone".
+- **No contact units, all correct:** my earlier table's rows ("address this
+  issue", "headphones", "sent the email about the class", "call it done", a work
+  question), plus "phonetic transcription", "the email thread about the budget",
+  "numbered list" and "contact lens".
+- **Contact units served, all correct:** "what is X's phone", "email X about
+  the class", "how do I reach X", "X's address", "e-mail X".
 - **Non-English:** the tokenizer handles Unicode ("teléfono", "cuál"), but the
   lexicon is English-only. German and Spanish contact questions select nothing,
   so they fail closed and nothing leaks.
