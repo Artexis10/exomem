@@ -1695,17 +1695,20 @@ def inspect_collection(
     *,
     authorize_path: Callable[[str], bool] | None = None,
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+    snapshot: AdapterSnapshot | None = None,
 ) -> CollectionInspection:
     """Inspect one authorized canonical representation without repairing it.
 
     The adapter is deliberately read once.  On parse failure the manifest version
     remains reportable, while the typed diagnostic preserves the canonical error.
+    A caller that already holds a snapshot read through the same authorizer passes it
+    as `snapshot`, so one inspection never reads the collection twice.
     """
     adapter = load_adapter(
         vault_root, manifest, authorize_path=authorize_path, project_values=project_values
     )
     try:
-        parsed = adapter.read()
+        parsed = snapshot if snapshot is not None else adapter.read()
     except collections.CollectionError as error:
         versions = (manifest.manifest_version,)
         return CollectionInspection(

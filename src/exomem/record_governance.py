@@ -1459,11 +1459,31 @@ def inspect_collection(
         if not _authorize(root, manifest.storage.source, receipt=True):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
         links = _LinkProjector.create(root, manifest)
+        # One read serves the inspection, the audit-gap pass and the guard: they read
+        # through the same authorizer, and reading three times made a guard refresh
+        # cost three passes over every item.
+        refused = [False]
+
+        def authorize_path(path: str) -> bool:
+            allowed = _authorize(root, path, receipt=True)
+            if not allowed:
+                refused[0] = True
+            return allowed
+
+        try:
+            shared = record_formats.load_adapter(
+                root, manifest, authorize_path=authorize_path
+            ).read()
+        except collections.CollectionError:
+            shared = None
+        # Only the read's own refusals decide the audit chain, as before.
+        read_refused = refused[0]
         try:
             inspection = record_formats.inspect_collection(
                 root,
                 manifest,
-                authorize_path=lambda path: _authorize(root, path, receipt=True),
+                authorize_path=authorize_path,
+                snapshot=shared,
             )
         except collections.CollectionError as error:
             inspection = record_formats.CollectionInspection(
@@ -1481,17 +1501,23 @@ def inspect_collection(
                 root,
                 manifest,
                 authorize_path=lambda path: _authorize(root, path, receipt=True),
+                snapshot=shared,
+                snapshot_denied=read_refused,
             )
         except collections.CollectionError:
             audit = {"status": "history_incomplete", "gaps": []}
         guards = None
         if not diagnostics:
             try:
-                snapshot = record_formats.load_adapter(
-                    root,
-                    manifest,
-                    authorize_path=lambda path: _authorize(root, path, receipt=True),
-                ).read()
+                snapshot = (
+                    shared
+                    if shared is not None
+                    else record_formats.load_adapter(
+                        root,
+                        manifest,
+                        authorize_path=lambda path: _authorize(root, path, receipt=True),
+                    ).read()
+                )
                 if not snapshot.diagnostics and all(
                     _authorize(root, version.path, receipt=True)
                     for version in snapshot.source_versions

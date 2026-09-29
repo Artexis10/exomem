@@ -114,9 +114,19 @@ def _age(vault: Path) -> None:
         os.utime(path, (old, old))
 
 
+def _no_graph_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The derived-graph rebuild sometimes runs on the calling thread and re-reads items."""
+    from exomem import graph_sync
+
+    monkeypatch.setattr(graph_sync, "start_registered", lambda *a, **k: None)
+    monkeypatch.setattr(graph_sync, "join_registered_if_settled", lambda *a, **k: True)
+
+
 @pytest.fixture
 def item_reads(monkeypatch: pytest.MonkeyPatch) -> _Counts:
     from exomem import vault as vault_module
+
+    _no_graph_rebuild(monkeypatch)
 
     seen = _Counts()
     seen.reads = 0  # type: ignore[attr-defined]
@@ -261,6 +271,7 @@ def _stat_calls_for_append(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, size
 
     from exomem import record_item_cache
 
+    _no_graph_rebuild(monkeypatch)
     monkeypatch.setattr(record_item_cache, "RACY_WINDOW_NS", 0)
     record_item_cache.clear()
     vault = tmp_path / f"stat-{size}-{len(list(tmp_path.iterdir()))}"
@@ -301,3 +312,47 @@ def test_append_stats_each_item_a_bounded_number_of_times(
     per_item = (large - small) / 27
     # Before: ~10 guard rounds x (6 ancestors + 2 leaf probes) plus censuses, ~700 per item.
     assert per_item < 40, f"{per_item:.0f} marginal stat calls per item per append"
+
+
+def test_append_parses_the_manifest_yaml_a_bounded_number_of_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One append re-resolves its manifest many times; identical bytes parse once."""
+    from exomem import structured_collections as collections
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _seed(vault, 3)
+    calls = {"n": 0}
+    real = collections._manifest_from_frontmatter
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(collections, "_manifest_from_frontmatter", counting)
+    records.append_record(vault, COLLECTION, item=ledger_item(slug="measured"), why="measure")
+    # The unchanged manifest parses at most once; the audit-head rewrite is one new document.
+    assert calls["n"] <= 3, f"{calls['n']} manifest parses in one append"
+
+
+def test_inspect_snapshots_the_collection_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard refresh a client pays between appends reads the collection one time."""
+    from exomem import record_formats
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _seed(vault, 3)
+    calls = {"n": 0}
+    real = record_formats.MarkdownItemsAdapter.read
+
+    def counting(self):
+        calls["n"] += 1
+        return real(self)
+
+    monkeypatch.setattr(record_formats.MarkdownItemsAdapter, "read", counting)
+    result = record_governance.inspect_collection(vault, COLLECTION)
+    assert calls["n"] == 1, f"{calls['n']} snapshots in one inspect"
+    assert "expected_container_hash" in str(result)
