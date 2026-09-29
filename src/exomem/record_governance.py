@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 import stat
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
@@ -924,13 +926,43 @@ def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
     """
     root = Path(vault_root)
     policy = egress.policy_module.load(root)
+    tombstones = egress.lifecycle.tombstoned_paths(root)
 
     def allowed(relative: str) -> bool:
         return not access.refuse_if_excluded(root, relative) and (
-            egress.release_level_for_path_only(root, relative, policy=policy) == egress.LEVEL_FULL
+            egress.release_level_for_path_only(
+                root, relative, policy=policy, tombstones=tombstones
+            )
+            == egress.LEVEL_FULL
         )
 
     return allowed
+
+
+#: The policy and tombstone set one Records operation decided against, keyed by
+#: vault root. Both are read once per pass because the plane does not move
+#: while the pass runs; per-path they cost a governance-root probe and a stat of
+#: every tombstone and event file, which made one append O(items).
+_AUTHORIZATION_PASS: ContextVar[tuple[Path, Any, frozenset[str]] | None] = ContextVar(
+    "exomem_records_authorization_pass", default=None
+)
+
+
+@contextmanager
+def authorization_pass(vault_root: Path) -> Iterator[None]:
+    """Read the policy and tombstones once for every `_authorize` in the block."""
+    root = Path(vault_root)
+    active = _AUTHORIZATION_PASS.get()
+    if active is not None and active[0] == root:
+        yield
+        return
+    token = _AUTHORIZATION_PASS.set(
+        (root, egress.policy_module.load(root), egress.lifecycle.tombstoned_paths(root))
+    )
+    try:
+        yield
+    finally:
+        _AUTHORIZATION_PASS.reset(token)
 
 
 def _authorize(
@@ -938,12 +970,19 @@ def _authorize(
 ) -> bool:
     if access.refuse_if_excluded(root, relative):
         return False
+    tombstones: frozenset[str] | None = None
+    active = _AUTHORIZATION_PASS.get()
+    if active is not None and active[0] == Path(root):
+        if policy is None:
+            policy = active[1]
+        tombstones = active[2]
     return (
         egress.release_level_for_path_only(
             root,
             relative,
             receipt_decision="release_authorized" if receipt else None,
             policy=policy,
+            tombstones=tombstones,
         )
         == egress.LEVEL_FULL
     )
@@ -1412,7 +1451,10 @@ def inspect_collection(
     # `records` already imports this governance boundary for mutations.
     from . import records
 
-    with egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector:
+    with (
+        authorization_pass(root),
+        egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector,
+    ):
         manifest = _resolve_released_collection(root, collection, receipt=True)
         if not _authorize(root, manifest.storage.source, receipt=True):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
@@ -2796,11 +2838,19 @@ def precommit_authorize_mutation(
     """
     root = Path(vault_root)
     paths = {manifest.path, manifest.storage.source, *planned_paths}
-    require_mutation_visibility(root, manifest, planned_paths=paths)
+    require_mutation_visibility(
+        root,
+        manifest,
+        planned_paths=paths,
+        census=None if snapshot is None else snapshot.directory_guards,
+    )
     if snapshot is not None:
         paths.update(version.path for version in snapshot.source_versions)
         paths.update(path for path, kind, _digest in snapshot.source_inventory if kind == "file")
-    with egress.disclosure_boundary(root, "record_mutation_precommit") as collector:
+    with (
+        authorization_pass(root),
+        egress.disclosure_boundary(root, "record_mutation_precommit") as collector,
+    ):
         for path in sorted(paths):
             if not _authorize(root, path, receipt=True):
                 raise collections.CollectionError(
@@ -2814,13 +2864,32 @@ def require_mutation_visibility(
     manifest: collections.CollectionManifest,
     *,
     planned_paths: Iterable[str] = (),
+    census: Sequence[vault.DirectoryCensusGuard] | None = None,
 ) -> None:
-    """Refuse before parsing when a mutation cannot see the entire CAS set."""
+    """Refuse before parsing when a mutation cannot see the entire CAS set.
+
+    `census` is the directory censuses a snapshot already captured and proved; a
+    caller that holds one walks those entries instead of scanning the tree again.
+    """
     root = Path(vault_root)
     allowed = full_release_filter(root)
     if not all(allowed(path) for path in (manifest.path, manifest.storage.source, *planned_paths)):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     if manifest.storage.strategy != "markdown-items":
+        return
+    if census is not None and _census_covers_every_directory(census):
+        candidates = 0
+        for directory in census:
+            for entry in directory.entries:
+                candidates += 1
+                if candidates > 2_000:
+                    raise collections.CollectionError(
+                        "RECORD_ITEM_LIMIT", "collection has too many item entries"
+                    )
+                if not allowed(entry.relative_path):
+                    raise collections.CollectionError(
+                        "COLLECTION_NOT_FOUND", "collection was not found"
+                    )
         return
     pending = [vault.DirectoryCensusGuard.capture(root, manifest.storage.source, max_entries=2_000)]
     candidates = 0
@@ -2840,6 +2909,22 @@ def require_mutation_visibility(
                 pending.append(
                     vault.DirectoryCensusGuard.capture(root, entry.relative_path, max_entries=2_000)
                 )
+
+
+def _census_covers_every_directory(census: Sequence[vault.DirectoryCensusGuard]) -> bool:
+    """Whether every child directory named by a census has a census of its own.
+
+    A snapshot read through an authorizing adapter omits the censuses of directories
+    it could not see. Walking that partial set would skip entries a mutation must
+    refuse on, so an incomplete census is never reused.
+    """
+    captured = {directory.target for directory in census}
+    return all(
+        entry.relative_path in captured
+        for directory in census
+        for entry in directory.entries
+        if stat.S_ISDIR(entry.mode)
+    )
 
 
 def require_candidate_manifest_visibility(vault_root: Path, manifest_path: str) -> None:
