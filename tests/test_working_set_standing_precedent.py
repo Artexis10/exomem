@@ -388,3 +388,48 @@ def test_reach_precedents_skips_an_anchor_reached_by_recency_alone(study_vault: 
     prior = reach(("recency",))
     assert CONCLUSION in named[0] and STANDING in named[1]
     assert prior == (frozenset(), frozenset())
+
+
+def test_the_conclusion_pages_kept_are_the_newest_not_the_alphabetically_first(
+    study_vault: Path,
+) -> None:
+    from exomem import context_roles
+
+    for index in range(30):
+        _write(
+            study_vault,
+            f"Knowledge Base/Notes/Decisions/ab-old-{index:02d}.md",
+            _note(
+                f"Old {index:02d}",
+                f"- [decision] An old settled point number {index:02d}.",
+                block=f"old-{index}",
+                link=True,
+                updated="2020-01-01",
+            ),
+        )
+    _reindex(study_vault)
+    index = working_set_index.WorkingSetIndex(study_vault)
+    row = next(r for r in index.anchors() if r.path == ENTITY)
+    anchor = working_set_resolve.ResolvedAnchor(
+        anchor_id=row.anchor_id,
+        path=row.path,
+        ref=None,
+        title=row.title,
+        kind="entity",
+        lifecycle="active",
+        status="resolved",
+        evidence=("exact_alias",),
+        categories=(),
+        neighbourhood=frozenset(),
+    )
+
+    pages, _standing = working_set.reach_precedents(
+        study_vault,
+        resolved=[anchor],
+        roles=[{"id": "precedents", "source": "anchor_default", "lane": "units"}],
+        registry=context_roles.load_roles(study_vault),
+        index=index,
+    )
+
+    assert CONCLUSION in pages
+    assert len(pages) == working_set.ENTITY_CONCLUSION_PAGES

@@ -770,7 +770,8 @@ def _conclusion_pages(
     newest first, at most `ENTITY_CONCLUSION_PAGES`.
 
     One indexed category read (`lexstore.unit_categories_of`) chooses the pages;
-    only the survivors' own dates are then read, from the warm page cache.
+    every survivor's own date is then read (from the warm page cache; the
+    candidates are bounded above) BEFORE the cut, so newest means newest.
     """
     from . import find_corpus, lexstore
 
@@ -783,7 +784,7 @@ def _conclusion_pages(
     holders = [path for path in ordered if (found or {}).get(path, frozenset()) & categories]
     dated: list[tuple[int, str]] = []
     root = Path(vault_root)
-    for path in holders[: 4 * ENTITY_CONCLUSION_PAGES]:
+    for path in holders:
         page = find_corpus.CACHE.get(root / path, root)
         dated.append((_date_rank(getattr(page, "updated", "") or ""), path))
     dated.sort(key=lambda entry: (-entry[0], entry[1]))
