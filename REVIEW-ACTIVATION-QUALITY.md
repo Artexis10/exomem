@@ -100,3 +100,67 @@ carry.
 The tiktoken and huggingface hosts are blocked here. I rebuilt `o200k_base` from npm
 `js-tiktoken`; its sha256 matches tiktoken's pinned `446a9538…`. There is no xdist,
 so the suites ran serially. Nothing was left to CI.
+
+## Recheck 1 (fix round 6214e4c..6e4dc93)
+
+**Verdict: REQUEST_CHANGES.** M1, M5 and M4 are done. M2's contiguous run ignores
+punctuation, so the grocery-budget failure comes back across a comma or a full stop.
+
+### Findings
+
+| Finding | Verdict | Evidence |
+|------|------|------|
+| HIGH M2 | **PARTIAL** | Both review controls pass, and so does T7. But see New concern 1. |
+| MEDIUM M1 | **FIXED** | `_spoken_as_name` (`working_set_resolve.py:1963`) forms the group for all-person groups, or for a word capitalised mid-sentence in a cased script. `test_working_set_bare_name_carry.py:62` is the compiled-packet test: the carry is not asked and `carried_by` is `None`. `:79` checks that the harbour turn still carries the note. |
+| LOW 1 | **FIXED** | `git grep -i alex -- src/` returns nothing. The docstring now uses an invented name. |
+| LOW 2 | **FIXED, bounded** | `discount_superseded_pages` (`working_set.py:1311`) checks each page with `_is_current_page`. It only covers stems counted at most `RETRIEVAL_CARRY_FETCH` (10) pages above the cap. A name with more than cap+10 revisions retired only by `superseded_by` still blocks the carry. That is acceptable, but the docstring should say it. |
+| LOW 3 | **FIXED** | `test_working_set_planning_item_ref.py:89,100,114` pins all three M4 scenarios. |
+| LOW 4 | **FIXED for 6e4dc93** | Merge 80b98fe took the base's v3 and v4 reports, and the real-compiler suite is green at the head (see Runs). The base has since moved to 1c6077d (A9, A10). The next base merge needs another re-record. |
+
+### New concerns
+
+1. **HIGH: punctuation does not break M2's run.** `_name_span`
+   (`working_set_resolve.py:1150`, called at `:1128`) walks `analysis.tokens`, and
+   `tokens_of` drops punctuation. So "solar array, monitoring" is one run. Probes use
+   the test file's own rows with both hubs retrieved:
+   - "Check the solar array, monitoring can wait." → `resolved`, Solar array monitoring hub only. Solar array hub is dropped.
+   - "The solar array. Monitoring is next week." → same result.
+   - "The kitchen renovation? Budget talk can wait." → budget hub only.
+   - "Update the kitchen renovation, budget is fine." → budget hub only.
+
+   This is the same confident wrong answer the review found, now from a comma. A
+   coordinator also bridges a run: "the kitchen renovation and the budget for it"
+   narrows. That reading is arguable, but a list ("X and Y") is two things. Fix: let
+   clause punctuation (`_SENTENCE_END` plus comma, colon and dashes) end a run, and
+   consider "and" and "or" as run breakers. The spec's "contiguous run of turn
+   tokens" should then say that punctuation ends a run. Add the four turns above as
+   controls.
+2. **LOW: every person-typed group ignores casing, even in a cased turn.** With two
+   `person` entities "Mark Ellison" and "Mark Fenwick", "Please mark the task done" and
+   "I left a pencil mark on the draft plan" come back `ambiguous`, and the carry is
+   suppressed. The ruling allows the person case, and "priya" in lower case is a
+   deliberate test. Still, in a cased turn that capitalises some other word mid-sentence
+   (so it is not all lower case), a lower-case person word could fall back to the
+   capital test. Owner's call.
+3. **LOW: headline casing.** "Notes From The Harbour Walk" → `ambiguous` between the
+   two businesses. A turn where every word is capitalised carries no casing signal,
+   the same as an all-caps turn.
+
+### Attacks
+
+- **Uncased scripts (CJK), M1.** Organisation entities "海港 面包店" and "海港 诊所": "海港 今天 很 忙" → `unresolved`, so no group, as specified. Persons 山田 ask (pinned).
+- **Uncased scripts (CJK), M2.** For spaced turns: "厨房 装修 预算" with the detached word "我 的 买菜 预算 超了 厨房 装修 又 停了" → `ambiguous`, correct. For unspaced turns, `tokens_of` yields whole runs such as "厨房装修预算怎么样", so no name word matches and both hubs stay `partial` (`unresolved`). That is safe, but it means M2 never narrows in unspaced CJK. That limit is in the existing tokeniser, not in this round.
+- **Withheld = absent.** `audience_view` removes a withheld row before `candidates_for`, so its `entity_type` never reaches `_bare_name_groups`. With one of two persons withheld ("Priya sent the invoice.") and one of two organisations withheld ("We ordered from Harbour again."), the result equals the twin catalogue without that row: `unresolved`, one `partial`.
+- **Person name at sentence start.** "Mark called about the invoice" → `ambiguous`, which is a true positive: the person case ignores casing, so the sentence-start rule never applies to persons. Organisations at sentence start ("Harbour sent the invoice.") stay `unresolved`. That errs towards carrying, not asking, and is acceptable. After an abbreviation ("approx. Harbour lunch") the word counts as a sentence start and is not grouped, erring the same way.
+
+### Runs
+
+Local suite (real-compiler, continuity, `working_set_*`, `activation*`) still running; numbers follow in the next push.
+
+`gh pr checks 1440` (read through the GitHub API) at 6e4dc93: 25 passed, 10 skipped,
+0 failed, and the required CI gate passed.
+
+### Environment
+I rebuilt the tokenizer from npm `js-tiktoken`: sha256 `446a9538cb6c…`, which matches.
+The CJK and M2 probe turns are resolver-level, using `_row` and `_resolve` from
+`tests/test_working_set_resolve_senses.py`. The withheld probe goes through `audience_view`.
