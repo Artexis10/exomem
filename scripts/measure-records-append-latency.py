@@ -211,6 +211,16 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     from exomem import vault as vault_module
     from exomem.governance import egress
 
+    if args.lift_caps:
+        # Measurement only: the product refuses a collection above 2,000 items. This
+        # lifts every cap so the cost curve can be read past it.
+        from exomem import record_governance
+
+        record_formats._MAX_ITEM_FILES = record_formats._MAX_RAW_ITEM_ENTRIES = 1_000_000
+        record_formats._MAX_COLLECTION_BYTES = 1 << 30
+        records._MAX_ITEM_FILES = 1_000_000
+        record_governance._MAX_ITEM_ENTRIES = 1_000_000
+
     authority = state_migration.assert_offline_migration_authority(source="latency harness")
     state_migration.migrate_vault_state_offline(vault, authority=authority)
     state_migration.reset_state_resolution_cache_for_tests()
@@ -452,6 +462,7 @@ def _parent(args: argparse.Namespace) -> int:
                 str(size),
                 "--appends",
                 str(args.appends),
+                *(["--lift-caps"] if args.lift_caps else []),
             ],
             capture_output=True,
             text=True,
@@ -477,6 +488,11 @@ def main() -> int:
     parser.add_argument("--sizes", default="10,100,1000")
     parser.add_argument("--appends", type=int, default=30)
     parser.add_argument("--out", default="records-append-latency.json")
+    parser.add_argument(
+        "--lift-caps",
+        action="store_true",
+        help="lift the 2,000-item collection caps (measurement of larger collections only)",
+    )
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--size", type=int, default=0, help=argparse.SUPPRESS)
     args = parser.parse_args()

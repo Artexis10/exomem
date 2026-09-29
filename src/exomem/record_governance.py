@@ -438,7 +438,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
     ):
         return None
     versions = payload["source_versions"]
-    if len(versions) > 2_000:
+    if len(versions) > _MAX_ITEM_ENTRIES:
         return None
     normalized_versions: list[dict[str, str]] = []
     seen_paths: set[str] = set()
@@ -912,6 +912,9 @@ egress.register_projector(
     ),
 )
 
+
+#: Item entries a Records operation will enumerate before it refuses.
+_MAX_ITEM_ENTRIES = 2_000
 
 def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
     """Return the Records full-content gate without the normal L5 walk floor.
@@ -1558,7 +1561,7 @@ def inspect_collection(
                 "snapshot": inspection.snapshot,
                 "source_versions": [
                     {"path": version.path, "hash": version.hash}
-                    for version in inspection.source_versions[:2_000]
+                    for version in inspection.source_versions[:_MAX_ITEM_ENTRIES]
                 ],
                 "diagnostics": diagnostics,
                 "audit": _inspection_audit(audit),
@@ -2934,7 +2937,7 @@ def _require_mutation_visibility(
         for directory in census:
             for entry in directory.entries:
                 candidates += 1
-                if candidates > 2_000:
+                if candidates > _MAX_ITEM_ENTRIES:
                     raise collections.CollectionError(
                         "RECORD_ITEM_LIMIT", "collection has too many item entries"
                     )
@@ -2943,13 +2946,17 @@ def _require_mutation_visibility(
                         "COLLECTION_NOT_FOUND", "collection was not found"
                     )
         return
-    pending = [vault.DirectoryCensusGuard.capture(root, manifest.storage.source, max_entries=2_000)]
+    pending = [
+        vault.DirectoryCensusGuard.capture(
+            root, manifest.storage.source, max_entries=_MAX_ITEM_ENTRIES
+        )
+    ]
     candidates = 0
     while pending:
         directory = pending.pop()
         for entry in directory.entries:
             candidates += 1
-            if candidates > 2_000:
+            if candidates > _MAX_ITEM_ENTRIES:
                 raise collections.CollectionError(
                     "RECORD_ITEM_LIMIT", "collection has too many item entries"
                 )
@@ -2959,7 +2966,9 @@ def _require_mutation_visibility(
                 )
             if stat.S_ISDIR(entry.mode):
                 pending.append(
-                    vault.DirectoryCensusGuard.capture(root, entry.relative_path, max_entries=2_000)
+                    vault.DirectoryCensusGuard.capture(
+                        root, entry.relative_path, max_entries=_MAX_ITEM_ENTRIES
+                    )
                 )
 
 
