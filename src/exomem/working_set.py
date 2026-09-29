@@ -480,11 +480,14 @@ def build_packet(
         if _redundant_superseded(item, present_paths):
             continue
         text = bounded_text(item.text)
-        if len(text) > MAX_UNIT_HARD_CHARS:
+        standing = bool(item.provenance.get("standing"))
+        # A standing unit leads the packet on every turn that resolves its
+        # project, relevant or not, so it gets no allowance past the size a
+        # unit is designed to fit.
+        if len(text) > (MAX_UNIT_CHARS if standing else MAX_UNIT_HARD_CHARS):
             deferred.append((item, "unit_too_long"))
             continue
         role_count = per_role.get(item.role, 0)
-        standing = bool(item.provenance.get("standing"))
         if role_count >= MAX_ITEMS_PER_ROLE and not standing:
             deferred.append((item, "role_cap"))
             continue

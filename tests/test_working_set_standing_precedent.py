@@ -433,3 +433,34 @@ def test_the_conclusion_pages_kept_are_the_newest_not_the_alphabetically_first(
 
     assert CONCLUSION in pages
     assert len(pages) == working_set.ENTITY_CONCLUSION_PAGES
+
+
+def test_a_standing_unit_gets_no_allowance_past_the_preferred_size() -> None:
+    """The standing page leads every turn that resolves its project; a long one
+    would be paid for on all of them. It is a pointer past `MAX_UNIT_CHARS`."""
+    long_unit = _item("x " * (working_set.MAX_UNIT_CHARS // 2 + 20))
+    standing = working_set.LaneItem(
+        **{
+            **{f: getattr(long_unit, f) for f in long_unit.__dataclass_fields__},
+            "provenance": {"category": "decision", "standing": True},
+        }
+    )
+    ordinary = _item("x " * (working_set.MAX_UNIT_CHARS // 2 + 20))
+
+    def packet_of(item):
+        return working_set.build_packet(
+            items=(item,),
+            anchors=(),
+            roles=(),
+            current_state=(),
+            ambiguity=(),
+            missing=(),
+            max_chars=4000,
+            generation={},
+            status="resolved",
+        )
+
+    assert len(packet_of(ordinary)["units"]) == 1
+    capped = packet_of(standing)
+    assert capped["units"] == []
+    assert [p["reason"] for p in capped["pointers"]] == ["unit_too_long"]
