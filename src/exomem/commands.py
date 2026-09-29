@@ -7092,59 +7092,33 @@ def op_remember(
 
     For distilled decisions, findings, failures, patterns, experiments and
     production logs. Raw material goes to `capture_source`; proof-bearing
-    artifacts to `preserve_evidence` or `preserve_artifacts`.
+    artifacts to `preserve_evidence`/`preserve_artifacts`.
 
     Every non-empty source must already resolve to authorized governed Source
-    or Evidence material; a URL, connector or remote file ID, script or
-    derivative summary is not the original, so capture it first and cite its
-    governed path or stable ref. With no external source, pass an honest empty
-    list. Unresolved citations return `UNRESOLVED_SOURCE_CITATION` and write
-    nothing. Details: references/writing.md.
+    or Evidence material (a URL, remote file ID or derivative summary is not the
+    original): capture it first and cite its path or stable ref, else pass an
+    empty list. Unresolved citations return `UNRESOLVED_SOURCE_CITATION` and
+    write nothing. Details: references/writing.md.
 
     Args:
-        content: Full markdown body after frontmatter.
-        title: Display title, stored in frontmatter and the H1.
-        slug: Lowercase ASCII kebab-case filename component.
+        content: Markdown body after frontmatter.
         note_type: research-note, insight, failure, pattern, experiment, or production-log.
         project: Required for research-note. __PROJECT_KEYS_HINT__
-        projects: Project keys for cross-project notes. __PROJECT_KEYS_HINT__
-        sources: Wikilinks to existing governed pages this conclusion draws from,
-            e.g. ["Knowledge Base/Sources/Articles/2026-05-18-example"]. Each gets
-            this note in its `ingested_into:`. Omitting it on a research-note,
+        projects: Cross-project keys. __PROJECT_KEYS_HINT__
+        sources: Wikilinks to governed pages this draws from, e.g.
+            ["Knowledge Base/Sources/Articles/2026-05-18-example"]; each gets
+            this note in its `ingested_into:`. Omitting on research-note,
             insight, failure or pattern only warns.
-        tags: Lowercase tags.
-        status: Status override.
-        severity: Failure severity.
-        pattern_type: Pattern subtype.
-        domain: Experiment domain.
-        started: Experiment start date.
-        duration: Experiment duration.
-        hypothesis: Experiment hypothesis.
-        n: Experiment sample size.
-        concluded: Experiment conclusion date.
-        medium: Production-log medium.
-        recorded: Production recording date.
-        published: Production publication date.
-        host: Production host/creator.
-        editor: Production editor/producer.
-        bridge_of: Source paths or stable refs for a reviewed cross-domain
-            bridge; requires bridge_scope and bridge_review.
-        bridge_scope: Lowercase scope slug for a bridge draft.
-        bridge_review: ISO date to review an approved bridge again.
-        suggestions: Also return a `suggestions` block of pages to link (read
-            under `response_detail='full'`). Costs one retrieval pass over the
-            corpus; duplicate warnings run either way.
-        project_category: Category for a new project key.
-        validate_only: Validate and return an immutable creation draft without writing.
-        draft_id: Draft identity returned by validate_only.
-        draft_hash: Reviewed draft hash returned by validate_only.
-        draft_token: Destination/date token returned by validate_only.
+        bridge_of: Source paths or stable refs for a cross-domain bridge;
+            requires bridge_scope and bridge_review.
+        suggestions: Also return `suggestions` (pages to link; read under
+            `response_detail='full'`); costs one retrieval pass.
+        validate_only: Return an immutable creation draft without writing.
+        draft_token: From validate_only.
         relation_disposition: Reviewed relation outcome for commit.
-        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_hash: Draft hash the review covers.
         relation_review_reason: Audit reason for reviewed-none.
-        vocabulary_decision: Answer to a vocabulary_preparation response: its
-            evidence_fingerprint, outcome reuse, create or defer, and the
-            reviewed canonical value.
+        vocabulary_decision: Answers a vocabulary_preparation response.
     """
     return op_note(
         vault_root,
@@ -7241,36 +7215,24 @@ def op_edit_memory(
 ) -> dict:
     """Edit an existing memory page with an auditable reason.
 
-    For small corrections, section edits, batch string edits, opinion-row fills
-    or one frontmatter field; substantial rewrites go to `replace_memory`. Edits
-    preserve ordinary Markdown without synthesizing YAML; tags, frontmatter
-    patch, and take-row operations still require frontmatter.
+    For small corrections, section, batch string or opinion-row edits, or one
+    frontmatter field; substantial rewrites go to `replace_memory`.
 
-    A source-changing edit validates the complete final `sources` list against
-    authorized governed Source or Evidence material. Unrelated edits leave a
-    legacy unresolved citation alone; find that debt with
-    `review_memory(mode="audit", categories=["unresolved_source_citation"])`.
+    A source-changing edit validates the full final `sources` list against
+    authorized governed Source or Evidence material; unrelated edits leave a
+    legacy unresolved citation alone.
 
-    When `RELATION_DISPOSITION_STALE` or `RELATION_DISPOSITION_MISSING` blocks
-    an edit, call the identical operation with `validate_only=true`, then
-    commit it unchanged with `transition_token=<returned transition_token>`,
-    `relation_disposition="reviewed_none"`,
-    `relation_review_hash=<returned relation_review_hash>` (not the page
-    content hash) and an explicit `relation_review_reason`.
-
-    Or author a typed relation in the body: `## Relations` followed by
-    `- supports [[Knowledge Base/Notes/Research/example-target]]`.
-    Dataview `supports:: [[...]]` is not supported relation syntax.
+    `RELATION_DISPOSITION_STALE`/`_MISSING`: repeat the identical operation with
+    `validate_only=true`, then commit unchanged with `transition_token`,
+    `relation_disposition="reviewed_none"`, the returned `relation_review_hash`
+    (not the page content hash) and a `relation_review_reason`. Details:
+    references/writing.md.
 
     Args:
-        path: Page to edit.
-        why: One-line rationale recorded in the log.
         operation: Nested edit selected by `kind`.
-        validate_only: Preview without committing. Also accepted as
-            `operation.validate_only` when both agree.
+        validate_only: Preview only; also accepted as `operation.validate_only`.
         identity_decision: `{outcome: "distinct", candidate_fingerprint}` for an
-            `aliases` patch naming a genuinely shared name; the fingerprint
-            comes from the refusal.
+            `aliases` patch naming a shared name; fingerprint from the refusal.
     """
     # Flat keyword arguments (`**legacy`) remain accepted from direct
     # Python/runtime callers for one compatibility release; they are
@@ -7341,40 +7303,36 @@ def op_observe_memory(
 ) -> dict:
     """Validate or mutate one semantic unit on a compiled memory page.
 
-    Compact observation is the default form; pass a governed non-observation
-    `kind` for rich semantic-block form and typed relations. Use `validate`
-    before a guarded commit when semantic review is required.
+    Compact observation is the default; pass a governed non-observation `kind`
+    for rich form and typed relations. `validate` first when semantic review is
+    required.
 
-    An update rebuilds the whole unit. `verdict`, `check_by` and `id` keep their
-    current value when omitted (as does any metadata row this tool does not
-    own); `tags`, `context` and `relations` are cleared when omitted, so resend
-    what you want to keep. Reference: references/writing.md.
+    An update rebuilds the whole unit: `verdict`, `check_by` and `id` keep their
+    value when omitted; `tags`, `context` and `relations` are cleared, so resend
+    what you keep. Details: references/writing.md.
 
     Args:
-        path: Parent page path or canonical memory reference.
+        path: Parent page path or memory reference.
         operation: add, update, remove, or validate.
-        category: Open semantic category.
-        content: Unit content.
         kind: Governed rich kind; omitted means compact observation.
-        tags: Compact suffix or rich metadata tags. Replaces on update.
-        context: Compact suffix or rich metadata context. Replaces on update.
-        relations: Rich typed relations as {kind, target} objects. Replaces on update.
-        verdict: Rich-only judgment: abandoned, confirmed, inconclusive,
-            qualified, or refuted. Empty string clears it on update.
-        check_by: Rich-only ISO date (YYYY-MM-DD) to revisit the unit. Empty
-            string clears it on update.
-        id: Explicit unique anchor within the parent; derived on add if omitted.
-        unit_ref: Current exact unit reference for update/remove.
+        tags: Replaces on update.
+        context: Replaces on update.
+        relations: {kind, target} objects. Replaces on update.
+        verdict: Rich-only: abandoned, confirmed, inconclusive, qualified, or
+            refuted. Empty string clears it on update.
+        check_by: Rich-only ISO revisit date. Empty string clears it on update.
+        id: Unique anchor within the parent; derived on add if omitted.
+        unit_ref: Exact unit reference for update/remove.
         expected_fingerprint: Current unit fingerprint; required for update/remove.
         expected_hash: Current parent-page content hash; required for update/remove.
-        transition_token: Token returned by validate.
-        relation_disposition: Existing-page semantic review disposition.
-        relation_review_hash: Transition hash covered by reviewed-none.
+        transition_token: From validate.
+        relation_disposition: Semantic review disposition (existing page).
+        relation_review_hash: Transition hash the reviewed-none covers.
         relation_review_reason: Audit reason for reviewed-none.
 
     Returns:
-        The normalized unit, its stable reference, parent hashes and feedback.
-        Echo `after_hash` (whole-file `content_hash`) as the next `expected_hash`.
+        The unit, its stable reference, parent hashes and feedback. Echo
+        `after_hash` as the next `expected_hash`.
     """
     raw_path = str(path or "").strip()
     if (
@@ -7490,48 +7448,22 @@ def op_replace_memory(
     Replacement is a new source claim: every non-empty `sources` entry must
     resolve to authorized governed Source or Evidence material, even if the old
     page carried an unresolved citation. Capture the original first or pass an
-    honest empty list (`UNRESOLVED_SOURCE_CITATION`). Details:
-    references/supersession.md.
+    empty list (`UNRESOLVED_SOURCE_CITATION`). Details: references/supersession.md.
 
     Args:
         old_path: Page to supersede.
-        content: Full markdown body for the new page.
-        title: New page title.
-        slug: Lowercase ASCII kebab-case filename component.
+        content: Markdown body of the new page.
         note_type: New page type.
-        reason: Why the old page is superseded.
         project: Required for research-note.
-        projects: Project keys.
         sources: Source/evidence paths for the new conclusion.
-        tags: Lowercase tags.
-        status: Status override.
-        severity: Failure severity.
-        pattern_type: Pattern subtype.
-        domain: Experiment domain.
-        started: Experiment start date.
-        duration: Experiment duration.
-        hypothesis: Experiment hypothesis.
-        n: Experiment sample size.
-        concluded: Experiment conclusion date.
-        medium: Production-log medium.
-        recorded: Production recording date.
-        published: Production publication date.
-        host: Production host/creator.
-        editor: Production editor/producer.
-        bridge_of: Source paths or stable refs for a reviewed cross-domain
-            bridge; requires bridge_scope and bridge_review.
-        bridge_scope: Lowercase scope slug for a bridge draft.
-        bridge_review: ISO date to review an approved bridge again.
-        project_category: Category for a new project key.
-        validate_only: Validate the replacement draft without writing either page.
-        draft_id: Draft identity returned by validate_only.
-        draft_hash: Reviewed draft hash returned by validate_only.
-        draft_token: Destination/date token returned by validate_only.
+        bridge_of: Source paths or stable refs for a cross-domain bridge;
+            requires bridge_scope and bridge_review.
+        validate_only: Validate without writing either page.
+        draft_token: From validate_only.
         relation_disposition: Reviewed relation outcome for commit.
-        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_hash: Draft hash the review covers.
         relation_review_reason: Audit reason for reviewed-none.
-        vocabulary_decision: Evidence-bound reuse, create or defer answer to an
-            experiment-domain vocabulary preparation.
+        vocabulary_decision: Answers an experiment-domain vocabulary preparation.
     """
     return op_replace(
         vault_root,
@@ -7598,32 +7530,27 @@ def op_capture_source(
     client passes the handle `exomem attach --lane source` prints), stored
     losslessly under `Sources/`. Proof-bearing artifacts go to
     `preserve_evidence`/`preserve_artifacts`: choose by what the artifact is
-    for, not by what the client can carry. The raw source is preserved first;
-    `compile_guidance=true` then returns a proposal for a future compiled note.
+    for, not what the client can carry. `compile_guidance=true` also returns a
+    proposal for a future compiled note.
 
-    Classification is optional and never blocks preserving: `source_kind` (what
-    it IS) and `domain` (what it is ABOUT) are independent open vocabularies.
+    Classification never blocks preserving: `source_kind` (what it IS) and
+    `domain` (what it is ABOUT) are independent open vocabularies.
 
     Args:
-        title: Source title.
-        content: Raw source text. Supply this or `files`, not both.
-        slug: Lowercase ASCII kebab-case filename component.
+        content: Raw text. Supply this or `files`, not both.
         source_type: Alias of source_kind; supply either.
         url: Required for kinds that declare it, such as article, paper, video.
-        tags: Lowercase secondary labels; not for kind, domain or project.
-        why_captured: Short reason this source matters.
-        compile_guidance: Return a compilation proposal for the captured source.
+        tags: Secondary labels; not for kind, domain or project.
+        compile_guidance: Return a compilation proposal.
         suggested_title: Title hint for the proposal.
-        source_kind: What the artifact IS, as a lowercase slug. Differing
-            values with source_type are refused. Name the kind you mean, even
-            if unfamiliar; 'other' only when it cannot be determined.
-        domain: What the artifact is ABOUT, as a lowercase slug.
-        projects: Project keys this source serves; never affects storage.
-        files: Temporary client file handles, captured as Sources instead of
-            `content`. See the parameter schema for the shape.
-        adoption: Adoption identity selecting exactly one supplied handle. It
-            establishes eligibility, not write consent; agent-initiated use
-            obeys proactive_capture.
+        source_kind: What it IS, lowercase slug. Differing values with
+            source_type are refused. Name the kind you mean; 'other' only when
+            undeterminable.
+        domain: What it is ABOUT, lowercase slug.
+        projects: Project keys served; never affects storage.
+        files: Client file handles, captured instead of `content`.
+        adoption: Selects exactly one supplied handle. Establishes eligibility,
+            not write consent; agent-initiated use obeys proactive_capture.
     """
     if files or adoption is not None:
         from . import client_artifacts
@@ -11335,46 +11262,27 @@ def op_manage_memory_file(
 
     Tier-2 escape hatch for structures typed memory commands do not fit.
     Destructive operations need the same explicit flags as their canonical
-    leaves. validate_only and the review fields apply only to Markdown
-    create/append.
+    leaves. validate_only and review fields apply only to Markdown create/append.
 
     Args:
         operation: list, create, append, move, reclassify,
             propose-reclassification, delete, trash-list, or recover.
         path: Target for list/create/append/delete; default trash path for recover.
-        content: Body for create/append.
-        frontmatter: Frontmatter for create.
-        overwrite: Let create replace an existing file.
         allow_curated: Permit operations in curated trees where canonical leaves allow it.
         kind: file or dir, for create.
-        parents: Create parent folders in dir mode.
-        recursive: Recurse for list or delete-directory.
-        include_hidden: Include hidden files for list.
-        old_path: Source of a move.
-        new_path: Destination of a move.
-        source_kind: What a captured artifact IS (open vocabulary). Reclassify
-            sets it; propose-reclassification may preview it.
-        domain: What it is ABOUT, independent of kind. Same use as source_kind.
-        reason: Required for reclassify; recorded on the source.
-        update_wikilinks: Rewrite inbound wikilinks on move.
+        source_kind: What a captured artifact IS; reclassify sets it.
+        domain: What it is ABOUT; like source_kind.
+        reason: Required for reclassify.
         confirm: Required for delete.
-        force_orphan: Delete despite inbound links.
-        force_superseded: Delete superseded history.
         expected_dead_inbound: Links expected to die in the same workflow.
-        trash_path: Trash entry to recover.
-        restore_path: Recovery destination.
-        date: YYYY-MM-DD filter for trash-list.
-        validate_only: Validate a Markdown create or append without writing.
-        draft_id: Draft identity returned by validate_only.
-        draft_hash: Reviewed draft hash returned by validate_only.
-        draft_token: Token returned by validate_only; replay an overwrite
-            preview's `draft_token` unchanged on commit.
-        semantic_transition_token: Opaque append transition token from validate_only.
+        validate_only: Validate a Markdown create/append without writing.
+        draft_token: From validate_only; replay an overwrite preview's token
+            unchanged on commit.
+        semantic_transition_token: Append token from validate_only.
         relation_disposition: Reviewed relation outcome for semantic create/append.
-        relation_review_hash: Draft or transition hash covered by the review.
+        relation_review_hash: Draft or transition hash the review covers.
         relation_review_reason: Audit reason for reviewed-none.
-        promotion_reason: Required for a move promoting Sources/ to Evidence/;
-            logged as the audit trail.
+        promotion_reason: Required for a move promoting Sources/ to Evidence/.
     """
     creation_review_requested = any(
         value is not None
