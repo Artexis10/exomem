@@ -25,11 +25,12 @@
       {
         "case_id": "C1",
         "failure_reasons": [
-          "gold recall 0.33 below the 0.9 floor",
-          "missing required fact(s): ['weekly limit', 'capacity ceiling']"
+          "gold recall 0.67 below the 0.9 floor",
+          "precision 0.67 below the 0.8 floor",
+          "missing required fact(s): ['capacity ceiling']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 2,
           "total": 3
         },
         "hedged": false,
@@ -38,7 +39,7 @@
           "hit": 0,
           "total": 1
         },
-        "precision": 1.0
+        "precision": 0.6666666666666666
       },
       {
         "case_id": "T1",
@@ -96,18 +97,17 @@
         "case_id": "C3",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "1 poison anchor(s) surfaced",
-          "gold recall 0.00 below the 0.9 floor",
+          "gold recall 0.50 below the 0.9 floor",
           "missing required fact(s): ['extending the reporting module']"
         ],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 2
         },
         "hedged": false,
         "passed": false,
         "poison": {
-          "hit": 1,
+          "hit": 0,
           "total": 1
         },
         "precision": null
@@ -258,11 +258,10 @@
         "case_id": "C8",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.00 below the 0.9 floor",
-          "missing required fact(s): ['version 3']"
+          "precision 0.00 below the 0.8 floor"
         ],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
         "hedged": false,
@@ -271,16 +270,17 @@
           "hit": 0,
           "total": 2
         },
-        "precision": null
+        "precision": 0.0
       },
       {
         "case_id": "T8",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.00 below the 0.9 floor"
+          "twin surfaced a ref outside its own gold",
+          "precision 0.00 below the 0.8 floor"
         ],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
         "hedged": false,
@@ -289,7 +289,7 @@
           "hit": 0,
           "total": 2
         },
-        "precision": null
+        "precision": 0.0
       },
       {
         "case_id": "C9",
@@ -352,11 +352,12 @@
       {
         "case_id": "C1",
         "failure_reasons": [
-          "gold recall 0.33 below the 0.9 floor",
-          "missing required fact(s): ['weekly limit', 'capacity ceiling']"
+          "gold recall 0.67 below the 0.9 floor",
+          "precision 0.67 below the 0.8 floor",
+          "missing required fact(s): ['capacity ceiling']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 2,
           "total": 3
         },
         "hedged": false,
@@ -365,7 +366,7 @@
           "hit": 0,
           "total": 1
         },
-        "precision": 1.0
+        "precision": 0.6666666666666666
       },
       {
         "case_id": "T1",
@@ -423,18 +424,17 @@
         "case_id": "C3",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "1 poison anchor(s) surfaced",
-          "gold recall 0.00 below the 0.9 floor",
+          "gold recall 0.50 below the 0.9 floor",
           "missing required fact(s): ['extending the reporting module']"
         ],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 2
         },
         "hedged": false,
         "passed": false,
         "poison": {
-          "hit": 1,
+          "hit": 0,
           "total": 1
         },
         "precision": null
@@ -585,11 +585,10 @@
         "case_id": "C8",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.00 below the 0.9 floor",
-          "missing required fact(s): ['version 3']"
+          "precision 0.00 below the 0.8 floor"
         ],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
         "hedged": false,
@@ -598,16 +597,17 @@
           "hit": 0,
           "total": 2
         },
-        "precision": null
+        "precision": 0.0
       },
       {
         "case_id": "T8",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.00 below the 0.9 floor"
+          "twin surfaced a ref outside its own gold",
+          "precision 0.00 below the 0.8 floor"
         ],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
         "hedged": false,
@@ -616,7 +616,7 @@
           "hit": 0,
           "total": 2
         },
-        "precision": null
+        "precision": 0.0
       },
       {
         "case_id": "C9",
@@ -679,11 +679,11 @@
       {
         "case_id": "C1",
         "failure_reasons": [
-          "gold recall 0.33 below the 0.9 floor",
-          "missing required fact(s): ['weekly limit', 'capacity ceiling']"
+          "gold recall 0.67 below the 0.9 floor",
+          "missing required fact(s): ['capacity ceiling']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 2,
           "total": 3
         },
         "hedged": false,
@@ -750,18 +750,17 @@
         "case_id": "C3",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "1 poison anchor(s) surfaced",
-          "gold recall 0.00 below the 0.9 floor",
+          "gold recall 0.50 below the 0.9 floor",
           "missing required fact(s): ['extending the reporting module']"
         ],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 2
         },
         "hedged": false,
         "passed": false,
         "poison": {
-          "hit": 1,
+          "hit": 0,
           "total": 1
         },
         "precision": null
@@ -908,31 +907,28 @@
       },
       {
         "case_id": "C8",
-        "failure_reasons": [
-          "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.00 below the 0.9 floor",
-          "missing required fact(s): ['version 3']"
-        ],
+        "failure_reasons": [],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
         "hedged": false,
-        "passed": false,
+        "passed": true,
         "poison": {
           "hit": 0,
           "total": 2
         },
-        "precision": null
+        "precision": 1.0
       },
       {
         "case_id": "T8",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.00 below the 0.9 floor"
+          "twin surfaced a ref outside its own gold",
+          "precision 0.00 below the 0.8 floor"
         ],
         "gold": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
         "hedged": false,
@@ -941,7 +937,7 @@
           "hit": 0,
           "total": 2
         },
-        "precision": null
+        "precision": 0.0
       },
       {
         "case_id": "C9",
@@ -1103,7 +1099,7 @@
       "by_anchor_kind": [
         {
           "gold": {
-            "hit": 0,
+            "hit": 1,
             "total": 2
           },
           "kind": "note",
@@ -1127,28 +1123,28 @@
       "case_id": "C1",
       "expected_status": "resolved",
       "failure_reasons": [
-        "gold recall 0.33 below the 0.9 floor",
-        "missing required fact(s): ['weekly limit', 'capacity ceiling']"
+        "gold recall 0.67 below the 0.9 floor",
+        "precision 0.67 below the 0.8 floor",
+        "missing required fact(s): ['capacity ceiling']"
       ],
       "gold": {
-        "hit": 1,
+        "hit": 2,
         "total": 3
       },
       "hedged": false,
       "is_twin": false,
       "must_exclude_present": [],
       "must_include_missing": [
-        "weekly limit",
         "capacity ceiling"
       ],
       "observed_status": "resolved",
-      "packet_chars": 325,
+      "packet_chars": 410,
       "passed": false,
       "poison": {
         "hit": 0,
         "total": 1
       },
-      "precision": 1.0,
+      "precision": 0.6666666666666666,
       "status_match": true,
       "twin_false_activation": false
     },
@@ -1193,7 +1189,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "unresolved",
-      "packet_chars": 304,
+      "packet_chars": 79,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -1311,7 +1307,7 @@
       "by_anchor_kind": [
         {
           "gold": {
-            "hit": 0,
+            "hit": 1,
             "total": 1
           },
           "kind": "note",
@@ -1327,7 +1323,7 @@
           },
           "kind": "planning_item",
           "poison": {
-            "hit": 1,
+            "hit": 0,
             "total": 1
           }
         }
@@ -1336,12 +1332,11 @@
       "expected_status": "resolved",
       "failure_reasons": [
         "expected status 'resolved', observed 'unresolved'",
-        "1 poison anchor(s) surfaced",
-        "gold recall 0.00 below the 0.9 floor",
+        "gold recall 0.50 below the 0.9 floor",
         "missing required fact(s): ['extending the reporting module']"
       ],
       "gold": {
-        "hit": 0,
+        "hit": 1,
         "total": 2
       },
       "hedged": false,
@@ -1351,10 +1346,10 @@
         "extending the reporting module"
       ],
       "observed_status": "unresolved",
-      "packet_chars": 46,
+      "packet_chars": 54,
       "passed": false,
       "poison": {
-        "hit": 1,
+        "hit": 0,
         "total": 1
       },
       "precision": null,
@@ -1451,7 +1446,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "unresolved",
-      "packet_chars": 335,
+      "packet_chars": 109,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -1660,7 +1655,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "unresolved",
-      "packet_chars": 345,
+      "packet_chars": 156,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -1749,7 +1744,7 @@
       "by_anchor_kind": [
         {
           "gold": {
-            "hit": 0,
+            "hit": 1,
             "total": 1
           },
           "kind": "note",
@@ -1763,27 +1758,24 @@
       "expected_status": "resolved",
       "failure_reasons": [
         "expected status 'resolved', observed 'unresolved'",
-        "gold recall 0.00 below the 0.9 floor",
-        "missing required fact(s): ['version 3']"
+        "precision 0.00 below the 0.8 floor"
       ],
       "gold": {
-        "hit": 0,
+        "hit": 1,
         "total": 1
       },
       "hedged": false,
       "is_twin": false,
       "must_exclude_present": [],
-      "must_include_missing": [
-        "version 3"
-      ],
+      "must_include_missing": [],
       "observed_status": "unresolved",
-      "packet_chars": 0,
+      "packet_chars": 68,
       "passed": false,
       "poison": {
         "hit": 0,
         "total": 2
       },
-      "precision": null,
+      "precision": 0.0,
       "status_match": false,
       "twin_false_activation": false
     },
@@ -1792,7 +1784,7 @@
       "by_anchor_kind": [
         {
           "gold": {
-            "hit": 0,
+            "hit": 1,
             "total": 1
           },
           "kind": "note",
@@ -1806,10 +1798,11 @@
       "expected_status": "resolved",
       "failure_reasons": [
         "expected status 'resolved', observed 'unresolved'",
-        "gold recall 0.00 below the 0.9 floor"
+        "twin surfaced a ref outside its own gold",
+        "precision 0.00 below the 0.8 floor"
       ],
       "gold": {
-        "hit": 0,
+        "hit": 1,
         "total": 1
       },
       "hedged": false,
@@ -1817,15 +1810,15 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "unresolved",
-      "packet_chars": 0,
+      "packet_chars": 69,
       "passed": false,
       "poison": {
         "hit": 0,
         "total": 2
       },
-      "precision": null,
+      "precision": 0.0,
       "status_match": false,
-      "twin_false_activation": false
+      "twin_false_activation": true
     },
     {
       "blocked": false,

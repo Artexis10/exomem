@@ -274,8 +274,11 @@ Two rules follow from reading the red cases:
 
 Per-case result after each mechanism, raw (with gold pages reached) and, where
 it differs, amendment A8. Measured with the harness's own `activate` and scorer
-on both trees; the sandbox could not fetch the o200k tokenizer, so only the
-token count was approximated (case verdicts do not depend on it):
+on both trees, and matched by the recorded v4 report re-recorded with the real
+o200k tokenizer (raw 9/18 and A8 10/18, beside the 9/18 base). Recall bought
+some precision: C1 serves one more page outside its gold (precision 1.00 to
+0.67, still red), and C8 and T8 serve their gold page as a carry, which raw
+precision does not count (0.00; A8 counts it):
 
 | Case | base (#1440) | +M1 same-kind | +M2-M4 named domains, thread, entity | +M5 lenses | +M6 title-named |
 |------|------|------|------|------|------|
