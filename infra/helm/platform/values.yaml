@@ -260,11 +260,17 @@ cellctl:
   # explicit addresses, refreshed deliberately, matching gateway's own
   # databaseEgressCidrs pattern.
   databaseEgressCidrs: []
+  # memoryLimit is 3Gi because the first index build over a large restored vault
+  # peaked above 1.2 GiB and was OOM-killed at 1536Mi. The owner's cell (about
+  # 9,300 files, 3.6 GB) then settled at 1.7 GiB resident at idle after
+  # indexing, so memoryRequest (1Gi) understates a large vault's steady state
+  # and lets several large cells overcommit a node. The request is left as is
+  # here; sizing it is a separate decision.
   cellResources:
     cpuRequest: 250m
     cpuLimit: "2"
     memoryRequest: 1Gi
-    memoryLimit: 1536Mi
+    memoryLimit: 3Gi
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {cpu: 500m, memory: 512Mi}

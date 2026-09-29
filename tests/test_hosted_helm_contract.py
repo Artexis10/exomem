@@ -3431,3 +3431,15 @@ def test_no_service_requires_an_external_load_balancer() -> None:
         and document.get("spec", {}).get("type") in {"LoadBalancer", "NodePort"}
     ]
     assert not offenders, f"these Services need an external balancer the cluster lacks: {offenders}"
+
+
+def test_cloud_cell_default_memory_envelope_is_3gi_limit_over_a_1gi_request() -> None:
+    """The cloud cell's first index build over a large restored vault was
+    OOM-killed at 1536Mi. The platform default feeds cellctl's
+    CELLCTL_CELL_MEMORY_LIMIT, which must agree with cellctl's own default."""
+    values = yaml.safe_load((PLATFORM / "values.yaml").read_text(encoding="utf-8"))
+    resources = values["cellctl"]["cellResources"]
+    assert resources["memoryLimit"] == "3Gi"
+    assert resources["memoryRequest"] == "1Gi"
+    main_py = (ROOT / "infra/cellctl/src/cellctl/main.py").read_text(encoding="utf-8")
+    assert 'os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", "3Gi")' in main_py

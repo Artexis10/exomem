@@ -76,6 +76,17 @@
   its byte-identical chart copy together with the limits the provisioner hardcodes, and
   correct the provisioner README, which still claims six cells against a contract of four.
 
+- [ ] 5.4 Measure whether cells on one node can share the model weights' memory
+  without sharing a process. Map one read-only weight file into several cell
+  containers on the node, then compare the node's total resident and shared pages
+  against the same cells with private copies. Tenant text must never leave its own
+  cell: a shared inference process stays rejected (proposal, alternatives). If ONNX
+  Runtime copies the initializers into private memory, record that and close the
+  task without a change.
+  - Found on 2026-09-28: the owner cell's first index build over a 3.6 GB vault
+    peaked above 1.2 GiB against a 1536 MiB limit. The peak was the build's working
+    set, not the model, so this is a density measure, not the fix for that peak.
+
 ## 6. Verify
 
 - [ ] 6.1 Run the full repository suite plus the pinned validation gate and strict
