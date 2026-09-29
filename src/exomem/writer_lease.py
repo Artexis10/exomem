@@ -2355,6 +2355,22 @@ def _probe_owner_liveness(state_dir: Path, owner: str) -> bool:
     return False
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """A connection whose `with` block commits or rolls back, then closes.
+
+    The stock `with conn:` only ends the transaction and leaves the handle to
+    the collector. A leaked handle keeps the WAL sidecars alive until some
+    later GC pass closes it, so the state directory changes at an arbitrary
+    moment after the store was last used.
+    """
+
+    def __exit__(self, exc_type, exc, traceback):  # noqa: ANN001
+        try:
+            return super().__exit__(exc_type, exc, traceback)
+        finally:
+            self.close()
+
+
 class IdempotencyStore:
     """Durable per-replica retry cache, deliberately outside the synced vault."""
 
@@ -2685,7 +2701,7 @@ class IdempotencyStore:
             self.path.with_name(f"{self.path.name}-shm"),
         )
         existed = {item for item in private_paths if item.exists()}
-        conn = sqlite3.connect(self.path, timeout=10)
+        conn = sqlite3.connect(self.path, timeout=10, factory=_ClosingConnection)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             if os.name == "nt":
@@ -4365,6 +4381,10 @@ class LeaseManager:
                     principal=effective_principal(),
                 ) as gate_context:
                     leaf_result = command.leaf(*injected, **kwargs)
+                    if vocabulary_binding is not None and not _ACTIVE_MUTATION_COMMITTED.get():
+                        from . import vocabulary_application
+
+                        vocabulary_application.refuse_identity_preparation(leaf_result)
                     if _ACTIVE_MUTATION_COMMITTED.get():
                         return attach_evidence(
                             committed_terminal(

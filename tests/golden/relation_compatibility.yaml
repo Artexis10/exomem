@@ -21,16 +21,21 @@ relations:
   extends: {direction: directed, origins: [semantic_relation]}
   implements: {direction: directed, origins: [semantic_relation]}
   links_to: {direction: directed, origins: [frontmatter, semantic_relation, wikilink]}
+  located_at: {direction: directed, origins: [semantic_relation]}
+  member_of: {direction: directed, origins: [semantic_relation]}
   mentions: {direction: directed, origins: [semantic_relation]}
   mitigates: {direction: directed, origins: [semantic_relation]}
   observed_in: {direction: directed, origins: [semantic_relation]}
+  operates: {direction: directed, origins: [semantic_relation]}
   owns: {direction: directed, origins: [semantic_relation]}
   part_of: {direction: directed, inverse: contains, origins: [semantic_relation]}
+  produces: {direction: directed, origins: [semantic_relation]}
   raises_question: {direction: directed, origins: [semantic_relation]}
   refines: {direction: directed, origins: [semantic_relation]}
   relates_to: {direction: symmetric, origins: [semantic_relation]}
   resolves: {direction: directed, origins: [semantic_relation]}
   supersedes: {direction: directed, origins: [frontmatter, semantic_relation]}
+  supplies: {direction: directed, origins: [semantic_relation]}
   supports: {direction: directed, origins: [semantic_relation]}
   tests: {direction: directed, origins: [semantic_relation]}
   used_for: {direction: directed, origins: [semantic_relation]}

@@ -412,6 +412,23 @@ from exomem import commands
 #: place in `product_commands` and the `capture` action's `advanced` list;
 #: every commitment, capture class and post-write advisory still says what it
 #: said, only without repeating a clause the payload already states elsewhere.
+#:
+#: `capture-identities-at-write-time` (authored 2026-09-19, merged onto the trim
+#: above 2026-09-28), PAID rather than spent. Added `LINK_NAMED_IDENTITIES_LINE`
+#: (91 B) to `balanced` and `maximal` capture, and "central or " into the
+#: "recurring entity" phrase each already carried (+11 B each) -- +102 B at both
+#: levels. Paid for by tightening existing sentences without changing what they
+#: instruct: `ACTIVATION_CARRIER_LINE` 182 B -> 138 B (-44 B; reordered its two
+#: clauses and dropped words the reordering made redundant),
+#: `_EPISODE_SWEEP_CAPTURE` 421 B -> 392 B (-29 B; an em-dash "for example"
+#: became a plain-ASCII "e.g.", and two adjectives came off two of five
+#: already-non-exhaustive examples), and the Entity routing sentence at both
+#: levels ("there; otherwise use one ... ; use Records only" -> "there, else one
+#: ... ; Records only", -13 B) plus two `maximal`-only conjunctions (-7 B). No
+#: ceiling raise. Measured on a scratch vault `(default surface, claude-code)`:
+#:
+#:     balanced    644 /   635
+#:     maximal     287 /   278   <- inside the 512 band, clear of maximal's 256
 COMPACT_BYTE_CEILING = 63_300
 
 #: The defect was compact and full being near-identical. A profile that does not

@@ -50,6 +50,7 @@ statement came from, not what it says.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import math
 from collections.abc import Iterable, Mapping
@@ -449,6 +450,164 @@ WORKING_SET_P95_MS_CEILING = 2500
 #: End-to-end padded-tree precision floor for C9 (N1).
 PADDING_PRECISION_FLOOR = 0.80
 
+#: Scoring amendments (design.md "Amendments"), each opt-in and reported
+#: beside the raw pre-registered score, never in its place. A2: a served unit
+#: whose ref is a fragment of a bound parent page recalls that page, for
+#: recall only. A4: on a twin, a poison anchor served ``partial`` beside a
+#: ``partial`` anchor from the twin's own gold is a hedge, not poison.
+UNIT_PARENT_RECALL = "unit_parent_recall"
+HEDGED_POISON = "hedged_poison"
+#: A7: on a positive (non-twin) case, every ambiguity candidate joins the
+#: precision denominator like a served anchor, so a candidate outside the
+#: case's gold counts against precision. The raw scorer leaves ambiguity out
+#: of precision, so a wrong candidate beside C7's gold still passes raw.
+AMBIGUITY_PRECISION = "ambiguity_precision"
+#: A8: on a positive (non-twin) case, a gold page served ``retrieval_carried``
+#: together with at least one of its own units satisfies the expected
+#: ``resolved`` status, and every unit whose ref is a ``#unit-`` fragment of a
+#: bound gold page is credited to that page in precision as well as recall
+#: (A2 amended recall only). Units of any other page stay distinct.
+CARRIED_GOLD = "carried_gold"
+#: A9: agent-choice scoring (see :data:`AGENT_CHOICE_RULE`).
+AGENT_CHOICE = "agent_choice"
+#: A10: invalid twins (see :data:`INVALID_TWINS`).
+INVALID_TWIN = "invalid_twin"
+AMENDMENTS: frozenset[str] = frozenset(
+    {UNIT_PARENT_RECALL, HEDGED_POISON, AMBIGUITY_PRECISION, CARRIED_GOLD, AGENT_CHOICE, INVALID_TWIN}
+)
+
+#: Amendment A10, as pre-registered: negative twins whose turn a
+#: pre-registered fixture page genuinely answers. The twin's premise (empty
+#: gold, nothing to activate) is a fixture-design defect for these, and
+#: serving that page is correct behaviour, so under A10 the twin is reported
+#: "invalid, excluded" rather than scored. Raw still scores it as-is, and the
+#: fixture page itself is frozen. twin -> (fixture page key, reason).
+INVALID_TWINS: dict[str, tuple[str, str]] = {
+    "T1": (
+        "t1_fitness_goal_note",
+        "the turn is about a step-count goal, and this pre-registered page (C1's poison) records one",
+    ),
+    "T2": (
+        "t2_camera_gear_note",
+        "latent: the turn is about photographing a dish, and this pre-registered page (C2's poison) "
+        "is the photography gear for it; the carry does not reach it today",
+    ),
+    "T9": (
+        "t2_camera_gear_note",
+        "latent: T2's turn on the padded tree, answered by the same page (C9's poison)",
+    ),
+}
+INVALID_TWIN_RULE = (
+    "A10 invalid twins. A negative twin (expected unresolved, empty gold) whose turn a "
+    "pre-registered fixture page genuinely answers is reported 'invalid, excluded' under "
+    "A10, never passed or failed. Raw scores it unchanged. The list is pre-registered with "
+    "the page and the reason; the fixture pages stay frozen."
+)
+
+#: Amendment A9, as pre-registered. Its digest (:func:`agent_choice_digest`)
+#: covers this text and the source of the functions that apply it.
+AGENT_CHOICE_RULE = (
+    "A9 agent-choice scoring. The compiler supplies recall within budget with "
+    "truthful labels; the primary agent chooses. A positive case (not a twin, "
+    "non-empty gold) passes when both hold. (1) Every gold page arrives under an "
+    "honest label: a resolved, partial or retrieval_carried anchor, or an "
+    "ambiguity candidate; and the case's gold facts are present in served "
+    "material. (2) Nothing is mislabelled: no non-gold page is served as a "
+    "resolved anchor or as a current_state entry, and no poison is served as "
+    "resolved. Extra honestly labelled partial or ambiguity siblings do not fail "
+    "the case, within the packet budget (the token hard cap and the packet's own "
+    "character limit). Twins and the no-memory case C6 are scored unchanged."
+)
+
+
+HONEST_ANCHOR_STATUSES: frozenset[str] = frozenset({"resolved", "partial", "retrieval_carried"})
+
+
+def _agent_choice_applies(fixture: FixtureCase) -> bool:
+    """A9 scores positive cases only: not a twin, and a gold of its own."""
+
+    return not fixture.case_id.startswith("T") and bool(fixture.gold)
+
+
+def _agent_choice_failures(
+    packet: ActivationPacket,
+    *,
+    gold_refs: tuple[str, ...],
+    poison_refs: tuple[str, ...],
+    must_include_missing: tuple[str, ...],
+    unit_parents: Mapping[str, str] | None,
+) -> list[str]:
+    """Why a positive case fails under A9 (:data:`AGENT_CHOICE_RULE`)."""
+
+    parents = unit_parents or {}
+
+    def page(ref: str) -> str:
+        return parents.get(ref, ref)
+
+    gold = set(gold_refs)
+    honest = {page(anchor.ref) for anchor in packet.anchors if anchor.status in HONEST_ANCHOR_STATUSES}
+    honest.update(page(ref) for ref in packet.ambiguity)
+    resolved_pages = {page(anchor.ref) for anchor in packet.anchors if anchor.status == "resolved"}
+
+    failures: list[str] = []
+    unlabelled = [ref for ref in gold_refs if ref not in honest]
+    if unlabelled:
+        failures.append(f"A9: {len(unlabelled)} gold page(s) not served under an honest label")
+    if must_include_missing:
+        failures.append(f"A9: gold fact(s) missing from served material: {list(must_include_missing)}")
+    mislabelled = sorted(ref for ref in resolved_pages if ref not in gold)
+    if mislabelled:
+        failures.append(f"A9: {len(mislabelled)} non-gold page(s) served as resolved")
+    stated = sorted({page(entry.anchor) for entry in packet.current_state} - gold)
+    if stated:
+        failures.append(f"A9: {len(stated)} non-gold page(s) served as current_state")
+    poisoned = [ref for ref in poison_refs if ref in resolved_pages]
+    if poisoned:
+        failures.append(f"A9: {len(poisoned)} poison page(s) served as resolved")
+    over_limit = packet.budget_limit_chars is not None and packet.budget_used_chars > packet.budget_limit_chars
+    if packet_token_count(packet) > TOKEN_HARD_CAP or over_limit:
+        failures.append("A9: packet exceeds its budget")
+    return failures
+
+
+def invalid_twins_digest() -> str:
+    """The pre-registered identity of A10: its rule and its list."""
+
+    payload = {"rule": INVALID_TWIN_RULE, "invalid_twins": {k: list(v) for k, v in INVALID_TWINS.items()}}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def invalid_twin_reason(case_id: str) -> str:
+    """The A10 exclusion reason every excluded twin's amended score carries."""
+
+    page, why = INVALID_TWINS[case_id]
+    return f"A10: invalid twin, excluded: {page} answers the turn ({why})"
+
+
+def agent_choice_digest() -> str:
+    """The pre-registered identity of A9: its rule and the code applying it."""
+
+    import inspect
+
+    parts = [
+        AGENT_CHOICE_RULE,
+        ",".join(sorted(HONEST_ANCHOR_STATUSES)),
+        inspect.getsource(_agent_choice_applies),
+        inspect.getsource(_agent_choice_failures),
+    ]
+    blob = "\n".join(part.replace("\r\n", "\n") for part in parts).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def excluded_case_ids(scores: Iterable[CaseScore]) -> tuple[str, ...]:
+    """The cases an A10-amended report excludes from its verdict."""
+
+    return tuple(
+        score.case_id
+        for score in scores
+        if score.failure_reasons and score.failure_reasons[0].startswith("A10: invalid twin, excluded")
+    )
+
 
 def _resolved_refs(packet: ActivationPacket) -> set[str]:
     return {anchor.ref for anchor in packet.anchors if anchor.status == "resolved"}
@@ -558,6 +717,8 @@ def score_case(
     *,
     key_to_ref: dict[str, str] | None = None,
     reference_binding: ReferenceBinding | None = None,
+    amendments: Iterable[str] = (),
+    unit_parents: Mapping[str, str] | None = None,
 ) -> CaseScore:
     """Score one packet against its pre-registered fixture.
 
@@ -569,7 +730,20 @@ def score_case(
     ``reference_binding`` additionally permits only projections frozen from
     canonical source bytes before activation; its map supersedes an equivalent
     ``key_to_ref`` argument.
+
+    ``amendments`` names scoring amendments to apply (:data:`AMENDMENTS`);
+    none by default, which is the raw pre-registered score. ``unit_parents``
+    maps a page's ref spellings to its canonical gold ref, frozen from
+    canonical readback before activation; :data:`UNIT_PARENT_RECALL` needs it.
     """
+
+    applied = frozenset(amendments)
+    unknown_amendments = sorted(applied - AMENDMENTS)
+    if unknown_amendments:
+        raise ValueError(f"unknown amendment(s) {unknown_amendments}")
+    for needs_parents in (UNIT_PARENT_RECALL, CARRIED_GOLD):
+        if needs_parents in applied and unit_parents is None:
+            raise ValueError(f"{needs_parents} needs a frozen unit_parents map")
 
     binding_map: dict[str, str] | None = None
     valid_projections: dict[str, str] = {}
@@ -606,43 +780,81 @@ def score_case(
         identity_mentions.update(packet.ambiguity)
         identity_mentions.update(valid_projections.values())
 
-    gold_hit = sum(1 for ref in gold_refs if ref in identity_mentions)
-    poison_hit = sum(
-        1
-        for ref in poison_refs
-        if (ref in mentioned and ref not in credited)
-        or any(
+    # A2: recall only. The unit keeps its own ref in every other channel.
+    recall_mentions = set(identity_mentions)
+    if UNIT_PARENT_RECALL in applied and unit_parents is not None:
+        for unit in packet.units:
+            parent, separator, fragment = unit.ref.partition("#")
+            if separator and fragment.startswith("unit-") and parent in unit_parents:
+                recall_mentions.add(unit_parents[parent])
+
+    own_gold = set(gold_refs)
+    # A8: each unit of a bound gold page, credited to that page; and the gold
+    # pages served `retrieval_carried` with at least one of their own units.
+    gold_unit_parent: dict[str, str] = {}
+    carried_gold: set[str] = set()
+    if CARRIED_GOLD in applied and unit_parents is not None and not fixture.case_id.startswith("T"):
+        for unit in packet.units:
+            parent, separator, fragment = unit.ref.partition("#")
+            if separator and fragment.startswith("unit-") and unit_parents.get(parent) in own_gold:
+                gold_unit_parent[unit.ref] = unit_parents[parent]
+        recall_mentions.update(gold_unit_parent.values())
+        carried_gold = {
+            unit_parents.get(anchor.ref, anchor.ref)
+            for anchor in packet.anchors
+            if anchor.status == "retrieval_carried"
+        } & set(gold_unit_parent.values())
+    # A4: a twin's poison served only as a `partial` anchor, beside a
+    # `partial` anchor from the twin's own gold, is a hedge. Served resolved,
+    # through any other channel, or alone, it stays poison.
+    hedged_poison: set[str] = set()
+    if HEDGED_POISON in applied and fixture.case_id.startswith("T"):
+        partial_refs = {anchor.ref for anchor in packet.anchors if anchor.status == "partial"}
+        if partial_refs & own_gold:
+            other_channels = set(false_activation_candidates) | set(all_bound_projections)
+            hedged_poison = {
+                ref
+                for ref in poison_refs
+                if ref in partial_refs
+                and ref not in other_channels
+                and not any(
+                    projection_ref in mentioned and canonical_ref == ref
+                    for projection_ref, canonical_ref in all_bound_projections.items()
+                )
+            }
+
+    def is_poison_hit(ref: str) -> bool:
+        if ref in hedged_poison:
+            return False
+        return (ref in mentioned and ref not in credited) or any(
             projection_ref in mentioned and canonical_ref == ref
             for projection_ref, canonical_ref in all_bound_projections.items()
         )
-    )
+
+    gold_hit = sum(1 for ref in gold_refs if ref in recall_mentions)
+    poison_hit = sum(1 for ref in poison_refs if is_poison_hit(ref))
 
     tallies: dict[str, list[int]] = {}
     for key, ref in zip(fixture.gold, gold_refs, strict=True):
         tally = tallies.setdefault(anchor_kind_for(key), [0, 0, 0, 0])
         tally[0] += 1
-        tally[1] += int(ref in identity_mentions)
+        tally[1] += int(ref in recall_mentions)
     for key, ref in zip(fixture.poison, poison_refs, strict=True):
         tally = tallies.setdefault(anchor_kind_for(key), [0, 0, 0, 0])
         tally[2] += 1
-        tally[3] += int(
-            (ref in mentioned and ref not in credited)
-            or any(
-                projection_ref in mentioned and canonical_ref == ref
-                for projection_ref, canonical_ref in all_bound_projections.items()
-            )
-        )
+        tally[3] += int(is_poison_hit(ref))
     by_anchor_kind = tuple(
         AnchorKindTally(kind=kind, gold_total=g_t, gold_hit=g_h, poison_total=p_t, poison_hit=p_h)
         for kind, (g_t, g_h, p_t, p_h) in sorted(tallies.items())
     )
 
     observed_status = turn_status(packet)
-    status_match = observed_status == fixture.expected_status
+    status_match = observed_status == fixture.expected_status or bool(
+        carried_gold and fixture.expected_status == "resolved"
+    )
 
     # Twin false activation (B1): a ref outside the twin's own gold, found via
     # a resolved anchor or any unit/pointer/current-state/ambiguity channel.
-    own_gold = set(gold_refs)
     twin_false_activation = bool(
         fixture.case_id.startswith("T")
         and any(
@@ -671,6 +883,8 @@ def score_case(
         and not packet.current_state
         and not packet.ambiguity
     )
+    # A4 removes the hedged poison hit (`is_poison_hit`) and nothing else: it
+    # never widens B3's `hedged`, so it cannot waive a status mismatch.
 
     # Precision (M1, spec: "computed over every ref the packet surfaces as a
     # resolved anchor, unit or pointer and excluding superseded ancestors the
@@ -682,7 +896,13 @@ def score_case(
     # (task 2.3) is excluded from the denominator: deliberately,
     # transparently marking it is correct compiler behaviour, not irrelevant
     # padding, and must not be penalised as if it were.
-    precision_denominator_refs = resolved | {unit.ref for unit in packet.units} | {p.ref for p in packet.pointers}
+    precision_denominator_refs = (
+        resolved
+        | {gold_unit_parent.get(unit.ref, unit.ref) for unit in packet.units}
+        | {p.ref for p in packet.pointers}
+    )
+    if AMBIGUITY_PRECISION in applied and not fixture.case_id.startswith("T"):
+        precision_denominator_refs |= set(packet.ambiguity)
     precision_denominator_refs -= credited
     relevant_precision_refs = set(gold_refs)
     relevant_precision_refs.update(
@@ -747,6 +967,21 @@ def score_case(
         failure_reasons.append(
             f"packet-contract violation: current_state statement exceeds {STATEMENT_MAX_CHARS} chars "
             f"for {list(overlong_statements)}"
+        )
+
+    # A10: a listed invalid twin is excluded, never passed or failed. The
+    # reason names it; `excluded_case_ids` reads it back.
+    if INVALID_TWIN in applied and fixture.case_id in INVALID_TWINS:
+        failure_reasons = [invalid_twin_reason(fixture.case_id)]
+
+    # A9 replaces the verdict of a positive case, never its raw metrics.
+    if AGENT_CHOICE in applied and _agent_choice_applies(fixture):
+        failure_reasons = _agent_choice_failures(
+            packet,
+            gold_refs=gold_refs,
+            poison_refs=poison_refs,
+            must_include_missing=must_include_missing,
+            unit_parents=unit_parents,
         )
 
     return CaseScore(
@@ -987,6 +1222,8 @@ def run_audit(
     key_to_ref: dict[str, str] | None = None,
     reference_binding: ReferenceBinding | None = None,
     fixtures: tuple[FixtureCase, ...] = FIXTURES,
+    amendments: Iterable[str] = (),
+    unit_parents: Mapping[str, str] | None = None,
 ) -> AuditReport:
     """Score every fixture against its supplied packet, or mark it blocked.
 
@@ -1025,6 +1262,8 @@ def run_audit(
             fixture,
             key_to_ref=key_to_ref,
             reference_binding=reference_binding,
+            amendments=amendments,
+            unit_parents=unit_parents,
         )
         if fixture.case_id in packets
         else _blocked_score(fixture)
@@ -1209,8 +1448,14 @@ def write_report(report: AuditReport, path: Path) -> Path:
 
 
 __all__ = [
+    "AMBIGUITY_PRECISION",
+    "AGENT_CHOICE",
+    "AGENT_CHOICE_RULE",
+    "AMENDMENTS",
+    "CARRIED_GOLD",
     "DISABLED_PACKET",
     "GOLD_RECALL_FLOOR",
+    "HEDGED_POISON",
     "HEDGED_TWINS_CEILING",
     "IDENTITY_ONLY_MECHANISMS",
     "PADDING_PRECISION_FLOOR",
@@ -1220,6 +1465,7 @@ __all__ = [
     "TOKEN_HARD_CAP",
     "TOKEN_P50_CEILING",
     "TOKEN_P95_CEILING",
+    "UNIT_PARENT_RECALL",
     "WORKING_SET_P50_MS_CEILING",
     "WORKING_SET_P95_MS_CEILING",
     "ActivationPacket",
@@ -1235,6 +1481,13 @@ __all__ = [
     "ReferenceBinding",
     "RunManifest",
     "Unit",
+    "INVALID_TWIN",
+    "INVALID_TWINS",
+    "INVALID_TWIN_RULE",
+    "agent_choice_digest",
+    "excluded_case_ids",
+    "invalid_twin_reason",
+    "invalid_twins_digest",
     "audit_passed",
     "build_report",
     "end_to_end_latency_distribution",

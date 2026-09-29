@@ -79,6 +79,13 @@ Durable decisions, evidence, and source material belong in the vault. Derived
 data should be safe to delete and regenerate, or explicitly documented when it
 is not.
 
+One documented exception lives in the state root rather than the vault: the
+sensing readings ledger, `<vault state dir>/sensing/readings.sqlite`. It is
+append-only instrument measurements, not canon. Losing it costs re-sensing on
+CPU rather than correctness, so back it up with the vault when sensing is on.
+Its projection, `sensing/projection.sqlite`, and the other files beside it are
+disposable.
+
 ## Hosted boundary
 
 The open-source runtime remains single-vault. Hosted service turns that existing

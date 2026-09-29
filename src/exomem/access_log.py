@@ -21,6 +21,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from . import local_ingress
 from .command_surface import canonical_request_id
 from .log_events import log_event
 from .cloud_cell import cloud_mode_enabled
@@ -128,6 +129,13 @@ class AccessLogMiddleware:
             session_ref = log_session_ref(session_id)
             if session_ref:
                 fields["session_id"] = session_ref
+            # Only a local-ingress request gains these; the public record's
+            # shape is unchanged. The client id is the operator's issuance
+            # label, never the token.
+            grant = local_ingress.current_grant()
+            if grant is not None:
+                fields["ingress"] = "local"
+                fields["client_id"] = grant.client_id
             if cf_ray and not cloud_mode_enabled() and (
                 not content_private_logging_enabled() or _CF_RAY_SHAPE.fullmatch(cf_ray)
             ):

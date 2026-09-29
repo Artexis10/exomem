@@ -21,8 +21,8 @@ same-language negative twin (``N<n>-<lang>``):
 * ``M3`` content-free: "let's continue", in each language.
 * ``M4`` language bias: a Russian turn about an English page, with unrelated
   Russian pages (one of them an anchor) in the same pool.
-* ``M5``/``N5`` CJK named: a Japanese anchor's name inside a Japanese
-  sentence; the twin holds the name only inside an unrelated compound.
+* ``M5``/``N5`` CJK named: a Japanese anchor's name inside a compound about
+  it; the twin holds the name only inside an unrelated compound.
 * ``M6`` continuity switch: a turn that names an anchor, then a same-language
   turn on another subject.
 * ``M7`` carry fragment: one accented word that the ASCII catalogue splits.
@@ -316,7 +316,10 @@ CASES: tuple[MultilingualCase, ...] = (
     _case(
         "M5-ja",
         "cjk_named",
-        "来月の合宿、山小屋の白樺をまた借りられるか確認してくれる？",
+        # The name inside a compound about it (白樺小屋, the Shirakaba hut): a
+        # name between particles (山小屋の白樺を) is spelled as a word and needs
+        # no band, so it would not exercise containment.
+        "来月の合宿、白樺小屋をまた借りられるか確認してくれる？",
         gold=("r_shirakaba_hut",),
         expected_status_on="resolved",
         expected_status_off="partial",

@@ -813,6 +813,9 @@ class TaxonomyPlan:
     taxonomy: SourceTaxonomy
     introductions: tuple[TaxonomyIntroduction, ...] = ()
     writes: tuple[PlannedWrite, ...] = ()
+    #: The registry text the writes were planned against; None when the
+    #: registry did not exist. Meaningful only when there are writes.
+    source_text: str | None = None
 
     @property
     def introduced_keys(self) -> tuple[str, ...]:
@@ -912,6 +915,7 @@ def plan_registrations(
         ),
         introductions=tuple(introductions),
         writes=(write,),
+        source_text=text if path_exists else None,
     )
 
 

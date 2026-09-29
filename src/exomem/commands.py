@@ -77,6 +77,7 @@ from . import evolution as evolution_module
 from . import find as find_module
 from . import (
     find_types,
+    foreground_priority,
     query_log,
     retrieval_models,
     semantic_census,
@@ -249,6 +250,55 @@ _DomainVocabularyDecisionArgument = Annotated[
                         },
                         "outcome": {"enum": ["reuse", "create", "defer"]},
                         "canonical": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+#: create-entity's shared-name decision: `distinct` bound to the fingerprint a
+#: preparation or a same-name refusal returned. Nothing else is decidable here;
+#: reuse means not creating, and merging is governed restructuring.
+_IdentityDecisionArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["outcome", "candidate_fingerprint"],
+                    "properties": {
+                        "outcome": {"enum": ["distinct"]},
+                        "candidate_fingerprint": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$",
+                            "description": "candidate_fingerprint returned for this name.",
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+#: create-entity's vault-declared facets: declared names only, a string for a
+#: `single` facet and a list for a `multi` one (see `_Schema/entity-types.yaml`
+#: `facets`). The writer re-validates against the registry.
+_EntityFacetsArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "maxProperties": 16,
+                    "additionalProperties": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}, "maxItems": 16},
+                        ]
                     },
                 },
                 {"type": "null"},
@@ -543,6 +593,29 @@ _OptionalClientArtifactFiles = Annotated[
             "pass through model-visible arguments. Proof-bearing artifacts go "
             "to `preserve_artifacts` instead — the lane is chosen by what the "
             "artifact is for, never by which transport is available."
+        ),
+    ),
+]
+
+
+class ClientTranscription(TypedDict):
+    """A transcription an AI client derived from one supplied original."""
+
+    file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+    text: Annotated[str, StringConstraints(min_length=1, max_length=100_000)]
+
+
+#: Optional like `_OptionalClientArtifactFiles`, and for the same reason not
+#: `| None`: an empty list already means "no transcriptions supplied".
+_OptionalClientTranscriptions = Annotated[
+    list[ClientTranscription],
+    Field(
+        max_length=8,
+        description=(
+            "Optional transcriptions of supplied originals, each {file_id, text}. "
+            "Each is saved on its original's Evidence page, bound to the "
+            "original's bytes, and only when that original is stored. Files "
+            "must have unique file_id values when transcriptions are supplied."
         ),
     ),
 ]
@@ -1523,20 +1596,29 @@ def op_bootstrap(
         "source_taxonomy": source_taxonomy_projection,
         "entity_registry": {
             "types": [
-                ({
-                    "id": definition.id,
-                    "folder": definition.folder,
-                    "family": entity_type_registry.family_of(definition.id) or definition.id,
-                } if profile == "compact" else {
-                    "id": definition.id,
-                    "folder": definition.folder,
-                    "family": (
-                        entity_type_registry.family_of(definition.id) or definition.id
-                    ),
-                    "aliases": list(definition.aliases),
-                    "label": definition.label,
-                    "capture_guidance": definition.capture_guidance,
-                })
+                {
+                    **({
+                        "id": definition.id,
+                        "folder": definition.folder,
+                        "family": entity_type_registry.family_of(definition.id) or definition.id,
+                    } if profile == "compact" else {
+                        "id": definition.id,
+                        "folder": definition.folder,
+                        "family": (
+                            entity_type_registry.family_of(definition.id) or definition.id
+                        ),
+                        "aliases": list(definition.aliases),
+                        "label": definition.label,
+                        "capture_guidance": definition.capture_guidance,
+                    }),
+                    # Only a type with vault-declared facets carries this key.
+                    **({
+                        "facets": {
+                            facet.name: f"{facet.cardinality} {facet.value}"
+                            for facet in entity_type_registry.facets_for(definition.id)
+                        }
+                    } if entity_type_registry.facets_for(definition.id) else {}),
+                }
                 for definition in entity_type_registry.active_definitions
             ],
             "capture_rule": (
@@ -1883,8 +1965,14 @@ def op_bootstrap(
             },
             "binary_upload": {
                 "tool": "preserve_artifacts",
-                "fields": ["files", "scope", "category"],
+                # The tool schema already lists these, so compact leaves them to it.
+                **(
+                    {"fields": ["files", "scope", "category", "transcriptions"]}
+                    if profile != "compact"
+                    else {}
+                ),
                 "when": "the client can supply temporary file handles",
+                "custody": "original first; transcription beside, never instead",
                 "fallback": {
                     "tool": "transfer_artifact",
                     "args": {"operation": "upload"},
@@ -1991,6 +2079,20 @@ def op_bootstrap(
                     "preserve_artifacts(scope='...', category='...', files=["
                     "{'download_url': 'https://...', 'file_id': '...', "
                     "'mime_type': 'image/png', 'file_name': 'receipt.png'}])"
+                ),
+            },
+            {
+                "goal": "preserve an attached original with its transcription",
+                "call": (
+                    "preserve_artifacts(scope='...', category='...', files=[<handle>], "
+                    "transcriptions=[{'file_id': '<handle file_id>', 'text': '...'}])"
+                ),
+            },
+            {
+                "goal": "preserve a local client's file",
+                "call": (
+                    "run `exomem attach <file>`, then pass its printed `file` handle in "
+                    "preserve_artifacts(files=[...]); `--lane source` for capture_source"
                 ),
             },
             {
@@ -4067,6 +4169,17 @@ def op_get(
         else:
             out["body_truncated"] = bool(out.get("body_truncated", False))
         out["body_chars"] = len(str(out.get("body", "")))
+    if "body" in out and not frontmatter_only:
+        # Pull-first sensing (default off): what released later notes did to
+        # this page. Absent when there is nothing to say, or when the snapshot
+        # read is not the one the projection modelled; never ranks anything.
+        from . import sensed_model
+
+        status = sensed_model.status_for(
+            vault_root, str(out["path"]), content_hash=result.content_hash
+        )
+        if status is not None:
+            out["epistemic_status"] = status
     return _attach_memory_ref(vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref)
 
 
@@ -4094,6 +4207,7 @@ def op_edit(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    identity_decision: dict | None = None,
 ) -> dict:
     """Lightweight in-place edit of a page (body, tags, a surgical snippet,
     a batch, an opinion row, or one frontmatter field).
@@ -4256,6 +4370,8 @@ def op_edit(
                 relation_review_reason=relation_review_reason,
             )
         elif field is not None:
+            if field == "aliases":
+                _refuse_claimed_aliases(vault_root, path, value, identity_decision)
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root,
                 path=path,
@@ -4553,6 +4669,9 @@ def op_link(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    identity_decision: _IdentityDecisionArgument = None,
+    facets: _EntityFacetsArgument = None,
+    aliases: list[str] | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -4584,15 +4703,31 @@ def op_link(
             `## Relations` as conservative `relates_to` edges. Same path
             conventions as `note.sources`.
         (per-type fields): see the bullet list above.
+        identity_decision: `{outcome: "distinct", candidate_fingerprint}` when
+            the name already denotes other active entities and this is a
+            different identity; the fingerprint comes from the preparation
+            or refusal for this exact name.
+        facets: Values for facets the registry declares for this type: a
+            string for a single facet, a list for a multi one. Undeclared
+            names are refused.
+        aliases: Other names the entity answers to, in any script, written to
+            its `aliases`. Give the native-script spelling of a name written
+            in another script (a Japanese name for an English-titled page) so
+            a turn in that script reaches it. At most 8, one line and 64
+            characters each; one any other page already answers to refuses.
 
     Returns:
-        {path, warnings}.
+        {path, warnings}, or a non-mutating `identity_preparation` when the
+        name already denotes active entities of other types only.
 
     Errors:
         ENTITY_TYPE_UNKNOWN (entity_type not in the active registry);
         INVALID_LINK (bad decision_status, missing required);
         ENTITY_EXISTS (update/link the returned active entity instead);
-        ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first).
+        ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first);
+        STALE_IDENTITY_DECISION (the candidates changed; decide again);
+        ENTITY_FACET_UNDECLARED / INVALID_ENTITY_FACET (facets outside the
+        type's declaration).
     """
     try:
         result = link_module.link(
@@ -4614,11 +4749,16 @@ def op_link(
             decided=decided,
             project=project,
             decision_status=decision_status,
+            identity_decision=identity_decision,
+            facets=facets,
+            aliases=aliases,
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
         if e.candidates:
             suffix += f" (candidates: {e.candidates})"
+        if e.candidate_fingerprint is not None:
+            suffix += f" (candidate_fingerprint: {e.candidate_fingerprint})"
         raise ValueError(f"{e.code}: {e.reason}{suffix}") from e
     return result.as_dict()
 
@@ -6282,7 +6422,11 @@ def op_activate_context(
     # all. `session` has one other reader, the upkeep carrier below, where it
     # names the caller whose session start may carry one upkeep item.
     started = time.perf_counter()
-    with state_paths_module.resolution_scope():
+    # A foreground request: in-process bulk passes (a whole-vault graph
+    # rebuild) pause at their next unit while this runs, instead of taking the
+    # GIL back after every SQLite call the request makes (5-15x per stage,
+    # measured). Activation is read-only and never waits on bulk work.
+    with state_paths_module.resolution_scope(), foreground_priority.foreground():
         bound_token = None
         if readiness_module.runtime_managed() and request_budget_module.current() is None:
             bound_token = request_budget_module.set_current(
@@ -6306,9 +6450,12 @@ def op_activate_context(
             # After the guard and outside the packet cache, like `continuity`:
             # at a caller's session start, at most one upkeep item, and only in
             # the process whose background worker proposed it. Never raises.
+            from . import sensed_model
             from . import upkeep as upkeep_module
 
             upkeep_module.for_packet(vault_root, packet, session=session)
+            # Also outside the cache: each resolved anchor page's sensed status.
+            sensed_model.for_packet(vault_root, packet)
         except Exception as error:
             query_log.log_activation_call(
                 vault_root,
@@ -7210,12 +7357,57 @@ def op_remember(
     )
 
 
+
+def _refuse_claimed_aliases(
+    vault_root: Path, path: str, value: object, identity_decision: dict | None = None
+) -> None:
+    """Refuse an `aliases` patch naming what another page already answers to.
+
+    The same guard `create-entity` runs (`entity_candidates.claimed_names`):
+    an alias another page holds would make a turn naming it resolve both. The
+    page's own title and current aliases are never a collision. A genuinely
+    shared name is admitted by an explicit `distinct` `identity_decision`
+    bound to that alias's candidate fingerprint; a page the caller may not see
+    never claims an alias, so a restricted caller is neither refused nor asked.
+    """
+    names = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    aliases = [str(item).strip() for item in names if isinstance(item, str) and str(item).strip()]
+    if not aliases:
+        return
+    rel = path if path.endswith(".md") else f"{path}.md"
+    claimed = entity_candidates_module.claimed_names(vault_root, aliases, exclude_path=rel)
+    if not claimed:
+        return
+    fingerprint = entity_candidates_module.claim_set_fingerprint(
+        vault_root, list(claimed), exclude_path=rel
+    )
+    if identity_decision is None:
+        alias, paths = next(iter(claimed.items()))
+        raise ValueError(
+            f"ENTITY_EXISTS: another page already answers to the alias {alias!r} "
+            f"({', '.join(paths)}); pick a name only this page answers to, or pass "
+            "identity_decision {outcome: distinct} with this candidate_fingerprint if it "
+            f"is a different identity (candidate_fingerprint: {fingerprint})"
+        )
+    try:
+        decision = link_module._identity_decision(identity_decision)  # noqa: SLF001
+    except link_module.LinkError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+    if decision["candidate_fingerprint"] != fingerprint:
+        raise ValueError(
+            "STALE_IDENTITY_DECISION: what these aliases resolve to changed since the "
+            "decision, or the decision was made for other names; decide again "
+            f"(candidate_fingerprint: {fingerprint})"
+        )
+
+
 def op_edit_memory(
     vault_root: Path,
     path: str,
     why: str,
     operation: edit_operations_module.EditOperation = None,  # type: ignore[assignment]
     validate_only: bool = False,
+    identity_decision: _IdentityDecisionArgument = None,
     **legacy: Any,
 ) -> dict:
     """Edit an existing memory page with an auditable reason.
@@ -7255,6 +7447,10 @@ def op_edit_memory(
         validate_only: Preview the edit without committing it. Accepted here or
             as `operation.validate_only`; giving it in both places is fine when
             they agree. Same meaning as on `remember` and `replace_memory`.
+        identity_decision: `{outcome: "distinct", candidate_fingerprint}` for an
+            `aliases` patch naming a name another page already answers to, when
+            the name is genuinely shared; the fingerprint comes from that
+            refusal. Not needed for names only withheld pages answer to.
 
     The previous flat keyword arguments remain accepted by direct Python/runtime
     callers for one compatibility release, but are deprecated and intentionally
@@ -7263,6 +7459,8 @@ def op_edit_memory(
     arguments: dict[str, Any] = {"path": path, "why": why, **legacy}
     if operation is not None:
         arguments["operation"] = operation
+    if identity_decision is not None:
+        arguments["identity_decision"] = identity_decision
     if validate_only:
         arguments["validate_only"] = True
     normalized = edit_operations_module.normalize_edit_arguments(arguments)
@@ -7591,7 +7789,8 @@ def op_capture_source(
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
 
-    Takes `content` for text or `files` for attached file handles, stored
+    Takes `content` for text or `files` for attached file handles (a local
+    client passes the handle `exomem attach --lane source` prints), stored
     losslessly under `Sources/`. This command is for raw material; proof-bearing
     artifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the
     artifact is for, not by what the client can carry.
@@ -7666,6 +7865,9 @@ def op_capture_source(
         projects=projects,
     )
     out: dict = {"source": source}
+    if "vocabulary_resolution" in source:
+        # The terminal reads the identity record from the leaf's top level.
+        out["vocabulary_resolution"] = source["vocabulary_resolution"]
     if compile_guidance:
         try:
             out["compile_guidance"] = op_propose_compilation(
@@ -7738,6 +7940,7 @@ _EpisodeProposalArgument = Annotated[
                                             "accept-relation",
                                             "edit",
                                             "supersede",
+                                            "append-record",
                                         ]
                                     },
                                     "args": {"type": "object"},
@@ -7757,7 +7960,9 @@ _EpisodeProposalArgument = Annotated[
 def op_episode_memory(
     vault_root: Path,
     source_schema: object,
-    action: Literal["record", "inspect", "candidates", "prepare", "disposition", "resume"],
+    action: Literal[
+        "record", "inspect", "candidates", "prepare", "disposition", "resume", "coverage"
+    ],
     episode: str | None = None,
     subject: str | None = None,
     summary: str | None = None,
@@ -7796,14 +8001,19 @@ def op_episode_memory(
     to execute the routed ones. A leaf is one typed step for an existing
     writer, of a kind its route owns: focused_note creates a note, entity an
     entity, relation_only accepts a relation, existing_page and semantic_unit
-    edit or supersede. It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
-    service enables episode execution.
+    edit or supersede, and records appends one item to a Records collection
+    (append-record: {collection, item, item_key?, body?, why,
+    expected_container_hash}). It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
+    service enables episode execution. After it runs, make one final
+    `coverage` pass: compare the input it names with each receipt and its
+    readback, prepare anything omitted or misrouted, then attest with
+    `resume` and `postcommit`. A committed note is not coverage.
 
     Args:
         action: `record` writes a recap revision; `inspect` reads this
             episode's revision history back; `candidates` reads its
             candidates; `prepare`, `disposition` and `resume` plan and
-            execute them.
+            execute them; `coverage` reads the final pass's evidence.
         episode: The `ep-` key a previous record returned, or the one a hook
             named. Omit it on a conversation's first record and reuse the
             returned key for the rest of that conversation. Required for
@@ -7827,7 +8037,12 @@ def op_episode_memory(
             one durable change, reused when you revise it.
         proposal: For `prepare`: {route, target?, title?, alternatives,
             evidence, reason, leaves: [{leaf_key, effect_revision, kind,
-            args}]}. A changed leaf needs the next `effect_revision`; a
+            args}]}. The destination is your call: `alternatives` lists up to
+            8 pages you inspected as possible homes, each {target: its
+            `exomem://` ref, scope: its declared scope in a line, version: the
+            `content_hash` you read}; an open page has no priority among them.
+            existing_page and semantic_unit name the `target` every leaf
+            writes. A changed leaf needs the next `effect_revision`; a
             committed one cannot change.
         disposition: For `disposition`: routed, no_capture, uncertain,
             rejected, deferred or awaiting_authority.
@@ -7850,7 +8065,11 @@ def op_episode_memory(
         input_revision, candidates: [{candidate_key, route, disposition,
         pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete,
         execution}; resume adds {status, executed, replayed, stale,
-        diverged, reconciled, blocked, deferred, publication}. Newlines, credential-shaped text and anything
+        diverged, reconciled, blocked, deferred, publication}; coverage adds
+        {input: {input_revision, ref, recovery}, receipts: [{candidate_key,
+        leaf_id, operation_id, receipt_digest, path, readback}]}. Every
+        candidates result carries coverage: {attempted, pending,
+        covered_through_input_revision, next}. Newlines, credential-shaped text and anything
         over a cap are refused with nothing written.
     """
     recap = {
@@ -7878,6 +8097,7 @@ def op_episode_memory(
         "record": (set(recap), set()),
         "inspect": (set(), set()),
         "candidates": (set(), set()),
+        "coverage": (set(), set()),
         "prepare": ({"candidate", "proposal"}, {"candidate", "proposal"}),
         "disposition": (
             {"candidate", "disposition", "reason"},
@@ -7891,7 +8111,7 @@ def op_episode_memory(
     if allowed is None:
         raise ValueError(
             "EPISODE_INVALID: action must be record, inspect, candidates, prepare, "
-            "disposition or resume"
+            "disposition, resume or coverage"
         )
     supplied = {**recap, **workflow}
     if any(value is not None and name not in allowed for name, value in supplied.items()):
@@ -7918,6 +8138,8 @@ def op_episode_memory(
         )
     if action == "candidates":
         return episode_workflow_module.inspect(vault_root, episode=episode)
+    if action == "coverage":
+        return episode_workflow_module.coverage(vault_root, episode=episode)
     if action == "prepare":
         return episode_workflow_module.prepare(
             vault_root, episode=episode, candidate=candidate, proposal=proposal
@@ -8007,12 +8229,17 @@ def op_preserve_artifacts(
     category: str,
     files: _ClientArtifactFiles,
     adoption: _OptionalArtifactAdoption = None,
+    transcriptions: _OptionalClientTranscriptions = (),  # noqa: B006 - read-only
 ) -> dict:
     """Preserve client-provided binary file handles as append-only Evidence.
 
     Use this canonical binary-preservation command when the client can supply
-    temporary HTTPS file handles. Exomem retrieves each handle server-side and
-    returns one terminal state per file — `stored`, `already_stored`, or
+    file handles: a chat client's attachments, or the handle `exomem attach`
+    prints on a local client (single use: storing its file spends it, while a
+    refused or failed file leaves it redeemable until it expires). When a
+    shared file is evidence, preserve the original first and put any
+    transcription in `transcriptions`, never instead. Exomem retrieves each handle server-side and returns one terminal
+    state per file — `stored`, `already_stored`, or
     `failed`. `already_stored` means those exact bytes are already under that
     destination, so nothing was written and the outcome names the existing path
     and ref; retrying a lost response with the same identity replays the batch
@@ -8030,6 +8257,8 @@ def op_preserve_artifacts(
         adoption: Optional explicit adoption identity selecting exactly one
             supplied handle. This establishes eligibility, not write consent;
             agent-initiated use obeys proactive_capture.
+        transcriptions: Optional {file_id, text} transcriptions of supplied
+            files, recorded on each stored original's page.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -8038,7 +8267,12 @@ def op_preserve_artifacts(
     # one counters block rather than N: see `due_state.batch_scope`.
     with due_state_module.batch_scope(vault_root):
         result = client_artifacts.preserve_artifacts(
-            vault_root, scope=scope, category=category, files=files, adoption=adoption
+            vault_root,
+            scope=scope,
+            category=category,
+            files=files,
+            adoption=adoption,
+            transcriptions=transcriptions,
         )
     _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,
@@ -9428,12 +9662,16 @@ def op_connect_memory(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    aliases: list[str] | None = None,
     ref: str | None = None,
     expected_hash: str | None = None,
     why: str | None = None,
     expected_fingerprint: str | None = None,
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
+    identity_decision: _IdentityDecisionArgument = None,
+    facets: _EntityFacetsArgument = None,
+    entity_family: str | None = None,
 ) -> dict | list[dict]:
     """Connect memory through links, typed graph context, or entities.
 
@@ -9491,6 +9729,8 @@ def op_connect_memory(
         decided: Decision date.
         project: Decision project key.
         decision_status: Decision status.
+        aliases: Other names the entity answers to, in any script; give the
+            native-script spelling of a name written in another script.
         ref: Relation-queue item ref for accept-relation.
         expected_hash: Target page `content_hash` drift guard for accept-relation.
             Required for accept-relation.
@@ -9502,6 +9742,15 @@ def op_connect_memory(
             the queue read and this call also refuses.
         vocabulary_ref: Optional vocabulary decision correlated with this typed application.
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
+        identity_decision: create-entity only. When the name already denotes
+            other active entities, `{outcome: "distinct", candidate_fingerprint}`
+            from that preparation or refusal commits a separate identity;
+            omit it to reuse a candidate or abstain.
+        facets: create-entity only. Values for the facets the registry
+            declares for entity_type (string for single, list for multi).
+        entity_family: Parent family from the entity registry. On
+            resolve-entity it matches every leaf type in that family; on
+            context and graph-context it keeps only entity neighbours of it.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -9541,10 +9790,14 @@ def op_connect_memory(
             "decided": None,
             "project": None,
             "decision_status": None,
+            "aliases": None,
             "ref": None,
             "expected_hash": None,
             "why": None,
             "expected_fingerprint": None,
+            "identity_decision": None,
+            "facets": None,
+            "entity_family": None,
         }
         invalid = sorted(
             name
@@ -9660,6 +9913,7 @@ def op_connect_memory(
             traversal_profile=traversal_profile,
             limit=limit,
             max_body_chars=max_body_chars,
+            entity_type_families=[entity_family] if entity_family else None,
         )
     if operation == "inbound-links":
         target_path = target or path
@@ -9670,7 +9924,11 @@ def op_connect_memory(
         if not name:
             raise ValueError("INVALID_TARGET: resolve-entity requires `name`")
         return entity_candidates_module.resolve_entity_candidate(
-            vault_root, name=name, entity_type=entity_type, limit=limit
+            vault_root,
+            name=name,
+            entity_type=entity_type,
+            entity_family=entity_family,
+            limit=limit,
         )
     if operation == "create-entity":
         missing = [
@@ -9699,6 +9957,9 @@ def op_connect_memory(
             decided=decided,
             project=project,
             decision_status=decision_status,
+            identity_decision=identity_decision,
+            facets=facets,
+            aliases=aliases,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
@@ -12591,7 +12852,12 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("add", "propose_compilation"),
-        {"surface": "primary", "actions": ("save",), "first_run_safe": False},
+        {
+            "surface": "primary",
+            "actions": ("save",),
+            "first_run_safe": False,
+            "mcp_meta": {"openai/fileParams": ("files",)},
+        },
     ),
     (
         "episode_memory",
@@ -12866,7 +13132,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                     schema_default=param.schema_default,
                 )
                 for param in params
-                if param.name in {"path", "why", "operation", "validate_only"}
+                if param.name in {"path", "why", "operation", "validate_only", "identity_decision"}
             )
         if response_detail is not None:
             response_detail_help = (

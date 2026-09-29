@@ -511,6 +511,115 @@ def append_record(
     return {"capture_sweep": sweep, **committed} if sweep else committed
 
 
+class _AppendPrepared(Exception):
+    """Carries a prepared append out of the writer before it publishes."""
+
+    def __init__(self, prepared: dict[str, Any]):
+        super().__init__("append prepared")
+        self.prepared = prepared
+
+
+def prepare_append(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    item: Mapping[str, Any],
+    item_key: str | None,
+    body: str | None,
+    expected_container_hash: str,
+    why: str,
+) -> dict[str, Any]:
+    """What `append_record` would commit now, without committing it.
+
+    Runs the writer itself -- resolution, visibility, value validation, key
+    derivation, the container guard and the natural-key checks -- and stops at
+    its last check before publication, so a curation leaf is prepared by the
+    very path that later executes it. A refused value is raised, never held.
+    Nothing is written. An existing item under the derived key is a conflict:
+    a prepared append always creates.
+    """
+    root = Path(vault_root)
+    text = _resumed_body(None, body)
+
+    def stop(
+        manifest: collections.CollectionManifest,
+        snapshot: record_formats.AdapterSnapshot,
+        key: str,
+        values: Mapping[str, Any],
+    ) -> None:
+        if any(record.identity.key == key for record in snapshot.records):
+            raise collections.CollectionError("RECORD_ID_CONFLICT", "record key already exists")
+        path, _guards = _new_item_path(root, manifest, key, values, snapshot)
+        raise _AppendPrepared(
+            {
+                "collection_id": manifest.collection_id,
+                "manifest_path": manifest.path,
+                "semantic_profile": manifest.semantic_profile,
+                "strategy": manifest.storage.strategy,
+                "item_key": key,
+                "path": path.relative_to(root).as_posix(),
+                "payload_hash": _payload_hash(manifest, key, values, text),
+            }
+        )
+
+    try:
+        append_record(
+            root,
+            collection,
+            item=item,
+            item_key=item_key,
+            expected_container_hash=expected_container_hash,
+            why=why,
+            body=body,
+            hold=False,
+            validate_snapshot=stop,
+        )
+    except _AppendPrepared as prepared:
+        return prepared.prepared
+    raise collections.CollectionError(
+        "RECORD_PREPARE_INCOMPLETE", "the append did not stop before publication"
+    )
+
+
+def append_receipt(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    item_key: str,
+    payload_hash: str,
+) -> dict[str, Any] | None:
+    """The Records receipt of one committed append, read back, or None.
+
+    The item must still exist under `item_key` with the payload that append
+    committed, and exactly one append transition in the collection's verified
+    audit chain must name that key, path, item hash and payload. Read-only:
+    any unreadable, withheld, ambiguous or broken state is None.
+    """
+    root = Path(vault_root)
+    try:
+        manifest = record_governance.resolve_collection_for_mutation(root, collection)
+        snapshot = record_formats.load_adapter(root, manifest).read()
+        matches = [record for record in snapshot.records if record.identity.key == item_key]
+        if len(matches) != 1 or matches[0].ambiguous:
+            return None
+        record = matches[0]
+        if _payload_hash(manifest, item_key, record.values, record.body) != payload_hash:
+            return None
+        correlation = _replay_audit_correlation(root, manifest, snapshot, record, payload_hash)
+    except (collections.CollectionError, vault.PathGuardError, OSError, ValueError):
+        return None
+    if correlation is None:
+        return None
+    return {
+        "collection_id": manifest.collection_id,
+        "item_key": item_key,
+        "canonical_path": record.source.path,
+        "after_item_hash": record.source.hash,
+        "payload_hash": payload_hash,
+        "audit_correlation": correlation,
+    }
+
+
 def _delivery_refusal(
     code: str,
     reason: str,

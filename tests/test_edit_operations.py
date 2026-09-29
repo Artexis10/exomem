@@ -477,6 +477,7 @@ def test_product_metadata_and_bound_signature_advertise_only_primary_form() -> N
         "why",
         "operation",
         "validate_only",
+        "identity_decision",
         "response_detail",
     ]
     assert command.params[2].required is True
@@ -488,6 +489,7 @@ def test_product_metadata_and_bound_signature_advertise_only_primary_form() -> N
         "why",
         "operation",
         "validate_only",
+        "identity_decision",
         "response_detail",
         "authorization_session_credential",
     ]

@@ -1780,7 +1780,10 @@ def test_the_filler_set_is_closed_and_declared() -> None:
     assert "work" in resolve_module.shipped_vocabulary().filler
     assert "resume" not in resolve_module.shipped_vocabulary().filler
     assert "report" not in resolve_module.shipped_vocabulary().filler
-    assert len(resolve_module.shipped_vocabulary().filler) == 33
+    filler = resolve_module.shipped_vocabulary().filler
+    # 33 English words and, since task 6.3, 30 Japanese ones.
+    assert len({word for word in filler if word.isascii()}) == 33
+    assert len(filler) == 63
 
 
 # --------------------------------------------------------------------------- #

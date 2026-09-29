@@ -916,7 +916,7 @@
     }
   },
   "capture_source": {
-    "description": "Capture raw source material and optionally return compile guidance.\n\nTakes `content` for text or `files` for attached file handles, stored\nlosslessly under `Sources/`. This command is for raw material; proof-bearing\nartifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the\nartifact is for, not by what the client can carry.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
+    "description": "Capture raw source material and optionally return compile guidance.\n\nTakes `content` for text or `files` for attached file handles (a local\nclient passes the handle `exomem attach --lane source` prints), stored\nlosslessly under `Sources/`. This command is for raw material; proof-bearing\nartifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the\nartifact is for, not by what the client can carry.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1695,6 +1695,21 @@
           "default": null,
           "description": "Decision status."
         },
+        "aliases": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Other names the entity answers to, in any script; give the native-script spelling of a name written in another script."
+        },
         "ref": {
           "anyOf": [
             {
@@ -1766,6 +1781,74 @@
           ],
           "default": null,
           "description": "Exact reviewed vocabulary fingerprint; grants no write permission."
+        },
+        "identity_decision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "outcome": {
+                  "enum": [
+                    "distinct"
+                  ]
+                },
+                "candidate_fingerprint": {
+                  "description": "candidate_fingerprint returned for this name.",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "outcome",
+                "candidate_fingerprint"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "create-entity only. When the name already denotes\nother active entities, `{outcome: \"distinct\", candidate_fingerprint}`\nfrom that preparation or refusal commits a separate identity;\nomit it to reuse a candidate or abstain."
+        },
+        "facets": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 16,
+                    "type": "array"
+                  }
+                ]
+              },
+              "maxProperties": 16,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "create-entity only. Values for the facets the registry\ndeclares for entity_type (string for single, list for multi)."
+        },
+        "entity_family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Parent family from the entity registry. On resolve-entity it matches every leaf type in that family; on context and graph-context it keeps only entity neighbours of it."
         },
         "response_detail": {
           "default": "compact",
@@ -2452,6 +2535,34 @@
           "description": "Preview the edit without committing it. Accepted here or as `operation.validate_only`; giving it in both places is fine when they agree. Same meaning as on `remember` and `replace_memory`.",
           "type": "boolean"
         },
+        "identity_decision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "outcome": {
+                  "enum": [
+                    "distinct"
+                  ]
+                },
+                "candidate_fingerprint": {
+                  "description": "candidate_fingerprint returned for this name.",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "outcome",
+                "candidate_fingerprint"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -2484,19 +2595,20 @@
     }
   },
   "episode_memory": {
-    "description": "Record what a conversation worked on, decided and left open, for the next session on any client.\n\nCall `record` once when a conversation reaches a decision or a stopping\npoint, and skip it when nothing durable happened. You write the recap:\nshort one-line items, never a transcript. It is kept as a bounded Source\nunder `Sources/Episodes/`, and the newest recap of each conversation leads\nthe `recent_context` block `activate_context` serves on every client.\nRecording again under the same `episode` with changed content adds a\nrevision and retires the previous one; an identical retry writes nothing.\n\nA recorded episode can also carry typed candidates for its durable\nchanges: `prepare` one candidate's destination, set its `disposition`\n(including honest no_capture, deferred or rejected ones), and `resume`\nto execute the routed ones. A leaf is one typed step for an existing\nwriter, of a kind its route owns: focused_note creates a note, entity an\nentity, relation_only accepts a relation, existing_page and semantic_unit\nedit or supersede. It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this\nservice enables episode execution.",
+    "description": "Record what a conversation worked on, decided and left open, for the next session on any client.\n\nCall `record` once when a conversation reaches a decision or a stopping\npoint, and skip it when nothing durable happened. You write the recap:\nshort one-line items, never a transcript. It is kept as a bounded Source\nunder `Sources/Episodes/`, and the newest recap of each conversation leads\nthe `recent_context` block `activate_context` serves on every client.\nRecording again under the same `episode` with changed content adds a\nrevision and retires the previous one; an identical retry writes nothing.\n\nA recorded episode can also carry typed candidates for its durable\nchanges: `prepare` one candidate's destination, set its `disposition`\n(including honest no_capture, deferred or rejected ones), and `resume`\nto execute the routed ones. A leaf is one typed step for an existing\nwriter, of a kind its route owns: focused_note creates a note, entity an\nentity, relation_only accepts a relation, existing_page and semantic_unit\nedit or supersede, and records appends one item to a Records collection\n(append-record: {collection, item, item_key?, body?, why,\nexpected_container_hash}). It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this\nservice enables episode execution. After it runs, make one final\n`coverage` pass: compare the input it names with each receipt and its\nreadback, prepare anything omitted or misrouted, then attest with\n`resume` and `postcommit`. A committed note is not coverage.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "action": {
-          "description": "`record` writes a recap revision; `inspect` reads this episode's revision history back; `candidates` reads its candidates; `prepare`, `disposition` and `resume` plan and execute them.",
+          "description": "`record` writes a recap revision; `inspect` reads this episode's revision history back; `candidates` reads its candidates; `prepare`, `disposition` and `resume` plan and execute them; `coverage` reads the final pass's evidence.",
           "enum": [
             "record",
             "inspect",
             "candidates",
             "prepare",
             "disposition",
-            "resume"
+            "resume",
+            "coverage"
           ],
           "type": "string"
         },
@@ -2712,7 +2824,8 @@
                           "create-entity",
                           "accept-relation",
                           "edit",
-                          "supersede"
+                          "supersede",
+                          "append-record"
                         ]
                       },
                       "args": {
@@ -2745,7 +2858,7 @@
             }
           ],
           "default": null,
-          "description": "For `prepare`: {route, target?, title?, alternatives,\nevidence, reason, leaves: [{leaf_key, effect_revision, kind,\nargs}]}. A changed leaf needs the next `effect_revision`; a\ncommitted one cannot change."
+          "description": "For `prepare`: {route, target?, title?, alternatives,\nevidence, reason, leaves: [{leaf_key, effect_revision, kind,\nargs}]}. The destination is your call: `alternatives` lists up to\n8 pages you inspected as possible homes, each {target: its\n`exomem://` ref, scope: its declared scope in a line, version: the\n`content_hash` you read}; an open page has no priority among them.\nexisting_page and semantic_unit name the `target` every leaf\nwrites. A changed leaf needs the next `effect_revision`; a\ncommitted one cannot change."
         },
         "disposition": {
           "anyOf": [
@@ -4519,7 +4632,7 @@
     }
   },
   "preserve_artifacts": {
-    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\ntemporary HTTPS file handles. Exomem retrieves each handle server-side and\nreturns one terminal state per file — `stored`, `already_stored`, or\n`failed`. `already_stored` means those exact bytes are already under that\ndestination, so nothing was written and the outcome names the existing path\nand ref; retrying a lost response with the same identity replays the batch\nrather than duplicating it. No binary data is passed as base64 through\nmodel-visible arguments. Clients without file handles keep using\n`transfer_artifact(operation=\"upload\")` followed by `/upload`.",
+    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\nfile handles: a chat client's attachments, or the handle `exomem attach`\nprints on a local client (single use: storing its file spends it, while a\nrefused or failed file leaves it redeemable until it expires). When a\nshared file is evidence, preserve the original first and put any\ntranscription in `transcriptions`, never instead. Exomem retrieves each handle server-side and returns one terminal\nstate per file — `stored`, `already_stored`, or\n`failed`. `already_stored` means those exact bytes are already under that\ndestination, so nothing was written and the outcome names the existing path\nand ref; retrying a lost response with the same identity replays the batch\nrather than duplicating it. No binary data is passed as base64 through\nmodel-visible arguments. Clients without file handles keep using\n`transfer_artifact(operation=\"upload\")` followed by `/upload`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -4596,6 +4709,32 @@
           ],
           "default": null,
           "description": "Optional explicit adoption identity selecting exactly one\nsupplied handle. This establishes eligibility, not write consent;\nagent-initiated use obeys proactive_capture."
+        },
+        "transcriptions": {
+          "default": [],
+          "description": "Optional transcriptions of supplied originals, each {file_id, text}. Each is saved on its original's Evidence page, bound to the original's bytes, and only when that original is stored. Files must have unique file_id values when transcriptions are supplied.",
+          "items": {
+            "description": "A transcription an AI client derived from one supplied original.",
+            "properties": {
+              "file_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "text": {
+                "maxLength": 100000,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_id",
+              "text"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "type": "array"
         },
         "response_detail": {
           "default": "compact",
@@ -5602,7 +5741,7 @@
       "additionalProperties": false,
       "properties": {
         "content": {
-          "description": "Full markdown body to write after frontmatter. Semantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.",
+          "description": "Full markdown body to write after frontmatter. Semantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading. Wikilink the people, organisations, places, equipment and products this note names, whether or not a page exists yet.",
           "type": "string"
         },
         "title": {
@@ -6065,7 +6204,7 @@
           "type": "string"
         },
         "content": {
-          "description": "Full markdown body for the new page. Semantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.",
+          "description": "Full markdown body for the new page. Semantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading. Wikilink the people, organisations, places, equipment and products this note names, whether or not a page exists yet.",
           "type": "string"
         },
         "title": {

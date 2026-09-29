@@ -67,7 +67,7 @@ from datetime import date
 from pathlib import Path
 
 FIXTURE_SET_ID = "context-activation-fixtures-v1"
-CORPUS_ID = "context-activation-corpus-v3"
+CORPUS_ID = "context-activation-corpus-v4"
 
 CASE_IDS: tuple[str, ...] = tuple(f"C{i}" for i in range(1, 10))
 TWIN_IDS: tuple[str, ...] = tuple(f"T{i}" for i in range(1, 10))
@@ -717,6 +717,161 @@ def find_fact_leaks_outside_gold_poison_pages(
 # --------------------------------------------------------------------------
 
 
+#: The corpus vault's own observation vocabulary (design.md amendment A1).
+#: The fixture notes use these labels, as a vault in real use grows its own;
+#: the vault registers them in its semantic-language registry and routes
+#: them to the context roles whose question they answer, through the
+#: supported schema writers. The gold notes' categories are never edited to
+#: fit the shipped vocabulary. ``hub`` and ``reference`` label page kinds
+#: rather than knowledge, so they are registered and routed to no role.
+CORPUS_CATEGORIES: dict[str, str] = {
+    "operating_constraint": "A limit the owner works within, such as a plan's weekly capacity.",
+    "pattern": "A recurring shape observed across several occasions.",
+    "goal": "Something the owner is working towards.",
+    "method": "A way of doing something that has worked.",
+    "failure": "Something that went wrong, and why.",
+    "current_state": "How something stands now.",
+    "resource": "A fact about an owned or shared resource.",
+    "hub": "What a hub page gathers.",
+    "reference": "Supporting reference material.",
+}
+CORPUS_ROLE_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "constraints": ("operating_constraint",),
+    "precedents": ("pattern", "failure"),
+    "preferences": ("goal",),
+    "methods": ("method",),
+    "baseline": ("current_state",),
+    "resources": ("resource",),
+}
+#: The vault files that hold that vocabulary; part of the logical identity.
+CORPUS_SCHEMA_FILES: tuple[str, ...] = (
+    "Knowledge Base/_Schema/semantic-language-registry.yaml",
+    "Knowledge Base/_Schema/context-roles.yaml",
+)
+
+#: Ordinary notes for corpus v4 (design.md amendment A1): what a vault that
+#: has been in use for a while holds besides the fixtures' own pages. Topic
+#: folders, a few observations each, in the registered vocabulary. Several
+#: share words with the fixture turns on purpose -- dinner and Saturday
+#: plans, photographs, weekly goals, half measures, temperature
+#: conversions, colleagues and deployments, sessions and bookings, search,
+#: rotas and approaches -- so a compiler that activates on shared words has
+#: something to activate wrongly. None repeats a fixture turn or fact.
+ORDINARY_NOTES: tuple[tuple[str, str, tuple[str, ...], tuple[tuple[str, str], ...]], ...] = (
+    # (folder, title, tags, ((category, observation), ...))
+    ("Kitchen", "Sourdough starter feeding", ("baking",), (("technique", "Feed the starter at a one to one ratio the night before baking."), ("finding", "A warm spot above the fridge doubles the starter in six hours."))),
+    ("Kitchen", "Weeknight pasta rotation", ("meals",), (("preference", "Keep three pasta dishes that take under twenty minutes."), ("fact", "The tomato and anchovy sauce keeps for four days."))),
+    ("Kitchen", "Saturday market haul list", ("meals", "market"), (("action", "Buy herbs and eggs at the Saturday farmers market before ten."), ("finding", "The cheese stall sells out of the aged cheddar by noon."))),
+    ("Kitchen", "Dinner party seating notes", ("hosting",), (("preference", "Seat the talkers apart so the dinner conversation spreads out."), ("decision", "Serve the main course family style rather than plated."))),
+    ("Kitchen", "Oven temperature conversions", ("baking", "conversion"), (("fact", "Gas mark four is roughly 180 degrees Celsius or 350 Fahrenheit."), ("technique", "Drop the fan oven setting by twenty degrees against the recipe."))),
+    ("Kitchen", "Batch cooking on Sundays", ("meals",), (("technique", "Cook grains and one braise on Sunday to cover half the week."), ("finding", "Freezing portions flat saves space and thaws in an hour."))),
+    ("Photography", "Food photography lighting", ("photography",), (("technique", "Side window light at a low angle shows texture on plated food."), ("finding", "A white card opposite the window lifts the shadows enough."))),
+    ("Photography", "Street photograph walks", ("photography",), (("preference", "Walk the old town at golden hour with a single prime."), ("finding", "Shooting from the hip misses focus more than half the time."))),
+    ("Photography", "Photo backup routine", ("photography", "backup"), (("action", "Copy each card to the archive drive the same evening."), ("constraint", "Never format a card until two copies exist."))),
+    ("Photography", "Portrait session checklist", ("photography",), (("action", "Charge batteries and clean the sensor the day before a portrait session."), ("technique", "Focus on the nearer eye and keep the aperture around f4."))),
+    ("Photography", "Film scanning settings", ("photography",), (("config", "Scan negatives at 3200 dpi with the dust filter off."), ("finding", "Colour negative scans need a manual white point per roll."))),
+    ("Photography", "Wedding album layout ideas", ("photography", "design"), (("design", "Open each album spread with one large image and two small ones."), ("preference", "Keep the candid shots ahead of the posed group photographs."))),
+    ("Fitness", "Half-marathon pacing plan", ("running",), (("technique", "Run the first half at goal pace minus ten seconds per kilometre."), ("goal", "Finish the autumn half-marathon under one hour fifty."))),
+    ("Fitness", "Weekly running distance", ("running",), (("goal", "Build to forty kilometres a week before the race block."), ("finding", "Mileage above that brings back the knee ache within a week."))),
+    ("Fitness", "Strength routine for runners", ("training",), (("technique", "Two short sessions of single-leg work each week are enough."), ("decision", "Dropped the heavy deadlifts during race weeks."))),
+    ("Fitness", "Sleep and recovery log", ("health",), (("finding", "Resting heart rate rises by five beats after a short night."), ("pattern", "Hard sessions on less than seven hours of sleep go badly."))),
+    ("Fitness", "Cycling commute notes", ("cycling",), (("fact", "The canal route is eleven kilometres and mostly flat."), ("preference", "Take the canal route unless it has rained overnight."))),
+    ("Fitness", "Swimming technique drills", ("swimming",), (("technique", "Catch-up drill fixes the crossing arm on the breathing side."), ("question", "Is bilateral breathing worth it for open water?"))),
+    ("Home", "Boiler service record", ("house",), (("fact", "The boiler was last serviced in March by the usual engineer."), ("action", "Book the next boiler service before the heating season."))),
+    ("Home", "Garden watering schedule", ("garden",), (("technique", "Water the tomatoes deeply twice a week rather than daily."), ("finding", "Mulch cut the watering needed by about half in July."))),
+    ("Home", "Bathroom damp fix", ("house",), (("problem", "Black mould returns on the ceiling above the shower every winter."), ("decision", "Fit an extractor fan on a humidity timer."))),
+    ("Home", "Loft insulation quotes", ("house", "costs"), (("fact", "Two quotes came in for topping the loft insulation up to 270 mm."), ("question", "Does the grant cover the loft hatch as well?"))),
+    ("Home", "Bike shed build", ("house", "project"), (("design", "A lean-to against the fence with a sloped felt roof."), ("action", "Order treated timber and roofing felt for the shed."))),
+    ("Home", "Houseplant care", ("plants",), (("technique", "Let the fiddle leaf fig dry out halfway before watering."), ("finding", "The snake plant is happiest in the north window."))),
+    ("Work", "Quarterly roadmap retro", ("work", "planning"), (("finding", "Two roadmap items slipped because the design review came late."), ("decision", "Hold design reviews before an item enters the quarter."))),
+    ("Work", "Design document template", ("work", "writing"), (("design", "Every design doc opens with the problem, then constraints, then options."), ("preference", "Keep design documents under five pages."))),
+    ("Work", "Deployment checklist", ("work", "release"), (("action", "Freeze merges an hour before a production deployment."), ("constraint", "No deployment on Fridays after two in the afternoon."))),
+    ("Work", "Colleague onboarding buddy notes", ("work", "people"), (("technique", "Pair a new colleague with a buddy for the first two weeks."), ("finding", "New starters ask most questions about the build tooling."))),
+    ("Work", "Incident review format", ("work", "release"), (("design", "Incident reviews cover timeline, impact, causes and follow-up actions."), ("preference", "Keep incident reviews blameless and under an hour."))),
+    ("Work", "Meeting room booking etiquette", ("work", "office"), (("constraint", "Release a booked room if the session is cancelled."), ("fact", "The large room seats twelve and has the only good projector."))),
+    ("Work", "Code review norms", ("work", "engineering"), (("preference", "Review small changes within the same working day."), ("decision", "Require one approving review before merging to main."))),
+    ("Work", "On-call handover notes", ("work", "support"), (("action", "Write the open alerts into the handover before the rotation changes."), ("finding", "Most pages last quarter came from the disk space alert."))),
+    ("Work", "Customer support macros", ("work", "support"), (("technique", "Start every macro by restating the customer's question."), ("fact", "The refund macro is used about thirty times a week."))),
+    ("Work", "Team offsite planning", ("work", "planning"), (("action", "Shortlist two venues within an hour of the office."), ("preference", "Plan the offsite dinner for the first evening, not the last."))),
+    ("Work", "Search engine operators", ("search", "research"), (("technique", "Quote exact phrases and exclude terms with a minus sign."), ("fact", "The site operator restricts results to one domain."))),
+    ("Work", "Library catalogue search tips", ("search", "research"), (("technique", "Search the catalogue by subject heading rather than keyword."), ("finding", "Interlibrary loans take about ten days to arrive."))),
+    ("Work", "Spreadsheet formula notes", ("work", "tools"), (("technique", "Use INDEX and MATCH instead of a nested lookup."), ("fact", "Conditional formatting slows the budget sheet above ten thousand rows."))),
+    ("Work", "Presentation rehearsal habits", ("work", "speaking"), (("technique", "Rehearse the opening two minutes out loud three times."), ("finding", "Slides with one idea each keep the room's attention."))),
+    ("Travel", "Lisbon trip ideas", ("travel",), (("preference", "Stay near the river rather than on the hills."), ("action", "Book the tram tour for the Saturday morning."))),
+    ("Travel", "Packing list for long weekends", ("travel",), (("action", "Pack a travel adapter, a spare charger and a rain shell."), ("preference", "Carry-on only for trips under five days."))),
+    ("Travel", "Train booking tricks", ("travel", "costs"), (("finding", "Advance fares open about twelve weeks before departure."), ("technique", "Split tickets can cost half the through fare."))),
+    ("Travel", "Mountain hut etiquette", ("travel", "hiking"), (("constraint", "Book mountain huts ahead in July and August."), ("fact", "Most huts serve dinner at seven and lights out at ten."))),
+    ("Travel", "Airport lounge notes", ("travel",), (("fact", "The terminal two lounge has showers and quiet rooms."), ("preference", "Skip the lounge for flights before seven in the morning."))),
+    ("Travel", "Language phrase list for Portugal", ("travel", "language"), (("fact", "Obrigado or obrigada depends on the speaker, not the listener."), ("action", "Learn the numbers to twenty before the trip."))),
+    ("Money", "Monthly budget review", ("finance",), (("action", "Reconcile the budget sheet on the first Sunday of each month."), ("finding", "Eating out takes about a fifth of discretionary spending."))),
+    ("Money", "Pension contribution decision", ("finance",), (("decision", "Raise pension contributions by two percent from April."), ("fact", "The employer matches contributions up to six percent."))),
+    ("Money", "Subscription audit", ("finance", "subscriptions"), (("finding", "Three streaming subscriptions overlapped for most of the year."), ("decision", "Keep one streaming service and rotate it every few months."))),
+    ("Money", "Energy tariff comparison", ("finance", "house"), (("fact", "The fixed tariff ends in November."), ("question", "Is a smart meter tariff cheaper for an evening-heavy household?"))),
+    ("Money", "Charity giving plan", ("finance",), (("decision", "Give monthly to two charities rather than one-off donations."), ("preference", "Prefer charities that publish their outcomes."))),
+    ("Money", "Car insurance renewal", ("finance", "car"), (("fact", "The renewal quote rose by a fifth this year."), ("action", "Compare three quotes a month before renewal."))),
+    ("Reading", "Book club picks", ("reading",), (("preference", "Alternate fiction and non-fiction picks each month."), ("action", "Suggest the lighthouse novel for the next meeting."))),
+    ("Reading", "Notes on a history of cartography", ("reading", "maps"), (("insight", "Early maps encoded the patron's priorities more than the terrain."), ("fact", "Mercator published his projection in 1569."))),
+    ("Reading", "Reading habit tracker", ("reading",), (("goal", "Read twenty books this year, a third of them non-fiction."), ("finding", "Reading on the commute doubled the pages read per week."))),
+    ("Reading", "Poetry anthology favourites", ("reading", "poetry"), (("preference", "Return to the sea poems in winter."), ("insight", "Short poems stick better when read aloud."))),
+    ("Reading", "Science fiction backlog", ("reading",), (("action", "Finish the generation ship novel before starting the new trilogy."), ("preference", "Prefer standalone novels over long series."))),
+    ("Reading", "Article highlights on attention", ("reading", "focus"), (("insight", "Switching tasks costs more than the minutes it seems to take."), ("finding", "Phone out of the room made the difference in the experiment."))),
+    ("Music", "Guitar practice routine", ("music", "guitar"), (("technique", "Warm up with chromatic runs, then twenty minutes on the new piece."), ("goal", "Play the fingerstyle arrangement cleanly by the summer."))),
+    ("Music", "Piano scales progress", ("music", "piano"), (("finding", "Contrary motion scales improved left hand evenness."), ("action", "Add the harmonic minor scales next week."))),
+    ("Music", "Choir rehearsal notes", ("music", "choir"), (("fact", "Choir rehearsal moves to Tuesday evenings from October."), ("technique", "Mark breaths in pencil before the first run-through."))),
+    ("Music", "Home recording setup", ("music", "recording"), (("config", "Record at 48 kHz and 24 bit with the gain peaking near minus twelve."), ("finding", "The duvet fort cut room echo more than the foam panels."))),
+    ("Music", "Concert tickets and dates", ("music",), (("fact", "The orchestra's season opener is on a Saturday in late September."), ("action", "Buy the balcony seats when general sale opens."))),
+    ("Music", "Vinyl collection care", ("music", "vinyl"), (("technique", "Clean records with a carbon brush before each play."), ("constraint", "Store records upright and away from the radiator."))),
+    ("Garden", "Vegetable bed rotation", ("garden",), (("technique", "Rotate brassicas, legumes and roots across three beds each year."), ("finding", "Last year's courgettes cropped better in the sunnier bed."))),
+    ("Garden", "Compost bin troubleshooting", ("garden",), (("problem", "The compost smells when it gets too wet."), ("technique", "Add shredded cardboard to balance wet kitchen scraps."))),
+    ("Garden", "Spring bulb planting", ("garden",), (("action", "Plant tulip bulbs in November after the first frost."), ("fact", "Bulbs go in at three times their own depth."))),
+    ("Garden", "Pruning the apple tree", ("garden",), (("technique", "Prune the apple tree in late winter while it is dormant."), ("constraint", "Never remove more than a quarter of the canopy in one year."))),
+    ("Garden", "Bird feeder observations", ("garden", "birds"), (("finding", "Goldfinches arrive at the nyjer feeder mostly in the morning."), ("question", "Would a second feeder stop the starlings crowding out the tits?"))),
+    ("Garden", "Allotment waiting list", ("garden",), (("fact", "The allotment waiting list is about two years long."), ("action", "Check the list position each spring."))),
+    ("Learning", "Spanish vocabulary review", ("language",), (("technique", "Review flashcards every morning for ten minutes."), ("finding", "Irregular verbs stick better in short example sentences."))),
+    ("Learning", "Statistics course notes", ("learning", "maths"), (("insight", "A confidence interval describes the method, not one fixed result."), ("fact", "The median is robust to a handful of outliers."))),
+    ("Learning", "Chess opening repertoire", ("chess",), (("decision", "Play the Italian game as white for now."), ("finding", "Losses come from the middlegame more than the opening."))),
+    ("Learning", "Knot tying practice", ("outdoors",), (("technique", "The bowline makes a fixed loop that will not slip."), ("fact", "A clove hitch is quick to tie but can roll under load."))),
+    ("Learning", "Touch typing progress", ("learning",), (("finding", "Typing speed plateaued near sixty words a minute."), ("goal", "Reach seventy words a minute with fewer errors."))),
+    ("Learning", "Watercolour basics", ("art",), (("technique", "Wet the paper first for soft skies."), ("finding", "Cheap paper buckles under more than two washes."))),
+    ("Health", "Dentist appointments", ("health",), (("fact", "The next check-up is booked for the spring."), ("action", "Ask about the sensitive tooth at the next appointment."))),
+    ("Health", "Allergy season notes", ("health",), (("pattern", "Hay fever flares in the first warm week of May."), ("technique", "Start the antihistamine a week before the pollen peak."))),
+    ("Health", "Posture at the desk", ("health", "work"), (("technique", "Raise the monitor so the top edge sits at eye level."), ("finding", "A standing break every hour eased the neck ache."))),
+    ("Health", "Hydration habit", ("health",), (("goal", "Drink two litres of water on training days."), ("finding", "A marked bottle on the desk made the habit stick."))),
+    ("Health", "Eye strain breaks", ("health", "work"), (("technique", "Every twenty minutes look twenty feet away for twenty seconds."), ("fact", "The optician recommended screen glasses last year."))),
+    ("Health", "Stretching after runs", ("health", "running"), (("technique", "Hold each calf and hamstring stretch for thirty seconds."), ("finding", "Skipping the stretches shows up as tight calves two days later."))),
+    ("Car", "Tyre pressure record", ("car",), (("fact", "Front tyres run at 2.3 bar and rear at 2.1 bar when unladen."), ("action", "Check the pressures on the first Saturday of each month."))),
+    ("Car", "MOT and service dates", ("car",), (("fact", "The MOT falls due in the same month as the insurance renewal."), ("action", "Book the service and the MOT together."))),
+    ("Car", "Winter driving kit", ("car",), (("action", "Keep a blanket, scraper and jump leads in the boot from November."), ("constraint", "Never set off with a frosted windscreen."))),
+    ("Car", "Fuel economy notes", ("car", "costs"), (("finding", "Motorway runs at a steady hundred give the best economy."), ("fact", "Short town trips use nearly twice the fuel per kilometre."))),
+    ("Car", "Roof box packing", ("car", "travel"), (("technique", "Put the soft bags in the roof box and the heavy cases low in the boot."), ("constraint", "Keep the roof box load under the rated seventy-five kilograms."))),
+    ("Car", "Electric car research", ("car", "research"), (("question", "Would a home charger pay for itself in three years?"), ("finding", "Winter range drops by about a fifth in the reviews."))),
+    ("Pets", "Dog walking routes", ("pets",), (("preference", "Take the woodland loop on dry days and the park when muddy."), ("fact", "The woodland loop takes about forty minutes."))),
+    ("Pets", "Vet visit notes", ("pets",), (("fact", "Booster vaccinations are due every twelve months."), ("action", "Book the dental check at the next vet visit."))),
+    ("Pets", "Dog training cues", ("pets",), (("technique", "Reward the recall with the high value treats only."), ("finding", "Short sessions of five minutes work better than long ones."))),
+    ("Pets", "Pet sitter handover", ("pets",), (("action", "Leave feeding amounts and the vet's number on the fridge."), ("preference", "Prefer a sitter who stays over to daily visits."))),
+    ("Pets", "Cat feeding schedule", ("pets",), (("fact", "The cat gets half a pouch morning and evening."), ("constraint", "No milk, it upsets his stomach."))),
+    ("Pets", "Aquarium water changes", ("pets", "aquarium"), (("technique", "Change a fifth of the aquarium water each week."), ("finding", "Algae blooms follow weeks with the lamp left on too long."))),
+    ("Community", "Neighbourhood cleanup day", ("community",), (("action", "Borrow litter pickers from the council for the Saturday cleanup."), ("finding", "Twelve volunteers covered the park and the canal path."))),
+    ("Community", "School fete stall", ("community",), (("decision", "Run the plant stall rather than the cake stall this year."), ("action", "Pot up cuttings three weeks before the fete."))),
+    ("Community", "Running club committee", ("community", "running"), (("fact", "The committee meets on the first Monday of the month."), ("action", "Draft the winter training calendar for the next meeting."))),
+    ("Community", "Repair cafe volunteering", ("community",), (("finding", "Lamps and toasters are the most common repairs."), ("preference", "Take the electrical bench rather than the textiles table."))),
+    ("Community", "Street party planning", ("community", "planning"), (("action", "Apply for the road closure eight weeks ahead."), ("decision", "Hold the street party on the late summer bank holiday."))),
+    ("Community", "Food bank rota", ("community",), (("fact", "The food bank rota runs in two-hour shifts."), ("preference", "Take the Thursday afternoon shift when possible."))),
+    ("Projects", "Shed workbench plans", ("woodwork",), (("design", "A workbench with a laminated top and a shelf below."), ("fact", "The bench needs to stand ninety centimetres high."))),
+    ("Projects", "Bookshelf build log", ("woodwork",), (("finding", "Pocket screws held better than dowels in the soft pine."), ("action", "Finish the shelves with two coats of hard wax oil."))),
+    ("Projects", "Raspberry Pi weather station", ("electronics",), (("config", "The sensor reports every ten minutes over the home network."), ("problem", "Humidity readings drift high after rain."))),
+    ("Projects", "Family photo digitising", ("photography", "family"), (("action", "Scan the albums from the loft in date order."), ("technique", "Name files by year and event so the archive sorts itself."))),
+    ("Projects", "Kitchen shelf install", ("house", "woodwork"), (("technique", "Find the studs before fixing the brackets to the stud wall."), ("constraint", "Keep the shelf load under fifteen kilograms per bracket."))),
+    ("Projects", "Model railway layout", ("hobby",), (("design", "A folded figure of eight fits the spare room wall."), ("question", "Would digital control be worth it for two locomotives?"))),
+    ("Family", "Birthday gift ideas", ("family",), (("preference", "Experiences over things for the grandparents."), ("action", "Order the photo book three weeks before the birthday."))),
+    ("Family", "Holiday rota with siblings", ("family", "planning"), (("decision", "Alternate who hosts the winter holidays each year."), ("fact", "The spare room sleeps four with the sofa bed."))),
+    ("Family", "Kids' swimming lessons", ("family", "swimming"), (("fact", "Lessons run on Saturday mornings during term time."), ("action", "Renew the lesson block before the end of term."))),
+    ("Family", "Family recipe collection", ("family", "meals"), (("action", "Write down grandmother's soup recipe before the next visit."), ("preference", "Keep the recipes in one shared folder."))),
+    ("Family", "Weekend activity ideas", ("family",), (("preference", "Mix one outdoor and one indoor plan each weekend."), ("fact", "The science museum is free on the first Sunday of the month."))),
+    ("Family", "School term dates", ("family",), (("fact", "Half term falls in the last week of October."), ("action", "Book time off for half term by the end of August."))),
+)
+
+
 def _write(root: Path, rel: str, text: str) -> None:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -742,6 +897,81 @@ def _page(
         f"---\ntitle: {title}\n{frontmatter}updated: 2026-09-01\n---\n\n# {title}\n\n{body}\n",
     )
     return rel
+
+
+def _register_corpus_vocabulary(root: Path) -> None:
+    """Register the corpus's categories and route them to roles (amendment A1)."""
+
+    from exomem import context_roles, semantic_language_registry
+    from exomem.commands import op_schema_memory
+
+    current = semantic_language_registry.load_registry(root)
+    op_schema_memory(
+        root,
+        operation="infer",
+        subject="categories",
+        save=True,
+        proposal={
+            "schema_version": 1,
+            "categories": {key: {"description": text} for key, text in CORPUS_CATEGORIES.items()},
+            "kinds": {},
+        },
+        expected_hash=current.content_hash,
+    )
+    registered = semantic_language_registry.load_registry(root)
+    unregistered = sorted(
+        key for key in CORPUS_CATEGORIES if registered.resolve_category(key).status == "unregistered"
+    )
+    if unregistered:
+        raise FixtureError(f"corpus categories did not register: {unregistered}")
+    saved = op_schema_memory(
+        root,
+        operation="save-roles",
+        subject="context-roles",
+        proposal={
+            "schema_version": 1,
+            "roles": {
+                role: {"add_categories": list(categories)}
+                for role, categories in CORPUS_ROLE_CATEGORIES.items()
+            },
+        },
+        why="route the corpus vault's own observation categories to their roles",
+        expected_hash=context_roles.load_roles(root).roles_hash,
+    )
+    if saved.get("findings"):
+        raise FixtureError(f"corpus role override refused: {saved['findings']!r}")
+    roles = context_roles.load_roles(root).roles
+    missing = sorted(
+        f"{role}:{category}"
+        for role, categories in CORPUS_ROLE_CATEGORIES.items()
+        for category in categories
+        if category not in roles[role].categories
+    )
+    if missing:
+        raise FixtureError(f"corpus role override did not take effect: {missing}")
+
+
+def _slug(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", title.casefold()).strip("-")
+
+
+def _write_ordinary_notes(root: Path) -> tuple[str, ...]:
+    """The vault's ordinary notes, as a user's editor writes them (amendment A1)."""
+
+    paths: list[str] = []
+    for index, (folder, title, tags, observations) in enumerate(ORDINARY_NOTES):
+        day = date.fromordinal(date(2026, 5, 1).toordinal() + index).isoformat()
+        tag_text = " ".join(f"#{tag}" for tag in tags)
+        lines = "\n".join(f"- [{category}] {text} {tag_text}" for category, text in observations)
+        rel = f"Knowledge Base/Notes/{folder}/{_slug(title)}.md"
+        _write(
+            root,
+            rel,
+            f"---\ntitle: {title}\ntype: note\nstatus: active\ncreated: {day}\nupdated: {day}\n"
+            f"tags: [{', '.join(tags)}]\n---\n\n# {title}\n\n## Observations\n\n{lines}\n",
+        )
+        paths.append(rel)
+    return tuple(paths)
 
 
 @dataclass(frozen=True)
@@ -873,8 +1103,14 @@ def _logical_corpus_hash(
             text,
         )
         pages.append((relative, text))
+    schema = {
+        relative: (root / relative).read_text(encoding="utf-8")
+        for relative in CORPUS_SCHEMA_FILES
+        if (root / relative).is_file()
+    }
     payload = {
         "corpus_id": CORPUS_ID,
+        "schema": schema,
         "fixture_set_hash": fixture_set_digest(),
         "seed": seed,
         "distractor_count": distractor_count,
@@ -1470,6 +1706,7 @@ def _build_corpus_in_process(
 
     root = Path(root)
     init_vault(root)
+    _register_corpus_vocabulary(root)
     rng = random.Random(seed)
     key_to_path: dict[str, str] = {}
 
@@ -1786,6 +2023,9 @@ def _build_corpus_in_process(
         category="current state",
         tags=("support",),
     )
+
+    # The ordinary notes a vault in use holds (amendment A1).
+    _write_ordinary_notes(root)
 
     # Distractor evidence/transcript pages padding C9's neighbourhood (N2):
     # composed from a generic outdoor-cooking word bank adjacent to, but
