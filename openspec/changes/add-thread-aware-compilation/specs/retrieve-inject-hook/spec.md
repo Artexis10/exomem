@@ -35,6 +35,8 @@ In `working_set` injection mode, where the client's prompt event carries a trans
 
 **Old services.** When an older service refuses the `conversation` field, the hook SHALL retry once without it within the same budget, as it already does for attribution fields.
 
+**Origin labels.** When the hook renders a packet, each anchor's `origin` SHALL be shown on its line. A `focus` or `conversation` origin SHALL be rendered as a plain label that names who supplied the cue (for example "from earlier in this conversation"). Hooks send no `focus`, so a hook-rendered packet carries no `focus` origin, never as the user's words. Anchors with origin `turn` SHALL render exactly as today.
+
 **Parity.** The hook script and its plugin mirror SHALL stay byte-identical.
 
 #### Scenario: A Claude Code conversation is sent without tool payloads
@@ -58,3 +60,9 @@ In `working_set` injection mode, where the client's prompt event carries a trans
 
 - **WHEN** the hook has sent a conversation containing a distinctive invented phrase
 - **THEN** none of the hook's state files, logs or checkpoints contains that phrase or its sha256
+
+#### Scenario: A carried anchor is labelled, not presented as the user's words
+
+- **WHEN** the packet carries one anchor with `origin = "conversation"`
+- **THEN** its rendered line carries the conversation label
+- **AND** a packet whose anchors are all `turn` renders byte-identically to today

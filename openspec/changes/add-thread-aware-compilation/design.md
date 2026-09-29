@@ -38,6 +38,18 @@ Three facts shape the design:
 
 ## Decisions
 
+**Orchestrator rulings, 2026-09-29**, recorded here as binding on the build lane:
+
+1. `focus` is current-turn evidence (D2.1). Every anchor carries an `origin` label (`turn`, `focus`, `turn_and_focus`, `conversation`), so the agent can tell what the user said from what the agent said was in play.
+2. Assistant turns go into `recent`, capped. Only the newest two are read for evidence, and the carry never walks them (D1, D2).
+3. The call ledger records `conversation` as name, length and sha256, the same as `turn`. There is no call-ledger contract change (D3).
+4. The 1 s bound is the CI gate as pinned (D7). Live-cell latency is a separate lane, which this change must not regress.
+5. S1 and S4 ship together, with one connector refresh (D7).
+6. Fold `claude/keyless-thread-continuity` into this change, and specify S2's precedence on top of it. See D9 for what the branch turned out to contain.
+7. The branch name stands, and authorship is fixed by squash merge.
+8. **New:** clients may put attachment-derived cues into `focus` (D8).
+
+
 ### D1. The signal: one optional `conversation` object with three bounded fields
 
 | Field | Who fills it | Bound | Truncation |
@@ -65,6 +77,13 @@ Three facts shape the design:
 The compiler adds one stage, `working_set.conversation`, between `working_set.resolve` evidence assembly and status derivation. Resolution then follows the rules below.
 
 1. **`focus` is part of the current turn.** It is resolved as a second segment with worded kinds only: `exact_alias`, `lexical_overlap` and `claims_match`. It gets no second recall query and no second embedding. Segments never pair: no n-gram, proximity window or rarity pair crosses them. The referential, follow-up and retrieval-carry tests read the turn segment alone. `focus` is treated as current rather than historical because the agent writes it for this turn. It is the remote client's only lever, and the agent may already set `anchor`, which is stronger.
+   - **Origin labels (ruling 1).** Every served anchor carries `origin`:
+     - `turn`: the user's words reached it;
+     - `focus`: only the agent's `focus` reached it;
+     - `turn_and_focus`: both reached it;
+     - `conversation`: carried from an earlier user entry.
+
+     Qualifiers never change an anchor's origin. A `focus` origin is never `agent_choice`, and `focus` cannot settle an ambiguity between anchors the turn segment itself resolved: that is what `anchor` is for. The hook render and the tool description say so, so the agent never mistakes its own cue for the user's statement.
 2. **`recent` and `refs` yield one qualifier, `conversation`.**
    - Sources:
      - a visible ref equal to an anchor's canonical ref;
@@ -76,7 +95,16 @@ The compiler adds one stage, `working_set.conversation`, between `working_set.re
 4. **Tie-break.** In an `ambiguous` turn, if exactly one competitor carries `conversation`, that competitor is served and the rest are listed `partial`, with `generation.disambiguated_by = "conversation"`. If none or several carry it, the turn stays ambiguous.
 5. **Carry (same-thread promotion).**
    - Trigger: an anaphoric turn of any length that reaches nothing by its own words (a pronoun or possessive, a demonstrative, a shipped follow-up marker, an ordinal plus "one/option", or "the former/latter").
-   - Precondition: no earlier rule (recency, continuity, follow-up) has already carried it.
+   - **Precedence (ruling 6).** Activation decides a turn that its words left open with the first rule, in this order, that resolves or carries an anchor, or abstains `ambiguous`:
+     1. the `anchor` override;
+     2. resolution by the turn and `focus` segments;
+     3. referential recency, including the continuity-thread resume;
+     4. the shipped follow-up carry from the caller's own session tier;
+     5. **the conversation carry**;
+     6. the retrieval carry;
+     7. abstention.
+
+     Rules 3, 4 and 6 are the contracts on `main` (context-activation-continuity, with memory-loop in `close-memory-loop`), and they are unchanged. The conversation carry sits before the retrieval carry on purpose: the incident that abstained and then "activated unrelated context" is the retrieval carry serving an incidental hit when the user's subject was in an earlier turn. A conversation carry that abstains `ambiguous` stops the ladder.
    - The compiler walks the user entries newest to oldest and stops at the first entry that resolves anchors on its own text. That entry's single anchor is carried `partial` with evidence `[conversation]` and `carried_by = "conversation"`. Two or more make the turn `ambiguous`, and the compiler does not choose. Nothing resolving means today's abstention.
    - Assistant entries are not walked: the subject must have been the user's.
    - Refs never carry: a read is not a referent.
@@ -100,7 +128,7 @@ The compiler adds one stage, `working_set.conversation`, between `working_set.re
 **What the call ledger keeps.**
 
 - The ledger already records every argument as name, byte length and sha256 (call-ledger). That is existing policy, and it covers `conversation` exactly as it covers `turn`.
-- This change does not widen it. Tightening it to name and length only for `conversation` is offered as a ruling (see "Needs ruling" in the PR), because it would be a call-ledger contract change.
+- This change does not widen it. Ruling 3 keeps it: there is no call-ledger contract change.
 
 **The token.** The continuity token never encodes a conversation field, a carried anchor, or an anchor that resolved only with the conversation's help. A conversation that dropped its signal then degrades to today's behaviour instead of laundering that signal into durable client state.
 
@@ -142,11 +170,18 @@ The plugin mirror stays byte-identical, pinned by `tests/test_plugin_sync.py`.
 
 One sentence is appended to `SERVER_INSTRUCTIONS`. The first sentence keeps "the user's message verbatim":
 
-> In a longer conversation also pass `conversation`: `focus`, one line naming the subjects now in play, and `refs`, the pages you already read; never rewrite `turn`.
+> In a longer conversation, or when the user's words lean on attachments, also pass `conversation`: `focus`, one line naming the subjects now in play, including names you read from attachments, and `refs`, the pages you already read; never rewrite `turn`.
 
 The rest of the surface follows it:
 
-- **Tool description.** It states the bounds and that every field is optional. The `turn` description keeps "verbatim".
+- **Tool description.** It states:
+  - the bounds, and that every field is optional;
+  - that `focus` may carry names or objects the agent read from attachments;
+  - that `focus`-origin anchors are the agent's cues, not the user's words;
+  - that activation reads no attachment itself.
+
+  The `turn` description keeps "verbatim".
+- **Length.** The sentence is longer than the first draft. S4's red test proves the instructions still fit the existing length test. If they do not, the attachment clause moves to the tool description only, and the server sentence reverts to the shorter form.
 - **Scaffold skill line** (`_scaffold/_Schema/SKILL.md`). It is updated to match, generic, with no leak tokens.
 - **Benchmark arm.** A3's arm prompt stays verbatim-only in the existing groups. The new group adds an arm that passes `focus` as specified here (D6).
 - **What remote agents are not asked for.** They are not asked for `recent`: pasting earlier turns costs the most tokens and duplicates what `focus` says better. `recent` stays open to them, bounded, for clients that want it.
@@ -164,6 +199,7 @@ The group lives in `benchmarks/epistemic/corpora/context_activation.py` (or a si
 - Each case has a negative twin (an unrelated conversation, or a current turn that reaches nothing).
 - At least three drowning cases and three topic-switch cases.
 - One withheld-versus-absent pair, scored for byte identity.
+- Two attachment cases: a nearly content-free turn ("thoughts on this?") with a fixture-authored `focus` of cues as a vision layer would read them, gold with `origin = "focus"`, and a twin whose cues name nothing in the corpus. They run on arms c and d. Arm (a) must abstain, as today's compiler correctly does.
 
 **Pre-registration.**
 
@@ -194,13 +230,12 @@ A baseline run of arm (a) on the current compiler is recorded in S0, so the inci
 | Slice | Content | Tool surface? |
 |---|---|---|
 | S0 | Group fixtures, digests, scorer arms; baseline of arm (a) on `main` | no |
-| S1 | Argument, bounds, `generation.conversation`, cache bypass, activation-log fields, withheld-equals-absent; `focus` segment; `conversation` qualifier, promotion, tie-break; drowning share | yes, additive |
-| S2 | Anaphoric carry; the anaphor set; stop-at-first walk | no |
-| S3 | Hook transcript tail for Claude Code, then Codex once its event is verified; mirror parity | no |
-| S4 | Server instructions, tool description, scaffold line; regenerate schema fixture, tool-surface contract, plugin trees, hosted render, capabilities doc; ChatGPT two-phase rollout (`pending_tool_surface_sha256`, `refresh_required`) | yes |
+| S1+S4 (one surface change, ruling 5) | Argument, bounds, `generation.conversation`, cache bypass, activation-log fields, withheld-equals-absent; `focus` segment with origin labels and attachment cues; `conversation` qualifier, promotion, tie-break; drowning share. Server instructions, tool description, scaffold line; regenerate schema fixture, tool-surface contract, plugin trees, hosted render, capabilities doc; ChatGPT two-phase rollout (`pending_tool_surface_sha256`, `refresh_required`) | yes, additive, one refresh |
+| S2 | Anaphoric carry; the anaphor set; stop-at-first walk; the precedence ladder | no |
+| S3 | Hook transcript tail for Claude Code, then Codex once its event is verified; origin labels in the render; mirror parity | no |
 | S5 | Acceptance run of the group on arms a to d; latency gate pinned | no |
 
-S1 and S4 can ship as one surface change if the owner prefers a single connector refresh. The rollout needs the owner to refresh the ChatGPT Personal Plugin and the claude.ai connector. Until then, remote clients keep today's behaviour, because the argument is optional and unknown to them.
+S1 and S4 ship as one surface change, so the owner refreshes the connectors once. The rollout needs the owner to refresh the ChatGPT Personal Plugin and the claude.ai connector. Until then, remote clients keep today's behaviour, because the argument is optional and unknown to them.
 
 **Latency budget.** Measured on the model-free synthetic reference corpus with a maximum-size conversation:
 
@@ -213,7 +248,51 @@ S1 and S4 can ship as one surface change if the owner prefers a single connector
 | **`working_set.conversation` total** | **≤ 60 ms** | Pinned in the CI latency gate |
 | **Warm `activate_context` total** | **≤ 1,000 ms** | Pinned alongside; skipped-stage fallback if the reserve is short |
 
-The existing audit ceilings (stage p50 800 ms and p95 2,500 ms, and the end-to-end naive baseline) stay as they are. The new 1 s bound is warm, synthetic and gate-local. Its relation to the brief's "activation p95 under 1 s" on live cells is raised for a ruling.
+**Latency scope (ruling 4).**
+
+- **What this change is accepted on.** The two CI-gate bounds above: warm `activate_context` p95 ≤ 1,000 ms and `working_set.conversation` p95 ≤ 60 ms, both on the synthetic reference corpus with a maximum-size conversation.
+- **What it is not accepted on.** Live-cell end-to-end latency (still about 16 s p95 on the naive-path baseline) belongs to a separate lane, and this change makes no claim about it.
+- **No regression.** The change must not regress live cells. A request without `conversation` does no conversation work and records no `working_set.conversation` span, which the spec pins. A request with one pays only the bounded stage above.
+- **Existing ceilings.** The audit's existing ceilings (stage p50 800 ms and p95 2,500 ms, and the end-to-end naive baseline) are unchanged.
+
+### D8. Attachment-derived cues travel in `focus` (ruling 8)
+
+**The incident (anonymised).** The user sends screenshots with nearly content-free text. Activation sees only the text and correctly abstains, while the client's vision layer could read names and objects from the images.
+
+**The fix.** It adds no new channel. The client may put what its vision or file layer read into `focus`:
+
+- The cues resolve as `focus` evidence with the same worded kinds and are labelled `origin = "focus"`.
+- They are never the user's words, never an `anchor` choice, and never authority for anything beyond contact.
+- They are request-scoped like all conversation content.
+- Activation receives, fetches and decodes no attachment, and runs no OCR, CLIP, captioning or other media model, so the request path gains no media stage and no model.
+
+**Rejected alternatives.**
+
+- A separate `attachments` field. That is another surface to refresh, for text the server would treat exactly like `focus`.
+- Server-side OCR or CLIP on attachments during activation. That puts a model on the request path, breaks p95, and sends user media through the server's media transducers outside their governed ingestion path.
+
+### D9. The keyless-thread branch (ruling 6), audited against `main`
+
+`claude/keyless-thread-continuity` (`72fd41ec`, three commits, based on `1abb81c7`) was audited on 2026-09-29 before folding it in:
+
+- **Its behaviour has already landed on `main`, in a later and hardened form**, through #1424 ("keyless continuity, incident routing…", `84f95bc9`):
+  - Every test function in the branch's `tests/test_working_set_keyless_continuity.py` exists on `main`.
+  - `main` adds four more: `test_a_rewritten_thread_is_served_as_keyless`, `test_a_signed_thread_lives_only_within_its_bounds`, `test_an_unsigned_thread_is_served_as_keyless` and `test_the_token_crosses_the_dispatcher_and_continues_the_thread`.
+  - The branch's `working_set_resolve.py` equals `main`'s.
+  - Its keyed/keyless cache separation (the third commit) is on `main` as the `:stranger` heat-digest salt in `working_set_runtime.py`.
+  - The follow-up carry and the vault-tier rule are in `close-memory-loop`'s memory-loop delta on `main`.
+- **A trial merge into current `main` conflicts in six files:**
+  - `close-memory-loop/specs/context-activation-continuity/spec.md`
+  - `commands.py`
+  - `working_set_runtime.py`
+  - `tool_surface_contract.json`
+  - `deploy/chatgpt/personal-plugin-contract.json`
+  - the keyless test, as an add/add conflict
+
+  On the spec, the branch's side is the *earlier* wording. It lacks the authenticated-thread clause, the `withheld` exception and the rewritten-thread scenario.
+- **Consequence.** Merging the branch as-is would at best be a no-op after conflict resolution toward `main`, and at worst would reintroduce the unauthenticated thread contract.
+
+This change therefore specifies S2's precedence on top of the landed contract, which is what the branch intended. Task 3.0 makes the build lane re-verify the audit before S2 and merge only a residual, if one appears. Whether the branch should instead be retired unmerged is raised to the orchestrator.
 
 ## Rejected alternatives
 
@@ -249,7 +328,8 @@ The existing audit ceilings (stage p50 800 ms and p95 2,500 ms, and the end-to-e
 - **Anaphor false positives.** "It" in "is it worth it?" makes the turn anaphoric. The carry still requires the turn to reach nothing and an earlier user entry to resolve on its own, and it serves `partial` only. Drowning and twin floors pin the rate.
 - **Transcript formats drift.** Closed parsers soft-fail to "no conversation", so a format change costs the feature and never correctness. Recorded fixtures per client pin the parser.
 - **Codex may not deliver `transcript_path` on `UserPromptSubmit`.** Then Codex gets no automatic conversation until it does, which is reported in S3.
-- **The call-ledger hash of the argument.** It stays within existing policy. The ruling covers tightening it.
+- **The call-ledger hash of the argument.** It stays within existing policy (ruling 3). A short `focus` is as guessable from its hash as a short `turn` already is.
+- **Attachment cues are only as good as the client's vision layer.** A misread name reaches nothing (a twin pins it) or reaches a wrong anchor labelled `focus`. The label is what lets the agent discount it.
 
 ## Migration
 

@@ -19,7 +19,8 @@ Hooked clients (Claude Code, Codex) can read a local transcript. Remote clients 
 
   The server enforces every bound itself, truncating deterministically. It reports `generation.conversation` as `applied`, `truncated` or `absent`, and never refuses a request over it. The name is `conversation`, not `thread`, because "thread" already names the continuity token's keyless thread (`generation.continuity_thread`).
 - **Conversation evidence is subordinate to the current turn** in the compiler, under closed rules:
-  - `focus` is the agent's statement of the current turn, so it is resolved as a second segment of the current turn. Anchors it reaches carry the source tag `focus`.
+  - `focus` is the agent's statement of the current turn, so it is resolved as a second segment of the current turn. Every anchor carries an `origin` label (`turn`, `focus`, `turn_and_focus` or `conversation`), so the agent can tell the user's words from its own cue.
+  - A client may put attachment-derived cues (names or objects its vision layer read from images) into `focus`. They resolve as `focus` evidence, never as authority. Activation itself runs no OCR, CLIP or other media model.
   - `recent` and `refs` contribute only a new qualifier evidence kind, `conversation`, which never creates a candidate and never resolves on its own.
   - The `conversation` qualifier has exactly three effects:
     1. **Promotion.** An anchor the current turn reached by one contact kind resolves with `conversation`, as it does with `continuity` today. This recovers the missed second domain.
@@ -42,13 +43,12 @@ Hooked clients (Claude Code, Codex) can read a local transcript. Remote clients 
   - it includes drowning cases (a long conversation about one subject, then a current turn about another), topic-switch poison and a withheld-versus-absent twin;
   - fixture digests are pinned in a commit that precedes the first scored run;
   - a mechanism-removal arm strips the conversation and must turn the group red.
-- **A measured latency budget.** The conversation stage adds at most 60 ms at p95 on the warm synthetic reference corpus, and warm activation with a full-size conversation stays under 1 s at p95. The CI latency gate pins both.
+- **A measured latency budget.** The conversation stage adds at most 60 ms at p95 on the warm synthetic reference corpus, and warm activation with a full-size conversation stays under 1 s at p95. The CI latency gate pins both, and they are this change's acceptance measure. Live-cell latency belongs to a separate lane; this change must not regress it, and a request without `conversation` does no extra work.
 - **Delivery in slices:**
   - S0: pre-registration and a baseline on the current compiler.
-  - S1: the argument, bounds, privacy and the promotion and tie-break rules.
-  - S2: the conversation carry and focus.
+  - S1+S4, shipped together with one connector refresh: the argument, bounds, privacy, origin labels, attachment cues, the promotion and tie-break rules, the instructions and the regenerated surfaces.
+  - S2: the conversation carry, placed before the retrieval carry and after the shipped recency and follow-up carries.
   - S3: hooks.
-  - S4: instructions and the connector rollout.
   - S5: the acceptance run.
 
 ## Capabilities
