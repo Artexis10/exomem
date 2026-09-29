@@ -910,6 +910,19 @@ def op_bootstrap(
     if frozen_profile and section is not None:
         raise ValueError("bootstrap: section is not available on this surface profile")
     active_product_names = frozenset(active_descriptor.product_commands)
+    # The recall contract opens with a line that names `activate_context`. Where the
+    # surface does not export it (hosted), the filter below would drop the WHOLE recall
+    # contract; carry the same instruction through `ask_memory` instead. A released
+    # profile keeps its published payload.
+    recall = engagement_policy["contract"].get("recall")
+    if (
+        not frozen_profile
+        and isinstance(recall, str)
+        and "activate_context" not in active_descriptor.callable_commands
+    ):
+        engagement_policy["contract"]["recall"] = recall.replace(
+            prominence_module.ACTIVATION_CARRIER_LINE, prominence_module.ASK_MEMORY_CARRIER_LINE
+        )
     # `change_with` is seeded from the CLI string, which is right for a local
     # install and wrong for every served surface. Take it from what this surface
     # actually offers: the agent-accessible control when it is served, and
