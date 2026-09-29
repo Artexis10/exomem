@@ -103,8 +103,8 @@ RULE = (
     "one bounded pass over the recent exchange for anything that would materially "
     "improve a later decision, lookup, repeated task, comparison or continuation; "
     "dedupe against written_recently and existing memory; stay silent when nothing "
-    "qualifies. A person's role goes to their entity; contact details go to a "
-    "linked governed page, never the entity body. "
+    "qualifies. A person's role goes to their entity; contact details go in its "
+    "Contact section as contact units. "
     "`consider` lists examples, not a closed set"
 )
 
@@ -115,6 +115,7 @@ CONSIDER: tuple[str, ...] = (
     "stable preference",
     "method or parameter",
     "entity facet",
+    "contact detail",
     "operational or vendor quirk",
     "evidence worth preserving",
     "relation",

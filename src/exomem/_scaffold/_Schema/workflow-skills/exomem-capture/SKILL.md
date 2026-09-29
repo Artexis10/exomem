@@ -70,14 +70,15 @@ carry transient progress; capture reusable decisions and verified milestones.
    then call `connect_memory(operation="resolve-entity", name=...)` before writing.
 7. When one active entity matches, use `edit_memory` for a small stable-fact
    correction or the canonical relation workflow for a new connection.
-   A stable, uniquely attributable non-contact fact about a resolved person,
-   including the vault owner's own entity (role, affiliation, relationship), is
-   an entity-level fact: route it to that entity under `proactive_capture`, not
-   just in the reply that used it. Contact details (phone, address, email,
-   identifiers) are never written into an entity page body. Put them in a
-   separate page linked from the entity, tagged so a governance scope can cover
-   it, and release them to the owner only through `govern_memory` audience
-   policy; see `references/governance.md`.
+   A stable, uniquely attributable fact about a resolved person, including the
+   vault owner's own entity (role, affiliation, relationship), is an entity-level
+   fact: route it to that entity under `proactive_capture`, not just in the reply
+   that used it. Contact details (phone, address, email, identifiers) go on the
+   same entity page, in a dedicated `## Contact` section, each as its own
+   `- [contact] ...` unit. Never put them in the summary or in `fact` units:
+   activation serves `contact` units only when the turn asks to reach the person,
+   and a restricted audience that cannot see the entity cannot see the section.
+   Do not create a separate contact page or page type.
 8. Only when no entity matches and the identity is stable, and central or
    recurring, and useful beyond this source, use `connect_memory(operation="create-entity")`.
    When the name you write is in another script than the user's own spelling
