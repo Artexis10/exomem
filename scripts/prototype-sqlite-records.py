@@ -113,7 +113,7 @@ class Store:
         )
         self.items_dir = root / manifest.storage.source
         self.items_dir.mkdir(parents=True, exist_ok=True)
-        self.lag_ms: list[float] = []
+        self.lag_seconds: list[float] = []
         self._queue: queue.Queue[tuple[str, dict, str] | None] = queue.Queue()
         self._worker: threading.Thread | None = None
         if sync_mode == "async":
@@ -147,7 +147,7 @@ class Store:
         while (job := self._queue.get()) is not None:
             key, values, correlation, enqueued = job  # type: ignore[misc]
             self._write_projection(key, self._render(key, values, correlation))
-            self.lag_ms.append((time.perf_counter_ns() - enqueued) / 1e6)
+            self.lag_seconds.append((time.perf_counter_ns() - enqueued) / 1e9)
             self._queue.task_done()
 
     # -- append -------------------------------------------------------------------
@@ -282,7 +282,7 @@ def run(size: int, appends: int, mode: str, synchronous: str) -> dict[str, objec
             "seed_seconds": round(seeded, 1),
             "append": _summary(wall),
             "guard_refresh": _summary(refresh),
-            "projection_lag_ms": _summary(store.lag_ms) if store.lag_ms else None,
+            "projection_lag_ms": _summary(store.lag_seconds) if store.lag_seconds else None,
         }
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

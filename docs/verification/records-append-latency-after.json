@@ -1,0 +1,1166 @@
+[
+ {
+  "size": 10,
+  "appends": 30,
+  "seed_seconds": 0.01,
+  "guarded_append": {
+   "audit.body": {
+    "p50_ms": 0.03,
+    "p95_ms": 0.03
+   },
+   "audit.plan": {
+    "p50_ms": 0.49,
+    "p95_ms": 1.12
+   },
+   "authz.precommit": {
+    "p50_ms": 3.38,
+    "p95_ms": 5.79
+   },
+   "authz.visibility": {
+    "p50_ms": 4.45,
+    "p95_ms": 5.9
+   },
+   "boundary.enter": {
+    "p50_ms": 1.38,
+    "p95_ms": 2.92
+   },
+   "boundary.exit": {
+    "p50_ms": 0.78,
+    "p95_ms": 1.11
+   },
+   "collection.profile": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "collection.resolve": {
+    "p50_ms": 7.46,
+    "p95_ms": 14.9
+   },
+   "dispatcher_outside_leaf": {
+    "p50_ms": 5.73,
+    "p95_ms": 8.62
+   },
+   "graph.join_registered": {
+    "p50_ms": 0.1,
+    "p95_ms": 0.15
+   },
+   "guard.after_container_hash": {
+    "p50_ms": 0.08,
+    "p95_ms": 0.13
+   },
+   "guard.load_adapter": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.01
+   },
+   "guard.manifest_load": {
+    "p50_ms": 2.54,
+    "p95_ms": 3.59
+   },
+   "guard.manifest_parse": {
+    "p50_ms": 7.31,
+    "p95_ms": 7.92
+   },
+   "guard.natural_key_twins": {
+    "p50_ms": 0.17,
+    "p95_ms": 0.25
+   },
+   "guard.snapshot_read": {
+    "p50_ms": 5.12,
+    "p95_ms": 7.31
+   },
+   "index.upsert_after_write": {
+    "p50_ms": 37.1,
+    "p95_ms": 50.03
+   },
+   "leaf": {
+    "p50_ms": 151.53,
+    "p95_ms": 188.65
+   },
+   "ledger.command_digest": {
+    "p50_ms": 0.03,
+    "p95_ms": 0.05
+   },
+   "ledger.completed_terminal": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "ledger.effective_key": {
+    "p50_ms": 0.06,
+    "p95_ms": 0.11
+   },
+   "ledger.run": {
+    "p50_ms": 154.2,
+    "p95_ms": 191.39
+   },
+   "post.capture_sweep_carrier": {
+    "p50_ms": 0.09,
+    "p95_ms": 0.13
+   },
+   "post.due_state_carrier": {
+    "p50_ms": 0.19,
+    "p95_ms": 0.36
+   },
+   "post.terminal_housekeeping": {
+    "p50_ms": 2.19,
+    "p95_ms": 4.47
+   },
+   "render.item": {
+    "p50_ms": 0.75,
+    "p95_ms": 0.95
+   },
+   "render.manifest_head": {
+    "p50_ms": 5.13,
+    "p95_ms": 6.36
+   },
+   "render.presentation_block": {
+    "p50_ms": 0.08,
+    "p95_ms": 0.1
+   },
+   "request.reserved_preflight": {
+    "p50_ms": 0.07,
+    "p95_ms": 0.11
+   },
+   "response.egress_postfilter": {
+    "p50_ms": 1.83,
+    "p95_ms": 2.23
+   },
+   "total": {
+    "p50_ms": 157.15,
+    "p95_ms": 194.67
+   },
+   "validate.arguments": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.01
+   },
+   "validate.values": {
+    "p50_ms": 1.76,
+    "p95_ms": 1.88
+   },
+   "validate.why_body": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.01
+   },
+   "write.batch_atomic_write": {
+    "p50_ms": 111.02,
+    "p95_ms": 143.75
+   },
+   "write.new_item_path": {
+    "p50_ms": 0.26,
+    "p95_ms": 0.36
+   },
+   "write.post_commit_fanout": {
+    "p50_ms": 50.44,
+    "p95_ms": 65.84
+   }
+  },
+  "guarded_call_spans": {
+   "delivery.vocabulary_after_commit": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.01
+   },
+   "derived.canonical_commit": {
+    "p50_ms": 28.19,
+    "p95_ms": 46.29
+   },
+   "derived.fanout": {
+    "p50_ms": 56.47,
+    "p95_ms": 72.2
+   },
+   "index.completion_check": {
+    "p50_ms": 1.43,
+    "p95_ms": 1.87
+   },
+   "index.corpus_publish": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "index.embeddings": {
+    "p50_ms": 0.31,
+    "p95_ms": 0.49
+   },
+   "index.epistemic_graph": {
+    "p50_ms": 1.84,
+    "p95_ms": 2.46
+   },
+   "index.graph_epoch_handoff": {
+    "p50_ms": 2.69,
+    "p95_ms": 3.97
+   },
+   "index.lexstore": {
+    "p50_ms": 0.16,
+    "p95_ms": 0.28
+   },
+   "index.memory_refs": {
+    "p50_ms": 10.17,
+    "p95_ms": 14.51
+   },
+   "index.path_custody": {
+    "p50_ms": 8.65,
+    "p95_ms": 9.64
+   },
+   "index.path_partition": {
+    "p50_ms": 1.16,
+    "p95_ms": 1.88
+   },
+   "index.policy_revalidate": {
+    "p50_ms": 1.52,
+    "p95_ms": 3.33
+   },
+   "index.resolver": {
+    "p50_ms": 0.19,
+    "p95_ms": 0.29
+   },
+   "index.self_write_registration": {
+    "p50_ms": 9.07,
+    "p95_ms": 13.1
+   },
+   "index.semantic_purge": {
+    "p50_ms": 3.01,
+    "p95_ms": 3.66
+   },
+   "index.semantic_states": {
+    "p50_ms": 2.01,
+    "p95_ms": 3.18
+   },
+   "index.upsert_after_write": {
+    "p50_ms": 37.09,
+    "p95_ms": 50.02
+   }
+  },
+  "guarded_append_wall_ms": {
+   "p50": 157.15,
+   "p95": 194.67
+  },
+  "guard_refresh_read_ms": {
+   "p50": 31.27,
+   "p95": 45.69
+  },
+  "guard_round_trip_ms": {
+   "p50": 188.42
+  },
+  "stage_calls_last_append": {
+   "request.reserved_preflight": 1,
+   "ledger.command_digest": 1,
+   "ledger.effective_key": 1,
+   "ledger.completed_terminal": 1,
+   "ledger.run": 1,
+   "validate.arguments": 1,
+   "collection.resolve": 3,
+   "collection.profile": 1,
+   "validate.why_body": 2,
+   "validate.values": 2,
+   "boundary.enter": 1,
+   "guard.manifest_load": 1,
+   "guard.manifest_parse": 11,
+   "authz.visibility": 2,
+   "guard.load_adapter": 1,
+   "guard.snapshot_read": 1,
+   "guard.natural_key_twins": 1,
+   "render.manifest_head": 1,
+   "write.new_item_path": 1,
+   "render.item": 1,
+   "render.presentation_block": 1,
+   "guard.after_container_hash": 1,
+   "audit.body": 1,
+   "audit.plan": 1,
+   "authz.precommit": 1,
+   "write.batch_atomic_write": 1,
+   "write.post_commit_fanout": 1,
+   "index.upsert_after_write": 1,
+   "boundary.exit": 1,
+   "post.due_state_carrier": 1,
+   "post.capture_sweep_carrier": 1,
+   "post.terminal_housekeeping": 1,
+   "graph.join_registered": 1,
+   "response.egress_postfilter": 1
+  },
+  "index_component_outcomes": {
+   "memory_refs": "completed",
+   "resolver": "completed",
+   "semantic_purge": "completed",
+   "lexstore": "completed",
+   "epistemic_graph": "registered",
+   "embeddings": "accepted"
+  },
+  "unguarded_append_wall_ms": {
+   "p50": 188.25,
+   "p95": 237.49
+  },
+  "profile_cumulative": "         562487 function calls (560625 primitive calls) in 0.434 seconds\n\n   Ordered by: cumulative time\n   List reduced from 1610 to 1282 due to restriction <'exomem'>\n   List reduced from 1282 to 45 due to restriction <45>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.000    0.000    0.441    0.441 scripts/measure-records-append-latency.py:319(one_append)\n        1    0.000    0.000    0.441    0.441 scripts/measure-records-append-latency.py:304(invoke)\n        1    0.000    0.000    0.441    0.441 src/exomem/writer_lease.py:5692(wrapped)\n        1    0.000    0.000    0.440    0.440 src/exomem/writer_lease.py:5709(wrapped)\n        1    0.000    0.000    0.440    0.440 src/exomem/writer_lease.py:5722(invoke)\n        1    0.000    0.000    0.440    0.440 src/exomem/writer_lease.py:5772(wrapped)\n        1    0.000    0.000    0.440    0.440 src/exomem/writer_lease.py:5784(invoke_command)\n     47/6    0.001    0.000    0.439    0.073 scripts/measure-records-append-latency.py:129(timed)\n        1    0.000    0.000    0.434    0.434 src/exomem/writer_lease.py:5887(_invoke)\n        1    0.000    0.000    0.434    0.434 src/exomem/writer_lease.py:4152(invoke)\n        1    0.000    0.000    0.432    0.432 src/exomem/writer_lease.py:2759(run)\n        1    0.000    0.000    0.429    0.429 src/exomem/writer_lease.py:4342(invoke_leaf)\n        1    0.000    0.000    0.428    0.428 scripts/measure-records-append-latency.py:282(timed_leaf)\n        1    0.000    0.000    0.428    0.428 src/exomem/commands.py:11750(op_record_memory)\n        1    0.000    0.000    0.428    0.428 src/exomem/record_memory.py:132(record_memory)\n        1    0.000    0.000    0.421    0.421 src/exomem/records.py:211(append_record)\n        1    0.000    0.000    0.280    0.280 src/exomem/vault.py:4697(batch_atomic_write)\n        1    0.001    0.001    0.276    0.276 src/exomem/vault.py:4766(_batch_atomic_write_locked)\n        1    0.000    0.000    0.129    0.129 src/exomem/vault.py:4285(post_commit_batch_fanout)\n        2    0.000    0.000    0.085    0.043 src/exomem/call_spans.py:236(wrapper)\n        1    0.000    0.000    0.085    0.085 scripts/measure-records-append-latency.py:296(spying_upsert)\n        1    0.000    0.000    0.085    0.085 src/exomem/index_sync.py:1604(upsert_after_write)\n  495/312    0.001    0.000    0.068    0.000 src/exomem/state_paths.py:135(_memoized)\n      183    0.000    0.000    0.058    0.000 src/exomem/state_paths.py:303(vault_state_dir)\n      183    0.000    0.000    0.057    0.000 src/exomem/state_paths.py:317(<lambda>)\n      183    0.001    0.000    0.057    0.000 src/exomem/state_paths.py:321(_compute_vault_state_dir)\n      772    0.008    0.000    0.056    0.000 src/exomem/vault.py:1158(recheck)\n        1    0.000    0.000    0.044    0.044 src/exomem/index_sync.py:1426(_dispatch_upsert_components)\n       36    0.000    0.000    0.043    0.001 .venv/lib/python3.11/site-packages/yaml/composer.py:29(get_single_node)\n        9    0.001    0.000    0.041    0.005 src/exomem/vault.py:1247(recheck_path_guards)\n       36    0.000    0.000    0.039    0.001 .venv/lib/python3.11/site-packages/yaml/composer.py:50(compose_document)\n   488/36    0.001    0.000    0.039    0.001 .venv/lib/python3.11/site-packages/yaml/composer.py:63(compose_node)\n        5    0.000    0.000    0.039    0.008 .venv/lib/python3.11/site-packages/yaml/__init__.py:51(compose)\n     71/6    0.001    0.000    0.038    0.006 .venv/lib/python3.11/site-packages/yaml/composer.py:117(compose_mapping_node)\n     1547    0.001    0.000    0.038    0.000 .venv/lib/python3.11/site-packages/yaml/parser.py:94(check_event)\n      188    0.001    0.000    0.034    0.000 src/exomem/state_paths.py:278(validate_vault_state_directory)\n        1    0.000    0.000    0.032    0.032 src/exomem/file_watcher.py:648(register_self_write)\n        1    0.000    0.000    0.031    0.031 src/exomem/file_watcher.py:613(_publish_registry_change)\n     3918    0.003    0.000    0.029    0.000 .venv/lib/python3.11/site-packages/yaml/scanner.py:113(check_token)\n        2    0.000    0.000    0.028    0.014 src/exomem/record_governance.py:2904(require_mutation_visibility)\n       11    0.000    0.000    0.026    0.002 src/exomem/structured_collections.py:1061(parse_manifest_bytes)\n        1    0.001    0.001    0.026    0.026 src/exomem/record_formats.py:395(read)\n       17    0.000    0.000    0.025    0.001 src/exomem/governance/policy.py:1292(load)\n      312    0.000    0.000    0.025    0.000 src/exomem/state_paths.py:179(resolved_vault_path)\n       84    0.000    0.000    0.025    0.000 src/exomem/record_governance.py:984(_authorize)\n\n\n",
+  "profile_tottime": "         562487 function calls (560625 primitive calls) in 0.434 seconds\n\n   Ordered by: internal time\n   List reduced from 1610 to 25 due to restriction <25>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n     8292    0.034    0.000    0.055    0.000 stdlib/pathlib.py:56(parse_parts)\n     4477    0.015    0.000    0.016    0.000 {built-in method posix.lstat}\n     3378    0.013    0.000    0.019    0.000 {built-in method posix.stat}\n     8288    0.012    0.000    0.070    0.000 stdlib/pathlib.py:484(_parse_args)\n    20730    0.009    0.000    0.011    0.000 stdlib/pathlib.py:239(splitroot)\n     6939    0.008    0.000    0.013    0.000 stdlib/pathlib.py:536(__str__)\n     4113    0.008    0.000    0.012    0.000 <frozen posixpath>:71(join)\n      875    0.008    0.000    0.030    0.000 <frozen posixpath>:418(_joinrealpath)\n      772    0.008    0.000    0.056    0.000 src/exomem/vault.py:1158(recheck)\n     5906    0.006    0.000    0.063    0.000 stdlib/pathlib.py:504(_from_parts)\n      156    0.006    0.000    0.006    0.000 {method 'execute' of 'sqlite3.Connection' objects}\n    39411    0.006    0.000    0.006    0.000 {built-in method builtins.isinstance}\n      167    0.005    0.000    0.024    0.000 src/exomem/vault.py:3629(_read_bounded_guarded_snapshot)\n       17    0.005    0.000    0.005    0.000 {built-in method posix.fsync}\n12302/12284    0.005    0.000    0.011    0.000 {built-in method builtins.any}\n     2133    0.005    0.000    0.011    0.000 src/exomem/reserved_paths.py:115(matches)\n     1411    0.005    0.000    0.005    0.000 {built-in method posix.close}\n     3523    0.005    0.000    0.005    0.000 {built-in method posix.fstat}\n    43670    0.005    0.000    0.005    0.000 {method 'append' of 'list' objects}\n    26359    0.005    0.000    0.005    0.000 {built-in method sys.intern}\n       12    0.004    0.000    0.014    0.001 src/exomem/vault.py:3369(_bounded_directory_entries)\n     6371    0.004    0.000    0.007    0.000 .venv/lib/python3.11/site-packages/yaml/scanner.py:145(need_more_tokens)\n     4994    0.004    0.000    0.057    0.000 stdlib/pathlib.py:868(__new__)\n     4786    0.004    0.000    0.005    0.000 stdlib/pathlib.py:523(_format_parsed_parts)\n8816/8810    0.004    0.000    0.006    0.000 {method 'join' of 'str' objects}\n\n\n",
+  "profile_refresh_cumulative": "         281462 function calls (278993 primitive calls) in 0.164 seconds\n\n   Ordered by: cumulative time\n   List reduced from 661 to 474 due to restriction <'exomem'>\n   List reduced from 474 to 40 due to restriction <40>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.000    0.000    0.165    0.165 scripts/measure-records-append-latency.py:312(refresh_hash)\n        1    0.000    0.000    0.165    0.165 scripts/measure-records-append-latency.py:304(invoke)\n        1    0.000    0.000    0.165    0.165 src/exomem/writer_lease.py:5692(wrapped)\n        1    0.000    0.000    0.164    0.164 src/exomem/writer_lease.py:5709(wrapped)\n        1    0.000    0.000    0.164    0.164 src/exomem/writer_lease.py:5722(invoke)\n        1    0.000    0.000    0.164    0.164 src/exomem/writer_lease.py:5772(wrapped)\n        1    0.000    0.000    0.164    0.164 src/exomem/writer_lease.py:5784(invoke_command)\n        1    0.000    0.000    0.136    0.136 src/exomem/writer_lease.py:5887(_invoke)\n        1    0.000    0.000    0.136    0.136 src/exomem/writer_lease.py:4152(invoke)\n        1    0.000    0.000    0.136    0.136 scripts/measure-records-append-latency.py:282(timed_leaf)\n        1    0.000    0.000    0.136    0.136 src/exomem/commands.py:11750(op_record_memory)\n        1    0.000    0.000    0.136    0.136 src/exomem/record_memory.py:132(record_memory)\n        1    0.000    0.000    0.135    0.135 src/exomem/record_governance.py:1461(inspect_collection)\n       79    0.000    0.000    0.075    0.001 scripts/measure-records-append-latency.py:129(timed)\n        1    0.002    0.002    0.040    0.040 src/exomem/record_formats.py:395(read)\n        1    0.000    0.000    0.040    0.040 src/exomem/records.py:1887(inspect_audit_gap)\n        1    0.000    0.000    0.040    0.040 src/exomem/records.py:1939(_inspect_audit_chain)\n        1    0.001    0.001    0.030    0.030 src/exomem/records.py:2059(_reconstruct_audit_chain)\n        1    0.000    0.000    0.030    0.030 src/exomem/record_governance.py:1261(_resolve_released_collection)\n        1    0.000    0.000    0.030    0.030 src/exomem/structured_collections.py:1257(resolve_collection)\n        1    0.000    0.000    0.029    0.029 src/exomem/structured_collections.py:1002(load_manifest)\n        1    0.000    0.000    0.028    0.028 src/exomem/governance/egress.py:4250(postfilter)\n        3    0.000    0.000    0.026    0.009 .venv/lib/python3.11/site-packages/yaml/__init__.py:51(compose)\n        3    0.000    0.000    0.026    0.009 .venv/lib/python3.11/site-packages/yaml/composer.py:29(get_single_node)\n        3    0.000    0.000    0.025    0.008 .venv/lib/python3.11/site-packages/yaml/composer.py:50(compose_document)\n    273/3    0.001    0.000    0.025    0.008 .venv/lib/python3.11/site-packages/yaml/composer.py:63(compose_node)\n     42/3    0.000    0.000    0.025    0.008 .venv/lib/python3.11/site-packages/yaml/composer.py:117(compose_mapping_node)\n      849    0.001    0.000    0.023    0.000 .venv/lib/python3.11/site-packages/yaml/parser.py:94(check_event)\n      411    0.001    0.000    0.023    0.000 src/exomem/record_governance.py:984(_authorize)\n    459/1    0.001    0.000    0.022    0.022 src/exomem/governance/scrubber.py:654(scrub_value)\n     2190    0.002    0.000    0.018    0.000 .venv/lib/python3.11/site-packages/yaml/scanner.py:113(check_token)\n        1    0.000    0.000    0.017    0.017 src/exomem/record_formats.py:1692(inspect_collection)\n        1    0.000    0.000    0.017    0.017 src/exomem/record_formats.py:1814(_inspect_presentation)\n      543    0.000    0.000    0.017    0.000 src/exomem/governance/scrubber.py:565(_scrub_explicit)\n      543    0.003    0.000    0.016    0.000 src/exomem/governance/scrubber.py:488(_active_alternatives)\n      125    0.001    0.000    0.015    0.000 src/exomem/records.py:2303(_event_matches_transition)\n      466    0.001    0.000    0.015    0.000 src/exomem/governance/scrubber.py:592(scrub_text)\n       72    0.000    0.000    0.013    0.000 src/exomem/record_formats.py:1897(_inspect_item_managed_bytes)\n      187    0.001    0.000    0.013    0.000 src/exomem/records.py:2528(_valid_audit_event)\n      145    0.000    0.000    0.012    0.000 src/exomem/record_formats.py:203(_require_authorized)\n\n\n"
+ },
+ {
+  "size": 100,
+  "appends": 30,
+  "seed_seconds": 0.08,
+  "guarded_append": {
+   "audit.body": {
+    "p50_ms": 0.03,
+    "p95_ms": 0.03
+   },
+   "audit.plan": {
+    "p50_ms": 0.46,
+    "p95_ms": 0.6
+   },
+   "authz.precommit": {
+    "p50_ms": 8.26,
+    "p95_ms": 10.41
+   },
+   "authz.visibility": {
+    "p50_ms": 10.07,
+    "p95_ms": 13.23
+   },
+   "boundary.enter": {
+    "p50_ms": 1.64,
+    "p95_ms": 2.2
+   },
+   "boundary.exit": {
+    "p50_ms": 0.81,
+    "p95_ms": 1.18
+   },
+   "collection.profile": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "collection.resolve": {
+    "p50_ms": 6.99,
+    "p95_ms": 8.41
+   },
+   "dispatcher_outside_leaf": {
+    "p50_ms": 6.06,
+    "p95_ms": 9.27
+   },
+   "graph.join_registered": {
+    "p50_ms": 0.1,
+    "p95_ms": 0.19
+   },
+   "guard.after_container_hash": {
+    "p50_ms": 0.22,
+    "p95_ms": 0.27
+   },
+   "guard.load_adapter": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.01
+   },
+   "guard.manifest_load": {
+    "p50_ms": 2.45,
+    "p95_ms": 3.35
+   },
+   "guard.manifest_parse": {
+    "p50_ms": 7.36,
+    "p95_ms": 9.89
+   },
+   "guard.natural_key_twins": {
+    "p50_ms": 0.66,
+    "p95_ms": 0.82
+   },
+   "guard.snapshot_read": {
+    "p50_ms": 13.04,
+    "p95_ms": 32.71
+   },
+   "index.upsert_after_write": {
+    "p50_ms": 37.13,
+    "p95_ms": 48.11
+   },
+   "leaf": {
+    "p50_ms": 181.78,
+    "p95_ms": 241.75
+   },
+   "ledger.command_digest": {
+    "p50_ms": 0.03,
+    "p95_ms": 0.04
+   },
+   "ledger.completed_terminal": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "ledger.effective_key": {
+    "p50_ms": 0.07,
+    "p95_ms": 0.24
+   },
+   "ledger.run": {
+    "p50_ms": 184.84,
+    "p95_ms": 245.84
+   },
+   "post.capture_sweep_carrier": {
+    "p50_ms": 0.09,
+    "p95_ms": 0.12
+   },
+   "post.due_state_carrier": {
+    "p50_ms": 0.19,
+    "p95_ms": 0.29
+   },
+   "post.terminal_housekeeping": {
+    "p50_ms": 2.39,
+    "p95_ms": 4.05
+   },
+   "render.item": {
+    "p50_ms": 0.73,
+    "p95_ms": 0.9
+   },
+   "render.manifest_head": {
+    "p50_ms": 5.02,
+    "p95_ms": 6.12
+   },
+   "render.presentation_block": {
+    "p50_ms": 0.08,
+    "p95_ms": 0.1
+   },
+   "request.reserved_preflight": {
+    "p50_ms": 0.08,
+    "p95_ms": 0.12
+   },
+   "response.egress_postfilter": {
+    "p50_ms": 1.87,
+    "p95_ms": 2.96
+   },
+   "total": {
+    "p50_ms": 188.02,
+    "p95_ms": 249.5
+   },
+   "validate.arguments": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.01
+   },
+   "validate.values": {
+    "p50_ms": 1.75,
+    "p95_ms": 2.03
+   },
+   "validate.why_body": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.01
+   },
+   "write.batch_atomic_write": {
+    "p50_ms": 124.48,
+    "p95_ms": 171.34
+   },
+   "write.new_item_path": {
+    "p50_ms": 0.82,
+    "p95_ms": 0.94
+   },
+   "write.post_commit_fanout": {
+    "p50_ms": 49.69,
+    "p95_ms": 62.58
+   }
+  },
+  "guarded_call_spans": {
+   "delivery.vocabulary_after_commit": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.01
+   },
+   "derived.canonical_commit": {
+    "p50_ms": 40.48,
+    "p95_ms": 72.51
+   },
+   "derived.fanout": {
+    "p50_ms": 55.22,
+    "p95_ms": 71.65
+   },
+   "index.completion_check": {
+    "p50_ms": 1.43,
+    "p95_ms": 2.02
+   },
+   "index.corpus_publish": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "index.embeddings": {
+    "p50_ms": 0.33,
+    "p95_ms": 0.81
+   },
+   "index.epistemic_graph": {
+    "p50_ms": 1.93,
+    "p95_ms": 3.16
+   },
+   "index.graph_epoch_handoff": {
+    "p50_ms": 2.67,
+    "p95_ms": 3.3
+   },
+   "index.lexstore": {
+    "p50_ms": 0.17,
+    "p95_ms": 0.28
+   },
+   "index.memory_refs": {
+    "p50_ms": 10.62,
+    "p95_ms": 14.27
+   },
+   "index.path_custody": {
+    "p50_ms": 8.43,
+    "p95_ms": 10.26
+   },
+   "index.path_partition": {
+    "p50_ms": 1.16,
+    "p95_ms": 1.54
+   },
+   "index.policy_revalidate": {
+    "p50_ms": 1.42,
+    "p95_ms": 2.08
+   },
+   "index.resolver": {
+    "p50_ms": 0.02,
+    "p95_ms": 0.03
+   },
+   "index.self_write_registration": {
+    "p50_ms": 7.98,
+    "p95_ms": 10.44
+   },
+   "index.semantic_purge": {
+    "p50_ms": 2.93,
+    "p95_ms": 4.29
+   },
+   "index.semantic_states": {
+    "p50_ms": 1.9,
+    "p95_ms": 2.42
+   },
+   "index.upsert_after_write": {
+    "p50_ms": 37.12,
+    "p95_ms": 48.07
+   }
+  },
+  "guarded_append_wall_ms": {
+   "p50": 188.02,
+   "p95": 249.5
+  },
+  "guard_refresh_read_ms": {
+   "p50": 64.4,
+   "p95": 95.63
+  },
+  "guard_round_trip_ms": {
+   "p50": 252.42
+  },
+  "stage_calls_last_append": {
+   "request.reserved_preflight": 1,
+   "ledger.command_digest": 1,
+   "ledger.effective_key": 1,
+   "ledger.completed_terminal": 1,
+   "ledger.run": 1,
+   "validate.arguments": 1,
+   "collection.resolve": 3,
+   "collection.profile": 1,
+   "validate.why_body": 2,
+   "validate.values": 2,
+   "boundary.enter": 1,
+   "guard.manifest_load": 1,
+   "guard.manifest_parse": 9,
+   "authz.visibility": 2,
+   "guard.load_adapter": 1,
+   "guard.snapshot_read": 1,
+   "guard.natural_key_twins": 1,
+   "render.manifest_head": 1,
+   "write.new_item_path": 1,
+   "render.item": 1,
+   "render.presentation_block": 1,
+   "guard.after_container_hash": 1,
+   "audit.body": 1,
+   "audit.plan": 1,
+   "authz.precommit": 1,
+   "write.batch_atomic_write": 1,
+   "write.post_commit_fanout": 1,
+   "index.upsert_after_write": 1,
+   "boundary.exit": 1,
+   "post.due_state_carrier": 1,
+   "post.capture_sweep_carrier": 1,
+   "post.terminal_housekeeping": 1,
+   "graph.join_registered": 1,
+   "response.egress_postfilter": 1
+  },
+  "index_component_outcomes": {
+   "memory_refs": "completed",
+   "resolver": "completed",
+   "semantic_purge": "completed",
+   "lexstore": "completed",
+   "epistemic_graph": "registered",
+   "embeddings": "accepted"
+  },
+  "unguarded_append_wall_ms": {
+   "p50": 228.65,
+   "p95": 273.59
+  },
+  "profile_cumulative": "         717875 function calls (715488 primitive calls) in 0.597 seconds\n\n   Ordered by: cumulative time\n   List reduced from 1599 to 1271 due to restriction <'exomem'>\n   List reduced from 1271 to 45 due to restriction <45>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.000    0.000    0.607    0.607 scripts/measure-records-append-latency.py:319(one_append)\n        1    0.000    0.000    0.607    0.607 scripts/measure-records-append-latency.py:304(invoke)\n        1    0.000    0.000    0.607    0.607 src/exomem/writer_lease.py:5692(wrapped)\n        1    0.000    0.000    0.607    0.607 src/exomem/writer_lease.py:5709(wrapped)\n        1    0.000    0.000    0.607    0.607 src/exomem/writer_lease.py:5722(invoke)\n        1    0.000    0.000    0.607    0.607 src/exomem/writer_lease.py:5772(wrapped)\n        1    0.000    0.000    0.607    0.607 src/exomem/writer_lease.py:5784(invoke_command)\n     45/6    0.001    0.000    0.605    0.101 scripts/measure-records-append-latency.py:129(timed)\n        1    0.000    0.000    0.600    0.600 src/exomem/writer_lease.py:5887(_invoke)\n        1    0.000    0.000    0.600    0.600 src/exomem/writer_lease.py:4152(invoke)\n        1    0.000    0.000    0.598    0.598 src/exomem/writer_lease.py:2759(run)\n        1    0.000    0.000    0.593    0.593 src/exomem/writer_lease.py:4342(invoke_leaf)\n        1    0.000    0.000    0.592    0.592 scripts/measure-records-append-latency.py:282(timed_leaf)\n        1    0.000    0.000    0.592    0.592 src/exomem/commands.py:11750(op_record_memory)\n        1    0.000    0.000    0.592    0.592 src/exomem/record_memory.py:132(record_memory)\n        1    0.000    0.000    0.583    0.583 src/exomem/records.py:211(append_record)\n        1    0.000    0.000    0.367    0.367 src/exomem/vault.py:4697(batch_atomic_write)\n        1    0.001    0.001    0.362    0.362 src/exomem/vault.py:4766(_batch_atomic_write_locked)\n        1    0.000    0.000    0.134    0.134 src/exomem/vault.py:4285(post_commit_batch_fanout)\n     1574    0.015    0.000    0.092    0.000 src/exomem/vault.py:1158(recheck)\n        2    0.000    0.000    0.092    0.046 src/exomem/call_spans.py:236(wrapper)\n        1    0.000    0.000    0.092    0.092 scripts/measure-records-append-latency.py:296(spying_upsert)\n        1    0.000    0.000    0.092    0.092 src/exomem/index_sync.py:1604(upsert_after_write)\n        9    0.001    0.000    0.079    0.009 src/exomem/vault.py:1247(recheck_path_guards)\n  495/312    0.001    0.000    0.073    0.000 src/exomem/state_paths.py:135(_memoized)\n      183    0.000    0.000    0.063    0.000 src/exomem/state_paths.py:303(vault_state_dir)\n      183    0.000    0.000    0.062    0.000 src/exomem/state_paths.py:317(<lambda>)\n      183    0.001    0.000    0.062    0.000 src/exomem/state_paths.py:321(_compute_vault_state_dir)\n        2    0.000    0.000    0.059    0.030 src/exomem/record_governance.py:2904(require_mutation_visibility)\n        2    0.000    0.000    0.054    0.027 src/exomem/record_governance.py:2921(_require_mutation_visibility)\n       10    0.001    0.000    0.051    0.005 src/exomem/vault.py:3538(recheck)\n        1    0.000    0.000    0.051    0.051 src/exomem/record_governance.py:2868(precommit_authorize_mutation)\n        1    0.003    0.003    0.050    0.050 src/exomem/record_formats.py:395(read)\n        1    0.000    0.000    0.049    0.049 src/exomem/index_sync.py:1426(_dispatch_upsert_components)\n       36    0.000    0.000    0.044    0.001 .venv/lib/python3.11/site-packages/yaml/composer.py:29(get_single_node)\n      504    0.002    0.000    0.044    0.000 src/exomem/record_governance.py:951(_access_refused)\n       36    0.000    0.000    0.040    0.001 .venv/lib/python3.11/site-packages/yaml/composer.py:50(compose_document)\n   488/36    0.001    0.000    0.040    0.001 .venv/lib/python3.11/site-packages/yaml/composer.py:63(compose_node)\n        5    0.000    0.000    0.040    0.008 .venv/lib/python3.11/site-packages/yaml/__init__.py:51(compose)\n      330    0.001    0.000    0.040    0.000 src/exomem/record_governance.py:931(allowed)\n     71/6    0.001    0.000    0.039    0.006 .venv/lib/python3.11/site-packages/yaml/composer.py:117(compose_mapping_node)\n     1547    0.001    0.000    0.039    0.000 .venv/lib/python3.11/site-packages/yaml/parser.py:94(check_event)\n      174    0.001    0.000    0.039    0.000 src/exomem/record_governance.py:984(_authorize)\n      188    0.001    0.000    0.037    0.000 src/exomem/state_paths.py:278(validate_vault_state_directory)\n      526    0.002    0.000    0.035    0.000 src/exomem/access.py:248(access_tier)\n\n\n",
+  "profile_tottime": "         717875 function calls (715488 primitive calls) in 0.597 seconds\n\n   Ordered by: internal time\n   List reduced from 1599 to 25 due to restriction <25>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n    11370    0.050    0.000    0.081    0.000 stdlib/pathlib.py:56(parse_parts)\n     5219    0.023    0.000    0.024    0.000 {built-in method posix.lstat}\n     4742    0.020    0.000    0.027    0.000 {built-in method posix.stat}\n    11366    0.017    0.000    0.103    0.000 stdlib/pathlib.py:484(_parse_args)\n     1574    0.015    0.000    0.092    0.000 src/exomem/vault.py:1158(recheck)\n       17    0.014    0.001    0.014    0.001 {built-in method posix.fsync}\n    28116    0.013    0.000    0.016    0.000 stdlib/pathlib.py:239(splitroot)\n       12    0.011    0.001    0.032    0.003 src/exomem/vault.py:3369(_bounded_directory_entries)\n     8311    0.010    0.000    0.017    0.000 stdlib/pathlib.py:536(__str__)\n     4863    0.010    0.000    0.015    0.000 <frozen posixpath>:71(join)\n     8394    0.009    0.000    0.094    0.000 stdlib/pathlib.py:504(_from_parts)\n     1235    0.009    0.000    0.009    0.000 {built-in method posix.close}\n      865    0.008    0.000    0.032    0.000 <frozen posixpath>:418(_joinrealpath)\n    49570    0.007    0.000    0.008    0.000 {built-in method builtins.isinstance}\n    36833    0.007    0.000    0.007    0.000 {built-in method sys.intern}\n        3    0.007    0.002    0.007    0.002 {method '__exit__' of 'sqlite3.Connection' objects}\n      156    0.007    0.000    0.007    0.000 {method 'execute' of 'sqlite3.Connection' objects}\n    60013    0.007    0.000    0.007    0.000 {method 'append' of 'list' objects}\n     7492    0.007    0.000    0.090    0.000 stdlib/pathlib.py:868(__new__)\n13062/13044    0.006    0.000    0.014    0.000 {built-in method builtins.any}\n     9483    0.006    0.000    0.006    0.000 <string>:2(__eq__)\n       11    0.006    0.001    0.006    0.001 {method 'close' of 'sqlite3.Connection' objects}\n     5868    0.005    0.000    0.007    0.000 stdlib/pathlib.py:523(_format_parsed_parts)\n     3889    0.005    0.000    0.009    0.000 <frozen os>:674(__getitem__)\n     2133    0.005    0.000    0.011    0.000 src/exomem/reserved_paths.py:115(matches)\n\n\n",
+  "profile_refresh_cumulative": "         440493 function calls (436788 primitive calls) in 0.261 seconds\n\n   Ordered by: cumulative time\n   List reduced from 661 to 474 due to restriction <'exomem'>\n   List reduced from 474 to 40 due to restriction <40>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.000    0.000    0.262    0.262 scripts/measure-records-append-latency.py:312(refresh_hash)\n        1    0.000    0.000    0.262    0.262 scripts/measure-records-append-latency.py:304(invoke)\n        1    0.000    0.000    0.261    0.261 src/exomem/writer_lease.py:5692(wrapped)\n        1    0.000    0.000    0.261    0.261 src/exomem/writer_lease.py:5709(wrapped)\n        1    0.000    0.000    0.261    0.261 src/exomem/writer_lease.py:5722(invoke)\n        1    0.000    0.000    0.261    0.261 src/exomem/writer_lease.py:5772(wrapped)\n        1    0.000    0.000    0.261    0.261 src/exomem/writer_lease.py:5784(invoke_command)\n        1    0.000    0.000    0.215    0.215 src/exomem/writer_lease.py:5887(_invoke)\n        1    0.000    0.000    0.215    0.215 src/exomem/writer_lease.py:4152(invoke)\n        1    0.000    0.000    0.215    0.215 scripts/measure-records-append-latency.py:282(timed_leaf)\n        1    0.000    0.000    0.215    0.215 src/exomem/commands.py:11750(op_record_memory)\n        1    0.000    0.000    0.215    0.215 src/exomem/record_memory.py:132(record_memory)\n        1    0.000    0.000    0.214    0.214 src/exomem/record_governance.py:1461(inspect_collection)\n      169    0.001    0.000    0.139    0.001 scripts/measure-records-append-latency.py:129(timed)\n        1    0.003    0.003    0.078    0.078 src/exomem/record_formats.py:395(read)\n        1    0.000    0.000    0.051    0.051 src/exomem/records.py:1887(inspect_audit_gap)\n        1    0.000    0.000    0.051    0.051 src/exomem/records.py:1939(_inspect_audit_chain)\n        1    0.000    0.000    0.046    0.046 src/exomem/governance/egress.py:4250(postfilter)\n        1    0.000    0.000    0.042    0.042 src/exomem/record_formats.py:1692(inspect_collection)\n      681    0.002    0.000    0.041    0.000 src/exomem/record_governance.py:984(_authorize)\n        1    0.000    0.000    0.041    0.041 src/exomem/record_formats.py:1814(_inspect_presentation)\n    751/1    0.003    0.000    0.039    0.039 src/exomem/governance/scrubber.py:654(scrub_value)\n        1    0.001    0.001    0.032    0.032 src/exomem/records.py:2059(_reconstruct_audit_chain)\n      162    0.001    0.000    0.031    0.000 src/exomem/record_formats.py:1897(_inspect_item_managed_bytes)\n      925    0.001    0.000    0.029    0.000 src/exomem/governance/scrubber.py:565(_scrub_explicit)\n      162    0.001    0.000    0.028    0.000 src/exomem/record_formats.py:1959(_inspect_shared_item_presentation)\n      925    0.006    0.000    0.028    0.000 src/exomem/governance/scrubber.py:488(_active_alternatives)\n        1    0.000    0.000    0.028    0.028 src/exomem/record_governance.py:1261(_resolve_released_collection)\n        1    0.000    0.000    0.028    0.028 src/exomem/structured_collections.py:1257(resolve_collection)\n        1    0.000    0.000    0.027    0.027 src/exomem/structured_collections.py:1002(load_manifest)\n      325    0.000    0.000    0.026    0.000 src/exomem/record_formats.py:203(_require_authorized)\n      758    0.001    0.000    0.026    0.000 src/exomem/governance/scrubber.py:592(scrub_text)\n      325    0.000    0.000    0.026    0.000 src/exomem/record_governance.py:1483(authorize_path)\n        3    0.000    0.000    0.024    0.008 .venv/lib/python3.11/site-packages/yaml/__init__.py:51(compose)\n        3    0.000    0.000    0.024    0.008 .venv/lib/python3.11/site-packages/yaml/composer.py:29(get_single_node)\n        3    0.000    0.000    0.024    0.008 .venv/lib/python3.11/site-packages/yaml/composer.py:50(compose_document)\n    273/3    0.001    0.000    0.024    0.008 .venv/lib/python3.11/site-packages/yaml/composer.py:63(compose_node)\n     42/3    0.000    0.000    0.023    0.008 .venv/lib/python3.11/site-packages/yaml/composer.py:117(compose_mapping_node)\n      849    0.001    0.000    0.021    0.000 .venv/lib/python3.11/site-packages/yaml/parser.py:94(check_event)\n      681    0.002    0.000    0.020    0.000 src/exomem/record_governance.py:951(_access_refused)\n\n\n"
+ },
+ {
+  "size": 1000,
+  "appends": 30,
+  "seed_seconds": 1.47,
+  "guarded_append": {
+   "audit.body": {
+    "p50_ms": 0.04,
+    "p95_ms": 0.05
+   },
+   "audit.plan": {
+    "p50_ms": 0.56,
+    "p95_ms": 1.01
+   },
+   "authz.precommit": {
+    "p50_ms": 77.21,
+    "p95_ms": 89.89
+   },
+   "authz.visibility": {
+    "p50_ms": 90.66,
+    "p95_ms": 107.72
+   },
+   "boundary.enter": {
+    "p50_ms": 1.96,
+    "p95_ms": 2.59
+   },
+   "boundary.exit": {
+    "p50_ms": 0.96,
+    "p95_ms": 1.36
+   },
+   "collection.profile": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "collection.resolve": {
+    "p50_ms": 7.45,
+    "p95_ms": 8.19
+   },
+   "dispatcher_outside_leaf": {
+    "p50_ms": 6.9,
+    "p95_ms": 8.44
+   },
+   "graph.join_registered": {
+    "p50_ms": 0.11,
+    "p95_ms": 0.16
+   },
+   "guard.after_container_hash": {
+    "p50_ms": 1.79,
+    "p95_ms": 2.11
+   },
+   "guard.load_adapter": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.03
+   },
+   "guard.manifest_load": {
+    "p50_ms": 2.45,
+    "p95_ms": 2.98
+   },
+   "guard.manifest_parse": {
+    "p50_ms": 7.48,
+    "p95_ms": 10.66
+   },
+   "guard.natural_key_twins": {
+    "p50_ms": 5.74,
+    "p95_ms": 6.83
+   },
+   "guard.snapshot_read": {
+    "p50_ms": 112.5,
+    "p95_ms": 170.64
+   },
+   "index.upsert_after_write": {
+    "p50_ms": 40.29,
+    "p95_ms": 52.13
+   },
+   "leaf": {
+    "p50_ms": 618.42,
+    "p95_ms": 698.95
+   },
+   "ledger.command_digest": {
+    "p50_ms": 0.05,
+    "p95_ms": 0.08
+   },
+   "ledger.completed_terminal": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "ledger.effective_key": {
+    "p50_ms": 0.07,
+    "p95_ms": 0.19
+   },
+   "ledger.run": {
+    "p50_ms": 621.74,
+    "p95_ms": 702.78
+   },
+   "post.capture_sweep_carrier": {
+    "p50_ms": 0.1,
+    "p95_ms": 0.13
+   },
+   "post.due_state_carrier": {
+    "p50_ms": 0.2,
+    "p95_ms": 0.26
+   },
+   "post.terminal_housekeeping": {
+    "p50_ms": 3.0,
+    "p95_ms": 4.65
+   },
+   "render.item": {
+    "p50_ms": 0.82,
+    "p95_ms": 1.0
+   },
+   "render.manifest_head": {
+    "p50_ms": 5.38,
+    "p95_ms": 6.5
+   },
+   "render.presentation_block": {
+    "p50_ms": 0.09,
+    "p95_ms": 0.13
+   },
+   "request.reserved_preflight": {
+    "p50_ms": 0.1,
+    "p95_ms": 0.12
+   },
+   "response.egress_postfilter": {
+    "p50_ms": 1.83,
+    "p95_ms": 2.42
+   },
+   "total": {
+    "p50_ms": 624.83,
+    "p95_ms": 706.37
+   },
+   "validate.arguments": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.01
+   },
+   "validate.values": {
+    "p50_ms": 1.9,
+    "p95_ms": 2.25
+   },
+   "validate.why_body": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.01
+   },
+   "write.batch_atomic_write": {
+    "p50_ms": 309.27,
+    "p95_ms": 402.8
+   },
+   "write.new_item_path": {
+    "p50_ms": 7.07,
+    "p95_ms": 9.82
+   },
+   "write.post_commit_fanout": {
+    "p50_ms": 61.12,
+    "p95_ms": 76.26
+   }
+  },
+  "guarded_call_spans": {
+   "delivery.vocabulary_after_commit": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.01
+   },
+   "derived.canonical_commit": {
+    "p50_ms": 174.16,
+    "p95_ms": 251.97
+   },
+   "derived.fanout": {
+    "p50_ms": 68.09,
+    "p95_ms": 92.12
+   },
+   "index.completion_check": {
+    "p50_ms": 1.56,
+    "p95_ms": 2.48
+   },
+   "index.corpus_publish": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "index.embeddings": {
+    "p50_ms": 0.34,
+    "p95_ms": 0.55
+   },
+   "index.epistemic_graph": {
+    "p50_ms": 2.06,
+    "p95_ms": 2.49
+   },
+   "index.graph_epoch_handoff": {
+    "p50_ms": 2.79,
+    "p95_ms": 3.99
+   },
+   "index.lexstore": {
+    "p50_ms": 0.18,
+    "p95_ms": 0.32
+   },
+   "index.memory_refs": {
+    "p50_ms": 12.01,
+    "p95_ms": 17.72
+   },
+   "index.path_custody": {
+    "p50_ms": 8.98,
+    "p95_ms": 11.43
+   },
+   "index.path_partition": {
+    "p50_ms": 1.21,
+    "p95_ms": 1.8
+   },
+   "index.policy_revalidate": {
+    "p50_ms": 1.55,
+    "p95_ms": 2.21
+   },
+   "index.resolver": {
+    "p50_ms": 0.02,
+    "p95_ms": 0.03
+   },
+   "index.self_write_registration": {
+    "p50_ms": 15.75,
+    "p95_ms": 19.33
+   },
+   "index.semantic_purge": {
+    "p50_ms": 3.04,
+    "p95_ms": 3.8
+   },
+   "index.semantic_states": {
+    "p50_ms": 2.06,
+    "p95_ms": 2.58
+   },
+   "index.upsert_after_write": {
+    "p50_ms": 40.27,
+    "p95_ms": 52.11
+   }
+  },
+  "guarded_append_wall_ms": {
+   "p50": 624.83,
+   "p95": 706.37
+  },
+  "guard_refresh_read_ms": {
+   "p50": 416.33,
+   "p95": 546.3
+  },
+  "guard_round_trip_ms": {
+   "p50": 1041.16
+  },
+  "stage_calls_last_append": {
+   "request.reserved_preflight": 1,
+   "ledger.command_digest": 1,
+   "ledger.effective_key": 1,
+   "ledger.completed_terminal": 1,
+   "ledger.run": 1,
+   "validate.arguments": 1,
+   "collection.resolve": 3,
+   "collection.profile": 1,
+   "validate.why_body": 2,
+   "validate.values": 2,
+   "boundary.enter": 1,
+   "guard.manifest_load": 1,
+   "guard.manifest_parse": 9,
+   "authz.visibility": 2,
+   "guard.load_adapter": 1,
+   "guard.snapshot_read": 1,
+   "guard.natural_key_twins": 1,
+   "render.manifest_head": 1,
+   "write.new_item_path": 1,
+   "render.item": 1,
+   "render.presentation_block": 1,
+   "guard.after_container_hash": 1,
+   "audit.body": 1,
+   "audit.plan": 1,
+   "authz.precommit": 1,
+   "write.batch_atomic_write": 1,
+   "write.post_commit_fanout": 1,
+   "index.upsert_after_write": 1,
+   "boundary.exit": 1,
+   "post.due_state_carrier": 1,
+   "post.capture_sweep_carrier": 1,
+   "post.terminal_housekeeping": 1,
+   "graph.join_registered": 1,
+   "response.egress_postfilter": 1
+  },
+  "index_component_outcomes": {
+   "memory_refs": "completed",
+   "resolver": "completed",
+   "semantic_purge": "completed",
+   "lexstore": "completed",
+   "epistemic_graph": "registered",
+   "embeddings": "accepted"
+  },
+  "unguarded_append_wall_ms": {
+   "p50": 642.05,
+   "p95": 771.95
+  },
+  "profile_cumulative": "         2353018 function calls (2345231 primitive calls) in 1.763 seconds\n\n   Ordered by: cumulative time\n   List reduced from 1590 to 1264 due to restriction <'exomem'>\n   List reduced from 1264 to 45 due to restriction <45>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.000    0.000    1.805    1.805 scripts/measure-records-append-latency.py:319(one_append)\n        1    0.000    0.000    1.805    1.805 scripts/measure-records-append-latency.py:304(invoke)\n        1    0.000    0.000    1.804    1.804 src/exomem/writer_lease.py:5692(wrapped)\n        1    0.000    0.000    1.804    1.804 src/exomem/writer_lease.py:5709(wrapped)\n        1    0.000    0.000    1.804    1.804 src/exomem/writer_lease.py:5722(invoke)\n        1    0.000    0.000    1.804    1.804 src/exomem/writer_lease.py:5772(wrapped)\n        1    0.000    0.000    1.804    1.804 src/exomem/writer_lease.py:5784(invoke_command)\n     45/6    0.001    0.000    1.801    0.300 scripts/measure-records-append-latency.py:129(timed)\n        1    0.000    0.000    1.795    1.795 src/exomem/writer_lease.py:5887(_invoke)\n        1    0.000    0.000    1.795    1.795 src/exomem/writer_lease.py:4152(invoke)\n        1    0.000    0.000    1.793    1.793 src/exomem/writer_lease.py:2759(run)\n        1    0.000    0.000    1.787    1.787 src/exomem/writer_lease.py:4342(invoke_leaf)\n        1    0.000    0.000    1.786    1.786 scripts/measure-records-append-latency.py:282(timed_leaf)\n        1    0.000    0.000    1.786    1.786 src/exomem/commands.py:11750(op_record_memory)\n        1    0.002    0.002    1.786    1.786 src/exomem/record_memory.py:132(record_memory)\n        1    0.000    0.000    1.775    1.775 src/exomem/records.py:211(append_record)\n        1    0.000    0.000    0.839    0.839 src/exomem/vault.py:4697(batch_atomic_write)\n        1    0.002    0.002    0.834    0.834 src/exomem/vault.py:4766(_batch_atomic_write_locked)\n     9670    0.082    0.000    0.425    0.000 src/exomem/vault.py:1158(recheck)\n        9    0.008    0.001    0.421    0.047 src/exomem/vault.py:1247(recheck_path_guards)\n        1    0.020    0.020    0.401    0.401 src/exomem/record_formats.py:395(read)\n       10    0.004    0.000    0.387    0.039 src/exomem/vault.py:3538(recheck)\n       12    0.080    0.007    0.305    0.025 src/exomem/vault.py:3369(_bounded_directory_entries)\n        2    0.000    0.000    0.290    0.145 src/exomem/record_governance.py:2904(require_mutation_visibility)\n        2    0.002    0.001    0.285    0.143 src/exomem/record_governance.py:2921(_require_mutation_visibility)\n     3204    0.010    0.000    0.250    0.000 src/exomem/record_governance.py:951(_access_refused)\n        1    0.001    0.001    0.239    0.239 src/exomem/record_governance.py:2868(precommit_authorize_mutation)\n     2130    0.003    0.000    0.217    0.000 src/exomem/record_governance.py:931(allowed)\n     3202    0.002    0.000    0.194    0.000 src/exomem/access.py:278(refuse_if_excluded)\n     3226    0.012    0.000    0.193    0.000 src/exomem/access.py:248(access_tier)\n        1    0.000    0.000    0.144    0.144 src/exomem/vault.py:4285(post_commit_batch_fanout)\n     1074    0.004    0.000    0.140    0.000 src/exomem/record_governance.py:984(_authorize)\n     3230    0.010    0.000    0.130    0.000 src/exomem/access.py:165(_policy_state)\n        2    0.000    0.000    0.112    0.056 src/exomem/vault.py:3474(capture)\n    13318    0.100    0.000    0.112    0.000 src/exomem/vault.py:979(_identity)\n    10620    0.011    0.000    0.111    0.000 src/exomem/vault.py:3622(<genexpr>)\n    20639    0.021    0.000    0.084    0.000 src/exomem/kbdir.py:18(kb_dirname)\n        2    0.000    0.000    0.084    0.042 src/exomem/call_spans.py:236(wrapper)\n        1    0.000    0.000    0.084    0.084 scripts/measure-records-append-latency.py:296(spying_upsert)\n        1    0.000    0.000    0.084    0.084 src/exomem/index_sync.py:1604(upsert_after_write)\n     3204    0.006    0.000    0.081    0.000 src/exomem/governance/egress.py:5228(release_level_for_path_only)\n  495/312    0.001    0.000    0.069    0.000 src/exomem/state_paths.py:135(_memoized)\n     3231    0.004    0.000    0.068    0.000 src/exomem/access.py:74(access_config_path)\n    12732    0.015    0.000    0.063    0.000 src/exomem/vault.py:3134(_is_registered_internal_state_artifact)\n     1061    0.007    0.000    0.062    0.000 src/exomem/record_item_cache.py:75(read_item)\n\n\n",
+  "profile_tottime": "         2353018 function calls (2345231 primitive calls) in 1.763 seconds\n\n   Ordered by: internal time\n   List reduced from 1590 to 25 due to restriction <25>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n    43626    0.184    0.000    0.291    0.000 stdlib/pathlib.py:56(parse_parts)\n    13318    0.100    0.000    0.112    0.000 src/exomem/vault.py:979(_identity)\n    19077    0.086    0.000    0.097    0.000 {built-in method posix.stat}\n     9670    0.082    0.000    0.425    0.000 src/exomem/vault.py:1158(recheck)\n       12    0.080    0.007    0.305    0.025 src/exomem/vault.py:3369(_bounded_directory_entries)\n    13292    0.071    0.000    0.072    0.000 {built-in method posix.lstat}\n    43622    0.061    0.000    0.367    0.000 stdlib/pathlib.py:484(_parse_args)\n   106027    0.046    0.000    0.054    0.000 stdlib/pathlib.py:239(splitroot)\n    34347    0.037    0.000    0.359    0.000 stdlib/pathlib.py:504(_from_parts)\n    58629    0.033    0.000    0.033    0.000 <string>:2(__eq__)\n    23475    0.028    0.000    0.046    0.000 stdlib/pathlib.py:536(__str__)\n    33446    0.027    0.000    0.375    0.000 stdlib/pathlib.py:868(__new__)\n    12940    0.026    0.000    0.039    0.000 <frozen posixpath>:71(join)\n   146073    0.024    0.000    0.024    0.000 {built-in method sys.intern}\n   232310    0.024    0.000    0.024    0.000 {method 'append' of 'list' objects}\n    20987    0.024    0.000    0.044    0.000 <frozen os>:674(__getitem__)\n   157114    0.022    0.000    0.023    0.000 {built-in method builtins.isinstance}\n    20639    0.021    0.000    0.084    0.000 src/exomem/kbdir.py:18(kb_dirname)\n        1    0.020    0.020    0.401    0.401 src/exomem/record_formats.py:395(read)\n    20987    0.016    0.000    0.059    0.000 <frozen _collections_abc>:771(get)\n    12732    0.015    0.000    0.063    0.000 src/exomem/vault.py:3134(_is_registered_internal_state_artifact)\n     8795    0.015    0.000    0.071    0.000 stdlib/pathlib.py:530(_make_child)\n    17503    0.014    0.000    0.018    0.000 stdlib/pathlib.py:523(_format_parsed_parts)\n    20987    0.013    0.000    0.020    0.000 <frozen os>:756(encode)\n    52192    0.012    0.000    0.045    0.000 {built-in method posix.fspath}\n\n\n",
+  "profile_refresh_cumulative": "         2008460 function calls (1993055 primitive calls) in 1.400 seconds\n\n   Ordered by: cumulative time\n   List reduced from 661 to 474 due to restriction <'exomem'>\n   List reduced from 474 to 40 due to restriction <40>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.000    0.000    1.412    1.412 scripts/measure-records-append-latency.py:312(refresh_hash)\n        1    0.000    0.000    1.408    1.408 scripts/measure-records-append-latency.py:304(invoke)\n        1    0.000    0.000    1.408    1.408 src/exomem/writer_lease.py:5692(wrapped)\n        1    0.000    0.000    1.407    1.407 src/exomem/writer_lease.py:5709(wrapped)\n        1    0.000    0.000    1.407    1.407 src/exomem/writer_lease.py:5722(invoke)\n        1    0.000    0.000    1.407    1.407 src/exomem/writer_lease.py:5772(wrapped)\n        1    0.000    0.000    1.407    1.407 src/exomem/writer_lease.py:5784(invoke_command)\n        1    0.000    0.000    1.195    1.195 src/exomem/writer_lease.py:5887(_invoke)\n        1    0.000    0.000    1.194    1.194 src/exomem/writer_lease.py:4152(invoke)\n        1    0.000    0.000    1.194    1.194 scripts/measure-records-append-latency.py:282(timed_leaf)\n        1    0.000    0.000    1.194    1.194 src/exomem/commands.py:11750(op_record_memory)\n        1    0.002    0.002    1.194    1.194 src/exomem/record_memory.py:132(record_memory)\n        1    0.000    0.000    1.193    1.193 src/exomem/record_governance.py:1461(inspect_collection)\n     1069    0.004    0.000    0.921    0.001 scripts/measure-records-append-latency.py:129(timed)\n        1    0.023    0.023    0.617    0.617 src/exomem/record_formats.py:395(read)\n     3381    0.011    0.000    0.256    0.000 src/exomem/record_governance.py:984(_authorize)\n        1    0.000    0.000    0.251    0.251 src/exomem/record_formats.py:1692(inspect_collection)\n        1    0.002    0.002    0.244    0.244 src/exomem/record_formats.py:1814(_inspect_presentation)\n        1    0.000    0.000    0.213    0.213 src/exomem/records.py:1887(inspect_audit_gap)\n        1    0.000    0.000    0.213    0.213 src/exomem/records.py:1939(_inspect_audit_chain)\n        1    0.000    0.000    0.212    0.212 src/exomem/governance/egress.py:4250(postfilter)\n   3451/1    0.013    0.000    0.196    0.196 src/exomem/governance/scrubber.py:654(scrub_value)\n     2125    0.001    0.000    0.192    0.000 src/exomem/record_formats.py:203(_require_authorized)\n     2125    0.002    0.000    0.190    0.000 src/exomem/record_governance.py:1483(authorize_path)\n     1062    0.003    0.000    0.189    0.000 src/exomem/record_formats.py:1897(_inspect_item_managed_bytes)\n     1062    0.004    0.000    0.170    0.000 src/exomem/record_formats.py:1959(_inspect_shared_item_presentation)\n        4    0.060    0.015    0.157    0.039 src/exomem/vault.py:3369(_bounded_directory_entries)\n        5    0.001    0.000    0.157    0.031 src/exomem/vault.py:3538(recheck)\n     4525    0.004    0.000    0.148    0.000 src/exomem/governance/scrubber.py:565(_scrub_explicit)\n     4525    0.031    0.000    0.142    0.000 src/exomem/governance/scrubber.py:488(_active_alternatives)\n     3381    0.009    0.000    0.133    0.000 src/exomem/record_governance.py:951(_access_refused)\n     2133    0.021    0.000    0.125    0.000 src/exomem/vault.py:1158(recheck)\n        2    0.002    0.001    0.123    0.061 src/exomem/vault.py:1247(recheck_path_guards)\n     3458    0.004    0.000    0.121    0.000 src/exomem/governance/scrubber.py:592(scrub_text)\n        2    0.000    0.000    0.114    0.057 src/exomem/vault.py:3474(capture)\n     1062    0.003    0.000    0.110    0.000 src/exomem/record_formats.py:1091(splice_item_presentation)\n     1062    0.009    0.000    0.087    0.000 src/exomem/record_formats.py:1148(_item_presentation_block)\n        1    0.004    0.004    0.083    0.083 src/exomem/records.py:2258(_audit_markers)\n     2124    0.021    0.000    0.078    0.000 src/exomem/record_formats.py:1225(_item_presentation_digests)\n     1065    0.001    0.000    0.069    0.000 src/exomem/access.py:278(refuse_if_excluded)\n\n\n"
+ },
+ {
+  "size": 10000,
+  "appends": 30,
+  "seed_seconds": 78.74,
+  "guarded_append": {
+   "audit.body": {
+    "p50_ms": 0.06,
+    "p95_ms": 0.07
+   },
+   "audit.plan": {
+    "p50_ms": 0.61,
+    "p95_ms": 0.74
+   },
+   "authz.precommit": {
+    "p50_ms": 816.8,
+    "p95_ms": 882.94
+   },
+   "authz.visibility": {
+    "p50_ms": 937.58,
+    "p95_ms": 1079.51
+   },
+   "boundary.enter": {
+    "p50_ms": 1.81,
+    "p95_ms": 2.21
+   },
+   "boundary.exit": {
+    "p50_ms": 0.93,
+    "p95_ms": 1.57
+   },
+   "collection.profile": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "collection.resolve": {
+    "p50_ms": 7.26,
+    "p95_ms": 8.87
+   },
+   "dispatcher_outside_leaf": {
+    "p50_ms": 7.35,
+    "p95_ms": 10.48
+   },
+   "graph.join_registered": {
+    "p50_ms": 0.1,
+    "p95_ms": 0.13
+   },
+   "guard.after_container_hash": {
+    "p50_ms": 20.31,
+    "p95_ms": 24.52
+   },
+   "guard.load_adapter": {
+    "p50_ms": 0.03,
+    "p95_ms": 0.04
+   },
+   "guard.manifest_load": {
+    "p50_ms": 2.46,
+    "p95_ms": 3.15
+   },
+   "guard.manifest_parse": {
+    "p50_ms": 7.56,
+    "p95_ms": 9.83
+   },
+   "guard.natural_key_twins": {
+    "p50_ms": 59.99,
+    "p95_ms": 66.81
+   },
+   "guard.snapshot_read": {
+    "p50_ms": 1372.93,
+    "p95_ms": 1540.48
+   },
+   "index.upsert_after_write": {
+    "p50_ms": 38.28,
+    "p95_ms": 46.39
+   },
+   "leaf": {
+    "p50_ms": 5195.74,
+    "p95_ms": 5697.82
+   },
+   "ledger.command_digest": {
+    "p50_ms": 0.06,
+    "p95_ms": 0.07
+   },
+   "ledger.completed_terminal": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "ledger.effective_key": {
+    "p50_ms": 0.07,
+    "p95_ms": 0.13
+   },
+   "ledger.run": {
+    "p50_ms": 5198.81,
+    "p95_ms": 5701.77
+   },
+   "post.capture_sweep_carrier": {
+    "p50_ms": 0.1,
+    "p95_ms": 0.13
+   },
+   "post.due_state_carrier": {
+    "p50_ms": 0.19,
+    "p95_ms": 0.3
+   },
+   "post.terminal_housekeeping": {
+    "p50_ms": 3.13,
+    "p95_ms": 6.25
+   },
+   "render.item": {
+    "p50_ms": 0.88,
+    "p95_ms": 1.14
+   },
+   "render.manifest_head": {
+    "p50_ms": 5.1,
+    "p95_ms": 5.85
+   },
+   "render.presentation_block": {
+    "p50_ms": 0.09,
+    "p95_ms": 0.16
+   },
+   "request.reserved_preflight": {
+    "p50_ms": 0.1,
+    "p95_ms": 0.13
+   },
+   "response.egress_postfilter": {
+    "p50_ms": 1.9,
+    "p95_ms": 2.97
+   },
+   "total": {
+    "p50_ms": 5201.76,
+    "p95_ms": 5705.84
+   },
+   "validate.arguments": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.02
+   },
+   "validate.values": {
+    "p50_ms": 1.87,
+    "p95_ms": 2.2
+   },
+   "validate.why_body": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.01
+   },
+   "write.batch_atomic_write": {
+    "p50_ms": 2245.6,
+    "p95_ms": 2590.81
+   },
+   "write.new_item_path": {
+    "p50_ms": 75.36,
+    "p95_ms": 88.92
+   },
+   "write.post_commit_fanout": {
+    "p50_ms": 350.98,
+    "p95_ms": 395.7
+   }
+  },
+  "guarded_call_spans": {
+   "delivery.vocabulary_after_commit": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.01
+   },
+   "derived.canonical_commit": {
+    "p50_ms": 1479.95,
+    "p95_ms": 1769.68
+   },
+   "derived.fanout": {
+    "p50_ms": 357.47,
+    "p95_ms": 407.21
+   },
+   "index.completion_check": {
+    "p50_ms": 1.46,
+    "p95_ms": 1.94
+   },
+   "index.corpus_publish": {
+    "p50_ms": 0.0,
+    "p95_ms": 0.0
+   },
+   "index.embeddings": {
+    "p50_ms": 0.32,
+    "p95_ms": 0.57
+   },
+   "index.epistemic_graph": {
+    "p50_ms": 1.87,
+    "p95_ms": 2.56
+   },
+   "index.graph_epoch_handoff": {
+    "p50_ms": 2.67,
+    "p95_ms": 3.33
+   },
+   "index.lexstore": {
+    "p50_ms": 0.17,
+    "p95_ms": 0.24
+   },
+   "index.memory_refs": {
+    "p50_ms": 11.12,
+    "p95_ms": 14.43
+   },
+   "index.path_custody": {
+    "p50_ms": 8.73,
+    "p95_ms": 10.28
+   },
+   "index.path_partition": {
+    "p50_ms": 1.22,
+    "p95_ms": 1.7
+   },
+   "index.policy_revalidate": {
+    "p50_ms": 1.54,
+    "p95_ms": 2.17
+   },
+   "index.resolver": {
+    "p50_ms": 0.02,
+    "p95_ms": 0.03
+   },
+   "index.self_write_registration": {
+    "p50_ms": 308.29,
+    "p95_ms": 349.67
+   },
+   "index.semantic_purge": {
+    "p50_ms": 3.06,
+    "p95_ms": 3.77
+   },
+   "index.semantic_states": {
+    "p50_ms": 1.99,
+    "p95_ms": 2.69
+   },
+   "index.upsert_after_write": {
+    "p50_ms": 38.26,
+    "p95_ms": 46.37
+   }
+  },
+  "guarded_append_wall_ms": {
+   "p50": 5201.76,
+   "p95": 5705.84
+  },
+  "guard_refresh_read_ms": {
+   "p50": 6089.25,
+   "p95": 6478.86
+  },
+  "guard_round_trip_ms": {
+   "p50": 11291.02
+  },
+  "stage_calls_last_append": {
+   "request.reserved_preflight": 1,
+   "ledger.command_digest": 1,
+   "ledger.effective_key": 1,
+   "ledger.completed_terminal": 1,
+   "ledger.run": 1,
+   "validate.arguments": 1,
+   "collection.resolve": 3,
+   "collection.profile": 1,
+   "validate.why_body": 2,
+   "validate.values": 2,
+   "boundary.enter": 1,
+   "guard.manifest_load": 1,
+   "guard.manifest_parse": 9,
+   "authz.visibility": 2,
+   "guard.load_adapter": 1,
+   "guard.snapshot_read": 1,
+   "guard.natural_key_twins": 1,
+   "render.manifest_head": 1,
+   "write.new_item_path": 1,
+   "render.item": 1,
+   "render.presentation_block": 1,
+   "guard.after_container_hash": 1,
+   "audit.body": 1,
+   "audit.plan": 1,
+   "authz.precommit": 1,
+   "write.batch_atomic_write": 1,
+   "write.post_commit_fanout": 1,
+   "index.upsert_after_write": 1,
+   "boundary.exit": 1,
+   "post.due_state_carrier": 1,
+   "post.capture_sweep_carrier": 1,
+   "post.terminal_housekeeping": 1,
+   "graph.join_registered": 1,
+   "response.egress_postfilter": 1
+  },
+  "index_component_outcomes": {
+   "memory_refs": "completed",
+   "resolver": "completed",
+   "semantic_purge": "completed",
+   "lexstore": "completed",
+   "epistemic_graph": "registered",
+   "embeddings": "accepted"
+  },
+  "unguarded_append_wall_ms": {
+   "p50": 5162.34,
+   "p95": 5403.77
+  },
+  "profile_cumulative": "         18845487 function calls (18783700 primitive calls) in 13.114 seconds\n\n   Ordered by: cumulative time\n   List reduced from 1588 to 1262 due to restriction <'exomem'>\n   List reduced from 1262 to 45 due to restriction <45>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.000    0.000   13.480   13.480 scripts/measure-records-append-latency.py:329(one_append)\n        1    0.000    0.000   13.480   13.480 scripts/measure-records-append-latency.py:314(invoke)\n        1    0.000    0.000   13.479   13.479 src/exomem/writer_lease.py:5692(wrapped)\n        1    0.000    0.000   13.479   13.479 src/exomem/writer_lease.py:5709(wrapped)\n        1    0.000    0.000   13.479   13.479 src/exomem/writer_lease.py:5722(invoke)\n        1    0.000    0.000   13.479   13.479 src/exomem/writer_lease.py:5772(wrapped)\n        1    0.000    0.000   13.479   13.479 src/exomem/writer_lease.py:5784(invoke_command)\n     45/6    0.004    0.000   13.477    2.246 scripts/measure-records-append-latency.py:129(timed)\n        1    0.000    0.000   13.472   13.472 src/exomem/writer_lease.py:5887(_invoke)\n        1    0.000    0.000   13.472   13.472 src/exomem/writer_lease.py:4152(invoke)\n        1    0.000    0.000   13.471   13.471 src/exomem/writer_lease.py:2759(run)\n        1    0.000    0.000   13.466   13.466 src/exomem/writer_lease.py:4342(invoke_leaf)\n        1    0.000    0.000   13.466   13.466 scripts/measure-records-append-latency.py:292(timed_leaf)\n        1    0.000    0.000   13.466   13.466 src/exomem/commands.py:11750(op_record_memory)\n        1    0.015    0.015   13.466   13.466 src/exomem/record_memory.py:132(record_memory)\n        1    0.001    0.001   13.443   13.443 src/exomem/records.py:211(append_record)\n        1    0.000    0.000    6.140    6.140 src/exomem/vault.py:4697(batch_atomic_write)\n        1    0.016    0.016    6.136    6.136 src/exomem/vault.py:4766(_batch_atomic_write_locked)\n        9    0.079    0.009    4.071    0.452 src/exomem/vault.py:1247(recheck_path_guards)\n    90666    0.775    0.000    4.005    0.000 src/exomem/vault.py:1158(recheck)\n        1    0.185    0.185    3.101    3.101 src/exomem/record_formats.py:395(read)\n       10    0.046    0.005    3.050    0.305 src/exomem/vault.py:3538(recheck)\n        2    0.002    0.001    2.511    1.255 src/exomem/record_governance.py:2907(require_mutation_visibility)\n        2    0.021    0.011    2.503    1.251 src/exomem/record_governance.py:2924(_require_mutation_visibility)\n    30204    0.088    0.000    2.360    0.000 src/exomem/record_governance.py:954(_access_refused)\n        1    0.006    0.006    2.216    2.216 src/exomem/record_governance.py:2871(precommit_authorize_mutation)\n       12    0.702    0.059    2.210    0.184 src/exomem/vault.py:3369(_bounded_directory_entries)\n    20130    0.029    0.000    2.027    0.000 src/exomem/record_governance.py:934(allowed)\n    30202    0.023    0.000    1.825    0.000 src/exomem/access.py:278(refuse_if_excluded)\n    30226    0.110    0.000    1.804    0.000 src/exomem/access.py:248(access_tier)\n    30230    0.095    0.000    1.221    0.000 src/exomem/access.py:165(_policy_state)\n    10074    0.036    0.000    1.175    0.000 src/exomem/record_governance.py:987(_authorize)\n   100620    0.105    0.000    1.055    0.000 src/exomem/vault.py:3622(<genexpr>)\n        2    0.004    0.002    0.890    0.445 src/exomem/vault.py:3474(capture)\n   191639    0.189    0.000    0.737    0.000 src/exomem/kbdir.py:18(kb_dirname)\n    30231    0.036    0.000    0.638    0.000 src/exomem/access.py:74(access_config_path)\n    30204    0.052    0.000    0.592    0.000 src/exomem/governance/egress.py:5228(release_level_for_path_only)\n   120732    0.137    0.000    0.566    0.000 src/exomem/vault.py:3134(_is_registered_internal_state_artifact)\n    10061    0.064    0.000    0.544    0.000 src/exomem/record_item_cache.py:75(read_item)\n        1    0.007    0.007    0.464    0.464 src/exomem/vault.py:3967(_prepare_path_guards)\n   121120    0.328    0.000    0.432    0.000 src/exomem/vault.py:979(_identity)\n    30230    0.016    0.000    0.385    0.000 src/exomem/access.py:134(_policy_signature)\n        1    0.000    0.000    0.381    0.381 src/exomem/vault.py:4285(post_commit_batch_fanout)\n    30226    0.094    0.000    0.298    0.000 src/exomem/access.py:225(_kb_relative)\n        1    0.000    0.000    0.284    0.284 src/exomem/file_watcher.py:648(register_self_write)\n\n\n",
+  "profile_tottime": "         18845487 function calls (18783700 primitive calls) in 13.114 seconds\n\n   Ordered by: internal time\n   List reduced from 1588 to 25 due to restriction <25>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n   367557    1.591    0.000    2.481    0.000 stdlib/pathlib.py:56(parse_parts)\n    90666    0.775    0.000    4.005    0.000 src/exomem/vault.py:1158(recheck)\n   163044    0.759    0.000    0.826    0.000 {built-in method posix.stat}\n       12    0.702    0.059    2.210    0.184 src/exomem/vault.py:3369(_bounded_directory_entries)\n    94268    0.631    0.000    0.632    0.000 {built-in method posix.lstat}\n   367553    0.507    0.000    3.107    0.000 stdlib/pathlib.py:484(_parse_args)\n   888837    0.387    0.000    0.454    0.000 stdlib/pathlib.py:239(splitroot)\n   121120    0.328    0.000    0.432    0.000 src/exomem/vault.py:979(_identity)\n   553503    0.315    0.000    0.315    0.000 <string>:2(__eq__)\n   295283    0.306    0.000    3.070    0.000 stdlib/pathlib.py:504(_from_parts)\n   294382    0.237    0.000    3.297    0.000 stdlib/pathlib.py:868(__new__)\n   176414    0.237    0.000    0.379    0.000 stdlib/pathlib.py:536(__str__)\n  1243822    0.203    0.000    0.203    0.000 {built-in method sys.intern}\n  1968718    0.197    0.000    0.197    0.000 {method 'append' of 'list' objects}\n   191987    0.193    0.000    0.372    0.000 <frozen os>:674(__getitem__)\n   191639    0.189    0.000    0.737    0.000 src/exomem/kbdir.py:18(kb_dirname)\n    93920    0.188    0.000    0.291    0.000 <frozen posixpath>:71(join)\n        1    0.185    0.185    3.101    3.101 src/exomem/record_formats.py:395(read)\n  1236962    0.167    0.000    0.175    0.000 {built-in method builtins.isinstance}\n   120732    0.137    0.000    0.566    0.000 src/exomem/vault.py:3134(_is_registered_internal_state_artifact)\n   191987    0.135    0.000    0.508    0.000 <frozen _collections_abc>:771(get)\n   191987    0.121    0.000    0.179    0.000 <frozen os>:756(encode)\n    71790    0.116    0.000    0.585    0.000 stdlib/pathlib.py:530(_make_child)\n    30226    0.110    0.000    1.804    0.000 src/exomem/access.py:248(access_tier)\n   134469    0.109    0.000    0.143    0.000 stdlib/pathlib.py:523(_format_parsed_parts)\n\n\n",
+  "profile_refresh_cumulative": "         17657249 function calls (17525501 primitive calls) in 19.522 seconds\n\n   Ordered by: cumulative time\n   List reduced from 644 to 460 due to restriction <'exomem'>\n   List reduced from 460 to 40 due to restriction <40>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.000    0.000   19.609   19.609 scripts/measure-records-append-latency.py:322(refresh_hash)\n        1    0.000    0.000   19.574   19.574 scripts/measure-records-append-latency.py:314(invoke)\n        1    0.000    0.000   19.574   19.574 src/exomem/writer_lease.py:5692(wrapped)\n        1    0.000    0.000   19.573   19.573 src/exomem/writer_lease.py:5709(wrapped)\n        1    0.000    0.000   19.573   19.573 src/exomem/writer_lease.py:5722(invoke)\n        1    0.000    0.000   19.573   19.573 src/exomem/writer_lease.py:5772(wrapped)\n        1    0.001    0.001   19.573   19.573 src/exomem/writer_lease.py:5784(invoke_command)\n        1    0.000    0.000   17.703   17.703 src/exomem/writer_lease.py:5887(_invoke)\n        1    0.000    0.000   17.703   17.703 src/exomem/writer_lease.py:4152(invoke)\n        1    0.000    0.000   17.703   17.703 scripts/measure-records-append-latency.py:292(timed_leaf)\n        1    0.000    0.000   17.703   17.703 src/exomem/commands.py:11750(op_record_memory)\n        1    0.015    0.015   17.703   17.703 src/exomem/record_memory.py:132(record_memory)\n        1    0.000    0.000   17.687   17.687 src/exomem/record_governance.py:1464(inspect_collection)\n        1    0.000    0.000    9.493    9.493 src/exomem/records.py:1887(inspect_audit_gap)\n        1    0.003    0.003    9.493    9.493 src/exomem/records.py:1939(_inspect_audit_chain)\n        1    0.105    0.105    8.693    8.693 src/exomem/records.py:2258(_audit_markers)\n    20002    8.146    0.000    8.146    0.000 src/exomem/records.py:2281(<genexpr>)\n    10069    0.046    0.000    7.796    0.001 scripts/measure-records-append-latency.py:129(timed)\n        1    0.216    0.216    4.945    4.945 src/exomem/record_formats.py:395(read)\n        1    0.000    0.000    2.632    2.632 src/exomem/record_formats.py:1692(inspect_collection)\n        1    0.020    0.020    2.565    2.565 src/exomem/record_formats.py:1814(_inspect_presentation)\n    30194    0.092    0.000    2.329    0.000 src/exomem/record_governance.py:987(_authorize)\n    10062    0.039    0.000    2.032    0.000 src/exomem/record_formats.py:1897(_inspect_item_managed_bytes)\n    20125    0.013    0.000    1.939    0.000 src/exomem/record_formats.py:203(_require_authorized)\n    20125    0.014    0.000    1.926    0.000 src/exomem/record_governance.py:1486(authorize_path)\n        1    0.000    0.000    1.867    1.867 src/exomem/governance/egress.py:4250(postfilter)\n    10062    0.044    0.000    1.831    0.000 src/exomem/record_formats.py:1959(_inspect_shared_item_presentation)\n  30419/1    0.116    0.000    1.765    1.765 src/exomem/governance/scrubber.py:654(scrub_value)\n    30194    0.077    0.000    1.343    0.000 src/exomem/record_governance.py:954(_access_refused)\n    40493    0.037    0.000    1.336    0.000 src/exomem/governance/scrubber.py:565(_scrub_explicit)\n    40493    0.272    0.000    1.286    0.000 src/exomem/governance/scrubber.py:488(_active_alternatives)\n    10062    0.030    0.000    1.169    0.000 src/exomem/record_formats.py:1091(splice_item_presentation)\n    30426    0.033    0.000    1.086    0.000 src/exomem/governance/scrubber.py:592(scrub_text)\n        2    0.018    0.009    0.940    0.470 src/exomem/vault.py:1247(recheck_path_guards)\n    10062    0.094    0.000    0.931    0.000 src/exomem/record_formats.py:1148(_item_presentation_block)\n    20128    0.182    0.000    0.922    0.000 src/exomem/vault.py:1158(recheck)\n        4    0.013    0.003    0.892    0.223 src/exomem/vault.py:3538(recheck)\n    20124    0.231    0.000    0.850    0.000 src/exomem/record_formats.py:1225(_item_presentation_digests)\n        4    0.250    0.063    0.723    0.181 src/exomem/vault.py:3369(_bounded_directory_entries)\n  1174297    0.266    0.000    0.628    0.000 src/exomem/governance/scrubber.py:521(<genexpr>)\n\n\n"
+ }
+]
