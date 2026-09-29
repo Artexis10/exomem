@@ -51,18 +51,39 @@ def candidate_fingerprint(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def alias_claim_fingerprint(vault_root: Path, alias: str) -> str:
+def alias_claim_fingerprint(
+    vault_root: Path, alias: str, *, exclude_path: str | None = None
+) -> str:
     """The fingerprint a `distinct` decision on an alias claim must carry.
 
-    Bound to the alias and to what it resolves to for THIS caller (withheld
-    pages read as absent), under its own entity-type marker so a decision made
-    for a title never authorizes an alias.
+    Bound to the claimants the guard refuses on: every page `claimed_names`
+    reports for this alias (notes, stems and the apostrophe, hyphen and
+    soft-hyphen folds included, not just entities), each as its path and the
+    hash of its current text, together with the alias's own folds. A new
+    claimant or a claimant's edit therefore makes an older decision stale, and
+    the value cannot be computed without a claimant. For a caller other than
+    the owner the claimants are the ones it may see, so a withheld page
+    neither enters the value nor moves it. A distinct entity-type marker keeps
+    a title decision from ever authorizing an alias.
     """
-    return candidate_fingerprint(
-        name=alias,
-        entity_type="alias",
-        resolution=resolve_entity_candidate(vault_root, name=alias),
-    )
+    from . import working_set_index
+    from .vault import content_hash
+
+    claimants = claimed_names(vault_root, [alias], exclude_path=exclude_path).get(alias, ())
+    versions: list[list[str]] = []
+    for path in claimants:
+        try:
+            digest = content_hash((vault_root / path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            digest = ""
+        versions.append([path, digest])
+    payload = {
+        "kind": "alias_claim",
+        "folds": sorted({working_set_index.normalize(alias), identity_key(alias)} - {""}),
+        "claimants": sorted(versions),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _aliases(value: object) -> tuple[str, ...]:

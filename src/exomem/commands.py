@@ -7379,7 +7379,9 @@ def _refuse_claimed_aliases(
     if not claimed:
         return
     fingerprints = {
-        alias: entity_candidates_module.alias_claim_fingerprint(vault_root, alias)
+        alias: entity_candidates_module.alias_claim_fingerprint(
+            vault_root, alias, exclude_path=rel
+        )
         for alias in claimed
     }
     decision = None

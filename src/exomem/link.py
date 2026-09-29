@@ -904,6 +904,7 @@ def link(
     alias_fingerprints = {
         alias: entity_candidates.alias_claim_fingerprint(vault_root, alias) for alias in claimed
     }
+    claimed_paths = dict(claimed)
     title_decided = decision is not None and (
         identity_resolution["status"] != "no_match"
         and decision["candidate_fingerprint"] == fingerprint
@@ -969,15 +970,7 @@ def link(
             if value == decision["candidate_fingerprint"]
         )
         claimed = {alias: found for alias, found in claimed.items() if alias != decided_alias}
-        alias_candidates = entity_candidates.resolve_entity_candidate(
-            vault_root, name=decided_alias
-        )["candidates"]
-        accepted_decision = {
-            **decision,
-            "distinct_from": [
-                str(item.get("ref") or item["path"]) for item in alias_candidates
-            ],
-        }
+        accepted_decision = {**decision, "distinct_from": list(claimed_paths[decided_alias])}
     if claimed:
         alias = next(iter(claimed))
         raise LinkError(

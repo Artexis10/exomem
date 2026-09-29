@@ -999,3 +999,151 @@ def test_a_withheld_page_never_claims_an_alias_so_no_decision_is_needed(
     _reset_caches()
     with pytest.raises(ValueError, match="ENTITY_EXISTS"):
         _patch_aliases(ja_vault, corvane, ["月影プロジェクト"])
+
+
+# --------------------------------------------------------------------------- #
+# The alias decision is bound to the claimants the guard refuses on
+# --------------------------------------------------------------------------- #
+#
+# `claimed_names` answers from the index too: notes, stems and the apostrophe,
+# hyphen and soft-hyphen folds all claim a name. A fingerprint over Entities/
+# alone would be a pure function of the alias string for any of those, so it
+# could be computed without being refused and would never go stale. It covers
+# the claimants themselves (path and content version) and the alias's fold.
+
+
+def _no_match_fingerprint(alias: str) -> str:
+    """What a fingerprint over Entities/ alone gives when no entity holds it."""
+    from exomem import entity_candidates
+
+    return entity_candidates.candidate_fingerprint(
+        name=alias,
+        entity_type="alias",
+        resolution={"candidates": [], "omitted_candidate_count": 0},
+    )
+
+
+def _decided(fingerprint: str) -> dict[str, str]:
+    return {"outcome": "distinct", "candidate_fingerprint": fingerprint}
+
+
+def test_a_note_claimant_binds_the_decision_it_cannot_be_precomputed(ja_vault: Path) -> None:
+    """ハヤブサ号 is a note. No entity holds it, so an Entities-only fingerprint
+    is a constant of the string: computable up front, never stale."""
+    fingerprint = _alias_refusal(ja_vault, "Corvane Motors", "ハヤブサ号")
+    assert fingerprint != _no_match_fingerprint("ハヤブサ号")
+
+    with pytest.raises(ValueError, match="STALE_IDENTITY_DECISION"):
+        _create_sharing(
+            ja_vault,
+            "Corvane Motors",
+            "ハヤブサ号",
+            identity_decision=_decided(_no_match_fingerprint("ハヤブサ号")),
+        )
+    assert not (ja_vault / CORVANE).exists()
+
+    created = _create_sharing(
+        ja_vault, "Corvane Motors", "ハヤブサ号", identity_decision=_decided(fingerprint)
+    )
+    assert created["path"] == CORVANE
+    assert created["identity_decision"]["distinct_from"] == [FALCON]
+
+
+def test_a_claimant_edit_or_a_second_claimant_makes_the_decision_stale(ja_vault: Path) -> None:
+    fingerprint = _alias_refusal(ja_vault, "Corvane Motors", "ハヤブサ号")
+
+    text = (ja_vault / FALCON).read_text(encoding="utf-8")
+    (ja_vault / FALCON).write_text(text + "\n整備の記録を追記した。\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="STALE_IDENTITY_DECISION"):
+        _create_sharing(
+            ja_vault, "Corvane Motors", "ハヤブサ号", identity_decision=_decided(fingerprint)
+        )
+    assert not (ja_vault / CORVANE).exists()
+
+    fresh = _alias_refusal(ja_vault, "Corvane Motors", "ハヤブサ号")
+    assert fresh != fingerprint
+    _create_sharing(
+        ja_vault, "Northgate Tools", "ハヤブサ号", identity_decision=_decided(fresh)
+    )
+    working_set_index.WorkingSetIndex(ja_vault).update()
+    with pytest.raises(ValueError, match="STALE_IDENTITY_DECISION"):
+        _create_sharing(
+            ja_vault, "Corvane Motors", "ハヤブサ号", identity_decision=_decided(fresh)
+        )
+
+
+def test_a_folded_spelling_is_bound_to_its_claimant_too(ja_vault: Path) -> None:
+    """テッ­サリー is テッサリー to the index; the claimant is the entity that
+    holds the folded name, and the pre-computable value is refused."""
+    _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["テッサリー"])
+    folded = "テッ­サリー"
+    fingerprint = _alias_refusal(ja_vault, "Corvane Motors", folded)
+    assert fingerprint != _no_match_fingerprint(folded)
+    with pytest.raises(ValueError, match="STALE_IDENTITY_DECISION"):
+        _create_sharing(
+            ja_vault,
+            "Corvane Motors",
+            folded,
+            identity_decision=_decided(_no_match_fingerprint(folded)),
+        )
+    _create_sharing(
+        ja_vault, "Corvane Motors", folded, identity_decision=_decided(fingerprint)
+    )
+    assert (ja_vault / CORVANE).exists()
+
+
+def test_an_edit_binds_the_decision_to_the_claimants_too(ja_vault: Path) -> None:
+    corvane = _create_entity(ja_vault, "Corvane Motors", "The carmaker.")
+    with pytest.raises(ValueError, match="ENTITY_EXISTS") as refused:
+        _patch_aliases(ja_vault, corvane, ["ハヤブサ号"])
+    found = _FINGERPRINT.search(str(refused.value))
+    assert found, str(refused.value)
+    with pytest.raises(ValueError, match="STALE_IDENTITY_DECISION"):
+        _patch_aliases(
+            ja_vault,
+            corvane,
+            ["ハヤブサ号"],
+            identity_decision=_decided(_no_match_fingerprint("ハヤブサ号")),
+        )
+    _patch_aliases(ja_vault, corvane, ["ハヤブサ号"], identity_decision=_decided(found.group(1)))
+    assert "ハヤブサ号" in (ja_vault / corvane).read_text(encoding="utf-8")
+
+
+def test_a_withheld_claimant_is_left_out_of_a_restricted_callers_fingerprint(
+    ja_vault: Path,
+) -> None:
+    """The shared name is held by a visible note and, once the owner adds it, a
+    withheld page. The restricted caller's fingerprint covers the visible
+    claimant only: it does not move when the withheld page changes, and the
+    refusal never names that page."""
+    secret = SECRET
+    owner_fingerprint = _alias_refusal(ja_vault, "Corvane Motors", "ハヤブサ号")
+    _patch_aliases(
+        ja_vault,
+        secret,
+        ["ハヤブサ号"],
+        identity_decision=_decided(owner_fingerprint),
+    )
+    working_set_index.WorkingSetIndex(ja_vault).update()
+    write_scope(ja_vault, paths=SECRET, name="Hidden")
+    write_rule(ja_vault, ceiling=0)
+    _reset_caches()
+
+    def restricted_refusal() -> str:
+        with request_scope(_external()):
+            return _refused(ja_vault, "Corvane Motors", ["ハヤブサ号"])
+
+    first = restricted_refusal()
+    assert "月影" not in first
+    found = _FINGERPRINT.search(first)
+    assert found, first
+
+    text = (ja_vault / SECRET).read_text(encoding="utf-8")
+    (ja_vault / SECRET).write_text(text + "\n非公開の追記。\n", encoding="utf-8")
+    _reset_caches()
+    again = _FINGERPRINT.search(restricted_refusal())
+    assert again and again.group(1) == found.group(1)
+
+    _reset_caches()
+    owner_now = _alias_refusal(ja_vault, "Corvane Motors", "ハヤブサ号")
+    assert owner_now != found.group(1)

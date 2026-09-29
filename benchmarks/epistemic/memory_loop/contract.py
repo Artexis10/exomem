@@ -363,7 +363,9 @@ def _shared_alias_decision(root: Path, path: str, aliases: list[str]) -> dict[st
     alias = next(iter(claimed))
     return {
         "outcome": "distinct",
-        "candidate_fingerprint": entity_candidates.alias_claim_fingerprint(root, alias),
+        "candidate_fingerprint": entity_candidates.alias_claim_fingerprint(
+            root, alias, exclude_path=path
+        ),
     }
 
 
