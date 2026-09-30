@@ -16,6 +16,7 @@ import tempfile
 from collections.abc import Callable
 
 import pytest
+from budget_gate import check_budget
 
 from exomem import bootstrap_core, capabilities, commands, prominence, workflow_skills
 
@@ -262,9 +263,11 @@ def test_the_index_lists_every_section_with_its_size(monkeypatch):
 @pytest.mark.parametrize("level", prominence.CANON)
 def test_the_core_stays_under_its_ceiling(monkeypatch, level, surface):
     size = len(_text(_bootstrap(monkeypatch, level, surface)))
-    assert size <= CORE_BYTE_CEILING - CORE_HEADROOM_WARNING_BYTES, (
-        f"core at {level} on {surface or 'default'} is {size:,} bytes: within "
-        f"{CORE_HEADROOM_WARNING_BYTES} of the {CORE_BYTE_CEILING:,} ceiling"
+    check_budget(
+        size,
+        ceiling=CORE_BYTE_CEILING,
+        band=CORE_HEADROOM_WARNING_BYTES,
+        label=f"core at {level} on {surface or 'default'}",
     )
 
 

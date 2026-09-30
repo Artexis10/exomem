@@ -14,9 +14,9 @@ from __future__ import annotations
 import json
 import pathlib
 import tempfile
-import warnings
 
 import pytest
+from budget_gate import check_budget
 
 from exomem import commands
 
@@ -72,30 +72,13 @@ HEADROOM_WARNING_BYTES = 512
 
 
 def test_compact_stays_under_its_byte_ceiling(payloads):
-    size = _size(payloads["compact"])
-    assert size <= COMPACT_BYTE_CEILING, (
-        f"compact bootstrap is {size:,} bytes (~{size // 4:,} tokens), over the "
-        f"{COMPACT_BYTE_CEILING:,} ceiling by {size - COMPACT_BYTE_CEILING:,}"
+    """Fails above the ceiling; warns (never fails) inside the headroom band."""
+    check_budget(
+        _size(payloads["compact"]),
+        ceiling=COMPACT_BYTE_CEILING,
+        band=HEADROOM_WARNING_BYTES,
+        label="compact bootstrap",
     )
-    headroom = COMPACT_BYTE_CEILING - size
-    if headroom < HEADROOM_WARNING_BYTES:
-        # The failure mode this catches is not the ceiling being wrong, it is
-        # the ceiling being reached *silently*. Compact grew to 70 bytes of
-        # headroom and nobody knew until an unrelated release PR went red two
-        # merges later, which is a bad place to first read the argument for why
-        # the number is what it is.
-        warnings.warn(
-            f"compact bootstrap is {size:,} bytes with only {headroom:,} bytes "
-            f"under the {COMPACT_BYTE_CEILING:,} ceiling. The next addition of "
-            "any size will trip it. Either trim compact, or raise the ceiling "
-            "with the reasoning the constant's docstring requires -- but decide "
-            "it deliberately rather than discovering it as a red CI run.",
-            stacklevel=2,
-        )
-
-
-def test_compact_clears_the_warning_headroom(payloads):
-    assert COMPACT_BYTE_CEILING - _size(payloads["compact"]) >= HEADROOM_WARNING_BYTES
 
 
 def test_a_hook_capable_client_still_clears_the_ceiling(monkeypatch):
@@ -124,9 +107,11 @@ def test_a_hook_capable_client_still_clears_the_ceiling(monkeypatch):
     size = _size(payload)
 
     assert "hook_cadence" in payload["engagement"]
-    assert COMPACT_BYTE_CEILING - size >= HEADROOM_WARNING_BYTES, (
-        f"compact bootstrap for a hook-capable client is {size:,} bytes, within "
-        f"{COMPACT_BYTE_CEILING - size:,} of the {COMPACT_BYTE_CEILING:,} ceiling"
+    check_budget(
+        size,
+        ceiling=COMPACT_BYTE_CEILING,
+        band=HEADROOM_WARNING_BYTES,
+        label="compact bootstrap for a hook-capable client",
     )
 
 

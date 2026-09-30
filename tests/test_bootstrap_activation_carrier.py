@@ -23,6 +23,7 @@ import pathlib
 import tempfile
 
 import pytest
+from budget_gate import check_budget
 
 import exomem
 from exomem import commands, prominence
@@ -280,15 +281,14 @@ def test_the_default_level_keeps_the_warning_margin(
     without a stored preference resolves through."""
     payload = _compact_for(monkeypatch, level=None, surface=surface)
     size = len(json.dumps(payload))
-    headroom = COMPACT_BYTE_CEILING - size
 
     assert payload["engagement"]["level"] == prominence.DEFAULT_PROMINENCE
     assert prominence.ACTIVATION_CARRIER_LINE in json.dumps(payload["engagement"])
-    assert headroom >= HEADROOM_WARNING_BYTES, (
-        f"compact bootstrap at the default level on "
-        f"{surface or 'the default surface'} is {size:,} bytes with {headroom:,} "
-        f"bytes of headroom; the carrier line must leave at least "
-        f"{HEADROOM_WARNING_BYTES:,}"
+    check_budget(
+        size,
+        ceiling=COMPACT_BYTE_CEILING,
+        band=HEADROOM_WARNING_BYTES,
+        label=f"compact bootstrap at the default level on {surface or 'the default surface'}",
     )
 
 
@@ -307,13 +307,13 @@ def test_the_maximal_level_keeps_a_headroom_floor(
     see the rationale beside `MAXIMAL_HEADROOM_WARNING_BYTES` above."""
     payload = _compact_for(monkeypatch, level="maximal", surface=surface)
     size = len(json.dumps(payload))
-    headroom = COMPACT_BYTE_CEILING - size
 
     assert prominence.ACTIVATION_CARRIER_LINE in json.dumps(payload["engagement"])
-    assert headroom >= MAXIMAL_HEADROOM_WARNING_BYTES, (
-        f"compact bootstrap at maximal on {surface or 'the default surface'} is "
-        f"{size:,} bytes with {headroom:,} bytes of headroom; maximal must leave "
-        f"at least {MAXIMAL_HEADROOM_WARNING_BYTES:,}"
+    check_budget(
+        size,
+        ceiling=COMPACT_BYTE_CEILING,
+        band=MAXIMAL_HEADROOM_WARNING_BYTES,
+        label=f"compact bootstrap at maximal on {surface or 'the default surface'}",
     )
 
 
