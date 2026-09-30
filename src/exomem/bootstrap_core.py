@@ -54,27 +54,18 @@ SECTIONS: dict[str, tuple[tuple[str, ...], str]] = {
         "the delegation envelope classes and protocol, in full",
     ),  # returns only `engagement.envelope`; see `_section_blocks`
     "epistemics": (
-        ("epistemic_contract",),
-        "the epistemic vocabulary, capture-the-outcome and prediction guidance",
+        ("epistemic_contract", "due_state"),
+        "the epistemic vocabulary, capture-the-outcome and prediction guidance; the due-item list",
     ),
     "diagnostics_reading": (
-        ("performance_profiles", "server"),
-        "reading timings; compute policy and tool-surface identity in full",
+        ("performance_profiles", "server", "latency"),
+        "reading timings; recall-latency breaches; compute policy and tool-surface identity in full",
     ),
 }
 
-#: A few words per section for the core's `sections` block: when to fetch it. The long
-#: form is `SECTIONS[name][1]`, served by `section='index'`.
-SECTION_HINTS: dict[str, str] = {
-    "authoring": "before writing a compiled note or semantic unit",
-    "entities": "vocabulary_workflow, entity types, relations, source kinds",
-    "records_planning": "recording an outcome or plan item; workflow contracts",
-    "routing": "picking a tool beyond the core table; find knobs",
-    "adoption": "first run, adopting a vault, knowledge packs",
-    "envelope": "the full delegation-envelope protocol",
-    "epistemics": "epistemic vocabulary, predictions",
-    "diagnostics_reading": "reading timings; compute policy",
-}
+#: The core lists at most this many entity type ids; the rest are in the `entities`
+#: section. Vault-declared types are unbounded, so the core's size must not follow them.
+CORE_ENTITY_TYPE_CAP = 12
 
 #: Keys the core carries verbatim from the reference payload.
 _VERBATIM = ("contract_version", "profile", "governance", "workflow", "active_capabilities")
@@ -91,7 +82,10 @@ SESSION_POST_WRITE_KEYS = (
     "family_disposition_reading",
 )
 
-#: Live, vault-derived keys added after the reference payload is built.
+#: Live, vault-derived keys added after the reference payload is built. The core serves
+#: neither in full: `due_state` as a counts summary (`_due_summary`), `latency` not at
+#: all. Both are bounded only by what the vault holds, so their full forms live in
+#: sections (`epistemics` and `diagnostics_reading`); a session client gets both in full.
 _PASSTHROUGH = ("due_state", "latency")
 
 
@@ -210,7 +204,12 @@ def _capture_semantics(reference: dict) -> dict:
     if "capture_rule" in entity:
         out["entity_capture_rule"] = entity["capture_rule"]
     if "types" in entity:
-        out["entity_types"] = [t["id"] for t in entity["types"] if isinstance(t, dict) and "id" in t]
+        ids = [t["id"] for t in entity["types"] if isinstance(t, dict) and "id" in t]
+        out["entity_types"] = ids[:CORE_ENTITY_TYPE_CAP]
+        if len(ids) > CORE_ENTITY_TYPE_CAP:
+            out["entity_types_more"] = (
+                f"+{len(ids) - CORE_ENTITY_TYPE_CAP} more: section=entities"
+            )
     return out
 
 
@@ -244,9 +243,23 @@ def _envelope_digest(envelope: dict) -> dict:
     digest["protocol"] = (
         "name the action class first; an unclassified action has no authority; "
         "intent above its ceiling is a proposal, never an act; honour the disposition; "
-        "record the outcome through triage; full protocol: bootstrap(section=envelope)"
+        "record the outcome through triage; more: section=envelope"
     )
     return digest
+
+
+def _due_summary(block: object) -> dict:
+    """The core's view of the due-state advisory: how many, the biggest category, and
+    where the list is. Bounded by construction, whatever the vault holds."""
+    summary: dict[str, Any] = {}
+    if isinstance(block, dict):
+        if "total" in block:
+            summary["total"] = block["total"]
+        categories = block.get("categories")
+        if isinstance(categories, dict) and categories:
+            summary["top_category"] = max(categories, key=lambda name: categories[name])
+    summary["list"] = "section=epistemics"
+    return summary
 
 
 def project_core(reference: dict) -> dict:
@@ -276,15 +289,11 @@ def project_core(reference: dict) -> dict:
     core["capture_semantics"] = _capture_semantics(reference)
     core["pointers"] = _pointers(reference)
     core["sections"] = {
-        "how": "bootstrap(section=<name>); index lists; all = full reference",
-        **{
-            name: f"{size} B: {SECTION_HINTS[name]}"
-            for name, size in sections_index(reference).items()
-        },
+        "how": "bootstrap(section=<name>|index|all)",
+        **sections_index(reference),
     }
-    for key in _PASSTHROUGH:
-        if key in reference:
-            core[key] = reference[key]
+    if "due_state" in reference:
+        core["due_state"] = _due_summary(reference["due_state"])
     return core
 
 
@@ -327,8 +336,8 @@ def project_session(reference: dict, core: dict) -> dict:
         "post_write": {k: post_write[k] for k in SESSION_POST_WRITE_KEYS if k in post_write}
     }
     for key in _PASSTHROUGH:
-        if key in core:
-            session[key] = core[key]
+        if key in reference:
+            session[key] = reference[key]
     session["loaded_operating_rules_prerequisite"] = (
         "The installed skill operating rules are loaded and match skill_contract."
     )

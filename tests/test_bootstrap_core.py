@@ -10,12 +10,14 @@ applies to.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import pathlib
 import tempfile
 from collections.abc import Callable
 
 import pytest
+from bootstrap_populated import CUSTOM_ENTITY_TYPES, populated_blocks, populated_root
 from budget_gate import check_budget
 
 from exomem import bootstrap_core, capabilities, commands, prominence, workflow_skills
@@ -25,17 +27,19 @@ from exomem import bootstrap_core, capabilities, commands, prominence, workflow_
 CORE_BYTE_CEILING = 15_000
 CORE_HEADROOM_WARNING_BYTES = 512
 
-#: Per-section ceilings: the measured size on the largest surface plus about 10%,
-#: so a section cannot quietly regrow into a second full payload.
+#: Per-section ceilings: the measured size on the largest surface plus about 10%, on a
+#: POPULATED vault (`bootstrap_populated`: 32 custom entity types, `due_state` and
+#: `latency` at their worst, which live in `epistemics` and `diagnostics_reading`), so a
+#: section cannot quietly regrow into a second full payload.
 SECTION_BYTE_CEILINGS = {
     "authoring": 20_900,
-    "entities": 8_300,
+    "entities": 11_900,
     "records_planning": 5_900,
     "routing": 12_500,
     "adoption": 7_200,
     "envelope": 2_200,
-    "epistemics": 3_500,
-    "diagnostics_reading": 1_300,
+    "epistemics": 4_950,
+    "diagnostics_reading": 2_200,
 }
 
 SURFACES = (None, "claude-code", "hosted-alpha-agent-v5")
@@ -48,24 +52,27 @@ def _root() -> pathlib.Path:
     return root
 
 
-def _bootstrap(monkeypatch, level: str, surface: str | None, **kwargs) -> dict:
+def _bootstrap(monkeypatch, level: str, surface: str | None, *, populated: bool = False, **kwargs) -> dict:
+    """`populated` serves a vault at the design's maximum bound (`bootstrap_populated`)."""
     monkeypatch.setenv("EXOMEM_PROMINENCE", level)
     monkeypatch.delenv("EXOMEM_SURFACE", raising=False)
     hosted = surface if surface and surface.startswith("hosted-") else None
     if surface and hosted is None:
         monkeypatch.setenv("EXOMEM_SURFACE", surface)
     kwargs.setdefault("profile", "compact")
-    if hosted is None:
-        return commands.op_bootstrap(_root(), **kwargs)
-    registry = commands.product_commands_for_profile(hosted, "rest")
-    descriptor = capabilities.ActiveSurfaceDescriptor(
-        surface="hosted-agent",
-        profile=hosted,
-        tier2_enabled=commands.PRODUCT_SURFACE_PROFILES[hosted].expose_tier2,
-        product_commands=tuple(command.name for command in registry),
-    )
-    with capabilities.active_surface(descriptor):
-        return commands.op_bootstrap(_root(), **kwargs)
+    root = populated_root() if populated else _root()
+    with populated_blocks() if populated else contextlib.nullcontext():
+        if hosted is None:
+            return commands.op_bootstrap(root, **kwargs)
+        registry = commands.product_commands_for_profile(hosted, "rest")
+        descriptor = capabilities.ActiveSurfaceDescriptor(
+            surface="hosted-agent",
+            profile=hosted,
+            tier2_enabled=commands.PRODUCT_SURFACE_PROFILES[hosted].expose_tier2,
+            product_commands=tuple(command.name for command in registry),
+        )
+        with capabilities.active_surface(descriptor):
+            return commands.op_bootstrap(root, **kwargs)
 
 
 def _text(value: object) -> str:
@@ -136,7 +143,7 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     ),
     "envelope-protocol-points-to-its-section": (
         prominence.CANON,
-        lambda core: "bootstrap(section=envelope)" in core["engagement"]["envelope"]["protocol"]
+        lambda core: "section=envelope" in core["engagement"]["envelope"]["protocol"]
         and "envelope" in core["sections"],
     ),
     "due-state-restraint": (
@@ -146,7 +153,7 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     ),
     "workflow-loop-names-the-vocabulary-section": (
         prominence.CANON,
-        lambda core: "vocabulary_workflow (bootstrap section entities)"
+        lambda core: "vocabulary_workflow (section entities)"
         in " ".join(core["workflow"]["loop"]),
     ),
     "sections-index": (
@@ -245,17 +252,14 @@ def test_core_plus_sections_reconstruct_the_reference_payload(monkeypatch, level
 
 
 @pytest.mark.parametrize("surface", SURFACES)
-def test_the_core_says_when_to_fetch_each_section(monkeypatch, surface):
-    """An agent that cannot tell what a section holds will not fetch it, and the rule
-    it would have carried is then never read. Each entry is its size and a few words."""
+def test_the_core_names_every_section_with_its_size_and_how_to_fetch_it(monkeypatch, surface):
+    """No per-section prose: a name says what it holds, `section=index` gives the long
+    fetch-when, and the core is at its budget. `how` names all three ways to ask."""
     core = _bootstrap(monkeypatch, "balanced", surface)
-    index = bootstrap_core.sections_index(_bootstrap(monkeypatch, "balanced", surface, section="all"))
-    for name in bootstrap_core.SECTIONS:
-        entry = core["sections"][name]
-        assert isinstance(entry, str), name
-        assert entry.startswith(f"{index[name]} B: "), (name, entry)
-        hint = entry.split(": ", 1)[1]
-        assert 8 <= len(hint) <= 64, (name, hint)
+    sections = core["sections"]
+    assert set(sections) == {"how", *bootstrap_core.SECTIONS}
+    assert all(isinstance(sections[name], int) for name in bootstrap_core.SECTIONS)
+    assert all(word in sections["how"] for word in ("section=", "index", "all"))
 
 
 def test_an_unknown_section_names_the_accepted_ones(monkeypatch):
@@ -296,10 +300,65 @@ def test_the_core_stays_under_its_ceiling(monkeypatch, level, surface):
     )
 
 
+@pytest.mark.parametrize("surface", SURFACES)
+@pytest.mark.parametrize("level", prominence.CANON)
+def test_the_populated_core_stays_under_the_hard_ceiling(monkeypatch, level, surface):
+    """The ceiling is a claim about a vault at the design's maximum bound, not an empty
+    one: custom entity types, `due_state` and `latency` all at their worst
+    (`tests/bootstrap_populated.py`). It fails at the ceiling and is never raised to fit."""
+    size = len(_text(_bootstrap(monkeypatch, level, surface, populated=True)))
+    assert size <= CORE_BYTE_CEILING, (
+        f"populated core at {level} on {surface or 'default'} is {size:,} bytes, over the "
+        f"{CORE_BYTE_CEILING:,} ceiling by {size - CORE_BYTE_CEILING:,}"
+    )
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+def test_the_vault_derived_blocks_are_bounded_in_the_core(monkeypatch, surface):
+    core = _bootstrap(monkeypatch, "maximal", surface, populated=True)
+    types = core["capture_semantics"]["entity_types"]
+    assert len(types) == bootstrap_core.CORE_ENTITY_TYPE_CAP < CUSTOM_ENTITY_TYPES
+    listed_total = len(bootstrap_core_registry_ids(monkeypatch, surface))
+    assert core["capture_semantics"]["entity_types_more"] == (
+        f"+{listed_total - bootstrap_core.CORE_ENTITY_TYPE_CAP} more: section=entities"
+    )
+    assert len(_text(core["due_state"])) <= 200
+    assert core["due_state"]["list"] == "section=epistemics"
+    assert "latency" not in core
+
+
+def bootstrap_core_registry_ids(monkeypatch, surface) -> list[str]:
+    section = _bootstrap(monkeypatch, "maximal", surface, populated=True, section="entities")
+    return [item["id"] for item in section["entity_registry"]["types"]]
+
+
+def test_the_full_blocks_are_served_by_the_sections_and_the_session(monkeypatch):
+    epistemics = _bootstrap(monkeypatch, "maximal", None, populated=True, section="epistemics")
+    diagnostics = _bootstrap(monkeypatch, "maximal", None, populated=True, section="diagnostics_reading")
+    assert epistemics["due_state"]["top"]
+    assert diagnostics["latency"]
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    with populated_blocks():
+        session = commands.op_bootstrap(
+            populated_root(), profile="session", skill_contract=workflow_skills.skill_contract()
+        )
+    assert session["due_state"]["top"] and session["latency"]
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+def test_core_plus_sections_reconstruct_a_populated_reference(monkeypatch, surface):
+    reference = _bootstrap(monkeypatch, "maximal", surface, populated=True, section="all")
+    assert {"due_state", "latency"} <= set(reference)
+    for key, home in (("due_state", "epistemics"), ("latency", "diagnostics_reading")):
+        served = _bootstrap(monkeypatch, "maximal", surface, populated=True, section=home)
+        assert served[key] == reference[key]
+
+
 @pytest.mark.parametrize("name", bootstrap_core.SECTIONS)
 def test_each_section_stays_under_its_ceiling(monkeypatch, name):
     for surface in SURFACES:
-        size = len(_text(_bootstrap(monkeypatch, "maximal", surface, section=name)))
+        payload = _bootstrap(monkeypatch, "maximal", surface, section=name, populated=True)
+        size = len(_text(payload))
         assert size <= SECTION_BYTE_CEILINGS[name], f"{name} is {size:,} bytes on {surface}"
 
 

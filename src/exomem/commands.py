@@ -913,7 +913,7 @@ def op_bootstrap(
     # Where the compact core points for the vocabulary workflow's full contract: it is
     # served on demand in a section, and a released profile keeps its published text.
     vocabulary_workflow_home = (
-        " (bootstrap section entities)" if profile == "compact" and not frozen_profile else ""
+        " (section entities)" if profile == "compact" and not frozen_profile else ""
     )
     active_product_names = frozenset(active_descriptor.product_commands)
     # The recall contract opens with a line that names `activate_context`. Where the
@@ -2198,6 +2198,13 @@ def op_bootstrap(
         core_payload = None
     else:
         core_payload = bootstrap_core_module.project_core(compact_payload)
+    # The calling client's own recall-latency breaches. The core does not carry them
+    # (they are bounded only by how many tools breach, and no turn needs them); they
+    # ride in the reference payload, so `diagnostics_reading` serves them and a session
+    # client, which has no other way to hear that its recalls went slow, gets them too.
+    latency_block = _bootstrap_latency_block()
+    if latency_block is not None and core_payload is not None:
+        compact_payload = {**compact_payload, "latency": latency_block}
     if section is not None:
         result = bootstrap_core_module.section_payload(compact_payload, section)
     elif session_unavailable is not None:
@@ -2212,12 +2219,10 @@ def op_bootstrap(
         )
     else:
         result = core_payload if core_payload is not None else compact_payload
-    # After every projection, so the session profile's key whitelist cannot
-    # drop it: the client on a reduced surface is exactly the one with no other
-    # way to hear that its own recalls have gone slow. Absent when healthy, so a
-    # healthy bootstrap keeps today's shape on every profile.
-    latency_block = _bootstrap_latency_block()
-    if latency_block is not None:
+    # A surface that serves no core (a released hosted profile, `full`, `diagnostics`)
+    # keeps today's shape: absent when healthy, appended after the projection so the
+    # session whitelist cannot drop it.
+    if latency_block is not None and core_payload is None:
         result["latency"] = latency_block
     return result
 

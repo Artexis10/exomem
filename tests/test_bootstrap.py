@@ -646,7 +646,12 @@ def test_session_bootstrap_unattested_contract_returns_compact_once(
     assert fallback["profile"] == "compact"
     assert fallback["session_profile_unavailable"] == reason
     assert "capture_semantics" in fallback and "sections" in fallback
-    assert fallback["due_state"] == block
+    # The fallback is the core, which carries a counts summary and points at the list.
+    assert fallback["due_state"] == {
+        "total": 1,
+        "top_category": "prediction",
+        "list": "section=epistemics",
+    }
     assert served == [vault]
     assert emitted == [block]
 
