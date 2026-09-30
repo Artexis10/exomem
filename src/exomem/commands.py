@@ -6264,6 +6264,8 @@ def op_activate_context(
     names included; `refs`, pages you read; `recent`, earlier `{role, text}`
     turns. Anchors report `origin`. Details: the skill's engagement reference.
 
+    Call again with `focus` for a subject the hook missed.
+
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
     already runs, and returns `abstained: true` with a reason rather than guessing

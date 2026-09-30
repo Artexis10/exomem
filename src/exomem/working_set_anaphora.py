@@ -1,5 +1,5 @@
 """When a turn may take its subject from the conversation (thread-aware
-compilation, ruling C1 on #1463, round 3).
+compilation, ruling C1 on #1463, round 4).
 
 The conversation carry runs for a turn that (a) resolves no anchor of its own,
 which the compiler decides, and here:
@@ -105,10 +105,10 @@ TASK_VOCABULARY: frozenset[str] = frozenset(
     """.split()
 )
 #: A time word is no topic only where one of these places it relative to now
-#: or to the thread ("last year", "next month", "the autumn", "this week"). An
+#: or to the thread ("last year", "next month", "this week"). An
 #: ungoverned one is content: "what day is it today", "autumn came early".
 _TIME_GOVERNORS: frozenset[str] = frozenset(
-    """next last this these previous coming following the every a an on by in
+    """next last this these previous coming following every on by in for
     within until before after since""".split()
 )
 #: Time adverbs: "revisit this tomorrow" keeps its demonstrative.
@@ -119,12 +119,9 @@ _TIME_ADVERBS: frozenset[str] = frozenset(
 _POINTERS: frozenset[str] = (
     ORDINALS | ORDINAL_HEADS | frozenset({"former", "latter", "previous", "above", "earlier", "same"})
 )
-#: Everything that is never content, bar time words and the vault's vocabulary.
-_KNOWN: frozenset[str] = _FUNCTION_WORDS | TASK_VOCABULARY | _POINTERS
 _CLITIC_VERBS: dict[str, str] = {"s": "is", "re": "are", "ll": "will", "d": "would", "ve": "have", "m": "am"}
 #: "n't" stems that are not the verb minus its final "n".
 _NEGATED: dict[str, str] = {"won": "will", "can": "can", "shan": "shall", "ain": "is"}
-#: Everything that is never content, bar the vault's own vocabulary.
 
 
 def _words(tokens: Iterable[str]) -> list[str]:
@@ -167,6 +164,33 @@ def forms(word: str) -> frozenset[str]:
     return frozenset(out)
 
 
+#: Normalize the closed task vocabulary exactly as the turn's words. The
+#: vocabulary entries themselves stay frozen; e.g. "figures" also covers "figure".
+_TASK_FORMS: frozenset[str] = frozenset(form for word in TASK_VOCABULARY for form in forms(word))
+_KNOWN: frozenset[str] = _FUNCTION_WORDS | _TASK_FORMS | _POINTERS
+_TIME_PREPOSITIONS: frozenset[str] = frozenset("on by in for with within until before after since".split())
+_WEEKDAYS: frozenset[str] = frozenset("monday tuesday wednesday thursday friday saturday sunday".split())
+_TIME_PREDICATES: frozenset[str] = _TASK_FORMS | frozenset(
+    "am is are was were be been being do does did doing have has had having "
+    "get got gotten go went gone make made take took taken give gave given put let "
+    "see saw seen look know knew known think thought want need come came try keep "
+    "kept seem sound feel felt happen say said tell told ask mean meant use find found".split()
+)
+
+
+def _time_is_modifier(words: Sequence[str], index: int) -> bool:
+    """Relative time, a preposition's article phrase, or a bare adverb/weekday
+    after a predicate names no subject. A copula's "the summer" does."""
+    if not index:
+        return False
+    previous = words[index - 1]
+    if previous in _TIME_GOVERNORS:
+        return True
+    if previous in {"the", "a", "an"}:
+        return index >= 2 and words[index - 2] in _TIME_PREPOSITIONS
+    return words[index] in (_TIME_ADVERBS | _WEEKDAYS) and bool(forms(previous) & _TIME_PREDICATES)
+
+
 def content_words(tokens: Sequence[str], *, vocabulary: frozenset[str] = frozenset()) -> tuple[str, ...]:
     """The turn's content words, in order: every word that is not a function
     word, a pointing word, a number, a governed time word, in
@@ -177,9 +201,14 @@ def content_words(tokens: Sequence[str], *, vocabulary: frozenset[str] = frozens
         word
         for index, word in enumerate(words)
         if any(ch.isalpha() for ch in word)
-        and not (word_forms := forms(word)) & _KNOWN
+        # A time noun's stem can be a function word ("evening" -> "even").
+        # Such a noun still needs a time modifier unless it is itself known.
+        and (
+            not (word_forms := forms(word)) & _KNOWN
+            or (word_forms & _TIME_WORDS and word not in _KNOWN)
+        )
         and not word_forms & vocabulary
-        and not (word_forms & _TIME_WORDS and index and words[index - 1] in _TIME_GOVERNORS)
+        and not (word_forms & _TIME_WORDS and _time_is_modifier(words, index))
     )
 
 

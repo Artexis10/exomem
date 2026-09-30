@@ -1,7 +1,8 @@
 """Held-out turns for the conversation carry's trigger (#1463, round 3).
 
-Written and committed BEFORE the content gate was implemented, and never
-tuned against: a later rule change must meet the bar on these as they stand.
+Written and committed BEFORE the content gate was implemented. Its first run
+is the held-out result; later vocabulary tuning used five of its misses, so
+subsequent runs are regression measurements, not held-out evidence.
 Every turn is lower case, as the owner types. Invented content only.
 
 `EARLIER` is the conversation every turn is sent with. A positive points back

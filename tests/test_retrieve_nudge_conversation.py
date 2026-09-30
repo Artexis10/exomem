@@ -448,5 +448,15 @@ def test_the_focus_origin_is_labelled_as_the_agents_cue() -> None:
     ],
 )
 def test_an_envelope_tag_is_refused_with_attributes_or_mid_text(text: str) -> None:
-    """Envelope tags are matched by their prefix, never with the closing `>`."""
+    """Envelope tag names end at whitespace, `>` or `/`, including attributes."""
     assert not hook._is_typed_text(text)
+
+
+@pytest.mark.parametrize("tag", ["skill-name", "skills", "instructions-example"])
+def test_an_owner_can_mention_a_tag_with_a_longer_name(tag: str) -> None:
+    assert hook._is_typed_text(f"Please explain <{tag}> in the guide.")
+
+
+@pytest.mark.parametrize("suffix", [' name="x">', "\tname='x'>", ">", "/>"])
+def test_the_exact_skill_envelope_is_still_refused(suffix: str) -> None:
+    assert not hook._is_typed_text(f"Please read <skill{suffix}machine text</skill>")

@@ -983,7 +983,7 @@ _INJECTED_MARKERS = ("[Exomem working set", "[Exomem retrieval check]", "KB rout
 #: Codex's environment, instruction and skill bodies. A block that starts with
 #: ANY tag is refused (the allowlist below), and a block that carries one of
 #: these anywhere is refused too, so a reminder appended to typed text cannot
-#: ride along with it. Each is a PREFIX: an attribute form
+#: ride along with it. Each tag ends at whitespace, `>` or `/`: an attribute form
 #: (`<system-reminder priority="high">`) is refused like the bare tag.
 _MACHINE_TAGS = (
     "<bash-",
@@ -991,10 +991,17 @@ _MACHINE_TAGS = (
     "<system-reminder",
     "<command-",
     "<local-command",
+    "<local-command-",
     "<environment_context",
     "<user_instructions",
     "<skill",
     "<instructions",
+)
+_MACHINE_TAG_RE = re.compile(
+    "(?:"
+    + "|".join(re.escape(tag) + (r"[a-z0-9_-]*" if tag.endswith("-") else "") for tag in _MACHINE_TAGS)
+    + r")(?=[\s>/])",
+    re.IGNORECASE,
 )
 #: A block opening with a tag is client plumbing, never a typed turn.
 _LEADING_TAG_RE = re.compile(r"\A\s*<[A-Za-z][A-Za-z0-9_-]*[ >/]")
@@ -1046,8 +1053,7 @@ def _is_typed_text(text: str) -> bool:
     head = text.lstrip()
     if not head or _LEADING_TAG_RE.match(head) or head.startswith(_INSTRUCTION_HEADERS):
         return False
-    lowered = text.lower()
-    if any(tag in lowered for tag in _MACHINE_TAGS):
+    if _MACHINE_TAG_RE.search(text):
         return False
     return not any(marker in text for marker in _INJECTED_MARKERS)
 
