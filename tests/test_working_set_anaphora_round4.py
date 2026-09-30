@@ -5,6 +5,15 @@ from __future__ import annotations
 import pytest
 from anaphor_acceptance_sets import EARLIER, POSITIVES as ACCEPTANCE_POSITIVES
 from anaphor_heldout_sets import EARLIER as HELDOUT_EARLIER, POSITIVES as HELDOUT_POSITIVES
+from anaphor_round6_sets import (
+    FIFTH_NEGATIVES,
+    FIFTH_POSITIVES,
+    LICENCE_NEGATIVES,
+    LICENCE_POSITIVES,
+    STRUCTURAL_NEGATIVES,
+    STRUCTURAL_POSITIVES,
+    earlier as repeated_earlier,
+)
 from test_working_set_conversation_carry import _carried
 
 TIME_NEGATIVES = (
@@ -148,10 +157,85 @@ def test_a_time_word_cannot_link_through_a_shared_function_word_stem() -> None:
 
 
 @pytest.mark.parametrize(
-    "turn,earlier",
-    [(turn, EARLIER) for turn in ACCEPTANCE_POSITIVES
+    "turn,earlier,subject",
+    [(turn, EARLIER, "Marlow Quay Survey") for turn in ACCEPTANCE_POSITIVES
      if turn not in {"does this affect the rota", "has anything changed there since"}]
-    + [(turn, HELDOUT_EARLIER) for turn in HELDOUT_POSITIVES if turn != "how bad is it now"],
+    + [(turn, HELDOUT_EARLIER, "Harbour Lantern Budget") for turn in HELDOUT_POSITIVES
+       if turn not in {
+           "how bad is it now", "what did they say about the seats",
+           "can you remind me why it grew", "and the shortlists, any news on those?",
+       }],
 )
-def test_every_previously_carried_acceptance_positive_keeps_its_subject(turn, earlier) -> None:
-    assert _carried([turn], earlier) == [turn]
+def test_licensed_acceptance_positives_keep_their_subject(turn, earlier, subject) -> None:
+    assert _carried([turn], earlier, subject_title=subject) == [turn]
+
+
+# Round 6: verbatim fifth-set disclosures plus 40 variants frozen pre-fix.
+
+
+@pytest.mark.parametrize("case_id,turn,subject", FIFTH_NEGATIVES)
+def test_each_disclosed_fifth_false_carry_abstains(case_id, turn, subject) -> None:
+    assert _carried([turn], repeated_earlier(subject, turn), subject_title=subject) == [], case_id
+
+
+@pytest.mark.parametrize("case_id,turn,subject", FIFTH_POSITIVES)
+def test_each_disclosed_fifth_positive_carries_except_drop_it(case_id, turn, subject) -> None:
+    expected = [] if turn == "drop it" else [turn]
+    assert _carried([turn], repeated_earlier(subject, turn), subject_title=subject) == expected, case_id
+
+
+@pytest.mark.parametrize("turn", LICENCE_NEGATIVES + STRUCTURAL_NEGATIVES)
+def test_round6_authored_negative_variants_abstain(turn: str) -> None:
+    assert _carried([turn], repeated_earlier("Alder database migration", turn),
+                    subject_title="Alder database migration") == []
+
+
+@pytest.mark.parametrize("turn", LICENCE_POSITIVES + STRUCTURAL_POSITIVES)
+def test_round6_authored_positive_variants_carry(turn: str) -> None:
+    assert _carried([turn], repeated_earlier("Alder database migration", turn),
+                    subject_title="Alder database migration") == [turn]
+
+
+@pytest.mark.parametrize("title,turn", [
+    ("Raven Telescope", "is that raven's final version"),
+    ("Orchid Telescope", "should we change its telescopes"),
+    ("Ember Shipping", "is that shipping ready"),
+    ("Raven-telescope Plan", "can you compare its raven-telescope figures"),
+])
+def test_the_subjects_own_title_forms_license_content(title, turn) -> None:
+    assert _carried([turn], repeated_earlier(title, turn), subject_title=title) == [turn]
+
+
+def test_an_older_subjects_title_does_not_license_the_selected_subject() -> None:
+    turn = "is its telescope ready"
+    entries = ({"role": "user", "text": "Can we review the Raven Telescope?"},
+               {"role": "user", "text": "Can we review the Briar workshop launch?"})
+    assert _carried([turn], entries, subject_title="Briar workshop launch") == []
+
+
+@pytest.mark.parametrize("turn", ["is it cold", "is it raining", "is it five miles away"])
+def test_a_dummy_complement_does_not_carry_even_when_its_head_is_in_the_title(turn) -> None:
+    title = "Cold Rain Miles"
+    assert _carried([turn], repeated_earlier(title, turn), subject_title=title) == []
+
+
+@pytest.mark.parametrize("turn", ["is it the first", "is it the second option", "is it the one"])
+def test_a_bare_pointer_is_not_a_bare_date(turn: str) -> None:
+    assert _carried([turn], EARLIER, subject_title="Marlow Quay Survey") == [turn]
+
+
+def test_snowy_is_a_dummy_weather_head_even_when_in_the_subject_title() -> None:
+    assert _carried(["is it snowy outside"], EARLIER, subject_title="Snowy Launch") == []
+
+
+@pytest.mark.parametrize("title,turn", [
+    ("Cold Launch", "how cold is it outside"),
+    ("Far Station", "how far is it to the station"),
+])
+def test_a_fronted_weather_or_distance_complement_is_dummy(title, turn) -> None:
+    assert _carried([turn], repeated_earlier(title, turn), subject_title=title) == []
+
+
+@pytest.mark.parametrize("turn", ["it has been late", "it had been midnight"])
+def test_a_perfect_copula_still_has_a_dummy_time_complement(turn: str) -> None:
+    assert _carried([turn], EARLIER) == []

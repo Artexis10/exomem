@@ -2384,15 +2384,16 @@ def _compile_packet(
     # The conversation carry, fifth on the ladder: after the recency and
     # follow-up carries above (each returned if it decided), before the
     # retrieval carry below. A turn whose own words reached nothing, that
-    # points back and brings no content word the earlier turns lack
-    # (`may_carry`), is carried from the newest earlier USER turn that named a
-    # subject. A turn with new content is a topic switch and falls through.
+    # points back, is considered against the newest earlier USER turn that
+    # named a subject. Only that subject's own title/name or frozen task words
+    # license its content (`may_carry`); shared turn vocabulary never does.
+    # Unlicensed content falls through without seeking an older subject.
     # Two subjects in that turn abstain `ambiguous` and stop the ladder;
     # nothing named falls through.
     if (
         not anchor
         and segments is not None
-        and working_set_conversation.may_carry(analysis, segments)
+        and analysis.points_back
         and resolution.status == "unresolved"
         and not any(
             set(item.evidence) & working_set_resolve.WORDED_CONTACT_KINDS
@@ -2403,7 +2404,11 @@ def _compile_packet(
         with _span(timings, "working_set.conversation"):
             carried_entries = entry_candidates()
         verdict = working_set_conversation.carry(carried_entries)
-        if verdict.status == "one":
+        licensed = bool(verdict.anchors) and all(
+            working_set_conversation.may_carry(analysis, subject_title=item.title)
+            for item in verdict.anchors
+        )
+        if verdict.status == "one" and licensed:
             (found,) = verdict.anchors
             source = next(item for item in rows if item.anchor_id == found.anchor_id)
             if _origins is not None:
@@ -2429,7 +2434,7 @@ def _compile_packet(
                 recent_context=recent,
                 carried_by="conversation",
             )
-        if verdict.status == "ambiguous":
+        if verdict.status == "ambiguous" and licensed:
             return abstained_packet(
                 reason="ambiguous",
                 max_chars=limit,

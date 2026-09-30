@@ -353,21 +353,24 @@ def apply(
     return tuple(ordered[: resolve_module.MAX_CANDIDATES]), origins, entry_candidates
 
 
-def may_carry(analysis: Any, segments: Analyzed) -> bool:
-    """Ruling C1 on #1463, (b) and (c): the turn points back, and every
-    content word it has already occurs in the earlier turns read here. One new
-    content word is a topic switch, which is never carried. Linear in the
-    turn's words plus the earlier entries' words."""
+def may_carry(analysis: Any, *, subject_title: str = "") -> bool:
+    """Ruling C1 on #1463, round 6: pointing plus a narrow content licence.
+    Only the subject's own title/name or frozen task forms license content.
+    Words merely shared with earlier turns are never evidence of reference."""
     if not analysis.points_back:
         return False
     if not analysis.content_words:
         return True
     from . import working_set_anaphora
 
-    earlier = working_set_anaphora.mentioned(
-        token for _entry, entry_analysis in segments.entries for token in entry_analysis.tokens
+    from .working_set_index import normalize, tokens_of
+
+    licensed = working_set_anaphora._TASK_FORMS | frozenset(
+        form
+        for word in working_set_anaphora._words(tokens_of(normalize(subject_title)))
+        for form in working_set_anaphora.forms(word)
     )
-    return all(working_set_anaphora.forms(word) & earlier for word in analysis.content_words)
+    return all(working_set_anaphora.forms(word) & licensed for word in analysis.content_words)
 
 
 @dataclass(frozen=True, slots=True)

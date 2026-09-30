@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from conversation_vault import seed
+from anaphor_round6_sets import FIFTH_NEGATIVES, FIFTH_POSITIVES, earlier as repeated_earlier
 from test_governance_egress import _reset_caches
 from test_working_set_carry import CARRY_PAGE, CARRY_TURN, _seed_carry_pages
 from test_working_set_hot_projection import _live, _one_old_tick
@@ -278,6 +279,51 @@ def test_a_carried_anchor_never_enters_the_token(cvault: Path) -> None:
     assert payload["refs"] == []
 
 
+@pytest.fixture
+def fifth_disclosures_vault(cvault: Path) -> Path:
+    from conversation_vault import _notes, _write
+
+    titles = {title for _case, _turn, title in (*FIFTH_NEGATIVES, *FIFTH_POSITIVES)}
+    for title in titles:
+        _write(
+            cvault / f"Knowledge Base/Entities/Projects/{title}.md",
+            f"---\ntype: entity\nentity_type: project\nstatus: active\n"
+            f"updated: 2026-09-01\n---\n\n# {title}\n\n## Summary\n\n"
+            f"{title} is an invented subject for carry regressions.\n{_notes(title)}",
+        )
+    working_set_index.WorkingSetIndex(cvault).rebuild()
+    _reset_caches()
+    lexstore.ensure_fresh(cvault)
+    working_set_runtime.reset_caches_for_tests()
+    return cvault
+
+
+def test_the_compiler_abstains_on_all_disclosed_fifth_false_carries(fifth_disclosures_vault: Path) -> None:
+    failures = []
+    for case_id, turn, title in FIFTH_NEGATIVES:
+        packet = _activate(fifth_disclosures_vault, turn,
+                           conversation={"recent": repeated_earlier(title, turn)},
+                           session=f"round6-negative-{case_id}")
+        if packet["generation"].get("carried_by") == "conversation" or title in _titles(packet):
+            failures.append((case_id, turn, _titles(packet)))
+    assert failures == []
+
+
+def test_the_compiler_restores_temporal_positives_and_excludes_drop_it(fifth_disclosures_vault: Path) -> None:
+    failures = []
+    for case_id, turn, title in FIFTH_POSITIVES:
+        packet = _activate(fifth_disclosures_vault, turn,
+                           conversation={"recent": repeated_earlier(title, turn)},
+                           session=f"round6-positive-{case_id}")
+        if turn == "drop it":
+            if packet["generation"].get("carried_by") == "conversation":
+                failures.append((case_id, turn, "closing carried"))
+        elif (packet["generation"].get("carried_by") != "conversation"
+              or _titles(packet) != [title] or not packet["units"]):
+            failures.append((case_id, turn, packet["abstention"]))
+    assert failures == []
+
+
 def test_without_a_conversation_nothing_is_carried(cvault: Path) -> None:
     packet = _activate(cvault, RICH)
     assert "carried_by" not in packet["generation"]
@@ -313,8 +359,8 @@ def test_the_shipped_follow_up_carry_still_wins(cvault: Path) -> None:
     assert _titles(with_conversation) == _titles(plain) == ["Ottilie Marsh"]
 
 
-#: The earlier user turn already spoke the turn's own words, so the turn
-#: brings no new content (ruling C1 on #1463, round 3) and may be carried.
+#: The earlier user turn repeats the retrieval words, but they are not words
+#: of the subject's own name. Shared vocabulary cannot license a carry.
 WINDOW_THREAD = {
     "recent": [
         _user("How did Ottilie Marsh do in the spring, and what about the quillon vantry window?"),
@@ -323,14 +369,14 @@ WINDOW_THREAD = {
 }
 
 
-def test_the_conversation_carry_precedes_the_retrieval_carry(cvault: Path) -> None:
+def test_shared_turn_words_do_not_license_the_conversation_carry(cvault: Path) -> None:
     turn = f"{CARRY_TURN} and what do we think of that"
     baseline = _activate(cvault, turn)
     assert baseline["generation"].get("carried_by") == "retrieval", "the fixture must admit a recall carry"
     packet = _activate(cvault, turn, conversation=WINDOW_THREAD)
-    assert packet["generation"]["carried_by"] == "conversation"
-    assert _titles(packet) == ["Ottilie Marsh"]
-    assert CARRY_PAGE not in [unit["provenance"]["path"] for unit in packet["units"]]
+    assert packet["generation"]["carried_by"] == "retrieval"
+    assert "Ottilie Marsh" not in _titles(packet)
+    assert CARRY_PAGE in [unit["provenance"]["path"] for unit in packet["units"]]
 
 
 def test_a_turn_with_new_content_words_is_a_topic_switch_and_never_carried(cvault: Path) -> None:
@@ -342,7 +388,7 @@ def test_a_turn_with_new_content_words_is_a_topic_switch_and_never_carried(cvaul
     assert "Ottilie Marsh" not in _titles(packet)
 
 
-def test_an_ambiguous_conversation_carry_stops_the_ladder(cvault: Path) -> None:
+def test_unlicensed_content_does_not_enter_the_ambiguous_carry(cvault: Path) -> None:
     turn = f"{CARRY_TURN} and what do we think of that"
     packet = _activate(
         cvault,
@@ -356,8 +402,8 @@ def test_an_ambiguous_conversation_carry_stops_the_ladder(cvault: Path) -> None:
             ]
         },
     )
-    assert packet["abstention"] == {"reason": "ambiguous"}
-    assert CARRY_PAGE not in str(packet["anchors"]) + str(packet["units"])
+    assert packet["generation"]["carried_by"] == "retrieval"
+    assert not {"Kestrel Hiring Plan", "Marlow Quay Survey"} & set(_titles(packet))
 
 
 def test_a_conversation_that_names_nothing_falls_through_to_the_retrieval_carry(cvault: Path) -> None:
@@ -378,16 +424,15 @@ def test_every_existing_carry_is_untouched_without_a_conversation(cvault: Path) 
 MAX_FALSE_POSITIVE_RATE = 0.05
 
 
-def _carried(turns, earlier) -> list[str]:
+def _carried(turns, earlier, *, subject_title: str = "") -> list[str]:
+    """The licence seam; callers supply the selected subject's actual title.
+    Earlier text is retained for identical before/after case inputs but is
+    deliberately not passed as licensing evidence."""
     from exomem import working_set_conversation
 
-    segments = working_set_conversation.Analyzed(
-        entries=tuple(
-            (working_set_conversation.Entry(entry["role"], entry["text"]), analyze(entry["text"]))
-            for entry in earlier
-        )
-    )
-    return [turn for turn in turns if working_set_conversation.may_carry(analyze(turn), segments)]
+    return [turn for turn in turns if working_set_conversation.may_carry(
+        analyze(turn), subject_title=subject_title,
+    )]
 
 
 @pytest.mark.parametrize("module", ["anaphor_heldout_sets", "anaphor_acceptance_sets"])
@@ -395,8 +440,9 @@ def test_the_trigger_meets_the_bar_on_the_held_out_and_acceptance_sets(module: s
     import importlib
 
     sets = importlib.import_module(module)
-    false_positives = _carried(sets.NEGATIVES, sets.EARLIER)
-    carried = _carried(sets.POSITIVES, sets.EARLIER)
+    title = "Marlow Quay Survey" if module == "anaphor_acceptance_sets" else "Harbour Lantern Budget"
+    false_positives = _carried(sets.NEGATIVES, sets.EARLIER, subject_title=title)
+    carried = _carried(sets.POSITIVES, sets.EARLIER, subject_title=title)
     assert len(false_positives) <= MAX_FALSE_POSITIVE_RATE * len(sets.NEGATIVES), false_positives
     print(f"{module}: FP {len(false_positives)}/{len(sets.NEGATIVES)}; recall {len(carried)}/{len(sets.POSITIVES)}")
 

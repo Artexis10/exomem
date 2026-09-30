@@ -1,5 +1,5 @@
 """When a turn may take its subject from the conversation (thread-aware
-compilation, ruling C1 on #1463, round 5).
+compilation, ruling C1 on #1463, round 6).
 
 The conversation carry runs for a turn that (a) resolves no anchor of its own,
 which the compiler decides, and here:
@@ -8,10 +8,11 @@ which the compiler decides, and here:
   follow-up marker, an ordinal followed by "one" or "option", a governed bare
   pointer ("that one", "the other one", "which one"), an elliptical "what
   about ..." opener, or the vault's referential cue;
-* (b) BRINGS NO NEW CONTENT: every content word of the turn already occurs in
-  the earlier turns. A content word is any word that is not a function word,
-  not a time word, not in the closed generic task vocabulary below and not in
-  the vault's referential vocabulary. One new content word is a topic switch:
+* (b) LICENSED CONTENT: every content word belongs to the carried subject's
+  own name/title or the frozen generic task vocabulary below. A word merely
+  shared with an earlier turn supplies no licence. Function words, pointing
+  words, numbers, time words and the vault's referential vocabulary are neutral.
+  An unlicensed content word is a topic switch:
   "does it snow much in oslo", "how do i descale a kettle", "it's been a long
   day" all bring words of their own, so none is carried.
 
@@ -105,10 +106,8 @@ TASK_VOCABULARY: frozenset[str] = frozenset(
     safe summarise summarize drop revisit manager expensive matter
     """.split()
 )
-#: A time word is no new topic only where one of these places it relative to now
-#: or to the thread ("last year", "next month", "this week"). An
-#: ungoverned one blocks a carry: "what day is it today", "autumn came early".
-#: Time words never count as shared content in `mentioned`, either.
+#: These governors make a demonstrative temporal deixis ("this week"),
+#: rather than a pointing word. Time words themselves are neutral.
 _TIME_GOVERNORS: frozenset[str] = frozenset(
     """next last this these previous coming following every on by in for
     within until before after since""".split()
@@ -173,28 +172,26 @@ def forms(word: str) -> frozenset[str]:
 #: vocabulary entries themselves stay frozen; e.g. "figures" also covers "figure".
 _TASK_FORMS: frozenset[str] = frozenset(form for word in TASK_VOCABULARY for form in forms(word))
 _TIME_FORMS: frozenset[str] = frozenset(form for word in _TIME_WORDS for form in forms(word))
-_KNOWN: frozenset[str] = _FUNCTION_WORDS | _TASK_FORMS | _POINTERS
-_TIME_PREPOSITIONS: frozenset[str] = frozenset("on by in for with within until before after since".split())
-_WEEKDAYS: frozenset[str] = frozenset("monday tuesday wednesday thursday friday saturday sunday".split())
-_TIME_PREDICATES: frozenset[str] = _TASK_FORMS | frozenset(
-    "am is are was were be been being do does did doing have has had having "
-    "get got gotten go went gone make made take took taken give gave given put let "
-    "see saw seen look know knew known think thought want need come came try keep "
-    "kept seem sound feel felt happen say said tell told ask mean meant use find found".split()
-)
-
-#: Grammar for a dummy subject's temporal copular complement. Work predicates
+#: Grammar for a dummy subject's bare copular complement. Work predicates
 #: ("ready", "due") stay outside it; these are not task vocabulary additions.
 _COPULAS = frozenset("am is are was were be been being".split())
 _CLOCK_NUMBERS = frozenset(
     "one two three four five six seven eight nine ten eleven twelve thirteen "
     "fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty".split()
 )
-_TIME_COMPLEMENT_WORDS = _TIME_WORDS | _CLOCK_NUMBERS | ORDINALS | frozenset(
-    "the a an of in at on by before after past to till until from for and or "
-    "not still now then yet already there here where you are nearly almost about "
-    "around half quarter am pm dark start end beginning middle next last this "
-    "these previous coming following".split()
+_KNOWN: frozenset[str] = _FUNCTION_WORDS | _TASK_FORMS | _POINTERS | _CLOCK_NUMBERS
+_ADJUNCT_PREPOSITIONS = frozenset("on in at after before by for from until during".split())
+_COMPLEMENT_MODIFIERS = frozenset(
+    "not still now then yet already nearly almost about around the a an "
+    "next last this these previous coming following".split()
+)
+_WEATHER_HEADS = frozenset(
+    "rain snow snowy sleet hail drizzle windy foggy sunny cloudy cold hot warm cool "
+    "wet dry humid freezing frosty stormy dark".split()
+)
+_DISTANCE_HEADS = frozenset("far near uphill downhill mile kilometer kilometre meter metre foot feet inch".split())
+_DATE_CLOCK_HEADS = _TIME_WORDS | _CLOCK_NUMBERS | frozenset(
+    "start end beginning middle holiday half am pm".split()
 )
 _CLOSING_IDIOMS = (
     ("leave", "it", "there"),
@@ -224,10 +221,11 @@ def _closing(words: Sequence[str]) -> bool:
 
 
 def _dummy_time_it(words: Sequence[str], index: int) -> bool:
-    """Recognise temporal copulas in statement and inverted question order,
-    including negation, relative dates and clock complements."""
+    """A bare time/date/clock/weather/distance complement makes copular it
+    dummy. A preposition heads an adjunct of a real referent instead.
+    Statements, questions, negations and contractions share this structure."""
     start = index + 1
-    while start < len(words) and words[start] in {"not", "will", "would", "still"}:
+    while start < len(words) and words[start] in {"not", "will", "would", "still", "has", "have", "had"}:
         start += 1
     if start < len(words) and words[start] in _COPULAS:
         start += 1
@@ -237,59 +235,48 @@ def _dummy_time_it(words: Sequence[str], index: int) -> bool:
             before -= 1
         if before < 0 or words[before] not in _COPULAS:
             return False
+    while start < len(words) and words[start] in _COMPLEMENT_MODIFIERS:
+        start += 1
     complement = words[start:]
-    return bool(complement) and any(
-        forms(word) & _TIME_WORDS or word == "dark" or word in _CLOCK_NUMBERS or word.isdecimal()
-        for word in complement
-    ) and all(
-        forms(word) & _TIME_COMPLEMENT_WORDS or word.isdecimal() for word in complement
-    )
-
-
-def _time_is_modifier(words: Sequence[str], index: int) -> bool:
-    """Relative time, a preposition's article phrase, or a bare adverb/weekday
-    after a predicate names no subject. A time qualifier of a work noun
-    ("friday review", "spring round") is also a modifier, never shared content.
-    A copula's "the summer" names a time subject."""
-    if index + 1 < len(words) and forms(words[index + 1]) & _TASK_FORMS:
-        return True
-    if not index:
+    # In wh-questions the bare complement precedes the inverted copula.
+    fronted = tuple(words[:2]) in {
+        ("what", "time"), ("what", "day"), ("what", "date"),
+    } or (len(words) > 1 and words[0] == "how"
+          and bool(forms(words[1]) & (_WEATHER_HEADS | _DISTANCE_HEADS)))
+    if not complement:
+        return fronted
+    head = complement[0]
+    if head in _ADJUNCT_PREPOSITIONS or (fronted and head in {"to", "outside", "there", "here"}):
+        return fronted
+    # "the one from last week" / "the first on Tuesday": the pointer is
+    # the head, with a temporal prepositional adjunct, rather than a date.
+    if (head in ORDINAL_HEADS | ORDINALS
+            and len(complement) > 1 and complement[1] in _ADJUNCT_PREPOSITIONS):
         return False
-    previous = words[index - 1]
-    if previous in _TIME_GOVERNORS:
-        return True
-    if previous in {"the", "a", "an"}:
-        return index >= 2 and words[index - 2] in _TIME_PREPOSITIONS
-    return words[index] in (_TIME_ADVERBS | _WEEKDAYS) and bool(forms(previous) & _TIME_PREDICATES)
+    if head in ORDINALS:
+        # Ordinals name a date only with its "of <time>" complement;
+        # otherwise they select a real item ("the first", "second option").
+        return (len(complement) > 2 and complement[1] == "of"
+                and any(forms(word) & _TIME_WORDS for word in complement[2:]))
+    if head in ORDINAL_HEADS and "the" in words[index + 1 : start]:
+        return False
+    return bool(forms(head) & (_DATE_CLOCK_HEADS | _WEATHER_HEADS | _DISTANCE_HEADS)) or head.isdecimal()
 
 
 def content_words(tokens: Sequence[str], *, vocabulary: frozenset[str] = frozenset()) -> tuple[str, ...]:
     """The turn's content words, in order: every word that is not a function
-    word, a pointing word, a number, a governed time word, in
+    word, a pointing word, a number, a neutral time word, in
     `TASK_VOCABULARY` or in `vocabulary` (the vault's referential cue and
     filler words)."""
     words = _words(tokens)
     return tuple(
         word
-        for index, word in enumerate(words)
+        for word in words
         if any(ch.isalpha() for ch in word)
-        # A time noun's stem can be a function word ("evening" -> "even").
-        # Such a noun still needs a time modifier unless it is itself known.
-        and (
-            not (word_forms := forms(word)) & _KNOWN
-            or (word_forms & _TIME_WORDS and word not in _KNOWN)
-        )
+        and not (word_forms := forms(word)) & _KNOWN
         and not word_forms & vocabulary
-        and not (word_forms & _TIME_WORDS and _time_is_modifier(words, index))
+        and not word_forms & _TIME_FORMS
     )
-
-
-def mentioned(tokens: Iterable[str]) -> frozenset[str]:
-    """Shared content forms from earlier turns. A calendar/clock/weekday
-    match never links a new turn to the conversation's subject."""
-    return frozenset(
-        form for word in _words(tokens) if not forms(word) & _TIME_WORDS for form in forms(word)
-    ) - _TIME_FORMS
 
 
 def points_back(

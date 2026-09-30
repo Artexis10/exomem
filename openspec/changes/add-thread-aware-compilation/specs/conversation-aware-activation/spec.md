@@ -169,9 +169,11 @@ A turn SHALL be carried from the conversation only when all three of these hold:
 
 1. **It resolves nothing of its own.** Its turn segment reaches no anchor by any worded contact kind.
 2. **It points back.** It speaks a cue from the effective referential vocabulary, or one of a closed, shipped set: third-person pronouns and possessives; "that", "this", "those", "these", "it"; the follow-up markers already shipped, except the bare pointers "one", "ones" and "other"; an ordinal followed by "one" or "option"; "the former" and "the latter"; an elliptical "what about …" or "how about …" opener. A bare pointer counts only when a determiner ("the", "a", "an"), a demonstrative, an ordinal or "which" governs it ("that one", "the other one", "which one"); a numeral use ("for one day", "no one") does not. Contractions are split first ("it's" is "it is"). A demonstrative that places a time ("this week", "these days") does not point back.
-3. **It brings no new content.** Every content word of the turn already occurs in the earlier turns the compiler reads. A content word is any word that is not a function word, a light verb, a pointing word, a number, a time word placed relative to now or to the thread ("last year", "next month", "the autumn"), a word of a closed, shipped generic task vocabulary (words for asking about an item's state, owner, decision, timing, cost, risk or outcome, such as "status", "due", "owner", "decide", "cost", "risk") or a word of the vault's referential vocabulary. Inflections are compared by their stems. One new content word is a topic switch, and the turn SHALL NOT be carried.
+3. **Its content is licensed by the subject.** Every content word SHALL belong to the selected subject's own name/title or the frozen generic task vocabulary, compared through the same `forms()` normalisation. A word merely appearing in an earlier user or assistant turn SHALL NOT license a carry. Function words, light verbs, pointers, numbers and the vault's referential vocabulary retain their existing neutral treatment. Time words SHALL neither license nor block the content gate. An unlicensed content word SHALL prevent the conversation carry.
 
-Length is not by itself a criterion: a long turn is carried when its words were already spoken earlier in the conversation.
+A copular "it" whose complement is a bare time, date, clock, weather or distance expression SHALL be treated as dummy and SHALL NOT carry. A temporal phrase headed by `on`, `in`, `at`, `after`, `before`, `by`, `for`, `from`, `until` or `during` is an adjunct of a real referent and MAY carry when the content licence permits it. Closing idioms retain their exclusions, including "drop it"; losing a real keep-or-drop instruction is a disclosed recall trade.
+
+Length is not by itself a criterion: a long turn may carry when all its content is licensed.
 
 **Precedence.** The conversation carry SHALL sit at one fixed place in the order in which activation decides a turn that its words did not resolve. That order builds on the keyless continuity, referential recency and follow-up contracts as they stand on `main` (context-activation-continuity, and memory-loop in `close-memory-loop`), and SHALL NOT change any of them. For each request, the first rule below that decides it wins:
 
@@ -185,7 +187,7 @@ Length is not by itself a criterion: a long turn is carried when its words were 
 
 A rule *decides* when it resolves or carries an anchor, or when it abstains `ambiguous`. A rule that finds nothing falls through to the next.
 
-The conversation carry therefore runs before the retrieval carry. A long anaphoric turn whose subject the user named earlier is carried from the user's own words, and is never served an unrelated recall hit that happens to match the turn's incidental words. Where the conversation carry abstains `ambiguous`, the retrieval carry SHALL NOT run.
+The conversation carry therefore runs before the retrieval carry. A licensed anaphoric turn whose subject the user named earlier is carried from that subject. Where the conversation carry abstains `ambiguous`, the retrieval carry SHALL NOT run. Unlicensed content falls through to shipped retrieval or abstention.
 
 The conversation carry SHALL run for an anaphoric turn only when both hold:
 
@@ -193,6 +195,8 @@ The conversation carry SHALL run for an anaphoric turn only when both hold:
 - the conversation has at least one visible `user` entry.
 
 The compiler SHALL then walk the visible `user` entries of `recent` from newest to oldest. It SHALL stop at the first entry in which at least one anchor resolves under the ordinary rules applied to that entry's text alone, with no recall query and no embedding.
+
+The compiler SHALL check the content licence against each selected anchor's own title. If any selected anchor fails the licence, the conversation carry SHALL fall through, without searching older entries for a different subject.
 
 - **Exactly one anchor.** That anchor SHALL be carried as the packet's single anchor:
   - at status `partial`, with evidence `[conversation]` and `origin = "conversation"`;
@@ -215,11 +219,26 @@ A refs-only conversation SHALL NOT carry: a ref says what was read, not what "it
 - **THEN** "Kestrel hiring plan" is carried
 - **AND** nothing from "Harbor Lantern budget" is served
 
-#### Scenario: The conversation carry precedes the retrieval carry
+#### Scenario: Shared earlier words do not license a conversation carry
 
-- **WHEN** a turn that points back reaches no anchor, its words would admit one dominant recall hit under the retrieval carry, an earlier user entry already spoke those words, and that entry resolves a different anchor
-- **THEN** the earlier entry's anchor is carried with `generation.carried_by = "conversation"`
-- **AND** the recall hit is not served
+- **WHEN** a pointing turn reaches no anchor, its content admits one dominant recall hit, an earlier user entry repeated those words but resolves a subject whose title does not license them, and they are not frozen task words
+- **THEN** the conversation carry falls through to the shipped retrieval carry
+- **AND** nothing is carried from that earlier subject
+
+#### Scenario: A bare clock complement is dummy
+
+- **WHEN** an earlier user entry resolved a subject, and the turn is "it's nearly midnight" or "is it Tuesday yet"
+- **THEN** the copular "it" is dummy and nothing is carried from the conversation
+
+#### Scenario: Preposition-headed time adjuncts preserve a real referent
+
+- **WHEN** an earlier user entry resolved a subject, and the turn is "is it on Tuesday", "is it still on for Friday", "it is at noon", "is it after the weekend" or "is it the one from last week"
+- **THEN** the subject is carried with `generation.carried_by = "conversation"`
+
+#### Scenario: Drop it remains a closing
+
+- **WHEN** an earlier user entry resolved a subject, and the turn is "drop it"
+- **THEN** nothing is carried from the conversation, even following an explicit keep-or-drop choice
 
 #### Scenario: A shipped follow-up carry still wins
 
@@ -234,7 +253,7 @@ A refs-only conversation SHALL NOT carry: a ref says what was read, not what "it
 #### Scenario: A turn with new content is a topic switch
 
 - **WHEN** an earlier user entry resolved an anchor, and the turn is "does it snow much in oslo in march", "is it possible to install Python 3.13 on my laptop?" or "it's been a long day"
-- **THEN** the turn brings content words the earlier turns lack, and nothing is carried from the conversation
+- **THEN** the turn brings content unlicensed by the subject's own name/title or frozen task vocabulary, and nothing is carried from the conversation
 
 #### Scenario: A contracted anaphor is carried
 

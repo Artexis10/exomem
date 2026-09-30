@@ -310,7 +310,8 @@ class TurnAnalysis:
     #: plus "one"/"option", a governed pointer or a referential cue?
     points_back: bool = False
     #: The turn's content words (`working_set_anaphora.content_words`). The
-    #: conversation carry runs only when every one occurs in earlier turns.
+    #: conversation carry licenses every one against the subject's own title
+    #: or frozen task vocabulary, never against other earlier-turn words.
     content_words: tuple[str, ...] = ()
     #: `points_back` with no content word at all: the verdict without a
     #: conversation to compare against.
@@ -391,8 +392,8 @@ def is_anaphoric(
 ) -> bool:
     """Taken on its own, does the turn lean on something said before? It must
     point back and bring no content word of its own (`working_set_anaphora`).
-    With a conversation, the carry asks instead whether its content words all
-    occur in the earlier turns (`working_set_conversation.may_carry`)."""
+    With a conversation, the carry licenses content against the carried
+    subject's own title/name (`working_set_conversation.may_carry`)."""
     return working_set_anaphora.points_back(
         tokens, referential_cue=referential_cue, follow_up_markers=FOLLOW_UP_MARKERS
     ) and not working_set_anaphora.content_words(tokens, vocabulary=_vocabulary_words(vocabulary))
