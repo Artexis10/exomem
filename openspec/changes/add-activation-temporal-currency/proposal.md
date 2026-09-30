@@ -15,16 +15,27 @@ were observed on private material and are reproduced here only with invented dat
 
 ## What Changes
 
-- A served unit carries its own authored time; the page's time is labelled apart.
-- Superseded or historical units are marked history and rank below current ones;
-  explicit supersession units are served in full.
-- `current_state` for an anchor resolved only by weak lexical evidence is held back when
-  old or undated, and labelled with its age otherwise.
-- A recommendation whose action a later outcome records is marked superseded by it, and
-  the outcome is marked newer.
+Currency is taken only from what the author wrote; nothing is inferred from dates,
+categories or shared words.
+
+- A served unit carries the date written in its context slot, never a date its prose
+  mentions or a deadline; its page's time orders undated units and is not published.
+- A unit is history only when its page is superseded or archived, or a unit on the
+  same page carries a `supersedes` relation naming it. History ranks after current
+  material within a role.
+- An outcome retires a recommendation only through that same authored relation.
+- `current_state` for an anchor resolved only by weak lexical or recall evidence is
+  held back when older than 30 days, age-labelled when recent, and served labelled
+  `resolved_by: lexical` when undated.
+- An entity or hub serves the current-state page its own page declares in
+  `current_state_page`, with the page's path so the egress guard decides it.
+- Relation targets and page times stay internal; no unit class is exempt from the
+  role cap; the hook labels history units.
 
 ## Impact
 
-Packet unit entries gain optional `history`, `newer_than` and `superseded_by_outcome`
-fields; `current_state` entries gain optional `resolved_by` and `age_days`. Unit
-`updated` is empty rather than the page's time when the unit authors no time.
+Packet unit entries gain an optional `history: true`; `current_state` entries gain
+optional `path`, `resolved_by` and `age_days`; an undated state labels its page time
+in its statement without publishing internal metadata. Unit `updated` is empty,
+rather than the page's time, when the unit authors no time. Standing units now count
+against the role cap. The prompt hook renders `history` and `carried history` labels.

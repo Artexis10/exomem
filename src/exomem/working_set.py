@@ -60,7 +60,7 @@ MAX_POINTERS = 40
 #: Pages linked to a resolved entity that hold conclusions and are read under
 #: `precedents` beyond the entity's capped link list, and the pages of the
 #: entity's project(s) that stand as precedent (one per project), with the
-#: units of each that are exempt from the role cap.
+#: leading units of each, counted against the role cap.
 ENTITY_CONCLUSION_PAGES = 6
 MAX_STANDING_PAGES = 2
 MAX_STANDING_UNITS = 2
@@ -436,11 +436,14 @@ def build_packet(
         return (
             0 if item.level == "unit" else 1,
             order.get(item.role, len(order)),
-            0 if item.provenance.get("standing") else 1,
             1 if item.provenance.get("carried") else 0,
+            0 if item.provenance.get("standing") else 1,
             # Within a role, current material ranks before history.
             _lifecycle_rank(item.lifecycle),
             -_date_rank(item.updated),
+            # Most units author no time of their own; their page's time orders
+            # them rather than their ref's spelling.
+            -_date_rank(str(item.provenance.get("page_updated") or "")),
             item.ref,
         )
 
@@ -476,7 +479,17 @@ def build_packet(
     # silence.
     state_entries: list[dict[str, Any]] = []
     for entry in current_state:
+        entry = dict(entry)
+        page_updated = str(entry.get("page_updated") or "")
         statement = str(entry.get("statement") or "")
+        # Page time labels an undated claim; it never becomes the claim's own
+        # time or a published compiler input. Charge the visible label too.
+        if not entry.get("as_of") and page_updated:
+            label = f" (page updated {page_updated})"
+            statement = statement[: working_set_state.STATEMENT_MAX_CHARS - len(label)] + label
+            entry["statement"] = statement
+        for key in working_set_currency.INTERNAL_PROVENANCE:
+            entry.pop(key, None)
         if used + len(statement) > limit:
             continue
         state_entries.append(dict(entry))
@@ -494,7 +507,8 @@ def build_packet(
             deferred.append((item, "unit_too_long"))
             continue
         role_count = per_role.get(item.role, 0)
-        if role_count >= MAX_ITEMS_PER_ROLE and not standing:
+        # No class is exempt: a standing unit takes one of its role's slots.
+        if role_count >= MAX_ITEMS_PER_ROLE:
             deferred.append((item, "role_cap"))
             continue
         if used + len(text) > limit or not text:
@@ -508,15 +522,11 @@ def build_packet(
             "updated": item.updated,
             "provenance": _provenance(item),
         }
-        if item.lifecycle != "active":
+        if item.lifecycle in working_set_currency.HISTORY_LIFECYCLES:
             unit["history"] = True
-        for key in ("newer_than", "superseded_by_outcome"):
-            if item.provenance.get(key):
-                unit[key] = item.provenance[key]
         units.append(unit)
         used += len(text)
-        if not standing:
-            per_role[item.role] = role_count + 1
+        per_role[item.role] = role_count + 1
 
     # A pointer is cheap but not free: its title and `why` are prose the caller
     # pays for, so the same ceiling bounds them. Once the budget is spent the
@@ -646,7 +656,16 @@ def _pointer(item: LaneItem, reason: str) -> dict[str, Any]:
 
 def _provenance(item: LaneItem) -> dict[str, Any]:
     out = {"path": item.path, "level": item.level, "anchor": item.anchor}
-    out.update({key: value for key, value in item.provenance.items() if value})
+    # A relation target and a page time are the compiler's own inputs: the
+    # first can name a page the audience may not see, in a field the egress
+    # guard does not read, and neither is anything the caller acts on.
+    out.update(
+        {
+            key: value
+            for key, value in item.provenance.items()
+            if value and key not in working_set_currency.INTERNAL_PROVENANCE
+        }
+    )
     return out
 
 
@@ -698,7 +717,7 @@ def run_lanes(
     own budget gate and timing span, and returns the pages the lane also reads
     beyond the anchors' neighbourhood (an entity's conclusion pages past its
     link cap) and the project pages that stand as precedent: their units lead
-    the role and are exempt from its item cap (`reach_precedents`).
+    the role and count against its item cap (`reach_precedents`).
 
     `current_state` is resolved ONCE by the caller and handed in, because the
     Records lane and the packet's own `current_state[]` block are two views of
@@ -1005,13 +1024,11 @@ def _units_lane(
                 title=str(getattr(hit, "parent_title", "") or parent),
                 text=str(getattr(hit, "content", "") or getattr(hit, "excerpt", "") or ""),
                 lifecycle=lifecycle,
-                # The unit's OWN authored time. A unit with none is served
-                # undated, with the page's time labelled apart as
-                # `page_updated`: the page changed when ANY unit on it did.
-                updated=working_set_currency.own_time(
-                    str(getattr(hit, "content", "") or ""),
-                    getattr(hit, "context", None),
-                ),
+                # The unit's OWN authored time, from its context slot. A unit
+                # with none is served undated: the page changed when ANY unit
+                # on it did. The page's time orders it (`page_updated`,
+                # internal, never published).
+                updated=working_set_currency.own_time(getattr(hit, "context", None)),
                 anchor=parent,
                 provenance={
                     "category": str(getattr(hit, "category", "") or ""),
@@ -1019,7 +1036,6 @@ def _units_lane(
                     "superseded_by": superseded_by,
                     "page_updated": str(getattr(hit, "parent_updated", "") or ""),
                     "supersedes_targets": list(supersedes),
-                    "supersession": bool(supersedes),
                 },
                 why=role.description or f"{role.id} lane",
             )

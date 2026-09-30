@@ -48,17 +48,19 @@ STATEFUL_KINDS = frozenset({"resource", "collection", "plan"})
 
 
 #: Anchor kinds whose current state is a page, not a collection row: the
-#: settled facts of a project or entity live in its canonical current-state page.
+#: settled facts of an entity or hub live in the current-state page its own page
+#: DECLARES. A project anchor has no page of its own, so it declares none.
 CANONICAL_KINDS = frozenset({"project", "entity", "hub"})
 CANONICAL = "canonical_page"
 #: Frontmatter key on the anchor's own page that names its current-state page.
+#: The only way a page becomes canonical: never "the newest page with a fact".
 CURRENT_PAGE_FIELD = "current_state_page"
 CANONICAL_CATEGORIES = ("fact", "config")
 CANONICAL_UNIT_LIMIT = 64
 
 
 def _named_current_page(vault_root: Path, anchor: Any) -> str:
-    """The neighbourhood page the anchor's own page names as current, if any."""
+    """The neighbourhood page the anchor's own page declares current, if any."""
     from . import find_corpus
 
     rel = str(getattr(anchor, "path", "") or "")
@@ -69,23 +71,28 @@ def _named_current_page(vault_root: Path, anchor: Any) -> str:
     named = frontmatter.get(CURRENT_PAGE_FIELD) if isinstance(frontmatter, dict) else None
     if not isinstance(named, str):
         return ""
-    target = normalize(named.strip().strip("[]").split("|")[0])
+    target = normalize(named.strip().strip("[]").split("|")[0].split("#")[0].removesuffix(".md"))
+    if not target:
+        return ""
+    matches = []
     for path in sorted(getattr(anchor, "neighbourhood", ()) or ()):
-        stem = path.rsplit("/", 1)[-1].removesuffix(".md")
-        if target and target in (normalize(path), normalize(stem)):
-            return path
-    return ""
+        stem = path.removesuffix(".md")
+        if target in (normalize(stem), normalize(stem.rsplit("/", 1)[-1])):
+            matches.append(path)
+    # A bare name shared by two pages names neither unambiguously. The author
+    # can use the full path to declare which page holds current state.
+    return matches[0] if len(matches) == 1 else ""
 
 
 def _from_canonical_page(vault_root: Path, anchor: Any) -> dict[str, Any] | None:
-    """The leading current-state unit of the anchor's canonical page.
+    """The leading current-state unit of the page the anchor declares current.
 
-    The canonical page is the one its own page names as current, else the newest
-    page in the neighbourhood carrying current-state units. The entry carries the
-    unit's OWN observed time, never the page's.
+    The entry carries the page's `path`, so the egress guard decides it like any
+    other page reference, and the unit's OWN authored time as `as_of`; a unit
+    that authors none is labelled with its page's time instead.
     """
-    neighbourhood = set(getattr(anchor, "neighbourhood", ()) or ())
-    if not neighbourhood:
+    named = _named_current_page(vault_root, anchor)
+    if not named:
         return None
     from . import find as find_module
     from . import ranking_config, structured_filters
@@ -101,43 +108,41 @@ def _from_canonical_page(vault_root: Path, anchor: Any) -> dict[str, Any] | None
             vault_root, query="", limit=CANONICAL_UNIT_LIMIT, scope="kb", plan=plan,
             snapshot=snapshot, prefer_active=True, config=ranking_config.DEFAULT_RANKING,
             mode="keyword", degraded_out=None, failed_out=None,
-            allowed_parent_paths=neighbourhood,
+            allowed_parent_paths={named},
             recall_checkpoint=snapshot.recall_checkpoint("kb"), repair=False,
             max_catalog_candidates=CANONICAL_UNIT_LIMIT,
         )
     except Exception:  # noqa: BLE001 - an unreadable unit index costs this entry only
         log.debug("current state: canonical page lookup failed", exc_info=True)
         return None
-    pages: dict[str, list[Any]] = {}
-    for hit in hits:
-        if getattr(hit, "parent_superseded_by", None):
-            continue
-        pages.setdefault(str(getattr(hit, "parent_path", "") or ""), []).append(hit)
-    pages.pop("", None)
-    if not pages:
+    hits = [
+        hit
+        for hit in hits
+        if str(getattr(hit, "parent_path", "") or "") == named
+        and not getattr(hit, "parent_superseded_by", None)
+    ]
+    if not hits:
         return None
-    named = _named_current_page(vault_root, anchor)
-    if named in pages:
-        chosen = named
-    else:
-        chosen = max(
-            pages, key=lambda path: (str(getattr(pages[path][0], "parent_updated", "") or ""), path)
-        )
 
     def _line(hit: Any) -> int:
         span = getattr(hit, "source_span", None) or {}
         return int(span.get("start_line", 0) or 0)
 
-    lead = min(pages[chosen], key=_line)
+    lead = min(hits, key=_line)
     content = str(getattr(lead, "content", "") or getattr(lead, "excerpt", "") or "").strip()
     if not content:
         return None
-    return {
+    entry = {
         "anchor": _anchor_ref(anchor),
         "source": CANONICAL,
-        "as_of": working_set_currency.own_time(content, getattr(lead, "context", None)),
+        "path": named,
+        "as_of": working_set_currency.own_time(getattr(lead, "context", None)),
         "statement": content[:STATEMENT_MAX_CHARS],
     }
+    page_updated = str(getattr(lead, "parent_updated", "") or "")
+    if not entry["as_of"] and page_updated:
+        entry["page_updated"] = page_updated
+    return entry
 
 
 def current_state_for(
@@ -201,7 +206,9 @@ def current_state_for(
 #: Evidence that names an anchor by shared WORDS alone. An anchor whose every
 #: evidence kind is in this set resolved on vocabulary, which two unrelated
 #: pages can share; its state is not vouched for by anything else.
-WEAK_EVIDENCE = frozenset({"lexical_overlap", "rare_term", "recency", "category_match", "usage_prior"})
+WEAK_EVIDENCE = frozenset(
+    {"lexical_overlap", "rare_term", "recency", "category_match", "usage_prior", "retrieval"}
+)
 #: A state older than this, on a weakly-resolved anchor, is held back rather
 #: than served as current. Younger state is served labelled with its age.
 WEAK_STATE_MAX_AGE_DAYS = 30
@@ -216,8 +223,9 @@ def temper_weak_entries(
     """Hold back or age-label current state from weakly-resolved anchors.
 
     Strongly-resolved anchors (an alias, a claim, a vector band, corroboration,
-    the agent's own pick) are untouched. A weak one's undated or old state is
-    dropped; recent state is kept and says how it was resolved and how old it is.
+    the agent's own pick) are untouched. A weak one's state older than
+    `WEAK_STATE_MAX_AGE_DAYS` is dropped; recent state says how it was resolved
+    and how old it is; undated state is served saying how it was resolved.
     """
     from datetime import date as _date
 
@@ -233,8 +241,15 @@ def temper_weak_entries(
         if entry.get("anchor") not in weak:
             out.append(dict(entry))
             continue
+        as_of = str(entry.get("as_of") or "")
+        if not as_of:
+            # Undated is not old: most authored state carries no date of its
+            # own. It is served, saying how it was resolved; a page time it
+            # already carries (`page_updated`) stays beside it.
+            out.append({**entry, "resolved_by": "lexical"})
+            continue
         try:
-            age = (now - _date.fromisoformat(str(entry.get("as_of") or "")[:10])).days
+            age = (now - _date.fromisoformat(as_of[:10])).days
         except ValueError:
             continue
         if age > WEAK_STATE_MAX_AGE_DAYS:
