@@ -260,14 +260,17 @@ _CONFLICT_KEYS = {
 }
 
 
-def _conflicting_insert_trigger(table: str, name: str, message: str) -> str:
-    conflicts = " OR ".join(
+def _conflicting_key_predicate(table: str) -> str:
+    return " OR ".join(
         "(" + " AND ".join(f"{column} = NEW.{column}" for column in key) + ")"
         for key in _CONFLICT_KEYS[table]
     )
+
+
+def _conflicting_insert_trigger(table: str, name: str, message: str) -> str:
     return f"""
         CREATE TRIGGER IF NOT EXISTS {name} BEFORE INSERT ON {table}
-        WHEN EXISTS (SELECT 1 FROM {table} WHERE {conflicts})
+        WHEN EXISTS (SELECT 1 FROM {table} WHERE {_conflicting_key_predicate(table)})
         BEGIN SELECT RAISE(ABORT, '{message}'); END
         """
 
@@ -297,6 +300,15 @@ _TRIGGERS_V1 = (
         "items", "items_never_replaced",
         "items rows cannot be replaced: row_id, item_key, view_path, natural_key conflict",
     ),
+    f"""
+    CREATE TRIGGER IF NOT EXISTS items_never_replaced_update BEFORE UPDATE ON items
+    WHEN EXISTS (
+      SELECT 1 FROM items
+      WHERE row_id != OLD.row_id AND ({_conflicting_key_predicate("items")})
+    )
+    BEGIN SELECT RAISE(ABORT,
+      'items rows cannot be replaced: row_id, item_key, view_path, natural_key conflict'); END
+    """,
     # The store-wide sequence is contiguous from 1 and follows the recorded head.
     """
     CREATE TRIGGER IF NOT EXISTS txns_commit_seq_contiguous BEFORE INSERT ON txns

@@ -670,6 +670,96 @@ def test_item_conflicting_inserts_are_refused(
     assert conn.execute("SELECT * FROM items").fetchall() == before
 
 
+def _two_items(writer: connection.WriterConnection) -> tuple[int, int]:
+    with writer.transaction() as tx:
+        _seed_collection(tx)
+        first = _item(tx, item_key="item-a", natural_key="natural-a", view_path="view-a")
+        second = _item(tx, item_key="item-b", natural_key="natural-b", view_path="view-b")
+        _txn(tx, txn_id=1, commit_seq=1, event_hash=H, prev_head=None)
+    return first, second
+
+
+@pytest.mark.parametrize("key", ["row_id", "item_key", "view_path", "natural_key"])
+@pytest.mark.parametrize("recursive", [0, 1])
+def test_update_or_replace_cannot_delete_an_item(
+    store: connection.WriterConnection, key: str, recursive: int,
+) -> None:
+    first, second = _two_items(store)
+    conn = store.connection
+    before = conn.execute("SELECT * FROM items ORDER BY row_id").fetchall()
+    conflicting = conn.execute(f"SELECT {key} FROM items WHERE row_id=?", (second,)).fetchone()[0]
+    # Catch inside the transaction: ABORT must preserve both rows even if
+    # the caller commits after handling the refusal.
+    with store.transaction() as tx:
+        tx.execute(f"PRAGMA recursive_triggers={recursive}")
+        with pytest.raises(sqlite3.IntegrityError, match="items"):
+            tx.execute(f"UPDATE OR REPLACE items SET {key}=? WHERE row_id=?", (conflicting, first))
+        assert tx.execute("SELECT * FROM items ORDER BY row_id").fetchall() == before
+    assert conn.execute("SELECT * FROM items ORDER BY row_id").fetchall() == before
+
+
+@pytest.mark.parametrize("key, unused", [
+    ("row_id", 100), ("item_key", "item-c"),
+    ("view_path", "view-c"), ("natural_key", "natural-c"),
+])
+@pytest.mark.parametrize("recursive", [0, 1])
+def test_ordinary_item_update_still_allowed(
+    store: connection.WriterConnection, key: str, unused: int | str, recursive: int,
+) -> None:
+    first, second = _two_items(store)
+    conn = store.connection
+    other_before = conn.execute("SELECT * FROM items WHERE row_id=?", (second,)).fetchone()
+    with store.transaction() as tx:
+        tx.execute(f"PRAGMA recursive_triggers={recursive}")
+        tx.execute("UPDATE items SET row_version=2, body='updated' WHERE row_id=?", (first,))
+        tx.execute(f"UPDATE items SET {key}=? WHERE row_id=?", (unused, first))
+    updated_id = unused if key == "row_id" else first
+    assert conn.execute(
+        f"SELECT {key}, row_version, body FROM items WHERE row_id=?", (updated_id,)
+    ).fetchone() == (unused, 2, "updated")
+    assert conn.execute("SELECT * FROM items WHERE row_id=?", (second,)).fetchone() == other_before
+    assert conn.execute("SELECT count(*) FROM items").fetchone() == (2,)
+
+
+@pytest.mark.parametrize("table", [*APPEND_ONLY, "items"])
+def test_conflict_key_registry_matches_unique_indexes(
+    store: connection.WriterConnection, table: str,
+) -> None:
+    conn = store.connection
+    unique_keys = {
+        tuple(column[2] for column in conn.execute(f"PRAGMA index_info('{index[1]}')"))
+        for index in conn.execute(f"PRAGMA index_list('{table}')")
+        if index[2]  # Include partial unique indexes, too.
+    }
+    # INTEGER PRIMARY KEY aliases the rowid and has no entry in index_list.
+    primary_key = tuple(
+        column[1]
+        for column in sorted(conn.execute(f"PRAGMA table_info('{table}')"), key=lambda row: row[5])
+        if column[5]
+    )
+    if primary_key:
+        unique_keys.add(primary_key)
+    assert set(schema._CONFLICT_KEYS[table]) == unique_keys
+
+
+def test_ensure_schema_restores_the_update_guard(store: connection.WriterConnection) -> None:
+    first, second = _two_items(store)
+    path = store.path
+    store.connection.execute("DROP TRIGGER IF EXISTS items_never_replaced_update")
+    store.close()
+    with connection.open_writer(path, lease_check=_allow) as reopened:
+        conn = reopened.connection
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='items_never_replaced_update'"
+        ).fetchone() == (1,)
+        before = conn.execute("SELECT * FROM items ORDER BY row_id").fetchall()
+        with reopened.transaction() as tx:
+            tx.execute("PRAGMA recursive_triggers=OFF")
+            with pytest.raises(sqlite3.IntegrityError, match="items"):
+                tx.execute("UPDATE OR REPLACE items SET row_id=? WHERE row_id=?", (second, first))
+        assert conn.execute("SELECT * FROM items ORDER BY row_id").fetchall() == before
+
+
 def test_schema_ensure_restores_protection_at_current_version(
     store: connection.WriterConnection,
 ) -> None:
