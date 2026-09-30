@@ -416,3 +416,25 @@ def test_the_entries_are_matched_in_one_catalogue_scan(
     commands.op_activate_context(cvault, turn=TURN, conversation={"recent": recent})
     # The turn's own scan and ONE scan for all five read entries.
     assert len(full_scans) == 1, full_scans
+
+
+def test_an_entrys_worded_kinds_on_a_row_do_not_depend_on_the_other_rows(cvault: Path) -> None:
+    """Why the qualifier may scan only the anchors already reached: for text
+    with no embedded words, the kinds an entry lends a row are the same whether
+    the row is matched alone or among the whole catalogue."""
+    from exomem import working_set_conversation
+
+    index = working_set_index.WorkingSetIndex(cvault)
+    rows = working_set_resolve.facts_from_rows(index.anchors())
+    keywords = {"term_anchor_counts": index.term_anchor_counts()}
+    analyses = [working_set_resolve.analyze_turn(text) for text in ENTRY_TEXTS if text.isascii()]
+    whole = working_set_resolve.candidates_for_each(analyses, rows, **keywords)
+    kinds = working_set_conversation.ENTRY_KINDS
+    for analysis, drawn in zip(analyses, whole):
+        full = {item.anchor_id: item.evidence & kinds for item in drawn if item.evidence & kinds}
+        for anchor_id, evidence in full.items():
+            (alone,) = working_set_resolve.candidates_for_each(
+                [analysis], [row for row in rows if row.anchor_id == anchor_id], **keywords
+            )
+            assert {item.anchor_id: item.evidence & kinds for item in alone} == {anchor_id: evidence}
+    assert any(whole)

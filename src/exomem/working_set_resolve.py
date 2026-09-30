@@ -1589,10 +1589,11 @@ def candidates_for_each(
         )
         runs = runs or any(_continua_runs(token) for token in analysis.tokens)
     frozen_terms, frozen_phrases = frozenset(terms), frozenset(phrases)
+    known = keywords.pop("row_lexicons", None) or {}
     lexicons: dict[str, RowLexicon] = {}
     named: list[AnchorFacts] = []
     for row in rows:
-        lexicon = row_lexicon(row)
+        lexicon = known.get(row.anchor_id) or row_lexicon(row)
         if _row_may_be_named(lexicon, frozen_terms, frozen_phrases, runs):
             lexicons[row.anchor_id] = lexicon
             named.append(row)

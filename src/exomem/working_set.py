@@ -2053,7 +2053,7 @@ def _compile_packet(
     # budget cannot start is skipped, never raised: the packet is then exactly
     # the packet without a conversation, and says so.
     segments = None
-    entry_candidates: tuple = ()
+    entry_candidates: Any = tuple
     if conversation is not None and conversation.present and not anchor:
         if _conversation_affordable():
             with _span(timings, "working_set.conversation"):
@@ -2399,7 +2399,10 @@ def _compile_packet(
             for item in resolution.anchors
         )
     ):
-        verdict = working_set_conversation.carry(entry_candidates)
+        # The carry's whole-catalogue scan is part of the conversation stage.
+        with _span(timings, "working_set.conversation"):
+            carried_entries = entry_candidates()
+        verdict = working_set_conversation.carry(carried_entries)
         if verdict.status == "one":
             (found,) = verdict.anchors
             source = next(item for item in rows if item.anchor_id == found.anchor_id)

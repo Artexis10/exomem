@@ -24,7 +24,7 @@ embedding, no model.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -251,13 +251,14 @@ def apply(
     term_anchor_counts: Mapping[str, int] | None = None,
     stopwords: frozenset[str] | None = None,
     rare_term_max_anchors: int | None = None,
-) -> tuple[tuple[Any, ...], dict[str, str], tuple[tuple[Entry, Any, tuple[Any, ...]], ...]]:
+) -> tuple[tuple[Any, ...], dict[str, str], Callable[[], tuple[tuple[Entry, Any, tuple[Any, ...]], ...]]]:
     """Fold `focus` and the earlier turns into the turn's candidates.
 
     Returns `(candidates, origins, entries)`: the merged candidates, an origin
-    label per anchor id that `focus` touched, and each read entry with its own
-    analysis and the candidates its words alone reached (the carry walks these,
-    so no entry is matched twice).
+    label per anchor id that `focus` touched, and a function returning each
+    read entry with its own analysis and the candidates its words alone reach
+    (the carry walks these). The qualifier reads only the anchors already
+    reached; the whole-catalogue scan runs only when the carry asks for it.
 
     * `focus` is a second segment of the CURRENT turn: worded contact kinds
       only (`FOCUS_KINDS`), no recall and no embedding, and it may create a
@@ -281,9 +282,20 @@ def apply(
     }
     origins: dict[str, str] = {}
     merged: dict[str, Any] = {item.anchor_id: item for item in candidates}
+    # Each row's names are derived once for the focus scan and the entries' scan.
+    lexicons = (
+        {row.anchor_id: resolve_module.row_lexicon(row) for row in rows}
+        if segments.focus is not None and segments.entries
+        else None
+    )
     if segments.focus is not None:
         for item in resolve_module.candidates_for(
-            segments.focus, rows, bands={}, routing_targets=routing_targets, **keywords
+            segments.focus,
+            rows,
+            bands={},
+            routing_targets=routing_targets,
+            row_lexicons=lexicons,
+            **keywords,
         ):
             worded = item.evidence & FOCUS_KINDS
             if not worded:
@@ -306,16 +318,33 @@ def apply(
     refs = frozenset(conversation.refs)
     if refs:
         named.update(row.anchor_id for row in rows if resolve_module.names_row(refs, row))
-    entry_candidates: list[tuple[Entry, Any, tuple[Any, ...]]] = []
-    # One scan of the catalogue for every read entry, not one per entry.
-    drawn_per_entry = resolve_module.candidates_for_each(
-        [analysis for _entry, analysis in segments.entries], rows, **keywords
-    )
-    for (entry, analysis), drawn in zip(segments.entries, drawn_per_entry, strict=True):
-        entry_candidates.append((entry, analysis, drawn))
-        for item in drawn:
-            if item.evidence & ENTRY_KINDS:
-                named.add(item.anchor_id)
+    analyses = [analysis for _entry, analysis in segments.entries]
+
+    def scan(over: Sequence[Any]) -> tuple[tuple[Any, ...], ...]:
+        # One scan of the catalogue for every read entry, not one per entry.
+        return resolve_module.candidates_for_each(analyses, over, row_lexicons=lexicons, **keywords)
+
+    # The qualifier needs only the anchors the turn or `focus` reached: an
+    # entry's worded kinds on a row never depend on another row's words,
+    # except through an embedded word (`candidates_for`'s consumption), where
+    # the whole catalogue is read.
+    embedded = any(set(analysis.words) - set(analysis.tokens) for analysis in analyses)
+    reached = rows if embedded else [row for row in rows if row.anchor_id in merged]
+    drawn_reached = scan(reached)
+    for drawn in drawn_reached:
+        named.update(item.anchor_id for item in drawn if item.evidence & ENTRY_KINDS)
+    computed: list[tuple[tuple[Entry, Any, tuple[Any, ...]], ...]] = []
+
+    def entry_candidates() -> tuple[tuple[Entry, Any, tuple[Any, ...]], ...]:
+        """Each read entry with its analysis and every candidate its words
+        reach in the whole catalogue: the carry's input, scanned only when the
+        carry runs."""
+        if not computed:
+            drawn_all = drawn_reached if reached is rows else scan(rows)
+            computed.append(tuple(zip(segments.entries, drawn_all, strict=True)))
+            computed[0] = tuple((entry, analysis, drawn) for (entry, analysis), drawn in computed[0])
+        return computed[0]
+
     for anchor_id in named & merged.keys():
         merged[anchor_id] = replace(
             merged[anchor_id], evidence=merged[anchor_id].evidence | {"conversation"}
