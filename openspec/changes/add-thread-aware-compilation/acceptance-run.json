@@ -29,13 +29,16 @@
   },
   "attachment_cases": "V26, V27, V29, W26 pass on arms c and d; abstain on arm a",
   "rows_failing_their_pre_registered_expectation": {
-    "count": 0,
-    "note": "runs on digests 374056f5... and 1c81d3e9... voided by the post-hoc fixture corrections in design.md; this run is on digest f8cad6d5..."
+    "count": 1,
+    "pending_ruling": [
+      "V21 arm b"
+    ],
+    "note": "round 3 on #1463: the content gate does not carry a follow-up that brings new words; runs on digests 374056f5... and 1c81d3e9... were voided earlier"
   },
   "latency": {
     "corpus": "2000 dense notes + 500 entities, model-free synthetic reference corpus",
     "samples": 20,
-    "working_set.conversation_p95_ms": 36.6,
+    "working_set.conversation_p95_ms": 14.63,
     "warm_activation_with_max_conversation_p95_ms": 143.75,
     "warm_activation_without_conversation_p95_ms": 47.99,
     "stage_recorded_without_conversation": false,
@@ -44,17 +47,30 @@
       "warm_p95_ms": 1000
     },
     "working_set.conversation_p95_ms_before_single_scan": 91.92,
-    "host_load": "shared host, load average about 5.5 on 16 cores"
+    "host_load": "shared host, load average about 10 to 14 on 16 cores",
+    "working_set.conversation_p95_ms_carry_path": 30.57
   },
   "pronoun_negatives": {
     "cases": "N1 to N22, paired with V17 and V18, arms a to d",
     "carried_on_arms_b_and_d": {
       "before_correction": "38 of 44",
-      "after_correction": "0 of 44"
+      "after_correction": "0 of 44",
+      "after_content_gate": "0 of 44"
     },
     "anaphoric_carry_positives_passing_on_arm_b": {
       "before_correction": "4 of 4",
       "after_correction": "4 of 4"
+    }
+  },
+  "carry_trigger_sets": {
+    "reviewer_acceptance_40_neg_25_pos": {
+      "false_positive": "0%",
+      "recall": "92%"
+    },
+    "held_out_32_neg_22_pos": {
+      "false_positive": "0%",
+      "recall_first_run": "81.8%",
+      "recall": "95.5%"
     }
   }
 }
