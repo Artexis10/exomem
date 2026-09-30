@@ -44,6 +44,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+from . import semantic_authoring
 from .kbdir import kb_dirname, kb_prefix
 
 
@@ -4137,7 +4138,12 @@ def _core_op_main(argv: list[str]) -> int:
     for name in sorted(cmds):
         cmd = cmds[name]
         summary = (cmd.description or name).strip().splitlines()[0]
-        sp = sub.add_parser(name, help=summary, description=summary)
+        detail = (
+            f"{summary}\n\n{semantic_authoring.CLI_REST_POINTER}"
+            if name in semantic_authoring.AUTHORING_TOOLS
+            else summary
+        )
+        sp = sub.add_parser(name, help=summary, description=detail)
         sp.add_argument(
             "--json",
             action="store_true",

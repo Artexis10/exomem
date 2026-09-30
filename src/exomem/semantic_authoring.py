@@ -524,6 +524,18 @@ def render_tool_guidance(
     return f"Semantic authoring [{identity}]: {guidance}"
 
 
+#: The tools that carry the authoring contract, and the one-line pointer the CLI
+#: help and REST description show instead of repeating it. Neither surface is
+#: agent context, so the MCP wire never carries this line.
+AUTHORING_TOOLS = frozenset(
+    {"remember", "replace_memory", "edit_memory", "observe_memory", "manage_memory_file"}
+)
+CLI_REST_POINTER = (
+    'Semantic authoring rules: see bootstrap(profile="full") / '
+    "`exomem bootstrap --profile full`."
+)
+
+
 #: The write surface's own carrier for `write-time-identity-candidates`
 #: (design D2): the only text every connected client -- one with no hook, no
 #: skill, nothing but the tool schema -- is certain to read. One sentence,

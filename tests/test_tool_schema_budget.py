@@ -154,3 +154,36 @@ def test_every_nullable_optional_parameter_still_accepts_an_explicit_null(server
                 )
             checked += 1
     assert checked > 300, checked
+
+
+def test_cli_help_and_rest_point_to_the_contract_but_the_mcp_wire_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """CLI and REST are not agent context: one pointer line, never on the MCP wire."""
+    from starlette.testclient import TestClient
+
+    from exomem import semantic_authoring
+    from exomem.__main__ import main
+
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "synthetic-test-key")
+    server = _build_server(monkeypatch, tmp_path)
+    pointer = semantic_authoring.CLI_REST_POINTER
+    assert 'bootstrap(profile="full")' in pointer and "exomem bootstrap --profile full" in pointer
+    assert all(pointer not in str(wire) for wire in _wires(server))
+
+    openapi = (
+        TestClient(server.http_app())
+        .get("/api/openapi.json", headers={"Authorization": "Bearer synthetic-test-key"})
+        .json()
+    )
+    for name in AUTHORING_TOOLS:
+        assert openapi["paths"][f"/api/{name}"]["post"]["description"] == pointer
+    assert "description" not in openapi["paths"]["/api/ask_memory"]["post"]
+
+    for name in sorted(AUTHORING_TOOLS):
+        with pytest.raises(SystemExit):
+            main([name, "--help"])
+        assert " ".join(capsys.readouterr().out.split()).count(" ".join(pointer.split())) == 1, name
+    with pytest.raises(SystemExit):
+        main(["ask_memory", "--help"])
+    assert "Semantic authoring rules" not in capsys.readouterr().out

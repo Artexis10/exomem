@@ -26,6 +26,7 @@ from . import (
     edit_operations,
     local_ingress,
     runtime_resources,
+    semantic_authoring,
     upload_tokens,
 )
 from . import commands as commands_module
@@ -530,6 +531,11 @@ def register_rest_facade(
                 "post": {
                     "operationId": cmd.name,
                     "summary": summary,
+                    **(
+                        {"description": semantic_authoring.CLI_REST_POINTER}
+                        if cmd.name in semantic_authoring.AUTHORING_TOOLS
+                        else {}
+                    ),
                     "security": [{"bearerAuth": []}],
                     "parameters": [
                         {
