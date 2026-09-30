@@ -277,6 +277,11 @@ def record_memory(
     }
     _validate_arguments(action, values)
     try:
+        from .collection_store import preview
+
+        selected, result = preview.dispatch(vault_root, "records", action, values)
+        if selected:
+            return result
         if action == "describe":
             return parse_manifest_contract()
         if action == "validate":
