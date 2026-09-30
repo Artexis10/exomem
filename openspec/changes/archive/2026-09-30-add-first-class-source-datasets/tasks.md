@@ -8,4 +8,4 @@
 
 - [x] 2.1 Verify companion identity, withheld raw reads, atomic rollback and legacy classification with preservation and governance suites; obtain independent review of the implementation.
 - [x] 2.2 Document format behavior, record local test/build/lint evidence, run strict OpenSpec validation and the public-artifact gate, and deliver a committed, pushed, ready PR.
-- [ ] 2.3 After full CI passes, merge authority and successful integration, synchronize and archive this change through OpenSpec; verify strict validation before and after closure.
+- [x] 2.3 After full CI passes, merge authority and successful integration, synchronize and archive this change through OpenSpec; verify strict validation before and after closure.
