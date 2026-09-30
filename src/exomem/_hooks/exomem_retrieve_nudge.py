@@ -1445,8 +1445,15 @@ def _packet_lines(packet: dict) -> list[str]:
         # page says so: three bytes, so "you named this anchor" and "this was
         # carried because you named it" stay distinguishable in the block.
         carried = isinstance(provenance, dict) and provenance.get("carried") is True
+        # History (an authored supersession replaced it, or its page is
+        # superseded or archived) is one word, so the agent does not act on a
+        # replaced claim as though it were current.
+        history = unit.get("history") is True
+        label = "carried" if carried else "unit"
+        if history:
+            label = "carried history" if carried else "history"
         if text:
-            lines.append(_packet_line("carried" if carried else "unit", text, ref))
+            lines.append(_packet_line(label, text, ref))
     for pointer in packet.get("pointers") or ():
         if not isinstance(pointer, dict):
             continue
