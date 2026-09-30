@@ -117,7 +117,9 @@ def encoder(monkeypatch: pytest.MonkeyPatch) -> _DeterministicEncoder:
     fake = _DeterministicEncoder()
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "")
     monkeypatch.setattr(embeddings, "embed_texts", fake)
-    monkeypatch.setattr(embeddings, "get_model", lambda: SimpleNamespace(texts_fit=lambda _texts: True))
+    model = SimpleNamespace(texts_fit=lambda _texts: True)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(embeddings, "get_model", lambda: model)
     monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
     return fake
 
@@ -1450,6 +1452,7 @@ def test_restarted_advisory_rejects_token_truncated_published_generation(vault, 
     from test_write_overlap_vectors import _local_bounded_encoder
 
     model, encode, _retained, _uncapped = _local_bounded_encoder()
+    monkeypatch.setattr(embeddings, "_MODEL", model)
     monkeypatch.setattr(embeddings, "get_model", lambda: model)
     monkeypatch.setattr(embeddings, "embed_texts", encode)
     body = ("a." * 150 + " ") * 4 + "collections"

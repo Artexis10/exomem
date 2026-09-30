@@ -188,18 +188,21 @@ def _candidates_for(
     from . import embeddings
 
     corpus_aware._require_complete_advisory_body(generation.body, title=generation.title)
-    with corpus_aware.recall_space.encoding_for(embeddings.get_embedding_index(vault_root)):
-        if not embeddings.advisory_passages_fit(list(generation.chunks)):
-            raise corpus_aware.OverlapAdvisorySkipped("text_truncated")
+    index = embeddings.get_embedding_index(vault_root)
     corpus_aware._require_advisory_vectors(
         generation.vectors, expected_count=len(generation.chunks)
     )
+    corpus_aware.recall_space.require_same_space(index, generation.space, generation.vectors[0])
+    with corpus_aware.recall_space.encoding_for(index):
+        if not embeddings.advisory_passages_fit(list(generation.chunks)):
+            raise corpus_aware.OverlapAdvisorySkipped("text_truncated")
     scores = corpus_aware.best_cosine_per_file_for_vectors(
         vault_root,
         generation.vectors,
         self_path=generation.rel_path,
         k=max(DUPLICATE_TOP_N, OVERLAP_TOP_N) * 5,
         strict=True,
+        encoded_for=generation.space,
     )
     duplicates = corpus_aware.detect_duplicates(
         vault_root,

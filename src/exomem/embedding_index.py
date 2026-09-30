@@ -1439,8 +1439,15 @@ class EmbeddingIndex:
     def stored_text_vectors(
         self, rel_path: str
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        """One page's published chunk and unit vectors keyed by exact text."""
+        chunks, units, _space = self.stored_text_vectors_with_space(rel_path)
+        return chunks, units
+
+    def stored_text_vectors_with_space(
+        self, rel_path: str
+    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], recall_space.SpaceIdentity | None]:
         """One page's published vectors keyed by the exact text each was encoded
-        from: `(chunk_text -> vector, unit content -> vector)`.
+        from, and their space identity, all from one read transaction.
 
         A write that changes one chunk of a long page takes the rest from here
         instead of encoding them again. A row is offered only when its blob is
@@ -1451,9 +1458,11 @@ class EmbeddingIndex:
         on one connection; never creates the sidecar.
         """
         if not self.path.exists():
-            return {}, {}
+            return {}, {}, None
         conn = self._connect()
         try:
+            conn.execute("BEGIN", ())
+            space = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
             chunk_rows = conn.execute(
                 "SELECT chunk_text, vector FROM chunks WHERE file_path = ?",
                 (rel_path,),
@@ -1464,7 +1473,8 @@ class EmbeddingIndex:
             ).fetchall()
         finally:
             conn.close()
-        width = self.dim * np.dtype(np.float32).itemsize
+        dim = space.dim if space is not None else recall_space.current_dim()
+        width = dim * np.dtype(np.float32).itemsize
 
         def keyed(rows: list[tuple[Any, Any]]) -> dict[str, np.ndarray]:
             return {
@@ -1473,7 +1483,7 @@ class EmbeddingIndex:
                 if isinstance(blob, (bytes, memoryview)) and len(blob) == width
             }
 
-        return keyed(chunk_rows), keyed(unit_rows)
+        return keyed(chunk_rows), keyed(unit_rows), space
 
     def _vec_search(
         self, query_vec: np.ndarray, k: int

@@ -473,7 +473,9 @@ def counting_encoder(monkeypatch):
         return np.asarray(rows, dtype=np.float32).reshape(len(texts), embeddings.VECTOR_DIM)
 
     monkeypatch.setattr(embeddings, "embed_texts", fake)
-    monkeypatch.setattr(embeddings, "get_model", lambda: SimpleNamespace(texts_fit=lambda _texts: True))
+    model = SimpleNamespace(texts_fit=lambda _texts: True)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(embeddings, "get_model", lambda: model)
     return encoded
 
 

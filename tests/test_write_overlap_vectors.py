@@ -12,6 +12,8 @@ import pytest
 from exomem import corpus_aware, embeddings, readiness
 from exomem import note as note_module
 
+_REAL_GET_MODEL = embeddings.get_model
+
 
 @pytest.fixture
 def overlap_corpus(vault, monkeypatch):
@@ -31,7 +33,9 @@ def overlap_corpus(vault, monkeypatch):
         return np.asarray(rows, dtype=np.float32)
 
     monkeypatch.setattr(embeddings, "embed_texts", encode)
-    monkeypatch.setattr(embeddings, "get_model", lambda: SimpleNamespace(texts_fit=lambda _texts: True))
+    model = SimpleNamespace(texts_fit=lambda _texts: True)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(embeddings, "get_model", lambda: model)
     index = embeddings.get_embedding_index(vault)
     for name, body in (("harbor", "Harbor tides and navigation."),
                        ("garden", "Garden irrigation and harvest.")):
@@ -284,6 +288,7 @@ def test_guard_must_reject_encoder_truncation(
 ):
     index, _encoded, queries = overlap_corpus
     model, encode, retained, uncapped = _local_bounded_encoder(backend=backend)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
     monkeypatch.setattr(embeddings, "get_model", lambda: model)
     monkeypatch.setattr(embeddings, "embed_texts", encode)
     prefix = ("a." * 150 + " ") * 4
@@ -313,6 +318,7 @@ def test_guard_counts_title_passage_prefix_and_special_tokens(
     model, encode, _retained, uncapped = _local_bounded_encoder(
         backend=backend, limit=8, prefix="a a ",
     )
+    monkeypatch.setattr(embeddings, "_MODEL", model)
     monkeypatch.setattr(embeddings, "get_model", lambda: model)
     monkeypatch.setattr(embeddings, "embed_texts", encode)
     assert len(uncapped.encode("a a written\n\na a a").ids) == 8
@@ -374,7 +380,8 @@ def test_budget_guard_uses_encoder_execution_slot(monkeypatch, previous):
     active = []
 
     @contextmanager
-    def execution():
+    def execution(*, wait=True):
+        assert wait is False
         active.append(True)
         try:
             yield
@@ -386,6 +393,7 @@ def test_budget_guard_uses_encoder_execution_slot(monkeypatch, previous):
         return True
 
     model = SimpleNamespace(texts_fit=fits)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
     monkeypatch.setattr(embeddings, "get_model", lambda: model)
     monkeypatch.setattr(runtime_resources, "model_execution", execution)
     monkeypatch.setattr(recall_space, "selected_model", lambda: "previous" if previous else None)
@@ -408,3 +416,200 @@ def test_budget_guard_uses_selected_previous_encoder(monkeypatch, backend):
     monkeypatch.setattr(embeddings, "get_model", lambda: pytest.fail("must use the selected encoder"))
     assert embeddings.advisory_passages_fit(["written\n\na a a"])
     assert not embeddings.advisory_passages_fit(["written\n\na a a a"])
+
+
+@pytest.mark.parametrize("backend", ["onnx", "torch"])
+def test_fully_reused_sweep_takes_no_blocking_slot(
+    vault, overlap_corpus, monkeypatch, backend
+):
+    from contextlib import contextmanager
+    from exomem import runtime_resources
+
+    index, _encoded, queries = overlap_corpus
+    model, _encode, _retained, _uncapped = _local_bounded_encoder(backend=backend)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(embeddings, "get_model", _REAL_GET_MODEL)
+    chunks = embeddings.chunk_text("Written", "A short complete body.")
+    row = np.zeros((1, index.dim), dtype=np.float32)
+    row[0, 0] = 1
+    path = "Knowledge Base/Notes/Insights/reused-budget.md"
+    index.upsert_file(path, chunks, row, 1.0)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: pytest.fail("no encode needed"))
+    waits = []
+
+    @contextmanager
+    def execution(*, wait=True):
+        waits.append(wait)
+        yield
+
+    monkeypatch.setattr(runtime_resources, "model_execution", execution)
+    assert corpus_aware._best_cosine_per_file(
+        vault, title="Written", body="A short complete body.", published_path=path, strict=True,
+    )
+    assert len(queries) == 1
+    assert waits == ([] if backend == "onnx" else [False])
+
+
+def test_reused_sweep_skips_when_encoder_is_not_resident(vault, overlap_corpus, monkeypatch):
+    index, _encoded, queries = overlap_corpus
+    chunks = embeddings.chunk_text("Written", "A short complete body.")
+    row = np.zeros((1, index.dim), dtype=np.float32)
+    row[0, 0] = 1
+    path = "Knowledge Base/Notes/Insights/cold-budget.md"
+    index.upsert_file(path, chunks, row, 1.0)
+    monkeypatch.setattr(embeddings, "_MODEL", None)
+    monkeypatch.setattr(embeddings, "get_model", lambda: pytest.fail("token proof must never load"))
+    with pytest.raises(corpus_aware.OverlapAdvisorySkipped, match="model_warming"):
+        corpus_aware._best_cosine_per_file(
+            vault, title="Written", body="A short complete body.", published_path=path, strict=True,
+        )
+    assert queries == []
+
+
+@pytest.mark.parametrize("previous", [False, True])
+def test_budget_guard_skips_busy_torch_slot(monkeypatch, previous):
+    from contextlib import nullcontext
+    from exomem import recall_space, runtime_resources
+
+    model, _encode, _retained, _uncapped = _local_bounded_encoder(backend="torch")
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(recall_space, "selected_model", lambda: "previous" if previous else None)
+    monkeypatch.setattr(recall_space, "previous_resident", lambda _name: model)
+
+    def busy(*, wait=True):
+        assert wait is False
+        raise runtime_resources.ModelBusyError("busy")
+
+    monkeypatch.setattr(runtime_resources, "model_execution", busy)
+    monkeypatch.setattr(recall_space, "_previous_gate", lambda: SimpleNamespace(admission=nullcontext, execution=busy))
+    with pytest.raises(runtime_resources.ModelBusyError):
+        embeddings.advisory_passages_fit(["A short body."])
+
+
+def test_generation_reuse_must_survive_same_width_model_cutover(vault, overlap_corpus, monkeypatch):
+    from test_deferred_write_advisory import _seed_page, _fingerprint, _prepare_custody, _run
+    from exomem import index_paths, recall_space
+    from exomem.embedding_index import EmbeddingIndex
+
+    old_index, _encoded, _queries = overlap_corpus
+    target = _seed_page(vault, 'cutover-target', 'A complete unchanged conclusion.')
+    from exomem import find as find_module
+    page = find_module._CACHE.get(vault / target, vault)
+    chunks = embeddings._chunks_for_page(vault, page)
+    old_row = np.zeros(embeddings.VECTOR_DIM, dtype=np.float32)
+    old_row[0] = 1
+    new_row = np.zeros_like(old_row)
+    new_row[1] = 1
+    old_index.upsert_file(target, chunks, np.tile(old_row, (len(chunks), 1)), 1.0)
+    old_identity = old_index.identity
+    # The configured new encoder exists before the cutover; the old sidecar
+    # keeps serving while its replacement is built, as in recall_migration.
+    monkeypatch.setenv(recall_space.RECALL_MODEL_ENV, 'reviewer-next-space')
+    monkeypatch.setattr(embeddings, 'MODEL_NAME', 'reviewer-next-space')
+    generation = embeddings.prepare_generation_vectors(
+        vault, target, expected_fingerprint=_fingerprint(vault, target), allow_encode=False,
+    )
+    assert generation is not None and generation.reused
+    new_index = EmbeddingIndex(vault, path=old_index.path.with_name(index_paths.space_sidecar_name('reviewer-next-space')))
+    counterpart = 'Knowledge Base/Notes/Insights/harbor.md'
+    new_index.upsert_file(counterpart, ['harbor'], [old_row], 2.0)
+    new_index.upsert_file(target, chunks, np.tile(new_row, (len(chunks), 1)), 2.0)
+    _prepare_custody(vault, batch_id='reviewer-model-cutover', target_rel=target)
+    prepare = embeddings.prepare_generation_vectors
+
+    def prepare_then_cutover(*args, **kwargs):
+        result = prepare(*args, **kwargs)
+        assert result is not None and result.reused
+        index_paths.publish_active_sidecar(vault, new_index.path.name)
+        return result
+
+    monkeypatch.setattr(embeddings, 'prepare_generation_vectors', prepare_then_cutover)
+    execution = _run(vault)[0]
+    active = embeddings.get_embedding_index(vault)
+    assert active.identity.model == 'reviewer-next-space'
+    assert old_identity != active.identity and old_identity.dim == active.identity.dim
+    mixed = corpus_aware.best_cosine_per_file_for_vectors(vault, generation.vectors, self_path=target, strict=True)
+    correct = corpus_aware.best_cosine_per_file_for_vectors(vault, np.tile(new_row, (len(chunks), 1)), self_path=target, strict=True)
+    assert mixed[counterpart] > 0.9
+    assert correct[counterpart] == 0.0
+    assert execution.candidate_count == 0 or execution.state == 'failed', (
+        'the deferred sweep publishes a near-duplicate from vectors of the retired model space'
+    )
+
+
+def test_generation_space_and_vectors_share_one_read_snapshot(vault, overlap_corpus, monkeypatch):
+    from test_deferred_write_advisory import _seed_page, _fingerprint
+    from exomem import find as find_module, recall_space
+    from exomem.embedding_index import EmbeddingIndex
+
+    index, _encoded, _queries = overlap_corpus
+    target = _seed_page(vault, "space-snapshot", "A complete unchanged conclusion.")
+    chunks = embeddings._chunks_for_page(vault, find_module._CACHE.get(vault / target, vault))
+    old_row = np.zeros(embeddings.VECTOR_DIM, dtype=np.float32)
+    old_row[0] = 1
+    new_row = np.zeros_like(old_row)
+    new_row[1] = 1
+    index.upsert_file(target, chunks, np.tile(old_row, (len(chunks), 1)), 1.0)
+    old_space = index.identity
+    new_space = recall_space.SpaceIdentity("next-space", None, index.dim)
+    other = EmbeddingIndex(vault, path=index.path)
+    connect = index._connect
+    switched = []
+
+    class Cursor:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def fetchall(self):
+            rows = self.inner.fetchall()
+            if not switched:
+                switched.append(True)
+                conn = other._connect()
+                try:
+                    with conn:
+                        recall_space.write_identity(conn, new_space)
+                        conn.execute("UPDATE chunks SET vector = ? WHERE file_path = ?", (new_row.tobytes(), target))
+                finally:
+                    conn.close()
+            return rows
+
+    class Connection:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def execute(self, sql, *args):
+            cursor = self.inner.execute(sql, *args)
+            return Cursor(cursor) if sql.startswith("SELECT key, value FROM meta") else cursor
+
+        def close(self):
+            self.inner.close()
+
+    monkeypatch.setattr(index, "_connect", lambda: Connection(connect()))
+    generation = embeddings.prepare_generation_vectors(
+        vault, target, expected_fingerprint=_fingerprint(vault, target), allow_encode=False,
+    )
+    assert generation is not None and generation.reused
+    assert switched
+    assert generation.space == old_space
+    assert np.array_equal(generation.vectors, np.tile(old_row, (len(chunks), 1)))
+    current = embeddings.prepare_generation_vectors(
+        vault, target, expected_fingerprint=_fingerprint(vault, target), allow_encode=False,
+    )
+    assert current is not None and current.space == new_space
+    assert np.array_equal(current.vectors, np.tile(new_row, (len(chunks), 1)))
+
+
+
+def test_bound_empty_source_space_refuses_a_different_serving_model(vault, overlap_corpus, monkeypatch):
+    from exomem import index_paths, recall_space
+    from exomem.embedding_index import EmbeddingIndex
+
+    old_index, _encoded, _queries = overlap_corpus
+    new_index = EmbeddingIndex(vault, path=old_index.path.with_name(index_paths.space_sidecar_name("next-space")))
+    row = np.zeros((1, embeddings.VECTOR_DIM), dtype=np.float32)
+    row[0, 0] = 1
+    with recall_space.selecting("next-space"):
+        new_index.upsert_file("Knowledge Base/Notes/Insights/harbor.md", ["harbor"], row, 1.0)
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: new_index)
+    with pytest.raises(corpus_aware.OverlapAdvisorySkipped, match="vector_space_mismatch"):
+        corpus_aware.best_cosine_per_file_for_vectors(vault, row, encoded_for=None, strict=True)

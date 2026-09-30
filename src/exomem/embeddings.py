@@ -1165,25 +1165,31 @@ def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
 
 
 def advisory_passages_fit(texts: list[str]) -> bool:
-    """Prove a complete passage fits the selected encoder, including its prefix."""
+    """Prove passages fit the resident selected encoder; never load or wait."""
     selected = recall_space.selected_model()
     model_name = selected or MODEL_NAME
-    if selected is not None and selected != MODEL_NAME:
-        model = recall_space.previous_resident(selected)
+    previous = selected is not None and selected != MODEL_NAME
+    with contextlib.ExitStack() as stack:
+        if previous:
+            stack.enter_context(recall_space._in_flight())
+            model = recall_space.previous_resident(selected)
+        else:
+            if not _MODEL_LOCK.acquire(blocking=False):
+                raise runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+            try:
+                stack.enter_context(BGE_GUARD.active())
+                model = _MODEL
+            finally:
+                _MODEL_LOCK.release()
         if model is None:
             raise recall_space.ServingEncoderCold("advisory encoder is not resident")
-    else:
-        model = get_model()
-    _query_prefix, prefix = _prefixes(model, model_name)
-    passages = [prefix + text for text in texts] if prefix else texts
-    # Fast torch tokenizers reconfigure shared state even for an uncapped read.
-    # Use the encoder's own execution slot, as an encode does, and keep the
-    # resident instance alive while inspecting it.
-    if selected is not None and selected != MODEL_NAME:
-        gate = recall_space._previous_gate()
-        with recall_space._in_flight(), gate.admission(), gate.execution():
-            return model.texts_fit(passages)
-    with BGE_GUARD.active(), runtime_resources.model_admission(), runtime_resources.model_execution():
+        _query_prefix, prefix = _prefixes(model, model_name)
+        passages = [prefix + text for text in texts] if prefix else texts
+        # ONNX counts on a private tokenizer clone. Torch reconfigures its
+        # shared tokenizer, so it must refuse if the encoder's slot is busy.
+        if not getattr(model, "concurrent_encodes", False):
+            execution = recall_space._previous_gate().execution if previous else runtime_resources.model_execution
+            stack.enter_context(execution(wait=False))
         return model.texts_fit(passages)
 
 
@@ -2092,6 +2098,7 @@ class GenerationVectors:
     sidecar rows rather than a fresh encode.  It is the observable a caller
     needs to prove that two consumers of one generation did not both pay for
     it, and it is content-free.
+    ``space`` binds these vectors to the source sidecar across model cutover.
     """
 
     rel_path: str
@@ -2101,6 +2108,7 @@ class GenerationVectors:
     chunks: tuple[str, ...]
     vectors: np.ndarray
     reused: bool
+    space: recall_space.SpaceIdentity | None
 
 
 def published_generation_vectors(
@@ -2112,16 +2120,21 @@ def published_generation_vectors(
     count: a page whose current chunking differs by one character is a
     different generation and must not borrow the previous one's vectors.
     """
+    published = _published_generation_vectors_with_space(vault_root, rel_path, chunks=chunks)
+    return published[0] if published is not None else None
+
+
+def _published_generation_vectors_with_space(
+    vault_root: Path, rel_path: str, *, chunks: list[str]
+) -> tuple[np.ndarray, recall_space.SpaceIdentity | None] | None:
     if not chunks:
-        return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
+        return np.zeros((0, recall_space.current_dim()), dtype=np.float32), None
     try:
         index = get_embedding_index(vault_root)
-        # Each chunk text and vector come from the same row read. A separate
-        # matrix snapshot plus later text lookup can pair different generations.
-        stored = _stored_text_vectors(index, rel_path)[0]
+        stored, _units, space = index.stored_text_vectors_with_space(rel_path)
         if any(chunk not in stored for chunk in chunks):
             return None
-        return np.asarray([stored[chunk] for chunk in chunks], dtype=np.float32)
+        return np.asarray([stored[chunk] for chunk in chunks], dtype=np.float32), space
     except Exception as e:  # noqa: BLE001 - sidecar reuse is an optimisation
         log.debug("published generation reuse unavailable (%s)", type(e).__name__)
         return None
@@ -2169,9 +2182,9 @@ def prepare_generation_vectors(
         log.debug("generation chunk preparation failed (%s)", type(e).__name__)
         return None
 
-    published = published_generation_vectors(vault_root, rel_path, chunks=chunks)
-    if published is not None and len(published) == len(chunks):
-        vectors, reused = published, True
+    published = _published_generation_vectors_with_space(vault_root, rel_path, chunks=chunks)
+    if published is not None and len(published[0]) == len(chunks):
+        (vectors, space), reused = published, True
     elif not allow_encode:
         return None
     else:
@@ -2181,7 +2194,9 @@ def prepare_generation_vectors(
             log.debug("generation model load failed (%s)", type(e).__name__)
             return None
         try:
-            with recall_space.encoding_for(get_embedding_index(vault_root)):
+            index = get_embedding_index(vault_root)
+            with recall_space.encoding_for(index):
+                space = index.identity
                 vectors, reused = _embed_live_chunks(chunks), False
         except Exception as e:  # noqa: BLE001 - one bad encode must not fail a worker
             log.debug("generation encode failed (%s)", type(e).__name__)
@@ -2200,6 +2215,7 @@ def prepare_generation_vectors(
         chunks=tuple(chunks),
         vectors=np.asarray(vectors, dtype=np.float32),
         reused=reused,
+        space=space,
     )
 
 

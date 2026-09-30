@@ -37,7 +37,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import call_spans, recall_space
+from . import call_spans, recall_space, runtime_resources
 from .kbdir import kb_prefix
 from .vault import content_hash
 
@@ -50,7 +50,7 @@ class OverlapAdvisorySkipped(RuntimeError):
 
 def _skip_overlap(reason: str, *, strict: bool) -> dict[str, float]:
     # Closed reasons only: exception messages can contain the written text.
-    if reason == "embeddings_warming":
+    if reason in {"embeddings_warming", "model_warming", "model_busy"}:
         log.debug("overlap advisory skipped: %s", reason)
     elif reason not in {"embeddings_disabled", "empty_text", "empty_vectors"}:
         log.warning("overlap advisory skipped: %s", reason)
@@ -1028,6 +1028,12 @@ def _best_cosine_per_file(
             return best_per_file
     except OverlapAdvisorySkipped as error:
         return _skip_overlap(str(error), strict=strict)
+    except recall_space.ServingEncoderCold:
+        return _skip_overlap("model_warming", strict=strict)
+    except runtime_resources.ModelBusyError:
+        return _skip_overlap("model_busy", strict=strict)
+    except recall_space.VectorSpaceMismatch:
+        return _skip_overlap("vector_space_mismatch", strict=strict)
     except ImportError:
         return _skip_overlap("embedding_unavailable", strict=strict)
     except Exception:  # noqa: BLE001 — best-effort
@@ -1131,6 +1137,9 @@ def pairwise_best_cosine_from_sidecar(
         return {}, set()
 
 
+_UNSPECIFIED_VECTOR_SPACE = object()
+
+
 def best_cosine_per_file_for_vectors(
     vault_root: Path,
     vectors,
@@ -1138,6 +1147,7 @@ def best_cosine_per_file_for_vectors(
     self_path: str | None = None,
     k: int = 15,
     strict: bool = False,
+    encoded_for: recall_space.SpaceIdentity | None | object = _UNSPECIFIED_VECTOR_SPACE,
 ) -> dict[str, float]:
     """`_best_cosine_per_file` for vectors a caller already holds — no encode.
 
@@ -1145,6 +1155,8 @@ def best_cosine_per_file_for_vectors(
     published for one generation, so the same page is never encoded twice.
     The target identity is excluded HERE rather than downstream, so a page
     cannot rank against itself or consume a `top_n` slot with a self-match.
+    When supplied, `encoded_for` must match the serving sidecar, including
+    None for an encode made while the source sidecar was empty.
 
     Returns ``{}`` on the same no-op contract as `_best_cosine_per_file`:
     embeddings disabled, sidecar empty or unreadable, or no vectors supplied.
@@ -1171,6 +1183,8 @@ def best_cosine_per_file_for_vectors(
             # reshapes before checking emptiness, so do not hand it rows here.
             if not idx.all_vectors()[0]:
                 return {}
+            if encoded_for is not _UNSPECIFIED_VECTOR_SPACE:
+                recall_space.require_same_space(idx, encoded_for, rows[0])
             _require_advisory_vectors(rows, expected_width=idx.dim)
             self_canon = _canon(self_path) if self_path else None
             best_per_file: dict[str, float] = {}
@@ -1186,6 +1200,8 @@ def best_cosine_per_file_for_vectors(
             return best_per_file
     except OverlapAdvisorySkipped as error:
         return _skip_overlap(str(error), strict=strict)
+    except recall_space.VectorSpaceMismatch:
+        return _skip_overlap("vector_space_mismatch", strict=strict)
     except ImportError:
         return _skip_overlap("embedding_unavailable", strict=strict)
     except Exception:  # noqa: BLE001 — best-effort
