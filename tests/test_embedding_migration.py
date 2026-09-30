@@ -113,6 +113,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         return _Model(name, log)
 
     monkeypatch.setattr(embedding_backend, "load_encoder", load)
+    monkeypatch.setattr(embedding_backend, "_importable", lambda _module: True)
     readiness.reset()
     find_module.clear_cache()
     embeddings.clear_embedding_indexes()
@@ -164,6 +165,7 @@ def preseeded_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         return _Model(name, log)
 
     monkeypatch.setattr(embedding_backend, "load_encoder", load)
+    monkeypatch.setattr(embedding_backend, "_importable", lambda _module: True)
     readiness.reset()
     find_module.clear_cache()
     embeddings.clear_embedding_indexes()
@@ -331,6 +333,120 @@ def test_initial_build_allows_an_empty_active_target_path(preseeded_world) -> No
     assert _vector_lane(vault)["status"] == "participated"
 
 
+def test_initial_build_resumes_after_a_live_write_and_restart(preseeded_world, monkeypatch) -> None:
+    vault, log, _loads = preseeded_world
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
+    plan = recall_migration.plan(vault)
+    assert plan is not None
+    assert not recall_migration.build(vault, plan, should_stop=lambda: bool(log))
+    committed = list(_passages_by(log, NEW))
+    added = vault / kb_dirname() / "Notes/live-write.md"
+    added.write_text("# Live write\n\nA page written before the initial cutover.\n", encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [added]).status == "completed"
+    assert embeddings.get_embedding_index(vault).identity.model == NEW
+    assert index_paths.active_sidecar_name(vault) is None
+
+    embeddings.unload_model()
+    embeddings.clear_embedding_indexes()
+    recall_migration.reset_for_tests()
+    find_module.clear_cache()
+    stop = threading.Event()
+    encode = _Model.encode
+
+    def pause_again(self, texts, **kwargs):
+        vectors = encode(self, texts, **kwargs)
+        stop.set()
+        return vectors
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_Model, "encode", pause_again)
+        assert recall_migration.run(vault, stop) == "paused"
+    assert recall_migration.status(vault)["state"] == "paused"
+    assert recall_migration.run(vault, threading.Event()) == "current"
+    active = embeddings.get_embedding_index(vault)
+    assert active.path == plan.shadow_path
+    assert index_paths.active_sidecar_name(vault) == active.path.name
+    assert set(active.file_mtimes()) == {
+        f"{kb_dirname()}/{rel}" for rel in [*_PAGES, "Notes/live-write.md"]
+    }
+    assert len(active.semantic_unit_parent_states()) == len(_PAGES)
+    assert all(_passages_by(log, NEW).count(text) == 1 for text in committed)
+    assert _vector_lane(vault)["status"] == "participated"
+
+
+@pytest.mark.parametrize("fixture", ["world", "preseeded_world"])
+@pytest.mark.parametrize("operation", ["plan", "run"])
+@pytest.mark.parametrize("reason", ["disabled", "import-failed", "missing-stack"])
+def test_embedding_build_skips_disabled_or_unavailable_stack(
+    request, monkeypatch, fixture, operation, reason
+) -> None:
+    vault, log, loads = request.getfixturevalue(fixture)
+    fetched = []
+    monkeypatch.setattr(embedding_backend, "ensure_served_artifact", lambda *args: fetched.append(args))
+    if reason == "disabled":
+        monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    elif reason == "import-failed":
+        monkeypatch.setattr(embeddings, "_IMPORT_FAILED", True)
+    else:
+        monkeypatch.setattr(embedding_backend, "_importable", lambda _module: False)
+    if operation == "plan":
+        assert recall_migration.plan(vault) is None
+    else:
+        expected = "disabled" if reason == "disabled" else "unavailable"
+        assert recall_migration.run(vault, threading.Event()) == expected
+        assert recall_migration.status(vault)["state"] == expected
+    assert loads == []
+    assert log == []
+    assert fetched == []
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+def test_empty_embedding_corpus_loads_no_encoder(preseeded_world, excluded) -> None:
+    from exomem import doctor
+
+    vault, log, loads = preseeded_world
+    if excluded:
+        (vault / kb_dirname() / "_access.yaml").write_text("excluded:\n  - Notes\n", encoding="utf-8")
+    else:
+        for rel in _PAGES:
+            (vault / kb_dirname() / rel).unlink()
+    for _restart in range(2):
+        assert recall_migration.plan(vault) is None
+        assert recall_migration.run(vault, threading.Event()) == "current"
+        check = doctor._check_recall_reembed(vault)
+        assert check is None or check.status == "pass"
+        check = doctor._check_embedding_sidecar(vault)
+        assert check is None or check.status == "pass"
+    assert loads == []
+    assert log == []
+
+
+def test_initial_build_progress_counts_only_eligible_pages(preseeded_world, monkeypatch) -> None:
+    from exomem import doctor
+
+    vault, log, loads = preseeded_world
+    excluded = vault / kb_dirname() / "Private/secret.md"
+    excluded.parent.mkdir()
+    excluded.write_text("# Excluded\n\nAn excluded page.\n", encoding="utf-8")
+    (vault / kb_dirname() / "_access.yaml").write_text("excluded:\n  - Private\n", encoding="utf-8")
+    empty = vault / kb_dirname() / "Notes/empty.md"
+    empty.write_text("---\ntype: note\ntitle: ''\n---\n", encoding="utf-8")
+    chunks = embeddings._chunks_for_page
+    monkeypatch.setattr(
+        embeddings, "_chunks_for_page",
+        lambda root, page, **kwargs: [] if page.path == empty else chunks(root, page, **kwargs),
+    )
+    check = doctor._check_recall_reembed(vault)
+    assert check.details["paths_total"] == len(_PAGES)
+    assert loads == []
+    plan = recall_migration.plan(vault)
+    assert plan is not None
+    assert recall_migration.build(vault, plan)
+    assert recall_migration.status(vault)["paths_done"] == len(_PAGES)
+    assert recall_migration.status(vault)["paths_total"] == len(_PAGES)
+    assert recall_migration.disk_status(vault)["building"]["paths_done"] == len(_PAGES)
+
+
 @pytest.mark.parametrize("started", [False, True])
 def test_doctor_reports_the_initial_build(preseeded_world, started) -> None:
     from exomem import doctor
@@ -358,9 +474,10 @@ def test_doctor_reports_the_initial_build(preseeded_world, started) -> None:
         assert "pending" in check.message
         assert f"0/{len(_PAGES)}" in check.message
     sidecar_check = doctor._check_embedding_sidecar(vault)
-    assert sidecar_check.status == "warn"
-    assert "initial" in sidecar_check.message.lower()
-    assert "maintain --reconcile" not in (sidecar_check.remediation or "")
+    assert sidecar_check is None  # embeddings.reembed owns the one progress finding.
+    report = doctor.doctor(vault=str(vault), profile="hybrid")
+    progress = [item for item in report.checks if "initial dense index build" in item.message]
+    assert len(progress) == 1 and progress[0].id == "embeddings.reembed"
     assert loads == []
 
 

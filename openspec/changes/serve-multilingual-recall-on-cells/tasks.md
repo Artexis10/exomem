@@ -9,7 +9,7 @@
 - [x] 2.1 Red: a cell with an English sidecar never loads the English encoder, refuses the vector lane with `vector_space_mismatch` while lexical recall answers, and after the job's cutover serves dense recall from the new sidecar, including a page written during the gap (`tests/test_embedding_migration.py`)
 - [x] 2.2 `recall_migration.run` runs on a cell; the old encoder stays unloaded there
 - [x] 2.3 Doctor reports a cell's refused sidecar as dense recall off, and says when the kill switch keeps it off (`tests/test_embedding_migration.py`)
-- [ ] 2.4 An absent or empty sidecar triggers a resumable initial build over preloaded pages and semantic units, with atomic cutover, one recall encoder, and doctor progress; cover restart recovery and an empty active target path (`tests/test_embedding_migration.py`)
+- [x] 2.4 An absent or empty sidecar triggers a resumable initial build over preloaded pages and semantic units, with atomic cutover, one recall encoder, and doctor progress; cover restart recovery including live writes, an empty active target path, disabled or unavailable embeddings, an empty corpus, and accurate single doctor progress (`tests/test_embedding_migration.py`)
 
 ## 3. Verification and rollout
 

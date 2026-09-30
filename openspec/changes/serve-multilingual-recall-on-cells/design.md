@@ -28,7 +28,7 @@ The job runs on a cell. `preload_serving_encoder` already does nothing on a cell
 
 ### D3. Initial builds reuse the resumable migration
 
-An absent or empty active sidecar has no serving space. The job plans an initial build into the recall encoder's space, using the existing committed batches, restart recovery, catch-up and atomic active-pointer cutover. An empty active path already naming that space still permits the build. Lexical recall serves meanwhile; doctor reports the initial build's pending state or disk progress instead of asking an operator to reconcile. No previous encoder is loaded or serving sidecar retired for this initial build. Hosted-mode runtimes still start no job.
+An absent or empty active sidecar has no serving space. The job plans an initial build into the recall encoder's space, using the existing committed batches, restart recovery, catch-up and atomic active-pointer cutover. An empty active path already naming that space still permits the build. A live write can give the legacy sidecar the target identity before cutover; while no active pointer is published, incomplete page or semantic-unit coverage still resumes the initial shadow build. Lexical recall serves meanwhile; doctor reports the initial build's pending state or disk progress once instead of asking an operator to reconcile. No previous encoder is loaded or serving sidecar retired for this initial build. Disabled embeddings or an unavailable serving stack skip the job before loading or fetching an encoder, and a vault without eligible pages needs no encoder or build warning. Cloud cells (`EXOMEM_CLOUD_CELL`) run the job; hosted-mode cells (`EXOMEM_HOSTED_CELL`) still start no job.
 
 ## Risks / Trade-offs
 

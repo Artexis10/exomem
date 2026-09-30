@@ -984,6 +984,9 @@ def test_sidecar_probe_uses_the_onnx_lane_when_that_is_what_is_installed(
 
     # It must get past the stack gate. Whatever it reports next is about the
     # sidecar or the model cache — never "the stack isn't installed".
+    if check is None:
+        check = doctor_module._check_recall_reembed(vault)
+    assert check is not None
     assert "serving stack isn't installed" not in check.message
 
 

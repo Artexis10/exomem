@@ -2097,13 +2097,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             and initial_build.details is not None
             and initial_build.details.get("serving") is None
         ):
-            return _check(
-                "embeddings.sidecar",
-                initial_build.status,
-                initial_build.message,
-                initial_build.remediation,
-                details=initial_build.details,
-            )
+            return None  # embeddings.reembed reports this progress once.
     if not sidecar.exists():
         return _check(
             "embeddings.sidecar",
@@ -2223,6 +2217,10 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
 
     recall = recall_space.recall_model()
     if serving is None:
+        if state.get("paths_total", 0) == 0:
+            return _check(
+                "embeddings.reembed", "pass", "No eligible pages need a dense index.", details=state,
+            )
         if state.get("reembed") == "off":
             return None
         built = building["paths_done"] if building else 0

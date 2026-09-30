@@ -47,6 +47,21 @@ A background job SHALL build a sidecar for the recall encoder's space beside the
 - **WHEN** a personal server or cloud cell starts over pages and semantic units already present in its vault, with no embedding sidecar or an empty one and no write receipts
 - **THEN** its background job builds every eligible chunk and semantic unit in the recall encoder's space using committed batches, resumes without re-encoding committed work after interruption, catches up and atomically publishes the active pointer, and dense recall participates after cutover without an operator or a second encoder; lexical recall serves during the build and doctor reports the pending build or its progress rather than recommending CLI reconcile
 
+#### Scenario: A live write does not orphan an interrupted initial build
+
+- **WHEN** an initial build is interrupted after a live write has given the legacy sidecar the recall encoder's identity, with incomplete corpus coverage and no published active pointer
+- **THEN** the next start resumes the initial shadow build without re-encoding committed batches, covers every eligible page and semantic unit, and reports current only after atomic cutover
+
+#### Scenario: Disabled or unavailable embeddings do not start a build
+
+- **WHEN** embeddings are disabled or the optional serving stack is unavailable
+- **THEN** the job reports a non-failure disabled or unavailable state without loading an encoder or fetching its artifact
+
+#### Scenario: An empty embedding corpus needs no encoder
+
+- **WHEN** a vault contains no eligible chunk-bearing pages
+- **THEN** the job is current without loading an encoder, repeated starts plan no build, and doctor emits no initial-build warning
+
 #### Scenario: A failed cutover changes nothing
 
 - **WHEN** writing the active pointer fails
