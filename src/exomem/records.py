@@ -904,10 +904,16 @@ def _resolve_bulk_source(
     return resolved
 
 
-def _bulk_used_depth(root: Path, manifest: collections.CollectionManifest) -> int:
-    """Events this collection already holds: an upper bound of its reachable chain."""
+def _bulk_used_depth(
+    root: Path, manifest: collections.CollectionManifest
+) -> tuple[int, bool]:
+    """Events this collection already holds (an upper bound of its reachable chain).
+
+    The flag is False when the history was not fully parsed, so the count is unknown.
+    """
     history = _audit_events(root, semantic_profile=manifest.semantic_profile)
-    return sum(1 for event in history.events if event["collection_id"] == manifest.collection_id)
+    used = sum(1 for event in history.events if event["collection_id"] == manifest.collection_id)
+    return used, history.parsed
 
 
 def _container_hash_from_inventory(
@@ -1157,6 +1163,8 @@ def bulk_upsert_records(
         for row in outcomes:
             counts[row["outcome"]] += 1
 
+        depth_marker: dict[str, str] = {}
+
         def _report(*, committed: bool, after_hash: str, **extra: Any) -> dict[str, Any]:
             return {
                 "operation": "bulk_upsert",
@@ -1168,6 +1176,7 @@ def bulk_upsert_records(
                 "counts": counts,
                 "before_container_hash": current_hash,
                 "after_container_hash": after_hash,
+                **depth_marker,
                 **extra,
             }
 
@@ -1181,7 +1190,12 @@ def bulk_upsert_records(
                 "the batch would take the collection past its item ceiling",
                 {"items": len(snapshot.records), "adding": inserts, "maximum": _MAX_ITEM_FILES},
             )
-        used = _bulk_used_depth(root, manifest)
+        used, depth_known = _bulk_used_depth(root, manifest)
+        if not depth_known:
+            # The history hit a read ceiling or a malformed line: the depth cannot be
+            # counted, so the call proceeds and the receipt says the check did not run.
+            depth_marker["depth_check"] = "unknown"
+            depth_marker["depth_check_reason"] = "history_incomplete"
         if used + len(plans) > _MAX_AUDIT_CHAIN_DEPTH:
             raise collections.CollectionError(
                 "BULK_UPSERT_AUDIT_DEPTH",

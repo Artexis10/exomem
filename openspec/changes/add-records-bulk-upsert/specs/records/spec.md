@@ -91,6 +91,10 @@ The audit protocol SHALL be unchanged: a committed batch SHALL append one ordina
 - **WHEN** the identical request is sent again with no transport identity and the refreshed container hash
 - **THEN** every row is `unchanged` and no event is written
 
+#### Scenario: Depth cannot be evaluated
+- **WHEN** the log history is not fully parsed (a size, event-count or segment ceiling, or a malformed line) so the collection's used depth cannot be counted
+- **THEN** the call is not refused for depth, and the result carries `depth_check: "unknown"` with `depth_check_reason: "history_incomplete"`; when the history parses, the exact check applies and no marker is added
+
 ### Requirement: Bulk upsert inherits exactly-once and withheld-as-absent
 A batch SHALL be authorised over the complete collection item set and every path it would touch before any write, exactly as a single append is, and SHALL commit exactly once or leave no file, manifest change or audit entry. When any manifest, source or item path of the collection is withheld from the requesting audience the call SHALL refuse `COLLECTION_NOT_FOUND`, indistinguishable from an absent collection, before any row is planned, so no outcome, count or echo can reveal the existence or content of an item the audience may not read.
 

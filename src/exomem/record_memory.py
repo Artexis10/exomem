@@ -505,7 +505,10 @@ def _bulk_upsert_contract() -> dict[str, Any]:
             "every row must resolve to a preserved Sources or Evidence page the caller may "
             "read; a missing, non-preserved or withheld page is rejected identically "
             "(SOURCE_NOT_FOUND). A declared array-of-link `sources` field receives the "
-            "verified reference; otherwise it rides each event's audit rationale"
+            "verified reference; otherwise it rides each event's audit rationale. For a "
+            "collection with a `sources` field, a row that omits `sources` gets the call's "
+            "source link, so re-importing unchanged values from a new source reports every "
+            "row `updated` and replaces the link"
         ),
         "audit": (
             "the audit protocol is unchanged: each written row gets an ordinary chained "
@@ -529,7 +532,9 @@ def _bulk_upsert_contract() -> dict[str, Any]:
             "depth_rule": (
                 f"each written row consumes one of the collection's {records._MAX_AUDIT_CHAIN_DEPTH} "
                 "audit-chain events; a batch that would cross the budget refuses up front "
-                "with BULK_UPSERT_AUDIT_DEPTH and writes nothing"
+                "with BULK_UPSERT_AUDIT_DEPTH and writes nothing; when the log history cannot "
+                "be fully read the count is unknown, the call proceeds, and the result carries "
+                'depth_check "unknown" with depth_check_reason "history_incomplete"'
             ),
             "refusals": [
                 "STALE_RECORD",

@@ -573,3 +573,23 @@ def test_a_withheld_source_reads_exactly_like_an_absent_one(vault_root: Path) ->
     assert {k: v for k, v in hidden.items() if k not in {"index", "source"}} == {
         k: v for k, v in absent.items() if k not in {"index", "source"}
     }
+
+
+def test_an_unparsed_history_reports_the_depth_check_as_unknown(
+    vault_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = records._audit_events
+    monkeypatch.setattr(
+        records,
+        "_audit_events",
+        lambda *a, **k: records._AuditEvents((), False),
+    )
+    result = _bulk(vault_root, _rows(2))
+    monkeypatch.setattr(records, "_audit_events", real)
+    assert result["committed"] is True
+    assert result["depth_check"] == "unknown"
+    assert result["depth_check_reason"] == "history_incomplete"
+    healthy = _bulk(
+        vault_root, _rows(2, start=10), expected_container_hash=result["after_container_hash"]
+    )
+    assert "depth_check" not in healthy
