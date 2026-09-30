@@ -879,7 +879,7 @@ def _records_lane(
             role=role.id,
             level="page",
             ref=f"{entry.get('anchor')}#current",
-            path="",
+            path=str(entry.get("path") or ""),
             title=str(entry.get("statement") or "")[:80],
             text=str(entry.get("statement") or ""),
             lifecycle="active",
@@ -1607,6 +1607,7 @@ def _carried_packet(
     status: str = working_set_resolve.RETRIEVAL_CARRIED_STATUS,
     evidence: tuple[str, ...] = ("retrieval",),
     carried_by: str = "retrieval",
+    visible: Callable[[str], bool] | None = None,
 ) -> dict[str, Any] | None:
     """One packet compiled from a single dominant page, marked as carried.
 
@@ -1688,6 +1689,7 @@ def _carried_packet(
             vault_root,
             anchors=(carried,),
             purpose=purpose,
+            visible=visible,
             index_generation=index_token[1],
             index_token=index_token,
         )
@@ -1756,6 +1758,7 @@ def _follow_up_packet(
     freshness_snapshot: Any,
     index: working_set_index.WorkingSetIndex | None,
     recent_context: Sequence[Mapping[str, Any]],
+    visible: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """The packet for a follow-up carried from the caller's own thread.
 
@@ -1783,6 +1786,7 @@ def _follow_up_packet(
             status="partial",
             evidence=evidence,
             carried_by="follow_up",
+            visible=visible,
         )
         listed = {
             "ref": page,
@@ -1821,6 +1825,7 @@ def _follow_up_packet(
                 vault_root,
                 anchors=(carried,),
                 purpose=purpose,
+                visible=visible,
                 index_generation=index_token[1],
                 index_token=index_token,
                 state_fields=conventions.state_fields,
@@ -2158,6 +2163,7 @@ def compile_packet(
                 status="resolved",
                 evidence=("continuity", "recency") if hot.from_token else ("recency",),
                 carried_by="continuity" if hot.from_token else "recency",
+                visible=visible,
             )
             if packet is not None:
                 return packet
@@ -2221,6 +2227,7 @@ def compile_packet(
                 freshness_snapshot=freshness_snapshot,
                 index=index,
                 recent_context=recent,
+                visible=visible,
             )
         if pages:
             return abstained_packet(
@@ -2264,6 +2271,7 @@ def compile_packet(
             packet = _carried_packet(
                 root,
                 page=carried,
+                visible=visible,
                 analysis=analysis,
                 registry=registry,
                 limit=limit,
@@ -2293,6 +2301,7 @@ def compile_packet(
             packet = _carried_packet(
                 root,
                 page=(agent_page, 0.0),
+                visible=visible,
                 analysis=analysis,
                 registry=registry,
                 limit=limit,
@@ -2347,6 +2356,7 @@ def compile_packet(
             root,
             anchors=resolution.resolved_anchors,
             purpose=purpose,
+            visible=visible,
             index_generation=index_token[1],
             index_token=index_token,
             state_fields=conventions.state_fields,
