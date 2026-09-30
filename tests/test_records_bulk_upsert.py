@@ -155,6 +155,45 @@ def test_a_changed_row_is_updated_without_the_single_append_conflict(vault_root:
     assert records.inspect_audit_gap(vault_root, manifest)["status"] == "ok"
 
 
+def test_an_existing_row_appends_three_optional_fields_in_request_order(
+    vault_root: Path,
+) -> None:
+    initial = ledger_item()
+    appended = {name: initial.pop(name) for name in ("metrics", "channels", "details")}
+    first = _bulk(vault_root, [{"item": initial}])
+    manifest = _manifest(vault_root)
+    record = record_formats.load_adapter(vault_root, manifest).read().records[0]
+    item_path = vault_root / record.source.path
+    original, _body, _marker = vault.parse_frontmatter(
+        item_path.read_text(encoding="utf-8"), strict=True
+    )
+    assert all(not manifest.schema.fields[name].required for name in appended)
+    assert all(name not in original for name in appended)
+    rows = [{"item": {**initial, **appended}}]
+
+    result = _bulk(vault_root, rows, expected_container_hash=first["after_container_hash"])
+
+    assert _outcomes(result) == ["updated"]
+    assert result["committed"] is True
+    assert result["counts"]["updated"] == 1
+    frontmatter, _body, _marker = vault.parse_frontmatter(
+        item_path.read_text(encoding="utf-8"), strict=True
+    )
+    assert frontmatter == {**original, **appended}
+    assert list(frontmatter) == list(original) + ["metrics", "channels", "details"]
+    updated_hash = result["after_container_hash"]
+    assert updated_hash == _hash(vault_root)
+    before_replay = _state(vault_root)
+
+    replay = _bulk(vault_root, rows, expected_container_hash=updated_hash)
+
+    assert _outcomes(replay) == ["unchanged"]
+    assert replay["committed"] is False
+    assert replay["before_container_hash"] == replay["after_container_hash"] == updated_hash
+    assert _hash(vault_root) == updated_hash
+    assert _state(vault_root) == before_replay
+
+
 def test_an_update_replaces_values_and_keeps_the_body_unless_one_is_supplied(
     vault_root: Path,
 ) -> None:

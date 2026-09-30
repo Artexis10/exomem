@@ -134,6 +134,60 @@ def test_schema_revision_allows_multiple_new_fields_in_one_item_update(
     assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == "ok"
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("scalar_style", ["plain", "literal"])
+@pytest.mark.parametrize("operation", ["change", "delete"])
+def test_multifield_append_alongside_last_field_change_or_delete(
+    tmp_path: Path,
+    newline: str,
+    scalar_style: str,
+    operation: str,
+) -> None:
+    manifest = setup_collection(tmp_path, presentation=False)
+    initial_values = values()
+    source = record_formats.render_markdown_item(
+        manifest, initial_values, ITEM_KEY, body="Unmanaged body.\n"
+    )
+    provenance = str(initial_values["provenance"])
+    rendered_provenance = (
+        "provenance: " + provenance
+        if scalar_style == "plain"
+        else "provenance: |-\n  " + provenance
+    )
+    source = source.replace(
+        vault.serialize_frontmatter({"provenance": provenance}), rendered_provenance
+    ).replace("\n", newline)
+    original, original_body, _marker = vault.parse_frontmatter(source, strict=True)
+    assert list(original)[-1] == "provenance"
+    assert original["provenance"] == provenance
+    changes = {
+        "omega_details": {"revision": 2},
+        "delta_note": "First line.\nSecond line.",
+        "alpha_tags": ["backfill", "reviewed"],
+    }
+    if operation == "change":
+        changes["provenance"] = "Corrected provenance."
+    delete_fields = ("provenance",) if operation == "delete" else ()
+
+    # Returning successfully proves the fidelity guard accepts the splice.
+    after = record_formats.render_markdown_item_update(
+        source, changes, delete_fields=delete_fields
+    )
+
+    frontmatter, body, _marker = vault.parse_frontmatter(after, strict=True)
+    expected = {name: value for name, value in original.items() if name not in delete_fields}
+    expected.update(changes)
+    assert frontmatter == expected
+    assert list(frontmatter) == [
+        name for name in original if name not in delete_fields
+    ] + ["omega_details", "delta_note", "alpha_tags"]
+    assert body == original_body
+    if newline == "\r\n":
+        assert "\n" not in after.replace("\r\n", "")
+    else:
+        assert "\r" not in after
+
+
 def test_multifield_splice_still_refuses_an_unrequested_field_loss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
