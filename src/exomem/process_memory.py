@@ -52,7 +52,11 @@ _MALLOC_TRIM: Any = _UNRESOLVED
 #: one allowance: at most one trim per interval per process.
 TRIM_INTERVAL_SECONDS = 60.0
 _LAST_TRIM: float | None = None
+#: A trim was asked for inside the interval and skipped; the reaper's next tick
+#: retries it, so freed memory is still returned once the interval passes.
+_TRIM_PENDING = False
 _TRIM_LOCK = threading.Lock()
+_clock: Callable[[], float] = time.monotonic
 
 
 def _resolve_malloc_trim() -> Callable[[int], int] | None:
@@ -67,22 +71,30 @@ def _resolve_malloc_trim() -> Callable[[int], int] | None:
         return None
 
 
-def trim_allocator(*, clock: Callable[[], float] = time.monotonic) -> bool:
+def trim_pending() -> bool:
+    """Whether a trim was skipped by the throttle and has not run since."""
+    return _TRIM_PENDING
+
+
+def trim_allocator(*, clock: Callable[[], float] | None = None) -> bool:
     """Ask glibc to return freed heap to the OS: ``malloc_trim(0)``.
 
     Freed heap otherwise stays in the allocator's arenas as resident high-water
     after a model reap or a drain batch. Runs at most once per
-    `TRIM_INTERVAL_SECONDS`; a call inside the interval is skipped. Off glibc
-    this is a no-op, and it never raises: its callers are background threads
-    that must keep running. Returns whether glibc reported releasing memory.
+    `TRIM_INTERVAL_SECONDS`; a call inside the interval is skipped and marked
+    pending (see `trim_pending`) for the reaper to retry. Off glibc this is a
+    no-op, and it never raises: its callers are background threads that must
+    keep running. Returns whether glibc reported releasing memory.
     """
-    global _MALLOC_TRIM, _LAST_TRIM
+    global _MALLOC_TRIM, _LAST_TRIM, _TRIM_PENDING
     try:
-        now = clock()
+        now = (clock or _clock)()
         with _TRIM_LOCK:
             if _LAST_TRIM is not None and now - _LAST_TRIM < TRIM_INTERVAL_SECONDS:
+                _TRIM_PENDING = True
                 return False
             _LAST_TRIM = now
+            _TRIM_PENDING = False
         if _MALLOC_TRIM is _UNRESOLVED:
             _MALLOC_TRIM = _resolve_malloc_trim()
         trim = _MALLOC_TRIM

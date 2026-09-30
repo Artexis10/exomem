@@ -22,6 +22,7 @@ from exomem import derived_drain, model_reaper, process_memory, readiness
 def _fresh_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(process_memory, "_MALLOC_TRIM", process_memory._UNRESOLVED)
     monkeypatch.setattr(process_memory, "_LAST_TRIM", None)
+    monkeypatch.setattr(process_memory, "_TRIM_PENDING", False)
 
 
 def test_trim_is_a_no_op_when_libc_cannot_be_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,6 +99,40 @@ def test_the_reaper_and_the_drain_share_one_allowance(
     model_reaper._reap_once([_slot("a", released=True)], now=10_000.0, threshold=1.0)
     derived_drain.drain_once(tmp_path, dispatch=None, limit=1, now=1.0)
     assert calls == [0]
+
+
+def test_a_throttled_release_is_trimmed_by_a_later_idle_tick(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drain trims at t=0, the reaper releases at t=30 (throttled): an idle tick
+    after the interval still trims, exactly once, and the next idle tick does not."""
+    calls: list[int] = []
+    now = {"t": 0.0}
+    monkeypatch.setattr(process_memory, "_MALLOC_TRIM", lambda pad: calls.append(pad) or 1)
+    monkeypatch.setattr(process_memory, "_clock", lambda: now["t"])
+    monkeypatch.setattr(readiness, "is_warming", lambda: False)
+    interval = process_memory.TRIM_INTERVAL_SECONDS
+
+    _fake_claims(monkeypatch, completed=["batch-1"])
+    derived_drain.drain_once(tmp_path, dispatch=None, limit=1, now=1.0)
+    assert calls == [0]
+
+    now["t"] = 30.0
+    assert model_reaper._reap_once([_slot("a", released=True)], now=10_000.0, threshold=1.0)
+    assert calls == [0]
+    assert process_memory.trim_pending()
+
+    idle = [_slot("b", released=False)]
+    now["t"] = 45.0  # still inside the interval: stays pending
+    assert model_reaper._reap_once(idle, now=10_000.0, threshold=1.0) == []
+    assert calls == [0]
+    now["t"] = interval + 1.0
+    assert model_reaper._reap_once(idle, now=10_000.0, threshold=1.0) == []
+    assert calls == [0, 0]
+    assert not process_memory.trim_pending()
+    now["t"] = 3 * interval
+    model_reaper._reap_once(idle, now=10_000.0, threshold=1.0)
+    assert calls == [0, 0]
 
 
 def test_trim_runs_against_the_real_libc_without_raising() -> None:
