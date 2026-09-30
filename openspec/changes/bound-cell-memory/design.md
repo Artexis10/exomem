@@ -56,6 +56,7 @@ Alternative: jemalloc via `LD_PRELOAD`. Kept as the fallback if D1 shows trimmin
 - Step 1: the semantic corpus context registers as a reapable idle cache slot, released when the model reaper releases RAM caches.
 - Step 2: page states and inbound and outbound link maps are served from the lexical store's page and semantic-unit tables. The Python context becomes a bounded, per-request view.
 - Step 2 is the largest item and is gated separately: correctness of governed writes and link resolution comes first, by the existing semantic-contract suites.
+- Step 1 waits for step 2. While the Python context is still what writers read, reclaiming it moves its cold whole-vault build onto the next governed write after every idle window, and a concurrent writer that waits past the two-second join fails closed.
 
 **D6. No whole-corpus fallbacks on a transient.**
 - `bm25.warm` declines when the FTS5 sidecar exists but is busy or unsynced. The next pass retries through FTS5.
