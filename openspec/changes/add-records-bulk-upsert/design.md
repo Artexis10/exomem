@@ -1,0 +1,124 @@
+## Context
+
+`records.append_record` validates one candidate, resolves identity (declared natural key, else a UUID), takes the writer lease, re-reads the collection, checks `expected_container_hash`, detects a content-identical replay, plans one item file, a manifest audit-head update and one log entry, and publishes them with `vault.batch_atomic_write`. The container hash is over the whole item set, so it changes on every commit. That is correct for one item and is what made 24 rows a 24-round serial chain.
+
+Already true and reused: natural-key identity (`collections.derived_item_key`, `_natural_key_twins`), content replay (`_payload_hash`, `_replay_audit_correlation`), all-or-nothing multi-file publication (`batch_atomic_write`, `transactional-vault-writes`), the audit chain (`_audit_body`, `_plan_required_audit`), and transport-level idempotency (`mutation_request_id` and the per-vault idempotency store, REST `Idempotency-Key`).
+
+## Goals / Non-Goals
+
+**Goals:** N rows, one guard, one write, one receipt; a complete per-row outcome report; safe retry; no weaker guarantee than a single append.
+
+**Non-Goals:** streaming or resumable multi-request imports (a call is bounded at 50 rows; a larger import is the client calling repeatedly); a bulk `update` of arbitrary existing items by `item_key` (this action upserts by natural key only); bulk deletion; server-side interpretation or normalisation of rows (the caller supplies normalised rows); the `dataset` storage strategy (still read-only); any change to hosted frozen candidates.
+
+## Decisions
+
+### 1. A new action, not a longer `append`
+
+`append` has a one-item contract (`item`, `item_key`, `held`, a single result). Overloading it with a list would make every existing argument rule conditional. `bulk_upsert` gets its own field set: `collection`, `rows`, `why`, `expected_container_hash`, `source`, `on_reject`. It is validated by the same `_ACTION_FIELDS` / `_REQUIRED_FIELDS` machinery, so surplus and missing fields refuse in one message as today.
+
+### 2. Request shape
+
+```
+record_memory(
+  action="bulk_upsert",
+  collection="...",
+  why="...",                       # one audit reason for the batch, <= 512 bytes
+  expected_container_hash="...",   # required; ONE guard for the whole batch
+  source="Evidence/....md",        # optional batch default provenance ref
+  on_reject="abort" | "skip",      # default "abort"
+  rows=[ { "item": {...}, "body": "...", "source": "Evidence/....md" }, ... ]  # 1..50
+)
+```
+
+Each row is `{item, body?, source?}`. `item_key` is not accepted per row. Identity is the declared natural key **per row**: a row whose values complete the declared natural key derives its identity from it (upsert semantics); a row that does not (the natural-key fields are optional in the schema) gets a generated UUID identity, is `inserted` or `rejected` and never `updated` or `unchanged`, and re-running the same rows duplicates them (ruled). Each row reports `identity: "natural-key" | "generated"`, and `describe` says so. A row's provenance is `row.source` or, absent that, the batch `source`; a row with neither is rejected `SOURCE_REQUIRED`.
+
+### 3. One guard, checked once, inside the lease
+
+The whole action runs inside one `mutation_guard`. The collection is read once, `expected_container_hash` is compared once (`CONTAINER_HASH_MISMATCH` refuses the entire batch, nothing planned), and every row is planned against that one snapshot plus the rows already planned in the same batch. The hash after the batch is the ordinary container hash of the resulting item set, so the next guarded call chains from the response as it does today.
+
+### 4. Row planning is the single-append plan, run in a loop
+
+For each row, in input order: schema and representability validation, size limits, identity from the natural key, natural-key twin check, payload hash, then the outcome:
+
+| Situation | Outcome |
+| --- | --- |
+| no item holds the identity | `inserted` |
+| item holds identity, identical payload hash | `unchanged` (no write) |
+| item holds identity, different payload | `updated` (item file replaced) |
+| twin holds the natural key under another identity, ambiguous record, invalid values, provenance failure | `rejected` with `code` and field paths |
+
+Between rows with a natural key, two rows in one request that derive the same identity are a caller error: the later one is `rejected` `DUPLICATE_ROW_KEY` naming the earlier row's index, never a silent last-write-wins.
+
+`updated` replaces the item's values wholesale with the row's values, and its body only when the row supplies one; it does not merge. This differs from single `append`, which refuses a different payload for a held identity (`RECORD_ID_CONFLICT`). That difference is the point of "upsert" and is stated in `describe`.
+
+### 5. Provenance
+
+`row.source` (or the batch `source`) must resolve, through the ordinary reader and release filter for the calling audience, to a preserved Evidence or Source page. An unresolvable reference and a withheld one produce the identical rejection (`SOURCE_NOT_FOUND`) with identical details, so the response cannot be used to probe for hidden pages. When the collection declares a link-array field named `sources`, the server appends the verified reference to it when absent. When it declares none the row is NOT rejected: the verified reference is recorded per row index in the audit receipt instead (decision 7). A batch may not fabricate provenance: the reference is only ever a page that exists at commit time, and it is re-checked (path guard) at publication like a single append's delivery evidence.
+
+### 6. Atomic by default; skip mode is still one atomic write
+
+Planning finishes before any write. In `abort` mode a single rejected row means zero writes; the response carries every row's outcome (rows that would have been accepted read `inserted`/`updated`/`unchanged` with `committed: false` on the batch), so one round trip finds every problem. In `skip` mode the accepted rows go into ONE `batch_atomic_write` and the rejected rows are reported; a crash mid-publication rolls the whole batch back per `transactional-vault-writes`. The response has a top-level `committed` boolean and `counts` per outcome, so "partial" is never inferred. Unchanged rows never write. If every row is `unchanged` or rejected, nothing is written and the audit head does not advance.
+
+### 7. One batch receipt over per-item chained events (ruled: option A)
+
+The audit protocol is unchanged. It is strictly one event per item (one `item_key`, `canonical_path` and `after_item_hash`; every item marker must match its event; the chain walk is capped at 2048 events; each event is one `log.md` entry), so a single bulk event would need a new event version and reader-compatibility work. That is deferred (option B, a follow-up only if depth or log size matters in practice).
+
+Instead each written row gets an ordinary `append` or `update` event, chained in input order. Their intermediate manifest and container hashes are computed in memory in sequence, so every event's before/after hashes chain exactly as N serial calls' would, but only the final state is ever published: the item files, ONE manifest write whose audit head is the last event, and ONE combined `log.md` write carrying N entries (`vault.plan_log_writes_many`). Publication is a single `batch_atomic_write`, so the chain on disk is either the old chain or the whole new one.
+
+Each event's rationale is `<why> | bulk <batch_id> <i>/<n>` plus, when the collection declares no `sources` link field, ` src <ref>`; it must fit the existing 512-byte rationale bound or that row is rejected `AUDIT_RATIONALE_TOO_LONG`. Events carry no row values.
+
+The response carries ONE batch receipt: `batch_id`, `rows`, `counts`, `committed`, `first_transition`, `last_transition`, and per-row `{index, outcome, item_key, transition_id?, source?, code?, fields?}`.
+
+**Chain-depth budget.** The chain walk refuses beyond 2048 events, so a bulk consumes one event per written row. Before planning writes, the batch computes the collection's used depth (events for this collection across the live log and archives, an upper bound of the reachable chain) and refuses `BULK_UPSERT_AUDIT_DEPTH` naming used, needed and budget when used + needed > 2048. It never half-writes. `describe` states the budget.
+
+### 8. Idempotency and exactly-once
+
+No new argument. Two existing layers compose:
+
+1. **Transport idempotency.** The command dispatcher already binds `mutation_request_id` and the implicit retry scope to every mutation; a retry under the same transport identity (REST `Idempotency-Key`) returns the recorded result without re-executing. `bulk_upsert` is an ordinary mutating command and inherits this unchanged.
+2. **Content replay.** On a natural-keyed collection identical payloads are `unchanged`, so replaying a committed batch writes nothing and reports every row `unchanged`, with no key and after the store's TTL. Generated-identity rows have no content replay, so retry safety for them rests on layer 1 alone (documented).
+
+Exactly-once: a batch either commits under `batch_atomic_write` (all events, all planned files) or leaves no file, no audit event and no manifest change. A crash between "commit" and "response" is resolved by either layer above.
+
+### 9. Withheld-as-absent
+
+The writer already refuses any mutation unless the caller's release filter allows the manifest, the source, and EVERY item entry of the collection (`require_mutation_visibility`, `COLLECTION_NOT_FOUND`), and `precommit_authorize_mutation` re-checks the union of every path to be written. A mutating caller therefore never holds a partial view: a hidden item makes the whole collection read as absent. Bulk runs those same two gates once, before planning, and once over the union of all planned paths before publication. So a hidden natural-key twin cannot exist for a caller that reaches planning, and no outcome, count or echo can reveal one. The earlier draft's "rejected without `item_keys`" case is dropped as unreachable.
+
+### 10. Limits
+
+50 rows per call (`BULK_UPSERT_MAX_ROWS`, exposed by `describe` with the reason). The writer lease is single and a bulk holds it for the whole publish; the hold grows faster than the row count (measured: 50 rows about 2.4 s into an empty ledger and 4.3 s into one holding 400 items, 100 rows 4.3 s and 7.4 s, 500 rows 54 s), and one call blocking every other write for a minute is unacceptable. 50 keeps one call near 5 s. `BULK_UPSERT_TARGET_ROWS = 500` is the documented per-call size for the SQLite-authoritative engine, whose writes do not grow with the number of files published; until then a larger import is repeated calls, each chained from the previous response's `after_container_hash`. Each row obeys the existing per-value (32 KiB) and body limits.
+
+### 11. Held candidates
+
+Bulk does not hold (ruled). A rejected row is reported with its diagnostics and is not written to the held-candidate store, because 500 held files from one call is exactly the noise that store was designed to avoid, and the caller already holds the complete rows. A caller wanting one row held or resumed uses `append` for it.
+
+### 12. Tool surface
+
+`bulk_upsert` joins the `record_memory` action enum and argument rules. Frozen hosted candidates (v1, v2, v3 Claude) keep their released schemas byte-for-byte; the local surface, the v5 candidate and the command binding are regenerated, along with the packaged guidance, plugin tree, hosted render and `docs/capabilities.md`, per `CONTRIBUTING.md`.
+
+## Risks / Trade-offs
+
+- **Blast radius of one wrong batch.** Upsert can overwrite. Mitigation: the container-hash guard, `abort` default, per-row outcomes with the updated identities named, and the audit transition. No dry-run action (ruled).
+- **Larger single transaction.** One `batch_atomic_write` of up to 50 item files, bounded by the cap and the existing item ceiling. The cap was set from measurements (decision 10).
+- **Behavioural difference from `append`.** `updated` for a changed payload. Named in `describe` and the spec so agents do not expect `RECORD_ID_CONFLICT`.
+
+## Open Questions
+
+None: ruled on PR #1452 (N = 500 kept as the SQLite-engine target, capped at 50 per call on the current engine after measurement; abort default, no dry-run; provenance falls back to the receipt; transport key plus content replay only; insert-only without a natural key).
+
+## Implementation notes
+
+- `records.bulk_upsert_records` plans every row against ONE snapshot, then chains ordinary `append`/`update` events in memory (intermediate manifest and container hashes are computed in sequence and never published) and publishes item files, one manifest write, and one combined log write (`vault.plan_log_writes_many`) with one `batch_atomic_write`. Both `markdown-items` and `markdown-log` storage are supported; `dataset` refuses as it does for append.
+- The container guard for `markdown-log` is the source file hash (the same value single append takes); for `markdown-items` it is the snapshot hash.
+- Per-item advisory carriers (`due_state`, `capture_sweep`) are not emitted for a batch: they are per-write hints and 500 of them would bury the receipt. Coverage still reads complete or partial from the written items' `sources` links at the next recompute.
+- Measured cost is dominated by `vault.batch_atomic_write`'s per-target access validation and post-commit fanout, which grow with the number of written files; that is the surface #1457 (records write-path performance) works on, so this change does not touch it.
+
+## Measured (synthetic 8-field ledger, markdown-items, CPU-only container)
+
+| rows | serial guarded appends | one `bulk_upsert` |
+| --- | --- | --- |
+| 24 | 15.2 s | 1.5 s |
+| 100 | 71.9 s | 4.8 s |
+| 500 | not run (extrapolates to about 6 min) | 57 s |
+
+With the #1457 write-path branch merged in: serial 14.0 s / 55.9 s, bulk 1.5 s / 4.5 s / 54 s. Bulk is roughly 10x faster at 24 and 12-16x at 100, but grows superlinearly at 500 because `vault.batch_atomic_write` validates and fans out per target, so one publication of 500 files holds the writer lease for about a minute. Batching those per-target costs is the next lever and belongs with #1457's work, not here; that is why a call is capped at 50 rows (decision 10).

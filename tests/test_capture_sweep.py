@@ -755,3 +755,37 @@ def test_every_batch_scope_is_paired_with_the_shared_batch_carrier() -> None:
         "these commands open a batch scope without the shared batch carrier, so "
         f"their episode boundary is silently swallowed: {sorted(opens_scope - carries)}"
     )
+
+
+def test_the_sweep_rule_puts_contact_details_in_the_entity_contact_section(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock, tmp_path: Path
+) -> None:
+    """A person's role goes to their entity; contact details go in its Contact
+    section as `contact` units, which activation serves only on demand. The
+    rule is the only prose on the wire, so it says so."""
+    _caller(monkeypatch, **HTTP_PRINCIPAL)
+
+    block = capture_sweep.block(tmp_path)
+
+    assert block is not None
+    rule = block["rule"].lower()
+    assert "role" in rule and "entity" in rule
+    assert "contact details" in rule and "contact section" in rule and "contact units" in rule
+    assert "contact detail" in block["consider"]
+    # The advisory grows by the new rule and one example, nothing else.
+    assert [item for item in block["consider"] if item != "contact detail"] == [
+        "conclusion",
+        "outcome or state change",
+        "stable preference",
+        "method or parameter",
+        "entity facet",
+        "operational or vendor quirk",
+        "evidence worth preserving",
+        "relation",
+        "planning implication",
+        "record implication",
+    ]
+
+
+def test_the_sweep_rule_stays_within_its_wire_cap() -> None:
+    assert len(capture_sweep.RULE) <= 400

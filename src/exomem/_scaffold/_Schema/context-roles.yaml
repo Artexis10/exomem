@@ -130,7 +130,7 @@ roles:
     description: What was decided or learned the last time this came up.
     lane: units
     categories: [decision, insight, finding]
-    anchor_defaults: [hub, project]
+    anchor_defaults: [hub, project, entity]
     cues: ["last time", "before", "previously", "we already"]
     evidence_cues: ["last time", "before", "previously"]
     evidence_categories: [decision, insight]
@@ -178,3 +178,12 @@ roles:
     # it), which is why it does not also need to be added above.
     evidence_cues: ["?", "what about", "why does"]
     evidence_categories: [question, problem]
+
+  contact:
+    description: How to reach this person or organisation, served only when the turn asks.
+    lane: units
+    categories: [contact]
+    anchor_defaults: []
+    # Selected by an intent shape over whole turn tokens (a contact noun tied to the
+    # person, or a reach verb whose object is the person), never by a cue substring.
+    intent: contact

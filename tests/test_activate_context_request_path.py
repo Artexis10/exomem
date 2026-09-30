@@ -923,8 +923,11 @@ def test_a_turn_naming_no_anchor_is_served_that_notes_units(
 def test_a_named_anchor_still_wins_through_the_whole_door(
     carried_vault: Path, budget_free
 ) -> None:
-    """The carried page's own words are in this turn too, and are ignored:
-    resolution reached an anchor, so the carry never runs."""
+    """The named anchor wins; a page the turn also names is carried BESIDE it.
+
+    Orchestrator ruling (recall-breadth, item 2): the compiler surfaces
+    everything the turn names. The carried page is labelled, never a peer
+    anchor, and never displaces or resolves in place of the named one."""
     from test_working_set_carry import CARRY_PAGE
 
     packet = commands.op_activate_context(
@@ -934,6 +937,13 @@ def test_a_named_anchor_still_wins_through_the_whole_door(
 
     assert packet["abstained"] is False, packet.get("abstention")
     assert "carried_by" not in packet["generation"]
-    assert CARRY_PAGE not in {
-        str(item.get("path") or "") for item in packet["anchors"]
-    }
+    anchors = packet["anchors"]
+    first = anchors[0]
+    assert first["status"] == "resolved"
+    assert str(first.get("path") or first.get("ref")) != CARRY_PAGE
+    assert first.get("evidence")
+    assert [a["status"] for a in anchors].count("resolved") == 1
+    carried = [a for a in anchors if str(a.get("path") or "") == CARRY_PAGE]
+    assert [a["status"] for a in carried] == ["retrieval_carried"]
+    assert packet["generation"]["also_carried"] == "retrieval"
+    assert not packet.get("ambiguity")

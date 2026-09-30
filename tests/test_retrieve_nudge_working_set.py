@@ -2332,3 +2332,25 @@ def test_status_only_block_renders_one_line() -> None:
     ]
     both = {**_packet(), "upkeep": {"status": "failed", "since": "x", "items": [_upkeep_item()]}}
     assert len(_upkeep_lines(hook._format_working_set_block(both, 4000))) == 2
+
+
+def test_a_unit_carried_beside_the_anchor_says_so_for_three_bytes() -> None:
+    def unit(carried: bool) -> dict:
+        provenance = {"path": "Knowledge Base/Notes/Research/window.md"}
+        if carried:
+            provenance["carried"] = True
+        return {
+            "ref": "Knowledge Base/Notes/Research/window.md#u1",
+            "role": "precedents",
+            "text": "The window was widened.",
+            "lifecycle": "active",
+            "updated": "2026-09-02",
+            "provenance": provenance,
+        }
+
+    plain = hook._format_working_set_block(_packet(units=[unit(False)], pointers=[]), 4000)
+    carried = hook._format_working_set_block(_packet(units=[unit(True)], pointers=[]), 4000)
+
+    assert "- carried: The window was widened." in carried
+    assert "- unit: The window was widened." in plain
+    assert len(carried.encode()) - len(plain.encode()) <= 10

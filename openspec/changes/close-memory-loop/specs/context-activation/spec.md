@@ -58,6 +58,80 @@ within that interval.
 - **THEN** its row carries neither the turn text nor the raw session value
 - **AND** a content-private packet's row carries no anchor identifiers
 
+### Requirement: Categorical anchor evidence and resolution
+Anchor candidates SHALL carry only categorical evidence kinds. Contact kinds —
+`exact_alias`, `lexical_overlap`, `vector_band`, `claims_match` and `retrieval` —
+establish that the turn reached the anchor; qualifier kinds — `category_match`,
+`graph_corroboration` and `usage_prior` — strengthen an anchor the turn already reached
+and SHALL never create a candidate on their own. No float score SHALL appear in the
+packet. An anchor SHALL resolve as `resolved` when it carries `exact_alias` or at least
+two independent kinds other than `usage_prior`, at least one of them a contact kind; as
+`partial` when it carries exactly one kind other than `usage_prior`; the turn SHALL be
+`ambiguous` when two or more resolved anchors of the same anchor kind share no anchor
+neighbour, neither is a neighbour of the other, and the turn reached them through the
+same words (a same-kind anchor the turn spelled by its own name, in words that no other
+same-kind anchor was reached through, is a second topic the turn also named, never a
+sense of the others), where an anchor's anchor
+neighbourhood is the set of its typed-link neighbours that are themselves anchors in
+the activation index (resolved anchors of different kinds are complementary; a shared
+page that is not an anchor, reached by alias or otherwise, never makes two anchors
+complementary; a direct typed link between the two always does; project-key anchors
+have no page, so they can neither bridge two anchors nor be anyone's neighbour, and two
+resolved project anchors are therefore trivially competing); otherwise,
+when no anchor is `resolved`, the turn SHALL be `unresolved` and the operation SHALL
+abstain with an empty packet. Lexical overlap SHALL ignore stopwords, and turn tokens
+SHALL keep their order and repetitions for n-gram construction so that two anchors
+sharing a word in their names can both receive `exact_alias` from one turn. `usage_prior` SHALL only break ties between
+otherwise equal candidates and SHALL never contribute to the two-kinds rule.
+`claims_match` SHALL be computed with the existing collection-claims routing and
+`graph_corroboration` SHALL count a typed edge between two candidates even when both
+already appear in ordinary recall.
+
+#### Scenario: Two kinds resolve a resource anchor
+- **WHEN** a turn mentions a resource whose profile page title matches lexically and
+  whose Records collection claims cover the turn's terms
+- **THEN** the anchor resolves with evidence `[lexical_overlap, claims_match]`
+
+#### Scenario: Ambiguous domain is reported, not guessed
+- **WHEN** a turn's terms resolve two hub anchors whose anchor neighbourhoods share no
+  anchor
+- **THEN** the packet status is `ambiguous`, both anchors are listed under
+  `ambiguity` with their neighbourhood sizes, and no role lane runs for either
+
+#### Scenario: Two directly linked anchors are complementary, not competing
+- **WHEN** a turn resolves two same-kind anchors and one of them links the other
+- **THEN** the packet is not `ambiguous`, both anchors are served, and both carry
+  `graph_corroboration`
+
+#### Scenario: A shared boilerplate page does not suppress ambiguity
+- **WHEN** two same-kind resolved anchors both link one page that is not an anchor,
+  for example a handbook reached through a short alias, and share no anchor neighbour
+- **THEN** the packet status is still `ambiguous`
+
+#### Scenario: Two names sharing a word both resolve
+- **WHEN** a turn names two anchors whose names share a word, such as "Alpha
+  Initiative and Beta Initiative"
+- **THEN** both anchors carry `exact_alias`
+
+#### Scenario: Negative twin abstains
+- **WHEN** a turn is lexically similar to an anchor's domain but carries no alias, no
+  claims coverage and no corroborating kind
+- **THEN** no anchor is `resolved`, the packet is `abstained: true` with
+  `abstention.reason = "unresolved"`, and `units` and `pointers` are empty
+
+#### Scenario: Usage never resolves
+- **WHEN** a candidate carries only `usage_prior` and `vector_band`
+- **THEN** it is at most `partial`
+
+#### Scenario: Two same-kind domains named apart are both served
+- **WHEN** a turn spells the names of two same-kind anchors that share no anchor
+  neighbour, in words neither name shares
+- **THEN** the packet is not `ambiguous` and both anchors are served
+
+#### Scenario: One shared name two same-kind anchors carry is still a question
+- **WHEN** a turn says only words two unlinked same-kind anchors share
+- **THEN** the packet status is `ambiguous`, as before
+
 ## ADDED Requirements
 
 ### Requirement: Competing senses decided by the turn's own words
@@ -187,3 +261,138 @@ SHALL still count, and the corpus page total SHALL be unchanged.
 #### Scenario: Current namesakes still make a phrase ordinary
 - **WHEN** four current pages carry the same phrase
 - **THEN** the phrase is not distinctive and no single page is carried
+
+### Requirement: A turn that names several domains is served all of them
+Activation SHALL compile the smallest sufficient SET of concurrently relevant contexts,
+and the count SHALL be driven by relevance, never capped at one. Each domain a turn
+explicitly names, with a resolvable page, is a candidate in its own right: same-kind
+anchors named apart are served together (see the modified resolution requirement), and
+an ordinary page the turn names by a distinctive phrase of its own is carried beside
+whatever the turn resolved.
+
+#### Scenario: A domain that is an ordinary page is served beside the resolved anchor
+- **WHEN** a turn resolves an anchor and also names, by a distinctive phrase of its own,
+  a current ordinary page that is none of that anchor's neighbourhood
+- **THEN** the packet also carries that page as an anchor of kind `page` at status
+  `retrieval_carried`, marked `generation.also_carried = "retrieval"`, with its units;
+  the resolved anchor is unchanged and the page is never reported `resolved`
+- **AND** a turn that names nothing beyond what it resolved carries nothing extra
+
+#### Scenario: The named anchor keeps its own material ahead of a carried page's
+- **WHEN** a turn resolves an anchor and carries a newer page beside it, and both have
+  units under the same role
+- **THEN** the resolved anchor's units are ranked ahead of the carried page's within the
+  role's item cap, and each carried unit's provenance says `carried: true`
+
+#### Scenario: Several pages named apart are each carried
+- **WHEN** a turn that resolved no anchor names two pages by two phrases, each phrase
+  answering to exactly one page
+- **THEN** both pages are carried, bounded at three by score, and a phrase two pages
+  answer to is not carried and is never guessed between
+
+### Requirement: Same-thread pages are candidate anchors for an overlapping turn
+For a caller with its own session or thread, a turn that resolved no anchor and is not
+answered by the retrieval carry SHALL treat the pages that conversation's own tier holds
+(the pages listed in its `recent_context`) as candidates, gated by overlap with the
+turn: the turn shares at least two words of the page's own name (title, aliases, tags),
+or all of a shorter name, or at least three words of its body. A qualifying page SHALL
+be served as a `partial` anchor with its units, marked `generation.carried_by =
+"follow_up"`; two or more qualifying pages SHALL abstain `ambiguous`, listing them. A
+turn sharing nothing with the page is not about it, another conversation's work and a
+keyless caller's vault-wide heat are never asked, and nothing is ever resolved this way.
+
+#### Scenario: A follow-up in the page's own words is served the page
+- **WHEN** a keyed conversation worked on an ordinary page, and its next turn shares
+  two words of that page's title but names no anchor and forms no carry phrase
+- **THEN** the packet serves that page as a `partial` anchor with `carried_by:
+  "follow_up"` instead of abstaining `unresolved`
+
+#### Scenario: An unrelated follow-up is not served the thread
+- **WHEN** the same conversation's next turn shares nothing of the page's name or body
+- **THEN** the page is not served
+
+### Requirement: A resolved entity is served the conclusions linked to it
+An entity anchor SHALL be read through the precedents lens by default, so that the
+`decision`, `insight` and `finding` units of the pages typed-linked to the entity are
+served with their own provenance (category, parent page, supersession), inside the
+existing per-lane and packet budgets. A conclusion note that is not linked to the
+entity SHALL NOT be served on its account, and a superseded conclusion SHALL be marked
+as such, never presented as current. The default applies when the turn's own words
+reached the entity; an entity that only recency supplied ("where were we") is read
+through its own identity and facets, not through every conclusion linked to it.
+
+#### Scenario: A settled decision about an organisation is served with the entity
+- **WHEN** a turn names an organisation entity and a decision note links to that entity
+- **THEN** the packet serves the decision unit with `provenance.category: "decision"`
+  and its parent page, and serves no decision note that does not link to the entity
+
+### Requirement: A resolved entity's conclusion pages are eligible without word overlap or link-list room
+The pages that link to a resolved entity and hold `decision`, `insight` or `finding`
+units SHALL be eligible under `precedents` whether or not they share a word with the
+turn and whether or not they fit within the entity's capped list of typed links. The
+index SHALL record inbound wikilinks past that cap under a relation of their own that
+never counts toward the anchor's neighbourhood (resolution reads what it always
+read). At most six such pages beyond the neighbourhood are read, chosen newest first
+over every holder (never the alphabetically first), and their units are subject to the
+lane and packet budgets and to the same egress guard. An anchor that only recency
+supplied is skipped, whichever route selected `precedents`.
+
+#### Scenario: A topic-specific conclusion past the link cap is served
+- **WHEN** a turn resolves a person entity that more pages link to than the link cap
+  keeps, and one of those pages holds a `decision` unit that shares no word with the turn
+- **THEN** the packet serves that unit under `precedents`, and serves no linked page
+  that holds no conclusion unit and no conclusion page that does not link to the entity
+
+### Requirement: A project's standing precedent page is served for its resolved anchors
+A page SHALL declare itself the standing precedent of its project with frontmatter
+`standing: true` and the project key in its own `project` or `projects`. When a turn
+resolves an anchor in that project (a project anchor, or a page anchor whose own
+frontmatter names the project), the compiler SHALL serve that page's units under
+`precedents`, at most one page per project and two standing pages per packet, at most
+two units per page, each unit no longer than 360 characters (a longer one is a
+`unit_too_long` pointer), ahead of the role's other units and outside its item cap,
+charged to the packet's character budget. An anchor, or a project, that only recency
+supplied ("where were we") is not read for conclusions or a standing page. Several declarations in one project resolve to the most
+recently updated. Another project's standing page, and a turn that resolved nothing in
+the project, serve none. The reach runs inside the `precedents` lane, behind that lane's
+own request-budget gate and under its timing span, so it adds no stage of its own and
+is skipped with the lane when the request budget cannot afford it.
+
+#### Scenario: A referent that only recency supplied serves neither
+- **WHEN** an entity or a project is the packet's referent through recency alone, and
+  `precedents` is selected by another route (a turn cue such as "before")
+- **THEN** neither the entity's conclusion pages nor the project's standing page is served
+
+#### Scenario: The methodology page constrains a turn that never names it
+- **WHEN** a turn resolves an entity whose project declares a standing page and the
+  turn shares no word with that page
+- **THEN** the packet serves the page's unit under `precedents`, and serves neither a
+  second standing page of that project nor another project's standing page
+
+### Requirement: A served scoped claim keeps its scope qualifier
+A unit SHALL be served whole or not at all. The compiler SHALL NOT cut a unit's text
+short, because a cut drops a qualifier ("chronic X", "for Y only") and turns a scoped
+claim into a general one. A unit longer than 900 characters SHALL be reported as a
+pointer with reason `unit_too_long`, never as a half-claim.
+
+#### Scenario: A qualifier past the preferred size survives
+- **WHEN** a unit longer than 360 characters ends with its scope qualifier
+- **THEN** the packet serves the unit's full text including the qualifier
+
+#### Scenario: A unit too long to serve whole becomes a pointer
+- **WHEN** a unit is longer than 900 characters
+- **THEN** it is not served as a unit and is reported as a pointer with reason
+  `unit_too_long`
+
+### Requirement: A carried page is read through the lenses its own units answer
+The retrieval carry SHALL read each carried page through the `units` lenses that select
+a category the page's own units are filed under, ordered by the turn's cues and then by
+priority and bounded by the same lens ceiling as any packet, so a page whose material
+sits under a category only a later lens selects is not read as empty. Where the page's
+categories cannot be read, every `units` lens applies as before.
+
+#### Scenario: A named page holding only a late lens's category is served
+- **WHEN** a turn names a current ordinary page by a distinctive phrase, and the page's
+  only units are filed under a category selected by a lens beyond the first six by
+  priority
+- **THEN** the packet carries the page with those units instead of abstaining

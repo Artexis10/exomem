@@ -233,6 +233,17 @@ RETRIEVED_CONTACT_KINDS: frozenset[str] = frozenset({"retrieval", "vector_band"}
 #: carries `fact`, and the whole vault became a candidate on one cue.
 CONTACT_KINDS: frozenset[str] = WORDED_CONTACT_KINDS | RETRIEVED_CONTACT_KINDS
 
+#: Kinds by which the turn NAMED an anchor, as opposed to an anchor a prior
+#: (`recency`) supplied and a tie-break or qualifier (`usage_prior`,
+#: `category_match`, `continuity`) decorated. CONTACT_KINDS plus `agent_choice`:
+#: the agent picking the anchor by ref is the strongest naming there is, but it
+#: is no contact kind (nothing in the turn's text reached the anchor), so it is
+#: added here rather than to `CONTACT_KINDS`, which `_status_for`'s clauses read.
+#: An anchor with no member here is prior-only: it says where the conversation
+#: was, never what the turn is about, so nothing beyond the anchor's own
+#: identity is read for it (conclusions, standing pages, role-selected lanes).
+NAMING_KINDS: frozenset[str] = CONTACT_KINDS | frozenset({"agent_choice"})
+
 #: Function words are dropped before the lexical band is measured. "the" shared
 #: between a turn and a title is not a reference; two content words are.
 #: `STOPWORDS` lives in `working_set_index` (re-exported here): the derived-
@@ -1960,6 +1971,39 @@ def _status_for(candidate: CandidateFacts, *, recency_resolves: bool = False) ->
     return _status_for_evidence(candidate.evidence, recency_resolves=recency_resolves)
 
 
+def band_yieldable_paths(resolution: Resolution) -> frozenset[str]:
+    """The pages `resolution` resolved only because of `vector_band`, on a
+    word the turn wrote as an ordinary word; empty otherwise.
+
+    Non-empty only when EVERY resolved anchor carries `vector_band`, would
+    fall back to `partial` without it (in practice `rare_term` + the band,
+    the third clause), and was reached through name words the turn never
+    writes with an initial capital, in a turn that has a casing signal
+    (`name_lower_case`, the signal `_spoken_as_name` reads for the same
+    question; `_casing_signal` counts a sentence-initial capital). A turn
+    with any anchor resolved on its own words is resolved with or without
+    the band, so the band decided nothing about it. A name word the turn
+    capitalises anywhere, or writes in a script with no case, is taken as
+    naming the anchor, and a phrase another page shares with the turn does
+    not overrule that. A turn typed entirely in lower case has no casing
+    signal and never yields. What is left, "convert the grill's
+    target temperature", is a common noun the band pulled a page in on, and
+    the caller may ask the carry what the turn names instead.
+    """
+    resolved = resolution.resolved_anchors
+    if resolution.status != "resolved" or not resolved:
+        return frozenset()
+    for anchor in resolved:
+        evidence = frozenset(anchor.evidence)
+        if (
+            "vector_band" not in evidence
+            or _status_for_evidence(evidence - {"vector_band"}) == "resolved"
+            or not anchor.name_lower_case
+        ):
+            return frozenset()
+    return frozenset(anchor.path or anchor.anchor_id for anchor in resolved)
+
+
 def _phrase_spans(tokens: Sequence[str], phrase_tokens: Sequence[str]) -> list[tuple[int, int]]:
     """Every contiguous span in `tokens` whose slice equals `phrase_tokens`,
     verbatim OR after `fold_possessive` (fix/activation-competing-senses,
@@ -2358,7 +2402,9 @@ def _competing_groups(
     """
     groups: list[tuple[str, tuple[ResolvedAnchor, ...]]] = []
     for kind in sorted({anchor.kind for anchor in resolved}):
-        group = [anchor for anchor in resolved if anchor.kind == kind]
+        group = _without_named_apart(
+            [anchor for anchor in resolved if anchor.kind == kind]
+        )
         if len(group) < 2:
             continue
         # At most MAX_ANCHORS nodes; a bounded structural connectivity check.
@@ -2380,6 +2426,40 @@ def _competing_groups(
         if len(reached) != len(group):
             groups.append((kind, tuple(group)))
     return tuple(groups)
+
+
+def _spelled_tokens(anchor: ResolvedAnchor) -> frozenset[str]:
+    """The tokens of every phrase the turn spelled this anchor's own name by."""
+    return frozenset(
+        token for phrase in anchor.exact_alias_phrases for token in phrase.split()
+    )
+
+
+def _without_named_apart(group: Sequence[ResolvedAnchor]) -> list[ResolvedAnchor]:
+    """Drop the members of a same-kind group the turn named APART from the rest.
+
+    Concurrent contexts (activation recall breadth): competing senses are
+    anchors the turn's SAME words reach. A member the turn spelled by its own
+    name ("book the autumn trip given the course schedule") is a second topic
+    the turn also named, not a sense of the others, when every OTHER member
+    was spelled too and no two spelled names share a token. The test is about
+    the turn's own spelling and never about the vault. A member reached only
+    by shared, retrieved or semantic evidence has no spelling to set it
+    apart, so it keeps competing with a spelled one ("Cargo Sled or cedar"
+    still asks), and two members spelled with a shared word ("tide model
+    rollout", "tide model research") still compete.
+    """
+    spelled = [_spelled_tokens(anchor) for anchor in group]
+    kept: list[ResolvedAnchor] = []
+    for index, anchor in enumerate(group):
+        apart = bool(spelled[index]) and all(
+            other and not spelled[index] & other
+            for other_index, other in enumerate(spelled)
+            if other_index != index
+        )
+        if not apart:
+            kept.append(anchor)
+    return kept
 
 
 def _ambiguity_dicts(kind: str, group: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]:
