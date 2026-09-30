@@ -328,6 +328,10 @@ The first slice SHALL run in the owner's real vault, preserving the raw export a
 - **WHEN** an incompatible pre-GA schema change affects the new summary slice
 - **THEN** the operator may require a new authorized import from the preserved immutable Source/Evidence under a compatible schema, with old progress/lineage reported honestly and no implicit migration of existing Records
 
+#### Scenario: Location samples stay withheld until released
+- **WHEN** the imported export carries GPS route or place samples and an external connector or hosted client queries the collection
+- **THEN** location fields are withheld from results, counts, previews, summary pages and rollups until the owner releases them, and the rest of the row's released fields are still returned
+
 ### Requirement: Typed numeric values and history are lossless
 
 Canonical typed-v1 SHALL preserve the full accepted integer/finite-number domain, int versus float subtype and signed zero. A discriminator SHALL select signed-64-bit INTEGER, exact canonical decimal TEXT for larger integers, or authoritative IEEE-754 binary64 BLOB for floats; REAL and sortable comparison keys MAY be derived, never canonical hash input. Comparisons/reductions SHALL not narrow oversized integers through REAL. Decode SHALL reconstruct original scalar subtype and exact canonical JSON input through existing normalization/payload hashing without a duplicate full JSON row. The forward schema SHALL introduce version_identity keyed by (row_id,row_version) with encoding/hash/txn/schema identity, immutable JSON and typed history payloads, sources FK to that spine and BEFORE UPDATE/BEFORE DELETE abort triggers on all new history tables. Migration SHALL preserve old immutable bytes, hashes, audit/source identities and prove full parity before atomic mapping publication; older readers SHALL refuse unsupported schema/encoding before any access. Direct typed indexes and generated json-v1 projections SHALL expose one logical query interface.

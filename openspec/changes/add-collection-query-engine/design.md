@@ -294,13 +294,14 @@ Rollback disables the preview and stops new-object queries with typed unavailabl
 
 ## Rulings
 
-Recorded 2026-09-30. The owner supplied O1–O3 below and O4 in the graph sibling. The orchestrator adopted the independent round-two critique's recommendations for CQ1, CQ2, CQ4–CQ14 and GQ1–GQ3/GQ5–GQ8. CQ3 uses the owner's source-local-day ruling, superseding the critique's UTC-only calendar recommendation. These settle all fourteen CQ questions; numeric targets remain provisional until measured.
+Recorded 2026-09-30. The owner supplied O1–O3 and O5 below and O4 in the graph sibling. The orchestrator adopted the independent round-two critique's recommendations for CQ1, CQ2, CQ4–CQ14 and GQ1–GQ3/GQ5–GQ8. CQ3 uses the owner's source-local-day ruling, superseding the critique's UTC-only calendar recommendation. These settle all fourteen CQ questions; numeric targets remain provisional until measured.
 
 | Ruling | Attributed decision |
 | --- | --- |
 | O1 — owner | Large collections are summary-first. SQLite replaces the file engine as Records/Planning authority; `items` retains the parent's 100,000-row/per-item guarantees, `summary` has bounded readable pages and tools for rows, with store-bounded capacity. Observed wearable data uses summary. |
 | O2 — owner | First slice goes directly to the real vault: preserve raw Source/Evidence first, create a NEW built-in Records collection, keep the store outside the vault, ship row release/egress before access. No existing-Records migration or preview vault. Pre-GA schema changes may require re-import. S1 precedes joins/FTS/ontology/graph/generic activation and has its own gate. |
 | O3 — owner / CQ3 | A day is each record's source-recorded local day: UTC plus its own UTC offset, or the source local date for date-only summaries. Missing both is flagged, never guessed; preview real time fields before import. No IANA/DST machinery in v1. |
+| O5 — owner | Location samples (GPS routes and places in a wearable export) are a sensitive field class: withheld from external connectors and hosted clients by default until the owner releases them, and never included in summary pages or rollups unless released. Deriving a missing UTC offset from location is deferred, not v1. |
 | CQ1 | Orchestrator: 8 indexes/16 paths/4 keys, optional 8-field FTS, default 4 and 1.5×/2× write/WAL gates; preserve parent absolute gates and measure views/rollups. |
 | CQ2 | Orchestrator: typed v1 with unchanged tolerant legacy adapter; preserve the entire numeric domain and teach the semantic difference. |
 | CQ3 | Owner: source-local day as O3; frozen UTC instants/windows do not override recorded calendar days. |
