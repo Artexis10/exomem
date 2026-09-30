@@ -1,7 +1,7 @@
 """Local vector embeddings for hybrid search.
 
 Loads the recall encoder lazily (`MODEL_NAME`: `BAAI/bge-m3` on a personal
-server, `BAAI/bge-base-en-v1.5` on a hosted or cloud cell; the heavy import
+server and a cloud cell, `BAAI/bge-base-en-v1.5` on a hosted cell; the heavy import
 stays off the keyword-mode hot path). Chunks each
 KB page paragraph-wise with title prepended, normalizes vectors so
 cosine = dot product, and persists to a per-machine sqlite sidecar

@@ -142,7 +142,11 @@ class ParsedPage:
 
     @property
     def file_kind(self) -> str:
-        if self.page_type == "dataset":
+        if self.page_type == "dataset" or (
+            self.page_type == "source"
+            and self.frontmatter.get("source_type") == "dataset-export"
+            and self.frontmatter.get("data_file")
+        ):
             fmt = self.frontmatter.get("format")
             return str(fmt).lower() if fmt else "dataset"
         if self.media_type:

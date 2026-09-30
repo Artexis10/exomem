@@ -2205,6 +2205,33 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
     if serving is None:
         return None
     building = state.get("building")
+    from . import recall_space
+
+    recall = recall_space.recall_model()
+    if recall_space.cell_mode() and serving["model"] != recall:
+        # A cell holds one encoder, so the sidecar another model wrote is
+        # refused until the re-embed cuts over, not served.
+        built = (
+            f"{building['paths_done']}/{state['paths_total']} pages built"
+            if building
+            else "not started"
+        )
+        if state.get("reembed") == "off":
+            return _check(
+                "embeddings.reembed",
+                "warn",
+                f"This cell encodes with {recall} and refuses its {serving['model']} sidecar; "
+                "dense recall is off and EXOMEM_RECALL_REEMBED=off keeps it off.",
+                "Unset EXOMEM_RECALL_REEMBED to let the cell re-embed and cut over.",
+                details=state,
+            )
+        return _check(
+            "embeddings.reembed",
+            "warn",
+            f"This cell encodes with {recall} and refuses its {serving['model']} sidecar; "
+            f"dense recall is off until the re-embed cuts over ({built}).",
+            details=state,
+        )
     if not building:
         return _check(
             "embeddings.reembed",

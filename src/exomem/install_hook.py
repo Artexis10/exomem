@@ -362,16 +362,74 @@ def _safe_file_status(path: Path) -> dict:
     }
 
 
+def _is_alternate_link_value(name: str, value: str) -> bool:
+    """True for the one link shape yadm's alternate mechanism produces.
+
+    A hook config names commands the agent executes, so a symlink is a redirect
+    that decides what runs, and following an arbitrary one would hand that
+    decision to anything able to create a link in the config directory.
+
+    yadm produces exactly one shape and it is not attacker-shaped: the deployed
+    name points at a sibling in the same directory whose name is the deployed
+    name plus a `##`-prefixed suffix (`settings.json -> settings.json##os.WSL`).
+    Requiring a bare child name is what keeps the target inside the directory
+    that was already trusted, so an absolute value, a parent-directory value,
+    and any other separator are all rejected here rather than resolved.
+    """
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    try:
+        safe._validate_child_name(value)
+    except OSError:
+        return False
+    prefix = f"{name}##"
+    return value.startswith(prefix) and len(value) > len(prefix)
+
+
+def _resolved_config_name(directory, name: str, display_path: Path) -> str:
+    """The child name a read or write of *name* must actually use.
+
+    Returns *name* unchanged for anything that is not a symlink, so the guard
+    behind this is reached exactly as before. For a yadm alternate link it
+    returns the sibling the link names, and the unchanged ownership,
+    group/other-writability and regular-file checks then apply to that sibling.
+
+    Every other symlink raises, including a link whose target is absolute, in a
+    parent directory, not `##`-suffixed, missing, or itself a link -- the last
+    because `_existing_kind` reports the link rather than what it points at.
+    """
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    kind = safe._existing_kind(directory, name)
+    if kind is None or not stat.S_ISLNK(kind):
+        return name
+    try:
+        value = (
+            os.readlink(directory.path / name)
+            if os.name == "nt"
+            else os.readlink(name, dir_fd=directory.fd)
+        )
+    except OSError as error:
+        raise OSError(f"unsafe hook config file: {display_path}") from error
+    if not _is_alternate_link_value(name, value):
+        raise OSError(f"unsafe hook config file: {display_path}")
+    target = safe._existing_kind(directory, value)
+    if target is None or not stat.S_ISREG(target):
+        raise OSError(f"unsafe hook config file: {display_path}")
+    return value
+
+
 def _read_json(path: Path) -> tuple[dict | None, str | None]:
     from ._hooks import exomem_continuation_checkpoint as safe
 
     try:
         with safe._open_secure_directory(path.parent, create=False) as directory:
             _require_trusted_directory(directory)
-            kind = safe._existing_kind(directory, path.name)
+            name = _resolved_config_name(directory, path.name, path)
+            kind = safe._existing_kind(directory, name)
             if kind is None or not stat.S_ISREG(kind):
                 raise OSError(f"unsafe hook config file: {path}")
-            fd = safe._open_secure_file_at(directory, path.name, os.O_RDONLY)
+            fd = safe._open_secure_file_at(directory, name, os.O_RDONLY)
             try:
                 info = os.fstat(fd)
                 if os.name != "nt" and (
@@ -944,6 +1002,23 @@ def check_hooks(
                 row["details"] = details
             _checks.append(row)
 
+        # A condition whose input could not be read has nowhere to go in a
+        # pass/fail report and lands on pass, so `--check` reported "no legacy
+        # kb_* hook entries configured" for a config it never opened -- on a
+        # machine holding four of them. Unevaluated is its own state, it names
+        # the path and the read error, and it fails the run.
+        def unevaluated(
+            id_: str,
+            _path: Path = sp,
+            _error: str | None = parse_error,
+        ) -> None:
+            add(
+                id_,
+                "unevaluated",
+                f"not evaluated: hook config unavailable at {_path}: {_error}",
+                {"path": str(_path), "error": _error},
+            )
+
         add(
             "config.file",
             "pass" if data is not None else "fail",
@@ -955,42 +1030,48 @@ def check_hooks(
             {"path": str(sp), "exists": sp.exists(), "parse_error": parse_error},
         )
 
-        any_legacy = False
-        for _py, _sh, event in _HOOK_SPECS:
-            for hook in _commands_for_event(data, event):
-                if _contains_any(hook, _LEGACY_MARKERS):
-                    any_legacy = True
-        if isinstance(data, dict) and isinstance(data.get("hooks"), dict):
-            for event in data["hooks"]:
+        if data is None:
+            unevaluated("config.legacy")
+        else:
+            any_legacy = False
+            for _py, _sh, event in _HOOK_SPECS:
                 for hook in _commands_for_event(data, event):
-                    command = f"{hook.get('command', '')} {hook.get('commandWindows', '')}"
-                    if _command_basenames(command).intersection(_CONTINUATION_LEGACY):
+                    if _contains_any(hook, _LEGACY_MARKERS):
                         any_legacy = True
-        add(
-            "config.legacy",
-            "fail" if any_legacy else "pass",
-            (
-                "legacy kb_* hook entries are still configured"
-                if any_legacy
-                else "no legacy kb_* hook entries configured"
-            ),
-        )
+            if isinstance(data.get("hooks"), dict):
+                for event in data["hooks"]:
+                    for hook in _commands_for_event(data, event):
+                        command = f"{hook.get('command', '')} {hook.get('commandWindows', '')}"
+                        if _command_basenames(command).intersection(_CONTINUATION_LEGACY):
+                            any_legacy = True
+            add(
+                "config.legacy",
+                "fail" if any_legacy else "pass",
+                (
+                    "legacy kb_* hook entries are still configured"
+                    if any_legacy
+                    else "no legacy kb_* hook entries configured"
+                ),
+            )
 
         scripts = {}
         for script, wrapper, event in _HOOK_SPECS:
-            entries = _commands_for_event(data, event)
-            configured = any(_contains_any(h, (script, wrapper)) for h in entries)
-            legacy = [h for h in entries if _contains_any(h, _LEGACY_MARKERS)]
-            add(
-                f"config.{event}",
-                "pass" if configured and not legacy else "fail",
-                (
-                    f"{event} points at current Exomem hook"
-                    if configured and not legacy
-                    else f"{event} does not point cleanly at current Exomem hook"
-                ),
-                {"entries": entries},
-            )
+            if data is None:
+                unevaluated(f"config.{event}")
+            else:
+                entries = _commands_for_event(data, event)
+                configured = any(_contains_any(h, (script, wrapper)) for h in entries)
+                legacy = [h for h in entries if _contains_any(h, _LEGACY_MARKERS)]
+                add(
+                    f"config.{event}",
+                    "pass" if configured and not legacy else "fail",
+                    (
+                        f"{event} points at current Exomem hook"
+                        if configured and not legacy
+                        else f"{event} does not point cleanly at current Exomem hook"
+                    ),
+                    {"entries": entries},
+                )
 
             status = _script_status(hd, script, wrapper)
             scripts.update(status)
@@ -1020,6 +1101,9 @@ def check_hooks(
 
         continuation_items = _continuation_items(hd, client)
         for item in continuation_items:
+            if data is None:
+                unevaluated(f"config.{item['event']}")
+                continue
             configured = _configured_item(data, item)
             add(
                 f"config.{item['event']}",
@@ -1032,22 +1116,25 @@ def check_hooks(
                 {"matcher": item.get("matcher")},
             )
         if client == "codex":
-            unsupported = {
-                "kind": "continuation",
-                "client": "codex",
-                "event": "SessionEnd",
-                "matcher": None,
-            }
-            configured = _configured_item(data, unsupported)
-            add(
-                "config.SessionEnd",
-                "fail" if configured else "pass",
-                (
-                    "Codex SessionEnd must remain unsupported for pinned 0.144.3"
-                    if configured
-                    else "Codex 0.144.3 has no Exomem SessionEnd registration"
-                ),
-            )
+            if data is None:
+                unevaluated("config.SessionEnd")
+            else:
+                unsupported = {
+                    "kind": "continuation",
+                    "client": "codex",
+                    "event": "SessionEnd",
+                    "matcher": None,
+                }
+                configured = _configured_item(data, unsupported)
+                add(
+                    "config.SessionEnd",
+                    "fail" if configured else "pass",
+                    (
+                        "Codex SessionEnd must remain unsupported for pinned 0.144.3"
+                        if configured
+                        else "Codex 0.144.3 has no Exomem SessionEnd registration"
+                    ),
+                )
 
         continuation_status = _script_status(hd, _CONTINUATION_SCRIPT, _CONTINUATION_WRAPPER)
         scripts.update(continuation_status)
@@ -1128,11 +1215,12 @@ def check_hooks(
             continuation_runtime,
         )
 
+        unhealthy = any(c["status"] in {"fail", "unevaluated"} for c in checks)
         reports.append(
             {
                 "client": client,
-                "status": ("failed" if any(c["status"] == "fail" for c in checks) else "healthy"),
-                "success": not any(c["status"] == "fail" for c in checks),
+                "status": "failed" if unhealthy else "healthy",
+                "success": not unhealthy,
                 "hook_dir": str(hd),
                 "settings_path": str(sp),
                 "scripts": scripts,
@@ -1340,6 +1428,47 @@ def _merged_config(source: dict, installed: list[dict], timeout: int) -> dict:
     return data
 
 
+# One place decides what a config backup is called. The predicate below has to
+# recognise exactly what the generator above it mints, and a hand-restated
+# pattern can drift from the format string it copies -- blessing the very
+# backup-of-a-backup growth it exists to prevent. Both read the same constants,
+# and a round-trip test pins them to each other.
+_BACKUP_INFIX = ".backup-"
+_BACKUP_STAMP = "%Y%m%dT%H%M%S"
+_BACKUP_TOKEN_BYTES = 6
+_BACKUP_TOKEN_ALPHABET = "0123456789abcdef"
+
+
+def _backup_name(name: str) -> str:
+    stamp = time.strftime(_BACKUP_STAMP, time.gmtime())
+    return f"{name}{_BACKUP_INFIX}{stamp}-{secrets.token_hex(_BACKUP_TOKEN_BYTES)}"
+
+
+def _is_backup_name(name: str) -> bool:
+    """True for a name `_backup_name` could have produced, and nothing else.
+
+    Deliberately stricter than the shape it parses: the stamp has to be a real
+    time under the same format string the generator uses, so a `##` condition
+    that merely looks timestamped is not mistaken for our own residue. Getting
+    this too wide is the dangerous direction -- an excluded source is dropped
+    from the merge and never reported, which is the one thing the source list
+    must not do.
+    """
+    head, infix, tail = name.rpartition(_BACKUP_INFIX)
+    if not infix or not head:
+        return False
+    stamp, dash, token = tail.rpartition("-")
+    if not dash or len(token) != _BACKUP_TOKEN_BYTES * 2:
+        return False
+    if token.strip(_BACKUP_TOKEN_ALPHABET):
+        return False
+    try:
+        time.strptime(stamp, _BACKUP_STAMP)
+    except ValueError:
+        return False
+    return True
+
+
 def _write_unique_at(directory, name: str, raw: bytes, mode: int) -> None:
     from ._hooks import exomem_continuation_checkpoint as safe
 
@@ -1379,45 +1508,52 @@ def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
     loop -- the retry on concurrent drift, the backup, the same-directory
     atomic replace -- and a second copy of it would be a second place for
     those windows to be got wrong.
+
+    Where the deployed name is a yadm alternate link, every step operates on the
+    sibling it names instead. The link is only the deployed view of that source,
+    so replacing the link itself would destroy the deployment and be undone by
+    the next alternate selection anyway. `path` in the returned report is
+    therefore the file that was actually written.
     """
     from ._hooks import exomem_continuation_checkpoint as safe
 
     path = Path(path).expanduser()
     with safe._open_secure_directory(path.parent, create=create) as parent:
         _require_trusted_directory(parent)
+        name = _resolved_config_name(parent, path.name, path)
+        written = path if name == path.name else path.parent / name
         for _attempt in range(3):
-            initial = _snapshot_config_at(parent, path.name, path)
+            initial = _snapshot_config_at(parent, name, written)
             merged = transform(initial["data"])
             if merged == initial["data"]:
-                return {"changed": False, "backup": None}
-            observed = _snapshot_config_at(parent, path.name, path)
+                return {"changed": False, "backup": None, "path": str(written)}
+            observed = _snapshot_config_at(parent, name, written)
             if not _same_snapshot(initial, observed):
                 continue
             raw = (json.dumps(merged, indent=2) + "\n").encode("utf-8")
-            temporary = f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(6)}"
+            temporary = f".{name}.tmp-{os.getpid()}-{secrets.token_hex(6)}"
             write_mode = initial["mode"] & ~0o022
             _write_unique_at(parent, temporary, raw, write_mode)
-            latest = _snapshot_config_at(parent, path.name, path)
+            latest = _snapshot_config_at(parent, name, written)
             if not _same_snapshot(initial, latest):
                 safe._unlink_at(parent, temporary)
                 continue
             backup_name: str | None = None
             if initial["exists"]:
-                stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
-                backup_name = f"{path.name}.backup-{stamp}-{secrets.token_hex(6)}"
+                backup_name = _backup_name(name)
                 _write_unique_at(parent, backup_name, initial["raw"], write_mode)
-            final = _snapshot_config_at(parent, path.name, path)
+            final = _snapshot_config_at(parent, name, written)
             if not _same_snapshot(initial, final):
                 safe._unlink_at(parent, temporary)
                 if backup_name:
                     safe._unlink_at(parent, backup_name)
                 continue
             try:
-                safe._replace_at(parent, temporary, path.name)
+                safe._replace_at(parent, temporary, name)
             except BaseException:
                 committed: bool | None = None
                 try:
-                    replacement = _snapshot_config_at(parent, path.name, path)
+                    replacement = _snapshot_config_at(parent, name, written)
                     committed = replacement["raw"] == raw
                     if not committed and not _same_snapshot(initial, replacement):
                         committed = None
@@ -1431,12 +1567,47 @@ def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
                     pass
                 raise
             backup = path.parent / backup_name if backup_name else None
-            return {"changed": True, "backup": str(backup) if backup else None}
+            return {
+                "changed": True,
+                "backup": str(backup) if backup else None,
+                "path": str(written),
+            }
     raise RuntimeError(f"concurrent hook config changes persisted at {path}")
 
 
 def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> dict:
     return _rewrite_hooks(path, lambda data: _merged_config(data, installed, timeout))
+
+
+def _merge_one_config(path: Path, installed: list[dict], timeout: int) -> dict:
+    """Merge into one alternate source, reporting rather than raising on failure.
+
+    A yadm alternate may be a Jinja template rather than JSON, so parseability
+    is decided by trying -- the same way the prune path decides it. A source
+    that will not parse is a thing to name, because the user still has to go and
+    edit it by hand, and never a reason to fail an install that has already
+    landed on the deployed config and on every source beside this one.
+    """
+    report: dict = {
+        "path": str(path),
+        "changed": False,
+        "backup": None,
+        "skipped": False,
+        "error": None,
+    }
+    try:
+        migration = _rewrite_hooks(
+            path,
+            lambda data: _merged_config(data, installed, timeout),
+            create=False,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        report["skipped"] = True
+        report["error"] = str(error)
+        return report
+    report["changed"] = migration["changed"]
+    report["backup"] = migration["backup"]
+    return report
 
 
 def _mark_restart_pending(hook_dir: Path) -> None:
@@ -1520,6 +1691,7 @@ def install_hook(
         "client": client,
         "config_changed": False,
         "backup": None,
+        "alternates": [],
     }
     if wire:
         sp = Path(settings_path).expanduser() if settings_path else _default_settings(client)
@@ -1528,6 +1700,17 @@ def install_hook(
         result["settings"] = str(sp)
         result["config_changed"] = migration["changed"]
         result["backup"] = migration["backup"]
+        # The deployed config is written first and may itself be an alternate
+        # source, where yadm links rather than copies; writing it twice would
+        # report the same file as both. Every remaining source is merged too,
+        # because a copy deployment regenerates the deployed file from whichever
+        # of them matches the machine.
+        written = Path(migration["path"]).name
+        result["alternates"] = [
+            _merge_one_config(source, installed, timeout)
+            for source in _alternate_sources(sp)
+            if source.name != written
+        ]
     return result
 
 
@@ -1926,11 +2109,24 @@ def _alternate_sources(path: Path) -> list[Path]:
     rather than copies, the link target. Whether a source is plain JSON or a
     template is decided later by trying to parse it, so this does not have to
     encode yadm's condition grammar to stay correct.
+
+    The suffix has to name something: a bare `settings.json##` names no yadm
+    condition and is not a source. A backup of a source, on the other hand, is
+    named after the source and so does match the name test
+    (`settings.json##os.WSL.backup-...`); treating one as a source of its own
+    would make every run write a backup of the previous run's backup, so the
+    names this module mints are excluded too.
     """
     sources: list[Path] = []
+    prefix = f"{path.name}##"
     try:
         for item in sorted(path.parent.iterdir()):
-            if item.name.startswith(f"{path.name}##") and not item.is_symlink():
+            if (
+                item.name.startswith(prefix)
+                and len(item.name) > len(prefix)
+                and not _is_backup_name(item.name)
+                and not item.is_symlink()
+            ):
                 sources.append(item)
     except OSError:
         return []

@@ -284,7 +284,7 @@ without a companion.
 
 Semantic companions SHALL be located and bound by a closed artifact-class registry:
 ordinary/media binaries use the sibling `<artifact-leaf>.md`; datasets use the unique
-canonical `type: dataset` card whose normalized `data_file` equals the artifact path; and a
+canonical card whose normalized `data_file` equals the artifact path and whose shape is either legacy `type: dataset` or `type: source` with explicit `source_type: dataset-export`; and a
 scene frame uses its sibling `<frame-leaf>.md` inside the canonical
 `<parent-media>.frames/` directory. Every valid companion SHALL carry a versioned
 `governance_companion` descriptor with `state: classified`. Its immutable binding tuple
@@ -326,7 +326,7 @@ Legacy scene-frame conversion SHALL parse finite non-negative `frame_ts`, calcul
 bounded result to equal both the filename milliseconds and indexed frame timestamp, and
 then store `frame_timestamp_ms`. A negative, non-finite, out-of-range, ambiguously
 indexed, or disagreeing value SHALL refuse. After migration, the float SHALL NOT be
-membership authority. New companions SHALL carry the descriptor at creation.
+membership authority. New companions SHALL carry the descriptor at creation, except automatically captured dataset source cards whose artifact semantics have not been owner-reviewed; those cards SHALL omit the descriptor and remain unresolved for still-undecided semantic scopes.
 
 #### Scenario: Selector kinds resolve membership
 
@@ -418,6 +418,17 @@ membership authority. New companions SHALL carry the descriptor at creation.
   milliseconds encoded in the canonical filename and index
 - **THEN** owner-reviewed backfill stores that exact `frame_timestamp_ms`; any rounding,
   range, filename, parent, or index mismatch refuses without choosing a source
+
+#### Scenario: Dataset source card retains unreviewed semantics
+
+- **WHEN** a new evidence upload produces a `type: source`, `source_type: dataset-export` card without a governance descriptor
+- **THEN** its source type and tags govern the Markdown card and it remains eligible as a source citation
+- **AND** raw dataset membership stays unresolved for still-undecided semantic scopes until owner-reviewed receipt-first backfill supplies a bound descriptor
+
+#### Scenario: Mixed dataset card variants are ambiguous
+
+- **WHEN** a legacy dataset page and an explicitly marked dataset source card both identify the same original
+- **THEN** classification and companion backfill refuse the duplicate set without choosing one variant
 
 ### Requirement: Pure order-free disclosure evaluator
 
