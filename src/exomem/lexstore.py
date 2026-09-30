@@ -2102,10 +2102,20 @@ def search_bm25(
     if not tokens:
         return []
     store = get_store(vault_root)
+    _BM25_ERROR.error_class = None
     result = store.search_bm25(tokens, k, scope, freshness, allowed_paths, repair)
     if repair:
         _admit_after_bounded_runtime_repair(vault_root, result)
     return result
+
+
+_BM25_ERROR = threading.local()
+
+
+def last_bm25_error_class() -> str | None:
+    """`classify_sqlite_error` of the SQLite error behind this thread's last
+    `search_bm25` returning None, or None when no error caused it."""
+    return getattr(_BM25_ERROR, "error_class", None)
 
 
 def search_bm25_result(
@@ -6770,6 +6780,7 @@ class LexicalStore:
                 ),
             )
         except sqlite3.Error as e:
+            _BM25_ERROR.error_class = classify_sqlite_error(e)
             self._note_query_failure(
                 e,
                 "lexical sidecar failed (%s); this process serves the in-process lexical paths",
