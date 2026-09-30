@@ -2086,6 +2086,10 @@ class VaultMutationCoordinator:
         self.poll_interval_seconds = poll_interval_seconds
         self.long_holder_seconds = long_holder_seconds
 
+    def current_thread_holds_boundary(self) -> bool:
+        """Whether this thread owns this vault/cell's exact mutation boundary."""
+        return _state_for(self.lock_path).owner_thread == threading.get_ident()
+
     @contextmanager
     def hold(
         self,
