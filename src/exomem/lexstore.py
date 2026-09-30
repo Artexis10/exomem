@@ -2100,10 +2100,63 @@ def search_bm25(
     if not tokens:
         return []
     store = get_store(vault_root)
+    _BM25_DECLINE.error_class = None
     result = store.search_bm25(tokens, k, scope, freshness, allowed_paths, repair)
     if repair:
         _admit_after_bounded_runtime_repair(vault_root, result)
     return result
+
+
+#: The SQLite error class behind this thread's last `search_bm25` decline, if
+#: an error caused it; read by `bm25_decline_reason`.
+_BM25_DECLINE = threading.local()
+
+
+def _catalogue_schema_current(vault_root: Path) -> bool | None:
+    """Read-only: is the sidecar's catalogue at the current schema? None when
+    that cannot be read now (absent, locked), which proves nothing."""
+    if not lexical_path(vault_root).exists():
+        return None
+    try:
+        conn = get_store(vault_root)._connect()
+    except sqlite3.Error:
+        return None
+    try:
+        conn.execute("PRAGMA busy_timeout=0")
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        return bool(row and row[0] == str(SCHEMA_VERSION)) and (
+            LexicalStore._pages_has_current_columns(conn)
+        )
+    except sqlite3.Error as error:
+        return False if classify_sqlite_error(error) == "rebuildable" else None
+    finally:
+        conn.close()
+
+
+def bm25_decline_reason(vault_root: Path) -> str:
+    """Why this thread's last `search_bm25` returned None.
+
+    * ``"retired"`` -- no sidecar serves this process: FTS5 unsupported, the
+      python backend, or a fatal error retired it.
+    * ``"not_current"`` -- the catalogue's schema is not the current version;
+      it serves nothing until the rebuild replaces it.
+    * ``"busy"`` -- a lock or busy result; ``"error"`` -- an unclassified
+      SQLite error.
+    * ``"lagging"`` -- the sidecar has not caught up with vault writes, or a
+      publication holds it.
+    """
+    if cache_token(vault_root) != "fts5":
+        return "retired"
+    error_class = getattr(_BM25_DECLINE, "error_class", None)
+    if error_class == "transient":
+        return "busy"
+    if error_class == "rebuildable":
+        return "not_current"
+    if error_class is not None:
+        return "error"
+    if _catalogue_schema_current(vault_root) is False:
+        return "not_current"
+    return "lagging"
 
 
 def search_bm25_result(
@@ -6738,6 +6791,7 @@ class LexicalStore:
                 ),
             )
         except sqlite3.Error as e:
+            _BM25_DECLINE.error_class = classify_sqlite_error(e)
             self._note_query_failure(
                 e,
                 "lexical sidecar failed (%s); this process serves the in-process lexical paths",

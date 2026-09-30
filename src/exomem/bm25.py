@@ -390,6 +390,62 @@ def unit_present(unit: TokenUnit, stems) -> bool:
 _tokenize = tokenize
 
 
+class LexicalSidecarUnavailable(RuntimeError):
+    """FTS5 owns the lexical lane but could not serve this query.
+
+    Raised instead of building the whole-corpus Python index: that index is
+    the memory the sidecar exists to avoid, and a transient must not buy it.
+    `reason` names the transient for the lane's status.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+#: Consecutive unclassified-SQLite-error declines after which the lane treats
+#: the sidecar as retired and lets the Python rung serve. Locks and sync lag
+#: are proven transient and never count; an unclassified error is not, and
+#: without a bound it would leave the lane declining for the process lifetime.
+UNKNOWN_ERROR_RETIREMENT = 5
+_UNKNOWN_ERROR_STREAKS: dict[str, int] = {}
+_UNKNOWN_ERROR_LOCK = threading.Lock()
+
+
+def _sidecar_decline(vault_root: Path) -> str | None:
+    """After the sidecar declined a query: the transient reason to decline the
+    lane with, or None when the Python rung may serve (the sidecar is retired,
+    its catalogue schema is not current, or unclassified errors hit the bound).
+    """
+    from . import lexstore
+
+    reason = lexstore.bm25_decline_reason(vault_root)
+    key = str(vault_root)
+    with _UNKNOWN_ERROR_LOCK:
+        if reason != "error":
+            _UNKNOWN_ERROR_STREAKS.pop(key, None)
+            streak = 0
+        else:
+            streak = _UNKNOWN_ERROR_STREAKS.get(key, 0) + 1
+            _UNKNOWN_ERROR_STREAKS[key] = streak
+    if reason in ("retired", "not_current"):
+        return None
+    if streak >= UNKNOWN_ERROR_RETIREMENT:
+        if streak == UNKNOWN_ERROR_RETIREMENT:
+            log.warning(
+                "bm25: lexical sidecar failed %d consecutive queries with unclassified "
+                "errors; treated as retired, the in-process rung serves until it recovers",
+                streak,
+            )
+        return None
+    return f"lexical_sidecar_{reason}"
+
+
+def _sidecar_served(vault_root: Path) -> None:
+    with _UNKNOWN_ERROR_LOCK:
+        _UNKNOWN_ERROR_STREAKS.pop(str(vault_root), None)
+
+
 class BM25Index:
     """Per-process BM25 corpus over KB markdown files.
 
@@ -620,11 +676,14 @@ class BM25Index:
         """Return top-k `(rel_path, bm25_score)` for `query`. Empty query → [].
 
         Backend ladder: the FTS5 lexical sidecar serves the lane when
-        available (posting-list cost instead of scoring all N docs); any
-        unavailability — kill switch, FTS5 absent, sidecar failure — falls
-        through to the in-process BM25Okapi rung below, which remains the
-        reference implementation and the `EXOMEM_LEXICAL_BACKEND=python`
-        target. Interface identical either way.
+        available (posting-list cost instead of scoring all N docs). An absent
+        sidecar — kill switch, FTS5 absent, a fatal failure — or a catalogue
+        whose schema is not current falls through to the in-process BM25Okapi
+        rung below, which remains the reference implementation and the
+        `EXOMEM_LEXICAL_BACKEND=python` target. A transiently unavailable
+        sidecar (locked, busy, lagging behind vault writes) raises
+        `LexicalSidecarUnavailable` instead; the next query retries FTS5.
+        Interface identical either way.
         """
         if not query.strip():
             return []
@@ -640,7 +699,11 @@ class BM25Index:
             repair=repair,
         )
         if indexed is not None:
+            _sidecar_served(vault_root)
             return indexed
+        declined = _sidecar_decline(vault_root)
+        if declined is not None:
+            raise LexicalSidecarUnavailable(declined)
         # Counted only where the python corpus actually serves: a sidecar-served
         # query touches nothing the reaper could reclaim here.
         self._hits += 1
@@ -676,11 +739,12 @@ class BM25Index:
 
         Returns the rung warmed: ``"fts5"``, ``"python"``, or ``"declined"``
         when FTS5 owns the lane but could not serve this pass (locked, busy,
-        or not yet synced). A declined warm builds nothing: the whole-corpus
-        Python index is the memory the sidecar exists to avoid, and a
-        transient must not buy it. The next warm retries through FTS5. Only
-        an absent sidecar (unsupported or retired) or the explicit python
-        backend warms the Python rung.
+        or lagging behind vault writes). A declined warm builds nothing: the
+        whole-corpus Python index is the memory the sidecar exists to avoid,
+        and a transient must not buy it. The next warm retries through FTS5.
+        The Python rung warms as `search` would serve it: an absent sidecar,
+        a catalogue whose schema is not current, or the explicit python
+        backend.
         """
         from . import lexstore
 
@@ -689,9 +753,11 @@ class BM25Index:
             # index in. The rank-bm25 corpus stays cold on purpose — not
             # holding N token lists resident is part of the backend's win;
             # a mid-process FTS5 retirement pays one rebuild, lazily.
+            _sidecar_served(vault_root)
             return "fts5"
-        if lexstore.cache_token(vault_root) == "fts5":
-            log.info("bm25: lexical sidecar busy or unsynced (scope=%s); warm declined", scope)
+        declined = _sidecar_decline(vault_root)
+        if declined is not None:
+            log.info("bm25: warm declined (%s, scope=%s)", declined, scope)
             return "declined"
         self._fresh_corpus(vault_root, scope, None)
         return "python"

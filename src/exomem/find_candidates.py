@@ -514,6 +514,17 @@ def collect_candidates(
                     }
         except lexstore.CatalogUnavailable:
             raise
+        except bm25.LexicalSidecarUnavailable as e:
+            # A transient: the other lanes answer, and the result is marked
+            # failed so it is never cached; the next query retries FTS5.
+            if capture_trace:
+                lane_statuses["bm25"] = {"status": "unavailable", "reason": e.reason}
+            log.info("BM25 lane declined (%s); ranking without it", e.reason)
+            record_degradation("bm25")
+            if failed_out is not None:
+                failed_out.append("bm25")
+            if timings is not None:
+                timings.skipped("bm25")
         except ImportError as e:
             if capture_trace:
                 lane_statuses["bm25"] = {
