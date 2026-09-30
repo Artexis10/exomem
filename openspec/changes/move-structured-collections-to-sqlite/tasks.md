@@ -40,7 +40,7 @@ Every phase also re-runs the existing Records and Planning test modules in file 
   - held `code` and `held_bytes`;
   - `collections.verified_through_txn` (A6).
 - [x] P1a.3 Placement: the `external-canonical` class in `reserved_paths` / `state_paths` and the placement inventory test. Red first: index rebuild and state migration never touch the store.
-- [ ] P1a.4 Type registry with built-ins only: `collection_types` / `collection_type_versions`, package-data `records.yaml` and `planning.yaml` with wire maps, and the named-validator registry (`planning.hierarchy.v1`). `semantic_profile` manifests resolve to the built-in types. Declared-type authoring is P4.
+- [x] P1a.4 Type registry with built-ins only: `collection_types` / `collection_type_versions`, package-data `records.yaml` and `planning.yaml` with wire maps, and the named-validator registry (`planning.hierarchy.v1`). `semantic_profile` manifests resolve to the built-in types. Declared-type authoring is P4.
 - [ ] P1a.5 Red: the generic writer contract on the store for both built-ins.
   - Append, replay, identity conflict, a natural-key race between two writers, and update with stale container and item guards.
   - Planning add, update and triage with hierarchy validation; create; revise; held, resume and discard.

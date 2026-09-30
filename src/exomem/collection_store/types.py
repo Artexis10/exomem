@@ -18,6 +18,9 @@ the closed shape that package data must already satisfy.
 from __future__ import annotations
 
 import functools
+import hashlib
+import json
+import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from importlib.resources import files
@@ -260,3 +263,42 @@ def type_for_profile(semantic_profile: str) -> CollectionType:
 def type_for_manifest(manifest: collections.CollectionManifest) -> CollectionType:
     """The type a parsed collection manifest belongs to."""
     return type_for_profile(manifest.semantic_profile)
+
+
+def register_builtins(conn: sqlite3.Connection, *, txn_id: int) -> None:
+    """Install shipped declarations inside the caller's mutation transaction.
+
+    Existing versions must match the shipped bytes. Type migrations and
+    declared-type authoring belong to P4; neither is silently performed here.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError("built-in registration requires a transaction")
+    for name, declared in builtin_types().items():
+        text = declaration_text(name)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        declaration = json.dumps(
+            yaml.safe_load(text), ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        )
+        current = conn.execute(
+            "SELECT current_version, builtin FROM collection_types WHERE name = ?", (name,)
+        ).fetchone()
+        if current is not None:
+            stored = conn.execute(
+                "SELECT declaration_json, declaration_hash FROM collection_type_versions "
+                "WHERE name = ? AND version = ?", (name, declared.version)
+            ).fetchone()
+            if (
+                tuple(current) != (declared.version, 1)
+                or stored is None
+                or tuple(stored) != (declaration, digest)
+            ):
+                raise CollectionTypeError(
+                    "COLLECTION_TYPE_VERSION_MISMATCH", "stored built-in differs from release", name
+                )
+            continue
+        conn.execute("INSERT INTO collection_types VALUES (?, ?, 1)", (name, declared.version))
+        conn.execute(
+            "INSERT INTO collection_type_versions VALUES (?, ?, ?, ?, 'compatible', ?)",
+            (name, declared.version, declaration, digest, txn_id),
+        )
