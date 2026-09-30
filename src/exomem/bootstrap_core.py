@@ -63,6 +63,19 @@ SECTIONS: dict[str, tuple[tuple[str, ...], str]] = {
     ),
 }
 
+#: A few words per section for the core's `sections` block: when to fetch it. The long
+#: form is `SECTIONS[name][1]`, served by `section='index'`.
+SECTION_HINTS: dict[str, str] = {
+    "authoring": "before writing a compiled note or semantic unit",
+    "entities": "vocabulary_workflow, entity types, relations, source kinds",
+    "records_planning": "recording an outcome or plan item; workflow contracts",
+    "routing": "picking a tool beyond the core table; find knobs",
+    "adoption": "first run, adopting a vault, knowledge packs",
+    "envelope": "the full delegation-envelope protocol",
+    "epistemics": "epistemic vocabulary, predictions",
+    "diagnostics_reading": "reading timings; compute policy",
+}
+
 #: Keys the core carries verbatim from the reference payload.
 _VERBATIM = ("contract_version", "profile", "governance", "workflow", "active_capabilities")
 
@@ -220,7 +233,8 @@ def _pointers(reference: dict) -> dict:
 
 
 def _envelope_digest(envelope: dict) -> dict:
-    """The envelope with its four-step protocol reduced to one line.
+    """The envelope with its four-step protocol reduced to one line, that line keeping
+    the unclassified-action rule and naming the section that holds the full protocol.
 
     Everything else is kept as served, including any live `ignored` report of stored
     classes this version does not know: the spec requires every class with its ceiling,
@@ -228,8 +242,9 @@ def _envelope_digest(envelope: dict) -> dict:
     """
     digest = {key: value for key, value in envelope.items() if key != "protocol"}
     digest["protocol"] = (
-        "name the action class first; intent above its ceiling is a proposal, never an act; "
-        "honour the disposition; record the outcome through triage"
+        "name the action class first; an unclassified action has no authority; "
+        "intent above its ceiling is a proposal, never an act; honour the disposition; "
+        "record the outcome through triage; full protocol: bootstrap(section=envelope)"
     )
     return digest
 
@@ -262,7 +277,10 @@ def project_core(reference: dict) -> dict:
     core["pointers"] = _pointers(reference)
     core["sections"] = {
         "how": "bootstrap(section=<name>); index lists; all = full reference",
-        **{name: size for name, size in sections_index(reference).items()},
+        **{
+            name: f"{size} B: {SECTION_HINTS[name]}"
+            for name, size in sections_index(reference).items()
+        },
     }
     for key in _PASSTHROUGH:
         if key in reference:

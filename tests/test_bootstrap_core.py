@@ -131,12 +131,23 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     ),
     "unclassified-action-has-no-authority": (
         prominence.CANON,
-        lambda core: "never an act" in core["engagement"]["envelope"]["protocol"],
+        lambda core: "unclassified action has no authority"
+        in core["engagement"]["envelope"]["protocol"],
+    ),
+    "envelope-protocol-points-to-its-section": (
+        prominence.CANON,
+        lambda core: "bootstrap(section=envelope)" in core["engagement"]["envelope"]["protocol"]
+        and "envelope" in core["sections"],
     ),
     "due-state-restraint": (
         prominence.CANON,
         lambda core: "silence beats bureaucracy" in core["write"]["due_state_handling"]
         and "never" in core["write"]["due_state_authority"],
+    ),
+    "workflow-loop-names-the-vocabulary-section": (
+        prominence.CANON,
+        lambda core: "vocabulary_workflow (bootstrap section entities)"
+        in " ".join(core["workflow"]["loop"]),
     ),
     "sections-index": (
         prominence.CANON,
@@ -231,6 +242,20 @@ def test_core_plus_sections_reconstruct_the_reference_payload(monkeypatch, level
         else:
             assert key in homes, f"{key} is in neither the core nor a section"
             assert sections[homes[key]][key] == value, f"{key} differs in section {homes[key]}"
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+def test_the_core_says_when_to_fetch_each_section(monkeypatch, surface):
+    """An agent that cannot tell what a section holds will not fetch it, and the rule
+    it would have carried is then never read. Each entry is its size and a few words."""
+    core = _bootstrap(monkeypatch, "balanced", surface)
+    index = bootstrap_core.sections_index(_bootstrap(monkeypatch, "balanced", surface, section="all"))
+    for name in bootstrap_core.SECTIONS:
+        entry = core["sections"][name]
+        assert isinstance(entry, str), name
+        assert entry.startswith(f"{index[name]} B: "), (name, entry)
+        hint = entry.split(": ", 1)[1]
+        assert 8 <= len(hint) <= 64, (name, hint)
 
 
 def test_an_unknown_section_names_the_accepted_ones(monkeypatch):

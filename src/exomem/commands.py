@@ -834,6 +834,7 @@ def op_bootstrap(
     differ from raw sources/evidence, and how Exomem differs from built-in AI
     memory. The payload is deterministic instruction plus local compute policy
     and product-surface metadata; it does not inspect or summarize vault content.
+    Compact is a core; its `sections` block lists the rest, fetched with `section`.
 
     Args:
         profile: "compact" (default), "full", "diagnostics", or "session".
@@ -909,6 +910,11 @@ def op_bootstrap(
     )
     if frozen_profile and section is not None:
         raise ValueError("bootstrap: section is not available on this surface profile")
+    # Where the compact core points for the vocabulary workflow's full contract: it is
+    # served on demand in a section, and a released profile keeps its published text.
+    vocabulary_workflow_home = (
+        " (bootstrap section entities)" if profile == "compact" and not frozen_profile else ""
+    )
     active_product_names = frozenset(active_descriptor.product_commands)
     # The recall contract opens with a line that names `activate_context`. Where the
     # surface does not export it (hosted), the filter below would drop the WHOLE recall
@@ -1687,7 +1693,7 @@ def op_bootstrap(
                 ),
                 "reason in the agent",
                 (
-                    "before saving, use vocabulary_workflow to resolve recurring identities "
+                    f"before saving, use vocabulary_workflow{vocabulary_workflow_home} to resolve recurring identities "
                     "and useful relationship meanings; enrich existing entities, and define "
                     "a missing type when existing types would distort the evidence. Keep "
                     "incidental names unpromoted; generic/no-edge/defer remain valid."
