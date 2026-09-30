@@ -98,8 +98,33 @@ def test_overlap_truncated_bodies_cannot_score_the_same_retained_prefix(
     assert "text_truncated" in caplog.text
 
 
-def test_overlap_queries_follow_two_committed_remember_bodies(vault, overlap_corpus):
+def test_overlap_long_body_split_without_truncation_keeps_distinct_tails(
+    vault, overlap_corpus
+):
+    _index, encoded, queries = overlap_corpus
+    prefix = "字" * (embeddings.MAX_UNSPACED_CHARS_PER_CHUNK * 2)
+    tails = ("Collections are authoritative.", "Relations determine compiler currency.")
+    for tail in tails:
+        corpus_aware._best_cosine_per_file(
+            vault, title="Written conclusion", body=prefix + tail
+        )
+    assert len(queries) == 2
+    assert not np.array_equal(queries[0], queries[1])
+    assert all(tail in "\n".join(encoded) for tail in tails)
+
+
+@pytest.mark.parametrize("sync_pending", [False, True])
+def test_overlap_queries_follow_two_committed_remember_bodies(
+    vault, overlap_corpus, monkeypatch, sync_pending
+):
     _index, _encoded, queries = overlap_corpus
+    if sync_pending:
+        monkeypatch.setattr(
+            embeddings, "upsert_after_write_status",
+            lambda _root, paths, **_k: embeddings.EmbeddingSyncStatus(
+                "degraded", "embedding_upsert_failed", len(paths)
+            ),
+        )
     for title, body in (
         ("Authoritative collections", "SQLite is authoritative for structured collections."),
         ("Compiler currency", "Compiler currency follows authored relations."),
@@ -159,11 +184,15 @@ def test_inline_remember_reports_skipped_overlap_in_returned_warnings(
     assert any("overlap advisory skipped" in warning for warning in result.warnings)
 
 
-def test_overlap_long_title_cannot_hide_different_written_bodies(vault, overlap_corpus):
+@pytest.mark.parametrize(
+    "title", ["shared " * 600, "字" * 600, "x" * 600],
+    ids=["spaced", "unspaced", "single-word"],
+)
+def test_overlap_long_title_cannot_hide_different_written_bodies(vault, overlap_corpus, title):
     _index, _encoded, queries = overlap_corpus
     for body in ("Collections are authoritative.", "Relations determine compiler currency."):
         assert corpus_aware._best_cosine_per_file(
-            vault, title="shared " * 600, body=body
+            vault, title=title, body=body
         ) == {}
     assert queries == []
 

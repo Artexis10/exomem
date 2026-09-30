@@ -59,6 +59,13 @@ def _skip_overlap(reason: str, *, strict: bool) -> dict[str, float]:
 def _require_complete_advisory_body(body: str, *, title: str = "") -> None:
     from . import embeddings
 
+    # The character splitter bounds body paragraphs only. An unspaced title
+    # is prepended unchanged, so it can consume the encoder's entire input.
+    if (
+        len(title.strip()) > embeddings.MAX_UNSPACED_CHARS_PER_CHUNK
+        and embeddings._needs_character_cap(title.strip())
+    ):
+        raise OverlapAdvisorySkipped("text_truncated")
     # The retrieval chunker intentionally drops long spaced paragraph tails.
     # A retained template prefix is not a query for the complete written note.
     for paragraph in body.split("\n\n"):
