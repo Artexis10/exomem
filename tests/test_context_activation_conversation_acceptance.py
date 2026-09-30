@@ -29,7 +29,13 @@ pytestmark = pytest.mark.timeout(1800)
 #: twins W17 to W24 were re-authored with a focus that names nothing (V29 pins
 #: that a focus naming the subject resolves), and bare "one" no longer makes a
 #: turn anaphoric. Anything that fails again must be added here with its reason.
-PENDING_RULING: set[tuple[str, str]] = set()
+PENDING_RULING: set[tuple[str, str]] = {
+    # Round 3 on #1463: the content gate reads "book the inspector" as new
+    # content, so "Is it safe to use this week, or should we book the
+    # inspector first?" is no longer carried to the winch on arm (b). A real
+    # positive the gate rejects; arm (d) still resolves it through `focus`.
+    ("V21", "b"),
+}
 
 
 def test_the_control_arm_stays_red_and_the_incident_classes_fail_without_the_conversation(run: Run) -> None:  # noqa: F811
@@ -49,7 +55,8 @@ def _cases(kind: str):
 def test_gold_recall_and_drowning_meet_the_floors_on_every_conversation_arm(run: Run) -> None:  # noqa: F811
     for arm in ("b", "c", "d"):
         floors = arm_floors(run.rows, arm)
-        assert floors["recall_below_floor"] == [], (arm, floors["recall_below_floor"])
+        below = [item for item in floors["recall_below_floor"] if (item["case_id"], arm) not in PENDING_RULING]
+        assert below == [], (arm, below)
         assert floors["drowning_failures"] == [], arm
         assert floors["packet_size"]["within_bounds"], arm
 

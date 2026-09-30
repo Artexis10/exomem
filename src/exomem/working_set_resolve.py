@@ -26,7 +26,7 @@ from typing import Any, NamedTuple
 
 from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .text_scripts import JAPANESE_PARTICLES, is_hiragana
-from .working_set_anaphora import is_anaphoric as _is_anaphoric
+from . import working_set_anaphora
 from .working_set_index import (
     RARE_TERM_MAX_ANCHORS,
     STOPWORDS,
@@ -305,11 +305,15 @@ class TurnAnalysis:
     #: Words the raw turn writes with a capital anywhere, a sentence start
     #: included, folded like the lexical terms. Empty when `cased_turn` is false.
     capitalised_anywhere: frozenset[str] = frozenset()
-    #: Does this turn lean on something said before, whatever its length? A
-    #: pronoun or possessive, a demonstrative, a shipped follow-up marker, an
-    #: ordinal followed by "one" or "option", or a referential cue
-    #: (`is_anaphoric`). Read only by the conversation carry, and only for a
-    #: turn whose own words reached no anchor.
+    #: Does this turn point back (`working_set_anaphora.points_back`): a
+    #: pronoun or possessive, a demonstrative, a follow-up marker, an ordinal
+    #: plus "one"/"option", a governed pointer or a referential cue?
+    points_back: bool = False
+    #: The turn's content words (`working_set_anaphora.content_words`). The
+    #: conversation carry runs only when every one occurs in earlier turns.
+    content_words: tuple[str, ...] = ()
+    #: `points_back` with no content word at all: the verdict without a
+    #: conversation to compare against.
     anaphoric: bool = False
 
 
@@ -383,13 +387,25 @@ def is_anaphoric(
     tokens: Sequence[str],
     *,
     referential_cue: bool = False,
-    breaks: frozenset[int] = frozenset(),
+    vocabulary: ReferentialVocabulary | None = None,
 ) -> bool:
-    """Does a turn lean on something said before? `working_set_anaphora`
-    holds the grammar; this passes it the shipped follow-up markers."""
-    return _is_anaphoric(
-        tokens, referential_cue=referential_cue, breaks=breaks, follow_up_markers=FOLLOW_UP_MARKERS
-    )
+    """Taken on its own, does the turn lean on something said before? It must
+    point back and bring no content word of its own (`working_set_anaphora`).
+    With a conversation, the carry asks instead whether its content words all
+    occur in the earlier turns (`working_set_conversation.may_carry`)."""
+    return working_set_anaphora.points_back(
+        tokens, referential_cue=referential_cue, follow_up_markers=FOLLOW_UP_MARKERS
+    ) and not working_set_anaphora.content_words(tokens, vocabulary=_vocabulary_words(vocabulary))
+
+
+def _vocabulary_words(vocabulary: ReferentialVocabulary | None) -> frozenset[str]:
+    """The vault's referential cue and filler words, which are never content."""
+    return _words_of_vocabulary(vocabulary if vocabulary is not None else shipped_vocabulary())
+
+
+@functools.lru_cache(maxsize=16)
+def _words_of_vocabulary(vocabulary: ReferentialVocabulary) -> frozenset[str]:
+    return frozenset(word for phrase in vocabulary.phrases for word in phrase.split()) | vocabulary.filler
 
 
 @dataclass(frozen=True, slots=True)
@@ -992,6 +1008,10 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
     # say what it is about.
     referential_cue = any(f" {phrase} " in token_text for phrase in vocabulary.phrases)
     referential = referential_cue and not _referential_residue(token_text, vocabulary)
+    pointing = working_set_anaphora.points_back(
+        tokens, referential_cue=referential_cue, follow_up_markers=FOLLOW_UP_MARKERS
+    )
+    content = working_set_anaphora.content_words(tokens, vocabulary=_vocabulary_words(vocabulary))
     return TurnAnalysis(
         text=text,
         tokens=tokens,
@@ -1007,9 +1027,9 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         run_breaks=_run_breaks(text, tokens),
         cased_turn=_casing_signal(turn),
         capitalised_anywhere=_capitalised_terms(turn, anywhere=True),
-        anaphoric=is_anaphoric(
-            tokens, referential_cue=referential_cue, breaks=_run_breaks(text, tokens)
-        ),
+        points_back=pointing,
+        content_words=content,
+        anaphoric=pointing and not content,
     )
 
 

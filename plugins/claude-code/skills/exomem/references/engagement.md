@@ -216,9 +216,11 @@ user's own words reached. Earlier turns and refs never reach an anchor by
 themselves: they strengthen one the turn or your `focus` already reached, or
 break a tie when exactly one competitor was named before
 (`generation.disambiguated_by`). A turn that points back ("is it still on
-track?") and names nothing is carried from the newest earlier user turn that
-named one subject; an ordinary turn that only happens to contain "it" or
-"that" is not.
+track?") and uses no word the earlier turns lack is carried from the newest
+earlier user turn that named one subject. A turn that brings in a new word
+("does it snow much in oslo?") is read as a new topic and is not carried, even
+when it also says "it"; pass `focus` when such a turn still means the earlier
+subject.
 
 Activation reads no attachment itself and runs no media model: only the names
 you put into `focus` count. Conversation text is used for that one call and

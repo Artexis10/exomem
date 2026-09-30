@@ -165,22 +165,13 @@ When none or two or more competitors carry `conversation`, the turn SHALL stay `
 
 ### Requirement: An anaphoric turn is carried from the newest conversation subject
 
-A turn SHALL be anaphoric when both of these hold:
+A turn SHALL be carried from the conversation only when all three of these hold:
 
-1. Its turn segment reaches no anchor by any worded contact kind.
-2. It speaks a cue from the effective referential vocabulary, or one of a closed, shipped anaphor set: third-person pronouns and possessives; "that", "this", "those", "these", "it"; the follow-up markers already shipped, except the bare pointers "one", "ones" and "other"; an ordinal followed by "one" or "option"; "the former" and "the latter". A bare pointer ("one", "ones", "other") counts as an anaphor only when a determiner ("the", "a", "an"), a demonstrative, an ordinal or "which" governs it ("that one", "the other one", "the second one", "which one"); a numeral use ("for one day", "no one") does not.
+1. **It resolves nothing of its own.** Its turn segment reaches no anchor by any worded contact kind.
+2. **It points back.** It speaks a cue from the effective referential vocabulary, or one of a closed, shipped set: third-person pronouns and possessives; "that", "this", "those", "these", "it"; the follow-up markers already shipped, except the bare pointers "one", "ones" and "other"; an ordinal followed by "one" or "option"; "the former" and "the latter"; an elliptical "what about …" or "how about …" opener. A bare pointer counts only when a determiner ("the", "a", "an"), a demonstrative, an ordinal or "which" governs it ("that one", "the other one", "which one"); a numeral use ("for one day", "no one") does not. Contractions are split first ("it's" is "it is"). A demonstrative that places a time ("this week", "these days") does not point back.
+3. **It brings no new content.** Every content word of the turn already occurs in the earlier turns the compiler reads. A content word is any word that is not a function word, a light verb, a pointing word, a number, a time word placed relative to now or to the thread ("last year", "next month", "the autumn"), a word of a closed, shipped generic task vocabulary (words for asking about an item's state, owner, decision, timing, cost, risk or outcome, such as "status", "due", "owner", "decide", "cost", "risk") or a word of the vault's referential vocabulary. Inflections are compared by their stems. One new content word is a topic switch, and the turn SHALL NOT be carried.
 
-   A word of that set counts only where it refers. Contractions are split first, so "it's still on track?" and "that's what I meant" are read as the pronoun they carry. These closed grammatical classes do NOT count:
-
-   - an expletive or dummy "it": weather and clock time ("it's raining", "what time is it"), an extraposed subject clause ("is it possible to…", "it's hard to say…", "does it matter if…"), a raising verb ("it seems that…", "it turns out…", "it looks like…"), "it takes … to", and an instruction about the answer's style ("make it shorter");
-   - an "it" whose antecedent is a noun phrase in an earlier clause of the same turn ("Let's switch to the grocery list, can you make it shorter?");
-   - a complementiser or relative "that": after a verb or adjective of saying, thinking or knowing ("I think that we should…", "I'm sure that…"), before a subject pronoun, or after a noun of the same turn ("the recipe that my aunt sent");
-   - temporal deixis: "this", "these", "next", "last" or "earlier" before a time word ("this week", "these days", "next week", "earlier today"), "the other day" and "on the other hand";
-   - a closing acknowledgement ("thanks, that's all", "that's fine").
-
-   An elliptical opener ("what about …", "how about …") is anaphoric: it reuses the previous question.
-
-Length is not a criterion: an anaphoric turn MAY carry any number of other words.
+Length is not by itself a criterion: a long turn is carried when its words were already spoken earlier in the conversation.
 
 **Precedence.** The conversation carry SHALL sit at one fixed place in the order in which activation decides a turn that its words did not resolve. That order builds on the keyless continuity, referential recency and follow-up contracts as they stand on `main` (context-activation-continuity, and memory-loop in `close-memory-loop`), and SHALL NOT change any of them. For each request, the first rule below that decides it wins:
 
@@ -226,7 +217,7 @@ A refs-only conversation SHALL NOT carry: a ref says what was read, not what "it
 
 #### Scenario: The conversation carry precedes the retrieval carry
 
-- **WHEN** an anaphoric turn reaches no anchor, its incidental words would admit one dominant recall hit under the retrieval carry, and an earlier user entry resolves a different anchor
+- **WHEN** a turn that points back reaches no anchor, its words would admit one dominant recall hit under the retrieval carry, an earlier user entry already spoke those words, and that entry resolves a different anchor
 - **THEN** the earlier entry's anchor is carried with `generation.carried_by = "conversation"`
 - **AND** the recall hit is not served
 
@@ -240,10 +231,10 @@ A refs-only conversation SHALL NOT carry: a ref says what was read, not what "it
 - **WHEN** a turn says "Cheers, there is plenty of chat for one day." and an earlier user entry resolved an anchor
 - **THEN** the turn is not anaphoric and nothing is carried
 
-#### Scenario: An ordinary pronoun-bearing turn is not carried
+#### Scenario: A turn with new content is a topic switch
 
-- **WHEN** an earlier user entry resolved an anchor, and the turn is "is it possible to install Python 3.13 on my laptop?", "I think that we should buy groceries on the way home" or "the other day I went hiking"
-- **THEN** the turn is not anaphoric and nothing is carried
+- **WHEN** an earlier user entry resolved an anchor, and the turn is "does it snow much in oslo in march", "is it possible to install Python 3.13 on my laptop?" or "it's been a long day"
+- **THEN** the turn brings content words the earlier turns lack, and nothing is carried from the conversation
 
 #### Scenario: A contracted anaphor is carried
 

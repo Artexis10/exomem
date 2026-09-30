@@ -2383,15 +2383,16 @@ def _compile_packet(
 
     # The conversation carry, fifth on the ladder: after the recency and
     # follow-up carries above (each returned if it decided), before the
-    # retrieval carry below. An anaphoric turn whose own words reached nothing
-    # is carried from the newest earlier USER turn that named a subject, so it
-    # is never served an unrelated recall hit that happens to match its
-    # incidental words. Two subjects in that turn abstain `ambiguous` and stop
-    # the ladder; nothing named falls through.
+    # retrieval carry below. A turn whose own words reached nothing, that
+    # points back and brings no content word the earlier turns lack
+    # (`may_carry`), is carried from the newest earlier USER turn that named a
+    # subject. A turn with new content is a topic switch and falls through.
+    # Two subjects in that turn abstain `ambiguous` and stop the ladder;
+    # nothing named falls through.
     if (
         not anchor
         and segments is not None
-        and analysis.anaphoric
+        and working_set_conversation.may_carry(analysis, segments)
         and resolution.status == "unresolved"
         and not any(
             set(item.evidence) & working_set_resolve.WORDED_CONTACT_KINDS

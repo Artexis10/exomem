@@ -321,7 +321,24 @@ def apply(
             merged[anchor_id], evidence=merged[anchor_id].evidence | {"conversation"}
         )
     ordered = sorted(merged.values(), key=resolve_module._candidate_order)
-    return tuple(ordered[: resolve_module.MAX_CANDIDATES]), origins, tuple(entry_candidates)
+    return tuple(ordered[: resolve_module.MAX_CANDIDATES]), origins, entry_candidates
+
+
+def may_carry(analysis: Any, segments: Analyzed) -> bool:
+    """Ruling C1 on #1463, (b) and (c): the turn points back, and every
+    content word it has already occurs in the earlier turns read here. One new
+    content word is a topic switch, which is never carried. Linear in the
+    turn's words plus the earlier entries' words."""
+    if not analysis.points_back:
+        return False
+    if not analysis.content_words:
+        return True
+    from . import working_set_anaphora
+
+    earlier = working_set_anaphora.mentioned(
+        token for _entry, entry_analysis in segments.entries for token in entry_analysis.tokens
+    )
+    return all(working_set_anaphora.forms(word) & earlier for word in analysis.content_words)
 
 
 @dataclass(frozen=True, slots=True)
