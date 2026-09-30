@@ -27,25 +27,25 @@ Every phase also re-runs the existing Records and Planning test modules in file 
 
 ## P1a. Store core, built-in writer, query and governance (dark)
 
-- [ ] P1a.1 Red: schema contract tests.
+- [x] P1a.1 Red: schema contract tests.
   - STRICT tables.
   - Append-only triggers abort UPDATE and DELETE on `txns`, `audit_effects`, `item_versions`, `item_sources`, `collection_manifests` and `collection_type_versions`.
   - The natural-key partial unique index and `view_path` uniqueness.
   - Readiness refuses SQLite < 3.38 and a state root where WAL does not take effect.
-- [ ] P1a.2 `collection_store/schema.py` (DDL, `store_meta.schema_version` 1, forward migrations) and `collection_store/connection.py` (pragmas, one writer connection under the lease, read connections).
-- [ ] P1a.2b Red, then schema support for the amendments:
+- [x] P1a.2 `collection_store/schema.py` (DDL, `store_meta.schema_version` 1, forward migrations) and `collection_store/connection.py` (pragmas, one writer connection under the lease, read connections).
+- [x] P1a.2b Red, then schema support for the amendments:
   - `store_meta` `instance_id`, lineage, forks, `commit_seq`, `store_head_hash` and `last_published_replica_sha256` (A3, A4);
   - `txns.commit_seq` / `store_head_hash`, unique and chained, with a fork test using colliding `txn_id` values;
   - `projection_state` published and pending hash and version plus stat identity (A7);
   - held `code` and `held_bytes`;
   - `collections.verified_through_txn` (A6).
-- [ ] P1a.3 Placement: the `external-canonical` class in `reserved_paths` / `state_paths` and the placement inventory test. Red first: index rebuild and state migration never touch the store.
+- [x] P1a.3 Placement: the `external-canonical` class in `reserved_paths` / `state_paths` and the placement inventory test. Red first: index rebuild and state migration never touch the store.
 - [ ] P1a.4 Type registry with built-ins only: `collection_types` / `collection_type_versions`, package-data `records.yaml` and `planning.yaml` with wire maps, and the named-validator registry (`planning.hierarchy.v1`). `semantic_profile` manifests resolve to the built-in types. Declared-type authoring is P4.
 - [ ] P1a.5 Red: the generic writer contract on the store for both built-ins.
   - Append, replay, identity conflict, a natural-key race between two writers, and update with stale container and item guards.
   - Planning add, update and triage with hierarchy validation; create; revise; held, resume and discard.
   - Receipts pass `mutation_terminal.valid_record_receipt`. Golden wire tests show `record_memory` and `plan_memory` arguments, receipts, codes and inspect shapes byte-equal between file and store mode.
-- [ ] P1a.6 Guards: generation and row-version tokens (§3), 64-hex and domain-separated. `payload_hash` golden vectors match today's `_payload_hash`.
+- [x] P1a.6 Guards: generation and row-version tokens (§3), 64-hex and domain-separated. `payload_hash` golden vectors match today's `_payload_hash`.
 - [ ] P1a.7 Transactions: one `BEGIN IMMEDIATE` per mutation. `txns` is inserted last with its hash chain, together with `audit_effects`, `item_versions`, `item_sources` and pending `projection_state` in the same transaction. No `log.md` write in store mode.
 - [ ] P1a.8 Request identity: `txns.request_id`, `request_hash` and `receipt_json`. Red first: a commit followed by a lost ledger write, retried, gives one transition; the same identity with a different request refuses.
 - [ ] P1a.9 Governance precommit inside the transaction (red first: a refusal rolls back and the governance receipt claims no commit). Policy is resolved once per operation, reusing #1457.
