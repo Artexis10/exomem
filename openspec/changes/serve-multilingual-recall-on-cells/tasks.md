@@ -13,6 +13,6 @@
 ## 3. Verification and rollout
 
 - [x] 3.1 Scoped suites green: recall switch, embedding migration, embedding index fingerprint, container distribution, and every test touching cell mode or the re-embed job
-- [ ] 3.2 The hosted and cloud images build locally; the hosted gate loads bge-base at 768 and the cloud gate loads bge-m3 at 1024
+- [x] 3.2 The hosted and cloud images build locally; the hosted gate loads bge-base at 768 and the cloud gate loads bge-m3 at 1024
 - [ ] 3.3 Released; the owner cell runs the release, re-embeds to bge-m3 and cuts over; the cell's peak memory during the build and resident memory after it are recorded against its limit
 - [ ] 3.4 The cloud parity smoke is re-run on the owner cell against the personal server, and the result is recorded

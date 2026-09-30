@@ -31,6 +31,6 @@ The job runs on a cell. `preload_serving_encoder` already does nothing on a cell
 - **Dense recall is off during an existing cell's re-embed.** Lexical, keyword, graph and temporal lanes serve. Doctor and `exomem status` report progress and ETA. The only existing cloud cell is the owner's.
 - **Writes during the gap log warnings.** Each write's encode soft-fails and its derived-drain receipt is retried, with a warning each time, until the cutover builds the page. That is noise, not loss.
 - **The refused 768-d matrix can stay resident** during the gap wherever warm-up or an audit loads it. It is never resident alongside the new one: the index is replaced at the cutover.
-- **The kill switch on a cell** (`EXOMEM_RECALL_REEMBED=off`) keeps dense recall off. The cloud image cannot fall back to bge-base on its own.
-- **The cloud image grows** by the bge-m3 artefact (~0.55 GB), and the release build fetches a release asset.
+- **The kill switch on a cell** (`EXOMEM_RECALL_REEMBED=off`) keeps dense recall off. The cloud image also carries bge-base, inherited from the hosted image, so before the cutover `EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5` on a cell serves its old sidecar again.
+- **The cloud image grows** by the bge-m3 artefact (~0.55 GB; 1.53 to 2.22 GB measured), and the release build fetches a release asset.
 - **Rolling back** to an older cloud image after the cutover leaves the cell with a bge-m3 sidecar it refuses. Older images neither carry the bge-m3 artefact nor re-embed on a cell, so dense recall is off until the next roll forward. Until the first start after the cutover retires it, the bge-base sidecar is still on disk; removing `.embeddings.active` then lets an older image serve it.
