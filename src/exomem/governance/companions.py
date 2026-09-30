@@ -240,7 +240,13 @@ def _dataset_cards(vault_root, artifact_path: str):
             continue
         if (
             marker is not None
-            and frontmatter.get("type") == "dataset"
+            and (
+                frontmatter.get("type") == "dataset"
+                or (
+                    frontmatter.get("type") == "source"
+                    and frontmatter.get("source_type") == "dataset-export"
+                )
+            )
             and frontmatter.get("data_file") == artifact_path
         ):
             cards.append(
