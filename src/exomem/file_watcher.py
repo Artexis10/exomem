@@ -39,7 +39,7 @@ import stat
 import threading
 import time
 import weakref
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -466,6 +466,74 @@ def publication_intent_deadline(intent: _PublicationIntent) -> float | None:
         if intent.disposition != "active":
             return None
         return intent.deadline
+
+
+#: Phases in which a governed writer may already have renamed its staged bytes
+#: into place. `prepared` precedes the first rename, so the AFTER bytes on disk
+#: then are not the writer's.
+_INSTALLING_OR_LATER = frozenset({"installing", "installed", "postpublish_verified"})
+
+
+def inflight_publications_explain(
+    vault_root: Path,
+    candidates: Mapping[str, tuple[int, int] | None],
+) -> set[str]:
+    """Vault-relative paths whose sampled bytes are an in-flight governed write's.
+
+    `candidates` maps a vault-relative POSIX path to the `(mtime_ns, size)` a
+    caller sampled from disk (None for a path absent there). A path is
+    explained only when all of these hold at once:
+
+    * an outstanding publication intent names it -- registered before the
+      writer's first rename, not yet expired, aborted or superseded -- and
+      the writer has begun installing (a `prepared` intent explains nothing);
+    * the file on disk now is byte-for-byte the content the writer staged:
+      same SHA-256 and size, read through one bounded, stable descriptor;
+    * that file is the one the caller sampled: same mtime and size.
+
+    So a foreign edit on the same path while the write is in flight -- even
+    one of identical size -- explains nothing, and neither does a write whose
+    publication failed. The one case it cannot separate is a foreign writer
+    installing exactly the governed writer's bytes, which is not a difference.
+    """
+    root = _canon_root(vault_root)
+    now = time.monotonic()
+    notifications: list[tuple[_PublicationIntent, list[_PublicationObservation]]] = []
+    pending: list[tuple[str, _PublicationIntent, tuple[int, int]]] = []
+    with _SUPPRESS_LOCK:
+        for rel, sampled in candidates.items():
+            if sampled is None:
+                continue
+            intent = _PUBLICATION_INTENTS.get((root, rel))
+            if intent is None:
+                continue
+            expired = _expire_publication_intent_locked(intent, now)
+            if expired:
+                notifications.append((intent, expired))
+            if intent.disposition == "active" and intent.phase in _INSTALLING_OR_LATER:
+                pending.append((rel, intent, sampled))
+    for intent, observers in notifications:
+        _notify_publication_observers(observers, intent, intent.disposition)
+    explained: set[str] = set()
+    for rel, intent, (sampled_mtime_ns, sampled_size) in pending:
+        if sampled_size != intent.size:
+            continue
+        proof = _bounded_descriptor_digest(Path(root) / rel, intent.size)
+        if (
+            proof is None
+            or proof[0] != intent.content_hash
+            or proof[1] != sampled_mtime_ns
+            or proof[2] != sampled_size
+        ):
+            continue
+        with _SUPPRESS_LOCK:
+            # Still the same token, and not failed while the file was read. A
+            # token that succeeded meanwhile published these exact bytes.
+            if _PUBLICATION_INTENTS.get(intent.key) is intent and (
+                intent.disposition in {"active", "succeeded"}
+            ):
+                explained.add(rel)
+    return explained
 
 
 def begin_publication_installation(intents: Iterable[_PublicationIntent]) -> None:
