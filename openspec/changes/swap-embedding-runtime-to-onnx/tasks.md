@@ -86,6 +86,19 @@
   - Found on 2026-09-28: the owner cell's first index build over a 3.6 GB vault
     peaked above 1.2 GiB against a 1536 MiB limit. The peak was the build's working
     set, not the model, so this is a density measure, not the fix for that peak.
+  - Measured on 2026-09-30 with bge-m3 int8, ORT 1.27.0, and 1/2/3 independent
+    laptop processes: product-path total PSS 643/1265/1886 MiB (additional
+    processes 622/621 MiB). Offline-optimized ORT loaded by path with
+    `session.use_memory_mapped_ort_model=1`,
+    `session.use_ort_model_bytes_for_initializers=1`, and
+    `session.disable_prepacking=1`, with load-time optimization disabled,
+    used 637/966/1295 MiB (additional processes 329/328 MiB), sharing 310 MiB
+    of resident read-only model pages; private anonymous memory remained
+    327 MiB per process. All successful variants were bit-identical on the
+    probe's three short texts (max absolute difference 0, minimum cosine
+    0.9999999999999998). External ONNX data without prepacking also shared
+    pages (additional processes 332/331 MiB); Python mmap-buffer input was
+    rejected. See `scripts/shared_weights_probe.py` for the repeatable probe.
 
 ## 6. Verify
 
