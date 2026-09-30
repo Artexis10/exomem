@@ -27,7 +27,7 @@ def test_generic_client_can_discover_validate_create_inspect_and_append_from_emp
 
     _empty_vault(tmp_path)
 
-    bootstrap = op_bootstrap(tmp_path)
+    bootstrap = op_bootstrap(tmp_path, section="all")
     assert bootstrap["records"]["agent_workflow"] == [
         "describe",
         "validate",

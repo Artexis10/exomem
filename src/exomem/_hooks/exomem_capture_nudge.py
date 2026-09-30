@@ -134,15 +134,24 @@ REMINDER = (
 )
 
 
+#: The short capture check, sent on every fire after a session's first (which carries
+#: the full `REMINDER`, once, and again after a compaction). The full doctrine is in
+#: the served core and in `REMINDER`; a fire that repeats it dozens of times in one
+#: session only spends context. Keeps the incident rules by name.
+REMINDER_SHORT = (
+    "[Exomem capture check] Capture a durable decision, outcome or stable fact per live "
+    "policy: distil, no transcripts; replace_memory supersedes a contradicted conclusion; "
+    "stated intent -> Planning/plan_memory, observed outcome -> Records/record_memory; "
+    "transient code/test/CI stays out. Nothing durable: stop."
+)
+
 #: The episode ask. Its own constant, so `REMINDER`'s bytes (and every pin on
 #: them) stay exactly as they were. `{key}` is the session's episode key.
 EPISODE_ASK = (
-    "[Exomem episode check] Several substantive turns have passed since this "
-    "session's last episode record. If the conversation reached a decision or a "
-    'stopping point, call episode_memory once with action="record", '
-    'episode="{key}", a one-line subject and summary, and short worked_on, decided '
-    "and open items; add said only for a user statement worth keeping verbatim. "
-    "Distil; no transcript. If nothing durable happened, do nothing."
+    "[Exomem episode check] If the conversation reached a decision or a stopping point, "
+    'call episode_memory once: action="record", episode="{key}", a one-line subject and '
+    "summary, short worked_on, decided and open items; said only for a user statement worth "
+    "keeping verbatim. Distil; no transcript. Otherwise do nothing."
 )
 #: The candidate-coverage ask (task 4.1), with its own prefix. `{key}` is the
 #: episode whose candidates the session prepared, `{next}` its ledger's next step.
@@ -278,10 +287,19 @@ def _hook_client() -> str:
 
 
 def _hook_home() -> Path:
-    explicit = os.environ.get("EXOMEM_HOOK_HOME")
-    if explicit:
-        return Path(explicit).expanduser()
-    return Path.home() / (".codex" if _hook_client() == "codex" else ".claude")
+    """The client's state home. Mirrors `resolve_home` in
+    `exomem_continuation_checkpoint.py` exactly (a standalone script cannot import
+    its sibling): the checkpoint hook clears this hook's stamps under that home on a
+    compaction, so the two MUST resolve alike or the re-arm misses. Pinned by
+    `tests/test_nudge_diet.py::test_every_hook_resolves_its_home_the_way_the_checkpoint_does`.
+    """
+    env = os.environ
+    shared = env.get("EXOMEM_HOOK_HOME")
+    if shared:
+        return Path(shared).expanduser()
+    if _hook_client() == "codex":
+        return Path(env.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+    return Path(env.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
 
 
 def _content_blocks(msg: dict) -> list[dict]:
@@ -1012,9 +1030,12 @@ def main() -> int:
     if not ok:  # fired recently this session — keep cost bounded
         return 0
 
+    # The full doctrine once per session (the stamp is cleared on compaction, which
+    # rewrites the context it lived in); every later fire is the short check.
+    first_fire = not stamp.exists()
     _touch(stamp)
     _log(assistant_text)
-    print(json.dumps({"decision": "block", "reason": REMINDER}))
+    print(json.dumps({"decision": "block", "reason": REMINDER if first_fire else REMINDER_SHORT}))
     return 0
 
 

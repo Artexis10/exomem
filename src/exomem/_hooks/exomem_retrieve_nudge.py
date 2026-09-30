@@ -106,16 +106,17 @@ import urllib.request
 from pathlib import Path
 
 REMINDER = (
-    "[Exomem retrieval check] Before answering: if this prompt touches a topic your "
-    "Exomem knowledge base might hold — a project, a past decision, a domain you've taken "
-    "notes on, or a 'what did I conclude / have I looked at' question — run a quiet "
-    "`ask_memory` only if recent conversation context does not already cover it, then fold "
-    "any hits into the answer (cite them). Do not repeat a KB search just because this "
-    "reminder appears again; reuse fresh KB context until the topic changes or the "
-    "answer needs more evidence. The KB is the source of truth for prior conclusions; "
-    "a miss means 'not found in what I searched,' not 'doesn't exist.' If the prompt "
-    "plainly has no KB bearing (chit-chat, status/control messages, or a fresh task "
-    "with no prior notes), skip silently."
+    "[Exomem retrieval check] If this prompt may touch prior knowledge and recent context "
+    "lacks it, run a quiet `ask_memory` and cite hits; the KB is the source of truth for "
+    "prior conclusions, a miss is not found in that scope. Don't repeat a search as this "
+    "reminder recurs; reuse fresh KB context. Chit-chat, control, fresh task: skip."
+)
+#: What `maximal` gets on every prompt after the session's first: its contract is recall
+#: before every substantive turn, so it is never silent, but it need not repeat the
+#: paragraph above. `balanced` and `light` stay silent between reminders.
+REMINDER_POINTER = (
+    "[Exomem retrieval check] Recall first: `ask_memory` or `activate_context` with the "
+    "turn; skip chit-chat or when recent context already covers it."
 )
 
 # Inject-mode routing-stub block: header + up to 3 `- path (type, updated)` lines,
@@ -423,10 +424,19 @@ def _hook_client() -> str:
 
 
 def _hook_home() -> Path:
-    explicit = os.environ.get("EXOMEM_HOOK_HOME")
-    if explicit:
-        return Path(explicit).expanduser()
-    return Path.home() / (".codex" if _hook_client() == "codex" else ".claude")
+    """The client's state home. Mirrors `resolve_home` in
+    `exomem_continuation_checkpoint.py` exactly (a standalone script cannot import
+    its sibling): the checkpoint hook clears this hook's stamps under that home on a
+    compaction, so the two MUST resolve alike or the re-arm misses. Pinned by
+    `tests/test_nudge_diet.py::test_every_hook_resolves_its_home_the_way_the_checkpoint_does`.
+    """
+    env = os.environ
+    shared = env.get("EXOMEM_HOOK_HOME")
+    if shared:
+        return Path(shared).expanduser()
+    if _hook_client() == "codex":
+        return Path(env.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+    return Path(env.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
 
 
 def _prompt(data: dict) -> str:
@@ -1766,6 +1776,33 @@ def main() -> int:
         return 0
 
     session_id = str(data.get("session_id") or data.get("sessionId") or "")
+    if mode == _OFF_MODE:
+        # Reminder-only: the full reminder once per session (the checkpoint hook
+        # clears the marker on compaction, which rewrites the context it lived in).
+        # `maximal` follows it with a pointer on every later prompt; the other
+        # levels stay silent. The client-wide cooldown still applies to the FULL
+        # reminder, so a second tab opened inside the window does not repeat what
+        # another session was just told; that session stays eligible and is reminded
+        # once the window passes.
+        reminded_ok, reminded = _cooldown_ok(session_id, 10**9)
+        global_ok, global_stamp = _global_cooldown_ok(global_cooldown)
+        if reminded_ok:
+            if not global_ok:
+                return 0
+            text = REMINDER
+        elif _prominence() == "maximal":
+            text = REMINDER_POINTER
+        else:
+            return 0
+        _touch(reminded)
+        if text == REMINDER and global_cooldown > 0:
+            _touch(global_stamp)
+        _log(prompt, "off", 0)
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": text,
+        }}))
+        return 0
     ok, stamp = _cooldown_ok(session_id, cooldown)
     # Already nudged recently this session — keep it quiet. Except a
     # referential prompt (working-set mode only, see above): its packet is the

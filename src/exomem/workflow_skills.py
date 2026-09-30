@@ -179,6 +179,12 @@ def validate_contract_projection(
         return
     skill_md = Path(skill_dir) / "SKILL.md"
     text = skill_md.read_text(encoding="utf-8")
+    if core:
+        # The core skill keeps the canonical contract in the reference it ships beside
+        # SKILL.md (`shrink-bootstrap`), so the always-loaded skill body stays small.
+        reference = Path(skill_dir) / "references" / "semantic-authoring.md"
+        if reference.is_file():
+            text += reference.read_text(encoding="utf-8")
     concise = semantic_authoring.render_concise()
     if text.count(concise) != 1:
         raise ValueError(

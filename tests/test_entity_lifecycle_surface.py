@@ -728,7 +728,7 @@ def test_bootstrap_carries_capability_honest_bounded_entity_cadence(
     ordinary_mode: str,
 ) -> None:
     monkeypatch.setenv("EXOMEM_PROMINENCE", level)
-    payload = commands.op_bootstrap(tmp_path)
+    payload = commands.op_bootstrap(tmp_path, section="all")
     lifecycle = payload["entity_registry"]["lifecycle"]
 
     assert lifecycle["available"] is True
@@ -780,7 +780,7 @@ def test_bootstrap_skips_recurrence_when_category_read_is_not_callable(tmp_path:
         product_commands=("bootstrap", "ask_memory"),
     )
     with active_surface(descriptor):
-        payload = commands.op_bootstrap(tmp_path)
+        payload = commands.op_bootstrap(tmp_path, section="all")
 
     lifecycle = payload["entity_registry"]["lifecycle"]
     assert lifecycle == {
@@ -809,7 +809,7 @@ def test_open_registry_projection_reports_leaf_folder_and_family(tmp_path: Path)
 
     community = next(
         item
-        for item in commands.op_bootstrap(tmp_path)["entity_registry"]["types"]
+        for item in commands.op_bootstrap(tmp_path, section="all")["entity_registry"]["types"]
         if item["id"] == "community"
     )
 
@@ -1011,7 +1011,7 @@ def test_hookless_client_spends_one_ordinary_read_and_one_general_recheck(
     for index, (signal, incidental) in enumerate(zip(positive, twin, strict=True)):
         _note(tmp_path, index, f"{signal}\n\n{incidental}")
 
-    lifecycle = commands.op_bootstrap(tmp_path)["entity_registry"]["lifecycle"]
+    lifecycle = commands.op_bootstrap(tmp_path, section="all")["entity_registry"]["lifecycle"]
     route = lifecycle["ordinary_read"]["route"]["arguments"]
     ordinary_remaining = lifecycle["ordinary_read"]["maximum_per_session"]
     general_remaining = lifecycle["general_mutation_recheck"]["maximum_per_session"]
@@ -1081,7 +1081,7 @@ def test_hookless_client_spends_one_ordinary_read_and_one_general_recheck(
 
 
 def test_three_batch_and_nine_batch_carrier_budgets_are_exact(tmp_path: Path) -> None:
-    lifecycle = commands.op_bootstrap(tmp_path)["entity_registry"]["lifecycle"]
+    lifecycle = commands.op_bootstrap(tmp_path, section="all")["entity_registry"]["lifecycle"]
 
     def journey(total_batches: int) -> tuple[int, int, bool, int]:
         mutations = 0
