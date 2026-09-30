@@ -44,7 +44,10 @@ Every phase also re-runs the existing Records and Planning test modules in file 
 - [ ] P1a.5 Red: the generic writer contract on the store for both built-ins.
   - Append, replay, identity conflict, a natural-key race between two writers, and update with stale container and item guards.
   - Planning add, update and triage with hierarchy validation; create; revise; held, resume and discard.
-  - Receipts pass `mutation_terminal.valid_record_receipt`. Golden wire tests show `record_memory` and `plan_memory` arguments, receipts, codes and inspect shapes byte-equal between file and store mode.
+  - Receipts pass `mutation_terminal.valid_record_receipt`. Golden wire tests compare `record_memory` and `plan_memory` between file and store mode (ruled 2026-09-30, following `specs/records/spec.md` "parity in shape"):
+    - byte-equal: public arguments, field names, markers, operations and error codes;
+    - normalised before comparison: the hash values §3 and §8 C1–C3 deliberately re-derive (`before_item_hash`, `after_item_hash`, `before_container_hash`, `after_container_hash`, `source_versions[].hash`), plus nondeterministic identities and timestamps;
+    - asserted separately as store-only additions: the §8 C4/C5 `inspect.projection` summary and projection diagnostics.
 - [x] P1a.6 Guards: generation and row-version tokens (§3), 64-hex and domain-separated. `payload_hash` golden vectors match today's `_payload_hash`.
 - [ ] P1a.7 Transactions: one `BEGIN IMMEDIATE` per mutation. `txns` is inserted last with its hash chain, together with `audit_effects`, `item_versions`, `item_sources` and pending `projection_state` in the same transaction. No `log.md` write in store mode.
 - [ ] P1a.8 Request identity: `txns.request_id`, `request_hash` and `receipt_json`. Red first: a commit followed by a lost ledger write, retried, gives one transition; the same identity with a different request refuses.
