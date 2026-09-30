@@ -53,6 +53,7 @@ def test_the_tool_description_states_bounds_attachments_origin_and_no_attachment
 
 def test_the_scaffold_line_names_conversation_and_attachments_generically() -> None:
     text = SCAFFOLD_SKILL.read_text(encoding="utf-8")
-    line = next(line for line in text.splitlines() if "`activate_context` with the turn verbatim" in line)
-    assert "conversation" in line and "focus" in line and "attachment" in line
-    assert "verbatim" in line
+    line = next(line for line in text.splitlines() if "also pass `conversation`" in line)
+    assert "focus" in line and "attachment" in line and "never rewrite the turn" in line
+    # The carrier line itself is untouched: it is pinned byte for byte elsewhere.
+    assert "call `activate_context` with the turn verbatim; on `ambiguous`, call again with `anchor`." in text

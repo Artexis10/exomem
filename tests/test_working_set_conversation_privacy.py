@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -53,6 +52,7 @@ def test_no_state_file_holds_the_conversation_or_its_hash(
 ) -> None:
     logs = tmp_path / "logs"
     monkeypatch.setenv("EXOMEM_LOG_DIR", str(logs))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
     monkeypatch.setattr(query_log, "_disabled", lambda: False)
     text = f"we agreed the {SENTINEL} wording before the Tidewater Grant call"
     packet = commands.op_activate_context(
@@ -69,7 +69,7 @@ def test_no_state_file_holds_the_conversation_or_its_hash(
         hashlib.sha256(value.encode("utf-8")).hexdigest()
         for value in (text, f"{SENTINEL} focus", SENTINEL, HUB_PATH)
     }
-    state_root = Path(os.environ["XDG_STATE_HOME"])
+    state_root = tmp_path / "xdg-state"
     files = _all_files(state_root, logs, cvault)
     assert files
     for path in files:
