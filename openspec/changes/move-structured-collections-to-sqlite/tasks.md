@@ -44,7 +44,7 @@ Every phase also re-runs the existing Records and Planning test modules in file 
 - [ ] P1a.5 Red: the generic writer contract on the store for both built-ins.
   - Append, replay, identity conflict, a natural-key race between two writers, and update with stale container and item guards.
   - Planning add, update and triage with hierarchy validation; create; revise; held, resume and discard.
-  - Receipts pass `mutation_terminal.valid_record_receipt`. Golden wire tests compare `record_memory` and `plan_memory` between file and store mode (ruled 2026-09-30, following `specs/records/spec.md` "parity in shape"):
+  - Receipts pass their kind's existing validator: Records receipts `mutation_terminal.valid_record_receipt`, Planning receipts `mutation_terminal.valid_planning_receipt`, and both `valid_collection_receipt` (ruled 2026-09-30: Planning keeps its `_plan_receipt` marker, `add`/`triage` operations and `plan_id`). Golden wire tests compare `record_memory` and `plan_memory` between file and store mode (ruled 2026-09-30, following `specs/records/spec.md` "parity in shape"):
     - byte-equal: public arguments, field names, markers, operations and error codes;
     - normalised before comparison: the hash values §3 and §8 C1–C3 deliberately re-derive (`before_item_hash`, `after_item_hash`, `before_container_hash`, `after_container_hash`, `source_versions[].hash`), plus nondeterministic identities and timestamps;
     - asserted separately as store-only additions: the §8 C4/C5 `inspect.projection` summary and projection diagnostics.
