@@ -5,7 +5,7 @@
 - [x] 0.3 Orchestrator rulings R1–R10, the #1452 sequencing, and "two writers without the lease are unsupported" folded into `design.md` ("Rulings") and the deltas.
 - [ ] 0.4 When #1452's `add-records-bulk-upsert` is archived into the canonical `records` spec, add a `records` MODIFIED delta here for its bulk requirements: store mode drops `BULK_UPSERT_AUDIT_DEPTH`, raises the cap to 500, and makes a batch one transition (`design.md` §9 "Sequencing"). Re-run `openspec validate --all --strict`.
 - [x] 0.5 Critic amendments 1–11 folded into `design.md` §16 (A1–A11), the sections it names and the deltas. Pinned version links and the compiler-lane rewrite moved out of this change (A11).
-- [ ] 0.6 Owner rulings on N1–N4 (`design.md`, "Needs ruling") applied.
+- [x] 0.6 Owner rulings on N1–N4 applied: all confirmed as implemented, and N3's preflight names the exact release (`design.md` "Rulings").
 
 ## How the phases ship
 
@@ -75,6 +75,7 @@ Every phase also re-runs the existing Records and Planning test modules in file 
 - [ ] P1b.3 The declared offline migration `collections-store-v1` in the managed upgrade path.
   - Standby pre-import with basis; unchanged collections carry their proofs forward, and only changed collections are re-imported and re-proved within the ~40 s cutover, or the upgrade is abandoned cleanly (A11).
   - Atomic publish, then the vault-side `mode.json` marker, the coordinator schema fence advance, and the `collections-store-v1` state descriptor (A5).
+  - On a multi-host vault, preflight refuses with `COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED` until the coordinator reports the store-aware schema, naming the exact release to upgrade to (N3). Red first.
   - Red first: a write during pre-import is re-imported; a handoff delta over budget abandons the upgrade and leaves files canonical; an old release refuses to start on a migrated vault.
 - [ ] P1b.3b `exomem collections migrate` for non-managed (stdio MCP) installs: offline, takes the mutation lock, refuses while a service holds the vault, same preflight and proof (A11). It is declared active only at the GA gate (P3.6).
 - [ ] P1b.4 Reverse export `maintain_memory(mode="collections-store-export")`: preview-first, atomic per collection, legacy-valid with a checkpoint event. It sets the mode marker to `exported` and tombstones the replica (A5). Red first: no host adopts a tombstoned replica or a stale local store after export. Round-trip test: files → store → files is byte-equal for collections not written in store mode, and legacy-valid (`acknowledged_gap`) for written ones.

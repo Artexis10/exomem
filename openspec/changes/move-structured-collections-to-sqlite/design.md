@@ -351,7 +351,7 @@ The same set feeds `snapshot` (§3). Withheld rows are indistinguishable from ab
 | C17 | `plan_memory` | a facade over the generic operations (§14.7); wire unchanged | unchanged |
 | C18 | manifests | `collection_type:` names the type; `semantic_profile: records\|planning` remain accepted aliases; `link` fields may declare `target.collection_type` and `pin: version` (§14.3) | additive |
 | C19 | `activate_context` packet | `generation.collection_types_hash`; the `collections` lane replaces the `records` and `planning` lanes (both kept as aliases); `ANCHOR_KINDS` gains `item` | additive |
-| C20 | lease coordinator wire | renew and release carry `collection_store_head: {store_id, instance_id, commit_seq, head_hash}`, which is coordination metadata only; a coordinator schema bump that migration fences (§16 A3, A5) | multi-host vaults need a coordinator at the new schema before migrating; preflight refuses otherwise |
+| C20 | lease coordinator wire | renew and release carry `collection_store_head: {store_id, instance_id, commit_seq, head_hash}`, which is coordination metadata only; a coordinator schema bump that migration fences (§16 A3, A5) | multi-host vaults need a coordinator at the new schema before migrating. Preflight refuses otherwise, naming the exact release to upgrade the coordinator to (ruled N3) |
 | C21 | refusal and hold codes | `COLLECTION_STORE_SYNC_PENDING` (retryable), `COLLECTION_STORE_DIVERGED`, `COLLECTION_VIEW_PATH`; held `VIEW_FOREIGN`, `VIEW_MOVED`; the `view_move` effect label (§16) | additive |
 | C22 | views | every item and manifest view gains the reserved `exomem_view` stamp, and every log block gains a stamp comment replacing the audit marker (§16 A2) | the stamp is refused in `item` / `changes` and ignored by the payload hash |
 | C23 | CLI | `exomem collections migrate`, `adopt-local`, `backup --to/--stdout` | additive |
@@ -961,6 +961,7 @@ Earlier, §10 stored the mode twice with no ordering, adopted a replica whenever
 
 - **One vault-side mode marker.** `Knowledge Base/_Collections/mode.json` holds `{mode: "files"|"store"|"exported", store_id, migrated_at, exported_at, fence_schema}`, published atomically. Adoption reads only this. A replica is adopted only when the marker says `store` with the same `store_id`. With `files` or `exported`, no replica is ever adopted. The state-root mode flag becomes a cache of the marker and is checked against it at startup.
 - **Export tombstones the replica.** Reverse export sets the marker to `exported` and renames the replica to `collections.sqlite.exported-<utc>`, so no host can adopt it. Re-migration mints a new `store_id`.
+- **Coordinator prerequisite (ruled N3).** On a multi-host vault, preflight first asks the coordinator for its schema. If it does not report the store-aware schema, migration refuses with `COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED`, naming the exact release to upgrade the coordinator to: the running release's version, which declares `collections-store-v1`.
 - **Fencing old releases.** Migration advances the coordinator schema fence (`required_schema_version`, `schema_fence_generation`, `writer_lease.py:1812-1838`) to the store-aware schema, so an old-release host cannot hold the writer lease and write files. Single-host installs record `collections-store-v1` as a state descriptor. `state_migration` refuses a downgrade over an unknown descriptor (`state_migration.py:543-547`), so an old release refuses to start on a migrated vault. The documented path is **export before downgrade**, and the doctor probe says so.
 - **Import binds to exact bytes.** In §10 step 5, `published_sha256` is the hash of the bytes the importer actually parsed, captured in the same read, not re-read later. A file that changes between parse and publication is therefore a human edit by construction.
 
@@ -1029,24 +1030,15 @@ A moved view keeps its item identity through its stamp, and Obsidian rewrites li
 
 ## Rulings
 
-The orchestrator's rulings on #1459 are folded into the sections cited. The critic's amendments 1–11 are ruled and folded into §16 (A1–A11) and the sections it names. Four points need a ruling; each is implemented as stated below unless ruled otherwise.
+Needs ruling: **None.**
 
-### Needs ruling
+The orchestrator's rulings on #1459 are folded into the sections cited. The critic's amendments 1–11 are ruled and folded into §16 (A1–A11) and the sections it names. The four follow-up points were confirmed as implemented:
 
-- **N1. Amendments 2 and 4 conflict as literally worded.** Amendment 2 stamps views with the "store instance id". Amendment 4 mints a new instance id at every adoption. A legitimate lease handoff adopts the replica, so under the literal wording every view rendered by the previous holder would read as foreign and trip `COLLECTION_STORE_DIVERGED` on every routine handoff. Idle release makes these routine: 60 s, `writer_lease.py:1726-1731`.
-  - *As implemented (§16 A2, A4):* stamps carry `store_id` (the lineage) plus `instance_id`. Each store keeps a lineage of `(instance_id, adopted_from, adopted_at_commit_seq, head_hash)`. A stamp or replica from an instance in the lineage, at or before its handoff point, is own history. Only instances outside the lineage are foreign.
-  - *To rule:* confirm the lineage reading.
-- **N2. Amendment 1's literal sequence leaves a gap.** "Rename the current view aside, install staging" with an ordinary rename would silently replace a file an editor writes between the two renames. That is the same loss the amendment exists to prevent.
-  - *As implemented (§16 A1 step 2):* install is no-clobber (`link` then unlink staging on POSIX, `MoveFileEx` without `REPLACE_EXISTING` on Windows, `RENAME_NOREPLACE` where available). A file that appears in the gap is held like a changed aside.
-  - *To rule:* confirm.
-- **N3. Amendment 3 needs a coordinator schema bump.** The coordinator today stores only holder, expiry and fencing token (`lease_coordinator.py:134-183`). It must now record `collection_store_head`. That fits "coordination metadata only" in `multi-host-writer-lease`, but a self-hosted or managed coordinator that has not implemented it would give the new holder no foreign head, and the vault would silently fall back to the unsafe replica-only rule.
-  - *As implemented (§8 C20, §16 A5):* a multi-host vault cannot migrate until its coordinator reports the new schema. Preflight refuses and names the requirement, and migration advances the fence to that schema.
-  - *To rule:* confirm, rather than allow migration with a degraded check.
-- **N4. The replica interval.** A full replica is about 15.8 MB at 10,000 rows (spike `results-10000.json`), so the earlier 1 s coalescing would push that much sync traffic per write burst.
-  - *As implemented (§16 A9):* at most one publish per 60 s under steady writes, plus synchronous publication at every orderly boundary (lease release, shutdown, quiesce, handoff, export). That raises the crash-only recovery point from about 1 s to at most 60 s. Handoff correctness does not depend on the interval, because A3's coordinator head makes a lagging replica wait rather than fork. The P1b.8 gate reports bytes per hour.
-  - *To rule:* confirm 60 s as the default (configurable). The alternative, an incremental changeset replica, would add a second on-disk format and is not proposed.
-
-Not a ruling, noted for the owner: amendment 11 moves the worked example's pinned executions and surfacing turns (from the owner's Recipes addendum) to the follow-up change. §14.8 keeps the example and marks those steps.
+- **N1 confirmed.** Views are stamped with `store_id` plus `instance_id`, and each store keeps an instance lineage `(instance_id, adopted_from, adopted_at_commit_seq, head_hash)`. Only instances outside the lineage are foreign (§16 A2, A4).
+- **N2 confirmed.** Install is no-clobber: `link` then unlink staging on POSIX, `MoveFileEx` without `REPLACE_EXISTING` on Windows, and `RENAME_NOREPLACE` where available. A file appearing between the aside rename and the install is held like a changed aside (§16 A1).
+- **N3 confirmed.** A multi-host vault cannot migrate until its coordinator reports the store-aware schema. This is acceptable because the coordinator is Exomem's own code and ships in the same release. The preflight refusal names the exact release to upgrade the coordinator to: the version of the running release that declares `collections-store-v1`, read from that release's own upgrade manifest at runtime rather than hard-coded (§8 C20, §16 A5).
+- **N4 confirmed.** The replica is published at most once per 60 s under steady writes (configurable), and synchronously at every orderly boundary: lease release, shutdown, quiesce, upgrade handoff and export (§16 A9).
+- **Amendment 11** (pinned links and the compiler-lane rewrite move to a follow-up change) is noted by the owner.
 
 ### Earlier rulings
 
