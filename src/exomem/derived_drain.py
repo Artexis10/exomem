@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import call_ledger, call_spans, derived_receipts, mode
+from . import call_ledger, call_spans, derived_receipts, mode, process_memory
 from .derived_receipts import DerivedComponentStatus
 
 log = logging.getLogger(__name__)
@@ -289,6 +289,8 @@ def drain_once(
             retire_visibility(vault_root, tuple(dict.fromkeys(completed_batches)))
         except Exception:  # noqa: BLE001 - read-side re-derivation; custody is unchanged
             log.warning("pending visibility retirement re-check failed", exc_info=True)
+    if completed_batches:
+        process_memory.trim_allocator()
     _note_pass_observation(
         vault_root,
         claimed=claimed_total,

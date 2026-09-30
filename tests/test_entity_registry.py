@@ -89,6 +89,39 @@ def test_registry_cache_hits_on_same_freshness_key_and_rebuilds_on_new_key(
     assert calls == 2
 
 
+def test_registry_cache_holds_only_the_current_and_previous_checkpoints(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """bound-cell-memory D6: each cached registry is a whole-vault projection of
+    entity pages, so the cache keeps the checkpoint being served and the one
+    before it (a request still finishing on it), never a history."""
+    module = _registry()
+    module.clear_entity_registry_cache()
+    _write(tmp_path, "Knowledge Base/Entities/People/aria.md", _entity("Aria Vale"))
+    builds: list[tuple] = []
+    original = module._build_registry
+    monkeypatch.setattr(
+        module,
+        "_build_registry",
+        lambda *args, **kwargs: builds.append(args) or original(*args, **kwargs),
+    )
+    checkpoints = [("checkpoint", n) for n in range(5)]
+    for checkpoint in checkpoints:
+        module.load_entity_registry(tmp_path, freshness_key=checkpoint)
+    previous, current = checkpoints[-2:]
+
+    cached = [key[1][: len(current)] for key in module._REGISTRY_CACHE]
+    assert cached == [previous, current]
+    assert len(module._REGISTRY_CACHE) == module._CACHE_SIZE
+    # Both retained checkpoints serve from cache; the one before them rebuilds.
+    built = len(builds)
+    module.load_entity_registry(tmp_path, freshness_key=previous)
+    module.load_entity_registry(tmp_path, freshness_key=current)
+    assert len(builds) == built
+    module.load_entity_registry(tmp_path, freshness_key=checkpoints[-3])
+    assert len(builds) == built + 1
+
+
 def test_cache_only_registry_lookup_never_builds(tmp_path: Path, monkeypatch) -> None:
     module = _registry()
     module.clear_entity_registry_cache()
