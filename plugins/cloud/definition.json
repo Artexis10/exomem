@@ -1,0 +1,18 @@
+{
+  "name": "exomem-cloud",
+  "display_name": "Exomem Cloud",
+  "description": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through Exomem Cloud.",
+  "resource": "https://exomem.substratesystems.io/mcp",
+  "profile": "product-cloud",
+  "author": {
+    "name": "Substrate Systems OÜ",
+    "url": "https://substratesystems.io"
+  },
+  "homepage": "https://substratesystems.io/exomem",
+  "repository": "https://github.com/Artexis10/exomem",
+  "privacy": "https://substratesystems.io/exomem/privacy",
+  "terms": "https://substratesystems.io/exomem/terms",
+  "support": "https://substratesystems.io/exomem/support",
+  "license": "AGPL-3.0-or-later",
+  "keywords": ["memory", "knowledge-base", "mcp", "notes"]
+}

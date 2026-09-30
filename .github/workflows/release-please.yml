@@ -117,6 +117,9 @@ jobs:
           uv run --frozen python scripts/hosted-plugin.py render --candidate "$parity_candidate" --platform all --openai-app-id "$openai_app_id"
           uv run --frozen python scripts/hosted-plugin.py render --candidate "$baseline_candidate" --platform all --openai-app-id "$openai_app_id"
 
+      - name: Regenerate current Cloud packages for the source release
+        run: uv run --frozen python scripts/cloud-plugin.py build
+
       - name: Verify the regenerated artifacts are current
         run: |
           uv run --frozen python scripts/hosted-plugin.py check --platform claude
@@ -156,7 +159,7 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add plugins/hosted
+          git add plugins/hosted plugins/cloud/generated
           git commit -m "chore(hosted): regenerate plugin artifacts for the release"
           git push
 
@@ -203,6 +206,13 @@ jobs:
 
       - name: Build package artifacts
         run: uv build
+
+      - name: Verify and stage current Cloud distribution archives
+        run: |
+          uv run --frozen python scripts/cloud-plugin.py check
+          cp plugins/cloud/generated/claude.zip dist/exomem-cloud-claude.zip
+          cp plugins/cloud/generated/openai.zip dist/exomem-cloud-openai.zip
+          cp plugins/cloud/generated/release.json dist/exomem-cloud-release.json
 
       - name: Smoke packaged connector fingerprint
         run: |

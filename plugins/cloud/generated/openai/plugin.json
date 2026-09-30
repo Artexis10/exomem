@@ -1,0 +1,95 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "exomem-cloud",
+  "version": "0.99.0",
+  "description": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through Exomem Cloud.",
+  "author": {
+    "name": "Substrate Systems OÜ",
+    "url": "https://substratesystems.io"
+  },
+  "homepage": "https://substratesystems.io/exomem",
+  "repository": "https://github.com/Artexis10/exomem",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "memory",
+    "knowledge-base",
+    "mcp",
+    "notes"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Exomem Cloud",
+        "shortDescription": "Memory across conversations",
+        "longDescription": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through Exomem Cloud.",
+        "developerName": "Substrate Systems OÜ",
+        "category": "Productivity",
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "websiteURL": "https://substratesystems.io/exomem",
+        "supportURL": "https://substratesystems.io/exomem/support",
+        "privacyPolicyURL": "https://substratesystems.io/exomem/privacy",
+        "termsOfServiceURL": "https://substratesystems.io/exomem/terms",
+        "composerIcon": "./assets/icon.svg",
+        "logo": "./assets/icon.svg"
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "grounded recall",
+              "prompt": "What retrieval approach did the sample project choose?",
+              "tools_triggered": "activate_context",
+              "expected_behavior": "Activate the user's turn, retrieve the seeded compact-retrieval decision, include review-sample and cite its authoritative memory reference. Do not write."
+            },
+            {
+              "description": "fresh continuation",
+              "prompt": "Pick up the sample project where we left off.",
+              "tools_triggered": "activate_context",
+              "expected_behavior": "Activate context and resume from the prior episode, naming the review-sample next action with a memory citation. Do not invent continuity or write another copy."
+            },
+            {
+              "description": "proactive outcome",
+              "prompt": "The review-sample sample dry run succeeded: compact retrieval found the decision without loading the whole vault. That is a reusable result from the method we just tried.",
+              "tools_triggered": "remember, observe_memory",
+              "expected_behavior": "Under the live balanced policy, check for duplicates and quietly capture the bounded reusable outcome without a save instruction. Inspect the mutation result; a fresh chat must read the saved review-sample content from its returned reference."
+            },
+            {
+              "description": "explicit capture",
+              "prompt": "Remember this sample conclusion: review-sample — narrow retrieval is enough when the question has one resolved subject.",
+              "tools_triggered": "remember, observe_memory",
+              "expected_behavior": "Check for existing knowledge and capture the distilled conclusion under the live envelope. Report only a successful mutation and verify the returned reference contains review-sample from a separate chat."
+            },
+            {
+              "description": "bounded recap",
+              "prompt": "We are stopping here. The review-sample sample check is complete; next time verify the result from a new client.",
+              "tools_triggered": "episode_memory",
+              "expected_behavior": "Record one bounded episode with the completed sample check and next action. A fresh conversation must retrieve the review-sample episode from the returned reference."
+            }
+          ],
+          "negative": [
+            {
+              "description": "trivial no write",
+              "prompt": "Thanks!"
+            },
+            {
+              "description": "cloud capability boundary",
+              "prompt": "Read the audio file on my laptop through this cloud connection. Do not pretend you have access."
+            },
+            {
+              "description": "denied write",
+              "prompt": "Save the review-sample sample result in the restricted sample scope."
+            }
+          ]
+        },
+        "commerce": false,
+        "commerce_description": "Connects an existing account. No sales, checkout, subscription initiation or upgrade promotion in the plugin."
+      },
+      "publication": {
+        "countries": []
+      }
+    }
+  }
+}
