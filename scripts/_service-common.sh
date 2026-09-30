@@ -626,6 +626,42 @@ exomem_dotenv_value() {
     exomem_dotenv_file_value "$repo_root/.env" "$name"
 }
 
+# True when $1 is the platform's default unit rather than a second service
+# (such as a client cell on another port) installed beside it.
+exomem_unit_is_default() {
+    local unit="${1:-}" default
+    default="$(exomem_unit_file)" || return 1
+    [[ -n "$unit" && "$unit" -ef "$default" ]]
+}
+
+# Read one key out of the environment a rendered unit gives its service, or
+# nothing. A second service's settings live in its own unit, never in the
+# checkout's .env, which describes the default service.
+exomem_unit_env_value() {
+    local unit="$1" name="$2" value="" env_file line
+    [[ -f "$unit" ]] || return 0
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        if [[ -x /usr/libexec/PlistBuddy ]]; then
+            value="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$name" "$unit" 2>/dev/null || true)"
+        fi
+        printf '%s' "$value"
+        return 0
+    fi
+    # systemd applies EnvironmentFile= after Environment=, so the file wins.
+    while IFS= read -r line; do
+        line="${line#Environment=}"
+        line="${line#\"}"
+        line="${line%\"}"
+        [[ "$line" == "$name="* ]] && value="${line#"$name"=}"
+    done < <(grep -E "^Environment=\"?$name=" "$unit" || true)
+    while IFS= read -r env_file; do
+        env_file="${env_file#-}"
+        line="$(exomem_dotenv_file_value "$env_file" "$name")"
+        [[ -n "$line" ]] && value="$line"
+    done < <(sed -n 's|^EnvironmentFile=||p' "$unit")
+    printf '%s' "$value"
+}
+
 # True when the per-user uv tool registry already owns Exomem.  Looking at the
 # registry, rather than merely `command -v exomem`, avoids taking over an
 # independently managed pip/pipx command in auto mode.
@@ -665,7 +701,27 @@ exomem_sync_uv_cli() {
         return 1
     }
     echo "Aligning lean uv-tool CLI to exomem==$service_version..."
-    uv tool install --force "exomem==$service_version"
+    # `--force` also replaces an operator-owned launcher (a regular file, where
+    # uv would put a symlink) in uv's bin directory. Keep those and put them back.
+    local bin_dir saved name
+    bin_dir="$(uv tool dir --bin 2>/dev/null || true)"
+    saved="$(mktemp -d)"
+    for name in exomem kb; do
+        if [[ -n "$bin_dir" && -f "$bin_dir/$name" && ! -L "$bin_dir/$name" ]]; then
+            cp -p "$bin_dir/$name" "$saved/$name"
+        fi
+    done
+    local status=0
+    uv tool install --force "exomem==$service_version" || status=$?
+    for name in exomem kb; do
+        if [[ -f "$saved/$name" ]]; then
+            rm -f "$bin_dir/$name"
+            mv "$saved/$name" "$bin_dir/$name"
+            echo "Kept the operator launcher $bin_dir/$name"
+        fi
+    done
+    rmdir "$saved" 2>/dev/null || true
+    return "$status"
 }
 
 exomem_managed_manifest_path() {
@@ -704,6 +760,23 @@ os.chmod(temporary, 0o600)
 os.replace(temporary, path)
 PY
     echo "Managed install manifest: $path"
+}
+
+# The manifest names ONE service: the one the CLI and TUI route to. Only the
+# default unit, or the service the manifest already names, may rewrite it; a
+# second service on this machine leaves it where it points.
+exomem_write_owned_managed_manifest() {
+    local unit="$1" python="$2" service_version="$3" service_profile="$4" service_target="$5"
+    local path current=""
+    path="$(exomem_managed_manifest_path)"
+    if ! exomem_unit_is_default "$unit" && [[ -f "$path" ]]; then
+        current="$("$python" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("service_target") or "")' "$path" 2>/dev/null || true)"
+        if [[ -n "$current" && "$current" != "$service_target" ]]; then
+            echo "Managed install manifest left on $current: $unit is not the service it names."
+            return 0
+        fi
+    fi
+    exomem_write_managed_manifest "$python" "$service_version" "$service_profile" "$service_target"
 }
 
 # Verify each PATH-visible console script, not just the first shim.  A stale
