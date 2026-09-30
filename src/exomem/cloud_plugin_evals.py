@@ -65,6 +65,50 @@ def _refs(value: object) -> set[str]:
     return set()
 
 
+def _grounded_refs(value: object, marker: str) -> set[str]:
+    """Bind content to its own page/hit, never sibling or linked-page content."""
+
+    def content(node: object) -> object:
+        if isinstance(node, dict):
+            return {
+                k: content(v)
+                for k, v in node.items()
+                if k not in {"ref", "path"}
+                and not (isinstance(v, dict) and {"ref", "path"}.intersection(v))
+            }
+        if isinstance(node, list):
+            return [
+                content(v)
+                for v in node
+                if not (isinstance(v, dict) and {"ref", "path"}.intersection(v))
+            ]
+        return node
+
+    if isinstance(value, dict):
+        own = {v for k, v in value.items() if k in {"ref", "path"} and isinstance(v, str) and v}
+        return (own if marker in _json(content(value)) else set()) | set().union(
+            *(_grounded_refs(v, marker) for v in value.values()), set()
+        )
+    if isinstance(value, list):
+        return set().union(*(_grounded_refs(v, marker) for v in value), set())
+    return set()
+
+
+def _committed(call: dict) -> bool:
+    if not _ok(call.get("result")) or call["arguments"].get("validate_only"):
+        return False
+    if call["result"].get("mutated") is False:
+        return False
+    if call.get("name") == "observe_memory":
+        return (
+            call["arguments"].get("operation", "add") in {"add", "update"}
+            and call["result"].get("mutated") is True
+        )
+    if call.get("name") == "episode_memory":
+        return call["arguments"].get("action") == "record"
+    return True
+
+
 def _report(issues: list[str]) -> dict:
     return {"ok": not issues, "issues": sorted(set(issues))}
 
@@ -81,21 +125,33 @@ def _readback_issues(
     if not isinstance(prompt, str) or not prompt or marker in prompt:
         issues.append("readback_prompt_leaks_answer")
     observations = readback.get("observations", [])
+    if not isinstance(observations, list) or any(not isinstance(o, dict) for o in observations):
+        return issues + ["readback_observations_invalid"]
+    users = [o.get("text") for o in observations if o.get("kind") == "user"]
+    if users != [prompt]:
+        issues.append("readback_user_turn_mismatch")
     refs = set().union(*(_refs(w.get("result")) for w in writes), set())
     reads = [
         o
         for o in _calls(observations)
         if o.get("name") == "read_memory"
-        and o.get("arguments", {}).get("path") in refs
+        and isinstance(o.get("arguments"), dict)
+        and o["arguments"].get("path") in refs
         and _ok(o.get("result"))
-        and marker in _json(o["result"])
+        and bool(_grounded_refs(o["result"], marker).intersection(refs))
     ]
     answers = [
         o.get("text", "")
         for o in observations
         if isinstance(o, dict) and o.get("kind") == "assistant"
     ]
-    if not reads or not refs or not answers or marker not in answers[-1]:
+    if (
+        not reads
+        or not refs
+        or not answers
+        or not isinstance(answers[-1], str)
+        or marker not in answers[-1]
+    ):
         issues.append("readback_not_bound")
     return issues
 
@@ -172,10 +228,17 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
         else:
             boot = boots[-1]
             result = boot["result"]
+            if any(
+                not isinstance(result.get(k, {}), dict)
+                for k in ("server", "active_capabilities", "engagement")
+            ):
+                return _report(issues + ["bootstrap_observation_invalid"])
             if result.get("server", {}).get("version") != identity["version"]:
                 issues.append("runtime_version_mismatch")
             capabilities = result.get("active_capabilities", {})
             tools = capabilities.get("available_product_tools", [])
+            if not isinstance(tools, list) or any(not isinstance(t, str) for t in tools):
+                return _report(issues + ["bootstrap_observation_invalid"])
             if capabilities.get("profile") != identity["profile"] or not {
                 "activate_context",
                 "read_memory",
@@ -185,13 +248,19 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
                 {"transfer_artifact", "adopt_vault", "process_media", "read_media"}
             ):
                 issues.append("excluded_capability_exposed")
-            if not result.get("engagement", {}).get("envelope"):
+            engagement = result.get("engagement", {})
+            envelope = engagement.get("envelope")
+            if not isinstance(envelope, dict) or not envelope:
                 issues.append("envelope_missing")
-            if case.get("proactive") and result.get("engagement", {}).get("level") not in {
-                "balanced",
-                "maximal",
-            }:
-                issues.append("proactive_engagement_not_permitted")
+            if case.get("proactive"):
+                classes = envelope.get("classes", {}) if isinstance(envelope, dict) else {}
+                capture = classes.get("proactive_capture", {}) if isinstance(classes, dict) else {}
+                if (
+                    engagement.get("level") not in {"balanced", "maximal"}
+                    or not isinstance(capture, dict)
+                    or capture.get("disposition") != "silent"
+                ):
+                    issues.append("proactive_engagement_not_permitted")
             if not case.get("compact_fallback") and (
                 boot["arguments"].get("profile") != "session"
                 or boot["arguments"].get("skill_contract") != identity["skill_contract"]
@@ -226,9 +295,8 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
             c
             for c in successful
             if c.get("name") in {"activate_context", "ask_memory", "read_memory"}
-            and marker in _json(c["result"])
         ]
-        refs = set().union(*(_refs(c["result"]) for c in grounding), set())
+        refs = set().union(*(_grounded_refs(c["result"], marker) for c in grounding), set())
         if not grounding or not any(r in answer for r in refs if r):
             issues.append("answer_not_grounded")
     if case.get("capture"):
@@ -236,7 +304,7 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
             c
             for c in successful
             if c.get("name") in case.get("write_tools", ["remember", "observe_memory"])
-            and not c["arguments"].get("validate_only")
+            and _committed(c)
             and marker in _json(c["arguments"])
         ]
         if not writes:
@@ -359,7 +427,7 @@ def native_evidence_issues(value: dict, evidence: Path, *, now: datetime) -> lis
             issues.append("native_locator_invalid")
         if not value.get("conversation_id"):
             issues.append("native_conversation_missing")
-    except (OSError, KeyError, TypeError, ValueError):
+    except (OSError, KeyError, TypeError, ValueError, AttributeError):
         issues.append("native_evidence_unbound")
     return issues
 
@@ -535,7 +603,7 @@ def directory_cases(root: Path) -> dict:
                 **(
                     {
                         "tools_triggered": ", ".join(c.get("required", c.get("required_any", []))),
-                    "expected_behavior": c["expected_behavior"],
+                        "expected_behavior": c["expected_behavior"],
                     }
                     if polarity == "positive"
                     else {}

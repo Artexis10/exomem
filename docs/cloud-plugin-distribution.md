@@ -93,6 +93,11 @@ For a capture, include `readback` with its own `conversation_id`, `surface`,
 `identity`, timestamp, prompt and observations, including `read_memory(path=...)`
 bound to the write's returned path/reference. Its result and answer must contain
 the unique content marker. Give that readback its own native evidence too.
+Its observed user turn must exactly match the separate `prompt` field, without
+supplying the marker or answer. Grounding binds each citation to the page/hit
+containing the marker. `observe_memory` validation is not a capture: acceptance
+requires an add/update with `mutated: true`. Proactive capture requires the live
+`engagement.envelope.classes.proactive_capture.disposition` to be `silent`.
 
 Each native record has an `evidence` object:
 

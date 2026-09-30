@@ -65,7 +65,7 @@ def main() -> int:
             report["issues"].extend("native:" + i for i in native["issues"])
             report["issues"].extend("package:" + i for i in package_check["issues"])
             report["ok"] = report["ok"] and native["ok"] and package_check["ok"]
-    except (OSError, ValueError, TypeError, KeyError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         # Exception messages can contain private evidence or paths.
         report = {"ok": False, "issues": ["input_or_artifact_invalid:" + type(exc).__name__]}
     print(json.dumps(report, indent=2, ensure_ascii=False))

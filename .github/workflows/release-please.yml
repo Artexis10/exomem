@@ -50,11 +50,10 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  # The descriptor no longer embeds the Exomem release, so an ordinary version
-  # bump leaves the hosted artifacts untouched and this job is a no-op. It stays
-  # because a release that DOES change the contract surface (a command, schema,
-  # capability, skill, or endpoint) still needs the generated descriptors and
-  # their sha256 locks rebuilt, and no `extra-files` updater can recompute a hash.
+  # Cloud packages bind the current version, skill contract and corpus digest;
+  # rebuild them on every release update. Legacy hosted descriptors need a
+  # rebuild only when their contract changes. No `extra-files` updater can
+  # recompute these archive bytes and hash locks.
   #
   # Without the GitHub App token this push uses GITHUB_TOKEN, which does not
   # retrigger the PR's checks -- the amended branch is correct but shows the

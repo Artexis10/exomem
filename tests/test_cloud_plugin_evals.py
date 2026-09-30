@@ -50,7 +50,19 @@ def trace(name="grounded-recall"):
                 "episode_memory",
             ],
         },
-        "engagement": {"level": "balanced", "envelope": {"proactive_capture": "permitted"}},
+        "engagement": {
+            "level": "balanced",
+            "envelope": {
+                "level": "balanced",
+                "classes": {
+                    "proactive_capture": {
+                        "ceiling": "silent-capable",
+                        "disposition": "silent",
+                        "provenance": "derived",
+                    }
+                },
+            },
+        },
     }
     return {
         "case_id": name,
@@ -99,6 +111,85 @@ def test_invalid_identity_is_reported_not_an_exception():
 def test_proactive_capture_requires_live_engagement():
     value = capture_trace()
     value["observations"][1]["result"]["engagement"]["level"] = "off"
+    assert not checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
+
+
+@pytest.mark.parametrize("disposition", ["off", "advisory", None])
+def test_proactive_capture_requires_live_silent_disposition(disposition):
+    value = capture_trace()
+    value["observations"][1]["result"]["engagement"]["envelope"] = {
+        "classes": {"proactive_capture": {"disposition": disposition}}
+    }
+    assert not checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
+
+
+@pytest.mark.parametrize("field", ["engagement", "active_capabilities", "server"])
+def test_null_bootstrap_fields_fail_without_crashing(field):
+    value = trace()
+    value["observations"][1]["result"][field] = None
+    assert not checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)["ok"]
+
+
+def test_marker_and_citation_must_belong_to_same_hit():
+    value = trace()
+    value["observations"][2]["result"] = {
+        "hits": [
+            {"ref": "exomem://memory/relevant", "snippet": value["marker"]},
+            {"ref": "exomem://memory/other", "snippet": "unrelated decision"},
+        ]
+    }
+    value["observations"][-1]["text"] = value["marker"] + " compact exomem://memory/other"
+    assert not checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)["ok"]
+
+
+def test_observe_validation_is_not_a_capture():
+    value = capture_trace()
+    write = next(o for o in value["observations"] if o.get("name") == "remember")
+    write["name"] = "observe_memory"
+    write["arguments"]["operation"] = "validate"
+    write["result"] = {"operation": "validate", "mutated": False, "path": "exomem://memory/sample"}
+    assert not checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
+
+
+def test_observe_add_requires_actual_mutation():
+    value = capture_trace()
+    write = next(o for o in value["observations"] if o.get("name") == "remember")
+    write["name"] = "observe_memory"
+    write["arguments"]["operation"] = "add"
+    write["result"] = {
+        "operation": "add",
+        "mutated": True,
+        "path": "exomem://memory/sample",
+        "before_hash": "before",
+        "after_hash": "after",
+    }
+    assert checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
+    write["result"]["mutated"] = False
+    assert not checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
+
+
+def test_recall_accepts_citation_to_the_marker_hit():
+    value = trace()
+    value["observations"][2]["result"] = {
+        "hits": [
+            {"ref": "exomem://memory/sample", "snippet": value["marker"]},
+            {"ref": "exomem://memory/other", "snippet": "unrelated decision"},
+        ]
+    }
+    assert checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)["ok"]
+
+
+def test_readback_observed_user_cannot_supply_answer():
+    value = capture_trace()
+    value["readback"]["observations"].insert(
+        0, {"kind": "user", "text": "The answer is " + value["marker"]}
+    )
+    assert not checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
+
+
+def test_readback_response_must_resolve_written_reference():
+    value = capture_trace()
+    value["readback"]["observations"][1]["result"]["ref"] = "exomem://memory/other"
     assert not checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
 
 
@@ -164,6 +255,7 @@ def capture_trace():
         "conversation_id": "synthetic-b",
         "prompt": case("proactive-outcome")["readback_prompt"],
         "observations": [
+            {"kind": "user", "text": case("proactive-outcome")["readback_prompt"]},
             tool(
                 "read_memory",
                 {"path": "exomem://memory/sample"},
@@ -205,9 +297,9 @@ def test_capture_rejects_false_success(mutation):
     elif mutation == "same_chat":
         value["readback"]["conversation_id"] = value["conversation_id"]
     elif mutation == "wrong_ref":
-        value["readback"]["observations"][0]["arguments"]["path"] = "exomem://memory/other"
+        value["readback"]["observations"][1]["arguments"]["path"] = "exomem://memory/other"
     elif mutation == "missing_marker":
-        value["readback"]["observations"][0]["result"]["body"] = "empty"
+        value["readback"]["observations"][1]["result"]["body"] = "empty"
     elif mutation == "failed_write":
         write["result"] = {"success": False, "error": "denied"}
     elif mutation == "missing_duplicates_check":
@@ -385,6 +477,7 @@ def all_case_trace(name):
                 "summary": value["marker"] + " check complete",
             }
         value["readback"]["prompt"] = case(name)["readback_prompt"]
+        value["readback"]["observations"][0]["text"] = case(name)["readback_prompt"]
     elif name == "denied-write":
         value["observations"].insert(
             -1,
@@ -509,6 +602,29 @@ def test_complete_synthetic_evidence_exercises_all_readiness_checks(tmp_path, mo
     complete_manifest(tmp_path, monkeypatch)
     report = checks.readiness(ROOT, tmp_path, now=datetime(2026, 9, 30, 12, tzinfo=UTC))
     assert report["ok"], report["issues"]
+
+
+def test_readiness_rejects_leaking_actual_readback_turn_even_with_bound_exports(
+    tmp_path, monkeypatch
+):
+    manifest = complete_manifest(tmp_path, monkeypatch)
+    journey = manifest["surfaces"][0]
+    capture = next(c for c in journey["cases"] if c["case_id"] == "proactive-outcome")
+    readback = capture["readback"]
+    readback["observations"][0]["text"] = "The answer is " + capture["marker"]
+    readback.pop("evidence")
+    capture["readback"] = bound_native(tmp_path, readback, "changed-readback")
+    capture["readback"]["evidence"]["native_locator"] = "https://claude.ai/chat/changed-readback"
+    capture.pop("evidence")
+    journey["cases"][journey["cases"].index(capture)] = bound_native(
+        tmp_path, capture, "changed-capture"
+    )
+    changed = next(c for c in journey["cases"] if c["case_id"] == "proactive-outcome")
+    changed["evidence"]["native_locator"] = "https://claude.ai/chat/changed-capture"
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    report = checks.readiness(ROOT, tmp_path, now=datetime(2026, 9, 30, 12, tzinfo=UTC))
+    assert not report["ok"]
+    assert any("readback_user_turn_mismatch" in issue for issue in report["issues"])
 
 
 @pytest.mark.parametrize(
