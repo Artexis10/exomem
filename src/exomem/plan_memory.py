@@ -188,19 +188,14 @@ def plan_memory(
     transition: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
 ) -> dict[str, Any]:
-    """Work with human-owned intended future state through one Planning surface.
+    """Work with human-owned intended future state (Planning).
 
-    `inspect`, `validate`, and `query` are read-only. `create`, `add`, `update`,
-    `triage`, `revise`, and `rebaseline` are guarded mutations. Planning stores
-    goals, outcomes, initiatives, work items, horizons, priorities, and explicit
-    commitments; observed events belong in `record_memory`, while a resolved
-    workflow contract may keep companion-owned execution artifacts external.
-
-    A plan's UUID is durable identity, not its reader-facing filename. New
-    collections can declare human filenames and managed presentation blocks;
-    existing UUID collections move only through an explicit read-only
-    `maintain_memory(mode="structured-files")` preview followed by exact-plan
-    apply. Never infer completion or horizon changes from elapsed time.
+    `inspect`, `validate`, `query` are read-only; `create`, `add`, `update`,
+    `triage`, `revise`, `rebaseline` write, guarded. Planning holds goals,
+    work items, horizons, commitments; observed events go to `record_memory`.
+    UUID identity is not the filename; human filenames arrive via
+    `maintain_memory(mode="structured-files")`. Never infer completion or
+    horizon changes from elapsed time.
     """
     values = locals().copy()
     values.pop("vault_root")

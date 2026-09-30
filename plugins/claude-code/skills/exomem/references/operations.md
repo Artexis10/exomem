@@ -915,3 +915,41 @@ this is how you query their values.
 
 ### Writes performed
 - None (read-only).
+
+## episode_memory
+
+Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `activate_context`. Recording again under the same `episode` with changed content adds a revision and retires the previous one; an identical retry writes nothing.
+
+### Candidate workflow (`resume` refuses with `episode_workflow_disabled` unless the service enables it)
+- `prepare` one candidate's destination, set its `disposition` (routed, no_capture, uncertain, rejected, deferred, awaiting_authority), then `resume` to execute routed leaves.
+- A leaf is one typed step for an existing writer: `create-note`, `create-entity`, `accept-relation`, `edit`, `supersede`, or `append-record` (`{collection, item, item_key?, body?, why, expected_container_hash}`). Never a free-form effect.
+- `proposal`: `{route, target?, title?, alternatives, evidence, reason, leaves: [{leaf_key, effect_revision, kind, args}]}`. `alternatives` lists up to 8 inspected pages as possible homes, each `{target, scope, version}`; an open page has no priority. A changed leaf needs the next `effect_revision`; a committed one cannot change.
+- `resume` needs `journal_digest` from your last candidates/prepare/disposition result (a stale one is refused with `EPISODE_REVISION_CONFLICT`) and `input_revision` (the revision your coverage review covered); `order` and `max_leaves` (1 to 16, default 8) bound the pass.
+- Finish with one `coverage` pass: compare the input it names with each receipt and readback, prepare anything omitted or misrouted, then attest with `resume` and `postcommit`. A committed note is not coverage.
+
+### Result shapes
+- record: `{episode, revision, source: {ref, path, title}, idempotent, recovery, ledger, about_skipped}`.
+- inspect: `{episode, revisions: [{revision, recovery}], latest_source_ref, coverage_current}`.
+- candidates/prepare/disposition: `{episode, input_revision, candidates: [{candidate_key, route, disposition, pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete, execution, coverage: {attempted, pending, covered_through_input_revision, next}}`.
+- resume adds `{status, executed, replayed, stale, diverged, reconciled, blocked, deferred, publication}`; coverage adds `{input: {input_revision, ref, recovery}, receipts: [{candidate_key, leaf_id, operation_id, receipt_digest, path, readback}]}`.
+- Newlines, credential-shaped text and anything over a cap are refused with nothing written. `about` refs you cannot see are dropped and counted in `about_skipped`; recording marks the rest as the conversation's latest work.
+
+## adoption_studio
+
+A durable, resumable session that turns an existing vault into governed knowledge. It never rewrites, moves or deletes originals. Preview-exact contract: `plan` shows the precise imports, and `apply` commits exactly that plan or refuses (`PLAN_STALE` on a stale `plan_id` or changed selection). `status` is the read-only default; `start` is guarded (`initialize_kb` bootstraps a missing Knowledge Base, otherwise `KB_NOT_INITIALIZED`).
+
+### Lifecycle
+1. `start` scans a subtree read-only and snapshots a candidate inventory (`path`, `include_hidden`).
+2. `select` materializes a folder-rule selection server-side (`include`, `exclude`, `overrides`, `include_junk`).
+3. `plan` previews exact targets, titles, hashes and frontmatter.
+4. `apply` copies the validated subset into governed Sources with provenance in one atomic batch (`plan_id`; `retry_failed` and `only_paths` narrow a retry).
+5. `cancel` closes a pre-apply run (`why` records the reason); `finish` proves recall, hands back a first question and optionally writes a run manifest under `Knowledge Base/_Adoption/` (`write_manifest`, default true).
+
+### Agent actions after apply
+- `work-item` returns bounded read-only context (`sources`, `max_sources` default 5, `max_chars_per_source` default 2000).
+- `propose` submits structured `proposals`.
+- `apply-proposal` approves one through an existing governed leaf: `ref` (`exomem://review/adoption/<id>`), `why` required, `expected_fingerprint` must still match, and `expected_hash` guards relation and reconciliation-relate targets.
+
+## adopt_vault
+
+One-shot adoption of an existing vault without replacing originals. `mode` is `scan-only` (default), `save-manifest`, `copy-as-sources` or `compile-selected`; only the last three write, under the governed Knowledge Base, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.

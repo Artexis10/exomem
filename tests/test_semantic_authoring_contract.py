@@ -573,8 +573,11 @@ def test_tool_write_guidance_is_bounded_and_routes_to_full_bootstrap() -> None:
         # Bounded: identity + short selection rule + exactly one compact example +
         # an explicit route to the full bootstrap projection.
         assert semantic_authoring.contract_identity() in guidance
-        assert portable["short_selection_rule"] in guidance
-        assert portable["examples"]["role"] in guidance
+        # Whole-page writers carry the selection rule and one example; the
+        # single-unit and operation tools carry the minimum and the remediation.
+        whole_page = tool in {"remember", "replace_memory"}
+        assert (portable["short_selection_rule"] in guidance) is whole_page
+        assert (portable["examples"]["role"] in guidance) is whole_page
         assert 'call bootstrap(profile="full")' in guidance
 
         # It must NOT duplicate the 16-label vocabulary table, the alias table,

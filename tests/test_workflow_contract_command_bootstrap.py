@@ -273,14 +273,15 @@ def test_context_is_exact_at_runtime_and_in_the_published_schema() -> None:
     schema = json.loads(
         Path("tests/fixtures/mcp_tool_schemas.json").read_text(encoding="utf-8")
     )["schema_memory"]["inputSchema"]["properties"]["context"]
-    context_schema = next(item for item in schema["anyOf"] if item.get("type") == "object")
+    # Optional-null structure is no longer published; the leaves still accept null.
+    context_schema = {key: value for key, value in schema.items() if key != "description"}
     assert context_schema == {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-            "domain": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-            "activity": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "project": {"type": "string"},
+            "domain": {"type": "string"},
+            "activity": {"type": "string"},
         },
     }
 

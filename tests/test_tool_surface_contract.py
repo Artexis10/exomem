@@ -97,15 +97,22 @@ def test_registry_projects_one_canonical_identity_into_every_authoring_tool() ->
 
 
 def test_registry_content_and_operation_guidance_covers_every_write_shape() -> None:
+    """The contract rides each authoring tool's description once; parameters stay lean."""
     compact = "- [category] content #tags (context) ^anchor"
 
     for name in ("remember", "replace_memory"):
-        content_help = _param(_command(name), "content").help
-        assert "## Observations" in content_help
-        assert compact in content_help
-        assert "open-vocabulary category" in content_help
-        assert "at least one valid, non-empty semantic unit" in content_help
-        assert "rich" in content_help.lower()
+        command = _command(name)
+        for needle in (
+            "## Observations",
+            compact,
+            "open-vocabulary category",
+            "at least one valid, non-empty semantic unit",
+            "rich form",
+        ):
+            assert needle in command.description, (name, needle)
+        content_help = _param(command, "content").help
+        assert "Semantic authoring" not in content_help
+        assert semantic_authoring.LINK_NAMED_IDENTITIES_GUIDANCE in content_help
 
     observe = _command("observe_memory")
     assert compact in observe.description
@@ -117,18 +124,17 @@ def test_registry_content_and_operation_guidance_covers_every_write_shape() -> N
     assert "final valid semantic unit" in observe.description
 
     edit = _command("edit_memory")
-    edit_help = _param(edit, "operation").help
-    assert "final valid semantic unit" in edit_help
-    assert "inactive-to-active" in edit_help
+    assert "final valid semantic unit" in edit.description
+    assert "inactive-to-active" in edit.description
+    assert "Semantic authoring" not in _param(edit, "operation").help
 
     manage = _command("manage_memory_file")
-    tier2_help = " ".join(
-        (_param(manage, "operation").help, _param(manage, "content").help)
-    )
-    assert "create, overwrite, and append" in tier2_help
-    assert "same semantic precommit contract" in tier2_help
-    assert "remember" in tier2_help
-    assert "replace_memory" in tier2_help
+    assert "create, overwrite, and append" in manage.description
+    assert "same semantic precommit contract" in manage.description
+    assert "remember" in manage.description
+    assert "replace_memory" in manage.description
+    for parameter in ("operation", "content"):
+        assert "Semantic authoring" not in _param(manage, parameter).help
 
 
 def test_observe_schema_field_split_renders_one_compact_row(
@@ -201,15 +207,12 @@ def test_mcp_rest_openapi_and_cli_help_inherit_registry_guidance(
     identity = semantic_authoring.contract_identity()
     for name in AUTHORING_TOOLS:
         assert identity in tools[name]["description"]
-    assert compact in tools["remember"]["inputSchema"]["properties"]["content"][
-        "description"
-    ]
-    assert "inactive-to-active" in tools["edit_memory"]["inputSchema"]["properties"][
-        "operation"
-    ]["description"]
-    assert "same semantic precommit contract" in tools["manage_memory_file"][
+    assert compact in tools["remember"]["description"]
+    assert semantic_authoring.LINK_NAMED_IDENTITIES_GUIDANCE in tools["remember"][
         "inputSchema"
-    ]["properties"]["operation"]["description"]
+    ]["properties"]["content"]["description"]
+    assert "inactive-to-active" in tools["edit_memory"]["description"]
+    assert "same semantic precommit contract" in tools["manage_memory_file"]["description"]
 
     client = TestClient(mcp.http_app())
     openapi = client.get(
@@ -219,24 +222,15 @@ def test_mcp_rest_openapi_and_cli_help_inherit_registry_guidance(
     remember_schema = openapi["paths"]["/api/remember"]["post"]["requestBody"][
         "content"
     ]["application/json"]["schema"]
-    assert compact in remember_schema["properties"]["content"]["description"]
-    edit_schema = openapi["paths"]["/api/edit_memory"]["post"]["requestBody"][
-        "content"
-    ]["application/json"]["schema"]
-    assert "final valid semantic unit" in edit_schema["properties"]["operation"][
-        "description"
-    ]
-    assert "inactive-to-active" in edit_schema["properties"]["operation"][
-        "description"
-    ]
-    assert semantic_authoring.AUTHORING_CONTRACT.content_digest in json.dumps(openapi)
+    assert semantic_authoring.LINK_NAMED_IDENTITIES_GUIDANCE in remember_schema[
+        "properties"
+    ]["content"]["description"]
 
     with pytest.raises(SystemExit) as exit_info:
         main(["remember", "--help"])
     assert exit_info.value.code == 0
     cli_help = capsys.readouterr().out
-    assert "## Observations" in cli_help
-    assert "[category] content #tags (context) ^anchor" in cli_help
+    assert "Wikilink" in cli_help
 
 
 def test_govern_memory_is_tier_two_on_mcp_rest_and_cli(
@@ -295,7 +289,7 @@ def test_govern_memory_schema_exposes_closed_session_action_selector(
     schema = _mcp_tools(mcp)["govern_memory"]["inputSchema"]
 
     assert "session" in schema["properties"]["operation"]["enum"]
-    assert schema["properties"]["session_action"]["anyOf"][0]["enum"] == [
+    assert schema["properties"]["session_action"]["enum"] == [
         "open",
         "status",
         "rotate",
@@ -450,7 +444,7 @@ def test_mcp_remember_carries_neighbour_domain_decision(
     decision_schema = _mcp_tools(mcp)["remember"]["inputSchema"]["properties"][
         "vocabulary_decision"
     ]
-    decision_object = decision_schema["anyOf"][0]
+    decision_object = decision_schema
     assert decision_object["additionalProperties"] is False
     assert set(decision_object["required"]) == {"evidence_fingerprint", "outcome", "canonical"}
     assert decision_object["properties"]["outcome"]["enum"] == ["reuse", "create", "defer"]

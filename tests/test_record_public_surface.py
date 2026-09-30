@@ -87,8 +87,6 @@ def test_record_descriptions_teach_observed_state_and_proposal_before_creation()
     assert "observed" in command.description.lower()
     assert "Planning" in command.description
     assert "propose" in command.description.lower()
-    assert "describe" in params["action"]
-    assert "rebaseline" in params["action"]
     assert "revise" in params["manifest_text"]
     assert "revise" in params["expected_manifest_hash"]
     assert "rebaseline" in params["acknowledged_gap_codes"]
