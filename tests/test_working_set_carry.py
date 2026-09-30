@@ -2492,3 +2492,77 @@ def test_the_carry_query_keeps_the_lexical_stage_term_budget(
         and budget.max_units == working_set_runtime.ACTIVATION_LEXICAL_MAX_TERMS
         for budget in budgets
     )
+
+
+# --------------------------------------------------------------------------- #
+# The band yields to the carry, but only for an ordinary word
+# --------------------------------------------------------------------------- #
+
+#: The resource anchor the band is planted on below.
+SLED_ANCHOR = "Knowledge Base/Products/Cargo Sled.md"
+
+
+def _band_on_the_sled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Semantic evidence as a real encoder would give it: the sled anchor
+    clears the band, so a rare word of its name plus the band resolves it."""
+    monkeypatch.setattr(
+        working_set, "signature_evidence", lambda _index, _turn: ({SLED_ANCHOR: True}, "ready")
+    )
+
+
+def _statuses(packet: dict) -> dict[str, str]:
+    return {item["path"]: item["status"] for item in packet["anchors"]}
+
+
+def test_a_band_resolution_on_an_ordinary_word_yields_to_the_page_the_turn_names(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "sled" is written as an ordinary word in a cased turn whose phrase
+    names the research note. Without the band the sled is `partial` and the
+    note is carried; with it the band must not resolve the sled instead."""
+    turn = "What did we decide about the quillon vantry window for the sled?"
+    _band_on_the_sled(monkeypatch)
+
+    packet = working_set.compile_packet(carry_vault, turn=turn, max_chars=4000)
+
+    assert packet["generation"]["carried_by"] == "retrieval"
+    assert _statuses(packet) == {CARRY_PAGE: "retrieval_carried"}
+
+
+def test_a_band_resolution_on_a_name_is_not_vetoed_by_a_phrase_hit(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same turn writing "Sled" as a name, capitalised away from the
+    sentence start: the turn named the anchor, and the note's phrase is
+    incidental. The band's resolution stands and the carry is not asked."""
+    turn = "What did we decide about the quillon vantry window for the Sled?"
+    _band_on_the_sled(monkeypatch)
+    asked: list[str] = []
+    real = working_set._carry_by_retrieval
+    monkeypatch.setattr(
+        working_set, "_carry_by_retrieval", lambda *a, **k: asked.append(k["turn"]) or real(*a, **k)
+    )
+
+    packet = working_set.compile_packet(carry_vault, turn=turn, max_chars=4000)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert "carried_by" not in packet["generation"]
+    assert _statuses(packet).get(SLED_ANCHOR) == "resolved"
+    assert asked == []
+
+
+def test_the_band_does_not_yield_to_a_page_the_carry_cannot_serve(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The carry names the note but its lanes read nothing off it. Yielding
+    would lose the band's page and serve nothing, so the band's resolution
+    stands."""
+    turn = "What did we decide about the quillon vantry window for the sled?"
+    _band_on_the_sled(monkeypatch)
+    monkeypatch.setattr(working_set, "_carried_packet", lambda *_a, **_k: None)
+
+    packet = working_set.compile_packet(carry_vault, turn=turn, max_chars=4000)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert "carried_by" not in packet["generation"]
+    assert _statuses(packet).get(SLED_ANCHOR) == "resolved"

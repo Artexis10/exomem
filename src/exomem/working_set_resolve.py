@@ -1971,6 +1971,39 @@ def _status_for(candidate: CandidateFacts, *, recency_resolves: bool = False) ->
     return _status_for_evidence(candidate.evidence, recency_resolves=recency_resolves)
 
 
+def band_yieldable_paths(resolution: Resolution) -> frozenset[str]:
+    """The pages `resolution` resolved only because of `vector_band`, on a
+    word the turn wrote as an ordinary word; empty otherwise.
+
+    Non-empty only when EVERY resolved anchor carries `vector_band`, would
+    fall back to `partial` without it (in practice `rare_term` + the band,
+    the third clause), and was reached through name words the turn never
+    writes with an initial capital, in a turn that has a casing signal
+    (`name_lower_case`, the signal `_spoken_as_name` reads for the same
+    question; `_casing_signal` counts a sentence-initial capital). A turn
+    with any anchor resolved on its own words is resolved with or without
+    the band, so the band decided nothing about it. A name word the turn
+    capitalises anywhere, or writes in a script with no case, is taken as
+    naming the anchor, and a phrase another page shares with the turn does
+    not overrule that. A turn typed entirely in lower case has no casing
+    signal and never yields. What is left, "convert the grill's
+    target temperature", is a common noun the band pulled a page in on, and
+    the caller may ask the carry what the turn names instead.
+    """
+    resolved = resolution.resolved_anchors
+    if resolution.status != "resolved" or not resolved:
+        return frozenset()
+    for anchor in resolved:
+        evidence = frozenset(anchor.evidence)
+        if (
+            "vector_band" not in evidence
+            or _status_for_evidence(evidence - {"vector_band"}) == "resolved"
+            or not anchor.name_lower_case
+        ):
+            return frozenset()
+    return frozenset(anchor.path or anchor.anchor_id for anchor in resolved)
+
+
 def _phrase_spans(tokens: Sequence[str], phrase_tokens: Sequence[str]) -> list[tuple[int, int]]:
     """Every contiguous span in `tokens` whose slice equals `phrase_tokens`,
     verbatim OR after `fold_possessive` (fix/activation-competing-senses,

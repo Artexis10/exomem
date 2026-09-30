@@ -2573,6 +2573,50 @@ def compile_packet(
                 recent_context=recent,
             )
 
+    # The band yields to the carry. A turn the band resolved (its page on
+    # `rare_term` + `vector_band`, nothing on its words alone) would, without
+    # the band, have been `unresolved` and asked the carry below. Where the
+    # band's rare word was an ordinary word ("convert the grill's target
+    # temperature" beside the grill page) and the carry names one DIFFERENT
+    # page, that page is what the turn named, and its carried packet is served
+    # exactly as it is without the band. Only when that packet builds: a
+    # carried page the lanes read nothing off would leave the turn with
+    # nothing, so the band's resolution stands instead. A rare word written
+    # as a name, or in a script with no case, is not asked about at all
+    # (`band_yieldable_paths`), which is what keeps a rare name plus the band
+    # resolving in any language, and keeps the carry's cost off those turns.
+    if (
+        not anchor
+        and not analysis.referential
+        and (band_paths := working_set_resolve.band_yieldable_paths(resolution))
+    ):
+        rival = dominant_carry(
+            _carry_by_retrieval(
+                root,
+                turn=turn,
+                timings=timings,
+                freshness_snapshot=freshness_snapshot,
+                lexical_seconds=lexical_seconds,
+            )
+        )
+        if rival is not None and rival[0] not in band_paths:
+            packet = _carried_packet(
+                root,
+                page=rival,
+                analysis=analysis,
+                registry=registry,
+                limit=limit,
+                purpose=purpose,
+                timings=timings,
+                generation=generation,
+                index_token=index_token,
+                freshness_snapshot=freshness_snapshot,
+                index=index,
+                recent_context=recent,
+            )
+            if packet is not None:
+                return packet
+
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
         groups = _carry_groups_by_retrieval(
             root,
