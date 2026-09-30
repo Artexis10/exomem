@@ -47,22 +47,35 @@ def test_dockerfile_has_a_fixed_nonroot_immutable_hosted_target() -> None:
     assert "VOLUME" not in hosted
 
 
-def test_hosted_image_bakes_and_serves_the_model_a_cell_encodes_with() -> None:
-    """A personal server encodes recall with bge-m3; a cell keeps the English
-    model until a node encoder serves it. The hosted build stage resolves
-    `embeddings.MODEL_NAME` outside any cell, so without the explicit model it
-    would fetch bge-m3 (a multi-gigabyte artefact build) for an image whose
-    cells never load it, and its offline gate would fail the English width.
-    Every process in the hosted and cloud images names the cell's model too."""
+def test_cell_images_bake_and_serve_the_model_their_cells_encode_with() -> None:
+    """A cell can fetch nothing under its no-egress policy and read-only root,
+    so each image carries and names exactly the model its cells resolve: the
+    English model in the hosted image, and bge-m3, which a personal server
+    also runs, in the cloud image. Each model's build stage fetches it and
+    loads it offline at its declared width."""
     from exomem import recall_space
 
-    cell_model = recall_space.configured_recall_model({"EXOMEM_HOSTED_CELL": "1"})
+    hosted_model = recall_space.configured_recall_model({"EXOMEM_HOSTED_CELL": "1"})
+    cloud_model = recall_space.configured_recall_model({"EXOMEM_CLOUD_CELL": "1"})
+    assert (hosted_model, cloud_model) == (recall_space.LEGACY_MODEL, recall_space.PERSONAL_MODEL)
     text = _read("Dockerfile")
-    builder = text.split("FROM builder-lean AS builder-hosted", 1)[1].split("\nFROM ", 1)[0]
-    hosted = text.split("FROM python:3.12-slim AS hosted", 1)[1].split("\nFROM ", 1)[0]
 
-    for stage in (builder, hosted):
-        assert f"{recall_space.RECALL_MODEL_ENV}={cell_model}" in stage
+    def stage(header: str) -> str:
+        return text.split(header, 1)[1].split("\nFROM ", 1)[0]
+
+    builder = stage("FROM builder-lean AS builder-hosted")
+    hosted = stage("FROM python:3.12-slim AS hosted")
+    cloud_builder = stage("FROM builder-hosted AS builder-cloud-model")
+    cloud = stage("FROM hosted AS cloud")
+
+    for part in (builder, hosted):
+        assert f"{recall_space.RECALL_MODEL_ENV}={hosted_model}" in part
+    for part in (cloud_builder, cloud):
+        assert f"{recall_space.RECALL_MODEL_ENV}={cloud_model}" in part
+    for part in (builder, cloud_builder):
+        assert "HF_HUB_OFFLINE=1" in part
+        assert "recall_space.declared_dim(MODEL_NAME)" in part
+    assert "COPY --from=builder-cloud-model /opt/exomem-models /opt/exomem-models" in cloud
 
 
 def test_dockerfile_cloud_target_sets_pod_local_log_dir_and_disables_fastmcp_egress() -> None:

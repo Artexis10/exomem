@@ -310,6 +310,43 @@ def test_no_request_thread_loads_a_model(world) -> None:
     assert loads == before
 
 
+def test_a_cell_re_embeds_with_its_one_encoder_while_lexical_recall_serves(
+    world, monkeypatch
+) -> None:
+    # A hosted or cloud cell holds one encoder. The old sidecar is refused
+    # rather than served by a second model, lexical recall answers while the
+    # new sidecar builds, and the vector lane returns at the cutover.
+    vault, log, loads = world
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
+    _warm(vault)
+    vector = _vector_lane(vault)
+    assert (vector["status"], vector["reason"]) == ("unavailable", "vector_space_mismatch")
+    hits = _explained(vault, "retry backoff")["hits"]
+    assert hits and hits[0]["path"] == f"{kb_dirname()}/Notes/page-0.md"
+
+    # A write meanwhile cannot land in the refused sidecar; the build takes it.
+    added = vault / kb_dirname() / "Notes/page-new.md"
+    added.write_text(
+        "---\ntype: note\ntitle: Circuit breaker\nupdated: 2026-09-02\n---\n\n"
+        "# Circuit breaker\n\nA breaker opens after repeated failures and probes later.\n",
+        encoding="utf-8",
+    )
+    embeddings.upsert_after_write_status(vault, [added])
+
+    job = recall_migration.start(vault, threading.Event())
+    job.join(timeout=60)
+    assert not job.is_alive()
+
+    assert recall_migration.status(vault)["state"] == "current"
+    assert {name for name, _thread in loads} == {NEW}
+    active = embeddings.get_embedding_index(vault)
+    assert active.identity.model == NEW
+    assert active.stored_chunks_for(f"{kb_dirname()}/Notes/page-new.md")[0]
+    log.clear()
+    assert _vector_lane(vault)["status"] == "participated"
+    assert _query_encoders(log) == [NEW]
+
+
 def test_the_kill_switch_keeps_the_old_sidecar_serving(world, monkeypatch) -> None:
     vault, log, _loads = world
     monkeypatch.setenv(recall_migration.REEMBED_ENV, "off")
@@ -520,3 +557,28 @@ def test_doctor_reads_the_build_from_disk(world) -> None:
     assert details["building"]["model"] == NEW
     assert details["building"]["sidecar"] == plan.shadow_path.name
     assert 0 < details["building"]["paths_done"] < details["paths_total"] == len(_PAGES)
+
+
+def test_doctor_reports_a_cells_refused_sidecar_as_dense_recall_off(world, monkeypatch) -> None:
+    # A cell does not serve the sidecar another model wrote, so doctor must
+    # not report it as serving while the re-embed runs.
+    from exomem import doctor
+
+    vault, log, _loads = world
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
+    _warm(vault)
+    plan = recall_migration.plan(vault)
+    recall_migration.build(vault, plan, should_stop=lambda: len(_passages_by(log, NEW)) >= 2)
+    recall_migration.reset_for_tests()
+
+    check = doctor._check_recall_reembed(vault)
+
+    assert check.status == "warn"
+    assert f"refuses its {OLD} sidecar" in check.message
+    assert "dense recall is off until the re-embed cuts over" in check.message
+    assert "pages built" in check.message
+
+    monkeypatch.setenv(recall_migration.REEMBED_ENV, "off")
+    check = doctor._check_recall_reembed(vault)
+    assert check.status == "warn"
+    assert "EXOMEM_RECALL_REEMBED=off keeps it off" in check.message

@@ -107,9 +107,9 @@ RUN uv pip install --python /app/.venv/bin/python "torch>=2.12" --index-url http
 # Only the bi-encoder is fetched, and only in the form the runtime reads.
 ########################################################################
 FROM builder-lean AS builder-hosted
-# A cell encodes recall with the English model until a node encoder serves the
-# multilingual one; name it here, where no cell flag is set, so the build
-# fetches the model its cells load.
+# A hosted cell encodes recall with the English model; name it here, where no
+# cell flag is set, so the build fetches the model its cells load. The cloud
+# image adds the multilingual one (`builder-cloud-model`).
 ENV HF_HOME=/opt/exomem-models \
     EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5
 # Resolve the model through the very backend the cell serves with, so the build
@@ -127,12 +127,35 @@ print('fetched', MODEL_NAME)" \
  && HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 EXOMEM_EMBED_BACKEND=onnx \
     /app/.venv/bin/python -c "\
 import importlib.util; \
-from exomem.embeddings import MODEL_NAME, VECTOR_DIM; \
-from exomem import embedding_backend as backend; \
+from exomem.embeddings import MODEL_NAME; \
+from exomem import embedding_backend as backend, recall_space; \
 encoder = backend.load_encoder(MODEL_NAME, backend=backend.ONNX); \
 v = encoder.encode(['offline load gate'], batch_size=1); \
-assert v.shape == (1, VECTOR_DIM), v.shape; \
+assert v.shape == (1, recall_space.declared_dim(MODEL_NAME)), v.shape; \
 assert importlib.util.find_spec('torch') is None, 'torch reached the hosted image'; \
+print('offline load verified', MODEL_NAME, v.shape)"
+
+########################################################################
+# builder-cloud-model — the multilingual recall model a cloud cell encodes
+# with: bge-m3's pinned int8 artefact and its tokenizer, the model a personal
+# server runs. Fetched into the same model root through the same backend, then
+# loaded once more with the network closed, as `builder-hosted` does for the
+# English model. Only the cloud stage copies it.
+########################################################################
+FROM builder-hosted AS builder-cloud-model
+ENV EXOMEM_RECALL_MODEL=BAAI/bge-m3
+RUN EXOMEM_EMBED_BACKEND=onnx /app/.venv/bin/python -c "\
+from exomem.embeddings import MODEL_NAME; \
+from exomem import embedding_backend as backend; \
+backend.load_encoder(MODEL_NAME, backend=backend.ONNX); \
+print('fetched', MODEL_NAME)" \
+ && HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 EXOMEM_EMBED_BACKEND=onnx \
+    /app/.venv/bin/python -c "\
+from exomem.embeddings import MODEL_NAME; \
+from exomem import embedding_backend as backend, recall_space; \
+encoder = backend.load_encoder(MODEL_NAME, backend=backend.ONNX); \
+v = encoder.encode(['offline load gate'], batch_size=1); \
+assert v.shape == (1, recall_space.declared_dim(MODEL_NAME)), v.shape; \
 print('offline load verified', MODEL_NAME, v.shape)"
 
 ########################################################################
@@ -284,6 +307,7 @@ CMD ["--transport", "http", "--port", "8765"]
 ########################################################################
 FROM hosted AS cloud
 COPY --from=restic-fetch /usr/local/bin/restic /usr/local/bin/restic
+COPY --from=builder-cloud-model /opt/exomem-models /opt/exomem-models
 
 USER root
 RUN usermod --home /data/host exomem
@@ -297,7 +321,11 @@ RUN usermod --home /data/host exomem
 # startup update check otherwise stalls every cold start on DNS (measured:
 # `/health` up after 24s against 4s with it off). Both names are read by the
 # installed `fastmcp.settings.Settings` (`env_prefix="FASTMCP_"`).
+#
+# EXOMEM_RECALL_MODEL: a cloud cell encodes recall with the multilingual model
+# a personal server runs; a hosted cell keeps the English one.
 ENV EXOMEM_CONTAINER_VARIANT=cloud \
+    EXOMEM_RECALL_MODEL=BAAI/bge-m3 \
     EXOMEM_LOG_DIR=/tmp/exomem-logs \
     FASTMCP_CHECK_FOR_UPDATES=off \
     FASTMCP_SHOW_SERVER_BANNER=false
