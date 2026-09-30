@@ -392,11 +392,14 @@ def _in_flight() -> Iterator[None]:
             _PREVIOUS_INFLIGHT -= 1
 
 
-def encode_with_previous(model: str, texts: list[str], *, is_query: bool) -> Any:
+def encode_with_previous(
+    model: str, texts: list[str], *, is_query: bool, encoder: Any = None
+) -> Any:
     """Encode for a sidecar written by `model`, with its resident encoder."""
     from . import embeddings
 
-    encoder = previous_resident(model)
+    if encoder is None:
+        encoder = previous_resident(model)
     if encoder is None:
         raise ServingEncoderCold(f"{model} is not resident")
     query_prefix, passage_prefix = embeddings._prefixes(encoder, model)
