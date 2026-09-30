@@ -334,26 +334,51 @@ def test_a_recency_only_entity_gets_neither_conclusions_nor_the_standing_page(
     assert not ({CONCLUSION, STANDING} & _paths(packet))
 
 
-def test_a_recency_only_project_gets_no_standing_page_on_a_bare_referential_turn(
+def test_a_recency_only_page_in_a_project_gets_no_standing_page_on_a_bare_referential_turn(
     study_vault: Path,
 ) -> None:
-    from exomem import commands, working_set_heat
+    """A project row has no page path, so it can never be hot: the project's
+    standing page is reached through a page whose frontmatter names the project.
+    Here that page resolves by recency alone, and the project's standing page
+    must stay out."""
+    packet = _recency_referent(study_vault, "where were we")
 
-    working_set_heat.reset_for_tests()
-    working_set_runtime.reset_caches_for_tests()
-    commands.op_activate_context(
-        study_vault,
-        turn="Let's pick this up.",
-        anchor="project:harbor-study",
-        session="earlier",
-        workspace="bench",
-    )
-    working_set_runtime.reset_caches_for_tests()
-    packet = commands.op_activate_context(
-        study_vault, turn="where were we", session="fresh", workspace="bench"
-    )
-
+    resolved = [a for a in packet["anchors"] if a["status"] == "resolved"]
+    assert [a["path"] for a in resolved] == [ENTITY]
+    assert set(resolved[0]["evidence"]) == {"recency"}
     assert STANDING not in _paths(packet)
+
+
+def test_reach_precedents_gives_a_prior_only_project_anchor_no_standing_page(
+    study_vault: Path,
+) -> None:
+    from exomem import context_roles
+
+    index = working_set_index.WorkingSetIndex(study_vault)
+    row = next(r for r in index.anchors() if r.anchor_id == "project:harbor-study")
+    registry = context_roles.load_roles(study_vault)
+    roles = [{"id": "precedents", "source": "turn_cue", "lane": "units"}]
+
+    def reach(evidence: tuple[str, ...]):
+        anchor = working_set_resolve.ResolvedAnchor(
+            anchor_id=row.anchor_id,
+            path=row.path,
+            ref=row.ref,
+            title=row.title,
+            kind="project",
+            lifecycle="active",
+            status="resolved",
+            evidence=evidence,
+            categories=(),
+            neighbourhood=frozenset(),
+        )
+        return working_set.reach_precedents(
+            study_vault, resolved=[anchor], roles=roles, registry=registry, index=index
+        )
+
+    assert STANDING in reach(("exact_alias",))[1]
+    assert reach(("recency",)) == (frozenset(), frozenset())
+    assert reach(("recency", "usage_prior")) == (frozenset(), frozenset())
 
 
 def test_reach_precedents_skips_an_anchor_reached_by_recency_alone(study_vault: Path) -> None:
@@ -388,6 +413,103 @@ def test_reach_precedents_skips_an_anchor_reached_by_recency_alone(study_vault: 
     prior = reach(("recency",))
     assert CONCLUSION in named[0] and STANDING in named[1]
     assert prior == (frozenset(), frozenset())
+
+
+@pytest.mark.parametrize("qualifier", ["usage_prior", "category_match", "continuity"])
+def test_a_referent_carrying_only_recency_and_a_qualifier_is_not_read_for_conclusions(
+    study_vault: Path, qualifier: str
+) -> None:
+    """A tie-break or qualifier beside `recency` is still not the turn naming the
+    anchor: only a CONTACT kind is. Direct reach with the qualifier stacked on
+    `recency`, through both the `turn_cue` route and the compiler's own roles."""
+    from exomem import context_roles
+
+    registry = context_roles.load_roles(study_vault)
+    index = working_set_index.WorkingSetIndex(study_vault)
+    row = next(r for r in index.anchors() if r.path == ENTITY)
+    evidence = ("recency", qualifier)
+    assert not set(evidence) & working_set_resolve.CONTACT_KINDS
+    anchor = working_set_resolve.ResolvedAnchor(
+        anchor_id=row.anchor_id,
+        path=row.path,
+        ref=None,
+        title=row.title,
+        kind="entity",
+        lifecycle="active",
+        status="resolved",
+        evidence=evidence,
+        categories=(),
+        neighbourhood=frozenset(),
+    )
+    roles = [{"id": "precedents", "source": "turn_cue", "lane": "units"}]
+    got = working_set.reach_precedents(
+        study_vault, resolved=[anchor], roles=roles, registry=registry, index=index
+    )
+    assert got == (frozenset(), frozenset())
+
+    # The role selection sees the same anchor as prior-only.
+    analysis = working_set_resolve.analyze_turn("before we ship, where were we")
+    selected = context_roles.select_roles(
+        registry,
+        anchor_kinds=("entity",),
+        analysis=analysis,
+        prior_only_kinds=frozenset({"entity"}),
+    )
+    got = working_set.reach_precedents(
+        study_vault, resolved=[anchor], roles=list(selected), registry=registry, index=index
+    )
+    assert got == (frozenset(), frozenset())
+
+
+def test_an_anchor_the_agent_chose_is_named_and_still_read_for_conclusions(
+    study_vault: Path,
+) -> None:
+    """`agent_choice` is no contact kind, but the agent naming the anchor by ref
+    is the turn naming it: the prior-only gate must not swallow it."""
+    from exomem import commands, working_set_heat
+
+    working_set_heat.reset_for_tests()
+    working_set_runtime.reset_caches_for_tests()
+    packet = commands.op_activate_context(
+        study_vault, turn="where were we", anchor=ENTITY, session="fresh", workspace="bench"
+    )
+
+    resolved = [a for a in packet["anchors"] if a["status"] == "resolved"]
+    assert resolved and "agent_choice" in resolved[0]["evidence"]
+    assert {CONCLUSION, STANDING} <= _paths(packet)
+
+
+def test_a_recency_referent_the_user_also_read_is_not_read_for_conclusions(
+    study_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recency referent is typically also the most-read page, so it carries
+    `usage_prior` beside `recency`. "where were we" in a fresh session names
+    nothing, so neither the conclusion nor the standing page is served. (The
+    suite disables the relevance check that produces `usage_prior`; the read
+    history is supplied here instead.)"""
+    monkeypatch.setattr(working_set, "_used_paths", lambda root, rows: frozenset({ENTITY}))
+
+    packet = _recency_referent(study_vault, "where were we")
+
+    anchors = [a for a in packet["anchors"] if a["status"] == "resolved"]
+    assert anchors and set(anchors[0]["evidence"]) == {"recency", "usage_prior"}
+    assert not ({CONCLUSION, STANDING} & _paths(packet))
+
+
+def test_before_we_ship_where_were_we_serves_no_conclusions_through_the_compiler(
+    study_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ruled probe, end to end: "before" selects `precedents` by cue, but a
+    turn that names nothing must not read the referent's conclusions, even when
+    the referent is also the page the user read most."""
+    monkeypatch.setattr(working_set, "_used_paths", lambda root, rows: frozenset({ENTITY}))
+
+    packet = _recency_referent(study_vault, "before we ship, where were we")
+
+    # Whatever the compiler does with the turn (today it abstains: the content
+    # word "ship" keeps it from resolving by recency), nothing it serves may
+    # include the referent's conclusions or its project's standing page.
+    assert not ({CONCLUSION, STANDING} & _paths(packet))
 
 
 def test_the_conclusion_pages_kept_are_the_newest_not_the_alphabetically_first(

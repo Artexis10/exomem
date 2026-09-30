@@ -825,11 +825,13 @@ def reach_precedents(
     precedent: set[str] = set()
     standing: list[str] = []
     for anchor in resolved:
-        # An anchor only a prior (recency) supplied was not named by the turn:
-        # reading its conclusions and its project's standing page would serve
-        # what the turn never asked about, whichever route selected the role.
+        # An anchor no NAMING kind reached was not named by the turn: a prior
+        # (recency) supplied it and a tie-break or qualifier (usage_prior,
+        # category_match, continuity) only decorated it. Reading its conclusions
+        # and its project's standing page would serve what the turn never asked
+        # about, whichever route selected the role.
         evidence = set(getattr(anchor, "evidence", ()) or ())
-        if evidence and evidence <= working_set_resolve.PRIOR_CONTACT_KINDS:
+        if evidence and not evidence & working_set_resolve.NAMING_KINDS:
             continue
         row = rows.get(str(getattr(anchor, "anchor_id", "") or ""))
         keys: list[str] = []
@@ -2736,7 +2738,7 @@ def compile_packet(
         named_kinds = {
             anchor.kind
             for anchor in resolution.resolved_anchors
-            if set(anchor.evidence) - working_set_resolve.PRIOR_CONTACT_KINDS
+            if set(anchor.evidence) & working_set_resolve.NAMING_KINDS
         }
         roles = context_roles.select_roles(
             registry,

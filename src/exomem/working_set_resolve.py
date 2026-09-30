@@ -233,6 +233,17 @@ RETRIEVED_CONTACT_KINDS: frozenset[str] = frozenset({"retrieval", "vector_band"}
 #: carries `fact`, and the whole vault became a candidate on one cue.
 CONTACT_KINDS: frozenset[str] = WORDED_CONTACT_KINDS | RETRIEVED_CONTACT_KINDS
 
+#: Kinds by which the turn NAMED an anchor, as opposed to an anchor a prior
+#: (`recency`) supplied and a tie-break or qualifier (`usage_prior`,
+#: `category_match`, `continuity`) decorated. CONTACT_KINDS plus `agent_choice`:
+#: the agent picking the anchor by ref is the strongest naming there is, but it
+#: is no contact kind (nothing in the turn's text reached the anchor), so it is
+#: added here rather than to `CONTACT_KINDS`, which `_status_for`'s clauses read.
+#: An anchor with no member here is prior-only: it says where the conversation
+#: was, never what the turn is about, so nothing beyond the anchor's own
+#: identity is read for it (conclusions, standing pages, role-selected lanes).
+NAMING_KINDS: frozenset[str] = CONTACT_KINDS | frozenset({"agent_choice"})
+
 #: Function words are dropped before the lexical band is measured. "the" shared
 #: between a turn and a title is not a reference; two content words are.
 #: `STOPWORDS` lives in `working_set_index` (re-exported here): the derived-
