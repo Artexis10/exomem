@@ -83,7 +83,8 @@ The test fails on a missing rule at any listed level and on a core over its ceil
 | `hosted-alpha-agent-v1` to `-v4` | unchanged, byte for byte | pinned (`profile`, `workflow`, `skill_contract`); no `section` |
 | `hosted-alpha-agent-v5` | diet applies | live registry, gains `section`; v5 candidate regenerated |
 | generic MCP (default surface), claude-code, REST/CLI | diet applies | live registry, gains `section` |
-| `full`, `diagnostics`, `session` | unchanged | unchanged |
+| `full`, `diagnostics` | unchanged | unchanged |
+| `session` | rebased on the core | live blocks as before; `engagement` (envelope digested), `server` (`compute_policy` moved to `diagnostics_reading`) and the `sections` index come from the core; 21,974 to 21,270 B |
 
 The frozen profiles are enforced, not asserted: `tests/test_bootstrap_frozen_profiles.py` records the SHA-256 of `op_bootstrap` for each of v1 to v4 at each level, with the volatile fields (`server.version`, the tool-surface digests) normalised, captured on the untouched base before any change. The diet is applied by branching on `active_descriptor.profile in LEGACY_PROFILE_CONTRACTS`, the same predicate the payload already uses to select pinned schemas, so a legacy profile takes the pre-diet code path unmodified. The hosted plugin candidates under `plugins/hosted/candidates/` and their `compatibility.json` digests for v2 to v4 must not change; only v5's regenerates, which is expected because v5 has no pinned schema by design.
 
