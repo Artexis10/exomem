@@ -30,10 +30,9 @@ def _offline_authority():
 
 def _make_store(vault: Path) -> Path:
     path = connection.store_path(vault)
-    writer = connection.open_writer(path, lease_check=lambda: True)
-    with writer.transaction() as tx:
-        tx.execute("INSERT INTO store_meta(key, value) VALUES ('probe', 'invented')")
-    writer.close()
+    with connection.open_writer(path, lease_check=lambda: True) as writer:
+        with writer.transaction() as tx:
+            tx.execute("INSERT INTO store_meta(key, value) VALUES ('probe', 'invented')")
     return path
 
 
@@ -152,3 +151,37 @@ def test_index_rebuilds_leave_the_store_untouched(
     commands.op_maintain_memory(vault, mode="reconcile")
 
     assert _fingerprint(store) == before
+
+
+def test_make_store_closes_writer_when_setup_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlite3
+
+    opened: list[sqlite3.Connection] = []
+    closed: list[sqlite3.Connection] = []
+
+    class FailedSetupConnection(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            opened.append(self)
+
+        def execute(self, sql, *args):
+            if "'probe'" in sql:
+                raise sqlite3.OperationalError("invented setup failure")
+            return super().execute(sql, *args)
+
+        def close(self):
+            closed.append(self)
+            return super().close()
+
+    monkeypatch.setattr(connection, "_CONNECTION_FACTORY", FailedSetupConnection)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="invented setup failure"):
+            _make_store(tmp_path / "vault")
+        assert opened
+        assert set(opened) <= set(closed)
+    finally:
+        for conn in opened:
+            if conn not in closed:
+                conn.close()
