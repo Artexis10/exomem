@@ -62,6 +62,39 @@ SEMANTIC_STAGE_P95_MS = 250.0
 #: Latency samples per content turn: every on-arm turn is compiled this many
 #: times from a cold packet cache, so the p95 is over more than one pass.
 LATENCY_PASSES = 3
+#: The named golds, and one ordinary note each that shares a phrase with the
+#: turn but is not what the turn names: a cleaning rota that mentions the
+#: glaze firing, a shed roof that leaks after winter, a shopping list for next
+#: month's retreat. Written into the multilingual vault after it has been
+#: measured, so every other assertion here reads the vault without them.
+NAMED_GOLDS = ("M1-de", "M1-ru", "M5-ja")
+INCIDENTAL_NOTES = {
+    "putzplan.md": (
+        "Putzplan Gemeinschaftsraum",
+        "Nach dem Glasurbrand am Donnerstag ist die Teeküche dran; Besen und Eimer stehen im Flur.",
+    ),
+    "saraj.md": (
+        "Сарай у озера",
+        "Крыша сарая протекает после зимы; ведро стоит у двери, пока не придёт кровельщик.",
+    ),
+    "kaidashi.md": (
+        "備品メモ",
+        "来月の合宿でプロジェクターをまた借りられるか確認してくれる人を探す。",
+    ),
+}
+_INCIDENTAL_NOTE = """---
+type: note
+status: active
+tags: [misc]
+created: "2026-09-01T02:00:39Z"
+updated: "2026-09-01T02:00:39Z"
+---
+# {title}
+
+## Observations
+
+- [note] {body} #misc
+"""
 
 
 @dataclasses.dataclass
@@ -77,6 +110,8 @@ class Measured:
     english_vectors: int
     fingerprint: str
     dim: int
+    incidental: dict[str, dict[str, dict]]
+    incidental_carry: dict[str, tuple[str, ...]]
 
 
 _MEASURED: dict[str, Measured] = {}
@@ -155,6 +190,22 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
             packet = commands.op_activate_context(root, turn=case.turn, include_timings=True)
             semantic_ms.append(float(packet["timings"]["stages"]["working_set.semantic"]["ms"]))
 
+    # The same vault with an ordinary note beside each named gold that shares
+    # a phrase with its turn, so the retrieval carry names that note instead.
+    for name, (title, body) in INCIDENTAL_NOTES.items():
+        (root / "Knowledge Base" / "Notes" / "Insights" / name).write_text(
+            _INCIDENTAL_NOTE.format(title=title, body=body), encoding="utf-8"
+        )
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(root).rebuild(load_encoder=True)
+    lexstore.ensure_fresh(root)
+    named_cases = [case for case in CASES if case.case_id in NAMED_GOLDS]
+    incidental_carry = {
+        case.case_id: tuple(path for path, _score in working_set_runtime.carry_candidates(root, case.turn)[0])
+        for case in named_cases
+    }
+    incidental = _compile_arms(root, [(case.case_id, case.prior_turn, case.turn) for case in named_cases], monkeypatch)
+
     # The English corpus carries its own recency on disk, in its own vault
     # root's heat sidecar -- untouched by the seeding above -- and its turns
     # are timed by nobody.
@@ -205,6 +256,8 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
         english_vectors,
         fingerprint,
         dim,
+        incidental,
+        incidental_carry,
     )
 
 
@@ -256,6 +309,30 @@ def test_every_named_positive_resolves_its_gold(measured: Measured) -> None:
         assert row["gold_resolved"] is True, (case_id, row)
         assert row["observed_status"]["off"] == "partial", (case_id, row)
     assert report["summary"]["named_resolution_rate"] == 1.0
+
+
+def test_an_incidental_note_the_carry_names_never_costs_a_named_gold(measured: Measured) -> None:
+    """Each named gold's turn also shares a phrase with an ordinary note. The
+    carry names that note for the German and Russian turns (an unspaced
+    Japanese turn has no phrase the carry can pair, so it names nothing).
+    The turn named the gold by its rare name, not the note, so the gold still
+    resolves on the band, exactly as it does with no such note in the vault,
+    and never resolves without it."""
+    notes = {name: f"Knowledge Base/Notes/Insights/{name}" for name in INCIDENTAL_NOTES}
+    assert measured.incidental_carry == {
+        "M1-de": (notes["putzplan.md"],),
+        "M1-ru": (notes["saraj.md"],),
+        "M5-ja": (),
+    }
+    for case in CASES:
+        if case.case_id not in NAMED_GOLDS:
+            continue
+        (gold,) = (measured.manifest.key_to_path[key] for key in case.gold)
+        on = {item["path"]: item["status"] for item in measured.incidental["on"][case.case_id]["anchors"]}
+        off = {item["path"]: item["status"] for item in measured.incidental["off"][case.case_id]["anchors"]}
+        assert on.get(gold) == "resolved", (case.case_id, on)
+        assert "carried_by" not in measured.incidental["on"][case.case_id]["generation"], case.case_id
+        assert off.get(gold) != "resolved", (case.case_id, off)
 
 
 def test_no_poison_is_banded_or_promoted(measured: Measured) -> None:

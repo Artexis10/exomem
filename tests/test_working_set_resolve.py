@@ -351,13 +351,28 @@ def test_vector_band_is_absent_without_vectors() -> None:
     assert "vector_band" not in candidates[0].evidence
 
 
-def test_a_turn_the_band_resolved_names_its_band_decided_pages() -> None:
+def _band_facts(anchor_id: str, evidence: tuple[str, ...], *, lower_case: bool = True, kind: str = "resource"):
+    """A candidate reached through a name word the turn wrote in lower case
+    (`lower_case`) or as a name (not `lower_case`)."""
+    return replace(_facts(anchor_id, kind=kind, evidence=evidence), name_lower_case=lower_case)
+
+
+def test_a_band_resolution_on_an_ordinary_word_may_yield() -> None:
     resolution = resolve_module.resolve(
-        [_facts("grill.md", evidence=("rare_term", "vector_band")), _facts("oven.md", evidence=("rare_term",))]
+        [_band_facts("grill.md", ("rare_term", "vector_band")), _facts("oven.md", evidence=("rare_term",))]
     )
 
     assert resolution.status == "resolved"
-    assert resolve_module.band_decided_paths(resolution) == frozenset({"grill.md"})
+    assert resolve_module.band_yieldable_paths(resolution) == frozenset({"grill.md"})
+
+
+def test_a_band_resolution_on_a_name_never_yields() -> None:
+    """Capitalised away from a sentence start, or in a script with no case:
+    either way `name_lower_case` is false and the turn named the anchor."""
+    resolution = resolve_module.resolve([_band_facts("quillmere.md", ("rare_term", "vector_band"), lower_case=False)])
+
+    assert resolution.status == "resolved"
+    assert resolve_module.band_yieldable_paths(resolution) == frozenset()
 
 
 @pytest.mark.parametrize(
@@ -369,37 +384,23 @@ def test_a_turn_the_band_resolved_names_its_band_decided_pages() -> None:
         ("lexical_overlap", "claims_match", "vector_band"),
     ],
 )
-def test_a_page_resolved_on_more_than_the_band_is_not_band_decided(evidence: tuple[str, ...]) -> None:
-    resolution = resolve_module.resolve([_facts("grill.md", evidence=evidence)])
+def test_a_page_resolved_on_more_than_the_band_never_yields(evidence: tuple[str, ...]) -> None:
+    resolution = resolve_module.resolve([_band_facts("grill.md", evidence)])
 
     assert resolution.status == "resolved"
-    assert resolve_module.band_decided_paths(resolution) == frozenset()
+    assert resolve_module.band_yieldable_paths(resolution) == frozenset()
 
 
 def test_one_anchor_resolved_on_its_words_means_the_band_decided_nothing() -> None:
     resolution = resolve_module.resolve(
         [
-            _facts("grill.md", kind="resource", evidence=("rare_term", "vector_band")),
+            _band_facts("grill.md", ("rare_term", "vector_band")),
             _facts("plan.md", kind="plan", evidence=("exact_alias",)),
         ]
     )
 
     assert {anchor.path for anchor in resolution.resolved_anchors} == {"grill.md", "plan.md"}
-    assert resolve_module.band_decided_paths(resolution) == frozenset()
-
-
-def test_a_yielded_band_resolution_holds_its_page_at_partial() -> None:
-    resolution = resolve_module.resolve(
-        [_facts("grill.md", evidence=("rare_term", "vector_band")), _facts("oven.md", evidence=("rare_term",))]
-    )
-
-    yielded = resolve_module.band_yielded(resolution)
-
-    assert yielded.status == "unresolved"
-    assert yielded.ambiguity == ()
-    assert [(anchor.path, anchor.status, anchor.evidence) for anchor in yielded.anchors] == [
-        (anchor.path, "partial", anchor.evidence) for anchor in resolution.anchors
-    ]
+    assert resolve_module.band_yieldable_paths(resolution) == frozenset()
 
 
 def test_graph_corroboration_counts_an_edge_between_two_candidates() -> None:
