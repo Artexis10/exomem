@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing raw Sources or Evidence.
 metadata:
-  skill_contract: 49aa79ab30625ad43ce8ea54832af80153d7433f5129498e94fb928976e5cbc9
+  skill_contract: 91df45e44519efa6345bcf243ed00d803d8304bafbd954715ae2fd7f1a6179c7
   version: "0.2.0"
 ---
 
