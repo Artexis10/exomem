@@ -277,6 +277,8 @@ _CHILD_ENV_ALLOW = frozenset(
         "EXOMEM_STATE_ROOT", "EXOMEM_HOSTED_STATE_ROOT", "EXOMEM_HOSTED_CELL",
         "EXOMEM_KB_DIRNAME", "EXOMEM_LOG_DIR", "EXOMEM_LOG_LEVEL", "EXOMEM_LOG_MAX_MB",
         "EXOMEM_LOG_BACKUPS", "EXOMEM_MODEL_OFFLINE", "EXOMEM_CPU_THREADS",
+        # The image's glibc arena bound (bound-cell-memory D2) holds for children too.
+        "MALLOC_ARENA_MAX",
     }
 )
 _CHILD_ENV_DENY = ("TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "CREDENTIAL", "COOKIE", "AUTH")

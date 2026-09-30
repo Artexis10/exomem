@@ -390,6 +390,27 @@ def unit_present(unit: TokenUnit, stems) -> bool:
 _tokenize = tokenize
 
 
+#: Consecutive warm declines on an unclassified SQLite error after which warm
+#: treats the sidecar as retired and warms the Python rung. A lock or sync lag
+#: is proven transient and never counts; an unclassified error is not, and
+#: without a bound warm would decline for the process lifetime.
+UNKNOWN_ERROR_RETIREMENT = 5
+_UNKNOWN_ERROR_STREAKS: dict[Path, int] = {}
+_UNKNOWN_ERROR_LOCK = threading.Lock()
+
+
+def _unknown_error_streak(vault_root: Path, error_class: str | None) -> int:
+    """Advance (or, for anything but an unclassified error, end) the streak."""
+    key = Path(vault_root).resolve()
+    with _UNKNOWN_ERROR_LOCK:
+        if error_class != "unknown":
+            _UNKNOWN_ERROR_STREAKS.pop(key, None)
+            return 0
+        streak = _UNKNOWN_ERROR_STREAKS.get(key, 0) + 1
+        _UNKNOWN_ERROR_STREAKS[key] = streak
+        return streak
+
+
 class BM25Index:
     """Per-process BM25 corpus over KB markdown files.
 
@@ -668,11 +689,21 @@ class BM25Index:
         # relevance proof; otherwise a valid lone structured manifest vanishes.
         return [(p, float(s)) for p, s in ranked]
 
-    def warm(self, vault_root: Path, scope: str = "kb") -> None:
+    def warm(self, vault_root: Path, scope: str = "kb") -> str:
         """Build (or freshness-check) whichever backend serves this lane —
         the startup warm-up hook, so the first hybrid find doesn't pay the
         first-build cliff (sidecar sync/population under FTS5; the corpus
-        stemming build on the in-process rung)."""
+        stemming build on the in-process rung).
+
+        Returns the rung warmed: ``"fts5"``, ``"python"``, or ``"declined"``
+        when FTS5 owns the lane but could not serve this pass (locked, busy,
+        or not yet synced). A declined warm builds nothing: the whole-corpus
+        Python index is the memory the sidecar exists to avoid, and a
+        transient must not buy it. The next warm retries through FTS5. Only
+        an absent sidecar (unsupported or retired), the explicit python
+        backend, or `UNKNOWN_ERROR_RETIREMENT` consecutive unclassified
+        sidecar errors warm the Python rung.
+        """
         from . import lexstore
 
         if lexstore.search_bm25(vault_root, "warm", 1, scope=scope) is not None:
@@ -680,8 +711,21 @@ class BM25Index:
             # index in. The rank-bm25 corpus stays cold on purpose — not
             # holding N token lists resident is part of the backend's win;
             # a mid-process FTS5 retirement pays one rebuild, lazily.
-            return
+            _unknown_error_streak(vault_root, None)
+            return "fts5"
+        if lexstore.cache_token(vault_root) == "fts5":
+            streak = _unknown_error_streak(vault_root, lexstore.last_bm25_error_class())
+            if streak < UNKNOWN_ERROR_RETIREMENT:
+                log.info("bm25: lexical sidecar busy or unsynced (scope=%s); warm declined", scope)
+                return "declined"
+            if streak == UNKNOWN_ERROR_RETIREMENT:
+                log.warning(
+                    "bm25: lexical sidecar failed %d consecutive warms with unclassified "
+                    "errors; treated as retired, warming the in-process rung",
+                    streak,
+                )
         self._fresh_corpus(vault_root, scope, None)
+        return "python"
 
     def unload_cache(self) -> bool:
         """Drop rebuildable in-process BM25 corpus/token caches."""
@@ -754,9 +798,9 @@ def search(
     )
 
 
-def warm(vault_root: Path, scope: str = "kb") -> None:
+def warm(vault_root: Path, scope: str = "kb") -> str:
     """Module-level warm-up hook using the per-process singleton."""
-    _INDEX.warm(vault_root, scope)
+    return _INDEX.warm(vault_root, scope)
 
 
 def unload_cache() -> bool:
