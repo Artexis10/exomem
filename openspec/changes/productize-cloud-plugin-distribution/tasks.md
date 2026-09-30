@@ -3,6 +3,8 @@
 - [ ] 1.1 Expose one generic skill-payload helper and teach capability restrictions only in the canonical scaffold; verify full resource closure, skill contract and existing self-hosted parity tests.
 - [ ] 1.2 Generate current Claude/OpenAI Cloud packages, manifests, public metadata and deterministic archives; verify schema, byte parity, archive safety, privacy and legacy artifact preservation.
 
+- [ ] 1.3 Add release-owned profile-aware activation modes and canonical runtime arguments; red-first verify native-MCP mode has no external transport, working-set fallback requests real activation, current capture/continuation stay profile-local, default installs remain compatible and exact health checks validate the generated commands.
+
 ## 2. Behavioural evaluation
 
 - [ ] 2.1 Add the shared synthetic corpus and observable trace evaluator with red-first tests for missing calls, wrong arguments, fabricated success, denied writes, absent independent readbacks and drift.

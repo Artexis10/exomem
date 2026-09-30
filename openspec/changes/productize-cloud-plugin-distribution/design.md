@@ -18,6 +18,12 @@ Deliver generated native packages, one shared behavioural evaluator, native acce
 
 ## Risks / Trade-offs
 
+### Profile-aware canonical hook activation
+
+The local profile-parity repair shares this batch's canonical workflow; harness integration lives in its own repository. Extend the release-owned hook installer with explicit `--activation-mode working-set|mcp` and profile binding. Standalone retrieval/capture scripts accept `--client` and `--hook-home`; wrappers forward arguments. Continuation accepts the same home binding. Health checks reconstruct the same expected registrations. Legacy defaults remain unchanged. Working-set mode retains its bounded transport and uses a native-MCP activation instruction on failure; MCP mode requests bootstrap when needed and one verbatim-turn activation through the already admitted native MCP, with no external HTTP or local-vault CLI invocation. Do not read or import provider-managed OAuth credentials or infer personal-vault access. Native acceptance distinguishes a directly injected packet from native-MCP delegation and tests unprompted activation, profile-local state, current Codex capture parsing and supported lifecycle events. Hook-bearing provider adapters remain thin and generated from these release-owned scripts; unsupported surfaces rely on the same Skill operating contract rather than pretending they execute hooks.
+
+MCP mode forbids capture's external episode/candidate-inspection door as well as retrieval transport, even when a personal service credential is present. Preserve transcript-based episode bookkeeping and success detection. Its retrieval cadence bypasses legacy session/global reminder suppression and includes short referential resumes, while intentional disable/prominence and task-control silence remain in force. The instruction reuses current already-held context and forbids duplicate activation. Installer/health commands use the same literal profile bindings and safe platform quoting; health reports installation separately from runtime proof.
+
 - Provider manifests change independently: validate against current primary docs and schemas and record adapter versions; behavioural files remain shared.
 - Imported connector tools alone do not prove skill activation: native traces must include unprompted activation and capture in ordinary conversation, then fresh-chat readback.
 - A scaffold workflow can describe excluded Cloud tools: add one canonical capability guard and test that clients receive the live exclusion list; do not silently claim complete media/import workflows.

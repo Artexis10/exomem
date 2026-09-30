@@ -28,6 +28,24 @@ The canonical core SHALL establish live engagement and capabilities through boot
 - **THEN** the client obtains live bootstrap and calls activate_context with the raw turn before filling remaining retrieval gaps
 - **AND** it refrains from unavailable media or transfer operations
 
+### Requirement: Canonical profile-aware activation hooks
+Supported local hook surfaces SHALL use release-owned retrieval, capture and continuation behaviour with explicit client and profile-local state. The installer SHALL support direct working-set injection and native-MCP delegation as separately observable modes. Native-MCP mode MUST NOT access provider credentials, an external hook transport or an implicit local vault. Working-set transport failure SHALL request native-MCP activation without claiming an injected packet. Existing default installation behaviour SHALL remain compatible.
+
+#### Scenario: Remote MCP context activation
+- **WHEN** a supported profile is installed in native-MCP mode
+- **THEN** its canonical prompt hook requests bootstrap when necessary and one raw-turn activate_context through its admitted Exomem MCP
+- **AND** its hook makes no external HTTP or local-vault CLI call
+
+#### Scenario: MCP activation cadence and transport policy
+- **WHEN** a second session or short referential resume needs activation inside reminder cooldowns
+- **THEN** its activation instruction is not suppressed and forbids duplicate calls for current already-held context
+- **AND** retrieval and capture make no external requests or service-credential reads in native-MCP mode, including episode and candidate-coverage checks
+
+#### Scenario: Profile-bound current capture and continuation
+- **WHEN** a named Codex profile executes its hooks
+- **THEN** the canonical capture parser recognizes stable Codex messages and hook state remains local to that profile
+- **AND** unsupported lifecycle events are not invented
+
 ### Requirement: Native provider packaging
 The Claude bundle SHALL support Chat, Cowork and Code with a fixed remote MCP URL and complete resources. The public OpenAI archive SHALL use the portable root manifest and MCP schemas and SHALL exclude private app bindings, including bindings in compatibility manifests. Both packages SHALL contain valid identity, legal/support metadata, contained assets and safe deterministic archives.
 
