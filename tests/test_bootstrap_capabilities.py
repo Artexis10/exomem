@@ -189,11 +189,14 @@ def _assert_conforms(
     )
     assert refs <= exported_names, sorted(refs - exported_names)
 
-    canonical = payload["server"]["canonical_mcp_tool_surface"]
-    assert canonical["scope"] == "packaged-full-mcp-discovery"
-    assert canonical["sha256"] == payload["server"][
-        "published_mcp_tool_surface_sha256"
-    ]
+    # The core names the digest once (flat); the structured form is in the reference
+    # payload (`section="all"`, `diagnostics_reading`, and the full profiles).
+    canonical = payload["server"].get("canonical_mcp_tool_surface")
+    if canonical is not None:
+        assert canonical["scope"] == "packaged-full-mcp-discovery"
+        assert canonical["sha256"] == payload["server"][
+            "published_mcp_tool_surface_sha256"
+        ]
     assert payload["server"]["published_mcp_tool_surface_scope"] == (
         "packaged-full-mcp-discovery"
     )

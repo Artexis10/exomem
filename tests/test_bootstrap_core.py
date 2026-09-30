@@ -262,6 +262,20 @@ def test_the_core_names_every_section_with_its_size_and_how_to_fetch_it(monkeypa
     assert all(word in sections["how"] for word in ("section=", "index", "all"))
 
 
+@pytest.mark.parametrize("surface", SURFACES)
+def test_the_core_names_the_tool_surface_digest_once(monkeypatch, surface):
+    """The digest was served twice, flat and again inside `canonical_mcp_tool_surface`.
+    The core keeps the documented flat key; the structured duplicate is in the
+    `diagnostics_reading` section with the rest of the server block."""
+    core = _bootstrap(monkeypatch, "balanced", surface)
+    digest = core["server"]["published_mcp_tool_surface_sha256"]
+    assert _text(core).count(digest) == 1
+    assert core["server"]["published_mcp_tool_surface_scope"] == "packaged-full-mcp-discovery"
+    assert "canonical_mcp_tool_surface" not in core["server"]
+    section = _bootstrap(monkeypatch, "balanced", surface, section="diagnostics_reading")
+    assert section["server"]["canonical_mcp_tool_surface"]["sha256"] == digest
+
+
 def test_an_unknown_section_names_the_accepted_ones(monkeypatch):
     with pytest.raises(ValueError, match="section must be one of") as raised:
         _bootstrap(monkeypatch, "balanced", None, section="nonexistent")

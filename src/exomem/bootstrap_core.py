@@ -277,7 +277,6 @@ def project_core(reference: dict) -> dict:
             "version",
             "published_mcp_tool_surface_sha256",
             "published_mcp_tool_surface_scope",
-            "canonical_mcp_tool_surface",
         )
         if key in server
     }
