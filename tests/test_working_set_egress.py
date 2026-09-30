@@ -29,7 +29,69 @@ from test_governance_egress import (
 
 from exomem import context_refs
 from exomem.governance import egress
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import owner_principal, request_scope
+
+
+@pytest.mark.parametrize("cue", ["", "right now", "currently", "how much"])
+def test_neighbourhood_state_never_names_a_withheld_page(tmp_path: Path, cue: str) -> None:
+    from exomem import working_set, working_set_index
+
+    anchor = "Knowledge Base/Products/Cargo Sled.md"
+    permitted = "Knowledge Base/Notes/sled-maintenance.md"
+    withheld = "Knowledge Base/Notes/Patterns/sled-buyout-terms.md"
+
+    def seed(root: Path, *, with_withheld: bool) -> Path:
+        _write_page(
+            root / anchor,
+            "---\ntype: note\nupdated: 2026-09-02\n---\n\n# Cargo Sled\n\n"
+            "## Constraints\n\nNever exceed 400 kg.\n\n"
+            "Related: [[sled-maintenance]] [[sled-buyout-terms]]\n",
+        )
+        _write_page(
+            root / permitted,
+            "---\ntype: note\ntitle: Sled maintenance\nstatus: active\n"
+            "updated: 2026-08-01\n---\n\n# Sled maintenance\n\nGrease the runners.\n",
+        )
+        if with_withheld:
+            _write_page(
+                root / withheld,
+                "---\ntype: note\ntitle: SECRETTITLE Sled buyout\nstatus: active\n"
+                "updated: 2026-09-25\n---\n\n# SECRETTITLE Sled buyout\n\nNothing here.\n",
+            )
+        write_scope(root)
+        write_rule(root, ceiling=0)
+        working_set_index.WorkingSetIndex(root).rebuild()
+        return root
+
+    present = seed(tmp_path / "present", with_withheld=True)
+    absent = seed(tmp_path / "absent", with_withheld=False)
+    turn = f"what are the constraints on the cargo sled {cue}".strip()
+
+    def packet(root: Path) -> dict:
+        compiled = working_set.compile_packet(root, turn=turn, freshness_key="k")
+        guarded = egress.guard_working_set(
+            root, compiled,
+            egress.AnnotatedHits(hits=[], withheld_paths=frozenset(), active=True),
+        )
+        assert guarded is not None
+        return guarded
+
+    with request_scope(_external()):
+        external_present = packet(present)
+        external_absent = packet(absent)
+
+    assert external_present == external_absent
+    assert external_present["current_state"][0]["statement"] == "latest active note: Sled maintenance"
+    assert external_present["current_state"][0]["as_of"] == "2026-08-01"
+    assert external_present["current_state"][0]["path"] == permitted
+    assert "SECRETTITLE" not in json.dumps(external_present)
+    assert "2026-09-25" not in json.dumps(external_present)
+
+    with request_scope(owner_principal()):
+        owner = packet(present)
+    assert owner["current_state"][0]["statement"] == "latest active note: SECRETTITLE Sled buyout"
+    assert owner["current_state"][0]["as_of"] == "2026-09-25"
+    assert owner["current_state"][0]["path"] == withheld
 
 
 def _release(*, withheld=(RESTRICTED_PATH,), blocked: bool = False) -> egress.AnnotatedHits:
