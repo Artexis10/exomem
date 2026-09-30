@@ -49,7 +49,7 @@ A background job SHALL build a sidecar for the recall encoder's space beside the
 
 #### Scenario: A live write does not orphan an interrupted initial build
 
-- **WHEN** an initial build is interrupted after a live write has given the legacy sidecar the recall encoder's identity, with incomplete corpus coverage, no published active pointer and a separate target-space shadow sidecar beside the active one
+- **WHEN** an initial build is interrupted, including before its first batch commits, and a live write has given the legacy sidecar the recall encoder's identity, with incomplete corpus coverage, no published active pointer and a separate target-space shadow sidecar beside the active one
 - **THEN** the next start resumes the initial shadow build without re-encoding committed batches, covers every eligible page and semantic unit, and reports current only after atomic cutover
 
 #### Scenario: A matching serving sidecar needs no startup coverage scan

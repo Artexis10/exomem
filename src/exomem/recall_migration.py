@@ -393,6 +393,13 @@ def build(
     should_stop: Callable[[], bool] = lambda: False,
 ) -> bool:
     """Build the new sidecar up to the vault's current state. False when stopped early."""
+    if plan_.serving is None:
+        from . import embeddings
+
+        # Persist restart evidence before the first encode can fail. Reads of
+        # a missing shadow do not create it, and a live write can meanwhile
+        # give the incomplete legacy sidecar the target identity.
+        embeddings.get_embedding_index(vault_root, path=plan_.shadow_path)._connect().close()
     _update(
         vault_root,
         state="building",

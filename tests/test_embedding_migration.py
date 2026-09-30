@@ -374,6 +374,63 @@ def test_initial_build_resumes_after_a_live_write_and_restart(preseeded_world, m
     assert _vector_lane(vault)["status"] == "participated"
 
 
+def test_initial_build_resumes_after_first_encode_fails_and_a_live_write(
+    preseeded_world, monkeypatch
+) -> None:
+    vault, log, _loads = preseeded_world
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
+
+    def crash_before_first_commit(self, texts, **kwargs):
+        raise RuntimeError("initial encode interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_Model, "encode", crash_before_first_commit)
+        job = recall_migration.start(vault, threading.Event())
+        job.join(timeout=60)
+        assert not job.is_alive()
+    assert recall_migration.status(vault)["state"] == "failed"
+    assert _passages_by(log, NEW) == []
+    assert index_paths.active_sidecar_name(vault) is None
+
+    added = vault / kb_dirname() / "Notes/live-write.md"
+    added.write_text("# Live write\n\nA page written after the first encode failed.\n", encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [added]).status == "completed"
+    assert embeddings.get_embedding_index(vault).identity.model == NEW
+    embeddings.unload_model()
+    embeddings.clear_embedding_indexes()
+    recall_migration.reset_for_tests()
+    find_module.clear_cache()
+
+    plan = recall_migration.plan(vault)
+    assert plan is not None and plan.serving is None
+    shadow = EmbeddingIndex(vault, path=plan.shadow_path)
+    assert plan.shadow_path.exists()
+    assert shadow.identity is None
+    assert shadow.file_mtimes() == {}
+    assert shadow.semantic_unit_parent_states() == {}
+    publish = index_paths.publish_active_sidecar
+
+    def publish_after_build(vault_root, name):
+        assert recall_migration.status(vault_root)["state"] == "cutting_over"
+        assert index_paths.active_sidecar_name(vault_root) is None
+        assert set(shadow.file_mtimes()) == {
+            f"{kb_dirname()}/{rel}" for rel in [*_PAGES, "Notes/live-write.md"]
+        }
+        assert len(shadow.semantic_unit_parent_states()) == len(_PAGES)
+        publish(vault_root, name)
+
+    monkeypatch.setattr(index_paths, "publish_active_sidecar", publish_after_build)
+    assert recall_migration.run(vault, threading.Event()) == "current"
+    active = embeddings.get_embedding_index(vault)
+    assert active.path == plan.shadow_path
+    assert index_paths.active_sidecar_name(vault) == active.path.name
+    assert set(active.file_mtimes()) == {
+        f"{kb_dirname()}/{rel}" for rel in [*_PAGES, "Notes/live-write.md"]
+    }
+    assert len(active.semantic_unit_parent_states()) == len(_PAGES)
+    assert _vector_lane(vault)["status"] == "participated"
+
+
 def test_healthy_legacy_sidecar_with_drift_does_not_plan_a_build(
     preseeded_world, monkeypatch
 ) -> None:
