@@ -75,6 +75,13 @@ def _wire_edit_candidate(
     # The suite disables embeddings globally; an empty value opens the real edit
     # advisory gate while the detector itself remains deterministic below.
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "")
+    # These tests exercise identity/suppression after a measured overlap, not
+    # backend availability. Supply its scores before the strict route sweep.
+    monkeypatch.setattr(
+        corpus_aware,
+        "_best_cosine_per_file",
+        lambda *args, **kwargs: {candidate.path: candidate.cosine},
+    )
     monkeypatch.setattr(
         corpus_aware,
         "detect_contradictions",

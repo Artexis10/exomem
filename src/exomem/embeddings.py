@@ -1164,6 +1164,35 @@ def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
         )
 
 
+def advisory_passages_fit(texts: list[str]) -> bool:
+    """Prove passages fit the resident selected encoder; never load or wait."""
+    selected = recall_space.selected_model()
+    model_name = selected or MODEL_NAME
+    previous = selected is not None and selected != MODEL_NAME
+    with contextlib.ExitStack() as stack:
+        if previous:
+            stack.enter_context(recall_space._in_flight())
+            model = recall_space.previous_resident(selected)
+        else:
+            if not _MODEL_LOCK.acquire(blocking=False):
+                raise runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+            try:
+                stack.enter_context(BGE_GUARD.active())
+                model = _MODEL
+            finally:
+                _MODEL_LOCK.release()
+        if model is None:
+            raise recall_space.ServingEncoderCold("advisory encoder is not resident")
+        _query_prefix, prefix = _prefixes(model, model_name)
+        passages = [prefix + text for text in texts] if prefix else texts
+        # ONNX counts on a private tokenizer clone. Torch reconfigures its
+        # shared tokenizer, so it must refuse if the encoder's slot is busy.
+        if not getattr(model, "concurrent_encodes", False):
+            execution = recall_space._previous_gate().execution if previous else runtime_resources.model_execution
+            stack.enter_context(execution(wait=False))
+        return model.texts_fit(passages)
+
+
 def _prefixes(model, model_name: str) -> tuple[str, str]:
     """The query and passage prefixes the resident model was trained with."""
     profile = getattr(model, "profile", None)
@@ -2069,6 +2098,7 @@ class GenerationVectors:
     sidecar rows rather than a fresh encode.  It is the observable a caller
     needs to prove that two consumers of one generation did not both pay for
     it, and it is content-free.
+    ``space`` binds these vectors to the source sidecar across model cutover.
     """
 
     rel_path: str
@@ -2078,6 +2108,7 @@ class GenerationVectors:
     chunks: tuple[str, ...]
     vectors: np.ndarray
     reused: bool
+    space: recall_space.SpaceIdentity | None
 
 
 def published_generation_vectors(
@@ -2089,31 +2120,24 @@ def published_generation_vectors(
     count: a page whose current chunking differs by one character is a
     different generation and must not borrow the previous one's vectors.
     """
+    published = _published_generation_vectors_with_space(vault_root, rel_path, chunks=chunks)
+    return published[0] if published is not None else None
+
+
+def _published_generation_vectors_with_space(
+    vault_root: Path, rel_path: str, *, chunks: list[str]
+) -> tuple[np.ndarray, recall_space.SpaceIdentity | None] | None:
     if not chunks:
-        return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
+        return np.zeros((0, recall_space.current_dim()), dtype=np.float32), None
     try:
         index = get_embedding_index(vault_root)
-        metadata, matrix = index.all_vectors()
+        stored, _units, space = index.stored_text_vectors_with_space(rel_path)
+        if any(chunk not in stored for chunk in chunks):
+            return None
+        return np.asarray([stored[chunk] for chunk in chunks], dtype=np.float32), space
     except Exception as e:  # noqa: BLE001 - sidecar reuse is an optimisation
-        log.debug("published generation vectors unavailable for %s: %s", rel_path, e)
+        log.debug("published generation reuse unavailable (%s)", type(e).__name__)
         return None
-    rows = sorted(
-        (
-            (chunk_index, row)
-            for row, (file_path, chunk_index) in enumerate(metadata)
-            if file_path == rel_path
-        )
-    )
-    if [chunk_index for chunk_index, _row in rows] != list(range(len(chunks))):
-        return None
-    try:
-        texts = index._texts_for([(rel_path, chunk_index) for chunk_index, _row in rows])
-    except Exception as e:  # noqa: BLE001 - sidecar reuse is an optimisation
-        log.debug("published chunk text unavailable for %s: %s", rel_path, e)
-        return None
-    if [texts.get((rel_path, chunk_index)) for chunk_index, _row in rows] != list(chunks):
-        return None
-    return np.asarray([matrix[row] for _chunk_index, row in rows], dtype=np.float32)
 
 
 def prepare_generation_vectors(
@@ -2155,25 +2179,27 @@ def prepare_generation_vectors(
             return None
         chunks = _chunks_for_page(Path(vault_root), page)
     except Exception as e:  # noqa: BLE001 - chunk extraction is best-effort
-        log.debug("generation chunks could not be prepared for %s: %s", rel_path, e)
+        log.debug("generation chunk preparation failed (%s)", type(e).__name__)
         return None
 
-    published = published_generation_vectors(vault_root, rel_path, chunks=chunks)
-    if published is not None and len(published) == len(chunks):
-        vectors, reused = published, True
+    published = _published_generation_vectors_with_space(vault_root, rel_path, chunks=chunks)
+    if published is not None and len(published[0]) == len(chunks):
+        (vectors, space), reused = published, True
     elif not allow_encode:
         return None
     else:
         try:
             get_model()
         except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
-            log.debug("generation vectors need a model that did not load: %s", e)
+            log.debug("generation model load failed (%s)", type(e).__name__)
             return None
         try:
-            with recall_space.encoding_for(get_embedding_index(vault_root)):
+            index = get_embedding_index(vault_root)
+            with recall_space.encoding_for(index):
+                space = index.identity
                 vectors, reused = _embed_live_chunks(chunks), False
         except Exception as e:  # noqa: BLE001 - one bad encode must not fail a worker
-            log.debug("generation vectors could not be encoded for %s: %s", rel_path, e)
+            log.debug("generation encode failed (%s)", type(e).__name__)
             return None
     # The page can move under a slow encode; re-prove before handing it on.
     try:
@@ -2189,6 +2215,7 @@ def prepare_generation_vectors(
         chunks=tuple(chunks),
         vectors=np.asarray(vectors, dtype=np.float32),
         reused=reused,
+        space=space,
     )
 
 
