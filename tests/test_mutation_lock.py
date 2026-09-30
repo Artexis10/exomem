@@ -2429,7 +2429,13 @@ def test_routine_background_holds_fold_into_one_info_summary(
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
-    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    # This test is about folding routine holds into a summary, not about the
+    # thresholds that decide what is routine. A loaded CI runner can stall a hold
+    # past 5ms or an acquire past one poll, which is correctly loud in production,
+    # so widen both thresholds here to keep every hold routine.
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault, poll_interval_seconds=60.0)
+    monkeypatch.setattr(mutation_lock_module, "_QUIET_HOLD_MS", 60_000.0)
+    monkeypatch.setattr(mutation_lock_module, "_BACKGROUND_QUIET_HOLD_MS", 60_000.0)
     monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 3600.0)
     mutation_lock_module._reset_hold_summary()
 
