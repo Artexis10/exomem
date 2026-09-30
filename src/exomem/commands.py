@@ -2167,20 +2167,18 @@ def op_bootstrap(
     #
     # Inside the command's own disclosure boundary: this aggregates across pages,
     # so the release plane has to decide every path before anything is counted.
+    due_block: dict | None = None
     try:
         from . import due_state as due_state_module
 
         with egress_module.disclosure_boundary(vault_root, "bootstrap"):
             due_block = due_state_module.served(vault_root)
         if due_block is not None:
-            # Attached unconditionally, then RECORDED. The attachment stays
-            # unconditional because a session opening on a reduced surface has no
-            # other way to hear about this at all, so bootstrap is not governed by
-            # emission. But it is still a delivery: without marking it, the first
-            # recall of the session repeats the identical block, which is the exact
-            # nagging the governor exists to prevent.
+            # Attached unconditionally, and RECORDED only where the full block is
+            # actually handed over (see the end of this function): the compact core
+            # serves a counts summary, and recording that as the delivery would burn
+            # the session's one emission, so the next recall would omit the list.
             payload["due_state"] = due_block
-            due_state_module.mark_emitted(due_block, vault_root=vault_root)
     except Exception:  # noqa: BLE001 — a due-state count never breaks a bootstrap
         log.debug("due-state projection unavailable for bootstrap", exc_info=True)
     compact_payload = _filter_bootstrap_payload(payload, active_descriptor)
@@ -2198,13 +2196,16 @@ def op_bootstrap(
         core_payload = None
     else:
         core_payload = bootstrap_core_module.project_core(compact_payload)
-    # The calling client's own recall-latency breaches. The core does not carry them
-    # (they are bounded only by how many tools breach, and no turn needs them); they
-    # ride in the reference payload, so `diagnostics_reading` serves them and a session
+    # The calling client's own recall-latency breaches. The core carries only a pointer
+    # (the figures are bounded only by how many tools breach, and no turn needs them);
+    # they ride in the reference payload, so `diagnostics_reading` serves them and a session
     # client, which has no other way to hear that its recalls went slow, gets them too.
     latency_block = _bootstrap_latency_block()
     if latency_block is not None and core_payload is not None:
         compact_payload = {**compact_payload, "latency": latency_block}
+        # The core carries the fact, not the figures: a client that has gone slow
+        # learns it and where the detail is, at no cost while the service is healthy.
+        core_payload["latency"] = bootstrap_core_module.LATENCY_POINTER
     if section is not None:
         result = bootstrap_core_module.section_payload(compact_payload, section)
     elif session_unavailable is not None:
@@ -2224,6 +2225,16 @@ def op_bootstrap(
     # session whitelist cannot drop it.
     if latency_block is not None and core_payload is None:
         result["latency"] = latency_block
+    # A delivery is recording what was handed over. Without it the first recall of the
+    # session repeats the identical block, the nagging the governor exists to prevent;
+    # with it on a summary, the list is never delivered at all. So: only a response
+    # that carries the full block records it (a session, `all`, `epistemics`, `full`,
+    # `diagnostics` and the released profiles), never the core or another section.
+    if due_block is not None and result.get("due_state") == due_block:
+        try:
+            due_state_module.mark_emitted(due_block, vault_root=vault_root)
+        except Exception:  # noqa: BLE001 — a ledger write never breaks a bootstrap
+            log.debug("due-state emission not recorded for bootstrap", exc_info=True)
     return result
 
 

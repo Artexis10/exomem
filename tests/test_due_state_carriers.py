@@ -938,3 +938,71 @@ def test_removing_the_bootstrap_carrier_fails_this_module(
     monkeypatch.setattr(_due_state(), "served", lambda *a, **k: None)
 
     assert "due_state" not in commands.op_bootstrap(vault, section="all")
+
+
+# ==========================================================================
+# Bootstrap records a delivery only where the full block is handed over
+# ==========================================================================
+
+
+def _would_emit(vault: Path) -> bool:
+    module = _due_state()
+    return module.would_emit(module.served(vault), vault_root=vault)
+
+
+def test_a_compact_bootstrap_does_not_burn_the_sessions_emission(vault: Path) -> None:
+    """The core serves a counts summary, not the list. Recording that as the delivery
+    made the next recall omit a list nobody had been shown, and let the first-surfaced
+    ledger mark refs as shown. Real due state, nothing patched."""
+    _overdue_prediction(vault, check_by=_yesterday())
+    _due_state().reconcile(vault)
+    _fresh_session()
+    assert _would_emit(vault)
+
+    core = commands.op_bootstrap(vault)
+
+    assert core["due_state"]["total"] == 1 and "top" not in core["due_state"]
+    assert _would_emit(vault), "the summary is not a delivery of the block"
+
+
+def test_another_section_does_not_record_a_delivery_either(vault: Path) -> None:
+    _overdue_prediction(vault, check_by=_yesterday())
+    _due_state().reconcile(vault)
+    _fresh_session()
+
+    commands.op_bootstrap(vault, section="authoring")
+
+    assert _would_emit(vault)
+
+
+@pytest.mark.parametrize("carrier", ["epistemics", "all", "session"])
+def test_serving_the_full_block_records_the_delivery(vault: Path, carrier: str) -> None:
+    from exomem import workflow_skills
+
+    _overdue_prediction(vault, check_by=_yesterday())
+    _due_state().reconcile(vault)
+    _fresh_session()
+    assert _would_emit(vault)
+
+    if carrier == "session":
+        served = commands.op_bootstrap(
+            vault, profile="session", skill_contract=workflow_skills.skill_contract()
+        )
+    else:
+        served = commands.op_bootstrap(vault, section=carrier)
+
+    assert served["due_state"]["top"], "the full block was handed over"
+    assert not _would_emit(vault)
+    recall = commands.op_ask_memory(vault, query="autovacuum", limit=5)
+    assert not (isinstance(recall, dict) and "due_state" in recall)
+
+
+def test_the_recall_after_a_compact_bootstrap_still_carries_the_list(vault: Path) -> None:
+    _overdue_prediction(vault, check_by=_yesterday())
+    _due_state().reconcile(vault)
+    _fresh_session()
+
+    commands.op_bootstrap(vault)
+    recall = commands.op_ask_memory(vault, query="autovacuum", limit=5)
+
+    assert isinstance(recall, dict) and recall["due_state"]["top"]

@@ -10,7 +10,7 @@ The blocks and what bounds them in the core (the sections carry them in full):
   every category present; the core serves a counts summary of at most 200 bytes.
 - `latency`: `latency_watch` reports one row per watched (tool, deep) pair for the
   calling client, each with `DOMINANT_SPANS` spans; every pair breaches here. The core
-  does not carry it.
+  carries only the breach pointer (`LATENCY_POINTER`).
 - custom entity types: nothing in the code caps their count, so `CUSTOM_ENTITY_TYPES` is
   a stated bound (32, well over the core's `CORE_ENTITY_TYPE_CAP`, so the cap is
   exercised); the core lists at most the cap and points at the `entities` section.
@@ -90,6 +90,5 @@ def populated_blocks() -> Iterator[None]:
     latency = maximal_latency()
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(due_state, "served", lambda *a, **k: block)
-        patch.setattr(due_state, "mark_emitted", lambda *a, **k: None)
         patch.setattr(commands, "_bootstrap_latency_block", lambda: latency)
         yield

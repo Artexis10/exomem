@@ -63,6 +63,11 @@ SECTIONS: dict[str, tuple[tuple[str, ...], str]] = {
     ),
 }
 
+#: What the core says about recall latency, and only while a breach is active (absent, so
+#: 0 bytes, when healthy). The full block, with its spans and figures, is in the
+#: `diagnostics_reading` section and in a session profile.
+LATENCY_POINTER = "breach; section=diagnostics_reading"
+
 #: The core lists at most this many entity type ids; the rest are in the `entities`
 #: section. Vault-declared types are unbounded, so the core's size must not follow them.
 CORE_ENTITY_TYPE_CAP = 12

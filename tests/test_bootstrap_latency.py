@@ -74,14 +74,16 @@ def test_the_block_survives_the_session_projection(
     assert out["latency"][0]["tool"] == "ask_memory"
 
 
-def test_the_core_does_not_carry_the_block_and_its_section_does(
+def test_the_core_carries_only_a_pointer_while_breaching_and_its_section_the_block(
     vault: Path, monkeypatch: pytest.MonkeyPatch, watch
 ) -> None:
-    """No turn needs a breach report, and it is bounded only by how many tools breach:
-    the always-served core leaves it out, `diagnostics_reading` serves it."""
+    """The figures are bounded only by how many tools breach and no turn needs them:
+    the always-served core says a breach is active and where to look (0 bytes while
+    healthy), `diagnostics_reading` serves the block."""
     _identity(monkeypatch, "openai-mcp/1.0.0")
-    _breach(watch, "openai-mcp/1.0.0")
     assert "latency" not in commands.op_bootstrap(vault)
+    _breach(watch, "openai-mcp/1.0.0")
+    assert commands.op_bootstrap(vault)["latency"] == "breach; section=diagnostics_reading"
     assert "latency" not in commands.op_bootstrap(vault, section="authoring")
     served = commands.op_bootstrap(vault, section="diagnostics_reading")
     assert served["latency"][0]["tool"] == "ask_memory"

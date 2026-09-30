@@ -338,12 +338,19 @@ def test_the_vault_derived_blocks_are_bounded_in_the_core(monkeypatch, surface):
     )
     assert len(_text(core["due_state"])) <= 200
     assert core["due_state"]["list"] == "section=epistemics"
-    assert "latency" not in core
+    assert core["latency"] == bootstrap_core.LATENCY_POINTER
+    assert len(_text({"latency": core["latency"]})) <= 60
 
 
 def bootstrap_core_registry_ids(monkeypatch, surface) -> list[str]:
     section = _bootstrap(monkeypatch, "maximal", surface, populated=True, section="entities")
     return [item["id"] for item in section["entity_registry"]["types"]]
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+def test_a_healthy_core_carries_no_latency_line(monkeypatch, surface):
+    core = _bootstrap(monkeypatch, "maximal", surface)
+    assert "latency" not in core
 
 
 def test_the_full_blocks_are_served_by_the_sections_and_the_session(monkeypatch):

@@ -62,3 +62,26 @@ Every text Exomem injects into a coding agent's context without the agent asking
 - **WHEN** the Stop capture check fires three times in one session
 - **THEN** the first fire carries the full text and the next two carry the short check
 - **AND** after a compaction the next fire carries the full text again
+
+## MODIFIED Requirements
+
+### Requirement: Bootstrap surfaces a recall latency regression to the client experiencing it
+
+The `bootstrap` response SHALL surface a recall latency regression only while the latency watch reports a breach for the calling client. The full `latency` block SHALL list, per breaching tool, the tool name, the deep flag, the sample count, `p50_ms`, `p90_ms`, `ceiling_ms` and the dominant spans as name, milliseconds and call count, and SHALL be served by the `diagnostics_reading` section and by the `session` profile. The compact core SHALL NOT carry the block: while a breach is active it SHALL carry only a `latency` pointer line naming that section (about 40 bytes), and while none is active it SHALL carry no `latency` key at all. The profiles that serve no core (`full`, `diagnostics` and the released hosted profiles) SHALL carry the block itself. The block SHALL be computed from the in-process watch and MUST NOT read the ledger file or any vault content. A bootstrap response for a client with no breach SHALL be identical in shape to a response without this capability.
+
+#### Scenario: A healthy service leaves bootstrap unchanged
+
+- **WHEN** the watch reports no breach for the calling client
+- **THEN** the bootstrap response has no `latency` key, on every profile and section
+
+#### Scenario: A breaching client is pointed at what is slow
+
+- **WHEN** the calling client's plain recall p90 is over its ceiling with enough samples
+- **THEN** the compact core carries a `latency` pointer line naming `section=diagnostics_reading`
+- **AND** `bootstrap(section="diagnostics_reading")` and the `session` profile carry the block with the tool, `samples`, `p50_ms`, `p90_ms`, `ceiling_ms` and the dominant spans
+- **AND** no query text, path or excerpt appears in either
+
+#### Scenario: Another client's breach is not this client's
+
+- **WHEN** only a different client's recalls are over the ceiling
+- **THEN** this client's bootstrap response has no `latency` key

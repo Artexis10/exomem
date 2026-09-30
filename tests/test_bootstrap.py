@@ -653,7 +653,9 @@ def test_session_bootstrap_unattested_contract_returns_compact_once(
         "list": "section=epistemics",
     }
     assert served == [vault]
-    assert emitted == [block]
+    # A summary is not a delivery of the block: nothing is recorded, so the next
+    # recall still carries the list.
+    assert emitted == []
 
 
 def test_product_front_door_metadata_is_registry_derived() -> None:
