@@ -209,20 +209,23 @@ def _hook_entry(item: dict, timeout: int) -> dict:
 
 
 def _is_private_group(gid: int) -> bool:
-    """Accept a user-private group only when it names no other members."""
+    """Accept only the user's primary group with no other explicit or primary members."""
     try:
         import grp
         import pwd
 
         user = pwd.getpwuid(os.geteuid())
+        if gid != user.pw_gid:
+            return False
         group = grp.getgrgid(gid)
+        if any(member != user.pw_name for member in group.gr_mem):
+            return False
+        return not any(
+            member.pw_gid == gid and member.pw_name != user.pw_name
+            for member in pwd.getpwall()
+        )
     except (ImportError, KeyError, OSError):
         return False
-    return all(member == user.pw_name for member in group.gr_mem) and (
-        gid == user.pw_gid
-        or group.gr_name == user.pw_name
-        or user.pw_name in group.gr_mem
-    )
 
 
 def _has_untrusted_writers(info: os.stat_result) -> bool:

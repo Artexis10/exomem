@@ -32,26 +32,27 @@ def private_group(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     user = SimpleNamespace(pw_name="hook-owner", pw_gid=gid, pw_uid=os.geteuid())
     group = SimpleNamespace(gr_name=user.pw_name, gr_gid=gid, gr_mem=[])
     monkeypatch.setattr(pwd, "getpwuid", lambda _uid: user)
+    monkeypatch.setattr(pwd, "getpwall", lambda: [user])
     monkeypatch.setattr(grp, "getgrgid", lambda _gid: group)
     return group
 
 
 @pytest.mark.parametrize("umask", [0o002, 0o022], ids=["0002", "0022"])
 @pytest.mark.parametrize("client", ["claude", "codex"])
-@pytest.mark.parametrize("group_kind", ["same-name", "primary", "sole-member"])
+@pytest.mark.parametrize("group_kind", ["primary-empty", "primary-sole-member"])
 def test_install_accepts_private_group_writable_config(
     tmp_path: Path, private_group, client: str, umask: int, group_kind: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    if group_kind != "same-name":
-        private_group.gr_name = "private-hook-group"
-    if group_kind == "sole-member":
+    private_group.gr_name = "private-hook-group"
+    if group_kind == "primary-sole-member":
         private_group.gr_mem = ["hook-owner"]
-        pwd = pytest.importorskip("pwd")
-        monkeypatch.setattr(
-            pwd, "getpwuid",
-            lambda uid: SimpleNamespace(pw_name="hook-owner", pw_gid=private_group.gr_gid + 1, pw_uid=uid),
-        )
+    pwd = pytest.importorskip("pwd")
+    user = pwd.getpwuid(os.geteuid())
+    other_user = SimpleNamespace(
+        pw_name="another-user", pw_gid=private_group.gr_gid + 1, pw_uid=os.geteuid() + 1,
+    )
+    monkeypatch.setattr(pwd, "getpwall", lambda: [user, other_user])
     home = tmp_path / client
     home.mkdir()
     home.chmod(0o775)
@@ -85,7 +86,11 @@ def test_install_accepts_private_group_writable_config(
 @pytest.mark.parametrize("umask", [0o002, 0o022], ids=["0002", "0022"])
 @pytest.mark.parametrize("client", ["claude", "codex"])
 @pytest.mark.parametrize("target", ["file", "parent", "ancestor", "hooks"])
-@pytest.mark.parametrize("reason", ["shared-group", "other-write", "foreign-owner", "missing-group"])
+@pytest.mark.parametrize("reason", [
+    "shared-group", "other-write", "foreign-owner", "missing-group", "unavailable-group",
+    "same-name", "sole-member", "shared-primary-empty", "shared-primary-sole-member",
+    "missing-user", "unavailable-user", "missing-passwd", "unavailable-passwd",
+])
 def test_install_refuses_untrusted_config_and_directories(
     tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch,
     client: str, umask: int, target: str, reason: str,
@@ -100,17 +105,39 @@ def test_install_refuses_untrusted_config_and_directories(
     config.write_text('{"theme":"dark"}\n')
     path = {"file": config, "parent": config_parent, "ancestor": home, "hooks": hooks}[target]
     mode = 0o644 if target == "file" else 0o755
-    if reason in {"shared-group", "missing-group"}:
+    if reason not in {"other-write", "foreign-owner"}:
         mode |= 0o020
+        pwd = pytest.importorskip("pwd")
+        grp = pytest.importorskip("grp")
         if reason == "shared-group":
             private_group.gr_mem = ["hook-owner", "another-user"]
+        elif reason in {"same-name", "sole-member"}:
+            user = pwd.getpwuid(os.geteuid())
+            user.pw_gid = private_group.gr_gid + 1
+            if reason == "sole-member":
+                private_group.gr_name = "private-hook-group"
+                private_group.gr_mem = [user.pw_name]
+        elif reason.startswith("shared-primary-"):
+            private_group.gr_name = "users"
+            user = pwd.getpwuid(os.geteuid())
+            if reason == "shared-primary-sole-member":
+                private_group.gr_mem = [user.pw_name]
+            other_user = SimpleNamespace(
+                pw_name="another-user", pw_gid=private_group.gr_gid, pw_uid=os.geteuid() + 1,
+            )
+            monkeypatch.setattr(pwd, "getpwall", lambda: [user, other_user])
         else:
-            grp = pytest.importorskip("grp")
+            error = KeyError if reason.startswith("missing-") else OSError
 
-            def missing_group(_gid):
-                raise KeyError("group not found")
+            def unavailable_database(*_args):
+                raise error("account database unavailable")
 
-            monkeypatch.setattr(grp, "getgrgid", missing_group)
+            if reason.endswith("group"):
+                monkeypatch.setattr(grp, "getgrgid", unavailable_database)
+            elif reason.endswith("user"):
+                monkeypatch.setattr(pwd, "getpwuid", unavailable_database)
+            else:
+                monkeypatch.setattr(pwd, "getpwall", unavailable_database)
     elif reason == "other-write":
         mode |= 0o002
     else:
@@ -135,8 +162,10 @@ def test_install_refuses_untrusted_config_and_directories(
 
     previous = os.umask(umask)
     try:
-        with pytest.raises(OSError, match="unsafe|writable|trusted|owned"):
+        with pytest.raises(OSError, match="unsafe|writable|trusted|owned") as refused:
             hook_module.install_hook(hook_dir=hooks, settings_path=config, client=client)
+        if target != "file":
+            assert "chmod g-w" in str(refused.value)
         assert config.read_bytes() == before
         assert not list(config_parent.glob("*.backup-*"))
         report = hook_module.check_hooks(clients=(client,), hook_dir=hooks, settings_path=config)
