@@ -2,8 +2,8 @@
 
 ## 1. Measure (D1)
 
-- [ ] 1.1 Profiling harness: drive a cell process through import, model load, first hybrid find, first governed write, and a reaper tick. Record tracemalloc top sites and total, `smaps_rollup`, cache-status counters, and unreturned allocator memory. The report is content-free.
-- [ ] 1.2 A large synthetic vault fixture, and a CI lane that runs the harness and publishes the report.
+- [x] 1.1 Profiling harness: drive a cell process through import, model load, first hybrid find, first governed write, and a reaper tick. Record tracemalloc top sites and total, `smaps_rollup`, cache-status counters, and unreturned allocator memory. The report is content-free.
+- [x] 1.2 A large synthetic vault fixture, and a CI lane that runs the harness and publishes the report.
 - [ ] 1.3 Baseline: run the harness on the synthetic vault and on a copy of a real large vault. Record the per-consumer figures and confirm or correct the analysis note's ranking.
 
 ## 2. Quick wins (D2, D3, D4, D5 step 1, D6); each PR carries a harness before/after

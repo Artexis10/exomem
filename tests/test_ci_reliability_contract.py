@@ -20,6 +20,7 @@ FULL_CI_JOBS = {
     "governance-projection-wire",
     "governance-projection-wire-vector-cpu",
     "semantic-write-latency",
+    "cell-memory-profile",
     "graph-convergence",
     "docker",
 }
