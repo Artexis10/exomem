@@ -329,3 +329,39 @@ def test_mcp_bearer_outside_protected_placeholder_is_redacted_and_invalid() -> N
     assert sanitized.carrier.consume() is authorization_request.INVALID_CREDENTIAL
     assert BEARER not in sanitized.body.decode()
     assert BEARER not in repr(sanitized.arguments)
+
+
+def test_stdio_refuses_invalid_utf8_without_normalizing_it(monkeypatch) -> None:
+    # A byte that is not UTF-8 must reach the strict frame decoder and be
+    # refused, not be replaced with U+FFFD and accepted as request text. The
+    # next valid frame on the same stream still reads.
+    import asyncio
+    import io
+    from types import SimpleNamespace
+
+    import anyio
+    from mcp.shared.message import SessionMessage
+
+    from exomem.governance import authorization_transport
+
+    invalid = (
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+        b'"params":{"name":"ask_memory","arguments":{"query":"\xff"}}}\n'
+    )
+    valid = b'{"jsonrpc":"2.0","id":2,"method":"ping"}\n'
+    monkeypatch.setattr(
+        authorization_transport.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(invalid + valid))
+    )
+
+    async def receive():
+        output = anyio.wrap_file(io.StringIO())
+        async with authorization_transport.sanitized_stdio_server(stdout=output) as (reader, writer):
+            first = await reader.receive()
+            second = await reader.receive()
+            await writer.aclose()
+        return first, second
+
+    first, second = asyncio.run(receive())
+    assert isinstance(first, authorization_transport.AuthorizationEnvelopeUnavailable)
+    assert isinstance(second, SessionMessage)
+    assert second.message.id == 2
