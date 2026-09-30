@@ -28,7 +28,7 @@ TOTAL_BUDGET = 90_000
 
 #: Per-tool ceilings in bytes. Their sum is deliberately under TOTAL_BUDGET.
 TOOL_CEILINGS: dict[str, int] = {
-    "edit_memory": 6675,
+    "edit_memory": 6725,
     "remember": 5200,
     "replace_memory": 4600,
     "manage_memory_file": 4325,

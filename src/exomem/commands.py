@@ -7228,7 +7228,8 @@ def op_edit_memory(
     `relation_disposition="reviewed_none"`,
     `relation_review_hash=<returned relation_review_hash>` (not the page
     content hash) and a `relation_review_reason`. Or author a relation in the body:
-    `## Relations` then `- supports [[Knowledge Base/Notes/Research/example-target]]`.
+    `## Relations` then `- supports [[Knowledge Base/Notes/Research/example-target]]`;
+    Dataview `supports:: [[...]]` is not supported relation syntax.
     See references/writing.md.
 
     Args:
@@ -11282,7 +11283,7 @@ def op_manage_memory_file(
         validate_only: Validate a Markdown create or append without writing.
         draft_token: The overwrite preview's `draft_token`, replayed unchanged on
             commit.
-        semantic_transition_token: Append token from validate_only.
+        semantic_transition_token: The append transition token from validate_only.
         relation_disposition: Reviewed relation outcome for semantic create/append.
         relation_review_hash: Draft or transition hash the review covers.
         relation_review_reason: Audit reason for reviewed-none.

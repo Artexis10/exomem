@@ -1,6 +1,6 @@
 ## Status
 
-Phase 1 (measure and propose). Nothing is implemented. The rulings requested at the end of this document gate Phase 2.
+Phase 2 (implemented, awaiting release). The owner's rulings on the five open points are recorded at the end of this document; the results are in "Outcome".
 
 ## Method
 
@@ -129,10 +129,60 @@ Behavioural check for cut guidance: the hosted behaviour fixtures and `test_host
 - A client that validates strictly against published output schemas loses typed `ask_memory` results. Mitigation: runtime payload is unchanged; ruling 2 offers the middle option.
 - One connector refresh for the owner. It is the same cost as any fingerprint move, taken once.
 
-## Needs ruling
+## Rulings
 
-1. **Budget:** at most 90,000 B (-51%), or a different number.
-2. **`ask_memory` output schema:** loose wrapped object (-15,950 B, recommended), or typed top-level fields only (about -13,000 B).
-3. **Optional-null structure:** drop `default: null` and the null arm (-18,642 B, recommended), or keep and accept about -42%.
-4. **`authorization_session_credential`:** keep declared with a one-line description (proposed), or stop publishing it (about -6.7 KB more; touches the raw-boundary guard, so not proposed).
-5. **Command-binding candidate:** the brief lists "v5 and command-binding" as moving. `hosted-alpha-agent-v4-command-binding-v1` pins the v4 profile and legacy schemas, so it cannot shrink without touching frozen v4 bytes. Confirm it should stay unchanged.
+1. Budget: at most 90,000 wire bytes, with per-tool ceilings, enforced by `tests/test_tool_schema_budget.py`.
+2. `ask_memory` output schema: the loose wrapped object that keeps the `result` wrap; union-arm assertions move to runtime-payload assertions. Sequenced after the `ask_memory` schema fix (#1448).
+3. Optional-null structure: dropped, on the condition that the server keeps accepting an explicit null for every optional parameter; a test sends null for every nullable optional parameter of every tool.
+4. `authorization_session_credential`: stays declared with a one-line description.
+5. `hosted-alpha-agent-v4-command-binding-v1` and every frozen v1 to v4 byte stay unchanged.
+
+## Outcome
+
+Measured with `scripts/measure-tool-schema-bytes.py` on the same basis as Phase 1: **184,208 B to 89,562 B (-51%)** across the 32 tools (the base at the merge point was 188,530 B after later `main` changes). Per tool:
+
+| Tool | Before (0.97.0) | After | Change |
+|---|---:|---:|---:|
+| `ask_memory` | 22,406 | 4,112 | -82% |
+| `manage_memory_file` | 13,600 | 4,321 | -68% |
+| `edit_memory` | 13,209 | 6,721 | -49% |
+| `remember` | 12,452 | 5,177 | -58% |
+| `replace_memory` | 10,986 | 4,590 | -58% |
+| `activate_context` | 9,760 | 3,279 | -66% |
+| `connect_memory` | 7,774 | 4,288 | -45% |
+| `maintain_memory` | 7,558 | 3,820 | -49% |
+| `schema_memory` | 7,484 | 3,982 | -47% |
+| `record_memory` | 7,425 | 4,265 | -43% |
+| `observe_memory` | 7,400 | 3,848 | -48% |
+| `episode_memory` | 6,941 | 4,283 | -38% |
+| `review_memory` | 6,619 | 3,371 | -49% |
+| `adoption_studio` | 5,519 | 3,400 | -38% |
+| `capture_source` | 5,301 | 3,385 | -36% |
+| `govern_memory` | 5,283 | 3,012 | -43% |
+| `triage_memory` | 4,538 | 3,091 | -32% |
+| `plan_memory` | 4,362 | 2,384 | -45% |
+| `preserve_artifacts` | 3,072 | 2,300 | -25% |
+| `configure_memory` | 2,409 | 1,685 | -30% |
+| `review_item_context` | 2,334 | 1,487 | -36% |
+| `read_memory` | 2,212 | 1,595 | -28% |
+| `adopt_vault` | 2,206 | 1,479 | -33% |
+| `query_dataset` | 2,042 | 1,358 | -33% |
+| `preserve_evidence` | 2,023 | 1,483 | -27% |
+| `bootstrap` | 1,936 | 1,390 | -28% |
+| `process_media` | 1,632 | 1,187 | -27% |
+| `transfer_artifact` | 1,484 | 1,084 | -27% |
+| `browse_memory` | 1,340 | 992 | -26% |
+| `read_media` | 1,102 | 797 | -28% |
+| `compile_source` | 1,046 | 813 | -22% |
+| `coordination_status` | 753 | 583 | -23% |
+| **Total** | **184,208** | **89,562** | **-51%** |
+
+Where the bytes went: optional-null structure and `additionalProperties: true` about 19 KB; the ten semantic-authoring copies (24.8 KB) became five bounded rules (`render_tool_guidance`, two tiers: whole-page writers carry the category selection rule and example, `observe_memory`, `edit_memory` and `manage_memory_file` carry the minimum, lifecycle, final-unit rule and remediation); `ask_memory`'s output schema 16.5 KB to 139 B; per-tool prose and parameter descriptions the rest. Long manuals moved to `references/{recall,writing,supersession,governance,vault-care,operation-routing,operations,planning-records}.md` in the generic scaffold.
+
+Implementation notes that differ from the proposal:
+
+- Compaction is one function, `command_surface.compact_input_schema`, applied once after registration for the personal MCP surface, to the REST/OpenAPI request schemas (so REST and MCP keep publishing identical parameter schemas), and to the hosted contract for non-legacy profiles. Historical profiles are skipped.
+- `hosted-alpha-agent-v4-command-binding-v1` reuses the v4 profile, whose gateway contract now carries the released `ask_memory` output schema from `hosted_legacy_ask_output_schema.json`. Its compatibility bytes and its command-binding contract digest are therefore unchanged. Only v5 follows the shortened live schema.
+- REST/OpenAPI and CLI `--help` no longer repeat the semantic-authoring contract on parameters (the write tools' MCP descriptions carry it once); `bootstrap(profile="full")` remains the full source.
+- A rule the trim once dropped and the tests caught was restored: `edit_memory`'s `relation_review_hash=<returned relation_review_hash>` recipe and `## Relations` example, `manage_memory_file`'s `draft_token` pairing, the open-vocabulary note on `source_type`, `suggestions=true`, and the `rebuild_graph` quarantine wording.
+

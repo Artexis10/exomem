@@ -18,3 +18,8 @@ The generated MCP tool surface SHALL stay within a committed byte budget so that
 
 - **WHEN** the live tool surface is shortened
 - **THEN** hosted candidates v1 to v4 and the command-binding candidate resolve their pinned legacy schemas and stay byte-identical
+
+#### Scenario: Optional parameters accept an explicit null the schema no longer advertises
+
+- **WHEN** a client sends an explicit null for a nullable optional parameter of any tool
+- **THEN** argument validation accepts it, because validation is built from the function signature and the published schema omits the null arm and the null default
