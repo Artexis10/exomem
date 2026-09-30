@@ -919,6 +919,378 @@ def test_symlinked_config_is_refused_without_touching_target(tmp_path: Path) -> 
     assert target.read_text(encoding="utf-8") == '{"untouched":true}'
 
 
+# --- yadm alternate sources: the install that has to survive regeneration -------
+
+
+def _our_entries(data: dict) -> list[dict]:
+    return [
+        hook
+        for groups in data.get("hooks", {}).values()
+        if isinstance(groups, list)
+        for group in groups
+        if isinstance(group, dict)
+        for hook in group.get("hooks", [])
+        if isinstance(hook, dict) and hook_module._is_exomem_entry(hook)
+    ]
+
+
+_WIRED_CLAUDE_ENTRIES = len(hook_module._HOOK_SPECS) + len(
+    hook_module._CONTINUATION_EVENTS["claude"]
+)
+
+
+def test_install_merges_every_alternate_source_and_survives_regeneration(
+    tmp_path: Path,
+) -> None:
+    """The defect this exists to fix: an install undone by `yadm status`.
+
+    Where yadm copies rather than links, the deployed config is regenerated
+    from whichever `##` source matches the machine, and alternate selection
+    runs after ordinary commands. An install that edits only the deployed file
+    is therefore reverted with no visible trigger -- exactly the way an
+    uninstall was, before the prune path was taught about sources (#580, #656).
+    """
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    msys = tmp_path / "settings.json##os.Msys"
+    wsl = tmp_path / "settings.json##os.WSL"
+    for source in (msys, wsl):
+        source.write_text('{"theme": "dark"}\n', encoding="utf-8")
+
+    result = hook_module.install_hook(hook_dir=hd, settings_path=sp)
+
+    assert {Path(row["path"]).name for row in result["alternates"]} == {msys.name, wsl.name}
+    assert all(row["changed"] and row["error"] is None for row in result["alternates"])
+    for source in (msys, wsl):
+        data = json.loads(source.read_text(encoding="utf-8"))
+        assert len(_our_entries(data)) == _WIRED_CLAUDE_ENTRIES
+        assert data["theme"] == "dark"
+
+    shutil.copyfile(wsl, sp)
+
+    regenerated = json.loads(sp.read_text(encoding="utf-8"))
+    assert len(_our_entries(regenerated)) == _WIRED_CLAUDE_ENTRIES
+
+
+def test_install_through_an_alternate_link_writes_the_source_and_keeps_the_link(
+    tmp_path: Path,
+) -> None:
+    """Where yadm links, install cannot run at all today.
+
+    `settings.json -> settings.json##os.WSL` is the shape yadm deploys on a
+    Unix host, and the regular-file guard refuses it before any merge is
+    attempted. The link is only the deployed view of the source, so the merge
+    has to land on the source and leave the link exactly as it found it.
+    """
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    source = tmp_path / "settings.json##os.WSL"
+    source.write_text('{"theme": "dark"}\n', encoding="utf-8")
+    try:
+        sp.symlink_to(source.name)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    result = hook_module.install_hook(hook_dir=hd, settings_path=sp)
+
+    assert sp.is_symlink()
+    assert os.readlink(sp) == source.name
+    assert result["config_changed"] is True
+    assert Path(result["backup"]).name.startswith(f"{source.name}.backup-")
+    assert result["alternates"] == []
+    data = json.loads(source.read_text(encoding="utf-8"))
+    assert data["theme"] == "dark"
+    assert len(_our_entries(data)) == _WIRED_CLAUDE_ENTRIES
+
+
+@pytest.mark.parametrize("shape", ["absolute", "parent", "not_an_alternate", "link_to_link"])
+def test_install_refuses_every_symlink_outside_the_alternate_shape(
+    tmp_path: Path, shape: str
+) -> None:
+    """The relaxation is a security boundary, so its edges are the test.
+
+    A hook config names commands the agent executes, so following an arbitrary
+    link would let anything able to write a link in the config directory choose
+    what runs. Only the one shape yadm produces -- a bare `##` sibling name --
+    is admitted; every other link stays refused, and nothing is written.
+    """
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    sp = config_dir / "settings.json"
+    untouched = '{"untouched": true}\n'
+    try:
+        if shape == "absolute":
+            guarded = config_dir / "settings.json##os.WSL"
+            guarded.write_text(untouched, encoding="utf-8")
+            sp.symlink_to(guarded)
+        elif shape == "parent":
+            guarded = tmp_path / "settings.json##os.WSL"
+            guarded.write_text(untouched, encoding="utf-8")
+            sp.symlink_to(Path("..") / guarded.name)
+        elif shape == "not_an_alternate":
+            guarded = config_dir / "settings.json.real"
+            guarded.write_text(untouched, encoding="utf-8")
+            sp.symlink_to(guarded.name)
+        else:
+            guarded = config_dir / "settings.json.real"
+            guarded.write_text(untouched, encoding="utf-8")
+            (config_dir / "settings.json##os.WSL").symlink_to(guarded.name)
+            sp.symlink_to("settings.json##os.WSL")
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    with pytest.raises(OSError):
+        hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
+
+    assert sp.is_symlink()
+    assert guarded.read_text(encoding="utf-8") == untouched
+    assert not list(tmp_path.rglob("*.backup-*"))
+    assert not list(config_dir.glob(".*.tmp-*"))
+
+
+def test_an_alternate_link_to_a_group_writable_source_is_still_refused(
+    tmp_path: Path,
+) -> None:
+    """The relaxation moves the guards onto the target; it does not lift them.
+
+    The link shape is admitted here, so the refusal has to come from the
+    target's own ownership and `0o022` check rather than from the link test --
+    which is what the error message pins. A source another local principal can
+    write is a source that can choose what the agent runs.
+    """
+    require_posix_file_modes()
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    source = tmp_path / "settings.json##os.WSL"
+    untouched = '{"untouched": true}\n'
+    source.write_text(untouched, encoding="utf-8")
+    source.chmod(0o664)
+    try:
+        sp.symlink_to(source.name)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    with pytest.raises(OSError, match="unsafe or writable"):
+        hook_module.install_hook(hook_dir=hd, settings_path=sp)
+
+    assert source.read_text(encoding="utf-8") == untouched
+    assert source.stat().st_mode & 0o777 == 0o664
+    assert not list(tmp_path.glob("*.backup-*"))
+
+
+def test_an_unparseable_alternate_source_is_skipped_and_reported(tmp_path: Path) -> None:
+    """A yadm template is not JSON, and is not a reason to abandon the install.
+
+    Uninstall already decides parseability by trying; a source that will not
+    parse is a thing to name, never a thing to fail the run on and never a
+    thing to drop silently.
+    """
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    template = tmp_path / "settings.json##template.j2"
+    template.write_text("{% if yadm.os %}{ not json {% endif %}\n", encoding="utf-8")
+    plain = tmp_path / "settings.json##os.WSL"
+    plain.write_text('{"theme": "dark"}\n', encoding="utf-8")
+    before = template.read_bytes()
+
+    result = hook_module.install_hook(hook_dir=hd, settings_path=sp)
+
+    rows = {Path(row["path"]).name: row for row in result["alternates"]}
+    assert rows[template.name]["skipped"] is True
+    assert rows[template.name]["error"]
+    assert rows[template.name]["changed"] is False
+    assert template.read_bytes() == before
+    assert rows[plain.name]["changed"] is True
+    assert rows[plain.name]["skipped"] is False
+    assert len(_our_entries(json.loads(plain.read_text(encoding="utf-8")))) == _WIRED_CLAUDE_ENTRIES
+    assert len(_our_entries(json.loads(sp.read_text(encoding="utf-8")))) == _WIRED_CLAUDE_ENTRIES
+
+
+def test_an_install_with_no_alternate_source_writes_only_the_deployed_config(
+    tmp_path: Path,
+) -> None:
+    """The unchanged case, pinned: no alternates means nothing new happens."""
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    original = b'{"theme": "dark"}\n'
+    sp.write_bytes(original)
+
+    result = hook_module.install_hook(hook_dir=hd, settings_path=sp)
+
+    assert result["alternates"] == []
+    assert result["config_changed"] is True
+    backup = Path(result["backup"])
+    assert backup.read_bytes() == original
+    assert backup.parent == sp.parent
+    assert sorted(item.name for item in tmp_path.iterdir()) == sorted(
+        [".cache", "hooks", sp.name, backup.name]
+    )
+
+
+def test_a_reinstall_leaves_alternate_sources_untouched_and_unbacked_up(
+    tmp_path: Path,
+) -> None:
+    """A no-op on a source must stay a no-op, including on the second run.
+
+    The backup of an alternate source is itself named `settings.json##...`, so
+    a source list built from the name alone picks up its own backups and merges
+    into them -- growing a fresh one every install. A normalized reinstall has
+    to change nothing at all.
+    """
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    wsl = tmp_path / "settings.json##os.WSL"
+    wsl.write_text('{"theme": "dark"}\n', encoding="utf-8")
+    hook_module.install_hook(hook_dir=hd, settings_path=sp)
+    before = {item.name: item.read_bytes() for item in tmp_path.iterdir() if item.is_file()}
+
+    result = hook_module.install_hook(hook_dir=hd, settings_path=sp)
+
+    assert result["config_changed"] is False
+    assert result["backup"] is None
+    assert [row["path"] for row in result["alternates"]] == [str(wsl)]
+    assert result["alternates"][0]["changed"] is False
+    assert result["alternates"][0]["backup"] is None
+    assert {
+        item.name: item.read_bytes() for item in tmp_path.iterdir() if item.is_file()
+    } == before
+
+
+def test_a_generated_backup_name_is_never_read_back_as_an_alternate_source() -> None:
+    """The predicate has to recognise what the generator actually mints.
+
+    These two are one format expressed twice, and a pattern restated by hand
+    drifts from the format string it copies -- then quietly blesses the
+    backup-of-a-backup growth it was written to prevent. So the expectation
+    here is a name the generator produced, never one this test spelled out.
+    """
+    minted = hook_module._backup_name("settings.json##os.WSL")
+
+    assert hook_module._is_backup_name(minted)
+    assert minted.startswith("settings.json##os.WSL")
+    assert not hook_module._is_backup_name("settings.json##os.WSL")
+    assert not hook_module._is_backup_name("settings.json##template.j2")
+    assert not hook_module._is_backup_name("settings.json##os.WSL.backup-")
+
+
+def test_a_bare_double_hash_neighbour_is_not_an_alternate_source(tmp_path: Path) -> None:
+    """`##` with nothing after it names no yadm condition, so it names no source.
+
+    The merge writes every source it finds, so the name test that finds them has
+    to be the one the alternate mechanism actually uses -- not a prefix match
+    that would have this installer editing a neighbouring file on its own.
+    """
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    stranger = tmp_path / "settings.json##"
+    stranger.write_text('{"theme": "dark"}\n', encoding="utf-8")
+    before = stranger.read_bytes()
+
+    result = hook_module.install_hook(hook_dir=hd, settings_path=sp)
+
+    assert result["alternates"] == []
+    assert stranger.read_bytes() == before
+
+
+def test_the_cli_names_the_alternate_sources_it_wired_and_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A skipped source the user never hears about is a silent drop."""
+    from exomem.__main__ import main
+
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    (tmp_path / "settings.json##os.WSL").write_text('{"theme": "dark"}\n', encoding="utf-8")
+    (tmp_path / "settings.json##template.j2").write_text("{% raw %}", encoding="utf-8")
+
+    assert main(["install-hook", "--hook-dir", str(hd), "--settings", str(sp)]) == 0
+
+    out = capsys.readouterr().out
+    assert "settings.json##os.WSL" in out
+    assert "settings.json##template.j2" in out
+    assert "skipped" in out
+
+
+def test_the_all_client_cli_also_names_its_alternate_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--client all` prints one line per client, so it had nowhere to say this.
+
+    A source that was skipped is one the user still has to edit by hand, and a
+    source that was wired still has to be committed. Neither survives being
+    reported only on the single-client branch.
+    """
+    from exomem.__main__ import main
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(shared))
+    (shared / "settings.json##os.WSL").write_text('{"theme": "dark"}\n', encoding="utf-8")
+    (shared / "hooks.json##template.j2").write_text("{% raw %}", encoding="utf-8")
+
+    assert main(["install-hook", "--client", "all"]) == 0
+
+    out = capsys.readouterr().out
+    assert "also wired into yadm alternate source" in out
+    assert "settings.json##os.WSL" in out
+    assert "! yadm alternate" in out
+    assert "hooks.json##template.j2" in out
+
+
+def test_an_unreadable_config_reports_the_legacy_check_as_unevaluated(
+    tmp_path: Path,
+) -> None:
+    """A check that did not run must never be scored as a check that passed.
+
+    The config here holds a legacy `kb_*` entry and cannot be read, and the
+    report said `PASS config.legacy: no legacy kb_* hook entries configured`.
+    An operator auditing the machine was told it was clean by a condition that
+    never executed, which is worse than being told nothing.
+    """
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp)
+    data = json.loads(sp.read_text(encoding="utf-8"))
+    data["hooks"]["UserPromptSubmit"] = [
+        {"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/kb-retrieve-nudge.sh"}]}
+    ]
+    hidden = tmp_path / "real-settings.json"
+    sp.unlink()
+    hidden.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    try:
+        sp.symlink_to(hidden)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    report = hook_module.check_hooks(clients=("claude",), hook_dir=hd, settings_path=sp)
+    checks = {row["id"]: row for row in report["clients"][0]["checks"]}
+
+    assert checks["config.file"]["status"] == "fail"
+    assert checks["config.legacy"]["status"] == "unevaluated"
+    assert str(sp) in checks["config.legacy"]["message"]
+    assert checks["config.legacy"]["details"]["error"]
+    assert report["success"] is False
+    assert report["clients"][0]["status"] == "failed"
+
+    rendered = hook_module.render_check_human(report)
+    assert "PASS config.legacy" not in rendered
+    assert "UNEVALUATED config.legacy" in rendered
+    assert "no legacy kb_* hook entries configured" not in rendered
+
+
+def test_a_readable_config_decides_every_condition_exactly_as_before(
+    tmp_path: Path,
+) -> None:
+    """The correction is narrow: nothing evaluable decides differently."""
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp)
+
+    report = hook_module.check_hooks(clients=("claude",), hook_dir=hd, settings_path=sp)
+    checks = report["clients"][0]["checks"]
+
+    assert all(row["status"] != "unevaluated" for row in checks)
+    assert {row["id"]: row["status"] for row in checks if row["id"].startswith("config.")} == {
+        "config.file": "pass",
+        "config.legacy": "pass",
+        "config.Stop": "pass",
+        "config.UserPromptSubmit": "pass",
+        "config.PreCompact": "pass",
+        "config.SessionEnd": "pass",
+        "config.SessionStart": "pass",
+    }
+
+
 def test_all_client_cli_isolated_partial_failure_and_override_rejection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

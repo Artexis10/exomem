@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.100.0](https://github.com/Artexis10/exomem/compare/v0.99.0...v0.100.0) (2026-09-30)
+
+
+### Features
+
+* **ingest:** add bounded dataset source cards and text previews ([#1163](https://github.com/Artexis10/exomem/issues/1163)) ([ef132bc](https://github.com/Artexis10/exomem/commit/ef132bc2646bda8b96cfbc14bab6984264260ebf))
+
+
+### Bug Fixes
+
+* **activation:** never let the current-state resolver name a withheld page ([#1485](https://github.com/Artexis10/exomem/issues/1485)) ([b314026](https://github.com/Artexis10/exomem/commit/b3140262dfac4934193634c95198cd376b0422b6))
+* **governance:** reject malformed UTF-8 on MCP stdio ([#1475](https://github.com/Artexis10/exomem/issues/1475)) ([92aaea8](https://github.com/Artexis10/exomem/commit/92aaea88fd56ed8a25fa62e2f9c491283374a0f1))
+* **hooks:** install into yadm alternate sources ([#1474](https://github.com/Artexis10/exomem/issues/1474)) ([2f9032f](https://github.com/Artexis10/exomem/commit/2f9032fc47446d1305cf6d4a5db4c7eb3e768c32))
+* **recall:** build the dense index for a vault that predates its first start ([#1483](https://github.com/Artexis10/exomem/issues/1483)) ([a5b86a9](https://github.com/Artexis10/exomem/commit/a5b86a9449862f682817ee1073f74eab47d840c9))
+
+
+### Performance
+
+* **cell:** measure cell memory and return freed heap after model reaps ([#1478](https://github.com/Artexis10/exomem/issues/1478)) ([db4646e](https://github.com/Artexis10/exomem/commit/db4646e9e70723c50aaeb3df637eb4703eb1479e))
+
 ## [0.99.0](https://github.com/Artexis10/exomem/compare/v0.98.0...v0.99.0) (2026-09-30)
 
 

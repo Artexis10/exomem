@@ -129,10 +129,24 @@ def test_current_state_never_scans_the_vault_for_an_unrelated_link_field(
     assert entries, "the newest Records observation must still surface"
     entry = entries[0]
     assert entry["source"] == "records"
+    assert entry["path"] == manifest.path
     assert entry["as_of"] == "2026-07-15"
     assert "completed" in entry["statement"]
     assert "Vehicle" not in entry["statement"]
     assert "exomem://memory" not in entry["statement"]
+
+
+def test_profile_state_carries_its_source_path(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    path = "Knowledge Base/Products/Cargo Sled.md"
+    _write_item(tmp_path / path, type="note", state="in storage", updated="2026-09-10")
+    entries = working_set_state.current_state_for(
+        tmp_path, anchors=(SimpleNamespace(kind="resource", path=path, ref=path),),
+    )
+
+    assert entries[0]["source"] == "profile"
+    assert entries[0]["path"] == path
 
 
 def test_current_state_governs_exactly_the_returned_row(

@@ -15,7 +15,10 @@ from .find_corpus import CACHE
 from .referent_resolution import EntityRecord
 from .vault import kb_root
 
-_CACHE_SIZE = 16
+#: The checkpoint being served and the one before it, which a request may
+#: still be finishing on. Each entry is a whole-vault projection of entity
+#: pages, so older checkpoints are resident memory nobody reads.
+_CACHE_SIZE = 2
 _REGISTRY_CACHE: OrderedDict[
     tuple[Path, tuple], Mapping[str, EntityRecord]
 ] = OrderedDict()
