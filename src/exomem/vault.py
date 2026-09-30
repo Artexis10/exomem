@@ -7419,6 +7419,41 @@ def plan_log_writes(
     )
 
 
+def plan_log_writes_many(
+    vault_root: Path,
+    *,
+    date_iso: str,
+    op: str,
+    rel_path_no_ext: str,
+    bodies: Iterable[str],
+    operation_token: str,
+) -> LogWritePlan:
+    """Plan one combined log update carrying one entry per body, oldest first.
+
+    One read, one rewrite and one rotation decision for the whole batch, so a
+    bulk write is a single log publication rather than one per entry.
+    """
+    log_file = kb_root(vault_root) / "log.md"
+    if not log_file.is_file():
+        return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
+    current, live_guard = read_guarded_text(vault_root, log_file)
+    updated = current
+    for body in bodies:
+        updated = prepend_log_entry(
+            updated,
+            date_iso=date_iso,
+            op=op,
+            rel_path_no_ext=rel_path_no_ext,
+            body=body,
+        )
+    return _plan_log_content(
+        vault_root,
+        log_text=updated,
+        live_guard=live_guard,
+        operation_token=operation_token,
+    )
+
+
 def rotate_log_if_needed(vault_root: Path) -> str | None:
     """Size-triggered rotation of `Knowledge Base/log.md`.
 

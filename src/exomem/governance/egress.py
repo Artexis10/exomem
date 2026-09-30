@@ -4712,6 +4712,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "create": "mutation",
         "query": "structure",
         "append": "mutation",
+        "bulk_upsert": "mutation",
         "update": "mutation",
         "revise": "mutation",
         "rebaseline": "mutation",
