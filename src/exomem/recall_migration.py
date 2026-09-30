@@ -22,7 +22,13 @@ old encoder is then released. The old sidecar stays on disk until a later start
 of this job retires it, so a failed or regretted cutover can fall back to it.
 
 `EXOMEM_RECALL_REEMBED=off` builds nothing: the old sidecar keeps serving with
-its own encoder. Hosted cells never run this job.
+its own encoder.
+
+A hosted or cloud cell holds one encoder, so it never serves the old sidecar
+with the model that wrote it: that sidecar is refused (the vector lane reports
+`vector_space_mismatch` and the lexical lanes answer) until this job cuts over
+to the sidecar it builds with the cell's own encoder. A write meanwhile cannot
+land in the refused sidecar and is built by the job's catch-up.
 """
 
 from __future__ import annotations
@@ -424,12 +430,10 @@ def run(vault_root: Path, stop: threading.Event) -> str:
     from . import embeddings
 
     serving_index = embeddings.get_embedding_index(vault_root)
-    if _hosted():
-        _update(vault_root, state="disabled", serving=_space(serving_index.identity), target=None)
-        return "disabled"
     if not _wait_for_warm(stop):
         return "stopped"
-    # Whatever happens next, the serving sidecar keeps its own encoder.
+    # Whatever happens next, the serving sidecar keeps its own encoder (except
+    # on a cell, which has none to spare for it).
     preload_serving_encoder(vault_root)
     if not reembed_enabled():
         _update(

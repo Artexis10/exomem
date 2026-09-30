@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.99.0](https://github.com/Artexis10/exomem/compare/v0.98.0...v0.99.0) (2026-09-30)
+
+
+### Features
+
+* **cloud:** encode cloud-cell recall with bge-m3 and re-embed on one encoder ([#1471](https://github.com/Artexis10/exomem/issues/1471)) ([061a2a2](https://github.com/Artexis10/exomem/commit/061a2a2c1937c8a2fdda9a3b76b6a2493ad84d22))
+
+
+### Bug Fixes
+
+* **upgrade:** upgrade a second service without touching the default one ([#1476](https://github.com/Artexis10/exomem/issues/1476)) ([8acc77c](https://github.com/Artexis10/exomem/commit/8acc77c4863298f1b8fc555f4dbce788ad860304))
+
 ## [0.98.0](https://github.com/Artexis10/exomem/compare/v0.97.0...v0.98.0) (2026-09-30)
 
 
