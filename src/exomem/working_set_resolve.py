@@ -22,7 +22,7 @@ import statistics
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, NamedTuple
 
 from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .text_scripts import JAPANESE_PARTICLES, is_hiragana
@@ -1558,6 +1558,30 @@ def eligible_categories(analysis: TurnAnalysis, roles: Iterable[Any]) -> frozens
 # --------------------------------------------------------------------------- #
 
 
+class RowLexicon(NamedTuple):
+    """One row's words as `candidates_for` compares them, derived once."""
+
+    names: frozenset[str]
+    name_terms: frozenset[str]
+    terms: frozenset[str]
+
+
+def row_lexicon(row: AnchorFacts) -> RowLexicon:
+    """`row`'s normalised names, the folded terms of its title and aliases,
+    and the folded terms of its whole vocabulary."""
+    return RowLexicon(
+        names=frozenset({normalize(row.title), *row.aliases} - {""}),
+        name_terms=frozenset(
+            folded
+            for term in tokens_of(" ".join((row.title, *row.aliases)))
+            if (folded := _fold_lexical_term(term)) is not None
+        ),
+        terms=frozenset(
+            folded for term in row.terms if (folded := _fold_lexical_term(term)) is not None
+        ),
+    )
+
+
 def candidates_for(
     analysis: TurnAnalysis,
     rows: Sequence[AnchorFacts],
@@ -1574,8 +1598,13 @@ def candidates_for(
     stopwords: frozenset[str] = _STOPWORDS,
     rare_term_max_anchors: int = RARE_TERM_MAX_ANCHORS,
     eligible_categories: frozenset[str] = frozenset(),
+    row_lexicons: Mapping[str, RowLexicon] | None = None,
 ) -> tuple[CandidateFacts, ...]:
     """Assemble categorical evidence for every anchor this turn can reach.
+
+    `row_lexicons` (anchor id -> `row_lexicon(row)`) lets a caller matching
+    several turns against the same rows derive each row's names once
+    (`candidates_for_each`); without it each row is derived here.
 
     `term_anchor_counts` is the index's title/alias term -> anchor-count table
     (`WorkingSetIndex.term_anchor_counts()`), the structure `rare_term`'s
@@ -1670,6 +1699,15 @@ def candidates_for(
     # (`test_r2_single_token_aliases_consume_nothing`). Linear in
     # rows x phrases, no index read: positions come from the turn's own
     # tokens, already in hand.
+    # Both passes below read each row's lexicon: derive it once per call.
+    lexicons: dict[str, RowLexicon] = dict(row_lexicons or {})
+
+    def lexicon_of(row: AnchorFacts) -> RowLexicon:
+        known = lexicons.get(row.anchor_id)
+        if known is None:
+            known = lexicons[row.anchor_id] = row_lexicon(row)
+        return known
+
     row_exact_phrases: dict[str, frozenset[str]] = {}
     own_covered: dict[str, frozenset[int]] = {}
     covered_positions: set[int] = set()
@@ -1688,7 +1726,7 @@ def candidates_for(
         if _inside_longer_words(word, matched_words, analysis.tokens)
     )
     for row in rows:
-        names = {normalize(row.title), *row.aliases} - {""}
+        names = lexicon_of(row).names
         matched = (names & phrases) - consumed_words
         row_exact_phrases[row.anchor_id] = frozenset(matched)
         positions: set[int] = set()
@@ -1715,6 +1753,8 @@ def candidates_for(
         term_positions.setdefault(folded_term, []).append(index)
 
     contained = _contained_names(analysis, rows, term_counts)
+    # The turn's own folds, once: `_name_span` reads them for every candidate.
+    token_folds = _token_folds(analysis.tokens, stopwords)
 
     # Pass 2 of 2: the ordinary per-row evidence assembly, reusing pass 1's
     # own matched phrases rather than recomputing them.
@@ -1762,14 +1802,9 @@ def candidates_for(
         # uses, so a title "It's Complicated" cannot manufacture the name
         # term "it" any more than a turn saying "it's" can -- one function,
         # both call sites, symmetric by construction.
-        row_terms_folded = frozenset(
-            folded for term in row.terms if (folded := _fold_lexical_term(term)) is not None
-        )
-        name_terms_folded = frozenset(
-            folded
-            for term in tokens_of(" ".join((row.title, *row.aliases)))
-            if (folded := _fold_lexical_term(term)) is not None
-        )
+        lexicon = lexicon_of(row)
+        row_terms_folded = lexicon.terms
+        name_terms_folded = lexicon.name_terms
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
         name_contact: frozenset[str] = frozenset()
@@ -1857,7 +1892,11 @@ def candidates_for(
                 exact_alias_phrases=matched_phrases,
                 name_contact=name_contact,
                 name_span=_name_span(
-                    analysis.tokens, stopwords, name_terms_folded, analysis.run_breaks
+                    analysis.tokens,
+                    stopwords,
+                    name_terms_folded,
+                    analysis.run_breaks,
+                    token_folds,
                 )
                 if name_contact and not name_contact & embedded_terms
                 else None,
@@ -1886,11 +1925,86 @@ def candidates_for(
     return tuple(out[:MAX_CANDIDATES])
 
 
+
+#: `candidates_for` arguments that can give an anchor contact without the
+#: turn's own words naming it. `candidates_for_each` may only narrow the rows
+#: when none of them is in play.
+_WORDLESS_CONTACT_ARGUMENTS = (
+    "vectors",
+    "query_vector",
+    "bands",
+    "routing_targets",
+    "retrieval_paths",
+    "hot_paths",
+)
+
+
+def _row_may_be_named(
+    lexicon: RowLexicon, terms: frozenset[str], phrases: frozenset[str], runs: bool
+) -> bool:
+    """Could any analysis whose folded terms and phrases are these reach the
+    row by its words? A superset test: every row `candidates_for` could
+    return, or read another row's consumption from, passes it."""
+    if lexicon.names & phrases or lexicon.name_terms & terms:
+        return True
+    return runs and any(len(name) >= 2 and _continua_class(name) for name in lexicon.names)
+
+
+def candidates_for_each(
+    analyses: Sequence[TurnAnalysis], rows: Sequence[AnchorFacts], **keywords: Any
+) -> tuple[tuple[CandidateFacts, ...], ...]:
+    """`candidates_for` for several analyses in ONE scan over `rows`.
+
+    The earlier entries of a conversation are matched by their words only (no
+    band, recall, routing or recency). Only a row whose own name shares a
+    word or a phrase with SOME entry can be reached, or consume a term for
+    another row, so the full catalogue is scanned once for those, and each
+    entry is then matched over that short list: the result is identical to
+    one `candidates_for` per entry at a fraction of the cost. With any
+    wordless contact source in `keywords` it falls back to one full scan each.
+    """
+    if not analyses:
+        return ()
+    if any(keywords.get(name) for name in _WORDLESS_CONTACT_ARGUMENTS):
+        return tuple(candidates_for(analysis, rows, **keywords) for analysis in analyses)
+    stopwords = keywords.get("stopwords", _STOPWORDS)
+    terms: set[str] = set()
+    phrases: set[str] = set()
+    runs = False
+    for analysis in analyses:
+        for term in frozenset((*analysis.tokens, *analysis.words)) - stopwords:
+            folded = _fold_lexical_term(term)
+            if folded is not None:
+                terms.add(folded)
+        phrases.update(analysis.ngrams, analysis.tokens, analysis.words)
+        phrases.update(
+            folded for token in analysis.tokens if (folded := fold_possessive(token)) not in stopwords
+        )
+        runs = runs or any(_continua_runs(token) for token in analysis.tokens)
+    frozen_terms, frozen_phrases = frozenset(terms), frozenset(phrases)
+    lexicons: dict[str, RowLexicon] = {}
+    named: list[AnchorFacts] = []
+    for row in rows:
+        lexicon = row_lexicon(row)
+        if _row_may_be_named(lexicon, frozen_terms, frozen_phrases, runs):
+            lexicons[row.anchor_id] = lexicon
+            named.append(row)
+    return tuple(
+        candidates_for(analysis, named, row_lexicons=lexicons, **keywords) for analysis in analyses
+    )
+
+def _token_folds(tokens: Sequence[str], stopwords: frozenset[str]) -> tuple[str | None, ...]:
+    """Each token's lexical fold, `None` for a stopword: what `_name_span`
+    compares against a name's terms, computed once per turn."""
+    return tuple(None if token in stopwords else _fold_lexical_term(token) for token in tokens)
+
+
 def _name_span(
     tokens: Sequence[str],
     stopwords: frozenset[str],
     name_terms: frozenset[str],
     breaks: frozenset[int] = frozenset(),
+    folds: Sequence[str | None] | None = None,
 ) -> tuple[int, int] | None:
     """The longest contiguous run of `tokens` spelling `name_terms` words.
 
@@ -1900,8 +2014,11 @@ def _name_span(
     coordinator ("and", "or"): "the solar array, monitoring" and "the solar
     array and monitoring" are two things, not one name. Ties go to the
     earliest run, so the span is deterministic. `None` when no token is a
-    name word.
+    name word. `folds` is each token's `_fold_lexical_term` (`None` for a
+    stopword), computed once per turn by a caller that spans many names.
     """
+    if folds is None:
+        folds = _token_folds(tokens, stopwords)
     best: tuple[int, int] | None = None
     best_words = 0
     start: int | None = None
@@ -1912,7 +2029,7 @@ def _name_span(
             start = None
             if token in _RUN_COORDINATORS:
                 continue
-        folded = None if token in stopwords else _fold_lexical_term(token)
+        folded = folds[index]
         if folded is not None and folded in name_terms:
             if start is None:
                 start, words = index, 0

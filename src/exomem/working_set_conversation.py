@@ -307,8 +307,11 @@ def apply(
     if refs:
         named.update(row.anchor_id for row in rows if resolve_module.names_row(refs, row))
     entry_candidates: list[tuple[Entry, Any, tuple[Any, ...]]] = []
-    for entry, analysis in segments.entries:
-        drawn = resolve_module.candidates_for(analysis, rows, bands={}, **keywords)
+    # One scan of the catalogue for every read entry, not one per entry.
+    drawn_per_entry = resolve_module.candidates_for_each(
+        [analysis for _entry, analysis in segments.entries], rows, **keywords
+    )
+    for (entry, analysis), drawn in zip(segments.entries, drawn_per_entry, strict=True):
         entry_candidates.append((entry, analysis, drawn))
         for item in drawn:
             if item.evidence & ENTRY_KINDS:

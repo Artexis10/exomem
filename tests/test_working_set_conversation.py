@@ -370,3 +370,49 @@ def test_promoted_material_keeps_within_a_third_of_the_budget_and_comes_last(cva
     assert paths.index(ottilie) < paths.index(grant)
     promoted = sum(len(unit["text"]) for unit in packet["units"] if unit["provenance"]["path"] == grant)
     assert promoted <= limit // 3
+
+
+# --------------------------------------------------------------------------- #
+# One catalogue scan for every earlier entry (latency ruling P1 on #1463)
+# --------------------------------------------------------------------------- #
+
+ENTRY_TEXTS = (
+    "We need to plan the spring rounds of the Marlow Quay Survey.",
+    "Ottilie Marsh said the Tidewater Grant call went well.",
+    "the Kestrel Hiring Plan and the Marlow Quay Survey both slipped",
+    "did the Kestrel Hiring Plan slip?",
+    "Which pressure did we settle on for the van tyres?",
+    "Ottilie's notes on the grant",
+    "マーロウ埠頭の調査について",
+    "plenty of chat for one day",
+)
+
+
+def test_one_scan_for_every_entry_matches_one_scan_per_entry(cvault: Path) -> None:
+    index = working_set_index.WorkingSetIndex(cvault)
+    rows = working_set_resolve.facts_from_rows(index.anchors())
+    keywords = {"term_anchor_counts": index.term_anchor_counts()}
+    analyses = [working_set_resolve.analyze_turn(text) for text in ENTRY_TEXTS]
+    batched = working_set_resolve.candidates_for_each(analyses, rows, **keywords)
+    one_by_one = tuple(working_set_resolve.candidates_for(a, rows, **keywords) for a in analyses)
+    assert batched == one_by_one
+    assert any(batched), "the fixture must reach something, or the comparison is vacuous"
+
+
+def test_the_entries_are_matched_in_one_catalogue_scan(
+    cvault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full_scans: list[int] = []
+    real = working_set_resolve.candidates_for
+    total = len(working_set_index.WorkingSetIndex(cvault).anchors())
+
+    def counting(analysis, rows, **kwargs):
+        if len(rows) == total:
+            full_scans.append(1)
+        return real(analysis, rows, **kwargs)
+
+    monkeypatch.setattr(working_set_resolve, "candidates_for", counting)
+    recent = [_user(text) if i % 2 == 0 else _assistant(text) for i, text in enumerate(ENTRY_TEXTS[:5])]
+    commands.op_activate_context(cvault, turn=TURN, conversation={"recent": recent})
+    # The turn's own scan and ONE scan for all five read entries.
+    assert len(full_scans) == 1, full_scans
