@@ -14,7 +14,7 @@ import types
 import numpy as np
 import pytest
 
-from exomem import embedding_backend
+from exomem import embedding_backend, privacy_log
 
 RUN_EQUIVALENCE = os.environ.get("RUN_EMBED_EQUIVALENCE_TEST") == "1"
 
@@ -134,7 +134,7 @@ def test_providers_always_end_in_cpu() -> None:
 
 
 def _fake_onnx_encoder(
-    monkeypatch: pytest.MonkeyPatch, *, served: bool
+    monkeypatch: pytest.MonkeyPatch, *, served: bool, device: str = "cpu"
 ) -> tuple[embedding_backend._OnnxEncoder, object, dict[str, str]]:
     class Options:
         def __init__(self) -> None:
@@ -187,7 +187,7 @@ def _fake_onnx_encoder(
     monkeypatch.setattr(embedding_backend, "ensure_artifact", lambda *_args: ("served.onnx", "abc"))
     monkeypatch.setattr(embedding_backend, "_model_file", lambda *_args: "hub.onnx")
 
-    encoder = embedding_backend._OnnxEncoder("model", "cpu")
+    encoder = embedding_backend._OnnxEncoder("model", device)
     return encoder, options, entries_at_session_creation
 
 
@@ -197,6 +197,7 @@ def test_cloud_weight_sharing_is_applied_to_the_served_onnx_path(
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     monkeypatch.delenv("EXOMEM_HOSTED_CELL", raising=False)
     monkeypatch.delenv("EXOMEM_ONNX_SHARE_WEIGHTS", raising=False)
+    privacy_log.install_hosted_log_redaction()
 
     with caplog.at_level("INFO", logger=embedding_backend.__name__):
         encoder, options, entries_at_session_creation = _fake_onnx_encoder(
@@ -206,11 +207,47 @@ def test_cloud_weight_sharing_is_applied_to_the_served_onnx_path(
     assert encoder.share_weights is True
     assert options.entries == {"session.disable_prepacking": "1"}
     assert entries_at_session_creation == {"session.disable_prepacking": "1"}
-    assert any(
-        record.getMessage().startswith("ONNX runtime shape:")
-        and "share_weights=True" in record.getMessage()
-        for record in caplog.records
-    )
+    runtime_records = [
+        record for record in caplog.records
+        if getattr(record, "event", None) == "onnx_runtime_shape"
+    ]
+    assert len(runtime_records) == 1
+    assert runtime_records[0].fields == {
+        "device": "cpu",
+        "intra_op_threads": options.intra_op_num_threads,
+        "inter_op_threads": options.inter_op_num_threads,
+        "share_weights": True,
+    }
+    assert runtime_records[0].content == {}
+    assert "served.onnx" not in caplog.text
+    assert "tokenizer.json" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("device", "expected"),
+    [("CPU", "cpu"), ("cuda:1", "cuda"), ("mps", "mps"),
+     ("private-device-path-sentinel", "other"),
+     ("cuda:private-device-path-sentinel", "cuda")],
+)
+def test_runtime_shape_fields_exclude_caller_device_content(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    device: str, expected: str,
+) -> None:
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "1")
+    privacy_log.install_hosted_log_redaction()
+    with caplog.at_level("INFO", logger=embedding_backend.__name__):
+        encoder, options, _ = _fake_onnx_encoder(monkeypatch, served=False, device=device)
+    record = next(r for r in caplog.records if getattr(r, "event", None) == "onnx_runtime_shape")
+    assert encoder.share_weights is False
+    assert record.fields == {
+        "device": expected,
+        "intra_op_threads": options.intra_op_num_threads,
+        "inter_op_threads": options.inter_op_num_threads,
+        "share_weights": False,
+    }
+    assert record.content == {}
+    assert "private-device-path-sentinel" not in str(record.__dict__)
+    assert "hub.onnx" not in str(record.__dict__)
 
 
 @pytest.mark.parametrize(
