@@ -107,11 +107,11 @@ RUN uv pip install --python /app/.venv/bin/python "torch>=2.12" --index-url http
 # Only the bi-encoder is fetched, and only in the form the runtime reads.
 ########################################################################
 FROM builder-lean AS builder-hosted
-# A cell encodes recall with the English model until a node encoder serves the
-# multilingual one; name it here, where no cell flag is set, so the build
-# fetches the model its cells load.
+# A cell encodes recall with the multilingual model a personal server runs,
+# from its pinned int8 artefact; name it here so the build fetches exactly the
+# model its cells load.
 ENV HF_HOME=/opt/exomem-models \
-    EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5
+    EXOMEM_RECALL_MODEL=BAAI/bge-m3
 # Resolve the model through the very backend the cell serves with, so the build
 # fetches exactly what that runtime opens — the ONNX export, the fast tokenizer,
 # and the sequence config — and never a torch serialization there is no loader
@@ -127,11 +127,11 @@ print('fetched', MODEL_NAME)" \
  && HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 EXOMEM_EMBED_BACKEND=onnx \
     /app/.venv/bin/python -c "\
 import importlib.util; \
-from exomem.embeddings import MODEL_NAME, VECTOR_DIM; \
-from exomem import embedding_backend as backend; \
+from exomem.embeddings import MODEL_NAME; \
+from exomem import embedding_backend as backend, recall_space; \
 encoder = backend.load_encoder(MODEL_NAME, backend=backend.ONNX); \
 v = encoder.encode(['offline load gate'], batch_size=1); \
-assert v.shape == (1, VECTOR_DIM), v.shape; \
+assert v.shape == (1, recall_space.declared_dim(MODEL_NAME)), v.shape; \
 assert importlib.util.find_spec('torch') is None, 'torch reached the hosted image'; \
 print('offline load verified', MODEL_NAME, v.shape)"
 
@@ -246,7 +246,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     TRANSFORMERS_OFFLINE=1 \
     EXOMEM_DISABLE_RANKING=1 \
     EXOMEM_EMBED_BACKEND=onnx \
-    EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5 \
+    EXOMEM_RECALL_MODEL=BAAI/bge-m3 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

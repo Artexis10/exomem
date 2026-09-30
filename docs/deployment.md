@@ -832,12 +832,13 @@ replication product.
 
 ## Recall model and re-embedding
 
-A personal server encodes recall with `BAAI/bge-m3`, served from a pinned int8
-ONNX artefact on CPU, and activation shares that one instance (about 0.65 GB
-resident). The first load builds the artefact from the pinned export: a 2.2 GB
-download and a quantisation that peaks near 9 GB in a child process. A hosted or
-cloud cell keeps `BAAI/bge-base-en-v1.5`. `EXOMEM_RECALL_MODEL` names the model
-explicitly.
+A personal server and a hosted or cloud cell encode recall with `BAAI/bge-m3`,
+served from a pinned int8 ONNX artefact on CPU, and activation shares that one
+instance (about 0.65 GB resident). The first load fetches the published
+artefact, or builds it from the pinned export: a 2.2 GB download and a
+quantisation that peaks near 9 GB in a child process. The hosted and cloud
+images carry the artefact, since a cell can fetch nothing. `EXOMEM_RECALL_MODEL`
+names the model explicitly.
 
 Every recall sidecar records the model, fingerprint and width of the vectors it
 holds, and nothing reads it with another encoder. When the recall model changes,
@@ -858,6 +859,10 @@ resident.
   finds it cold. `EXOMEM_RECALL_REEMBED=off` is the way to keep one model.
 - Rolling back to `BAAI/bge-base-en-v1.5` after a later start has retired the
   old sidecar re-embeds the whole vault into the English space, the same way.
+- A hosted or cloud cell holds one model. It never loads the old one: the old
+  sidecar is refused, the vector lane reports `vector_space_mismatch` and the
+  lexical lanes answer until the cutover. Writes meanwhile are built by the
+  job's catch-up.
 - `exomem index` maintains whichever sidecar is serving, with its own model.
 - The sidecar for bge-m3 is about a third larger: 1,024 dimensions against 768.
 

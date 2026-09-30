@@ -310,6 +310,43 @@ def test_no_request_thread_loads_a_model(world) -> None:
     assert loads == before
 
 
+def test_a_cell_re_embeds_with_its_one_encoder_while_lexical_recall_serves(
+    world, monkeypatch
+) -> None:
+    # A hosted or cloud cell holds one encoder. The old sidecar is refused
+    # rather than served by a second model, lexical recall answers while the
+    # new sidecar builds, and the vector lane returns at the cutover.
+    vault, log, loads = world
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
+    _warm(vault)
+    vector = _vector_lane(vault)
+    assert (vector["status"], vector["reason"]) == ("unavailable", "vector_space_mismatch")
+    hits = _explained(vault, "retry backoff")["hits"]
+    assert hits and hits[0]["path"] == f"{kb_dirname()}/Notes/page-0.md"
+
+    # A write meanwhile cannot land in the refused sidecar; the build takes it.
+    added = vault / kb_dirname() / "Notes/page-new.md"
+    added.write_text(
+        "---\ntype: note\ntitle: Circuit breaker\nupdated: 2026-09-02\n---\n\n"
+        "# Circuit breaker\n\nA breaker opens after repeated failures and probes later.\n",
+        encoding="utf-8",
+    )
+    embeddings.upsert_after_write_status(vault, [added])
+
+    job = recall_migration.start(vault, threading.Event())
+    job.join(timeout=60)
+    assert not job.is_alive()
+
+    assert recall_migration.status(vault)["state"] == "current"
+    assert {name for name, _thread in loads} == {NEW}
+    active = embeddings.get_embedding_index(vault)
+    assert active.identity.model == NEW
+    assert active.stored_chunks_for(f"{kb_dirname()}/Notes/page-new.md")[0]
+    log.clear()
+    assert _vector_lane(vault)["status"] == "participated"
+    assert _query_encoders(log) == [NEW]
+
+
 def test_the_kill_switch_keeps_the_old_sidecar_serving(world, monkeypatch) -> None:
     vault, log, _loads = world
     monkeypatch.setenv(recall_migration.REEMBED_ENV, "off")

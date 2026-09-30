@@ -48,12 +48,11 @@ def test_dockerfile_has_a_fixed_nonroot_immutable_hosted_target() -> None:
 
 
 def test_hosted_image_bakes_and_serves_the_model_a_cell_encodes_with() -> None:
-    """A personal server encodes recall with bge-m3; a cell keeps the English
-    model until a node encoder serves it. The hosted build stage resolves
-    `embeddings.MODEL_NAME` outside any cell, so without the explicit model it
-    would fetch bge-m3 (a multi-gigabyte artefact build) for an image whose
-    cells never load it, and its offline gate would fail the English width.
-    Every process in the hosted and cloud images names the cell's model too."""
+    """A cell encodes recall with the model a personal server runs. The hosted
+    build stage fetches the model it names and its offline gate loads it, so
+    the stage and every process in the hosted and cloud images name exactly
+    the model a cell resolves: a cell can fetch nothing under its no-egress
+    policy and read-only root."""
     from exomem import recall_space
 
     cell_model = recall_space.configured_recall_model({"EXOMEM_HOSTED_CELL": "1"})

@@ -1,8 +1,7 @@
 """Recall runs one multilingual encoder on a personal server.
 
 A personal server encodes recall (and, sharing the instance, activation) with
-`BAAI/bge-m3`. A hosted or cloud cell keeps `BAAI/bge-base-en-v1.5` until the
-node encoder serves it. What a trace or doctor reports as the model is the one
+`BAAI/bge-m3`, and so does a hosted or cloud cell. What a trace or doctor reports as the model is the one
 whose vectors actually served: while a re-embed has not cut over, that is the
 model that wrote the serving sidecar.
 """
@@ -28,14 +27,11 @@ BASE = "BAAI/bge-base-en-v1.5"
     [
         ({}, M3),
         ({"EXOMEM_HOSTED_CELL": "0"}, M3),
-        ({"EXOMEM_HOSTED_CELL": "1"}, BASE),
-        ({"EXOMEM_CLOUD_CELL": "true"}, BASE),
-        ({"EXOMEM_HOSTED_CELL": "off", "EXOMEM_CLOUD_CELL": "yes"}, BASE),
-        # A malformed flag is read as a cell, as content-private logging reads it.
-        ({"EXOMEM_HOSTED_CELL": "maybe"}, BASE),
-        # An explicit model wins over the deployment's default, either way.
+        ({"EXOMEM_HOSTED_CELL": "1"}, M3),
+        ({"EXOMEM_CLOUD_CELL": "true"}, M3),
+        # An explicit model wins over the default, on a server or a cell.
         ({"EXOMEM_RECALL_MODEL": BASE}, BASE),
-        ({"EXOMEM_RECALL_MODEL": M3, "EXOMEM_HOSTED_CELL": "1"}, M3),
+        ({"EXOMEM_RECALL_MODEL": BASE, "EXOMEM_HOSTED_CELL": "1"}, BASE),
     ],
 )
 def test_the_recall_encoder_follows_the_deployment(env: dict[str, str], model: str) -> None:
