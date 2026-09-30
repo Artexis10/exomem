@@ -13,6 +13,14 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_claude_directory_manifest_declares_privacy_policy(tmp_path: Path) -> None:
+    cloud_plugins.build_packages(ROOT, tmp_path)
+    definition = json.loads((ROOT / "plugins/cloud/definition.json").read_text())
+    with zipfile.ZipFile(tmp_path / "claude.zip") as archive:
+        manifest = json.loads(archive.read(".claude-plugin/plugin.json"))
+        assert manifest["privacyPolicyUrl"] == definition["privacy"]
+
+
 def test_openai_submission_icons_are_contained_square_pngs(tmp_path: Path) -> None:
     cloud_plugins.build_packages(ROOT, tmp_path)
     with zipfile.ZipFile(tmp_path / "openai.zip") as archive:

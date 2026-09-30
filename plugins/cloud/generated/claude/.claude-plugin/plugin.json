@@ -8,6 +8,7 @@
   },
   "homepage": "https://substratesystems.io/exomem",
   "repository": "https://github.com/Artexis10/exomem",
+  "privacyPolicyUrl": "https://substratesystems.io/exomem/privacy",
   "license": "AGPL-3.0-or-later",
   "keywords": [
     "memory",

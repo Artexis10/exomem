@@ -108,6 +108,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 "author": definition["author"],
                 "homepage": definition["homepage"],
                 "repository": definition["repository"],
+                "privacyPolicyUrl": definition["privacy"],
                 "license": definition["license"],
                 "keywords": definition["keywords"],
             }
