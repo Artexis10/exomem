@@ -40,6 +40,7 @@ from typing import Protocol
 import numpy as np
 
 from . import accel, model_cache, runtime_resources
+from .log_events import log_event
 
 log = logging.getLogger(__name__)
 
@@ -521,12 +522,19 @@ class _OnnxEncoder:
         self._session = ort.InferenceSession(onnx_path, sess_options=options, providers=providers)
         self._inputs = {spec.name for spec in self._session.get_inputs()}
         self.device = device
-        log.info(
-            "ONNX runtime shape: device=%s intra_op_threads=%s inter_op_threads=%s share_weights=%s",
-            device,
-            options.intra_op_num_threads,
-            options.inter_op_num_threads,
-            self.share_weights,
+        # The hosted privacy boundary retains only catalogued content-free events.
+        # Never put a caller-supplied device string or model/artifact path in fields.
+        device_kind = device.lower().split(":", 1)[0]
+        log_event(
+            log,
+            logging.INFO,
+            "onnx_runtime_shape",
+            fields={
+                "device": device_kind if device_kind in {"cpu", "cuda", "mps"} else "other",
+                "intra_op_threads": options.intra_op_num_threads,
+                "inter_op_threads": options.inter_op_num_threads,
+                "share_weights": self.share_weights,
+            },
         )
 
     def encode(
