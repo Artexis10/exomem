@@ -110,7 +110,7 @@
   - Extend the existing SOPS handoff, ciphertext validation and apply path to accept complete, exact-key-set Cloud platform Secret bundles while retaining scalar destinations; test bundle rotation shapes and reject incomplete, malformed or plaintext artifacts before publication or apply.
 - [x] 3.9a Classify every hosted scheduler job explicitly in chart values and render `exomem-reconcile` unsuspended whenever either Cloud control workload is enabled, while legacy-only jobs remain suspended; cover Cloud-on, legacy-pause-only and all-off renders.
 - [x] 3.9b Before deploying the lifecycle scheduler chart change, gate Substrate's legacy hosted lifecycle lane inside `/api/cron/exomem-reconcile` when Cloud is enabled, while retaining the Paddle and Cloud lanes. Substrate #190 is deployed; the authenticated production sweep returned zero legacy operations and a successful Cloud reconciliation on 2026-09-30.
-- [ ] 3.9c Deploy the scheduler chart after the Substrate gate and verify a successful scheduled Cloud sweep while every legacy-only job remains suspended.
+- [x] 3.9c Deploy the scheduler chart after the Substrate gate and verify a successful scheduled Cloud sweep while every legacy-only job remains suspended. Exomem #1490 (`9cdcea434`) deployed as platform revision 71 on 2026-09-30; the actual manifest matched the reviewed server dry-run, changing only reconcile `suspend: true` to `false`. The first scheduled job completed successfully at 19:50:15 UTC, and the scheduler ledger recorded a fresh success with zero consecutive failures.
 - [ ] 3.10 Integration test on disposable K3s:
   - create, then pod kill with a governed write after it;
   - owner-only modes asserted after first start, pod replacement and restore;
