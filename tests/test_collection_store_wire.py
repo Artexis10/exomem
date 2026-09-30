@@ -23,10 +23,14 @@ def normalized(value):
     if isinstance(value, dict):
         lifecycle = value.get("operation") == "revise"
         source_version = set(value) == {"path", "hash"}
+        # A saved view's identity hashes its manifest hash, so it is mode-local (tasks.md P1a.5).
+        saved_view = set(value) == {"name", "definition", "identity"}
         return {
             k: "<hash>" if v is not None and (
                 k in hashes or (k == "payload_hash" and lifecycle) or (k == "hash" and source_version)
-            ) else "<identity>" if k in identities and v is not None else normalized(v)
+            ) else "<identity>" if v is not None and (
+                k in identities or (k == "identity" and saved_view)
+            ) else normalized(v)
             for k, v in value.items()
         }
     if isinstance(value, list):
@@ -148,7 +152,7 @@ def test_revision_hash_parity_obeys_the_ruled_normalization(paired, profile):
 
 @pytest.mark.parametrize("profile", ["records", "planning"])
 def test_inspect_shape_guards_and_store_only_projection(paired, profile):
-    invoke, _, handle = paired
+    invoke, roots, handle = paired
     paired_create(paired, profile)
     key_arg = "item_key" if profile == "records" else "plan_id"
     for mode in (0, 1):
@@ -168,6 +172,19 @@ def test_inspect_shape_guards_and_store_only_projection(paired, profile):
     else:
         assert set(stored) == set(inspections[0])
     stored["diagnostics"] = []
+    text, stored_hash = handle.connection.execute(
+        "SELECT manifest_text, manifest_hash FROM collection_manifests ORDER BY manifest_version DESC LIMIT 1"
+    ).fetchone()
+    manifests = [
+        collections.load_manifest(roots[0], manifest_path(profile)),
+        collections.parse_manifest_bytes(roots[1], manifest_path(profile), text.encode()),
+    ]
+    assert manifests[1].manifest_version.hash == stored_hash
+    for manifest, inspection in zip(manifests, inspections):
+        if profile == "planning":
+            assert inspection["saved_views"], "Planning declares its default saved views"
+        for view in inspection["saved_views"]:
+            assert view["identity"] == collections.resolve_saved_view(manifest, view["name"]).identity
     same_wire(*inspections)
     proposed = manifest_text(profile).replace("title: Work", "title: Revised")
     for mode, inspection in enumerate(inspections):
