@@ -50,7 +50,10 @@ class OverlapAdvisorySkipped(RuntimeError):
 
 def _skip_overlap(reason: str, *, strict: bool) -> dict[str, float]:
     # Closed reasons only: exception messages can contain the written text.
-    log.warning("overlap advisory skipped: %s", reason)
+    if reason == "embeddings_warming":
+        log.debug("overlap advisory skipped: %s", reason)
+    elif reason not in {"embeddings_disabled", "empty_text", "empty_vectors"}:
+        log.warning("overlap advisory skipped: %s", reason)
     if strict:
         raise OverlapAdvisorySkipped(reason)
     return {}
@@ -966,6 +969,8 @@ def _best_cosine_per_file(
             idx = embeddings.get_embedding_index(vault_root)
             # The draft is encoded for the sidecar it is scored against.
             in_space.enter_context(recall_space.encoding_for(idx))
+            if not embeddings.advisory_passages_fit(chunks):
+                raise OverlapAdvisorySkipped("text_truncated")
             stored = (
                 embeddings._stored_text_vectors(idx, published_path)[0]
                 if published_path

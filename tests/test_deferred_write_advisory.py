@@ -9,6 +9,7 @@ terminal handoff is faked, and it is faked through Lane 1's own committed
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 import importlib
 import importlib.util
 import inspect
@@ -116,7 +117,7 @@ def encoder(monkeypatch: pytest.MonkeyPatch) -> _DeterministicEncoder:
     fake = _DeterministicEncoder()
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "")
     monkeypatch.setattr(embeddings, "embed_texts", fake)
-    monkeypatch.setattr(embeddings, "get_model", lambda: object())
+    monkeypatch.setattr(embeddings, "get_model", lambda: SimpleNamespace(texts_fit=lambda _texts: True))
     monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
     return fake
 
@@ -1380,3 +1381,90 @@ def test_unauthorized_and_deleted_target_states_stay_indistinguishable(
         assert module.resolve_result(vault, refs[unchanged])["status"] == "ready"
         assert module.resolve_result(vault, refs[changed])["status"] == "superseded"
         assert module.resolve_result(vault, refs[deleted])["status"] == "superseded"
+
+
+@pytest.mark.parametrize("failure", ["truncated", "backend"])
+def test_failed_route_must_release_inputs(vault, encoder, monkeypatch, failure):
+    from exomem import advisory_handoff
+
+    body = "shared " * embeddings.MAX_WORDS_PER_CHUNK + "Distinct written tail."
+    target = _seed_page(vault, "failed-route", body)
+    receipt, _ = _prepare_custody(vault, batch_id="failed-route", target_rel=target)
+    inputs = corpus_aware.WriteAdvisoryInputs(
+        route="remember", target_rel_path=target, self_path=target,
+        title="Review probe", body=body, note_type="insight",
+    )
+    if failure == "backend":
+        def fail(*_args, **_kwargs):
+            raise RuntimeError("synthetic failure")
+        monkeypatch.setattr(_advisory(), "_candidates_for_route", fail)
+    advisory_handoff.register_route_inputs(vault, receipt.batch_id, inputs)
+    try:
+        execution = _run(vault)[0]
+        assert execution.completed and execution.state == "failed"
+        assert not _run(vault, now=21.0)
+        assert advisory_handoff.route_inputs(vault, receipt.batch_id) is None
+    finally:
+        advisory_handoff.forget_route_inputs(vault, receipt.batch_id)
+
+
+def test_deferred_backend_failure_must_not_log_written_content(vault, encoder, monkeypatch, caplog):
+    target = _seed_page(vault, "private-error", "A short complete written conclusion.")
+    _prepare_custody(vault, batch_id="private-error", target_rel=target)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("REDACTED_SYNTHETIC_CONTENT_SENTINEL")
+
+    monkeypatch.setattr(embeddings, "embed_texts", fail)
+    with caplog.at_level("DEBUG", logger="exomem.embeddings"):
+        execution = _run(vault)[0]
+    assert execution.completed and execution.state == "failed"
+    assert "REDACTED_SYNTHETIC_CONTENT_SENTINEL" not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+def test_failed_route_keeps_inputs_when_publication_is_rejected(vault, encoder):
+    from exomem import advisory_handoff
+
+    body = "shared " * embeddings.MAX_WORDS_PER_CHUNK + "Distinct written tail."
+    target = _seed_page(vault, "rejected-route", body)
+    receipt, _ = _prepare_custody(vault, batch_id="rejected-route", target_rel=target)
+    inputs = corpus_aware.WriteAdvisoryInputs(
+        route="remember", target_rel_path=target, self_path=target,
+        title="Review probe", body=body, note_type="insight",
+    )
+    advisory_handoff.register_route_inputs(vault, receipt.batch_id, inputs)
+    try:
+        expired = _claim(vault, owner="expired-worker", now=20.0, lease=1.0)
+        refused = _advisory().execute_write_advisory(vault, expired, now=500.0)
+        assert refused.outcome == "stale_claim"
+        assert advisory_handoff.route_inputs(vault, receipt.batch_id) is inputs
+        accepted = _run(vault, owner="live-worker", now=600.0)[0]
+        assert accepted.completed and accepted.state == "failed"
+        assert advisory_handoff.route_inputs(vault, receipt.batch_id) is None
+    finally:
+        advisory_handoff.forget_route_inputs(vault, receipt.batch_id)
+
+
+def test_restarted_advisory_rejects_token_truncated_published_generation(vault, encoder, monkeypatch):
+    from test_write_overlap_vectors import _local_bounded_encoder
+
+    model, encode, _retained, _uncapped = _local_bounded_encoder()
+    monkeypatch.setattr(embeddings, "get_model", lambda: model)
+    monkeypatch.setattr(embeddings, "embed_texts", encode)
+    body = ("a." * 150 + " ") * 4 + "collections"
+    target = _seed_page(vault, "token-truncated-restart", body)
+    page = find_module._CACHE.get(vault / target, vault)
+    chunks = embeddings._chunks_for_page(vault, page)
+    index = embeddings.get_embedding_index(vault)
+    index.upsert_file(target, chunks, encode(chunks), 1.0)
+    generation = embeddings.prepare_generation_vectors(
+        vault, target, expected_fingerprint=_fingerprint(vault, target), allow_encode=False,
+    )
+    assert generation is not None and generation.reused
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: pytest.fail("must reuse rows"))
+    monkeypatch.setattr(index, "search_many", lambda *_a, **_k: pytest.fail("must skip scoring"))
+    _prepare_custody(vault, batch_id="token-truncated-restart", target_rel=target)
+    execution = _run(vault)[0]
+    assert execution.completed and execution.state == "failed"
+    assert execution.failure_code == "embedding_unavailable"

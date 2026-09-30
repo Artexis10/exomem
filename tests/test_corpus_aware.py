@@ -9,6 +9,7 @@ torch and lift the suite-wide embeddings gate.
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 from collections import Counter
 from pathlib import Path
 
@@ -472,7 +473,7 @@ def counting_encoder(monkeypatch):
         return np.asarray(rows, dtype=np.float32).reshape(len(texts), embeddings.VECTOR_DIM)
 
     monkeypatch.setattr(embeddings, "embed_texts", fake)
-    monkeypatch.setattr(embeddings, "get_model", lambda: object())
+    monkeypatch.setattr(embeddings, "get_model", lambda: SimpleNamespace(texts_fit=lambda _texts: True))
     return encoded
 
 

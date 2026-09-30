@@ -185,7 +185,12 @@ def _candidates_for(
     caller can commit the once-only first-surfaced ledger after -- and only
     after -- the store accepts the result they belong to.
     """
+    from . import embeddings
+
     corpus_aware._require_complete_advisory_body(generation.body, title=generation.title)
+    with corpus_aware.recall_space.encoding_for(embeddings.get_embedding_index(vault_root)):
+        if not embeddings.advisory_passages_fit(list(generation.chunks)):
+            raise corpus_aware.OverlapAdvisorySkipped("text_truncated")
     corpus_aware._require_advisory_vectors(
         generation.vectors, expected_count=len(generation.chunks)
     )
@@ -328,6 +333,8 @@ def _publish(
         now=now,
     )
     accepted = publication.outcome in {"published", "already_published"}
+    if publication.outcome in {"published", "already_published", "superseded"}:
+        advisory_handoff.forget_route_inputs(vault_root, claimed_status.batch_id)
     return AdvisoryExecution(
         batch_id=claimed_status.batch_id,
         outcome=publication.outcome,
@@ -381,6 +388,7 @@ def execute_write_advisory(
         )
 
     if stored.state != "pending":
+        advisory_handoff.forget_route_inputs(vault_root, batch_id)
         # A crash after publication reuses the stored result and completes the
         # component without recomputation (Design Decision 6). Recomputing here
         # could not converge: ordinary corpus drift between the crash and this
@@ -477,8 +485,6 @@ def execute_write_advisory(
             vault_root, emitted
         ):
             _arm_published_quiet_offer(vault_root, ref, candidates, emitted)
-        if execution.outcome in {"published", "already_published", "superseded"}:
-            advisory_handoff.forget_route_inputs(vault_root, batch_id)
         return execution
 
     from . import embeddings  # numpy-backed; loaded only when a claim is executed
@@ -519,8 +525,8 @@ def execute_write_advisory(
             now=now,
             reused_vectors=generation.reused,
         )
-    except Exception:  # noqa: BLE001 - optional advisory work fails closed and soft
-        log.warning("advisory computation failed batch=%s", batch_id, exc_info=True)
+    except Exception as error:  # noqa: BLE001 - optional advisory work fails closed and soft
+        log.warning("advisory computation failed stage=generation_advisory (%s)", type(error).__name__)
         return _publish(
             vault_root,
             claimed_status,

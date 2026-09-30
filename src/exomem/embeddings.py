@@ -1164,6 +1164,29 @@ def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
         )
 
 
+def advisory_passages_fit(texts: list[str]) -> bool:
+    """Prove a complete passage fits the selected encoder, including its prefix."""
+    selected = recall_space.selected_model()
+    model_name = selected or MODEL_NAME
+    if selected is not None and selected != MODEL_NAME:
+        model = recall_space.previous_resident(selected)
+        if model is None:
+            raise recall_space.ServingEncoderCold("advisory encoder is not resident")
+    else:
+        model = get_model()
+    _query_prefix, prefix = _prefixes(model, model_name)
+    passages = [prefix + text for text in texts] if prefix else texts
+    # Fast torch tokenizers reconfigure shared state even for an uncapped read.
+    # Use the encoder's own execution slot, as an encode does, and keep the
+    # resident instance alive while inspecting it.
+    if selected is not None and selected != MODEL_NAME:
+        gate = recall_space._previous_gate()
+        with recall_space._in_flight(), gate.admission(), gate.execution():
+            return model.texts_fit(passages)
+    with BGE_GUARD.active(), runtime_resources.model_admission(), runtime_resources.model_execution():
+        return model.texts_fit(passages)
+
+
 def _prefixes(model, model_name: str) -> tuple[str, str]:
     """The query and passage prefixes the resident model was trained with."""
     profile = getattr(model, "profile", None)
@@ -2093,27 +2116,15 @@ def published_generation_vectors(
         return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
     try:
         index = get_embedding_index(vault_root)
-        metadata, matrix = index.all_vectors()
+        # Each chunk text and vector come from the same row read. A separate
+        # matrix snapshot plus later text lookup can pair different generations.
+        stored = _stored_text_vectors(index, rel_path)[0]
+        if any(chunk not in stored for chunk in chunks):
+            return None
+        return np.asarray([stored[chunk] for chunk in chunks], dtype=np.float32)
     except Exception as e:  # noqa: BLE001 - sidecar reuse is an optimisation
-        log.debug("published generation vectors unavailable for %s: %s", rel_path, e)
+        log.debug("published generation reuse unavailable (%s)", type(e).__name__)
         return None
-    rows = sorted(
-        (
-            (chunk_index, row)
-            for row, (file_path, chunk_index) in enumerate(metadata)
-            if file_path == rel_path
-        )
-    )
-    if [chunk_index for chunk_index, _row in rows] != list(range(len(chunks))):
-        return None
-    try:
-        texts = index._texts_for([(rel_path, chunk_index) for chunk_index, _row in rows])
-    except Exception as e:  # noqa: BLE001 - sidecar reuse is an optimisation
-        log.debug("published chunk text unavailable for %s: %s", rel_path, e)
-        return None
-    if [texts.get((rel_path, chunk_index)) for chunk_index, _row in rows] != list(chunks):
-        return None
-    return np.asarray([matrix[row] for _chunk_index, row in rows], dtype=np.float32)
 
 
 def prepare_generation_vectors(
@@ -2155,7 +2166,7 @@ def prepare_generation_vectors(
             return None
         chunks = _chunks_for_page(Path(vault_root), page)
     except Exception as e:  # noqa: BLE001 - chunk extraction is best-effort
-        log.debug("generation chunks could not be prepared for %s: %s", rel_path, e)
+        log.debug("generation chunk preparation failed (%s)", type(e).__name__)
         return None
 
     published = published_generation_vectors(vault_root, rel_path, chunks=chunks)
@@ -2167,13 +2178,13 @@ def prepare_generation_vectors(
         try:
             get_model()
         except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
-            log.debug("generation vectors need a model that did not load: %s", e)
+            log.debug("generation model load failed (%s)", type(e).__name__)
             return None
         try:
             with recall_space.encoding_for(get_embedding_index(vault_root)):
                 vectors, reused = _embed_live_chunks(chunks), False
         except Exception as e:  # noqa: BLE001 - one bad encode must not fail a worker
-            log.debug("generation vectors could not be encoded for %s: %s", rel_path, e)
+            log.debug("generation encode failed (%s)", type(e).__name__)
             return None
     # The page can move under a slow encode; re-prove before handing it on.
     try:
