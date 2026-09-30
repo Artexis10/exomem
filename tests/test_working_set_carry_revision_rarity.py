@@ -198,3 +198,140 @@ def test_new_carry_terms_reuse_the_catalogue_page_total(
     assert second == ({"unseenword": 0}, first[1])
     totals = [query for query in queries if query.startswith("SELECT COUNT(*) FROM pages p WHERE")]
     assert len(totals) == 1, "a new term recounted an unchanged corpus"
+
+
+_FREQUENCY_FILTERS = {
+    "scope": "kb",
+    "exclude_navigation": True,
+    "exclude_raw_material": True,
+    "exclude_statuses": working_set.RETIRED_PAGE_STATUSES,
+}
+
+
+def _filtered_counts(vault: Path, terms=("brask",)):
+    result = lexstore.term_document_frequencies(vault, terms, **_FREQUENCY_FILTERS)
+    assert result.readiness.complete
+    assert result.value is not None
+    return result.value
+
+
+def _remove_index_rows(store, paths):
+    conn = store._connect()
+    try:
+        with conn:
+            for path in paths:
+                row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (path,)).fetchone()
+                assert row is not None
+                store._delete_rowid(conn, row[0])
+    finally:
+        conn.close()
+
+
+def test_filtered_counts_follow_an_incremental_repair(vault: Path) -> None:
+    _seed(vault, retired=0)
+    paths = [CURRENT]
+    for index in range(3):
+        path = f"{RESEARCH}/copy-{index}.md"
+        _write(vault / path, _revision(str(index), status="active", body="runs hourly.", successor=None))
+        paths.append(path)
+    lexstore.ensure_fresh(vault)
+    store = lexstore.get_store(vault)
+    _remove_index_rows(store, paths)
+    before = _filtered_counts(vault)
+    assert before[0] == {"brask": 0}
+
+    lexstore.ensure_fresh(vault)
+
+    assert _filtered_counts(vault) == ({"brask": 4}, before[1] + 4)
+    rare, pages, state = working_set_runtime.rare_turn_terms(vault, ["brask"])
+    assert state == "available" and pages == before[1] + 4
+    assert "brask" not in rare
+
+
+@pytest.mark.parametrize("second_process", [False, True])
+def test_filtered_counts_follow_an_exact_row_purge(vault: Path, second_process: bool) -> None:
+    import subprocess
+    import sys
+
+    _seed(vault, retired=0)
+    before = _filtered_counts(vault)
+    assert before[0] == {"brask": 1}
+    if second_process:
+        script = (
+            "from pathlib import Path; from exomem import lexstore; import sys; "
+            "assert lexstore.get_store(Path(sys.argv[1])).purge_exact_persisted_rows([sys.argv[2]]) == 1"
+        )
+        subprocess.run(
+            [sys.executable, "-c", script, str(vault), CURRENT],
+            check=True, capture_output=True, text=True,
+        )
+    else:
+        assert lexstore.get_store(vault).purge_exact_persisted_rows([CURRENT]) == 1
+
+    assert _filtered_counts(vault) == ({"brask": 0}, before[1] - 1)
+
+
+def test_stale_reader_cannot_install_counts_after_a_rebuild(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(vault, retired=0)
+    store = lexstore.get_store(vault)
+    _remove_index_rows(store, [CURRENT])
+    original = store._document_frequency_query
+
+    def rebuild_after_compute(conn, tokens, scope, **kwargs):
+        result = original(conn, tokens, scope, **kwargs)
+        with store._publication_lock():
+            writer = store._connect_setup()
+            try:
+                store._rebuild(writer)
+            finally:
+                writer.close()
+        assert store._filtered_term_frequency_cache is None
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_document_frequency_query", rebuild_after_compute)
+        before = _filtered_counts(vault)
+    assert before[0] == {"brask": 0}
+    assert store._filtered_term_frequency_cache is None, "stale reader republished its old counts"
+    assert _filtered_counts(vault) == ({"brask": 1}, before[1] + 1)
+
+
+@pytest.mark.parametrize("filtered", [False, True])
+def test_retained_cache_stays_within_its_limit_for_an_oversized_request(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, filtered: bool
+) -> None:
+    _seed(vault, retired=0)
+    monkeypatch.setattr(lexstore, "_TERM_FREQUENCY_CACHE_MAX", 2)
+    kwargs = _FREQUENCY_FILTERS if filtered else {"scope": "kb"}
+    # Warm one positive count, then request more positive counts than fit.
+    lexstore.term_document_frequencies(vault, ["brask"], **kwargs)
+    terms = ["brask", "ferri", "timet", "unseenword"]
+    result = lexstore.term_document_frequencies(vault, terms, **kwargs)
+    assert result.readiness.complete and result.value is not None
+    store = lexstore.get_store(vault)
+    conn = store._connect()
+    try:
+        expected = store._document_frequency_query(conn, terms, **kwargs)
+    finally:
+        conn.close()
+    assert result.value == expected
+    assert all(expected[0][term] > 0 for term in terms[:3])
+    cached = store._filtered_term_frequency_cache if filtered else store._term_frequency_cache
+    assert cached is not None and len(cached[1]) <= 2
+    assert lexstore.term_document_frequencies(vault, terms, **kwargs).value == expected
+
+
+def test_frequency_revision_follows_fts_only_mutations(vault: Path) -> None:
+    _seed(vault, retired=0)
+    before = _filtered_counts(vault)
+    store = lexstore.get_store(vault)
+    conn = store._connect()
+    try:
+        with conn:
+            rowid = conn.execute("SELECT rowid FROM pages WHERE path = ?", (CURRENT,)).fetchone()[0]
+            conn.execute("UPDATE fts SET stemmed = 'unseenword' WHERE rowid = ?", (rowid,))
+    finally:
+        conn.close()
+    assert _filtered_counts(vault) == ({"brask": 0}, before[1])
