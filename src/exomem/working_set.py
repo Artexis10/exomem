@@ -458,6 +458,13 @@ def build_packet(
     # fresh session opens with, and a turn that resolved a lot must not spend
     # the whole ceiling before saying what was recently worked on.
     recent_entries, used = _budgeted_recent(recent_context, limit)
+    # Conversation inference gets only its promoted share. Working continuity
+    # retains the unresolved turn's ordinary budget, outside that share.
+    material_limit = (
+        min(limit, used + limit // PROMOTED_SHARE_DIVISOR)
+        if generation.get("carried_by") == "conversation"
+        else limit
+    )
 
     # Current state is the highest-value prose about the RESOLVED anchors — it
     # is the answer to "what is true right now" — so it is budgeted next and the
@@ -467,7 +474,7 @@ def build_packet(
     state_entries: list[dict[str, Any]] = []
     for entry in current_state:
         statement = str(entry.get("statement") or "")
-        if used + len(statement) > limit:
+        if used + len(statement) > material_limit:
             continue
         state_entries.append(dict(entry))
         used += len(statement)
@@ -480,7 +487,7 @@ def build_packet(
         if role_count >= MAX_ITEMS_PER_ROLE:
             deferred.append((item, "role_cap"))
             continue
-        if used + len(text) > limit or not text:
+        if used + len(text) > material_limit or not text:
             deferred.append((item, "budget"))
             continue
         if item.promoted and promoted_used + len(text) > promoted_share:
@@ -516,7 +523,7 @@ def build_packet(
             continue
         pointer = _pointer(item, reason)
         cost = len(pointer["title"]) + len(pointer["why"])
-        if used + cost > limit:
+        if used + cost > material_limit:
             starved.setdefault(item.role, None)
             continue
         pointers.append(pointer)

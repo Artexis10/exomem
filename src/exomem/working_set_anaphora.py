@@ -24,9 +24,10 @@ pins that).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 
-from .working_set_index import STOPWORDS, fold_plural
+from .working_set_index import STOPWORDS, fold_plural, tokens_of
 
 PERSONAL_ANAPHORS: frozenset[str] = frozenset(
     {"he", "she", "him", "her", "hers", "his", "it", "its", "they", "them", "their", "theirs"}
@@ -179,7 +180,29 @@ _CLOCK_NUMBERS = frozenset(
     "one two three four five six seven eight nine ten eleven twelve thirteen "
     "fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty".split()
 )
-_KNOWN: frozenset[str] = _FUNCTION_WORDS | _TASK_FORMS | _POINTERS | _CLOCK_NUMBERS
+# Only surface words are neutral; inflectional stems cannot become grammar.
+_KNOWN: frozenset[str] = _FUNCTION_WORDS | _POINTERS | _CLOCK_NUMBERS
+# An opaque token outside any title/task licence, never a pointing word.
+_CODE_SPAN = "`code`"
+_CODE_SPANS = re.compile(r"(?P<ticks>`+)(?!`)[\s\S]*?(?<!`)(?P=ticks)(?!`)")
+
+
+def anaphora_tokens(text: str) -> tuple[str, ...]:
+    """Read delimited inline/fenced code as one opaque content token per span.
+
+    Ordinary resolution keeps its own verbatim tokens. Only pointer and
+    content analysis hides code, so a pronoun inside code never points.
+    """
+    result: list[str] = []
+    start = 0
+    for match in _CODE_SPANS.finditer(text):
+        result.extend(tokens_of(text[start:match.start()]))
+        result.append(_CODE_SPAN)
+        start = match.end()
+    result.extend(tokens_of(text[start:]))
+    return tuple(result)
+
+
 _ADJUNCT_PREPOSITIONS = frozenset("on in at after before by for from until during".split())
 _COMPLEMENT_MODIFIERS = frozenset(
     "not still now then yet already nearly almost about around the a an "
@@ -273,8 +296,10 @@ def content_words(tokens: Sequence[str], *, vocabulary: frozenset[str] = frozens
         word
         for word in words
         if any(ch.isalpha() for ch in word)
-        and not (word_forms := forms(word)) & _KNOWN
-        and not word_forms & vocabulary
+        and word not in _KNOWN
+        and not (word_forms := forms(word)) & _TASK_FORMS
+        # Neutral grammar words in vault filler still use surface matching.
+        and not word_forms & (vocabulary - _KNOWN)
         and not word_forms & _TIME_FORMS
     )
 

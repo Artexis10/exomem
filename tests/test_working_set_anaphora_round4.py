@@ -14,7 +14,11 @@ from anaphor_round6_sets import (
     STRUCTURAL_POSITIVES,
     earlier as repeated_earlier,
 )
-from test_working_set_conversation_carry import _carried
+from test_working_set_conversation_carry import _carried, analyze
+from anaphor_round7_sets import (
+    CODE_TURNS, CONTENT_FREE_FIFTH_IDS, CONTENT_FREE_VARIANTS,
+    STEM_COLLISION_WORDS, TOPIC_SWITCH_VARIANTS,
+)
 
 TIME_NEGATIVES = (
     "is it the weekend yet",
@@ -52,10 +56,15 @@ TIME_EARLIER = (
 
 # Recall is reported, not gated: no pointing word in the first case, and
 # "wait" remains content under the frozen task vocabulary in the second.
+# Round 7 supersedes round 4: neutral time leaves these content-free carries.
+TIME_CONTENT_FREE = {
+    "is it in the morning or the evening", "is it after the spring equinox",
+    "this is the best time of year",
+}
 TIME_MISSES = {"can priya do saturday", "can it wait until monday"}
 
 
-@pytest.mark.parametrize("turn", TIME_NEGATIVES)
+@pytest.mark.parametrize("turn", [t for t in TIME_NEGATIVES if t not in TIME_CONTENT_FREE])
 def test_a_time_subject_does_not_carry(turn: str) -> None:
     assert _carried([turn], TIME_EARLIER) == []
 
@@ -134,13 +143,15 @@ ROUND5_EARLIER = TIME_EARLIER + (
 
 @pytest.mark.parametrize(
     "turn",
-    ROUND5_REVIEW_NEGATIVES + DUMMY_TIME_NEGATIVES + TIME_LINK_NEGATIVES + CLOSING_NEGATIVES,
+    ROUND5_REVIEW_NEGATIVES + DUMMY_TIME_NEGATIVES + CLOSING_NEGATIVES,
 )
 def test_dummy_time_and_closing_turns_do_not_carry_even_with_shared_words(turn: str) -> None:
     assert _carried([turn], ROUND5_EARLIER) == []
 
 
-@pytest.mark.parametrize("turn", ROUND5_POSITIVES)
+# Round 7 ruling: bare temporal "late" is dummy; disclose this recall loss.
+@pytest.mark.parametrize("turn", [t for t in ROUND5_POSITIVES
+                                  if t != "is it still late in the evening there for the review"])
 def test_a_referential_it_or_comparison_keeps_its_subject(turn: str) -> None:
     assert _carried([turn], ROUND5_EARLIER) == [turn]
 
@@ -151,19 +162,22 @@ def test_a_shared_weekday_is_not_a_dummy_its_subject(weekday: str) -> None:
     assert _carried([f"is it {weekday} yet where you are"], earlier) == []
 
 
-def test_a_time_word_cannot_link_through_a_shared_function_word_stem() -> None:
+def test_a_neutral_time_word_can_carry_without_a_shared_stem() -> None:
     earlier = ({"role": "user", "text": "the migration plan is even better now"},)
-    assert _carried(["is that the evening"], earlier) == []
+    # Round 7 ruling: neutral time; this content-free carry is permitted.
+    assert _carried(["is that the evening"], earlier) == ["is that the evening"]
 
 
 @pytest.mark.parametrize(
     "turn,earlier,subject",
     [(turn, EARLIER, "Marlow Quay Survey") for turn in ACCEPTANCE_POSITIVES
-     if turn not in {"does this affect the rota", "has anything changed there since"}]
+     if turn not in {"does this affect the rota", "has anything changed there since",
+                         "the second option sounds better"}]
     + [(turn, HELDOUT_EARLIER, "Harbour Lantern Budget") for turn in HELDOUT_POSITIVES
        if turn not in {
            "how bad is it now", "what did they say about the seats",
            "can you remind me why it grew", "and the shortlists, any news on those?",
+           "what happens if we can't close it",
        }],
 )
 def test_licensed_acceptance_positives_keep_their_subject(turn, earlier, subject) -> None:
@@ -174,8 +188,9 @@ def test_licensed_acceptance_positives_keep_their_subject(turn, earlier, subject
 
 
 @pytest.mark.parametrize("case_id,turn,subject", FIFTH_NEGATIVES)
-def test_each_disclosed_fifth_false_carry_abstains(case_id, turn, subject) -> None:
-    assert _carried([turn], repeated_earlier(subject, turn), subject_title=subject) == [], case_id
+def test_each_disclosed_fifth_case_follows_the_round7_classification(case_id, turn, subject) -> None:
+    expected = [turn] if case_id in CONTENT_FREE_FIFTH_IDS else []
+    assert _carried([turn], repeated_earlier(subject, turn), subject_title=subject) == expected, case_id
 
 
 @pytest.mark.parametrize("case_id,turn,subject", FIFTH_POSITIVES)
@@ -239,3 +254,66 @@ def test_a_fronted_weather_or_distance_complement_is_dummy(title, turn) -> None:
 @pytest.mark.parametrize("turn", ["it has been late", "it had been midnight"])
 def test_a_perfect_copula_still_has_a_dummy_time_complement(turn: str) -> None:
     assert _carried([turn], EARLIER) == []
+
+
+@pytest.mark.parametrize("turn", sorted(TIME_CONTENT_FREE) + list(TIME_LINK_NEGATIVES))
+def test_round7_neutral_time_content_free_labels_carry(turn: str) -> None:
+    # Round 7 ruling supersedes the older negative neutral-time labels.
+    assert _carried([turn], ROUND5_EARLIER) == [turn]
+
+
+def test_round7_discloses_the_bare_temporal_head_recall_loss() -> None:
+    turn = "is it still late in the evening there for the review"
+    assert _carried([turn], ROUND5_EARLIER) == []
+
+
+@pytest.mark.parametrize("word", STEM_COLLISION_WORDS)
+def test_round7_a_function_word_stem_cannot_hide_new_content(word: str) -> None:
+    from exomem import working_set_anaphora
+
+    assert working_set_anaphora.forms(word) & working_set_anaphora._FUNCTION_WORDS
+    turn = f"i got a new {word}; can you review it"
+    assert _carried([turn], repeated_earlier("Alder database migration", turn),
+                    subject_title="Alder database migration") == []
+    assert word in analyze(turn).content_words
+
+
+@pytest.mark.parametrize("word", ["offer", "often", "butter", "inner"])
+def test_round7_surface_words_remain_content(word: str) -> None:
+    from exomem.working_set_anaphora import content_words
+
+    assert content_words((word,)) == (word,)
+
+
+@pytest.mark.parametrize("turn", CODE_TURNS + TOPIC_SWITCH_VARIANTS)
+def test_round7_code_and_new_content_never_carry(turn: str) -> None:
+    assert _carried([turn], repeated_earlier("Alder database migration", turn),
+                    subject_title="Alder database migration") == []
+
+
+@pytest.mark.parametrize("turn", CODE_TURNS[:4])
+def test_round7_pointers_inside_code_never_point(turn: str) -> None:
+    assert not analyze(turn).points_back
+    assert len(analyze(turn).content_words) == 1
+
+
+@pytest.mark.parametrize("turn", CONTENT_FREE_VARIANTS)
+def test_round7_frozen_content_free_variants_carry(turn: str) -> None:
+    assert _carried([turn], repeated_earlier("Alder database migration", turn),
+                    subject_title="Alder database migration") == [turn]
+
+
+def test_round7_a_function_word_in_vault_vocabulary_cannot_license_its_stem() -> None:
+    from exomem.working_set_anaphora import content_words
+
+    assert content_words(("offer",), vocabulary=frozenset({"off"})) == ("offer",)
+    assert content_words(("off",), vocabulary=frozenset({"off"})) == ()
+
+
+@pytest.mark.parametrize("turn,title", [
+    ("the second option sounds better", "Marlow Quay Survey"),
+    ("what happens if we can't close it", "Harbour Lantern Budget"),
+])
+def test_round7_surface_function_inflections_disclose_recall_losses(turn: str, title: str) -> None:
+    # Round 7 ruling: sounds/happens are surface content, outside the licence.
+    assert _carried([turn], EARLIER, subject_title=title) == []

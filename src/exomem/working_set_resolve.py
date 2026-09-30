@@ -1009,10 +1009,13 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
     # say what it is about.
     referential_cue = any(f" {phrase} " in token_text for phrase in vocabulary.phrases)
     referential = referential_cue and not _referential_residue(token_text, vocabulary)
+    anaphora_tokens = working_set_anaphora.anaphora_tokens(text)
+    anaphora_text = f" {' '.join(_spell_out_cues(anaphora_tokens, vocabulary))} "
+    anaphora_cue = any(f" {phrase} " in anaphora_text for phrase in vocabulary.phrases)
     pointing = working_set_anaphora.points_back(
-        tokens, referential_cue=referential_cue, follow_up_markers=FOLLOW_UP_MARKERS
+        anaphora_tokens, referential_cue=anaphora_cue, follow_up_markers=FOLLOW_UP_MARKERS
     )
-    content = working_set_anaphora.content_words(tokens, vocabulary=_vocabulary_words(vocabulary))
+    content = working_set_anaphora.content_words(anaphora_tokens, vocabulary=_vocabulary_words(vocabulary))
     return TurnAnalysis(
         text=text,
         tokens=tokens,

@@ -173,6 +173,10 @@ A turn SHALL be carried from the conversation only when all three of these hold:
 
 A copular "it" whose complement is a bare time, date, clock, weather or distance expression SHALL be treated as dummy and SHALL NOT carry. A temporal phrase headed by `on`, `in`, `at`, `after`, `before`, `by`, `for`, `from`, `until` or `during` is an adjunct of a real referent and MAY carry when the content licence permits it. Closing idioms retain their exclusions, including "drop it"; losing a real keep-or-drop instruction is a disclosed recall trade.
 
+Function words, pointers and clock numbers SHALL be tested by surface spelling after contraction splitting, including when they also appear in vault referential filler. Inflectional forms SHALL still apply to subject titles, frozen task vocabulary, the remaining referential vocabulary and neutral time words. A word whose stem merely matches a function word SHALL remain content. Each backtick-delimited inline or fenced code span SHALL count as one unlicensed content word; a pointer inside it SHALL NOT point back.
+
+A content-free pointing turn MAY carry the newest subject within the one-third footprint. Its carry rate SHALL be reported separately from topic-switch false carries, which remain gated at at most five percent on sets not used for tuning. Recall losses SHALL be disclosed without gating. This round-seven ruling supersedes the round-four all-false-carry bar.
+
 Length is not by itself a criterion: a long turn may carry when all its content is licensed.
 
 **Precedence.** The conversation carry SHALL sit at one fixed place in the order in which activation decides a turn that its words did not resolve. That order builds on the keyless continuity, referential recency and follow-up contracts as they stand on `main` (context-activation-continuity, and memory-loop in `close-memory-loop`), and SHALL NOT change any of them. For each request, the first rule below that decides it wins:
@@ -200,12 +204,38 @@ The compiler SHALL check the content licence against each selected anchor's own 
 
 - **Exactly one anchor.** That anchor SHALL be carried as the packet's single anchor:
   - at status `partial`, with evidence `[conversation]` and `origin = "conversation"`;
-  - its material served under the ordinary lanes;
+  - its material served under the ordinary lanes, with subject prose (units, current state and pointers together) capped at one third of `max_chars`;
   - `generation.carried_by = "conversation"`.
 - **Two or more.** The turn SHALL abstain `ambiguous` listing them, and SHALL NOT choose.
 - **No entry resolves an anchor.** The turn SHALL abstain exactly as without `conversation`.
 
 A refs-only conversation SHALL NOT carry: a ref says what was read, not what "it" refers to. A carried anchor, being `partial`, SHALL NOT enter the continuity token.
+
+#### Scenario: A conversation carry keeps within a third of the budget
+
+- **WHEN** an unresolved pointing turn carries a conversation subject with more material than the request's `max_chars`
+- **THEN** its units, current-state statements and pointer prose together use at most `max_chars // 3` characters
+- **AND** the anchor remains `partial` with evidence `[conversation]`
+- **AND** `recent_context` retains the budget it receives for an unresolved turn
+- **AND** the same subject reached by the turn's own words retains the ordinary budget
+
+#### Scenario: A new content word prevents the conversation carry
+
+- **WHEN** an earlier user entry resolved a subject and the current turn is "i got a new offer; how should i respond to it"
+- **THEN** "offer" is content even though an inflectional stem matches "off"
+- **AND** the turn SHALL NOT carry that conversation subject
+
+#### Scenario: Content-free inference is permitted within its footprint
+
+- **WHEN** an earlier user entry resolved a subject and the current turn is "was that your final reply"
+- **THEN** the newest subject carries with `generation.carried_by = "conversation"`, at `partial` with evidence `[conversation]`
+- **AND** its served subject prose uses at most `max_chars // 3` characters
+
+#### Scenario: Code pointers are opaque content
+
+- **WHEN** an earlier user entry resolved a subject and the current turn is "can you explain `it = 1`" or contains a fenced code block
+- **THEN** each code span counts as one unlicensed content word and its internal pointer does not point back
+- **AND** the conversation SHALL NOT carry
 
 #### Scenario: A rich follow-up keeps the conversation's subject
 
