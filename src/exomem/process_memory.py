@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -46,6 +48,11 @@ def _darwin_physical_footprint_bytes(pid: int) -> int | None:
 
 _UNRESOLVED: Any = object()
 _MALLOC_TRIM: Any = _UNRESOLVED
+#: A trim walks every arena, so reap ticks and back-to-back drain passes share
+#: one allowance: at most one trim per interval per process.
+TRIM_INTERVAL_SECONDS = 60.0
+_LAST_TRIM: float | None = None
+_TRIM_LOCK = threading.Lock()
 
 
 def _resolve_malloc_trim() -> Callable[[int], int] | None:
@@ -60,16 +67,22 @@ def _resolve_malloc_trim() -> Callable[[int], int] | None:
         return None
 
 
-def trim_allocator() -> bool:
+def trim_allocator(*, clock: Callable[[], float] = time.monotonic) -> bool:
     """Ask glibc to return freed heap to the OS: ``malloc_trim(0)``.
 
     Freed heap otherwise stays in the allocator's arenas as resident high-water
-    after a model reap or a drain batch. Off glibc this is a no-op, and it never
-    raises: its callers are background threads that must keep running. Returns
-    whether glibc reported releasing memory.
+    after a model reap or a drain batch. Runs at most once per
+    `TRIM_INTERVAL_SECONDS`; a call inside the interval is skipped. Off glibc
+    this is a no-op, and it never raises: its callers are background threads
+    that must keep running. Returns whether glibc reported releasing memory.
     """
-    global _MALLOC_TRIM
+    global _MALLOC_TRIM, _LAST_TRIM
     try:
+        now = clock()
+        with _TRIM_LOCK:
+            if _LAST_TRIM is not None and now - _LAST_TRIM < TRIM_INTERVAL_SECONDS:
+                return False
+            _LAST_TRIM = now
         if _MALLOC_TRIM is _UNRESOLVED:
             _MALLOC_TRIM = _resolve_malloc_trim()
         trim = _MALLOC_TRIM

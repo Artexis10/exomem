@@ -21,6 +21,7 @@ from exomem import derived_drain, model_reaper, process_memory, readiness
 @pytest.fixture(autouse=True)
 def _fresh_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(process_memory, "_MALLOC_TRIM", process_memory._UNRESOLVED)
+    monkeypatch.setattr(process_memory, "_LAST_TRIM", None)
 
 
 def test_trim_is_a_no_op_when_libc_cannot_be_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -63,6 +64,39 @@ def test_trim_calls_malloc_trim_with_zero_padding(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(process_memory, "_MALLOC_TRIM", fake_trim)
     assert process_memory.trim_allocator() is True
+    assert calls == [0]
+
+
+def test_trim_runs_at_most_once_per_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr(process_memory, "_MALLOC_TRIM", lambda pad: calls.append(pad) or 1)
+    interval = process_memory.TRIM_INTERVAL_SECONDS
+    now = {"t": 1000.0}
+
+    def clock() -> float:
+        return now["t"]
+
+    assert process_memory.trim_allocator(clock=clock) is True
+    for step in (0.0, 1.0, interval - 0.001):
+        now["t"] = 1000.0 + step
+        assert process_memory.trim_allocator(clock=clock) is False
+    now["t"] = 1000.0 + interval
+    assert process_memory.trim_allocator(clock=clock) is True
+    now["t"] += interval / 2
+    assert process_memory.trim_allocator(clock=clock) is False
+    assert calls == [0, 0]
+
+
+def test_the_reaper_and_the_drain_share_one_allowance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Both call sites go through the one throttled helper."""
+    calls: list[int] = []
+    monkeypatch.setattr(process_memory, "_MALLOC_TRIM", lambda pad: calls.append(pad) or 1)
+    monkeypatch.setattr(readiness, "is_warming", lambda: False)
+    _fake_claims(monkeypatch, completed=["batch-1"])
+    model_reaper._reap_once([_slot("a", released=True)], now=10_000.0, threshold=1.0)
+    derived_drain.drain_once(tmp_path, dispatch=None, limit=1, now=1.0)
     assert calls == [0]
 
 
@@ -135,6 +169,13 @@ def test_a_drain_pass_that_completes_nothing_does_not_trim(
     _fake_claims(monkeypatch, completed=[])
     assert derived_drain.drain_once(tmp_path, dispatch=None, limit=1, now=1.0) == 0
     assert trims == []
+
+
+def test_sensor_worker_children_inherit_the_arena_bound() -> None:
+    from exomem import sensor_worker
+
+    env = sensor_worker.child_env({"MALLOC_ARENA_MAX": "2", "PATH": "/usr/bin"})
+    assert env["MALLOC_ARENA_MAX"] == "2"
 
 
 def test_hosted_and_cloud_images_bound_glibc_arenas() -> None:
