@@ -46,9 +46,9 @@ Every returned path SHALL carry ordered nodes, typed edge refs/orientation, auth
 
 ### Requirement: Dynamic ontology resolves transitive types and stable identities
 
-Relation types, open-vocabulary categories, entity kinds and declared collection types SHALL be first-class query dimensions with stable internal identities and current released definitions or explicit undefined status. Versioned vocabulary/alias/closure projections SHALL live beside graph edges in the same per-vault store and remain derived from governed Markdown/registry authoring sources. Queries by parent relation SHALL include all recursive subtypes by default; exact-only SHALL be explicit. Type-hierarchy cycles SHALL be rejected. Is-a/part-of instance closure SHALL traverse admitted hops and preserve path provenance, never use global closure to bypass release.
+Relation types, open-vocabulary categories, entity kinds and declared collection types SHALL be first-class query dimensions with stable internal identities and current released definitions or explicit undefined status. Versioned vocabulary/alias/closure projections SHALL live beside graph edges in the same per-vault store and remain derived from governed Markdown/registry authoring sources. Queries by parent relation SHALL include all audience-admitted recursive subtypes by default; exact-only SHALL be explicit. Type-hierarchy cycles SHALL be rejected. Is-a/part-of instance closure SHALL traverse admitted hops and preserve path provenance, never use global closure to bypass release.
 
-Renames SHALL preserve identity/aliases; merges/replacements SHALL preserve historical IDs and revalidate current saved views/compiler bindings. Semantic incompatibility SHALL make a view explicitly unavailable with correction guidance. Vocabulary changes SHALL invalidate affected closure/query/cache bases before serving new results. Agents SHALL have explicit existing-name MCP routes for category definition/rename/merge via schema_memory subject ontology diff-ontology/save-ontology with immutable source-hash guard/dependency preview and existing schema mutation confirmation; relation/entity-kind operations SHALL delegate to existing family writers. Ordinary open category authoring SHALL remain available through observe_memory without mandatory definition registration. Agents SHALL author/reuse definitions through existing vocabulary governance and then query the acknowledged version immediately, or receive a typed warming result rather than falsely empty data.
+Renames SHALL preserve identity/aliases; compatible merges SHALL preserve historical IDs/edge identities and revalidate current saved views/compiler bindings without coalescing authored parallel edges. Retirement and incompatible replacement SHALL follow Retired and replaced relation types preserve authored identity. Semantic incompatibility SHALL make a view explicitly unavailable with correction guidance. Vocabulary changes SHALL invalidate affected closure/query/cache bases before serving new results. Agents SHALL have explicit existing-name MCP routes for category definition/rename/merge via schema_memory subject ontology diff-ontology/save-ontology with immutable source-hash guard/dependency preview and existing schema mutation confirmation; relation/entity-kind operations SHALL delegate to existing family writers. Ordinary open category authoring SHALL remain available through observe_memory without mandatory definition registration. Agents SHALL author/reuse definitions through existing vocabulary governance and then query the acknowledged version immediately, or receive a typed warming result rather than falsely empty data.
 
 #### Scenario: Custom subtype recursively rolls up
 - **WHEN** corroborates extends supports and independently_corroborates extends corroborates
@@ -88,9 +88,9 @@ The system SHALL migrate derived graph nodes/edges, document metadata, vocabular
 
 ### Requirement: Agent and compiler use the shared graph lifecycle
 
-Graph/path/pattern/ontology queries SHALL be discoverable through bootstrap on-demand sections and generic skill guidance, using the existing `connect_memory` name and shared compose/explain/preview/dry_run/execute envelope. Saved mixed views SHALL be governed, typed and versioned; errors SHALL be repairable without leaked SQL/hidden refs. Existing vocabulary authoring routes and confirmations SHALL remain binding. Real-MCP agent journeys SHALL cover each capability; absent agent access SHALL fail delivery. Tool-schema/core ceilings and frozen adapters SHALL be preserved.
+Graph/path/pattern/ontology queries SHALL be discoverable through schema_memory(subject=query-engine, operation=inspect, name=graph) and schema_memory(subject=ontology, operation=inspect), bootstrap route stubs and generic skill guidance, using connect_memory(operation=query, query_request=…) and the shared compose/explain/preview/dry_run/execute envelope. Existing connect_memory.query SHALL remain a bounded string on existing operations; operation=query SHALL refuse text query and existing operations SHALL refuse query_request. Mixed views SHALL expose schema_memory subject=query-views inventory-query-views/inspect-query-view alongside diff/save, under the collection sibling's definition/paging/authorization limits. Exact installed-adapter schema/core/route byte/fingerprint deltas SHALL be measured as the integrated union before publication, without reusing the parent 400-byte allowance. Saved mixed views SHALL be governed, typed and versioned; errors SHALL be repairable without leaked SQL/hidden refs. Existing vocabulary authoring routes and confirmations SHALL remain binding. Real-MCP agent journeys SHALL cover each capability; absent agent access SHALL fail delivery. Tool-schema/core ceilings and frozen adapters SHALL be preserved.
 
-Graph-aware `activate_context` SHALL expand resolved anchors along authored supersedes/supports/contradicts and declared links, preserving authored-currency rules and path provenance. It SHALL use at most 3 hops, 8 released neighbours/node, 64 nodes/128 edge visits, 2 paths and one graph request within the shared 30 ms stage deadline (10 ms graph allocation), 2,048-byte graph unit and 6,144-byte combined stage cap. Stale/unproven/costly traversal SHALL abstain. Cache SHALL depend on audience/policy, collection generations, proven graph/vocabulary basis and exact query fingerprint. Hidden successors SHALL not suppress visible predecessors or disclose currency beyond release.
+Graph-aware `activate_context` SHALL expand resolved anchors along authored supersedes/supports/contradicts and declared links, preserving authored-currency rules and path provenance. It SHALL use at most 3 hops, 8 released neighbours/node, 64 nodes/128 edge visits, 2 paths and one graph request within the shared 30 ms stage deadline (10 ms graph allocation), 2,048-byte graph unit and 6,144-byte combined stage cap. Stale/unproven/costly traversal SHALL abstain. Private cache freshness SHALL depend on audience/policy, collection generations, proven graph/vocabulary basis and exact query fingerprint. Public provenance/cursors SHALL expose only released-dependency semantics under Graph continuation separates public basis from private freshness. Hidden successors SHALL not suppress visible predecessors or disclose currency beyond release.
 
 #### Scenario: Currency chain explains why a unit is current
 - **WHEN** a resolved anchor has a released authored supersedes chain within compiler limits
@@ -129,3 +129,47 @@ Graph query IR SHALL use backend-neutral stable references and declared semantic
 #### Scenario: Embedded tier is exceeded
 - **WHEN** measured degree/work load or store/replica/throughput gates exceed the embedded tier over three benchmark runs
 - **THEN** the system reports the bounded limit and proposes an explicit migration, without pretending SQLite supports unrestricted billion-edge traversal
+
+### Requirement: Ontology closure uses the admitted term graph
+
+Subtype and replacement closure SHALL be audience-qualified over the admitted term graph, admitting each term, alias/definition version, hierarchy/replacement assertion and its author/source/evidence obligations before resolving names or computing closure. Visible endpoints SHALL NOT authorize a withheld defining assertion. Hidden intermediate terms/assertions SHALL break closure as absent. A global closure SHALL be reused only after complete release of all its dependencies is proved; otherwise bounded admitted closure or typed unavailable/cost SHALL apply. Released assertion paths SHALL provide provenance. Filtering, counts, definitions, explain/preview, saved views, caches and cursors SHALL all use this closure, separately from admitted instance is-a/part-of traversal.
+
+#### Scenario: Withheld term intermediate breaks subtype closure
+- **WHEN** visible supports reaches visible public_leaf only through withheld secret_subtype or a withheld parent assertion, and a visible authored edge uses public_leaf
+- **THEN** the supports query's filtering/counts/definitions/preview/saved-view/continuation agree with the twin omitting that term/assertion, without exposing a hierarchy shortcut; exact public_leaf matching remains governed by its released identity
+
+### Requirement: Graph continuation separates public basis from private freshness
+
+Every call SHALL privately prove the current source/parser/registry/checkpoint graph generation. A distinct authenticated public continuation basis SHALL bind normalized query/schema/semantics, released anchors, audience/purpose/live policy, frozen time/order and query-relevant released nodes/edges/authors/evidence/ontology dependency identities/versions, including admitted candidates that may affect enumeration. Full projection/vocabulary/store generations SHALL NOT cause public staleness or appear in public provenance. Hidden-only changes and semantically identical rebuilds SHALL preserve cursors when this admitted basis is unchanged after private reproof. Visible dependency or live policy/schema changes SHALL return QUERY_CURSOR_STALE; tampered/malformed/differently bound cursors SHALL return QUERY_CURSOR_INVALID. Unproven freshness SHALL return warming/unavailable, never generation-derived stale or falsely complete. No transaction SHALL span page calls; byte continuation SHALL resume after the last emitted result.
+
+#### Scenario: Hidden edge write leaves a cursor valid
+- **WHEN** a caller pages a released graph result and an unrelated withheld edge changes before a coherent generation is published
+- **THEN** private freshness is re-proven and the same next paths/count/estimates/availability/continuation are returned as the twin without that hidden change
+
+#### Scenario: Hidden vocabulary write leaves a cursor valid
+- **WHEN** a withheld term, definition or hierarchy assertion changes between pages without changing the admitted term graph
+- **THEN** the released cursor stays valid through private closure/cache recomputation, with the same result and availability as its absent twin
+
+#### Scenario: Released basis change distinguishes stale from invalid
+- **WHEN** a query-relevant released edge/type dependency changes, or a cursor is tampered/rebound to another audience/query
+- **THEN** the released change returns stale and the tampered/rebound token invalid, with no hidden diagnostics; a semantically identical projection rebuild alone returns neither
+
+### Requirement: Retired and replaced relation types preserve authored identity
+
+Retired relation types SHALL retain immutable identity, labels/versions, released hierarchy and a retirement tombstone. Existing edges SHALL continue answering exact and parent queries over admitted hierarchy and SHALL be labeled retired in output/definitions/views; new authoring under a retired type SHALL refuse. Compatible merges SHALL rebind current admitted interpretation without coalescing distinct authored edges or changing raw label/version/history. Incompatible replacements SHALL NOT automatically reinterpret existing edges; their original identity/meaning SHALL remain queryable and incompatible view rewrites SHALL require explicit governed authoring. Alias/replacement cycles and reuse of any historical canonical label for another ID SHALL be refused before source save/projection publication. Hidden mappings SHALL not reveal a replacement target or grant authority.
+
+#### Scenario: Retired relation keeps exact and parent matching
+- **WHEN** a visible edge's type is retired without a successor
+- **THEN** exact and admitted-parent queries and compatible saved views still include its same edge identity labeled retired, while new authoring under it refuses
+
+#### Scenario: Compatible merge retains parallel edges
+- **WHEN** two compatible types with distinct authored edges sharing endpoints merge to one admitted canonical interpretation
+- **THEN** both edge refs/history/path multiplicities remain distinct and exact counts are unchanged by canonical interpretation rebinding
+
+#### Scenario: Incompatible replacement preserves old interpretation
+- **WHEN** a type receives a semantically incompatible successor
+- **THEN** existing edges keep their original released interpretation and only an explicitly governed authored change may alter it; incompatible view bindings are unavailable with released repair guidance
+
+#### Scenario: Historical label cannot be reused
+- **WHEN** a proposal creates an alias/replacement cycle or assigns a historical canonical label to a different ID
+- **THEN** validation refuses without changing term/edge identity or version history

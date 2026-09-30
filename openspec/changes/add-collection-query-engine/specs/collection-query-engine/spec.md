@@ -18,7 +18,7 @@ The system SHALL accept a closed version-1 structured query over Records, Planni
 
 ### Requirement: Declared indexes have migration-owned lifecycle and budgets
 
-A type or collection SHALL declare scalar fields as filterable/sortable and optional composite indexes. The store SHALL maintain generated columns and matching indexes through schema migrations, never query-triggered DDL. Each collection SHALL allow at most 8 secondary B-tree indexes, 4 keys per index and 16 distinct indexed scalar paths; identity/natural-key indexes are exempt and relation indexes count toward the limit. A governed declaration preview SHALL report additions, removals, backfill and dependent-view impact.
+A type or collection SHALL declare scalar fields as filterable/sortable and optional composite indexes. For json-v1 collections the store SHALL maintain generated projection columns and matching indexes; for canonical typed-v1 collections it SHALL index direct typed scalar/derived exact comparison columns without requiring duplicate generated JSON columns. Both SHALL use schema migrations, never query-triggered DDL. Each collection SHALL allow at most 8 secondary B-tree indexes, 4 keys per index and 16 distinct indexed scalar paths; identity/natural-key indexes are exempt and relation indexes count toward the limit. A governed declaration preview SHALL report additions, removals, backfill and dependent-view impact.
 
 #### Scenario: A declared index becomes ready atomically
 - **WHEN** an authorized declaration revision adds an indexed field to a populated collection
@@ -58,7 +58,7 @@ Legacy requests and saved views SHALL preserve Python-evaluator behavior for eve
 
 ### Requirement: Versioned filters distinguish typed values, nulls and dates
 
-Version 1 SHALL support all existing operators, boolean composition, inclusive/exclusive `between`, explicit `is_null`, `is_missing` and `is_not_null`, and day/week/month date math frozen to one `as_of`. Typed comparisons SHALL exclude missing/null values; `is_null` SHALL match only present null, and `is_not_null` SHALL include present empty strings. Instants SHALL require a zone and normalize to UTC; UTC calendar month arithmetic SHALL clamp to a valid last day. Invalid types, dates and reversed ranges SHALL fail validation.
+Version 1 SHALL support all existing operators, boolean composition, inclusive/exclusive `between`, explicit `is_null`, `is_missing` and `is_not_null`, and day/week/month date math frozen to one `as_of`. Typed comparisons SHALL exclude missing/null values; `is_null` SHALL match only present null, and `is_not_null` SHALL include present empty strings. Instants SHALL require the source UTC offset and store UTC plus that per-record UTC offset; date-only summaries SHALL retain the supplied local date without inventing an instant. Calendar day/ISO-week/month buckets SHALL use the source-recorded local date for each record. Missing both offset and local date SHALL be flagged, never guessed from the host zone or other records; import preview SHALL verify the real export's time fields before start. Frozen UTC relative-window month arithmetic SHALL clamp to a valid last day. IANA/DST machinery SHALL be deferred. Invalid types, dates and reversed ranges SHALL fail validation.
 
 #### Scenario: Null is distinct from absent and empty
 - **WHEN** rows contain an absent field, present null and a present empty string
@@ -66,7 +66,11 @@ Version 1 SHALL support all existing operators, boolean composition, inclusive/e
 
 #### Scenario: Relative range is frozen across pages
 - **WHEN** a caller continues a query with an as-of-relative date range after the clock crosses midnight or a month boundary
-- **THEN** the same frozen instant and UTC calendar rules apply to every page
+- **THEN** the same frozen instant/window and declared source-local bucket basis apply to every page
+
+#### Scenario: Source local day is never guessed
+- **WHEN** records straddle UTC midnight with different source offsets, daily summaries supply only a local date, or a record has neither offset nor date
+- **THEN** preview identifies the real time fields, import/queries/rollups agree on each supplied local day and date-only summary, and the missing-basis record is flagged under explicit stop/skip policy without inventing a timezone
 
 ### Requirement: Multi-key order and projection use bounded keyset pages
 
@@ -86,7 +90,7 @@ Version 1 SHALL support up to 4 explicit sort keys with direction/null placement
 
 ### Requirement: Grouping supports multiple exact aggregates and HAVING
 
-Version 1 SHALL support up to 4 group keys, UTC day/ISO-week/month buckets, 8 named aggregates (`count`, `sum`, `avg`, `min`, `max`, `percentile`, `distinct_count`) and HAVING over group keys/aggregate aliases. Percentile SHALL be exact continuous interpolation at `(n-1)*p`, with p in [0,1]. Null/missing SHALL be separate group keys and excluded from field reductions. Empty input SHALL produce zero count/distinct-count, null other aggregates, and no grouped rows. Pre-HAVING groups SHALL cap at 1,000; exceeding it SHALL fail rather than silently trim a reduction. Group pages SHALL default/cap at 50/200.
+Version 1 SHALL support up to 4 group keys, source-local day/ISO-week/month buckets, 8 named aggregates (`count`, `sum`, `avg`, `min`, `max`, `percentile`, `distinct_count`) and HAVING over group keys/aggregate aliases. Percentile SHALL be exact continuous interpolation at `(n-1)*p`, with p in [0,1]. Null/missing SHALL be separate group keys and excluded from field reductions. Empty input SHALL produce zero count/distinct-count, null other aggregates, and no grouped rows. Pre-HAVING groups SHALL cap at 1,000; exceeding it SHALL fail rather than silently trim a reduction. Group pages SHALL default/cap at 50/200.
 
 #### Scenario: One grouped query computes several reductions
 - **WHEN** a query groups invented executions by month/status and asks for count, sum, average, median and distinct recipe count with HAVING
@@ -222,7 +226,7 @@ The system SHALL expose compose, explain, safe cost preview, dry-run and executi
 
 ### Requirement: Large collections use compact typed storage and streaming ingest
 
-Large declared collections SHALL support a migration-managed canonical typed-column encoding in the single per-vault store, retaining stable identities, immutable version/source history, logical hashing/audit, governance and existing query/render/edit-back semantics. Declared dense scalars SHALL not require a full JSON row plus duplicate JSON projection; sparse residual objects MAY retain bounded JSON. Existing JSON encoding SHALL remain readable and migration SHALL prove logical parity before publishing. Optional bulky-text compression SHALL be lossless, versioned and bounded at decode; indexed scalar fields SHALL remain directly comparable.
+Large declared collections SHALL support a migration-managed canonical typed-column encoding in the single per-vault store, retaining stable identities, immutable version/source history, logical hashing/audit, governance and the explicit items/summary query/render/edit-back contracts in the MODIFIED structured-collections requirements. Declared dense scalars SHALL not require a full JSON row plus duplicate JSON projection; sparse residual objects MAY retain bounded JSON. Existing JSON encoding SHALL remain readable and migration SHALL prove logical parity before publishing. Optional bulky-text compression SHALL be lossless, versioned and bounded at decode; indexed scalar fields SHALL remain directly comparable.
 
 The importer SHALL stream authorized preserved-source CSV, NDJSON and JSON arrays through declared mappings, with decoded rows ≤1 MiB/depth 32 and batches ≤500 rows/4 MiB. Each batch SHALL enforce normal mutation authority and atomically commit values/history/audit/checkpoint under one idempotent identity. Preview/start/status/cancel SHALL be agent-reachable through existing MCP names with bounded responses. Invalid/cancelled/interrupted imports SHALL report actual partial state and resume positions, never a fabricated complete import. Additional import peak RSS SHALL be ≤64 MiB independent of collection size. Time-series indexes SHALL support timestamp/type orders within the declared index budget.
 
@@ -248,7 +252,7 @@ The importer SHALL stream authorized preserved-source CSV, NDJSON and JSON array
 
 ### Requirement: Incremental rollups preserve governed exactness
 
-Declared daily/ISO-week rollups SHALL support exact count/sum/avg/min/max/latest and update affected old/new buckets, readiness and generation in the same canonical transaction as every relevant write. Dirty/unproven rollups SHALL be unavailable, never stale-complete. Rollup reuse SHALL require uniform release or exact fully admitted release partitions; a policy splitting a partition SHALL use a bounded governed base reduction or an explicit unavailable/cost result. Percentile and distinct-count SHALL NOT be fabricated by combining insufficient rollup statistics.
+Declared daily/ISO-week rollups SHALL use each record's source-local day basis and SHALL support exact count/sum/avg/min/max/latest and update affected old/new buckets, readiness and generation in the same canonical transaction as every relevant write. Dirty/unproven rollups SHALL be unavailable, never stale-complete. Rollup implementation SHALL begin with uniform release and bounded exact base fallback; maintained mixed partitions SHALL require measured demand and SHALL cap at 8 rollups/collection, 4 group dimensions, 16 total maintained release partitions and 16 affected old/new bucket-partition updates/row mutation, with precommit refusal above bounds. Rollup reuse SHALL require uniform release or exact fully admitted release partitions; a policy splitting a partition SHALL use a bounded governed base reduction or an explicit unavailable/cost result. Percentile and distinct-count SHALL NOT be fabricated by combining insufficient rollup statistics.
 
 #### Scenario: A hidden member would change the maximum
 - **WHEN** a mixed-release query runs against a bucket containing a withheld maximum value
@@ -282,7 +286,7 @@ Each query unit SHALL fit 2,048 UTF-8 bytes, collection units 4,096 bytes total,
 
 #### Scenario: Resting metric turn produces a sourced unit
 - **WHEN** a declared wearable type matches a last-30-days resting-heart-rate turn
-- **THEN** the compiler serves a bounded released latest/trend recipe unit identifying metric, UTC window, collection, count/completeness and normalized query without exposing raw SQL
+- **THEN** the compiler serves a bounded released latest/trend recipe unit identifying metric, frozen window/source-local day basis, collection, count/completeness and normalized query without exposing raw SQL
 
 #### Scenario: Query timeout is not an empty window
 - **WHEN** a matched query cannot finish admission or execution inside the shared 30 ms stage deadline
@@ -298,7 +302,7 @@ Each query unit SHALL fit 2,048 UTF-8 bytes, collection units 4,096 bytes total,
 
 ### Requirement: Every capability is discoverable and agent-reachable
 
-Structured queries, lifecycle/explain, aggregates/rollups, big-data import, saved views, sibling graph/path/ontology operations and query/path compiler units SHALL have an existing-name MCP route and generic skill instructions, discoverable through bootstrap core stubs or on-demand sections. Publication SHALL preserve #1458 tool-schema diet, #1464 compact-core ceiling (currently 63,300 serialized bytes), route visibility, response limits and frozen adapter schemas. A capability without a successful real-MCP agent-task journey SHALL NOT count as delivered.
+Structured queries, lifecycle/explain, aggregates/rollups, big-data import, saved views, sibling graph/path/ontology operations and query/path compiler units SHALL have an existing-name MCP route and generic skill instructions, discoverable through bootstrap core route stubs and the concrete existing-tool read routes in Existing tool routes preserve text queries and bounded discovery. Publication SHALL preserve #1458 tool-schema diet, #1464 compact-core ceiling (currently 63,300 serialized bytes), route visibility, response limits and frozen adapter schemas. A capability without a successful real-MCP agent-task journey SHALL NOT count as delivered.
 
 #### Scenario: Agent discovers and runs every delivered capability
 - **WHEN** held-out invented row/analysis, graph/mixed and import/view/refinement tasks run through the installed MCP surface and current generic skill
@@ -310,4 +314,52 @@ Structured queries, lifecycle/explain, aggregates/rollups, big-data import, save
 
 #### Scenario: Grammar exceeds bootstrap core budget
 - **WHEN** lifecycle or graph guidance would increase compact core above its existing ceiling
-- **THEN** details move to an on-demand section, the core route remains discoverable and no ceiling is increased or frozen schema changed
+- **THEN** details move to bounded schema_memory inspect chapters, the core route remains discoverable and no ceiling is increased or frozen schema changed
+
+### Requirement: First owner slice is a governed new summary collection in the real vault
+
+The first slice SHALL run in the owner's real vault, preserving the raw export as immutable Source/Evidence before preview/import into a NEW collection of the extensible built-in Records type with collection-local fields/natural key and summary view mode. It SHALL NOT migrate existing Records or require a preview vault. The store SHALL remain outside the vault folder under the existing placement contract. Merged parent P1a writer/registry/lease/parity and row-level release/egress for store rows SHALL ship before any agent or connector read. Streaming typed import, structured filter/order/keyset/count/sum/avg and exact daily rollup SHALL be reachable through existing record_memory describe/create/import/query routes and SHALL precede joins, FTS, ontology, graph and generic activation. The S1 gate SHALL prove the real installed-MCP preserved-source → create → preview/import → status/resume → governed query/daily sourced answer journey against independent expected rows/counts/values/local days, plus authority/crash/retry, placement/portability, schema-byte, storage/RSS/throughput and integrated correctness checks. It SHALL NOT require P4/P5 arbitrary type authoring or waive parent P1b/P2/P3 for existing-collection migration. Full capability/graph gates SHALL remain separate.
+
+#### Scenario: Owner queries the real export before unrelated capabilities
+- **WHEN** S1 prerequisites and the real-MCP gate pass for a newly created summary Records collection
+- **THEN** the owner can obtain governed daily counts/sums/averages from the real preserved export without waiting for joins, FTS, ontology, graph or generic activation, and all existing Records remain unmigrated
+
+#### Scenario: Pre-GA source replay is explicit
+- **WHEN** an incompatible pre-GA schema change affects the new summary slice
+- **THEN** the operator may require a new authorized import from the preserved immutable Source/Evidence under a compatible schema, with old progress/lineage reported honestly and no implicit migration of existing Records
+
+### Requirement: Typed numeric values and history are lossless
+
+Canonical typed-v1 SHALL preserve the full accepted integer/finite-number domain, int versus float subtype and signed zero. A discriminator SHALL select signed-64-bit INTEGER, exact canonical decimal TEXT for larger integers, or authoritative IEEE-754 binary64 BLOB for floats; REAL and sortable comparison keys MAY be derived, never canonical hash input. Comparisons/reductions SHALL not narrow oversized integers through REAL. Decode SHALL reconstruct original scalar subtype and exact canonical JSON input through existing normalization/payload hashing without a duplicate full JSON row. The forward schema SHALL introduce version_identity keyed by (row_id,row_version) with encoding/hash/txn/schema identity, immutable JSON and typed history payloads, sources FK to that spine and BEFORE UPDATE/BEFORE DELETE abort triggers on all new history tables. Migration SHALL preserve old immutable bytes, hashes, audit/source identities and prove full parity before atomic mapping publication; older readers SHALL refuse unsupported schema/encoding before any access. Direct typed indexes and generated json-v1 projections SHALL expose one logical query interface.
+
+#### Scenario: Numeric counterexamples round-trip exactly
+- **WHEN** fields contain 1, 1.0, -0.0, 9007199254740993 or 2**63
+- **THEN** typed current/version decoding preserves value, int/float subtype, signed zero, hash input and exact comparisons/reductions without REAL rounding or SQLite integer overflow
+
+#### Scenario: New history rejects mutation and orphan sources
+- **WHEN** a caller updates/deletes a typed_versions or version_identity row, or inserts a source without its (row_id,row_version) identity
+- **THEN** the triggers/FK abort and immutable version/source/audit history is unchanged
+
+### Requirement: Import jobs retain continuing source and target authority
+
+An import job SHALL bind its initiating principal, live authorization session/grant identity/expiry, purpose/policy basis, immutable source receipt/hash/lineage, exact target collection/store lineage and declaration/mapping version. It SHALL re-resolve applicable principal authority and source release before each batch and recheck at commit under the writer lease, including the parent's complete-authorized-state target mutation rule. Ambient service authority or an initial cached grant SHALL never substitute. Source revocation, expiry, target-authority loss or invalid lineage SHALL roll back the current batch and pause with authority_lost and honest partial acknowledged progress. Explicit resume SHALL reauthorize the same initiating principal and unchanged source/target basis; a different principal SHALL NOT inherit it implicitly. Service-host takeover SHALL re-prove lineage and live authority before replay/commit. Status and cancel SHALL separately authorize source, target and job ownership. Protected credential state SHALL never appear in pages/receipts. Refused status SHALL not disclose hidden job identifiers or counts.
+
+#### Scenario: Revocation pauses between batches
+- **WHEN** source release or full-state target authority is revoked after one batch, including a target becoming mixed-release
+- **THEN** the next batch or commit recheck refuses without additional rows/audit/checkpoint advancement, reports partial progress only to an authorized caller and resumes only after explicit renewed authority
+
+#### Scenario: Expiry or takeover cannot widen job authority
+- **WHEN** the initiating grant expires or another host/principal attempts takeover after a committed batch
+- **THEN** no ambient owner authority completes the import, host takeover proves the original binding, a different principal's continuation refuses and acknowledged batches remain durable once
+
+### Requirement: Existing tool routes preserve text queries and bounded discovery
+
+connect_memory SHALL retain its existing bounded string query argument. Only operation=query SHALL accept the separate shallow query_request object (≤16 KiB) and SHALL refuse text query/unrelated operation arguments; existing operations SHALL reject query_request. On-demand guidance SHALL use schema_memory(subject=query-engine, operation=inspect, name=collections|import|graph) and schema_memory(subject=ontology, operation=inspect), bounded at 64 KiB with capability/version and no writes; record_memory(action=describe) SHALL describe collection fields/views/indexes. Bootstrap SHALL keep its existing profiles with a route stub and no section accessor. Mixed saved views SHALL use schema_memory(subject=query-views, operation=inventory-query-views, limit, continuation) and operation=inspect-query-view with name, beside diff-query-views/save-query-views. Inventory SHALL default to 20/cap at 100; definitions SHALL cap at 100/vault and 16 KiB each, with typed value parameters and release-qualified dependency validation. Missing/withheld definitions/dependencies SHALL have identical public behavior. The exact schema/description/route additions SHALL have a separate measured before/after byte/fingerprint delta against generated installed adapters at S1 and integrated Q5/G5 gates, fitting existing schema/core/route ceilings without reusing the parent's 400-byte allowance or changing frozen adapters.
+
+#### Scenario: Legacy text and structured graph calls stay distinct
+- **WHEN** an agent uses legacy graph-context with string query, then operation=query with query_request, and attempts either envelope on the wrong operation
+- **THEN** the first two use their respective validated routes and the crossed arguments refuse without coercion or silent routing
+
+#### Scenario: Agent inspects grammar and mixed views through real tools
+- **WHEN** an agent calls schema_memory inspect for query-engine/ontology and inventory-query-views then inspect-query-view
+- **THEN** bounded current guidance/authorized definitions are returned, hidden/absent twins match and installed schema/core measurements cover exactly those invocable routes
