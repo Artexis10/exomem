@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
+import struct
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,11 +20,16 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mod
 
 @pytest.fixture(autouse=True)
 def _pin_install_hook_umask():
+    cached = getattr(hook_module, "_private_group_for_user", None)
+    if cached is not None:
+        cached.cache_clear()
     previous = os.umask(0o022)
     try:
         yield
     finally:
         os.umask(previous)
+        if cached is not None:
+            cached.cache_clear()
 
 
 @pytest.fixture
@@ -40,11 +48,11 @@ def private_group(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 @pytest.mark.parametrize("umask", [0o002, 0o022], ids=["0002", "0022"])
 @pytest.mark.parametrize("client", ["claude", "codex"])
 @pytest.mark.parametrize("group_kind", ["primary-empty", "primary-sole-member"])
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux user-private-group exception")
 def test_install_accepts_private_group_writable_config(
     tmp_path: Path, private_group, client: str, umask: int, group_kind: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    private_group.gr_name = "private-hook-group"
     if group_kind == "primary-sole-member":
         private_group.gr_mem = ["hook-owner"]
     pwd = pytest.importorskip("pwd")
@@ -118,7 +126,6 @@ def test_install_refuses_untrusted_config_and_directories(
                 private_group.gr_name = "private-hook-group"
                 private_group.gr_mem = [user.pw_name]
         elif reason.startswith("shared-primary-"):
-            private_group.gr_name = "users"
             user = pwd.getpwuid(os.geteuid())
             if reason == "shared-primary-sole-member":
                 private_group.gr_mem = [user.pw_name]
@@ -164,8 +171,7 @@ def test_install_refuses_untrusted_config_and_directories(
     try:
         with pytest.raises(OSError, match="unsafe|writable|trusted|owned") as refused:
             hook_module.install_hook(hook_dir=hooks, settings_path=config, client=client)
-        if target != "file":
-            assert "chmod g-w" in str(refused.value)
+        assert "chmod g-w,o-w" in str(refused.value)
         assert config.read_bytes() == before
         assert not list(config_parent.glob("*.backup-*"))
         report = hook_module.check_hooks(clients=(client,), hook_dir=hooks, settings_path=config)
@@ -178,6 +184,7 @@ def test_install_refuses_untrusted_config_and_directories(
 
 
 @pytest.mark.parametrize("umask", [0o002, 0o022], ids=["0002", "0022"])
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux user-private-group exception")
 def test_install_new_config_under_explicit_umask(tmp_path: Path, private_group, umask: int) -> None:
     previous = os.umask(umask)
     try:
@@ -198,7 +205,7 @@ def test_install_refuses_shared_primary_group_under_umask_0002(
 ) -> None:
     pwd = pytest.importorskip("pwd")
     user = pwd.getpwuid(os.geteuid())
-    private_group.gr_name = "users"
+    assert private_group.gr_name == user.pw_name
     assert private_group.gr_mem == []
     other_user = SimpleNamespace(
         pw_name="another-user", pw_gid=private_group.gr_gid, pw_uid=os.geteuid() + 1,
@@ -231,3 +238,163 @@ def test_install_refuses_shared_primary_group_under_umask_0002(
         )["status"] == "fail"
     finally:
         os.umask(previous)
+
+
+@pytest.mark.parametrize("view", ["local-only", "missing-current", "wrong-name", "wrong-uid"])
+def test_install_refuses_partial_passwd_enumeration(
+    tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch, view: str,
+) -> None:
+    pwd = pytest.importorskip("pwd")
+    user = pwd.getpwuid(os.geteuid())
+    if view == "local-only":
+        private_group.gr_name = "domain users"
+        entries = [SimpleNamespace(pw_name="local-user", pw_uid=user.pw_uid + 1, pw_gid=user.pw_gid + 1)]
+    elif view == "missing-current":
+        entries = []
+    else:
+        entries = [SimpleNamespace(
+            pw_name=user.pw_name if view == "wrong-uid" else "another-name",
+            pw_uid=user.pw_uid + 1 if view == "wrong-uid" else user.pw_uid,
+            pw_gid=user.pw_gid + 1,
+        )]
+    monkeypatch.setattr(pwd, "getpwall", lambda: entries)
+    home = tmp_path / "client"
+    home.mkdir()
+    config = home / "settings.json"
+    original = b'{"theme":"dark"}\n'
+    config.write_bytes(original)
+    config.chmod(0o664)
+    with pytest.raises(OSError, match="unsafe|writable|trusted"):
+        hook_module.install_hook(hook_dir=home / "hooks", settings_path=config)
+    assert config.read_bytes() == original
+    assert not list(home.glob("*.backup-*"))
+
+
+def test_install_refuses_mismatched_private_group_name(tmp_path: Path, private_group) -> None:
+    private_group.gr_name = "domain users"
+    home = tmp_path / "client"
+    home.mkdir()
+    home.chmod(0o775)
+    with pytest.raises(OSError, match="unsafe|writable|trusted"):
+        hook_module.install_hook(hook_dir=home / "hooks", settings_path=home / "settings.json")
+
+
+def _set_extended_access_acl(path: Path) -> None:
+    if sys.platform != "linux" or not hasattr(os, "setxattr"):
+        pytest.skip("Linux POSIX access ACL xattrs required")
+    # Linux ACL xattr v2: owner, named user, owning group, mask, other.
+    # Use a mapped UID so this also runs in a single-UID sandbox namespace.
+    execute = int(path.is_dir())
+    acl = struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, permissions, uid)
+        for tag, permissions, uid in (
+            (0x01, 6 | execute, 0xFFFFFFFF), (0x02, 7, os.geteuid()),
+            (0x04, 4 | execute, 0xFFFFFFFF), (0x10, 6 | execute, 0xFFFFFFFF),
+            (0x20, 4 | execute, 0xFFFFFFFF),
+        )
+    )
+    try:
+        os.setxattr(path, "system.posix_acl_access", acl)
+    except OSError as error:
+        if error.errno in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}:
+            pytest.skip("Filesystem does not support POSIX access ACLs")
+        raise
+    assert "system.posix_acl_access" in os.listxattr(path)
+    assert path.stat().st_mode & 0o020
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("target", ["file", "hooks"])
+def test_install_refuses_extended_access_acl(
+    tmp_path: Path, private_group, client: str, target: str,
+) -> None:
+    home = tmp_path / client
+    home.mkdir()
+    hooks = home / "hooks"
+    hooks.mkdir()
+    config = home / ("hooks.json" if client == "codex" else "settings.json")
+    original = b'{"theme":"dark"}\n'
+    config.write_bytes(original)
+    path = config if target == "file" else hooks
+    _set_extended_access_acl(path)
+    if target == "file":
+        assert hook_module._safe_file_status(config)["mode_ok"] is False
+        data, error = hook_module._read_json(config)
+        assert data is None
+        assert "chmod g-w,o-w" in error
+    with pytest.raises(OSError, match="unsafe|writable|trusted") as refused:
+        hook_module.install_hook(hook_dir=hooks, settings_path=config, client=client)
+    assert "chmod g-w,o-w" in str(refused.value)
+    assert config.read_bytes() == original
+    assert not list(home.glob("*.backup-*"))
+    report = hook_module.check_hooks(clients=(client,), hook_dir=hooks, settings_path=config)
+    check_id = "config.file" if target == "file" else "scripts.continuation"
+    assert next(row for row in report["clients"][0]["checks"] if row["id"] == check_id)["status"] == "fail"
+
+
+def test_deployed_script_refuses_extended_access_acl(tmp_path: Path, private_group) -> None:
+    home = tmp_path / "client"
+    home.mkdir()
+    hooks = home / "hooks"
+    config = home / "settings.json"
+    hook_module.install_hook(hook_dir=hooks, settings_path=config)
+    script = hooks / hook_module._CONTINUATION_SCRIPT
+    _set_extended_access_acl(script)
+    report = hook_module.check_hooks(clients=("claude",), hook_dir=hooks, settings_path=config)
+    assert next(row for row in report["clients"][0]["checks"] if row["id"] == "scripts.continuation")["status"] == "fail"
+
+
+@pytest.mark.parametrize("platform", ["darwin", "freebsd14"])
+@pytest.mark.parametrize("mode", [0o644, 0o664])
+def test_non_linux_keeps_base_group_write_rule(
+    tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch, platform: str, mode: int,
+) -> None:
+    config = tmp_path / "settings.json"
+    config.write_text("{}\n")
+    config.chmod(mode)
+    monkeypatch.setattr(sys, "platform", platform)
+    assert hook_module._safe_file_status(config)["mode_ok"] is (mode == 0o644)
+
+
+@pytest.mark.parametrize("error_code", [errno.ENOTSUP, errno.EOPNOTSUPP, errno.EACCES, errno.EIO])
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux user-private-group exception")
+def test_acl_probe_errors_fail_closed_except_unsupported(
+    tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch, error_code: int,
+) -> None:
+    config = tmp_path / "settings.json"
+    config.write_text("{}\n")
+    config.chmod(0o664)
+
+    def unavailable_xattrs(_target):
+        raise OSError(error_code, "xattr probe failed")
+
+    monkeypatch.setattr(os, "listxattr", unavailable_xattrs)
+    assert hook_module._safe_file_status(config)["mode_ok"] is (error_code in {errno.ENOTSUP, errno.EOPNOTSUPP})
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux user-private-group exception")
+def test_private_group_enumeration_cached_across_install_and_check(
+    tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pwd = pytest.importorskip("pwd")
+    user = pwd.getpwuid(os.geteuid())
+    calls = 0
+
+    def enumerated_users():
+        nonlocal calls
+        calls += 1
+        return [user]
+
+    monkeypatch.setattr(pwd, "getpwall", enumerated_users)
+    home = tmp_path / "client"
+    home.mkdir()
+    home.chmod(0o775)
+    config = home / "settings.json"
+    config.write_text("{}\n")
+    config.chmod(0o664)
+    hooks = home / "hooks"
+    hooks.mkdir()
+    hooks.chmod(0o775)
+    assert hook_module.install_hook(hook_dir=hooks, settings_path=config)["wired"]
+    hook_module.check_hooks(clients=("claude",), hook_dir=hooks, settings_path=config)
+    assert calls == 1

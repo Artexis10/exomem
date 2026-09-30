@@ -47,7 +47,9 @@ import re
 import secrets
 import stat
 import subprocess
+import sys
 import time
+from functools import cache
 from pathlib import Path
 
 _HOOK_DIR_SRC = Path(__file__).parent / "_hooks"
@@ -209,32 +211,57 @@ def _hook_entry(item: dict, timeout: int) -> dict:
 
 
 def _is_private_group(gid: int) -> bool:
-    """Accept only the user's primary group with no other explicit or primary members."""
+    return _private_group_for_user(os.geteuid(), gid)
+
+
+@cache
+def _private_group_for_user(euid: int, gid: int) -> bool:
+    """Require the user-private-group convention and no other known members."""
     try:
         import grp
         import pwd
 
-        user = pwd.getpwuid(os.geteuid())
+        user = pwd.getpwuid(euid)
         if gid != user.pw_gid:
             return False
         group = grp.getgrgid(gid)
+        if group.gr_name != user.pw_name:
+            return False
         if any(member != user.pw_name for member in group.gr_mem):
             return False
         # gr_mem omits primary-group users, so an empty list can still be shared.
+        members = pwd.getpwall()
+        # NSS may return only local users. Refuse an enumeration missing this user.
+        if not any(
+            member.pw_name == user.pw_name and member.pw_uid == user.pw_uid
+            for member in members
+        ):
+            return False
         return not any(
             member.pw_gid == gid and member.pw_name != user.pw_name
-            for member in pwd.getpwall()
+            for member in members
         )
     except (ImportError, KeyError, OSError):
         return False
 
 
-def _has_untrusted_writers(info: os.stat_result) -> bool:
+def _has_untrusted_writers(info: os.stat_result, target: int | Path) -> bool:
     mode = stat.S_IMODE(info.st_mode)
-    return bool(mode & 0o002) or bool(
-        mode & 0o020
-        and (info.st_uid != os.geteuid() or not _is_private_group(info.st_gid))
-    )
+    if mode & 0o002:
+        return True
+    if not mode & 0o020:
+        return False
+    if (
+        sys.platform != "linux"
+        or info.st_uid != os.geteuid()
+        or not _is_private_group(info.st_gid)
+    ):
+        return True
+    # With an access ACL, the mode's group bits describe its mask, not its writers.
+    try:
+        return "system.posix_acl_access" in os.listxattr(target)
+    except OSError as error:
+        return error.errno not in {errno.ENOTSUP, errno.EOPNOTSUPP}
 
 
 def _require_trusted_directory(directory) -> None:
@@ -265,11 +292,11 @@ def _require_trusted_directory(directory) -> None:
             if index == len(parts) - 1:
                 if info.st_uid != os.geteuid():
                     offenders.append((str(walked), "owned by another user"))
-                elif _has_untrusted_writers(info):
+                elif _has_untrusted_writers(info, current):
                     offenders.append((str(walked), f"group/other-writable ({mode:04o})"))
             else:
                 sticky_trusted = bool(mode & stat.S_ISVTX) and info.st_uid in {0, os.geteuid()}
-                if _has_untrusted_writers(info) and not sticky_trusted:
+                if _has_untrusted_writers(info, current) and not sticky_trusted:
                     offenders.append((str(walked), f"group/other-writable ({mode:04o})"))
         if offenders:
             detail = "; ".join(f"{path} ({reason})" for path, reason in offenders)
@@ -297,7 +324,7 @@ def _safe_file_status(path: Path) -> dict:
         listed = os.lstat(path)
         safe_regular = stat.S_ISREG(listed.st_mode) and not stat.S_ISLNK(listed.st_mode)
         mode_ok = safe_regular and (
-            os.name == "nt" or not _has_untrusted_writers(listed)
+            os.name == "nt" or not _has_untrusted_writers(listed, path)
         )
         if not safe_regular:
             raise OSError("not a safe regular file")
@@ -343,9 +370,11 @@ def _read_json(path: Path) -> tuple[dict | None, str | None]:
             try:
                 info = os.fstat(fd)
                 if os.name != "nt" and (
-                    info.st_uid != os.geteuid() or _has_untrusted_writers(info)
+                    info.st_uid != os.geteuid() or _has_untrusted_writers(info, fd)
                 ):
-                    raise OSError(f"unsafe writable hook config file: {path}")
+                    raise OSError(
+                        f"unsafe writable hook config file: {path}; fix: chmod g-w,o-w {path}"
+                    )
                 chunks: list[bytes] = []
                 total = 0
                 while total <= 8 * 1024 * 1024:
@@ -618,7 +647,7 @@ def _safe_file_status_at(directory, name: str, display_path: Path) -> dict:
             safe_regular = stat.S_ISREG(info.st_mode)
             mode_ok = safe_regular and (
                 os.name == "nt"
-                or (info.st_uid == os.geteuid() and not _has_untrusted_writers(info))
+                or (info.st_uid == os.geteuid() and not _has_untrusted_writers(info, fd))
             )
             h = hashlib.sha256()
             while True:
@@ -1197,8 +1226,11 @@ def _snapshot_config_at(directory, name: str, display_path: Path) -> dict:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise OSError(f"hook config is not a regular file: {display_path}")
-        if os.name != "nt" and (info.st_uid != os.geteuid() or _has_untrusted_writers(info)):
-            raise OSError(f"hook config is unsafe or writable: {display_path}")
+        if os.name != "nt" and (info.st_uid != os.geteuid() or _has_untrusted_writers(info, fd)):
+            raise OSError(
+                f"hook config is unsafe or writable: {display_path}; "
+                f"fix: chmod g-w,o-w {display_path}"
+            )
         chunks = []
         while True:
             chunk = os.read(fd, 1024 * 1024)
