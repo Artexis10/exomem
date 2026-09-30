@@ -135,15 +135,18 @@ def test_the_warm_encode_reading_is_the_model_when_there_is_one() -> None:
     assert _derived(points, "first_hybrid_find")["unreturned_allocator_bytes"] == 180
 
 
-def test_a_model_delta_is_recorded_raw_never_clamped() -> None:
+def test_a_negative_model_delta_is_recorded_raw_but_never_attributed() -> None:
     points = _cell_points()
-    # Untraced anon FELL across the load (170 against 180): report that, not 0.
+    # Untraced anon FELL across the load (170 against 180): record that, but a
+    # model cannot hold negative memory, so nothing is subtracted for it.
     points[1] = _point("model_load", rss=350, anon=290, traced=100, overhead=20, model=True)
 
     estimate = profile.derive(points)
 
     assert estimate["load_delta_bytes"] == -10 * MIB
-    assert _derived(points, "model_load")["model_native_bytes"] == -10
+    assert estimate["attributed_bytes"] == 0
+    assert _derived(points, "model_load")["model_native_bytes"] == 0
+    assert _derived(points, "model_load")["unreturned_allocator_bytes"] == 170
 
 
 def test_a_stub_run_records_its_raw_deltas_but_attributes_nothing() -> None:
@@ -222,6 +225,33 @@ def test_a_failed_stage_prints_its_captured_output(
     printed = capsys.readouterr()
     assert "child said this" in printed.err
     assert "child failed" in printed.err
+
+
+def test_a_stage_that_hangs_is_stopped_and_its_output_printed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = _stage_args(tmp_path)
+    args.timeout = 5.0
+
+    def hanging(command, **kwargs):
+        assert kwargs.get("timeout") == 10.0
+        raise subprocess.TimeoutExpired(
+            command, kwargs["timeout"], output="child got this far", stderr="then stalled"
+        )
+
+    monkeypatch.setattr(profile.subprocess, "run", hanging)
+
+    with pytest.raises(SystemExit, match="stage cell timed out"):
+        profile._run_stage("cell", args, {})
+    printed = capsys.readouterr()
+    assert "child got this far" in printed.err
+    assert "then stalled" in printed.err
+
+
+def test_a_negative_arena_bound_is_refused() -> None:
+    with pytest.raises(SystemExit):
+        profile._parser().parse_args(["--malloc-arena-max", "-1"])
+    assert profile._parser().parse_args(["--malloc-arena-max", "0"]).malloc_arena_max == 0
 
 
 def test_a_passing_stage_prints_nothing(
@@ -352,6 +382,8 @@ def test_smoke_run_profiles_a_real_cloud_cell_and_stays_content_free(tmp_path: P
     assert cell["cell_ready"]["counters"]["caches"]["vector_matrices"]["embedding"]["rows"] > 0
     assert "first_governed_write" in proc.stdout
     assert report["malloc_arena_max"] == 2
+    assert "keepcost_bytes" in cell["reaper_tick"]["glibc"]
+    assert cell["reaper_tick"]["facts"]["trimmed"] in {True, False, None}
     assert "lazily" in report["note"]
     assert report["cell"]["model_estimate"]["basis"] == "stub"
     assert report["cell"]["model_estimate"]["warm_delta_bytes"] is not None

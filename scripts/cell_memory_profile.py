@@ -42,9 +42,10 @@ counters (``resource_status``). Derived per point:
   overhead: anonymous memory no Python allocation accounts for.
 - ``model_native_bytes``: the ONNX Runtime session, tokenizer and arena,
   estimated as the growth of ``untraced_anon_bytes`` from the import point to
-  the warm point (after one query encode), while the model stays resident (zero
-  after a reap, and always zero for the stub). Each stage's ``model_estimate``
-  records the raw load and warm deltas, unclamped, including a stub's. The
+  the warm point (after one query encode), floored at zero, while the model
+  stays resident (zero after a reap, and always zero for the stub). Each
+  stage's ``model_estimate`` records the raw load and warm deltas, unclamped,
+  including a stub's. The
   runtime libraries are imported before the import point, so the deltas hold
   the session rather than library initialisation.
 - ``unreturned_allocator_bytes`` = untraced anon - model native: design D1's
@@ -52,8 +53,12 @@ counters (``resource_status``). Derived per point:
   file-backed pages (shared-library text, mapped files) are not allocator
   memory. ``file_backed_bytes`` = Rss - Anonymous restores the Rss form. The
   residual also holds other native heaps (SQLite page caches, extension
-  modules' own allocations); glibc's own count of free-but-held bytes is
-  ``glibc.free_bytes``, the direct reading to compare it with.
+  modules' own allocations). glibc's own count of free chunks is
+  ``glibc.free_bytes``, which corroborates the residual only until a trim:
+  ``malloc_trim`` hands free pages back while their chunks stay free, so after
+  one ``free_bytes`` still counts memory that is no longer resident. After a
+  trim, read Rss and ``unreturned_allocator_bytes``; the reaper tick's
+  ``trimmed`` fact says whether one ran.
 
 The report is content-free: numbers, code locations and fixed vocabulary only.
 Before writing it, the harness scans it for the vault root, the scratch root,
@@ -194,6 +199,7 @@ def glibc_mallinfo() -> dict[str, int] | None:
         "mmap_bytes": int(info.hblkhd),
         "in_use_bytes": int(info.uordblks),
         "free_bytes": int(info.fordblks),
+        "keepcost_bytes": int(info.keepcost),
     }
 
 
@@ -324,9 +330,10 @@ def derive(points: list[dict[str, Any]], *, native_model: bool = True) -> dict[s
     if not native_model:
         basis, model_native = "stub", 0
     elif warm_delta is not None:
-        basis, model_native = "model_warm", warm_delta
+        basis, model_native = "model_warm", max(0, warm_delta)
     else:
-        basis, model_native = "model_load", load_delta
+        basis = "model_load"
+        model_native = None if load_delta is None else max(0, load_delta)
     for point in points:
         smaps = point.get("smaps_rollup") or {}
         residual = untraced(point)
@@ -542,6 +549,22 @@ def _warm_model() -> None:
     embeddings.embed_texts([QUERY], is_query=True)
 
 
+_NO_TRIM = object()
+
+
+def _last_trim() -> Any:
+    """The allocator trim's last-run stamp, or `_NO_TRIM` on a tree without one.
+
+    The reaper does not report whether it trimmed; a changed stamp across the
+    tick says one ran (not how much it returned: Rss says that).
+    """
+    try:
+        from exomem import process_memory
+    except ImportError:
+        return _NO_TRIM
+    return getattr(process_memory, "_LAST_TRIM", _NO_TRIM)
+
+
 def _settle(timeout: float, vault_root: Path | None = None) -> dict[str, Any]:
     """Wait for transient startup/follow-up threads and queued derived work."""
     deadline = time.monotonic() + timeout
@@ -705,11 +728,19 @@ async def _cell_scenario(args: argparse.Namespace, points: list[dict], started: 
                 )
 
                 threshold = model_reaper.idle_seconds()
+                trims_before = _last_trim()
                 reaped = model_reaper._reap_once(
                     model_reaper.default_slots(), time.monotonic() + threshold + 1.0, threshold
                 )
+                trims_after = _last_trim()
                 points.append(
-                    sample("reaper_tick", top=args.top, started=started, reaped=sorted(reaped))
+                    sample(
+                        "reaper_tick",
+                        top=args.top,
+                        started=started,
+                        reaped=sorted(reaped),
+                        trimmed=None if trims_after is _NO_TRIM else trims_after != trims_before,
+                    )
                 )
     finally:
         mcp._exomem_local_runtime_activation._shutdown.set()
@@ -759,9 +790,16 @@ def _run_stage(stage: str, args: argparse.Namespace, env: dict[str, str]) -> dic
     ]
     started = time.monotonic()
     # A cell logs a great deal; it is only worth reading when a stage fails.
-    proc = subprocess.run(
-        command, env=env, cwd=str(ROOT), check=False, capture_output=True, text=True
-    )
+    try:
+        proc = subprocess.run(
+            command, env=env, cwd=str(ROOT), check=False, capture_output=True, text=True,
+            timeout=args.timeout * 2,
+        )
+    except subprocess.TimeoutExpired as expired:
+        for label, captured in (("stdout", expired.output), ("stderr", expired.stderr)):
+            text = captured.decode(errors="replace") if isinstance(captured, bytes) else captured
+            print(f"--- stage {stage} {label} ---\n{text or ''}", file=sys.stderr)
+        raise SystemExit(f"stage {stage} timed out after {args.timeout * 2:.0f}s") from None
     if proc.returncode != 0 or not out.exists():
         print(f"--- stage {stage} stdout ---\n{proc.stdout}", file=sys.stderr)
         print(f"--- stage {stage} stderr ---\n{proc.stderr}", file=sys.stderr)
@@ -856,6 +894,13 @@ def render_table(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _non_negative_int(raw: str) -> int:
+    value = int(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be 0 (unset) or a positive arena count")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--notes", type=int, default=3000, help="synthetic notes (default 3000)")
@@ -869,7 +914,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--top", type=int, default=15, help="allocation sites per point")
     parser.add_argument(
-        "--malloc-arena-max", type=int, default=2,
+        "--malloc-arena-max", type=_non_negative_int, default=2,
         help="MALLOC_ARENA_MAX for the stages; 2 mirrors the image, 0 leaves it unset",
     )
     parser.add_argument("--timeout", type=float, default=900.0, help="cell readiness/find budget")
