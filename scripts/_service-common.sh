@@ -638,7 +638,7 @@ exomem_unit_is_default() {
 # nothing. A second service's settings live in its own unit, never in the
 # checkout's .env, which describes the default service.
 exomem_unit_env_value() {
-    local unit="$1" name="$2" value="" env_file line
+    local unit="$1" name="$2" python="${3:-python3}" value="" env_file line
     [[ -f "$unit" ]] || return 0
     if [[ "$(uname -s)" == "Darwin" ]]; then
         if [[ -x /usr/libexec/PlistBuddy ]]; then
@@ -647,13 +647,24 @@ exomem_unit_env_value() {
         printf '%s' "$value"
         return 0
     fi
+    # One Environment= line may carry several quoted or bare assignments, split
+    # the way systemd splits them; a later assignment wins.
+    value="$("$python" - "$unit" "$name" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+value = ""
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if line.startswith("Environment="):
+        for word in shlex.split(line.partition("=")[2]):
+            key, sep, rest = word.partition("=")
+            if sep and key == sys.argv[2]:
+                value = rest
+print(value, end="")
+PY
+)" || value=""
     # systemd applies EnvironmentFile= after Environment=, so the file wins.
-    while IFS= read -r line; do
-        line="${line#Environment=}"
-        line="${line#\"}"
-        line="${line%\"}"
-        [[ "$line" == "$name="* ]] && value="${line#"$name"=}"
-    done < <(grep -E "^Environment=\"?$name=" "$unit" || true)
     while IFS= read -r env_file; do
         env_file="${env_file#-}"
         line="$(exomem_dotenv_file_value "$env_file" "$name")"
@@ -770,9 +781,10 @@ exomem_write_owned_managed_manifest() {
     local path current=""
     path="$(exomem_managed_manifest_path)"
     if ! exomem_unit_is_default "$unit" && [[ -f "$path" ]]; then
+        # An unreadable manifest is the default service's to repair, not ours to claim.
         current="$("$python" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("service_target") or "")' "$path" 2>/dev/null || true)"
-        if [[ -n "$current" && "$current" != "$service_target" ]]; then
-            echo "Managed install manifest left on $current: $unit is not the service it names."
+        if [[ "$current" != "$service_target" ]]; then
+            echo "Managed install manifest left on ${current:-its unreadable contents}: $unit is not the service it names."
             return 0
         fi
     fi

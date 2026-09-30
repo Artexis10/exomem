@@ -162,7 +162,7 @@ echo "  repo:      $(exomem_repo_version "$REPO_ROOT")"
 # The unit's own environment names its vault. The checkout's .env and the
 # shell describe the default service, so a second service never falls back to
 # them: that would migrate and doctor the wrong vault.
-[[ -z "$VAULT" ]] && VAULT="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_VAULT_PATH)"
+[[ -z "$VAULT" ]] && VAULT="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_VAULT_PATH "$VENV_PYTHON")"
 if [[ -z "$VAULT" ]]; then
     exomem_unit_is_default "$UNIT_FILE" \
         || die "no vault in $UNIT_FILE or its EnvironmentFile; pass --vault for a service that is not the default unit"

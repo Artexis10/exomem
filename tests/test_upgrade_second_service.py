@@ -95,6 +95,27 @@ def test_unit_env_value_falls_back_to_environment_lines_and_optional_files(tmp_p
     assert result.stdout == "/vaults/inline"
 
 
+def test_unit_env_value_splits_multiple_assignments_like_systemd(tmp_path: Path) -> None:
+    env = _home(tmp_path)
+    bare = _unit(
+        tmp_path,
+        "exomem-bare",
+        env_file=None,
+        environment="Environment=EXOMEM_VAULT_PATH=/vaults/bare OTHER=1",
+    )
+    quoted = _unit(
+        tmp_path,
+        "exomem-quoted",
+        env_file=None,
+        environment='Environment="EXOMEM_PORT=8766" "EXOMEM_VAULT_PATH=/vaults/with space"',
+    )
+
+    assert _bash(f'exomem_unit_env_value "{bare}" EXOMEM_VAULT_PATH', env).stdout == "/vaults/bare"
+    assert _bash(f'exomem_unit_env_value "{quoted}" EXOMEM_VAULT_PATH', env).stdout == (
+        "/vaults/with space"
+    )
+
+
 def test_only_the_default_unit_counts_as_default(tmp_path: Path) -> None:
     env = _home(tmp_path)
     default = _unit(tmp_path, "exomem", env_file=None)
@@ -127,6 +148,19 @@ def test_second_service_leaves_the_default_services_manifest_alone(tmp_path: Pat
     assert result.returncode == 0, result.stderr
     assert "left on http://127.0.0.1:8765" in result.stdout
     assert json.loads(manifest.read_text(encoding="utf-8")) == original
+
+
+def test_second_service_does_not_claim_an_unreadable_manifest(tmp_path: Path) -> None:
+    env = _home(tmp_path)
+    second = _unit(tmp_path, "exomem-second", env_file=None)
+    manifest = _manifest(env)
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{not json", encoding="utf-8")
+
+    result = _write_owned(env, second, "http://127.0.0.1:8766")
+
+    assert result.returncode == 0, result.stderr
+    assert manifest.read_text(encoding="utf-8") == "{not json"
 
 
 def test_second_service_updates_a_manifest_that_already_names_it(tmp_path: Path) -> None:
@@ -195,7 +229,11 @@ def _run_upgrade(
     tmp_path: Path, env: dict[str, str], unit: Path
 ) -> subprocess.CompletedProcess[str]:
     python = tmp_path / "venv-python"
-    python.write_text("#!/bin/sh\necho 0.1.0\n", encoding="utf-8")
+    # Reports an installed version, and runs the unit parser like a real venv would.
+    python.write_text(
+        '#!/bin/sh\nif [ "$1" = - ]; then exec python3 "$@"; fi\necho 0.1.0\n',
+        encoding="utf-8",
+    )
     python.chmod(0o755)
     unit.write_text(
         unit.read_text(encoding="utf-8").replace("/nonexistent/python", str(python)),
