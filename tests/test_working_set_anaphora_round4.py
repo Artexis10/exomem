@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from anaphor_acceptance_sets import EARLIER
+from anaphor_acceptance_sets import EARLIER, POSITIVES as ACCEPTANCE_POSITIVES
+from anaphor_heldout_sets import EARLIER as HELDOUT_EARLIER, POSITIVES as HELDOUT_POSITIVES
 from test_working_set_conversation_carry import _carried
 
 TIME_NEGATIVES = (
@@ -76,3 +77,81 @@ def test_a_preposition_can_place_an_article_time_phrase(turn: str) -> None:
 @pytest.mark.parametrize("turn", sorted(TIME_MISSES))
 def test_time_word_cases_with_other_missing_evidence_still_abstain(turn: str) -> None:
     assert _carried([turn], TIME_EARLIER) == []
+
+
+# Round 5: authored before the grammar fix. The five reviewer examples are
+# tuning cases now; the further variants exercise the same grammar classes.
+ROUND5_REVIEW_NEGATIVES = (
+    "is it the first of next month already",
+    "is it tuesday yet where you are",
+    "is it the end of next week now",
+    "is it late in the evening there",
+    "ok, that's enough, let's leave it there",
+)
+DUMMY_TIME_NEGATIVES = (
+    "is it dark there yet",
+    "it's nearly midnight",
+    "it is the start of next year already",
+    "isn't it half past ten there",
+    "will it be the second of december tomorrow",
+)
+TIME_LINK_NEGATIVES = (
+    "what about wednesday",
+    "and how about sunday",
+    "is that january",
+    "is that midnight",
+)
+CLOSING_NEGATIVES = (
+    "let's call it a day",
+    "fine, drop it",
+    "thanks, forget it",
+    "ok, that's it",
+    "never mind, that'll do it",
+    "let's leave it",
+    "that's enough, leave it there",
+)
+ROUND5_POSITIVES = (
+    "will it be ready tomorrow",
+    "is it still due friday",
+    "how did her results compare with the spring round",
+    "is it still late in the evening there for the review",
+    "ok, let's drop it from the plan",
+)
+ROUND5_EARLIER = TIME_EARLIER + (
+    {"role": "user", "text": "the migration review is tuesday, wednesday, sunday, january and midnight; the plan has a start in december at half past ten and ends after dark tomorrow"},
+    {"role": "assistant", "text": "fine, thanks; it is nearly ready. never forget to call before you drop the plan for the day"},
+)
+
+
+@pytest.mark.parametrize(
+    "turn",
+    ROUND5_REVIEW_NEGATIVES + DUMMY_TIME_NEGATIVES + TIME_LINK_NEGATIVES + CLOSING_NEGATIVES,
+)
+def test_dummy_time_and_closing_turns_do_not_carry_even_with_shared_words(turn: str) -> None:
+    assert _carried([turn], ROUND5_EARLIER) == []
+
+
+@pytest.mark.parametrize("turn", ROUND5_POSITIVES)
+def test_a_referential_it_or_comparison_keeps_its_subject(turn: str) -> None:
+    assert _carried([turn], ROUND5_EARLIER) == [turn]
+
+
+@pytest.mark.parametrize("weekday", ["wednesday", "saturday", "sunday"])
+def test_a_shared_weekday_is_not_a_dummy_its_subject(weekday: str) -> None:
+    earlier = ({"role": "user", "text": f"the migration plan is due {weekday}"},)
+    assert _carried([f"is it {weekday} yet where you are"], earlier) == []
+
+
+def test_a_time_word_cannot_link_through_a_shared_function_word_stem() -> None:
+    earlier = ({"role": "user", "text": "the migration plan is even better now"},)
+    assert _carried(["is that the evening"], earlier) == []
+
+
+@pytest.mark.parametrize(
+    "turn,earlier",
+    [(turn, EARLIER) for turn in ACCEPTANCE_POSITIVES
+     if turn not in {"does this affect the rota", "has anything changed there since"}]
+    + [(turn, HELDOUT_EARLIER) for turn in HELDOUT_POSITIVES if turn != "how bad is it now"],
+)
+def test_every_previously_carried_acceptance_positive_keeps_its_subject(turn, earlier) -> None:
+    assert _carried([turn], earlier) == [turn]

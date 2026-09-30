@@ -1,5 +1,5 @@
 """When a turn may take its subject from the conversation (thread-aware
-compilation, ruling C1 on #1463, round 4).
+compilation, ruling C1 on #1463, round 5).
 
 The conversation carry runs for a turn that (a) resolves no anchor of its own,
 which the compiler decides, and here:
@@ -83,6 +83,7 @@ _TIME_WORDS: frozenset[str] = frozenset(
     time hour minute moment date later earlier soon ago recently lately early late
     monday tuesday wednesday thursday friday saturday sunday january february march
     april may june july august september october november december
+    noon midnight midday dawn dusk sunrise sunset equinox clock oclock
     """.split()
 )
 #: The closed generic task vocabulary: words for asking about a work item's
@@ -104,9 +105,10 @@ TASK_VOCABULARY: frozenset[str] = frozenset(
     safe summarise summarize drop revisit manager expensive matter
     """.split()
 )
-#: A time word is no topic only where one of these places it relative to now
+#: A time word is no new topic only where one of these places it relative to now
 #: or to the thread ("last year", "next month", "this week"). An
-#: ungoverned one is content: "what day is it today", "autumn came early".
+#: ungoverned one blocks a carry: "what day is it today", "autumn came early".
+#: Time words never count as shared content in `mentioned`, either.
 _TIME_GOVERNORS: frozenset[str] = frozenset(
     """next last this these previous coming following every on by in for
     within until before after since""".split()
@@ -129,6 +131,9 @@ def _words(tokens: Iterable[str]) -> list[str]:
     "not"), a possessive folded to its noun, and hyphenated words split."""
     words: list[str] = []
     for token in tokens:
+        if token == "let's":
+            words.extend(("let", "us"))
+            continue
         head, apostrophe, tail = token.partition("'")
         if apostrophe and head:
             if tail == "t":
@@ -167,6 +172,7 @@ def forms(word: str) -> frozenset[str]:
 #: Normalize the closed task vocabulary exactly as the turn's words. The
 #: vocabulary entries themselves stay frozen; e.g. "figures" also covers "figure".
 _TASK_FORMS: frozenset[str] = frozenset(form for word in TASK_VOCABULARY for form in forms(word))
+_TIME_FORMS: frozenset[str] = frozenset(form for word in _TIME_WORDS for form in forms(word))
 _KNOWN: frozenset[str] = _FUNCTION_WORDS | _TASK_FORMS | _POINTERS
 _TIME_PREPOSITIONS: frozenset[str] = frozenset("on by in for with within until before after since".split())
 _WEEKDAYS: frozenset[str] = frozenset("monday tuesday wednesday thursday friday saturday sunday".split())
@@ -177,10 +183,76 @@ _TIME_PREDICATES: frozenset[str] = _TASK_FORMS | frozenset(
     "kept seem sound feel felt happen say said tell told ask mean meant use find found".split()
 )
 
+#: Grammar for a dummy subject's temporal copular complement. Work predicates
+#: ("ready", "due") stay outside it; these are not task vocabulary additions.
+_COPULAS = frozenset("am is are was were be been being".split())
+_CLOCK_NUMBERS = frozenset(
+    "one two three four five six seven eight nine ten eleven twelve thirteen "
+    "fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty".split()
+)
+_TIME_COMPLEMENT_WORDS = _TIME_WORDS | _CLOCK_NUMBERS | ORDINALS | frozenset(
+    "the a an of in at on by before after past to till until from for and or "
+    "not still now then yet already there here where you are nearly almost about "
+    "around half quarter am pm dark start end beginning middle next last this "
+    "these previous coming following".split()
+)
+_CLOSING_IDIOMS = (
+    ("leave", "it", "there"),
+    ("leave", "it"),
+    ("that", "is", "it"),
+    ("forget", "it"),
+    ("drop", "it"),
+    ("call", "it", "a", "day"),
+    ("that", "will", "do", "it"),
+)
+_ACKNOWLEDGEMENT_WORDS = frozenset(
+    "ok okay fine right yes yeah yep well thanks thank you that's that is all "
+    "enough never mind let us please just now for today then and there".split()
+)
+
+
+def _closing(words: Sequence[str]) -> bool:
+    """A closed idiom plus only acknowledgement/closing words ends the turn.
+    A task-bearing remainder ("drop it from the plan") keeps its referent."""
+    for idiom in _CLOSING_IDIOMS:
+        for index in range(len(words) - len(idiom) + 1):
+            if tuple(words[index : index + len(idiom)]) == idiom:
+                remainder = (*words[:index], *words[index + len(idiom) :])
+                if all(word in _ACKNOWLEDGEMENT_WORDS for word in remainder):
+                    return True
+    return False
+
+
+def _dummy_time_it(words: Sequence[str], index: int) -> bool:
+    """Recognise temporal copulas in statement and inverted question order,
+    including negation, relative dates and clock complements."""
+    start = index + 1
+    while start < len(words) and words[start] in {"not", "will", "would", "still"}:
+        start += 1
+    if start < len(words) and words[start] in _COPULAS:
+        start += 1
+    else:
+        before = index - 1
+        if before >= 0 and words[before] == "not":
+            before -= 1
+        if before < 0 or words[before] not in _COPULAS:
+            return False
+    complement = words[start:]
+    return bool(complement) and any(
+        forms(word) & _TIME_WORDS or word == "dark" or word in _CLOCK_NUMBERS or word.isdecimal()
+        for word in complement
+    ) and all(
+        forms(word) & _TIME_COMPLEMENT_WORDS or word.isdecimal() for word in complement
+    )
+
 
 def _time_is_modifier(words: Sequence[str], index: int) -> bool:
     """Relative time, a preposition's article phrase, or a bare adverb/weekday
-    after a predicate names no subject. A copula's "the summer" does."""
+    after a predicate names no subject. A time qualifier of a work noun
+    ("friday review", "spring round") is also a modifier, never shared content.
+    A copula's "the summer" names a time subject."""
+    if index + 1 < len(words) and forms(words[index + 1]) & _TASK_FORMS:
+        return True
     if not index:
         return False
     previous = words[index - 1]
@@ -213,18 +285,24 @@ def content_words(tokens: Sequence[str], *, vocabulary: frozenset[str] = frozens
 
 
 def mentioned(tokens: Iterable[str]) -> frozenset[str]:
-    """Every form of every word in earlier turns, for `content_words` to be
-    checked against."""
-    return frozenset(form for word in _words(tokens) for form in forms(word))
+    """Shared content forms from earlier turns. A calendar/clock/weekday
+    match never links a new turn to the conversation's subject."""
+    return frozenset(
+        form for word in _words(tokens) if not forms(word) & _TIME_WORDS for form in forms(word)
+    ) - _TIME_FORMS
 
 
 def points_back(
     tokens: Sequence[str], *, referential_cue: bool = False, follow_up_markers: frozenset[str] = frozenset()
 ) -> bool:
     """(c): does the turn carry a word that points at something said before?"""
+    words = _words(tokens)
+    if _closing(words) or any(
+        word == "it" and _dummy_time_it(words, index) for index, word in enumerate(words)
+    ):
+        return False
     if referential_cue:
         return True
-    words = _words(tokens)
     if any(tuple(words[: len(opener)]) == opener for opener in _ELLIPTICAL_OPENERS):
         return True
     markers = (follow_up_markers - BARE_POINTERS) | PERSONAL_ANAPHORS | DEMONSTRATIVES
