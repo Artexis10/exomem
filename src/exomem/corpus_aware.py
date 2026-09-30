@@ -43,6 +43,60 @@ from .vault import content_hash
 
 log = logging.getLogger(__name__)
 
+
+class OverlapAdvisorySkipped(RuntimeError):
+    """No complete, usable query was available; no proximity was measured."""
+
+
+def _skip_overlap(reason: str, *, strict: bool) -> dict[str, float]:
+    # Closed reasons only: exception messages can contain the written text.
+    log.warning("overlap advisory skipped: %s", reason)
+    if strict:
+        raise OverlapAdvisorySkipped(reason)
+    return {}
+
+
+def _require_complete_advisory_body(body: str, *, title: str = "") -> None:
+    from . import embeddings
+
+    # The retrieval chunker intentionally drops long spaced paragraph tails.
+    # A retained template prefix is not a query for the complete written note.
+    for paragraph in body.split("\n\n"):
+        if (
+            len(paragraph.split()) > embeddings.MAX_WORDS_PER_CHUNK
+            and not embeddings._needs_character_cap(paragraph)
+        ):
+            raise OverlapAdvisorySkipped("text_truncated")
+    # Titles are prepended after the body word cap, so an unbounded title can
+    # itself hide the body from a backend's token limit. Keep the complete
+    # passage within the chunker's word budget rather than trusting that prefix.
+    if any(
+        len(chunk.split()) > embeddings.MAX_WORDS_PER_CHUNK
+        for chunk in embeddings.chunk_text(title, body)
+    ):
+        raise OverlapAdvisorySkipped("text_truncated")
+
+
+def _require_advisory_vectors(
+    vectors, *, expected_count: int | None = None, expected_width: int | None = None
+) -> None:
+    import numpy as np
+
+    rows = np.asarray(vectors, dtype=np.float32)
+    if (
+        rows.ndim != 2
+        or not rows.shape[0]
+        or not rows.shape[1]
+        or (expected_count is not None and rows.shape[0] != expected_count)
+        or (expected_width is not None and rows.shape[1] != expected_width)
+        or not np.isfinite(rows).all()
+    ):
+        raise OverlapAdvisorySkipped("invalid_vectors")
+    norms = np.linalg.norm(rows.astype(np.float64), axis=1)
+    if not np.all(np.isfinite(norms) & np.isclose(norms, 1.0, rtol=1e-3, atol=1e-6)):
+        raise OverlapAdvisorySkipped("invalid_vectors")
+
+
 # Tunable knobs — intuition-seeded like find.RankingConfig; revisit against the
 # eval harness (scripts/eval_retrieval.py) once a golden set exists. Kept here
 # as named constants so they're one-line greppable.
@@ -567,7 +621,27 @@ class WriteAdvisoryInputs:
             raise ValueError(f"unknown write advisory route: {self.route}")
 
 
+@dataclass(frozen=True)
+class SkippedWriteAdvisory:
+    """A returned skip warning, with no candidate, score, or triage identity."""
+
+    warning: str
+
+
 def write_advisory_for(
+    vault_root: Path,
+    inputs: WriteAdvisoryInputs,
+    *,
+    record_surfacing: bool = True,
+) -> list[EmittedWriteAdvisory | SkippedWriteAdvisory]:
+    """Return measured advisories, or a visible warning that the sweep was skipped."""
+    try:
+        return _write_advisory_for(vault_root, inputs, record_surfacing=record_surfacing)
+    except OverlapAdvisorySkipped as error:
+        return [SkippedWriteAdvisory(f"overlap advisory skipped: {error}")]
+
+
+def _write_advisory_for(
     vault_root: Path,
     inputs: WriteAdvisoryInputs,
     *,
@@ -580,6 +654,7 @@ def write_advisory_for(
             title=inputs.title,
             body=inputs.body,
             published_path=inputs.target_rel_path,
+            strict=True,
         )
         duplicate_candidates = detect_duplicates(
             vault_root,
@@ -605,11 +680,15 @@ def write_advisory_for(
             ],
             record_surfacing=record_surfacing,
         )
+    cosines = _best_cosine_per_file(
+        vault_root, title="", body=inputs.body, strict=True
+    )
     candidates = detect_contradictions(
         vault_root,
         title="",
         body=inputs.body,
         self_path=inputs.self_path,
+        precomputed=cosines,
     )
     # The grouping and emission half of the advisory: a ref batch and a
     # review-state read per candidate. Timed separately from the cosine sweep
@@ -819,6 +898,7 @@ def _best_cosine_per_file(
     body: str,
     k: int = 15,
     published_path: str | None = None,
+    strict: bool = False,
 ) -> dict[str, float]:
     """Embed a draft (title+body) as PASSAGES and return the max cosine per
     existing file over the sidecar: ``{file_path: best_score}``.
@@ -840,16 +920,21 @@ def _best_cosine_per_file(
     texts the page's rows lack are encoded, so a missing or stale row costs
     what it always did, and reuse never changes a score while the sidecar's
     one-model invariant holds.
+
+    A body truncated by the retrieval chunker or an unusable vector is never
+    scored. By default the skip
+    is logged and returns {}; strict callers receive OverlapAdvisorySkipped
+    so a deferred result cannot report an unmeasured sweep as ready.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return {}
+        return _skip_overlap("embeddings_disabled", strict=strict)
     # While the background warm-up is loading the model, embedding the draft
     # would BLOCK on the singleton lock (minutes on a first-ever download) —
     # and this runs inline on every add/note/edit and pack assembly. Skip the
     # sweep; {} is the same no-op contract used for torch-less deploys.
     from . import readiness
     if readiness.should_defer("embeddings"):
-        return {}
+        return _skip_overlap("embeddings_warming", strict=strict)
     try:
         from . import embeddings
 
@@ -864,12 +949,13 @@ def _best_cosine_per_file(
             call_spans.span("advisory.best_cosine", {}) as measured,
             contextlib.ExitStack() as in_space,
         ):
+            _require_complete_advisory_body(body, title=title)
             chunks = embeddings.chunk_text(title, body)
             if not chunks:
                 if measured is not None:
                     measured["texts"] = 0
                     measured["chars"] = 0
-                return {}
+                return _skip_overlap("empty_text", strict=strict)
             idx = embeddings.get_embedding_index(vault_root)
             # The draft is encoded for the sidecar it is scored against.
             in_space.enter_context(recall_space.encoding_for(idx))
@@ -906,14 +992,17 @@ def _best_cosine_per_file(
                     measured["recalled"] = sum(1 for chunk in chunks if chunk in recalled)
             if full_encode:
                 vecs = embeddings.embed_texts(chunks, is_query=False)
+                _require_advisory_vectors(vecs, expected_count=len(chunks), expected_width=idx.dim)
                 embeddings.remember_passage_vectors(chunks, vecs, stamp=stamp)
             else:
                 lookup = {chunk: stored[chunk] for chunk in chunks if chunk in stored}
                 if to_encode:
                     fresh = embeddings.embed_texts(to_encode, is_query=False)
+                    _require_advisory_vectors(fresh, expected_count=len(to_encode), expected_width=idx.dim)
                     embeddings.remember_passage_vectors(to_encode, fresh, stamp=stamp)
                     lookup.update(zip(to_encode, fresh, strict=True))
                 vecs = [lookup[chunk] for chunk in chunks]
+            _require_advisory_vectors(vecs, expected_count=len(chunks), expected_width=idx.dim)
             best_per_file: dict[str, float] = {}
             # Every chunk in one pass over the matrix, asking eligibility only of
             # the pages that reach a chunk's top-k: a `search` per chunk re-read
@@ -925,12 +1014,12 @@ def _best_cosine_per_file(
                     if fp not in best_per_file or score > best_per_file[fp]:
                         best_per_file[fp] = score
             return best_per_file
-    except ImportError as e:
-        log.debug("_best_cosine_per_file unavailable (%s)", e)
-        return {}
-    except Exception as e:  # noqa: BLE001 — best-effort
-        log.debug("_best_cosine_per_file failed: %s", e)
-        return {}
+    except OverlapAdvisorySkipped as error:
+        return _skip_overlap(str(error), strict=strict)
+    except ImportError:
+        return _skip_overlap("embedding_unavailable", strict=strict)
+    except Exception:  # noqa: BLE001 — best-effort
+        return _skip_overlap("advisory_failed", strict=strict)
 
 
 def _index_admitter(vault_root: Path):
@@ -1036,6 +1125,7 @@ def best_cosine_per_file_for_vectors(
     *,
     self_path: str | None = None,
     k: int = 15,
+    strict: bool = False,
 ) -> dict[str, float]:
     """`_best_cosine_per_file` for vectors a caller already holds — no encode.
 
@@ -1048,7 +1138,7 @@ def best_cosine_per_file_for_vectors(
     embeddings disabled, sidecar empty or unreadable, or no vectors supplied.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return {}
+        return _skip_overlap("embeddings_disabled", strict=strict)
     try:
         from . import embeddings
 
@@ -1062,8 +1152,14 @@ def best_cosine_per_file_for_vectors(
                 measured["texts"] = 0
                 measured["vectors"] = len(rows)
             if not rows:
-                return {}
+                return _skip_overlap("empty_vectors", strict=strict)
+            _require_advisory_vectors(rows)
             idx = embeddings.get_embedding_index(vault_root)
+            # There are no possible matches in an empty corpus. search_many
+            # reshapes before checking emptiness, so do not hand it rows here.
+            if not idx.all_vectors()[0]:
+                return {}
+            _require_advisory_vectors(rows, expected_width=idx.dim)
             self_canon = _canon(self_path) if self_path else None
             best_per_file: dict[str, float] = {}
             # The same scoring and eligibility as the inline sweep, so a
@@ -1076,12 +1172,12 @@ def best_cosine_per_file_for_vectors(
                     if fp not in best_per_file or score > best_per_file[fp]:
                         best_per_file[fp] = score
             return best_per_file
-    except ImportError as e:
-        log.debug("best_cosine_per_file_for_vectors unavailable (%s)", e)
-        return {}
-    except Exception as e:  # noqa: BLE001 — best-effort
-        log.debug("best_cosine_per_file_for_vectors failed: %s", e)
-        return {}
+    except OverlapAdvisorySkipped as error:
+        return _skip_overlap(str(error), strict=strict)
+    except ImportError:
+        return _skip_overlap("embedding_unavailable", strict=strict)
+    except Exception:  # noqa: BLE001 — best-effort
+        return _skip_overlap("advisory_failed", strict=strict)
 
 
 def _declared_pair_filter(vault_root: Path, self_path: str | None):

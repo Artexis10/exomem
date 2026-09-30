@@ -185,11 +185,16 @@ def _candidates_for(
     caller can commit the once-only first-surfaced ledger after -- and only
     after -- the store accepts the result they belong to.
     """
+    corpus_aware._require_complete_advisory_body(generation.body, title=generation.title)
+    corpus_aware._require_advisory_vectors(
+        generation.vectors, expected_count=len(generation.chunks)
+    )
     scores = corpus_aware.best_cosine_per_file_for_vectors(
         vault_root,
         generation.vectors,
         self_path=generation.rel_path,
         k=max(DUPLICATE_TOP_N, OVERLAP_TOP_N) * 5,
+        strict=True,
     )
     duplicates = corpus_aware.detect_duplicates(
         vault_root,
@@ -241,6 +246,8 @@ def _candidates_for_route(
     changes no warning of this result.
     """
     emitted = corpus_aware.write_advisory_for(vault_root, inputs, record_surfacing=False)
+    if any(isinstance(item, corpus_aware.SkippedWriteAdvisory) for item in emitted):
+        raise corpus_aware.OverlapAdvisorySkipped("embedding_unavailable")
     return _candidates_from_emitted(vault_root, emitted, result_ref=result_ref), emitted
 
 
@@ -430,6 +437,15 @@ def execute_write_advisory(
             candidates, emitted = _candidates_for_route(
                 vault_root, route_inputs, result_ref=ref
             )
+        except corpus_aware.OverlapAdvisorySkipped:
+            return _publish(
+                vault_root,
+                claimed_status,
+                state="failed",
+                failure_code="embedding_unavailable",
+                observed=observed,
+                now=now,
+            )
         except Exception as error:  # noqa: BLE001 - optional advisory fails closed and soft
             if not isinstance(error, _UnaddressableAdvisory):
                 # The sweep runs over the draft's own title and body, which an
@@ -482,6 +498,16 @@ def execute_write_advisory(
 
     try:
         candidates, emitted = _candidates_for(vault_root, generation, result_ref=ref)
+    except corpus_aware.OverlapAdvisorySkipped:
+        return _publish(
+            vault_root,
+            claimed_status,
+            state="failed",
+            failure_code="embedding_unavailable",
+            observed=observed,
+            now=now,
+            reused_vectors=generation.reused,
+        )
     except _UnaddressableAdvisory:
         log.debug("advisory batch=%s surfaced an unaddressable advisory", batch_id)
         return _publish(

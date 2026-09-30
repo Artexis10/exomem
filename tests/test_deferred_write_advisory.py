@@ -418,6 +418,58 @@ def test_advisory_result_failure_is_visible_and_not_mutation_failure(
     assert module.advisory_custody(vault, receipt).status.state == "completed"
 
 
+@pytest.mark.parametrize("failure", ["warming", "backend", "truncated"])
+def test_route_advisory_unavailable_is_failed_instead_of_ready_empty(
+    vault: Path, encoder: _DeterministicEncoder, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from exomem import advisory_handoff, readiness
+
+    body = "Written conclusion about authoritative collections."
+    if failure == "truncated":
+        body = "shared " * embeddings.MAX_WORDS_PER_CHUNK + body
+    target = _seed_page(vault, "route-unavailable", body)
+    before = (vault / target).read_bytes()
+    receipt, _ = _prepare_custody(vault, batch_id="b-route-unavailable", target_rel=target)
+    ref = derived_receipts.advisory_result_ref(vault, receipt)
+    advisory_handoff.register_route_inputs(vault, receipt.batch_id, corpus_aware.WriteAdvisoryInputs(
+        route="remember", target_rel_path=target, self_path=target,
+        title="Route unavailable", body=body, note_type="insight",
+    ))
+    if failure == "warming":
+        monkeypatch.setattr(readiness, "should_defer", lambda *_a: True)
+    elif failure == "backend":
+        def fail(*_a, **_k):
+            raise RuntimeError("backend unavailable")
+        monkeypatch.setattr(embeddings, "embed_texts", fail)
+    try:
+        execution = _run(vault)[0]
+        assert execution.state == "failed"
+        assert execution.failure_code == "embedding_unavailable"
+        result = _resolve(vault, ref)
+        assert result["status"] == "failed"
+        assert "advisories" not in result
+        assert (vault / target).read_bytes() == before
+    finally:
+        advisory_handoff.forget_route_inputs(vault, receipt.batch_id)
+
+
+def test_restarted_advisory_truncated_generation_is_failed_without_scoring(
+    vault: Path, encoder: _DeterministicEncoder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = "shared " * embeddings.MAX_WORDS_PER_CHUNK + "Distinct written tail."
+    target = _seed_page(vault, "restart-truncated", body)
+    receipt, _ = _prepare_custody(vault, batch_id="b-restart-truncated", target_rel=target)
+    ref = derived_receipts.advisory_result_ref(vault, receipt)
+    monkeypatch.setattr(
+        corpus_aware, "best_cosine_per_file_for_vectors",
+        lambda *_a, **_k: pytest.fail("a truncated generation must not be scored"),
+    )
+    execution = _run(vault)[0]
+    assert execution.state == "failed"
+    assert execution.failure_code == "embedding_unavailable"
+    assert _resolve(vault, ref)["status"] == "failed"
+
+
 def test_advisory_result_material_target_change_is_superseded(
     vault: Path, encoder: _DeterministicEncoder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
