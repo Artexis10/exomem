@@ -1,7 +1,7 @@
 {
   "name": "exomem-cloud",
   "description": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through Exomem Cloud.",
-  "version": "0.99.0",
+  "version": "0.100.0",
   "author": {
     "name": "Substrate Systems OÜ",
     "url": "https://substratesystems.io"

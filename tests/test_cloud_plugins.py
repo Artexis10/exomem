@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 import tomllib
 import zipfile
 from pathlib import Path
@@ -10,6 +11,22 @@ from exomem import cloud_plugins, package_skills, workflow_skills
 from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_openai_submission_icons_are_contained_square_pngs(tmp_path: Path) -> None:
+    cloud_plugins.build_packages(ROOT, tmp_path)
+    with zipfile.ZipFile(tmp_path / "openai.zip") as archive:
+        manifest = json.loads(archive.read("plugin.json"))
+        interface = manifest["extensions"]["com.openai"]["interface"]
+        for key, minimum in (("logo", 256), ("composerIcon", 48)):
+            relative = interface[key].removeprefix("./")
+            assert relative == "assets/icon.png"
+            data = archive.read(relative)
+            assert data[:8] == b"\x89PNG\r\n\x1a\n"
+            width, height = struct.unpack(">II", data[16:24])
+            assert width == height and minimum <= width <= 4096
+            assert len(data) <= 5 * 1024 * 1024
+            assert data == (ROOT / "plugins/cloud/assets/icon.png").read_bytes()
 
 
 def test_cloud_packages_share_complete_canonical_skill_bytes(tmp_path: Path) -> None:

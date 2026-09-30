@@ -122,6 +122,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
         else:
             from .cloud_plugin_evals import directory_cases
 
+            shutil.copyfile(root / "plugins/cloud/assets/icon.png", assets / "icon.png")
             interface = {
                 "displayName": definition["display_name"],
                 "shortDescription": "Memory across conversations",
@@ -133,8 +134,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 "supportURL": definition["support"],
                 "privacyPolicyURL": definition["privacy"],
                 "termsOfServiceURL": definition["terms"],
-                "composerIcon": "./assets/icon.svg",
-                "logo": "./assets/icon.svg",
+                "composerIcon": "./assets/icon.png",
+                "logo": "./assets/icon.png",
             }
             manifest = {
                 "$schema": _SCHEMA_BASE + "plugin.schema.json",
