@@ -1,0 +1,23 @@
+# Built-in collection type: Records (observed state).
+# Package data; changes only with a release. Only built-in types carry `wire`.
+name: records
+version: 1
+title: Records
+item_type: record
+kind: observed
+placement: Records
+description: >-
+  A ledger of observed facts and events. Each collection declares its own
+  fields and natural key in its manifest.
+extensible: true
+fields: {}
+default_audience: policy
+wire:
+  item_id_property: record_id
+  reference_namespace: record
+  manifest_audit_property: record_audit
+  item_audit_marker: exomem-record-audit
+  activity_prefix: "Records audit-v1 "
+  receipt_property: _record_receipt
+  receipt_marker: exomem.records-mutation
+  error_codes: {}

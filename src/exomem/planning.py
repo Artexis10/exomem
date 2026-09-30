@@ -1497,6 +1497,20 @@ def _validate_relationships(
         plans[record.identity.key] = values
     if plan_id is not None and candidate is not None:
         plans[plan_id] = dict(candidate)
+    validate_hierarchy(manifest, plans)
+
+
+def validate_hierarchy(
+    manifest: collections.CollectionManifest, plans: Mapping[str, Mapping[str, Any]]
+) -> None:
+    """Planning's typed hierarchy over one complete set of plans, keyed by plan id.
+
+    Areas carry no parent; an initiative's parent is an outcome and a work
+    item's is an initiative; active plans point only at active targets; a
+    child's area agrees with its parent's; there are no cycles; and nothing
+    archived keeps an active child. This is the named validator
+    ``planning.hierarchy.v1``.
+    """
     parents: dict[str, str] = {}
     for key, values in plans.items():
         kind = values["kind"]
