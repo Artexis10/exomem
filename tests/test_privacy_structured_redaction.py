@@ -145,10 +145,16 @@ def test_hosted_uncataloged_extra_record_is_fully_blanked(hosted_logger, caplog)
     assert not getattr(record, "fields", None)
 
 
+@pytest.mark.parametrize(
+    ("access_level", "parent_propagates"),
+    [(logging.NOTSET, True), (logging.ERROR, True), (logging.ERROR, False)],
+)
 def test_hosted_uvicorn_access_record_formats_through_the_real_access_formatter(
     hosted_logger: logging.Logger,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
+    access_level: int,
+    parent_propagates: bool,
 ) -> None:
     """`uvicorn.access` logs a fixed 5-tuple that
     `uvicorn.logging.AccessFormatter.formatMessage` unpacks positionally.
@@ -162,11 +168,19 @@ def test_hosted_uvicorn_access_record_formats_through_the_real_access_formatter(
     from uvicorn.logging import AccessFormatter
 
     access_logger = logging.getLogger("uvicorn.access")
+    # A preceding uvicorn.Config(log_level="error") leaves this child logger
+    # above WARNING even when caplog lowers the root logger's level.
+    monkeypatch.setattr(access_logger, "level", access_level)
+    monkeypatch.setattr(logging.getLogger("uvicorn"), "propagate", parent_propagates)
     # `logging_config._silence_uvicorn_access()` disables this logger
     # process-wide, so an earlier server-logging test would otherwise leave
     # nothing for caplog to capture.
     monkeypatch.setattr(access_logger, "disabled", False)
-    monkeypatch.setattr(access_logger, "propagate", True)
+    # Uvicorn also stops propagation on its parent logger. Capture at the
+    # emitting logger so that earlier server configuration cannot drop it.
+    monkeypatch.setattr(access_logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(access_logger, "propagate", False)
+    caplog.set_level(logging.WARNING, logger="uvicorn.access")
     access_logger.warning(
         '%s - "%s %s HTTP/%s" %d',
         "203.0.113.7",
