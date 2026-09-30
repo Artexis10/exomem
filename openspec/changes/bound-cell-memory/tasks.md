@@ -12,7 +12,7 @@
 - [ ] 2.2 vec0 for hosted cells: default to `EXOMEM_VEC_BACKEND=sqlite-vec` in hosted mode, verify the image loads the extension, and refuse at start with a stable code when it cannot. Gates: golden floors, backend parity, and latency at the owner-vault chunk count.
 - [ ] 2.3 Byte-bounded `FrontmatterCache` with an environment override; the hosted default is set from 1.3.
 - [ ] 2.4 `bm25.warm` declines when FTS5 is present but busy or unsynced, with a red-first test for the locked-sidecar case.
-- [ ] 2.5 Entity-registry cache holds 2 checkpoints, not 16.
+- [x] 2.5 Entity-registry cache holds 2 checkpoints, not 16.
 - [ ] 2.6 Register the semantic corpus context as a reapable idle cache slot.
 
 ## 3. Structural (D7, D5 step 2)
