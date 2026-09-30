@@ -424,10 +424,19 @@ def _hook_client() -> str:
 
 
 def _hook_home() -> Path:
-    explicit = os.environ.get("EXOMEM_HOOK_HOME")
-    if explicit:
-        return Path(explicit).expanduser()
-    return Path.home() / (".codex" if _hook_client() == "codex" else ".claude")
+    """The client's state home. Mirrors `resolve_home` in
+    `exomem_continuation_checkpoint.py` exactly (a standalone script cannot import
+    its sibling): the checkpoint hook clears this hook's stamps under that home on a
+    compaction, so the two MUST resolve alike or the re-arm misses. Pinned by
+    `tests/test_nudge_diet.py::test_every_hook_resolves_its_home_the_way_the_checkpoint_does`.
+    """
+    env = os.environ
+    shared = env.get("EXOMEM_HOOK_HOME")
+    if shared:
+        return Path(shared).expanduser()
+    if _hook_client() == "codex":
+        return Path(env.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+    return Path(env.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
 
 
 def _prompt(data: dict) -> str:

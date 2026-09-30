@@ -90,8 +90,15 @@ def _run(script: str, event: dict, home: Path, **env: str) -> str:
         "EXOMEM_HOOK_CLIENT": "claude",
         **env,
     }
-    for name in ("EXOMEM_RETRIEVE_INJECT", "KB_RETRIEVE_INJECT", "EXOMEM_SURFACE"):
+    for name in (
+        "EXOMEM_RETRIEVE_INJECT",
+        "KB_RETRIEVE_INJECT",
+        "EXOMEM_SURFACE",
+        "EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC",
+    ):
         environment.pop(name, None)
+    # Env passed by the caller is authoritative, including a cooldown it sets.
+    environment.update(env)
     done = subprocess.run(
         [sys.executable, str(HOOKS / script)],
         input=json.dumps(event),
@@ -198,6 +205,106 @@ def test_a_lifecycle_event_rearms_both_full_texts(tmp_path):
         )
     )
     assert again == retrieve.REMINDER
+
+
+def _isolated_env(tmp_path: Path, client: str, **extra: str) -> dict[str, str]:
+    """A hook environment with NO shared-home override: only the client's own
+    config-dir variable (or none) decides where the hook keeps its state."""
+    keep = {k: v for k, v in os.environ.items() if k.startswith(("PATH", "SYSTEMROOT", "LANG"))}
+    return {
+        **keep,
+        "HOME": str(tmp_path / "home"),
+        "USERPROFILE": str(tmp_path / "home"),
+        "EXOMEM_HOOK_CLIENT": client,
+        "EXOMEM_PROMINENCE": "balanced",
+        **extra,
+    }
+
+
+def _spawn(script: str, args: list[str], event: dict, env: dict[str, str]) -> str:
+    done = subprocess.run(
+        [sys.executable, str(HOOKS / script), *args],
+        input=json.dumps(event),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+        cwd=env["HOME"],
+    )
+    return done.stdout.strip()
+
+
+@pytest.mark.parametrize(
+    ("client", "config_var"),
+    [("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME"), ("claude", None), ("codex", None)],
+)
+def test_a_real_precompact_rearms_the_retrieval_reminder_under_a_relocated_config_dir(
+    tmp_path, client, config_var
+):
+    """End to end: PreCompact through the checkpoint hook's own entry point, then the
+    retrieve hook again. The checkpoint clears the stamps under `resolve_home`, which
+    honours CLAUDE_CONFIG_DIR / CODEX_HOME; the nudge hooks must look in the same place
+    or the compaction never re-arms them."""
+    (tmp_path / "home").mkdir()
+    extra = {}
+    if config_var:
+        config = tmp_path / "relocated-config"
+        config.mkdir()
+        extra[config_var] = str(config)
+    env = _isolated_env(tmp_path, client, **extra)
+    session = "s-relocated"
+    prompt = {"prompt": PROMPT, "session_id": session}
+
+    first = _context(_spawn("exomem_retrieve_nudge.py", [], prompt, env))
+    quiet = _context(_spawn("exomem_retrieve_nudge.py", [], prompt, env))
+    assert first == retrieve.REMINDER
+    assert quiet == ""
+
+    _spawn(
+        "exomem_continuation_checkpoint.py",
+        ["--client", client],
+        {
+            "hook_event_name": "PreCompact",
+            "session_id": session,
+            "trigger": "auto",
+            "cwd": str(tmp_path / "home"),
+            "transcript_path": str(tmp_path / "home" / "t.jsonl"),
+        },
+        env,
+    )
+
+    again = _context(_spawn("exomem_retrieve_nudge.py", [], prompt, env))
+    assert again == retrieve.REMINDER
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize(
+    "environ",
+    [
+        {},
+        {"CLAUDE_CONFIG_DIR": "~/cfg-claude"},
+        {"CODEX_HOME": "~/cfg-codex"},
+        {"CLAUDE_CONFIG_DIR": "", "CODEX_HOME": ""},
+        {"EXOMEM_HOOK_HOME": "~/shared", "CLAUDE_CONFIG_DIR": "/x", "CODEX_HOME": "/y"},
+    ],
+)
+def test_every_hook_resolves_its_home_the_way_the_checkpoint_does(
+    tmp_path, monkeypatch, client, environ
+):
+    """The three standalone scripts cannot import each other, so the resolution is
+    mirrored; this pins the mirrors to `resolve_home`, the one definition."""
+    for name in ("EXOMEM_HOOK_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("EXOMEM_HOOK_CLIENT", client)
+    for key, value in environ.items():
+        monkeypatch.setenv(key, value)
+
+    expected = checkpoint.resolve_home(client)
+    assert retrieve._hook_home() == expected
+    assert capture._hook_home() == expected
 
 
 def test_the_plugin_mirrors_stay_byte_identical():
