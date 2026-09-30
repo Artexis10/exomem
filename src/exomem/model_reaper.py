@@ -149,7 +149,7 @@ def _quiet_cache_slot(
 
 def default_slots() -> list[ResourceSlot]:
     """Default reclaimable resources: models when policy allows, CPU caches in quiet mode."""
-    from . import bm25, find
+    from . import bm25, find, semantic_contract
     from . import embeddings as e
 
     return [
@@ -192,6 +192,12 @@ def default_slots() -> list[ResourceSlot]:
             ),
             lambda: any(find.release_idle_ram_caches().values()),
             find.cache_activity,
+        ),
+        _quiet_cache_slot(
+            "semantic-corpus-context",
+            semantic_contract.corpus_context_resident,
+            semantic_contract.release_idle_corpus_contexts,
+            semantic_contract.corpus_context_activity,
         ),
     ]
 

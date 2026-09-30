@@ -13,7 +13,7 @@
 - [ ] 2.3 Byte-bounded `FrontmatterCache` with an environment override; the hosted default is set from 1.3.
 - [ ] 2.4 `bm25.warm` declines when FTS5 is present but busy or unsynced, with a red-first test for the locked-sidecar case.
 - [x] 2.5 Entity-registry cache holds 2 checkpoints, not 16.
-- [ ] 2.6 Register the semantic corpus context as a reapable idle cache slot.
+- [x] 2.6 Register the semantic corpus context as a reapable idle cache slot.
 
 ## 3. Structural (D7, D5 step 2)
 
