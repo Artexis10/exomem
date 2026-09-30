@@ -166,7 +166,7 @@ The whole serialized v1 result SHALL cap at 64 KiB. It SHALL label source, query
 
 ### Requirement: Query admission and cancellation bound resource use
 
-Before execution the planner SHALL check at most 100,000 estimated authorized row visits and the join/group limits, refusing unbounded work. Execution SHALL have a 200 ms deadline and SQLite progress-handler cancellation checked at least every 1,000 VM instructions, with deadline checks around non-SQL work. Readers SHALL use an 8 MiB page cache, at most 2 connections per vault, bounded 128-row fetches and disk-backed intermediate state capped at 64 MiB/query. Incremental query-reader peak RSS SHALL be at most 16 MiB and shared release cache at most 8 MiB/vault. No full-collection Python materialization SHALL occur.
+Before ordinary interactive execution the planner SHALL check at most 100,000 estimated authorized row visits and the join/group limits, refusing unbounded work. Interactive execution SHALL have a 200 ms deadline and SQLite progress-handler cancellation checked at least every 1,000 VM instructions, with deadline checks around non-SQL work. Readers SHALL use an 8 MiB page cache, at most 2 connections per vault, bounded 128-row fetches and disk-backed intermediate state capped at 64 MiB/query. Incremental query-reader peak RSS SHALL be at most 16 MiB and shared release cache at most 8 MiB/vault. No full-collection Python materialization SHALL occur. Explicit `query.execution_profile="analytics"` on the same MCP collection-query route MAY select a synchronous ceiling of 10 million released visits, 2 seconds for the whole call including admission/serialization and 256 MiB disk temp, preserving 16 MiB reader RSS and existing group/output caps. Profile omission SHALL mean interactive. Compose/preview/explain/dry-run SHALL validate/report selected profile bounds. Analytics SHALL return an exact completed reduction or typed cost/timeout refusal with no partial reduction or resumable half-computed aggregate; it SHALL NOT widen ordinary interactive or compiler budgets.
 
 #### Scenario: Expensive or interrupted work returns no partial reduction
 - **WHEN** the estimated cost exceeds the limit, actual execution times out, temp space exhausts or the caller cancels
@@ -175,6 +175,10 @@ Before execution the planner SHALL check at most 100,000 estimated authorized ro
 #### Scenario: Next caller inherits no authorization state
 - **WHEN** a reader is reused after timeout or disconnect under a different audience
 - **THEN** it starts with fresh admission and cannot read the previous caller's temporary release set
+
+#### Scenario: Agent explicitly selects bounded large analysis
+- **WHEN** an agent previews and executes a million-row exact reduction that declared rollups cannot answer using query.execution_profile="analytics"
+- **THEN** the existing MCP route applies the published 10-million-visit/2-second whole-call ceiling and returns an exact completed result or cost/timeout refusal, while omission retains 100,000 visits/200 ms and activation remains within its 30 ms stage
 
 ### Requirement: Physical plans and release benchmarks prove the targets
 
@@ -199,3 +203,111 @@ The engine SHALL remain default-off until parent P1a prerequisites and phase gat
 #### Scenario: Portability keeps indexed queries consistent
 - **WHEN** a validated one-store snapshot is restored under a compatible query-engine reader
 - **THEN** declared schemas, projection mappings, governed query results and audit history agree with the exported state
+
+### Requirement: Agent query lifecycle supports self-correction
+
+The system SHALL expose compose, explain, safe cost preview, dry-run and execution through one versioned query envelope on existing non-frozen MCP tool names, sharing the same IR and query leaf with CLI/REST. Explain SHALL identify authorized logical indexes/access stages, bounds and release strategy without raw SQL or hidden statistics. Compose SHALL normalize/validate without value reads; dry-run SHALL bind/admit/prepare without executing results or persistent changes. Saved views SHALL accept typed value parameters only and SHALL be revalidated after incremental query refinement. Errors SHALL carry a stable code, request field, expected/allowed released values, repair guidance and retryability suitable for an agent to correct its request.
+
+#### Scenario: Agent refines an expensive query
+- **WHEN** an agent previews a wide time-range reduction beyond admitted cost
+- **THEN** it receives a cost refusal or unknown bound with safe guidance to narrow the window or use an exact declared rollup, can compose/dry-run the revised request and execute it through the same MCP tool
+
+#### Scenario: Explain exposes useful index information without SQL
+- **WHEN** an admitted equality/range and ordered page uses a declared index
+- **THEN** explain names that released logical index and access stage while omitting physical SQL and withheld cardinalities
+
+#### Scenario: Dry-run has no persistent effect
+- **WHEN** a saved or ad hoc query is dry-run
+- **THEN** binding/governance/cost and preparation findings are returned without result iteration, schema changes, collection writes or audit effects
+
+### Requirement: Large collections use compact typed storage and streaming ingest
+
+Large declared collections SHALL support a migration-managed canonical typed-column encoding in the single per-vault store, retaining stable identities, immutable version/source history, logical hashing/audit, governance and existing query/render/edit-back semantics. Declared dense scalars SHALL not require a full JSON row plus duplicate JSON projection; sparse residual objects MAY retain bounded JSON. Existing JSON encoding SHALL remain readable and migration SHALL prove logical parity before publishing. Optional bulky-text compression SHALL be lossless, versioned and bounded at decode; indexed scalar fields SHALL remain directly comparable.
+
+The importer SHALL stream authorized preserved-source CSV, NDJSON and JSON arrays through declared mappings, with decoded rows ≤1 MiB/depth 32 and batches ≤500 rows/4 MiB. Each batch SHALL enforce normal mutation authority and atomically commit values/history/audit/checkpoint under one idempotent identity. Preview/start/status/cancel SHALL be agent-reachable through existing MCP names with bounded responses. Invalid/cancelled/interrupted imports SHALL report actual partial state and resume positions, never a fabricated complete import. Additional import peak RSS SHALL be ≤64 MiB independent of collection size. Time-series indexes SHALL support timestamp/type orders within the declared index budget.
+
+#### Scenario: Crash after a committed import batch
+- **WHEN** a streaming job loses its response after a batch commits and retries the same source/job/batch identity
+- **THEN** rows, version/audit and checkpoint are returned exactly once without duplicate effects, and later work resumes from the next source position
+
+#### Scenario: Invalid row leaves honest partial progress
+- **WHEN** a later source row fails declared type validation under stop-on-error policy
+- **THEN** previous committed batches remain durable, the current batch is absent and status names failed/partial state, imported count and repairable position without claiming completion
+
+#### Scenario: Typed storage migration fails parity
+- **WHEN** reconstructed values/history/hashes differ from the previous encoding
+- **THEN** cutover refuses and the previous canonical mapping remains active with no rewritten append-only history
+
+#### Scenario: Million-row capacity gate includes audit
+- **WHEN** the deterministic 8-scalar-field/2-index fixture imports at least one million rows
+- **THEN** active typed payload/index bytes are ≤96 MiB per million, initial live database including identity/version/source/audit is ≤512 MiB per million, sustained committed throughput is ≥10,000 rows/s, 500-row batch latency retains the parent <1 s gate and all component/RAM/WAL measurements are reported
+
+#### Scenario: Raw export is smaller than audited storage
+- **WHEN** the private authorized wearable-export journey compares its roughly 244 MB raw source to the imported store
+- **THEN** the report separately names raw bytes, active typed/index bytes, full audited database, retained evidence, replica and WAL peak, and makes no unsupported claim of whole-import compression
+
+### Requirement: Incremental rollups preserve governed exactness
+
+Declared daily/ISO-week rollups SHALL support exact count/sum/avg/min/max/latest and update affected old/new buckets, readiness and generation in the same canonical transaction as every relevant write. Dirty/unproven rollups SHALL be unavailable, never stale-complete. Rollup reuse SHALL require uniform release or exact fully admitted release partitions; a policy splitting a partition SHALL use a bounded governed base reduction or an explicit unavailable/cost result. Percentile and distinct-count SHALL NOT be fabricated by combining insufficient rollup statistics.
+
+#### Scenario: A hidden member would change the maximum
+- **WHEN** a mixed-release query runs against a bucket containing a withheld maximum value
+- **THEN** result, count, preview and completeness equal the twin with that row absent, using an exact admitted partition or governed base query
+
+#### Scenario: Update changes time bucket and minimum
+- **WHEN** a governed update moves an item between dates and replaces the previous bucket minimum
+- **THEN** both buckets, recomputed minimum, row state and generation commit together or all remain at the old state
+
+#### Scenario: Policy change splits a rollup partition
+- **WHEN** release policy changes after a rollup/result cache was populated
+- **THEN** the old rollup eligibility and cached query are invalidated before serving results, with no stale aggregate or false zero
+
+### Requirement: Unified query IR preserves governance across backends
+
+The system SHALL use a backend-neutral typed IR for documents, collection rows and graph references with stable semantic/ontology identities. Source scans, declared joins, reductions and sibling traversals SHALL carry one admission plan; every backend SHALL compile its release predicates before projection/reduction. SQLite SHALL be the only delivered backend in this change. Unknown or unavailable domain/operation capabilities SHALL refuse explicitly. Future backends SHALL pass the same semantic/rows-absent corpus and cancellation/snapshot contract without requiring changed agent queries or weakened release rules. Markdown documents SHALL remain file-canonical, with current read-only metadata/unit projections. Scale tiers SHALL distinguish measured embedded gates from future hosted/billions targets and use explicit migration/equivalence proof for promotion.
+
+#### Scenario: Same request targets a backend lacking admitted traversal
+- **WHEN** the fake adapter used by contract tests does not support a required graph/release operation
+- **THEN** the unchanged structured query receives typed unsupported/unavailable rather than an unrestricted fallback or rewritten semantics
+
+#### Scenario: Unified document and row query
+- **WHEN** an agent queries declared links between a collection row and a knowledge-page dimension after the sibling capability is ready
+- **THEN** both sources use the shared IR/admission plan and returned definitions/provenance describe only released rows/pages
+
+### Requirement: Activation serves query-derived units within exact freshness budgets
+
+On every matching turn, `activate_context` SHALL select query-derived working-set units through declared surfacing cues/match_fields/anchors/roles and kind restrictions, using authored views or closed deterministic query recipes through the shared leaf. Units SHALL state metric, window, source collection, query/fingerprint, released row count or explicit unknown, provenance and complete/partial/unknown/failed state. Unknown, partial or failed reads SHALL NOT be shown as zero or a complete trend. The combined collection/graph stage SHALL have a 30 ms hard deadline and ≤30 ms p95 within <1 s p95 activation; at most two collection queries and one sibling graph request SHALL execute. It SHALL abstain on deadline/unproven freshness, not fall back to unbounded work.
+
+Each query unit SHALL fit 2,048 UTF-8 bytes, collection units 4,096 bytes total, one graph unit 2,048 bytes and the combined stage 6,144 bytes or the active packet's smaller remaining allowance, preserving existing mandatory continuity/tool/bootstrap budgets. Cache keys SHALL contain query fingerprint, participating collection generations and audience, with policy/window/schema/view/vocabulary/projection basis in the fingerprint. Writes and policy/ontology/projection changes SHALL exactly invalidate dependent entries; stale aggregate reuse SHALL be forbidden.
+
+#### Scenario: Resting metric turn produces a sourced unit
+- **WHEN** a declared wearable type matches a last-30-days resting-heart-rate turn
+- **THEN** the compiler serves a bounded released latest/trend recipe unit identifying metric, UTC window, collection, count/completeness and normalized query without exposing raw SQL
+
+#### Scenario: Query timeout is not an empty window
+- **WHEN** a matched query cannot finish admission or execution inside the shared 30 ms stage deadline
+- **THEN** that unit abstains with explicit failed/unknown state and no zero or complete trend, while independent ready units may remain
+
+#### Scenario: Cached renewal count changes after a write
+- **WHEN** a write changes a subscription's renewal month or a participating collection generation
+- **THEN** the cached renewing-this-month view is invalidated transactionally and the next unit uses the new exact released count/window/source
+
+#### Scenario: Activation gains preserve current gates
+- **WHEN** the extended benchmark runs at least 30 query-derived and 30 sibling path-derived turns and their negative/cold twins
+- **THEN** correct unit inclusion improves by at least 15 percentage points per new family, irrelevant units are ≤1%, existing continuity/corpus gates and sub-second p95 pass, and withheld disclosure/false-zero cases remain zero
+
+### Requirement: Every capability is discoverable and agent-reachable
+
+Structured queries, lifecycle/explain, aggregates/rollups, big-data import, saved views, sibling graph/path/ontology operations and query/path compiler units SHALL have an existing-name MCP route and generic skill instructions, discoverable through bootstrap core stubs or on-demand sections. Publication SHALL preserve #1458 tool-schema diet, #1464 compact-core ceiling (currently 63,300 serialized bytes), route visibility, response limits and frozen adapter schemas. A capability without a successful real-MCP agent-task journey SHALL NOT count as delivered.
+
+#### Scenario: Agent discovers and runs every delivered capability
+- **WHEN** held-out invented row/analysis, graph/mixed and import/view/refinement tasks run through the installed MCP surface and current generic skill
+- **THEN** each capability has a successful end-to-end case, per-family correct final answers are ≥95%, first executable queries ≥90%, repair within two revisions ≥90%, median calls ≤4/p95 ≤8 excluding separately reported long import polling, and governance/false-complete/false-zero failures are zero
+
+#### Scenario: Internal tests pass but the tool route is absent
+- **WHEN** a feature works through a Python leaf but its current MCP adapter cannot discover or invoke it
+- **THEN** the capability release gate fails until its tool/skill/adapter journey succeeds
+
+#### Scenario: Grammar exceeds bootstrap core budget
+- **WHEN** lifecycle or graph guidance would increase compact core above its existing ceiling
+- **THEN** details move to an on-demand section, the core route remains discoverable and no ceiling is increased or frozen schema changed
