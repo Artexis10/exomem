@@ -78,7 +78,7 @@ Alternative: jemalloc via `LD_PRELOAD`. Kept as the fallback if D1 shows trimmin
 ## Migration Plan
 
 1. The harness lands first and records a baseline for a large synthetic vault and the owner vault copy.
-2. The quick wins land together (D2, D3, D4, D6 and D5 step 1), each with a harness before/after in its PR.
+2. The quick wins land together (D2, D3, D4 and D6), each with a harness before/after in its PR.
 3. D7, then D5 step 2.
 4. Once the harness shows the first-build peak and idle floor with headroom, lower cellctl's default memory limit and request in the platform chart. That is its own rollout; it re-renders every cell.
 
