@@ -42,7 +42,7 @@ Three facts shape the design:
 
 1. `focus` is current-turn evidence (D2.1). Every anchor carries an `origin` label (`turn`, `focus`, `turn_and_focus`, `conversation`), so the agent can tell what the user said from what the agent said was in play.
 2. Assistant turns go into `recent`, capped. Only the newest two are read for evidence, and the carry never walks them (D1, D2).
-3. The call ledger records `conversation` as name, length and sha256, the same as `turn`. There is no call-ledger contract change (D3).
+3. The call ledger records `conversation` by name and byte length only, never a hash (corrected post hoc, see "Post-hoc corrections").
 4. The 1 s bound is the CI gate as pinned (D7). Live-cell latency is a separate lane, which this change must not regress.
 5. S1 and S4 ship together, with one connector refresh (D7).
 6. Fold `claude/keyless-thread-continuity` into this change, and specify S2's precedence on top of it. See D9 for what the branch turned out to contain.
@@ -128,8 +128,7 @@ The compiler adds one stage, `working_set.conversation`, between `working_set.re
 
 **What the call ledger keeps.**
 
-- The ledger already records every argument as name, byte length and sha256 (call-ledger). That is existing policy, and it covers `conversation` exactly as it covers `turn`.
-- This change does not widen it. Ruling 3 keeps it: there is no call-ledger contract change.
+- The ledger records every other argument as name, byte length and sha256 (call-ledger). `conversation` is recorded by name and byte length only: a hash of a short, guessable conversation is a confirmation oracle. This is a call-ledger contract change, specified in this change's `call-ledger` delta (post-hoc correction on #1463).
 
 **The token.** The continuity token never encodes a conversation field, a carried anchor, or an anchor that resolved only with the conversation's help. A conversation that dropped its signal then degrades to today's behaviour instead of laundering that signal into durable client state.
 
@@ -344,3 +343,15 @@ The change is additive. Old clients and old services interoperate: the argument 
 **Fixture correction, `context-activation-conversation-v1`.** The first acceptance run failed twins W17 to W24 on arms (c) and (d). Each twin's turn is content-free, but it carried the paired case's fixture `focus` naming the earlier subject. `focus` is current-turn evidence (ruling 1), so an exact alias in it resolves that anchor, and the twin resolved its own poison. The named focus was a confound: a twin exists to test a content-free turn. The twins' `focus` was therefore re-authored to `closing pleasantries`, which names nothing. One case, V29 (attachment group, arms a, c, d), was added: the same content-free turn with a focus that names the earlier subject, pre-registered so that arms (c) and (d) resolve it with `origin = "focus"` and arm (a) abstains. That keeps ruling 1 pinned. It is a case in the attachment group rather than a twin because the twin invariants (one twin per case, a twin never serves its case's gold) forbid a twin that resolves its case's gold. The fixtures were edited after the first scored run, so that run is void: the digest moved from `374056f5…` to `1c81d3e9…`, the arm (a) baseline and the acceptance run were re-recorded, and the eight rows left `PENDING_RULING`.
 
 **Anaphor set.** The bare pointers "one", "ones" and "other" no longer make a turn anaphoric by themselves (the shipped follow-up test, `is_follow_up`, is unchanged). They count only when a determiner, demonstrative, ordinal or "which" governs them. This removes the false positive on a numeral use ("plenty of chat for one day"), which the first acceptance run found on W24 (arm b).
+
+## Post-hoc corrections (orchestrator rulings on #1463)
+
+**The hook admits turns instead of filtering them.** The transcript reader dropped known wrappers from user records, so shell input and output, task notifications, compaction summaries, transcript-only and tool-result records, and Codex instruction and environment messages reached the service as user turns. It now admits an unflagged user record whose text blocks open with no tag and carry no client envelope; any true `is…` flag refuses the record. The hook is standalone and cannot import the package, so the shared egress scrubber runs where the text arrives: `bound()` removes any credential it recognises from `focus` and every entry before matching, and reports `truncated`.
+
+**The call ledger no longer hashes the conversation.** Ruling 3 of #1455 kept the ledger's per-argument sha256 for `conversation`. That hash is a confirmation oracle for text the caller never meant to persist, so the ledger records `conversation` by name and byte length only (the `call-ledger` delta). The privacy test now drives the built MCP server with its middleware and checks the serialised argument's own digests, which the earlier direct call could not see.
+
+**Anaphor precision.** The first anaphor set fired on ordinary turns: an expletive "it" ("is it possible to install…"), a complementiser "that" ("I think that we should…"), temporal deixis ("this week", "the other day"), and it missed contractions ("it's still on track?"). The set now splits contractions and excludes those classes, a same-turn antecedent and a closing acknowledgement (spec, "An anaphoric turn is carried…"). The carry gate itself is unchanged: it runs only when the turn's own resolution is `unresolved` with no worded contact. Measured on the authored unit set, the false-positive rate on 29 pronoun-bearing negatives fell from 86.2% to 0% and recall on 40 anaphoric turns rose from 92.5% to 100%; on two sets written after the rule was fixed, 2 of 25 and 2 of 22 negatives still fire (a two-word extraposed predicate, "would it make sense to", and a comparative "earlier").
+
+**Fixture correction, `context-activation-conversation-v1`.** 22 pronoun-bearing negatives (N1 to N22, twin mode `pronoun_negative`) were added to the two anaphoric-carry cases: each sends its case's earlier turns with a focus that names nothing and must serve nothing from them on any arm. They are extra negatives, not the case's one twin. On arms (b) and (d) the old anaphor set carried 38 of their 44 rows; the corrected set carries none, and V17, V18, V28 and W28 still carry. The fixtures changed, so the digest moved from `1c81d3e9…` to `f8cad6d5…` and the arm (a) baseline and the acceptance run were re-recorded.
+
+**Conversation stage latency.** The stage matched each earlier entry with its own scan of the catalogue and re-derived every row's names per scan. The entries are now matched in one scan (`candidates_for_each`), which keeps only rows that share a word or phrase with some entry and derives each row's names once; the turn's token folds are computed once per turn. The maximum-size gate's stage p95 fell from 91.9 ms to 36.6 ms on the same loaded host, under the unchanged 60 ms budget.

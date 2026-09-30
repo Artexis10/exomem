@@ -170,6 +170,16 @@ A turn SHALL be anaphoric when both of these hold:
 1. Its turn segment reaches no anchor by any worded contact kind.
 2. It speaks a cue from the effective referential vocabulary, or one of a closed, shipped anaphor set: third-person pronouns and possessives; "that", "this", "those", "these", "it"; the follow-up markers already shipped, except the bare pointers "one", "ones" and "other"; an ordinal followed by "one" or "option"; "the former" and "the latter". A bare pointer ("one", "ones", "other") counts as an anaphor only when a determiner ("the", "a", "an"), a demonstrative, an ordinal or "which" governs it ("that one", "the other one", "the second one", "which one"); a numeral use ("for one day", "no one") does not.
 
+   A word of that set counts only where it refers. Contractions are split first, so "it's still on track?" and "that's what I meant" are read as the pronoun they carry. These closed grammatical classes do NOT count:
+
+   - an expletive or dummy "it": weather and clock time ("it's raining", "what time is it"), an extraposed subject clause ("is it possible to…", "it's hard to say…", "does it matter if…"), a raising verb ("it seems that…", "it turns out…", "it looks like…"), "it takes … to", and an instruction about the answer's style ("make it shorter");
+   - an "it" whose antecedent is a noun phrase in an earlier clause of the same turn ("Let's switch to the grocery list, can you make it shorter?");
+   - a complementiser or relative "that": after a verb or adjective of saying, thinking or knowing ("I think that we should…", "I'm sure that…"), before a subject pronoun, or after a noun of the same turn ("the recipe that my aunt sent");
+   - temporal deixis: "this", "these", "next", "last" or "earlier" before a time word ("this week", "these days", "next week", "earlier today"), "the other day" and "on the other hand";
+   - a closing acknowledgement ("thanks, that's all", "that's fine").
+
+   An elliptical opener ("what about …", "how about …") is anaphoric: it reuses the previous question.
+
 Length is not a criterion: an anaphoric turn MAY carry any number of other words.
 
 **Precedence.** The conversation carry SHALL sit at one fixed place in the order in which activation decides a turn that its words did not resolve. That order builds on the keyless continuity, referential recency and follow-up contracts as they stand on `main` (context-activation-continuity, and memory-loop in `close-memory-loop`), and SHALL NOT change any of them. For each request, the first rule below that decides it wins:
@@ -230,6 +240,16 @@ A refs-only conversation SHALL NOT carry: a ref says what was read, not what "it
 - **WHEN** a turn says "Cheers, there is plenty of chat for one day." and an earlier user entry resolved an anchor
 - **THEN** the turn is not anaphoric and nothing is carried
 
+#### Scenario: An ordinary pronoun-bearing turn is not carried
+
+- **WHEN** an earlier user entry resolved an anchor, and the turn is "is it possible to install Python 3.13 on my laptop?", "I think that we should buy groceries on the way home" or "the other day I went hiking"
+- **THEN** the turn is not anaphoric and nothing is carried
+
+#### Scenario: A contracted anaphor is carried
+
+- **WHEN** an earlier user entry resolved "Ottilie Marsh", and the turn is "it's still on track for the autumn?"
+- **THEN** "Ottilie Marsh" is carried with `generation.carried_by = "conversation"`
+
 #### Scenario: A governed pointer is an anaphor
 
 - **WHEN** a turn says "which one is cheaper?" or "the other one, please"
@@ -274,7 +294,9 @@ Conversation content SHALL be request-scoped.
 - the episode ledger or capture state;
 - timings, logs or any other machine-local state file.
 
-**Call ledger.** The call ledger SHALL keep its existing shape-and-hash record of arguments (call-ledger: "Arguments Are Recorded As Shape And Hash, Never Values"), which covers `conversation` exactly as it covers `turn`.
+**Call ledger.** The call ledger SHALL record `conversation` by its name and byte length only, never a hash (call-ledger: "Arguments Are Recorded As Shape And Hash, Never Values", as modified by this change).
+
+**Credentials.** Before anything is matched, the server SHALL run the shared egress scrubber over `focus` and every `recent` entry. A credential it recognises SHALL be removed, never matched, and its removal SHALL report `truncated`.
 
 **Activation log.** The activation log MAY record only these, per call:
 
@@ -297,7 +319,7 @@ Conversation content SHALL be request-scoped.
 
 - **WHEN** a request carries a `recent` entry containing a distinctive invented phrase
 - **THEN** after the call, no file under the vault's machine-local state root contains that phrase
-- **AND** no file other than the call ledger contains its sha256
+- **AND** no file, the call ledger included, contains its sha256 or the sha256 of the serialised `conversation` argument
 
 #### Scenario: A request with a conversation bypasses the cache
 

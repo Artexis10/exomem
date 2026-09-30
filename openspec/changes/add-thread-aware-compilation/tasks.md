@@ -51,7 +51,7 @@ The orchestrator ruled on the design on 2026-09-29; the rulings are recorded in 
   - door parity across MCP, CLI and REST.
   Evidence: tests/test_working_set_conversation_bounds.py (14 tests; red on the missing argument, green).
 - [x] 2.2 Red: privacy tests covering:
-  - a sentinel phrase absent from every state file, and its sha256 absent from every file except the call ledger;
+  - a sentinel phrase absent from every state file, and its sha256 and the serialised argument's sha256 absent from every file, the call ledger included;
   - the cache bypass;
   - no hot-profile event from refs;
   - the token never encoding conversation-only anchors;

@@ -8,7 +8,7 @@ In `working_set` injection mode, where the client's prompt event carries a trans
 
 **Recent turns.** `conversation.recent` holds the last user and assistant text turns before the current prompt, oldest first, within the `conversation-aware-activation` bounds.
 
-- Only human-typed user text and the assistant's final text SHALL count.
+- Only human-typed user text and the assistant's final text SHALL count. A user turn SHALL be admitted by an allowlist, never kept by a denylist: an unflagged user record whose text blocks open with no tag, carry no client envelope and carry no Exomem data header. On Claude Code a record with any true `is…` flag (meta, sidechain, compaction summary, transcript-only, or one the hook does not know) or a tool result is not a user turn, and neither is text that opens with or carries `<bash-`, `<task-notification>`, `<system-reminder>`, `<command-` or `<local-command`. On Codex the AGENTS.md instruction message, `<environment_context>`, `<user_instructions>` and `<skill>` bodies, and any non-human record are not user turns.
 - These are excluded:
   - tool calls and tool results;
   - thinking or reasoning blocks;
@@ -45,6 +45,12 @@ In `working_set` injection mode, where the client's prompt event carries a trans
 - **THEN** the activation request's `conversation.recent` holds those five text turns, oldest first, within bounds
 - **AND** `conversation.refs` holds the read page's ref
 - **AND** no text from the tool result or the injected block appears in the request
+
+#### Scenario: Machine output never becomes a user turn
+
+- **WHEN** the tail holds shell input and output (with a credential line in the output), a task notification, a reminder, a slash-command envelope, a compaction summary, a meta record, a sidechain record and a tool result, between two human-typed turns
+- **THEN** `recent` holds only the two human-typed turns and the assistant's final text
+- **AND** none of the machine text, and not the credential line, is sent
 
 #### Scenario: An unreadable transcript costs nothing
 
