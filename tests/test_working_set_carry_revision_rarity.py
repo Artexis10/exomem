@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from test_working_set_carry import _write, seed_ordinary_notes
 from test_working_set_index import _seed_planning, _seed_structure
 
@@ -109,3 +111,90 @@ def test_current_pages_sharing_the_name_still_make_it_ordinary(vault: Path) -> N
     hits, _state = working_set_runtime.carry_candidates(vault, TURN)
 
     assert working_set.dominant_carry(hits) is None
+
+
+def test_warm_carry_rarity_reuses_counts_until_the_catalogue_changes(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(vault, retired=3)
+    store = lexstore.get_store(vault)
+    counted: list[tuple[str, ...]] = []
+    original = store._document_frequency_query
+
+    def count(conn, tokens, scope, **kwargs):
+        counted.append(tuple(tokens))
+        return original(conn, tokens, scope, **kwargs)
+
+    monkeypatch.setattr(store, "_document_frequency_query", count)
+    stems = working_set_runtime.pairable_stems(TURN)
+    first = working_set_runtime.rare_turn_terms(vault, stems)
+    working_set_runtime.reset_caches_for_tests()
+    assert working_set_runtime.rare_turn_terms(vault, stems) == first
+    assert len(counted) == 1, "an unchanged carry recounted the whole corpus"
+
+    for index in range(3):
+        _write(
+            vault / RESEARCH / f"brask-ferry-timetable-copy-{index}.md",
+            _revision(f"copy {index}", status="active", body="is posted at the pier.", successor=None),
+        )
+    lexstore.ensure_fresh(vault)
+    rare, pages, state = working_set_runtime.rare_turn_terms(vault, stems)
+    assert state == "available"
+    assert pages == first[1] + 3
+    assert "brask" not in rare
+    assert len(counted) == 2
+
+
+def test_carry_rarity_cache_keeps_filtered_counts_separate(vault: Path) -> None:
+    _seed(vault, retired=3)
+    stems = ["brask"]
+    unfiltered = lexstore.term_document_frequencies(vault, stems, scope="kb").value
+    filtered = lexstore.term_document_frequencies(
+        vault, stems, scope="kb", exclude_navigation=True,
+        exclude_raw_material=True, exclude_statuses=working_set.RETIRED_PAGE_STATUSES,
+    ).value
+    assert unfiltered is not None and filtered is not None
+    assert unfiltered[0]["brask"] == 4
+    assert filtered[0]["brask"] == 1
+    assert lexstore.term_document_frequencies(vault, stems, scope="kb").value == unfiltered
+
+
+def test_carry_rarity_cache_eviction_keeps_counts_needed_by_this_request(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(vault, retired=3)
+    monkeypatch.setattr(lexstore, "_TERM_FREQUENCY_CACHE_MAX", 2)
+    kwargs = {"scope": "kb", "exclude_statuses": working_set.RETIRED_PAGE_STATUSES}
+    first = lexstore.term_document_frequencies(vault, ["brask", "oldword"], **kwargs).value
+    assert first is not None and first[0]["brask"] == 1
+
+    second = lexstore.term_document_frequencies(vault, ["brask", "unseenword"], **kwargs).value
+    assert second is not None
+    assert second[0] == {"brask": 1, "unseenword": 0}
+    cached = lexstore.get_store(vault)._filtered_term_frequency_cache
+    assert cached is not None and len(cached[1]) <= 2
+
+
+def test_new_carry_terms_reuse_the_catalogue_page_total(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(vault, retired=3)
+    store = lexstore.get_store(vault)
+    queries: list[str] = []
+    original = store._document_frequency_query
+
+    def trace(conn, tokens, scope, **kwargs):
+        conn.set_trace_callback(queries.append)
+        try:
+            return original(conn, tokens, scope, **kwargs)
+        finally:
+            conn.set_trace_callback(None)
+
+    monkeypatch.setattr(store, "_document_frequency_query", trace)
+    kwargs = {"scope": "kb", "exclude_raw_material": True}
+    first = lexstore.term_document_frequencies(vault, ["brask"], **kwargs).value
+    second = lexstore.term_document_frequencies(vault, ["unseenword"], **kwargs).value
+    assert first is not None and second is not None
+    assert second == ({"unseenword": 0}, first[1])
+    totals = [query for query in queries if query.startswith("SELECT COUNT(*) FROM pages p WHERE")]
+    assert len(totals) == 1, "a new term recounted an unchanged corpus"

@@ -3279,6 +3279,7 @@ class LexicalStore:
         # ((scope, catalogue generation), {stem: document frequency}, pages in
         # scope) for bounded queries; see `_catalogue_term_frequencies`.
         self._term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
+        self._filtered_term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
 
     def _decline_rebuild(self, reason: str) -> bool:
         """Record one stable, content-free repair result and decline."""
@@ -3890,6 +3891,7 @@ class LexicalStore:
             self._restore_quarantined_set(quarantined)
             return False
         self._term_frequency_cache = None
+        self._filtered_term_frequency_cache = None
         self._discard_quarantined_set(quarantined)
         return True
 
@@ -4698,6 +4700,7 @@ class LexicalStore:
             )
         self._witnessed.clear()
         self._term_frequency_cache = None
+        self._filtered_term_frequency_cache = None
         # Never stamp a newer projection over bytes parsed from an older scan.
         # A concurrent projected event is reconciled from its current live map;
         # raw Records events leave these checkpoints unchanged and need no work.
@@ -6055,6 +6058,7 @@ class LexicalStore:
                 replace=True,
             )
         self._term_frequency_cache = None
+        self._filtered_term_frequency_cache = None
         # Live `-wal`/`-shm` were folded away by `_quiesce_live_wal`.
         return True
 
@@ -6208,6 +6212,7 @@ class LexicalStore:
                 self._synced.clear()
                 self._witnessed.clear()
                 self._term_frequency_cache = None
+                self._filtered_term_frequency_cache = None
                 self._adopted_rows = dict(detached.rows)
         return published
 
@@ -6799,7 +6804,7 @@ class LexicalStore:
         return self._serve_from_ready_catalog_result(
             scope,
             freshness,
-            lambda conn: self._document_frequency_query(
+            lambda conn: self._catalogue_term_frequencies(
                 conn,
                 stemmed_tokens,
                 scope,
@@ -6860,6 +6865,7 @@ class LexicalStore:
         exclude_navigation: bool = False,
         exclude_raw_material: bool = False,
         exclude_statuses: tuple[str, ...] = (),
+        pages_in_scope: int | None = None,
     ) -> tuple[dict[str, int], int]:
         """`({stem: pages carrying it}, pages in scope)` — one indexed lookup
         per DISTINCT stem, over the same join `_bm25_query` ranks with."""
@@ -6869,10 +6875,12 @@ class LexicalStore:
         raw_clause, raw_params = _excluded_rows_clause(
             navigation=False, raw_material=exclude_raw_material
         )
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM pages p WHERE p.{col} = 1" + raw_clause,
-            raw_params,
-        ).fetchone()
+        if pages_in_scope is None:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM pages p WHERE p.{col} = 1" + raw_clause,
+                raw_params,
+            ).fetchone()
+            pages_in_scope = int(total[0]) if total else 0
         excluded_clause, excluded_params = _excluded_rows_clause(
             navigation=exclude_navigation,
             raw_material=exclude_raw_material,
@@ -6888,10 +6896,14 @@ class LexicalStore:
                 (f'"{token}"', *excluded_params),
             ).fetchone()
             frequencies[token] = int(row[0]) if row else 0
-        return frequencies, int(total[0]) if total else 0
+        return frequencies, pages_in_scope
 
     def _catalogue_term_frequencies(
-        self, conn: sqlite3.Connection, tokens: list[str], scope: str
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str,
+        *,
+        exclude_navigation: bool = False,
+        exclude_raw_material: bool = False,
+        exclude_statuses: tuple[str, ...] = (),
     ) -> tuple[dict[str, int], int]:
         """`({stem: pages in `scope` holding it}, pages in `scope`)`.
 
@@ -6900,7 +6912,7 @@ class LexicalStore:
         column the MATCH reads, so a word held only outside the scope is
         absent from it rather than rare.
 
-        Cached per catalogue generation, keyed by the scope, the stored
+        Cached per catalogue generation, keyed by the scope, exclusions, the stored
         checkpoints and the catalogue identity read on `conn`'s own snapshot,
         so only stems this generation has not been asked about are counted.
         Every path that replaces the live catalogue in this process clears the
@@ -6910,25 +6922,48 @@ class LexicalStore:
         """
         generation = (
             scope,
+            exclude_navigation,
+            exclude_raw_material,
+            exclude_statuses,
             *conn.execute(
                 "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' "
                 "OR key = 'catalog_identity' ORDER BY key"
             ).fetchall(),
         )
-        cached = self._term_frequency_cache
+        # The carry excludes navigation, raw material and retired pages. Keep
+        # its counts separate from the ranking query's unfiltered frequencies,
+        # so alternating the two stages does not recount the corpus every turn.
+        filtered = exclude_navigation or exclude_raw_material or bool(exclude_statuses)
+        cached = (
+            self._filtered_term_frequency_cache if filtered else self._term_frequency_cache
+        )
         if cached is not None and cached[0] == generation:
             known, pages = cached[1], cached[2]
         else:
             known, pages = MappingProxyType({}), None
         missing = [token for token in dict.fromkeys(tokens) if token not in known]
         if missing or pages is None:
-            found, pages = self._document_frequency_query(conn, missing, scope)
-            merged = {} if len(known) + len(missing) > _TERM_FREQUENCY_CACHE_MAX else dict(known)
+            found, pages = self._document_frequency_query(
+                conn, missing, scope,
+                exclude_navigation=exclude_navigation,
+                exclude_raw_material=exclude_raw_material,
+                exclude_statuses=exclude_statuses,
+                pages_in_scope=pages,
+            )
+            # Evict unrelated stems, keeping the counts this request needs.
+            merged = (
+                {token: known[token] for token in tokens if token in known}
+                if len(known) + len(missing) > _TERM_FREQUENCY_CACHE_MAX
+                else dict(known)
+            )
             merged.update((token, int(found.get(token, 0))) for token in missing)
             # Replaced whole, never mutated: a concurrent reader keeps the
             # mapping it already holds.
             known = MappingProxyType(merged)
-            self._term_frequency_cache = (generation, known, pages)
+            if filtered:
+                self._filtered_term_frequency_cache = (generation, known, pages)
+            else:
+                self._term_frequency_cache = (generation, known, pages)
         return {token: int(known.get(token, 0)) for token in tokens}, pages
 
     def _bm25_query(
