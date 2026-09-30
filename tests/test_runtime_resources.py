@@ -70,8 +70,12 @@ def test_invalid_budget_values_fail_closed(
         ({"EXOMEM_CLOUD_CELL": "true"}, True),
         ({}, False),
         ({"EXOMEM_HOSTED_CELL": "1"}, False),
+        ({"EXOMEM_CLOUD_CELL": "1", "EXOMEM_HOSTED_CELL": "1"}, False),
         ({"EXOMEM_CLOUD_CELL": "1", "EXOMEM_ONNX_SHARE_WEIGHTS": "0"}, False),
         ({"EXOMEM_ONNX_SHARE_WEIGHTS": "1"}, True),
+        ({"EXOMEM_CLOUD_CELL": "1", "EXOMEM_ONNX_SHARE_WEIGHTS": ""}, True),
+        ({"EXOMEM_CLOUD_CELL": "1", "EXOMEM_ONNX_SHARE_WEIGHTS": "   "}, True),
+        ({"EXOMEM_ONNX_SHARE_WEIGHTS": ""}, False),
     ],
 )
 def test_onnx_weight_sharing_defaults_to_cloud_and_honours_explicit_override(
@@ -80,10 +84,23 @@ def test_onnx_weight_sharing_defaults_to_cloud_and_honours_explicit_override(
     assert runtime_resources.onnx_share_weights_enabled(environment) is expected
 
 
-@pytest.mark.parametrize("value", ["", "true", "yes", "2", "off"])
-def test_onnx_weight_sharing_rejects_non_binary_explicit_values(value: str) -> None:
-    with pytest.raises(ValueError, match="EXOMEM_ONNX_SHARE_WEIGHTS must be 0 or 1"):
-        runtime_resources.onnx_share_weights_enabled({"EXOMEM_ONNX_SHARE_WEIGHTS": value})
+@pytest.mark.parametrize("value", ["true", "yes", "2", "off"])
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [({}, False), ({"EXOMEM_CLOUD_CELL": "1"}, True)],
+)
+def test_onnx_weight_sharing_warns_and_uses_default_for_invalid_override(
+    value: str,
+    environment: dict[str, str],
+    expected: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    environment = {**environment, "EXOMEM_ONNX_SHARE_WEIGHTS": value}
+
+    assert runtime_resources.onnx_share_weights_enabled(environment) is expected
+    assert len(caplog.records) == 1
+    assert "EXOMEM_ONNX_SHARE_WEIGHTS" in caplog.text
+    assert repr(value) in caplog.text
 
 
 def test_unsafe_native_override_escape_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:

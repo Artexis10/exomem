@@ -7,12 +7,15 @@ native environment before optional model runtimes import.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import threading
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 CPU_THREADS_ENV = "EXOMEM_CPU_THREADS"
 SYNC_WORKERS_ENV = "EXOMEM_SYNC_WORKERS"
@@ -155,17 +158,31 @@ def onnx_share_weights_enabled(env: Mapping[str, str] | None = None) -> bool:
 
     Cloud cells opt in by default because several isolated processes share one
     node. A personal or hosted server keeps ONNX Runtime's prepacked fast path.
-    The explicit binary override always wins and rejects ambiguous spellings.
+    The explicit binary override wins when valid. Empty values are unset;
+    malformed values warn and fall back to the deployment-mode default.
     """
     values = os.environ if env is None else env
-    raw = values.get(ONNX_SHARE_WEIGHTS_ENV)
-    if raw is None:
-        from . import cloud_cell
+    from . import cloud_cell
 
-        return cloud_cell.cloud_mode_enabled(values)
+    hosted = str(values.get("EXOMEM_HOSTED_CELL", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    default = cloud_cell.cloud_mode_enabled(values) and not hosted
+    raw = values.get(ONNX_SHARE_WEIGHTS_ENV)
+    if raw is None or not str(raw).strip():
+        return default
     value = str(raw).strip()
     if value not in {"0", "1"}:
-        raise ValueError(f"{ONNX_SHARE_WEIGHTS_ENV} must be 0 or 1")
+        log.warning(
+            "invalid %s=%r; using deployment default %s",
+            ONNX_SHARE_WEIGHTS_ENV,
+            raw,
+            default,
+        )
+        return default
     return value == "1"
 
 
