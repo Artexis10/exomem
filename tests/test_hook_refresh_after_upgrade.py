@@ -126,12 +126,14 @@ def test_refresh_wired_profiles_reports_a_hook_error_without_raising(tmp_path: P
     profile.mkdir(parents=True)
     settings = profile / "settings.json"
     settings.write_text(json.dumps(_wired_settings()), encoding="utf-8")
-    os.chmod(profile, 0o775)  # group-writable: install-hook must refuse this
+    # Other-writable: install-hook must refuse this. (Group-writable alone is
+    # accepted when the group is the owner's private group, as on CI runners.)
+    os.chmod(profile, 0o777)
     try:
         report = hook_module.refresh_wired_profiles(sys.executable, home=home)
         # The installer refuses and reports; it never chmods the offending
         # directory itself to work around its own refusal.
-        assert profile.stat().st_mode & 0o777 == 0o775
+        assert profile.stat().st_mode & 0o777 == 0o777
     finally:
         os.chmod(profile, 0o700)
 
