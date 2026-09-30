@@ -42,3 +42,35 @@ def test_marginal_remeasures_all_children_after_pages_become_shared():
     assert probe.pss_accounting([{"Pss": 350}, {"Pss": 350}], 650) == {
         "node_total_pss_kib": 700, "marginal_pss_kib": 50,
     }
+
+
+def test_latency_corpora_have_twenty_queries_and_twenty_prose_chunks():
+    corpora = probe.latency_corpora()
+
+    assert set(corpora) == {"queries", "chunks"}
+    assert len(corpora["queries"]) == 20
+    assert len(corpora["chunks"]) == 20
+    assert all(3 <= len(text.split()) <= 30 for text in corpora["queries"])
+    assert all(350 <= len(text.split()) <= 500 for text in corpora["chunks"])
+
+
+def test_latency_summary_reports_median_milliseconds_per_text():
+    assert probe.latency_summary([2.0, 1.0, 3.0], text_count=20) == {
+        "repetitions_seconds": [2.0, 1.0, 3.0],
+        "median_ms_per_text": 100.0,
+    }
+
+
+def test_latency_comparison_covers_probe_variants_and_product_knob():
+    configurations = probe.latency_configurations("served.onnx")
+
+    assert [item["name"] for item in configurations] == [
+        "probe-v0",
+        "probe-no-prepack",
+        "product-knob-off",
+        "product-knob-on",
+    ]
+    assert configurations[0]["config"] == {}
+    assert configurations[1]["config"] == {"session.disable_prepacking": "1"}
+    assert configurations[2]["share_weights"] is False
+    assert configurations[3]["share_weights"] is True

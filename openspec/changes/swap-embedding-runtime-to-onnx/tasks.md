@@ -99,6 +99,17 @@
     0.9999999999999998). External ONNX data without prepacking also shared
     pages (additional processes 332/331 MiB); Python mmap-buffer input was
     rejected. See `scripts/shared_weights_probe.py` for the repeatable probe.
+  - Latency measured on 2026-09-30 after warming each session, with three
+    repetitions over 20 query texts (9-13 tokens) and 20 synthetic prose chunks
+    (458-477 tokens). On the product `_OnnxEncoder` path, default prepacking took
+    24.2 ms/query and 514.5 ms/chunk at the median; disabling prepacking took
+    27.1 ms/query and 524.7 ms/chunk. The direct probe pair measured 23.5/493.4
+    ms with prepacking and 27.0/502.9 ms without it (query/chunk respectively).
+
+- [ ] 5.5 Disable ONNX prepacking for served artifacts in Exomem Cloud cells so
+  independent cell processes share file-backed weights; keep personal and hosted
+  servers on the default prepacked path, with an explicit `EXOMEM_ONNX_SHARE_WEIGHTS`
+  binary override.
 
 ## 6. Verify
 

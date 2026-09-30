@@ -15,6 +15,7 @@ import mmap
 import os
 import selectors
 import signal
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,34 @@ TEXTS = [
     "A read-only file can share physical pages between processes.",
     "Unicode text: café, 中文, and a small 🧠.",
 ]
+QUERY_TEXTS = [
+    "How does shared model memory work?",
+    "Find the latest deployment decision.",
+    "What changed in the recall pipeline?",
+    "Why did the embedding load fail?",
+    "Show notes about model latency.",
+    "Which runtime setting saves memory?",
+    "When was the cloud limit measured?",
+    "Summarise the active indexing plan.",
+    "Where is the encoder configured?",
+    "Who owns the release checklist?",
+    "Compare the current and previous benchmark.",
+    "List evidence for the memory estimate.",
+    "Explain the tokenizer compatibility rule.",
+    "What remains open in the migration?",
+    "Find the production rollback steps.",
+    "Which cells use the multilingual model?",
+    "How many threads does ONNX use?",
+    "What is the vector parity threshold?",
+    "Locate the artifact integrity check.",
+    "Is prepacking enabled for personal servers?",
+]
+CHUNK_TOPICS = (
+    "platform", "runtime", "storage", "network", "service",
+    "release", "search", "index", "memory", "model",
+    "privacy", "backup", "restore", "worker", "gateway",
+    "client", "server", "process", "system", "project",
+)
 FIELDS = (
     "Rss", "Pss", "Shared_Clean", "Shared_Dirty",
     "Private_Clean", "Private_Dirty", "Anonymous",
@@ -61,6 +90,41 @@ def pss_accounting(samples: list[dict], previous_total: int | None) -> dict[str,
         "node_total_pss_kib": total,
         "marginal_pss_kib": total - (previous_total or 0),
     }
+
+
+def latency_corpora() -> dict[str, list[str]]:
+    """Deterministic synthetic query and long-prose workloads."""
+    chunks = []
+    for topic in CHUNK_TOPICS:
+        sentence = (
+            f"The careful {topic} team reviews each system change with clear evidence and "
+            "records the result before the next reliable release begins."
+        )
+        chunks.append(" ".join([sentence] * 19))
+    return {"queries": list(QUERY_TEXTS), "chunks": chunks}
+
+
+def latency_summary(repetitions: list[float], *, text_count: int) -> dict:
+    """Summarise whole-corpus timings as the requested per-text median."""
+    return {
+        "repetitions_seconds": repetitions,
+        "median_ms_per_text": statistics.median(repetitions) * 1000 / text_count,
+    }
+
+
+def latency_configurations(source: str) -> list[dict]:
+    """The experimental pair plus the real product path with both knob values."""
+    return [
+        {"name": "probe-v0", "path": source, "product": False, "config": {}},
+        {
+            "name": "probe-no-prepack",
+            "path": source,
+            "product": False,
+            "config": {"session.disable_prepacking": "1"},
+        },
+        {"name": "product-knob-off", "path": source, "product": True, "share_weights": False},
+        {"name": "product-knob-on", "path": source, "product": True, "share_weights": True},
+    ]
 
 
 def mapping_accounting(pid: int, paths: list[str]) -> dict:
@@ -136,6 +200,109 @@ def prepare(kind: str, source: str, directory: str) -> None:
         else:
             raise ValueError(f"unknown preparation kind: {kind}")
         ort.InferenceSession(source, sess_options=options, providers=["CPUExecutionProvider"])
+
+
+def latency_child(configuration: dict) -> None:
+    """Time one session in one process after warming both latency corpora."""
+    import onnxruntime as ort
+    from tokenizers import Tokenizer
+
+    from exomem import embedding_backend as backend
+    from exomem import runtime_resources
+
+    if configuration["product"]:
+        os.environ[runtime_resources.ONNX_SHARE_WEIGHTS_ENV] = (
+            "1" if configuration["share_weights"] else "0"
+        )
+        encoder = backend._OnnxEncoder(MODEL, "cpu")
+    else:
+        encoder = backend._OnnxEncoder.__new__(backend._OnnxEncoder)
+        encoder.profile = backend.read_profile(MODEL)
+        encoder._tokenizer = Tokenizer.from_file(backend.require_tokenizer(MODEL))
+        encoder._tokenizer.enable_truncation(max_length=encoder.profile.max_seq)
+        encoder._pad_id = encoder._tokenizer.token_to_id(encoder.profile.pad_token)
+        if encoder._pad_id is None:
+            raise ValueError("product padding token is absent")
+        encoder._tokenizer.enable_padding(
+            pad_id=encoder._pad_id, pad_token=encoder.profile.pad_token,
+        )
+        options = session_options(config=configuration["config"])
+        encoder._session = ort.InferenceSession(
+            configuration["path"], sess_options=options, providers=["CPUExecutionProvider"],
+        )
+        encoder._inputs = {item.name for item in encoder._session.get_inputs()}
+        encoder.device = "cpu"
+        encoder.share_weights = "session.disable_prepacking" in configuration["config"]
+
+    corpora = latency_corpora()
+    token_counts = {}
+    for name, texts in corpora.items():
+        encoded = encoder._tokenizer.encode_batch(texts)
+        token_counts[name] = [sum(item.attention_mask) for item in encoded]
+    if not all(350 <= count <= 500 for count in token_counts["chunks"]):
+        raise ValueError(f"chunk token counts outside 350..500: {token_counts['chunks']}")
+
+    for texts in corpora.values():
+        encoder.encode(texts)
+    timings = {}
+    for name, texts in corpora.items():
+        repetitions = []
+        for _ in range(3):
+            started = time.perf_counter()
+            encoder.encode(texts)
+            repetitions.append(time.perf_counter() - started)
+        timings[name] = latency_summary(repetitions, text_count=len(texts))
+    report = {
+        "name": configuration["name"],
+        "product": configuration["product"],
+        "share_weights": encoder.share_weights,
+        "token_counts": token_counts,
+        "timings": timings,
+    }
+    encoder.release()
+    print(json.dumps(report), flush=True)
+
+
+def run_latency_comparison(source: str, scratch: Path) -> list[dict]:
+    """Run each latency arm alone so no competing session distorts the result."""
+    results = []
+    for configuration in latency_configurations(source):
+        log_path = scratch / f"latency-{configuration['name']}.stderr"
+        process = None
+        try:
+            with log_path.open("wb") as stderr:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        __file__,
+                        "--internal-mode",
+                        "latency",
+                        "--variant",
+                        json.dumps(configuration),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=stderr,
+                    text=True,
+                )
+                stdout, _ = process.communicate(timeout=1800)
+            if process.returncode != 0:
+                detail = log_path.read_text(errors="replace")[-8000:]
+                raise RuntimeError(
+                    f"latency arm {configuration['name']} failed ({process.returncode}): {detail}"
+                )
+            result = json.loads(stdout.strip().splitlines()[-1])
+            results.append(result)
+            query_ms = result["timings"]["queries"]["median_ms_per_text"]
+            chunk_ms = result["timings"]["chunks"]["median_ms_per_text"]
+            print(
+                f"{configuration['name']}: queries={query_ms:.1f} ms/text, "
+                f"chunks={chunk_ms:.1f} ms/text",
+                flush=True,
+            )
+        finally:
+            if process is not None and process.poll() is None:
+                stop(process)
+    return results
 
 
 def child(variant: dict, reference: str) -> None:
@@ -343,7 +510,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-procs", type=int, choices=(1, 2, 3), default=3)
     parser.add_argument("--out", type=Path)
-    parser.add_argument("--internal-mode", choices=("child", "prepare"), help=argparse.SUPPRESS)
+    parser.add_argument("--latency-only", action="store_true")
+    parser.add_argument(
+        "--internal-mode", choices=("child", "prepare", "latency"), help=argparse.SUPPRESS,
+    )
     parser.add_argument("--variant", help=argparse.SUPPRESS)
     parser.add_argument("--reference", help=argparse.SUPPRESS)
     parser.add_argument("--source", help=argparse.SUPPRESS)
@@ -356,6 +526,9 @@ def main() -> int:
         return 0
     if args.internal_mode == "prepare":
         prepare(args.kind, args.source, args.scratch)
+        return 0
+    if args.internal_mode == "latency":
+        latency_child(json.loads(args.variant))
         return 0
     if args.out is None:
         parser.error("--out is required")
@@ -391,6 +564,10 @@ def main() -> int:
     signal.signal(signal.SIGTERM, interrupted)
     with tempfile.TemporaryDirectory(prefix="shared-weights-probe-") as directory:
         scratch = Path(directory)
+        if args.latency_only:
+            metadata["latency"] = run_latency_comparison(source, scratch)
+            args.out.write_text(json.dumps(metadata, indent=2) + "\n")
+            return 0
         reference = scratch / "baseline.npy"
         for variant in variants(source, scratch):
             kind = variant["prepare"]

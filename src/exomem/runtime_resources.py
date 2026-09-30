@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +17,7 @@ from typing import Any
 CPU_THREADS_ENV = "EXOMEM_CPU_THREADS"
 SYNC_WORKERS_ENV = "EXOMEM_SYNC_WORKERS"
 ALLOW_NATIVE_OVERRIDES_ENV = "EXOMEM_ALLOW_NATIVE_THREAD_OVERRIDES"
+ONNX_SHARE_WEIGHTS_ENV = "EXOMEM_ONNX_SHARE_WEIGHTS"
 SYSTEMD_CPU_WEIGHT = 20
 _NATIVE_ENV = {
     "OMP_NUM_THREADS": None,
@@ -146,6 +148,25 @@ def configure_onnx_session_options(options: Any, *, default_threads: int | None 
         threads = max(1, min(default_threads, effective_online_cpus()))
     options.intra_op_num_threads = threads
     options.inter_op_num_threads = 1
+
+
+def onnx_share_weights_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Whether served ONNX sessions should retain file-backed shared weights.
+
+    Cloud cells opt in by default because several isolated processes share one
+    node. A personal or hosted server keeps ONNX Runtime's prepacked fast path.
+    The explicit binary override always wins and rejects ambiguous spellings.
+    """
+    values = os.environ if env is None else env
+    raw = values.get(ONNX_SHARE_WEIGHTS_ENV)
+    if raw is None:
+        from . import cloud_cell
+
+        return cloud_cell.cloud_mode_enabled(values)
+    value = str(raw).strip()
+    if value not in {"0", "1"}:
+        raise ValueError(f"{ONNX_SHARE_WEIGHTS_ENV} must be 0 or 1")
+    return value == "1"
 
 
 class ModelBusyError(RuntimeError):
