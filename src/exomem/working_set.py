@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import os
 import posixpath
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
@@ -982,7 +982,7 @@ def _lane(
     if role.lane == "entity":
         return LaneResult(_entity_lane(vault_root, role, anchors=anchors))
     if role.lane == "graph":
-        return LaneResult(_graph_lane(role, anchors=anchors))
+        return LaneResult(_graph_lane(role, anchors=anchors, neighbourhood=neighbourhood))
     if role.lane == "evidence":
         return LaneResult(_evidence_lane(role, neighbourhood=neighbourhood))
     return LaneResult(())
@@ -1165,11 +1165,23 @@ def _entity_lane(
     return tuple(out)
 
 
-def _graph_lane(role: context_roles.ContextRole, *, anchors: Sequence[Any]) -> tuple[LaneItem, ...]:
-    """Typed neighbours as pointers. A neighbour's BODY belongs to another lane."""
+def _graph_lane(
+    role: context_roles.ContextRole,
+    *,
+    anchors: Sequence[Any],
+    neighbourhood: Collection[str] | None = None,
+) -> tuple[LaneItem, ...]:
+    """Typed neighbours as pointers. A neighbour's BODY belongs to another lane.
+
+    `neighbourhood` is the caller's visible neighbourhood: a withheld page must
+    not take one of the GRAPH_MAX_NODES slots before the guard runs.
+    """
     out: list[LaneItem] = []
     for anchor in anchors:
-        for neighbour in sorted(getattr(anchor, "neighbourhood", ()) or ())[:GRAPH_MAX_NODES]:
+        mine = getattr(anchor, "neighbourhood", ()) or ()
+        if neighbourhood is not None:
+            mine = [path for path in mine if path in neighbourhood]
+        for neighbour in sorted(mine)[:GRAPH_MAX_NODES]:
             out.append(
                 LaneItem(
                     role=role.id,

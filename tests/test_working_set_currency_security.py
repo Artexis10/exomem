@@ -698,3 +698,19 @@ def test_original_high1_fixture_never_leaks_on_records_cues(tmp_path, turn):
     vault = _governed_entity_vault(tmp_path, declared=True)
     assert "SECRETFACT" not in json.dumps(_ext(vault, turn))
     assert "SECRETFACT" in json.dumps(_owner(vault, turn))
+
+
+def test_graph_lane_skips_withheld_neighbours_before_its_node_cap() -> None:
+    """A withheld page must not take a graph-lane slot before the guard runs."""
+    from types import SimpleNamespace
+
+    from exomem import working_set as ws
+
+    role = SimpleNamespace(id="graph-role")
+    visible = [f"Knowledge Base/Notes/Insights/v{i:02d}.md" for i in range(ws.GRAPH_MAX_NODES)]
+    withheld = "Knowledge Base/Notes/Aaa-withheld/x.md"  # sorts before every visible path
+    anchor = SimpleNamespace(path="Knowledge Base/Entities/x.md", neighbourhood=frozenset([withheld, *visible]))
+    items = ws._graph_lane(role, anchors=[anchor], neighbourhood=frozenset(visible))
+    paths = [item.path for item in items]
+    assert withheld not in paths
+    assert len(paths) == ws.GRAPH_MAX_NODES
