@@ -187,3 +187,17 @@
       `edit_memory`, `observe_memory` or `remember`, and `full_upserts` stops
       growing with ordinary writes.
 
+
+## 9. Capture survives contention
+
+- [x] 9.1 Red-first `tests/test_capture_boundary_hold.py`: a cold identity
+      inventory is built while the boundary is free for `episode_memory` and a
+      `record_memory` update; `reserved_paths.warm_identity_catalogue_before_boundary`
+      called from `LeaseManager.invoke`; index page counts use one scandir pass.
+- [x] 9.2 Red-first `tests/test_capture_contention_absorbed.py`: concurrent
+      `remember`, `episode_memory` and `record_memory` append writes meeting a
+      held boundary all commit once with no `MUTATION_BUSY`; an overdue holder
+      and an exhausted wait refuse with a `cause`. `LeaseManager` waits in
+      arrival order (`_FairCaptureQueue`) around `idempotency.run`.
+- [ ] 9.3 Live: after deploy, `exomem_mutation_busy_total` stays flat under
+      maximal capture and `contention_absorbed` log rows show the waits.
