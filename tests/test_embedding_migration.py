@@ -374,6 +374,79 @@ def test_initial_build_resumes_after_a_live_write_and_restart(preseeded_world, m
     assert _vector_lane(vault)["status"] == "participated"
 
 
+def test_healthy_legacy_sidecar_with_drift_does_not_plan_a_build(
+    preseeded_world, monkeypatch
+) -> None:
+    from exomem import semantic_index
+
+    vault, _log, _loads = preseeded_world
+    embeddings.index_incremental(vault, log_fn=lambda _message: None)
+    active = embeddings.get_embedding_index(vault)
+    target = recall_migration._target_identity()
+    assert active.identity.accepts(target.model, target.fingerprint)
+    assert index_paths.active_sidecar_name(vault) is None
+    shadow = active.path.parent / index_paths.space_sidecar_name(target.fingerprint)
+    assert not shadow.exists()
+    edited = vault / kb_dirname() / list(_PAGES)[-1]
+    edited.write_text(edited.read_text(encoding="utf-8") + "\nAn offline edit.\n", encoding="utf-8")
+    mtime = active.file_mtimes()[edited.relative_to(vault).as_posix()] + 5
+    os.utime(edited, (mtime, mtime))
+    find_module.clear_cache()
+    calls = {"pages": 0, "units": 0}
+    eligible = recall_migration._eligible_pages
+    parent_state = semantic_index.build_parent_index_state
+
+    def pages(root):
+        calls["pages"] += 1
+        return eligible(root)
+
+    def units(*args, **kwargs):
+        calls["units"] += 1
+        return parent_state(*args, **kwargs)
+
+    monkeypatch.setattr(recall_migration, "_eligible_pages", pages)
+    monkeypatch.setattr(semantic_index, "build_parent_index_state", units)
+    assert recall_migration.plan(vault) is None
+    assert calls == {"pages": 0, "units": 0}
+    assert not shadow.exists()
+
+
+def test_published_current_sidecar_plans_without_enumerating_pages(
+    preseeded_world, monkeypatch
+) -> None:
+    vault, _log, _loads = preseeded_world
+    assert recall_migration.run(vault, threading.Event()) == "current"
+    assert index_paths.active_sidecar_name(vault) is not None
+    calls = []
+    eligible = recall_migration._eligible_pages
+
+    def pages(root):
+        calls.append(root)
+        return eligible(root)
+
+    monkeypatch.setattr(recall_migration, "_eligible_pages", pages)
+    assert recall_migration.plan(vault) is None
+    assert calls == []
+
+
+@pytest.mark.parametrize("missing", ["onnxruntime", "tokenizers", None])
+def test_served_model_checks_onnx_stack_despite_torch_backend(
+    preseeded_world, monkeypatch, missing
+) -> None:
+    monkeypatch.setattr(embeddings, "MODEL_NAME", "BAAI/bge-m3")
+    assert embedding_backend.served_artifact(embeddings.MODEL_NAME) is not None
+    monkeypatch.setattr(embedding_backend, "resolve_backend", lambda: embedding_backend.TORCH)
+    calls = []
+
+    def importable(module):
+        calls.append(module)
+        return module != missing
+
+    monkeypatch.setattr(embedding_backend, "_importable", importable)
+    assert recall_migration._embedding_skip_reason() == ("unavailable" if missing else None)
+    assert calls == (["onnxruntime"] if missing == "onnxruntime" else ["onnxruntime", "tokenizers"])
+
+
 @pytest.mark.parametrize("fixture", ["world", "preseeded_world"])
 @pytest.mark.parametrize("operation", ["plan", "run"])
 @pytest.mark.parametrize("reason", ["disabled", "import-failed", "missing-stack"])
@@ -395,6 +468,10 @@ def test_embedding_build_skips_disabled_or_unavailable_stack(
         expected = "disabled" if reason == "disabled" else "unavailable"
         assert recall_migration.run(vault, threading.Event()) == expected
         assert recall_migration.status(vault)["state"] == expected
+        active = embeddings.get_embedding_index(vault)
+        assert recall_migration.status(vault)["serving"] == recall_migration._space(
+            active.identity, active.path
+        )
     assert loads == []
     assert log == []
     assert fetched == []

@@ -49,13 +49,18 @@ A background job SHALL build a sidecar for the recall encoder's space beside the
 
 #### Scenario: A live write does not orphan an interrupted initial build
 
-- **WHEN** an initial build is interrupted after a live write has given the legacy sidecar the recall encoder's identity, with incomplete corpus coverage and no published active pointer
+- **WHEN** an initial build is interrupted after a live write has given the legacy sidecar the recall encoder's identity, with incomplete corpus coverage, no published active pointer and a separate target-space shadow sidecar beside the active one
 - **THEN** the next start resumes the initial shadow build without re-encoding committed batches, covers every eligible page and semantic unit, and reports current only after atomic cutover
+
+#### Scenario: A matching serving sidecar needs no startup coverage scan
+
+- **WHEN** the serving sidecar accepts the recall encoder's identity and either an active pointer is published or no separate target-space shadow sidecar exists
+- **THEN** planning enumerates no pages and performs no per-page semantic coverage checks, and ordinary drift in a legacy sidecar does not trigger a full shadow build
 
 #### Scenario: Disabled or unavailable embeddings do not start a build
 
 - **WHEN** embeddings are disabled or the optional serving stack is unavailable
-- **THEN** the job reports a non-failure disabled or unavailable state without loading an encoder or fetching its artifact
+- **THEN** the job reports a non-failure disabled or unavailable state with the existing serving-space details without loading an encoder or fetching its artifact; a served artifact requires ONNX Runtime and tokenizers even when Torch is the preferred backend
 
 #### Scenario: An empty embedding corpus needs no encoder
 

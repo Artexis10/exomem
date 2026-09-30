@@ -136,7 +136,11 @@ def _embedding_skip_reason() -> str | None:
         return "disabled"
     if embeddings._IMPORT_FAILED:
         return "unavailable"
-    backend = embedding_backend.resolve_backend()
+    backend = (
+        embedding_backend.ONNX
+        if embedding_backend.served_artifact(recall_space.recall_model()) is not None
+        else embedding_backend.resolve_backend()
+    )
     modules = (
         ("onnxruntime", "tokenizers")
         if backend == embedding_backend.ONNX
@@ -197,19 +201,22 @@ def plan(vault_root: Path) -> MigrationPlan | None:
 
     if _embedding_skip_reason() is not None:
         return None
-    pages = list(_eligible_pages(vault_root))
-    if not pages:
-        return None  # No encoder is needed until eligible content exists.
     active = embeddings.get_embedding_index(vault_root)
     serving = active.identity
+    published = index_paths.active_sidecar_name(vault_root) is not None
+    if serving is None and not list(_eligible_pages(vault_root)):
+        return None  # No encoder is needed until eligible content exists.
     target = _target_identity()
-    if serving is not None and serving.accepts(target.model, target.fingerprint):
-        if index_paths.active_sidecar_name(vault_root) is None and _coverage_incomplete(vault_root, active, pages):
-            serving = None  # Resume the initial shadow build despite live writes to legacy.
-        else:
-            return None
     key = target.fingerprint or f"{target.model}|{target.dim}"
     shadow_path = active.path.parent / index_paths.space_sidecar_name(key)
+    if serving is not None and serving.accepts(target.model, target.fingerprint):
+        if published or shadow_path == active.path or not shadow_path.exists():
+            return None
+        # Only a separate target-space shadow is evidence of an interrupted
+        # initial build. Ordinary legacy drift belongs to incremental reconcile.
+        if not _coverage_incomplete(vault_root, active, list(_eligible_pages(vault_root))):
+            return None
+        serving = None  # Resume the initial shadow build despite live writes to legacy.
     if serving is not None and shadow_path == active.path:
         return None
     return MigrationPlan(serving, target, shadow_path)
@@ -495,10 +502,15 @@ def run(vault_root: Path, stop: threading.Event) -> str:
     from . import embeddings
 
     skip = _embedding_skip_reason()
-    if skip is not None:
-        _update(vault_root, state=skip, serving=None, target=None)
-        return skip
     serving_index = embeddings.get_embedding_index(vault_root)
+    if skip is not None:
+        _update(
+            vault_root,
+            state=skip,
+            serving=_space(serving_index.identity, serving_index.path),
+            target=None,
+        )
+        return skip
     if not _wait_for_warm(stop):
         return "stopped"
     # Whatever happens next, the serving sidecar keeps its own encoder (except
