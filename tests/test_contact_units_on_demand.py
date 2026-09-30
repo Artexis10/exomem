@@ -120,8 +120,8 @@ def test_a_carried_page_serves_contact_only_when_the_intent_is_present() -> None
     quiet = working_set_resolve.analyze_turn("What is Maren working on this week?")
     asking = working_set_resolve.analyze_turn("What is Maren's phone?")
 
-    assert "contact" not in {r["id"] for r in working_set._carry_roles(registry, quiet, NAMES)}  # noqa: SLF001
-    carried = working_set._carry_roles(registry, asking, NAMES)  # noqa: SLF001
+    assert "contact" not in {r["id"] for r in working_set._carry_roles(registry, quiet, anchor_names=NAMES)}  # noqa: SLF001
+    carried = working_set._carry_roles(registry, asking, anchor_names=NAMES)  # noqa: SLF001
     assert {"id": "contact", "source": "turn_cue", "lane": "units"} in carried
 
 

@@ -735,14 +735,17 @@ superseded_by: [Knowledge Base/Notes/Research/girvan-slot-window.md]
     working_set_index.WorkingSetIndex(vault).rebuild()
 
 
-def test_a_turn_naming_two_separate_pages_carries_neither(vault: Path) -> None:
-    """The reviewer's B2. Both pages are named — each by its own distinctive
-    phrase — and the ranking happened to spread them 31.07 against 17.40.
+def test_a_turn_naming_two_separate_pages_carries_both(vault: Path) -> None:
+    """The reviewer's B2, restated for concurrent contexts. Both pages are
+    named, each by its own distinctive phrase, and the ranking happened to
+    spread them 31.07 against 17.40.
 
     A score gap between two NAMED pages says nothing about which one the
-    turn meant; the same shape measured 19.60 against 19.16 on a turn
-    differing only in wording. Serving the higher one is the round-1 failure
-    in a new coat: a guess presented as a resolution.
+    turn meant, so the gap decides nothing: the turn did not mean one of
+    them, it named both, each by a phrase only that page answers to. Serving
+    both is not a guess between them, and serving neither leaves the agent
+    without what the turn plainly asked for. A phrase two pages answer to is
+    still a question (`test_a_turn_that_names_two_pages_carries_neither`).
     """
     _seed_named_pages_corpus(vault)
 
@@ -757,8 +760,13 @@ def test_a_turn_naming_two_separate_pages_carries_neither(vault: Path) -> None:
     assert working_set.dominant_carry(hits) is None
 
     packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
-    assert packet["abstained"] is True
-    assert packet["abstention"] == {"reason": "unresolved"}
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert {a["path"] for a in packet["anchors"]} == {
+        "Knowledge Base/Notes/Research/kelvane-throughput.md",
+        "Knowledge Base/Notes/Research/murran-dispatch.md",
+    }
+    assert _anchor_statuses(packet) == ["retrieval_carried", "retrieval_carried"]
+    assert packet["generation"]["carried_by"] == "retrieval"
 
 
 def test_a_superseded_predecessor_does_not_block_its_successor(vault: Path) -> None:
@@ -956,7 +964,8 @@ def test_a_turn_that_names_two_pages_carries_neither(
 
 
 def test_a_resolved_anchor_wins_over_a_dominant_hit(carry_vault: Path, budget_free) -> None:
-    """A named anchor always wins: the carry never runs when one resolved."""
+    """A named anchor always wins: the carry never resolves anything, and a
+    page the turn also named is served BESIDE the anchor, never in its place."""
     packet = working_set.compile_packet(
         carry_vault,
         turn=(
@@ -968,9 +977,11 @@ def test_a_resolved_anchor_wins_over_a_dominant_hit(carry_vault: Path, budget_fr
 
     assert packet["abstained"] is False, packet.get("abstention")
     assert "carried_by" not in packet["generation"]
+    assert packet["generation"]["also_carried"] == "retrieval"
     assert "resolved" in _anchor_statuses(packet)
-    assert "retrieval_carried" not in _anchor_statuses(packet)
-    assert CARRY_PAGE not in _unit_paths(packet)
+    assert _anchor_statuses(packet).count("resolved") == 1
+    assert _anchor_statuses(packet).count("retrieval_carried") == 1
+    assert CARRY_PAGE in _unit_paths(packet)
 
 
 def test_a_carried_packet_mints_a_token_naming_the_carried_page(
@@ -1010,7 +1021,9 @@ def test_the_carry_costs_only_the_turns_that_would_have_abstained(
         timings=resolved_timings,
     )
     assert packet["abstained"] is False, packet.get("abstention")
-    assert "working_set.carry" not in resolved_timings.as_dict()["stages"]
+    # A resolved turn pays for the carry only to read what ELSE it named, and
+    # only over the words no resolved anchor consumed.
+    assert packet["generation"].get("also_carried") is None
 
 
 # --------------------------------------------------------------------------- #
@@ -1196,7 +1209,7 @@ def test_a_carried_page_that_is_an_anchor_row_reports_the_indexed_title(
     """
     hub = "Knowledge Base/Notes/Insights/northern-corridor-hub.md"
     monkeypatch.setattr(
-        working_set, "_carry_by_retrieval", lambda *args, **kwargs: ((hub, 12.0),)
+        working_set, "_carry_groups_by_retrieval", lambda *args, **kwargs: (((hub, 12.0),),)
     )
     monkeypatch.setattr(
         working_set, "run_lanes", lambda *args, **kwargs: ((_page_item(hub),), ())
@@ -1406,29 +1419,25 @@ def test_filtering_happens_after_a_wider_fetch(
     assert working_set.dominant_carry(hits) is None
 
 
-def test_a_turn_that_names_two_pages_lists_them_for_the_client(vault: Path) -> None:
+def test_a_turn_that_names_two_pages_lists_them_for_the_client(
+    carry_vault: Path, budget_free
+) -> None:
     """An abstention that says nothing leaves the client with an empty
     packet and no way to know that a question would help.
 
-    The turn named two pages; neither is carried, because choosing is the
-    guess the compiler exists not to make. But the client can choose, and
-    the only thing it needs is their names.
+    The turn named two pages by ONE phrase; neither is carried, because
+    choosing is the guess the compiler exists not to make. But the client can
+    choose, and the only thing it needs is their names.
     """
-    _seed_named_pages_corpus(vault)
-
-    turn = (
-        "I am trying to remember whether the kelvane throughput ceiling change "
-        "and the murran dispatch lane split were decided in the same month"
-    )
-    packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
+    packet = working_set.compile_packet(carry_vault, turn=TIE_TURN, max_chars=4000)
 
     assert packet["abstained"] is True
     assert packet["abstention"] == {"reason": "unresolved"}
     assert packet["units"] == []
     listed = packet["anchors"]
     assert {item["path"] for item in listed} == {
-        "Knowledge Base/Notes/Research/kelvane-throughput.md",
-        "Knowledge Base/Notes/Research/murran-dispatch.md",
+        "Knowledge Base/Notes/Research/tarn-rollover-cadence-north.md",
+        "Knowledge Base/Notes/Research/tarn-rollover-cadence-south.md",
     }, listed
     assert {item["status"] for item in listed} == {"retrieval_named"}
     assert {item["kind"] for item in listed} == {"page"}
@@ -1436,24 +1445,19 @@ def test_a_turn_that_names_two_pages_lists_them_for_the_client(vault: Path) -> N
     # Not `ambiguity`, which means two anchors RESOLVED.
     assert packet["ambiguity"] == []
     # And the titles are the pages' own, not their filenames.
-    assert "Kelvane throughput" in {item["title"] for item in listed}
+    assert "Tarn rollover cadence north" in {item["title"] for item in listed}
 
 
-def test_the_hook_renders_the_named_pages_as_its_menu(vault: Path) -> None:
+def test_the_hook_renders_the_named_pages_as_its_menu(carry_vault: Path, budget_free) -> None:
     """The client-facing half: the shipped hook injects the list."""
     from exomem._hooks import exomem_retrieve_nudge as nudge
 
-    _seed_named_pages_corpus(vault)
-    turn = (
-        "I am trying to remember whether the kelvane throughput ceiling change "
-        "and the murran dispatch lane split were decided in the same month"
-    )
-    packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
+    packet = working_set.compile_packet(carry_vault, turn=TIE_TURN, max_chars=4000)
 
     block = nudge._format_working_set_block(packet, nudge._WORKING_SET_MAX_CHARS)
 
-    assert "kelvane-throughput.md" in block, block
-    assert "murran-dispatch.md" in block, block
+    assert "tarn-rollover-cadence-north.md" in block, block
+    assert "tarn-rollover-cadence-south.md" in block, block
     assert nudge._block_keeps_the_reminder(packet) is True
     # And the remedy it offers is the one that now actually works: `anchor=`
     # accepts an ordinary compiled page the packet listed, not only a row of
@@ -1634,7 +1638,7 @@ def test_a_carried_and_a_named_packet_both_lead_with_recent_context(
     assert carried["units"], "and still serves the page it carried"
     assert carried["budget"]["used_chars"] <= 4000
 
-    # Two named pages: no carry, and the list the client can choose from.
+    # Two pages named apart: both carried, and the block still leads.
     named = working_set.compile_packet(
         vault,
         turn=(
@@ -1644,12 +1648,10 @@ def test_a_carried_and_a_named_packet_both_lead_with_recent_context(
         max_chars=4000,
     )
 
-    assert named["abstained"] is True
-    assert named["abstention"] == {"reason": "unresolved"}
-    assert set(_anchor_statuses(named)) == {"retrieval_named"}
+    assert named["abstained"] is False, named.get("abstention")
+    assert _anchor_statuses(named) == ["retrieval_carried", "retrieval_carried"]
     assert list(named)[0] == "recent_context", list(named)
-    assert named["recent_context"], "a named abstention still says what was worked on"
-    assert named["budget"]["used_chars"] == _recent_cost(named)
+    assert named["recent_context"], "a multi-page carry still says what was worked on"
     assert named["budget"]["used_chars"] <= 4000
 
 
@@ -1858,7 +1860,7 @@ def test_a_page_named_by_its_title_is_carried_past_the_navigation_pages(
     ]
 
 
-def test_navigation_pages_are_never_listed_as_named(vault: Path, budget_free) -> None:
+def test_navigation_pages_are_never_carried_as_named(vault: Path, budget_free) -> None:
     vault = _navigation_vault(vault)
     turn = (
         "I am trying to remember whether the kelvane throughput ceiling change "
@@ -1867,7 +1869,6 @@ def test_navigation_pages_are_never_listed_as_named(vault: Path, budget_free) ->
 
     packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
 
-    assert packet["abstained"] is True
     listed = [item["path"] for item in packet["anchors"]]
     assert sorted(listed) == [
         "Knowledge Base/Notes/Research/kelvane-throughput.md",

@@ -233,6 +233,17 @@ RETRIEVED_CONTACT_KINDS: frozenset[str] = frozenset({"retrieval", "vector_band"}
 #: carries `fact`, and the whole vault became a candidate on one cue.
 CONTACT_KINDS: frozenset[str] = WORDED_CONTACT_KINDS | RETRIEVED_CONTACT_KINDS
 
+#: Kinds by which the turn NAMED an anchor, as opposed to an anchor a prior
+#: (`recency`) supplied and a tie-break or qualifier (`usage_prior`,
+#: `category_match`, `continuity`) decorated. CONTACT_KINDS plus `agent_choice`:
+#: the agent picking the anchor by ref is the strongest naming there is, but it
+#: is no contact kind (nothing in the turn's text reached the anchor), so it is
+#: added here rather than to `CONTACT_KINDS`, which `_status_for`'s clauses read.
+#: An anchor with no member here is prior-only: it says where the conversation
+#: was, never what the turn is about, so nothing beyond the anchor's own
+#: identity is read for it (conclusions, standing pages, role-selected lanes).
+NAMING_KINDS: frozenset[str] = CONTACT_KINDS | frozenset({"agent_choice"})
+
 #: Function words are dropped before the lexical band is measured. "the" shared
 #: between a turn and a title is not a reference; two content words are.
 #: `STOPWORDS` lives in `working_set_index` (re-exported here): the derived-
@@ -2358,7 +2369,9 @@ def _competing_groups(
     """
     groups: list[tuple[str, tuple[ResolvedAnchor, ...]]] = []
     for kind in sorted({anchor.kind for anchor in resolved}):
-        group = [anchor for anchor in resolved if anchor.kind == kind]
+        group = _without_named_apart(
+            [anchor for anchor in resolved if anchor.kind == kind]
+        )
         if len(group) < 2:
             continue
         # At most MAX_ANCHORS nodes; a bounded structural connectivity check.
@@ -2380,6 +2393,40 @@ def _competing_groups(
         if len(reached) != len(group):
             groups.append((kind, tuple(group)))
     return tuple(groups)
+
+
+def _spelled_tokens(anchor: ResolvedAnchor) -> frozenset[str]:
+    """The tokens of every phrase the turn spelled this anchor's own name by."""
+    return frozenset(
+        token for phrase in anchor.exact_alias_phrases for token in phrase.split()
+    )
+
+
+def _without_named_apart(group: Sequence[ResolvedAnchor]) -> list[ResolvedAnchor]:
+    """Drop the members of a same-kind group the turn named APART from the rest.
+
+    Concurrent contexts (activation recall breadth): competing senses are
+    anchors the turn's SAME words reach. A member the turn spelled by its own
+    name ("book the autumn trip given the course schedule") is a second topic
+    the turn also named, not a sense of the others, when every OTHER member
+    was spelled too and no two spelled names share a token. The test is about
+    the turn's own spelling and never about the vault. A member reached only
+    by shared, retrieved or semantic evidence has no spelling to set it
+    apart, so it keeps competing with a spelled one ("Cargo Sled or cedar"
+    still asks), and two members spelled with a shared word ("tide model
+    rollout", "tide model research") still compete.
+    """
+    spelled = [_spelled_tokens(anchor) for anchor in group]
+    kept: list[ResolvedAnchor] = []
+    for index, anchor in enumerate(group):
+        apart = bool(spelled[index]) and all(
+            other and not spelled[index] & other
+            for other_index, other in enumerate(spelled)
+            if other_index != index
+        )
+        if not apart:
+            kept.append(anchor)
+    return kept
 
 
 def _ambiguity_dicts(kind: str, group: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]:
