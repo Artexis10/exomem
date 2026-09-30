@@ -21,6 +21,7 @@
 {{- fail "unsupported hosted scheduler observability contract" -}}
 {{- end }}
 {{- $schedulerEnvironmentVariable := $contract.authentication.schedulerEnvironmentVariable -}}
+{{- $cloudEnabled := or .Values.cellctl.enabled .Values.cloudGateway.enabled -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -63,6 +64,10 @@ data:
   contract.json: |-
 {{ $contractRaw | indent 4 }}
 {{- range $job := $contract.jobs }}
+{{- $jobPolicy := index $.Values.scheduler.jobs $job.name -}}
+{{- if not $jobPolicy -}}
+{{- fail (printf "scheduler job %s has no chart policy" $job.name) -}}
+{{- end -}}
 {{- $cadenceSeconds := 0 -}}
 {{- if eq $job.schedule "* * * * *" -}}
 {{- $cadenceSeconds = 60 -}}
@@ -95,7 +100,7 @@ metadata:
     exomem.io/contract-sha256: {{ $contractSha256 | quote }}
 spec:
   schedule: {{ $job.schedule | quote }}
-  suspend: {{ eq (include "exomem.legacyHostedPaused" $) "true" }}
+  suspend: {{ and (eq (include "exomem.legacyHostedPaused" $) "true") (not (and $cloudEnabled $jobPolicy.servesCloud)) }}
   concurrencyPolicy: {{ $contract.kubernetesJobPolicy.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $contract.kubernetesJobPolicy.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: {{ $contract.kubernetesJobPolicy.successfulJobsHistoryLimit }}
