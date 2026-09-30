@@ -330,10 +330,13 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
         denied = [c for c in calls if c.get("name") in WRITE_TOOLS and not _ok(c["result"])]
         if not denied or any(c.get("name") in WRITE_TOOLS for c in successful):
             issues.append("denial_not_observed")
-        if re.search(r"\b(saved|stored|recorded)\b", answer.casefold()) and not re.search(
-            r"\b(not|never|could not|couldn't|wasn't|isn't)\s+(?:been\s+)?(?:saved|stored|recorded)\b",
+        unnegated = re.sub(
+            r"\b(not|never|could not|couldn't|wasn't|isn't|haven't|hasn't|didn't|nothing was)"
+            r"\s+(?:been\s+)?(?:saved|stored|recorded)\b",
+            "",
             answer.casefold(),
-        ):
+        )
+        if re.search(r"\b(saved|stored|recorded)\b", unnegated):
             issues.append("denial_reported_success")
     return _report(issues)
 
