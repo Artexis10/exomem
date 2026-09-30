@@ -39,6 +39,7 @@ control-prompt silence as the reminder, and fall back to it on any failure.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -207,6 +208,83 @@ def _hook_entry(item: dict, timeout: int) -> dict:
     return entry
 
 
+def _is_private_group(gid: int) -> bool:
+    """Accept a user-private group only when it names no other members."""
+    try:
+        import grp
+        import pwd
+
+        user = pwd.getpwuid(os.geteuid())
+        group = grp.getgrgid(gid)
+    except (ImportError, KeyError, OSError):
+        return False
+    return all(member == user.pw_name for member in group.gr_mem) and (
+        gid == user.pw_gid
+        or group.gr_name == user.pw_name
+        or user.pw_name in group.gr_mem
+    )
+
+
+def _has_untrusted_writers(info: os.stat_result) -> bool:
+    mode = stat.S_IMODE(info.st_mode)
+    return bool(mode & 0o002) or bool(
+        mode & 0o020
+        and (info.st_uid != os.geteuid() or not _is_private_group(info.st_gid))
+    )
+
+
+def _require_trusted_directory(directory) -> None:
+    """Keep the secure ancestor walk, accepting only the owner's private group.
+
+    This is installer policy. The standalone continuation hook retains its
+    stricter directory rule for private checkpoint state.
+    """
+    if os.name == "nt":
+        return
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    absolute = directory.path.absolute()
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    handles: list[int] = []
+    offenders: list[tuple[str, str]] = []
+    try:
+        current = os.open(absolute.anchor or "/", flags)
+        handles.append(current)
+        walked = Path(absolute.anchor or "/")
+        parts = absolute.parts[1:]
+        for index, part in enumerate(parts):
+            current = os.open(part, flags, dir_fd=current)
+            handles.append(current)
+            walked /= part
+            info = os.fstat(current)
+            mode = stat.S_IMODE(info.st_mode)
+            if index == len(parts) - 1:
+                if info.st_uid != os.geteuid():
+                    offenders.append((str(walked), "owned by another user"))
+                elif _has_untrusted_writers(info):
+                    offenders.append((str(walked), f"group/other-writable ({mode:04o})"))
+            else:
+                sticky_trusted = bool(mode & stat.S_ISVTX) and info.st_uid in {0, os.geteuid()}
+                if _has_untrusted_writers(info) and not sticky_trusted:
+                    offenders.append((str(walked), f"group/other-writable ({mode:04o})"))
+        if offenders:
+            detail = "; ".join(f"{path} ({reason})" for path, reason in offenders)
+            leaf = str(absolute)
+            scope = detail if offenders[-1][0] == leaf else f"{detail} (ancestor(s) of {leaf})"
+            raise OSError(
+                errno.EPERM,
+                f"unsafe writable or foreign-owned directory: {scope}; "
+                f"fix: {safe.trusted_directory_remediation(offenders)}",
+            )
+        retained = os.fstat(directory.fd)
+        reopened = os.fstat(current)
+        if (retained.st_dev, retained.st_ino) != (reopened.st_dev, reopened.st_ino):
+            raise OSError(errno.EPERM, "trusted directory identity changed")
+    finally:
+        while handles:
+            os.close(handles.pop())
+
+
 def _safe_file_status(path: Path) -> dict:
     safe_regular = False
     mode_ok = False
@@ -215,7 +293,7 @@ def _safe_file_status(path: Path) -> dict:
         listed = os.lstat(path)
         safe_regular = stat.S_ISREG(listed.st_mode) and not stat.S_ISLNK(listed.st_mode)
         mode_ok = safe_regular and (
-            os.name == "nt" or not bool(stat.S_IMODE(listed.st_mode) & 0o022)
+            os.name == "nt" or not _has_untrusted_writers(listed)
         )
         if not safe_regular:
             raise OSError("not a safe regular file")
@@ -253,7 +331,7 @@ def _read_json(path: Path) -> tuple[dict | None, str | None]:
 
     try:
         with safe._open_secure_directory(path.parent, create=False) as directory:
-            safe._require_trusted_directory(directory)
+            _require_trusted_directory(directory)
             kind = safe._existing_kind(directory, path.name)
             if kind is None or not stat.S_ISREG(kind):
                 raise OSError(f"unsafe hook config file: {path}")
@@ -261,7 +339,7 @@ def _read_json(path: Path) -> tuple[dict | None, str | None]:
             try:
                 info = os.fstat(fd)
                 if os.name != "nt" and (
-                    info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022
+                    info.st_uid != os.geteuid() or _has_untrusted_writers(info)
                 ):
                     raise OSError(f"unsafe writable hook config file: {path}")
                 chunks: list[bytes] = []
@@ -477,7 +555,7 @@ def _script_status(hook_dir: Path, script: str, wrapper: str) -> dict:
     try:
         directory_context = safe._open_secure_directory(hook_dir, create=False)
         directory = directory_context.__enter__()
-        safe._require_trusted_directory(directory)
+        _require_trusted_directory(directory)
     except OSError:
         if directory_context is not None:
             directory_context.__exit__(None, None, None)
@@ -536,7 +614,7 @@ def _safe_file_status_at(directory, name: str, display_path: Path) -> dict:
             safe_regular = stat.S_ISREG(info.st_mode)
             mode_ok = safe_regular and (
                 os.name == "nt"
-                or (info.st_uid == os.geteuid() and not stat.S_IMODE(info.st_mode) & 0o022)
+                or (info.st_uid == os.geteuid() and not _has_untrusted_writers(info))
             )
             h = hashlib.sha256()
             while True:
@@ -1066,7 +1144,7 @@ def _deploy_file(source: Path, destination: Path) -> None:
     from ._hooks import exomem_continuation_checkpoint as safe
 
     with safe._open_secure_directory(destination.parent, create=True) as parent:
-        safe._require_trusted_directory(parent)
+        _require_trusted_directory(parent)
         existing = safe._existing_kind(parent, destination.name)
         if existing is not None and not stat.S_ISREG(existing):
             raise OSError(f"refusing unsafe hook destination {destination.name}")
@@ -1115,7 +1193,7 @@ def _snapshot_config_at(directory, name: str, display_path: Path) -> dict:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise OSError(f"hook config is not a regular file: {display_path}")
-        if os.name != "nt" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022):
+        if os.name != "nt" and (info.st_uid != os.geteuid() or _has_untrusted_writers(info)):
             raise OSError(f"hook config is unsafe or writable: {display_path}")
         chunks = []
         while True:
@@ -1153,7 +1231,7 @@ def _snapshot_config(path: Path) -> dict:
 
     try:
         with safe._open_secure_directory(path.parent, create=False) as directory:
-            safe._require_trusted_directory(directory)
+            _require_trusted_directory(directory)
             return _snapshot_config_at(directory, path.name, path)
     except FileNotFoundError:
         return {
@@ -1240,7 +1318,7 @@ def _write_unique(path: Path, raw: bytes, mode: int) -> None:
     from ._hooks import exomem_continuation_checkpoint as safe
 
     with safe._open_secure_directory(path.parent, create=True) as directory:
-        safe._require_trusted_directory(directory)
+        _require_trusted_directory(directory)
         _write_unique_at(directory, path.name, raw, mode)
 
 
@@ -1258,7 +1336,7 @@ def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
 
     path = Path(path).expanduser()
     with safe._open_secure_directory(path.parent, create=create) as parent:
-        safe._require_trusted_directory(parent)
+        _require_trusted_directory(parent)
         for _attempt in range(3):
             initial = _snapshot_config_at(parent, path.name, path)
             merged = transform(initial["data"])
@@ -1542,7 +1620,7 @@ def _write_upgrade_refresh_report(home: Path, report: dict) -> None:
     path = _upgrade_refresh_report_path(home)
     try:
         with safe._open_secure_directory(path.parent, create=True) as directory:
-            safe._require_trusted_directory(directory)
+            _require_trusted_directory(directory)
             existing = safe._existing_kind(directory, path.name)
             if existing is not None:
                 if not stat.S_ISREG(existing):
@@ -1686,7 +1764,7 @@ def read_last_upgrade_refresh(home: Path | None = None) -> dict | None:
 
         path = _upgrade_refresh_report_path(resolved_home)
         with safe._open_secure_directory(path.parent, create=False) as directory:
-            safe._require_trusted_directory(directory)
+            _require_trusted_directory(directory)
             if not stat.S_ISREG(safe._existing_kind(directory, path.name) or 0):
                 return None
             fd = safe._open_secure_file_at(directory, path.name, os.O_RDONLY)

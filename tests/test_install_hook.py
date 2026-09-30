@@ -35,6 +35,15 @@ CAPTURE_SCRIPT = _HOOKS / "exomem_capture_nudge.py"
 RETRIEVE_SCRIPT = _HOOKS / "exomem_retrieve_nudge.py"
 
 
+@pytest.fixture(autouse=True)
+def _pin_install_hook_umask():
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
 def _stop_cmds(data: dict) -> list[str]:
     return [h["command"] for g in data["hooks"].get("Stop", []) for h in g["hooks"]]
 
