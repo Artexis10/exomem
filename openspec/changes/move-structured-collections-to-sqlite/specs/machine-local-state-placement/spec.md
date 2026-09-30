@@ -18,7 +18,9 @@ it, state migration SHALL move it only losslessly, and backups and
 portability exports SHALL include a consistent snapshot of it. Its in-vault
 replica SHALL be a single-file consistent snapshot, published by atomic
 rename and never written in place. It SHALL be classified `vault-canonical`
-and SHALL NOT count as persistent machine-local state under the vault.
+and SHALL NOT count as persistent machine-local state under the vault. The
+vault-side collection mode marker beside it SHALL likewise be `vault-canonical`,
+and SHALL be the only authority for whether a replica may be adopted.
 
 Batch and held-publication intermediates SHALL be classified separately as
 `target-adjacent`: they SHALL remain beside the publication destination for

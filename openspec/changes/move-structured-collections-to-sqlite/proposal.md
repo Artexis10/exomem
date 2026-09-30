@@ -30,6 +30,19 @@ The owner has decided: **knowledge stays Markdown** (Notes, Entities, Sources, E
 - **Backup.** Snapshots are consistent: the SQLite backup API writes to a staging file, which is integrity-checked and atomically renamed. A sync-safe single-file replica in the vault serves restic and vault copies. Hosted cells keep the live store on the tenant volume, and portability export carries the snapshot as canonical data.
 - **Performance targets.** Append p95 < 20 ms at 10,000 rows. Bulk 500 rows < 1 s. Query results match the file path, and query latency is no worse. The spike under `benchmarks/collections_sqlite_spike/` measures the storage engine at 0.7 ms append p95 and 20 ms for a 500-row bulk at 10,000 rows.
 - **Deletion.** The hand-built container hashing, path and census guards on collection writes, twin scanning and ambiguity marking, manifest audit heads and item audit markers, `log.md` audit writing and parsing, chain reconstruction and depth caps, content-replay correlation, held files as storage, and per-write full-collection re-reads are removed. `design.md` §13 lists them.
+- **Safety amendments (critic review, ruled; `design.md` §16):**
+  - check-then-swap publishing, so a write never overwrites an unseen edit, plus a watcher-independent reconcile;
+  - a stamp in every view and log block, so stale and foreign edits are held, never applied;
+  - a coordinator-recorded store head, with a bounded `COLLECTION_STORE_SYNC_PENDING` on real cross-host handoffs only and an explicit `adopt-local`;
+  - instance identity and immediate divergence detection;
+  - one vault-side mode marker, a fenced migration, a state descriptor and a tombstoned replica on export;
+  - an uncapped legacy importer;
+  - cached release decisions and no second fsync;
+  - reserved `_Collections/` and listed leak surfaces;
+  - backups that never copy the live store;
+  - `VIEW_MOVED`;
+  - a stdio migrate command and a cutover-bounded handoff proof.
+- **Deferred to a follow-up change (ruled):** version-pinned links and the compiler-lane rewrite (surfacing declared types through kind-mapped roles).
 - **Datasets are unchanged.** The `dataset` strategy (CSV/TSV/JSON) stays file-canonical and query-only. Those files are human-owned sources, not agent-written collections.
 
 **BREAKING (internal contracts, not tool names):** canonical-storage requirements in `structured-collections`, `planning`, `human-owned-structured-files` and `governance-kernel` change. Direct edits to views are adopted or held instead of being reported as audit gaps. Views are normalized on re-render. `log.md` stops receiving Records and Planning audit events. The guard tokens keep their shape but not their derivation, so a caller holding a pre-migration hash gets one stale refusal and refreshes. Released frozen hosted candidates keep their schemas byte-for-byte.
@@ -47,7 +60,6 @@ None. The store is a storage change inside existing capabilities.
 - `records`: Records is a built-in type and `record_memory` its typed facade; held candidates live in the store and are rendered as views.
 - `human-owned-structured-files`: views materialize after commit; managed presentation and authored body are projections.
 - `governance-kernel`: governance granularity follows the row, not the file; Planning mutation still requires the complete authorized state; a type's `owner` default audience is a subject-level default-deny.
-- `context-roles`: one generic `collections` lane serving items by kind; roles gain `collection_kinds`; an `item` anchor kind; `collection_types_hash` in packets.
 - `machine-local-state-placement`: a new `external-canonical` placement class for the live store.
 - `hosted-vault-portability`: export carries the collection store snapshot as canonical data.
 

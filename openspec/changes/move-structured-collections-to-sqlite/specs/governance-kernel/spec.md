@@ -1,5 +1,16 @@
 ## ADDED Requirements
 
+### Requirement: Collection store artifacts and view paths never disclose withheld items
+The vault-side collection directory (the replica, mode marker, staging, aside, foreign, exported and sync-conflict copies) SHALL be reserved and denied on every egress path, the hosted gateway, and every index and resolver. Release decisions SHALL be cached per audience, policy fingerprint and collection, and re-evaluated only for changed rows or a changed fingerprint. Every surface that can expose a view path SHALL authorize the item behind it before disclosing the path, its title-bearing filename or its existence: directory listing and counts, inbound links and graph neighbours, the wikilink and title resolver, lexical and reference indexes, page refusal shapes, file-tool refusals, attention and due-state entries, history-page links, held-correction views, inventory counts, and sync-conflict copies of views.
+
+#### Scenario: The replica is never served
+- **WHEN** any caller requests, lists, searches or resolves a path under the vault-side collection directory
+- **THEN** it is treated as absent
+
+#### Scenario: A withheld item's filename does not leak through a listing
+- **WHEN** a withheld item's view has a title-bearing filename and an audience lists its folder, follows backlinks, or resolves the title
+- **THEN** the view path, filename and count are absent from every response, exactly as if the item did not exist
+
 ### Requirement: Collection type default audience is a subject-level default-deny
 Every item of a collection type whose declaration sets `default_audience: owner` SHALL be evaluated with a subject-level default-deny that follows exactly the existing scope `default_deny` rule:
 - an audience that no standing rule names for a scope matching the item receives the minimum disclosure;
@@ -10,7 +21,7 @@ A type with `default_audience: policy` SHALL add no default. A type declaration 
 
 #### Scenario: A declared type is private by default
 - **WHEN** a new type is saved with the default audience and no authored rule names a delegated audience for its items
-- **THEN** that audience's queries, inventory, counts and pinned-link projections treat every item of the type as absent, while the owner sees them
+- **THEN** that audience's queries, inventory, counts and link projections treat every item of the type as absent, while the owner sees them
 
 #### Scenario: An authored rule shares a declared type
 - **WHEN** the owner authors a standing rule naming an audience over a scope whose paths match the type's placement

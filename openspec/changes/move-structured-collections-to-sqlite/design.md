@@ -63,16 +63,19 @@ The live store is one SQLite file per vault: `collections.sqlite` under the vaul
 - backups and portability include it.
 
 The vault carries a **replica**: `Knowledge Base/_Collections/collections.sqlite`. It is a single-file (`journal_mode=DELETE`) consistent snapshot, published by the backup API to a target-adjacent staging file, checked with `PRAGMA quick_check`, and atomically renamed into place.
-- **When it is published:** after committed transactions, coalesced with a 1 s window, off the acknowledgement path. It is always flushed synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export.
-- **What it carries:** `store_id`, a store-wide `commit_seq` and the lease epoch in `store_meta`.
+- **When it is published:** after committed transactions, coalesced to at most one publish per 60 s under steady writes (A9), off the acknowledgement path. Publication is check-then-swap against the last replica this instance published (A4). It is always flushed synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export.
+- **What it carries:** in `store_meta`, the `store_id`, the publishing `instance_id` and its lineage, a store-wide `commit_seq` and chained `store_head_hash` (A3, A4), and the lease epoch. Whether a replica may be adopted at all is decided by the vault-side mode marker `Knowledge Base/_Collections/mode.json` (A5).
 - **How it is used:** it is what restic, vault copies and multi-host replicas carry. It is never opened for writing in place.
 
 Single source of truth is preserved because exactly one live store accepts writes: the one held by the writer-lease holder. The replica is a published copy of it, in the same sense that the Markdown views are.
 
-**Multi-host takeover** (opt-in `multi-host-writer-lease`):
-- A host that acquires the lease compares its local live store with the vault replica. If the replica has the same `store_id` and a `commit_seq` ahead of the local store, and the local head transaction appears in the replica, it adopts the replica: copy, `integrity_check`, swap. Then it serves writes.
-- If the local store holds transactions that the replica does not, collection writes refuse `COLLECTION_STORE_DIVERGED` and operator attention is raised. Knowledge writes and all reads continue.
-- The recovery point for a crashed writer is the coalescing window. That is the same exposure as today's file replication lag. Stranded transactions stay in the crashed host's store for operator recovery.
+**Multi-host takeover** (opt-in `multi-host-writer-lease`) is specified in §16 A3 and A4, which supersede the earlier replica-only rule:
+- The lease holder reports its store head `(store_id, instance_id, commit_seq, head_hash)` to the coordinator on every renew and release.
+- A new holder facing a head recorded by another instance adopts the replica only once the replica reaches that head. Until then it refuses collection writes with the retryable `COLLECTION_STORE_SYNC_PENDING`.
+- A single-host store, where no foreign head was ever recorded, never waits.
+- `exomem collections adopt-local` continues deliberately from local state, recording the fork point.
+- Any foreign replica or view stamp is `COLLECTION_STORE_DIVERGED` immediately. Collection writes refuse, and knowledge writes and all reads continue.
+- The crash recovery point is the replica publish interval. Stranded transactions stay in the crashed host's store and are reconciled into held corrections (§15 item 5).
 
 *Alternative rejected:* the live store inside the vault. The ratified `machine-local-state-placement` requirement exists because sync agents hash, hold and replace database files, and a WAL database copied mid-checkpoint is corrupt. Ruled (R1): the live store under the per-vault state root, plus the integrity-checked single-file replica at `Knowledge Base/_Collections/collections.sqlite`.
 
@@ -82,7 +85,9 @@ These are STRICT tables. `collection_store/schema.py` owns the DDL and migration
 
 ```sql
 store_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)
-  -- schema_version, store_id (uuid4), commit_seq, created_at,
+  -- schema_version, store_id (uuid4, the store lineage), instance_id (this physical copy, A4),
+  -- lineage (JSON: instance_id, adopted_from, adopted_at_commit_seq, head_hash), forks (A3),
+  -- commit_seq, store_head_hash (A3), last_published_replica_sha256 (A4), created_at,
   -- migrated_from ('files' | NULL), lease_epoch
 
 collections(
@@ -97,6 +102,7 @@ collections(
   audit_head TEXT,                           -- event_hash of the latest transaction
   audit_reader_version INTEGER NOT NULL,     -- 1 or 2, carried for the wire (sec. 8)
   legacy_audit_status TEXT,                  -- status imported from files, NULL if native
+  verified_through_txn INTEGER,              -- audit chain verified up to here (A6)
   log_frame_json TEXT,                       -- log layout only: bytes outside the item section,
                                              -- BOM, newline style, final-newline state (re-emitted exactly)
   created_txn INTEGER NOT NULL, updated_txn INTEGER NOT NULL)
@@ -154,22 +160,27 @@ txns(                                        -- one row per committed mutation =
   receipt_json TEXT NOT NULL,                -- the exact terminal receipt returned to the caller
   committed_at TEXT NOT NULL,                -- UTC, second precision
   prev_event_hash TEXT, event_hash TEXT NOT NULL,
+  commit_seq INTEGER NOT NULL UNIQUE,        -- store-wide sequence (A3)
+  store_head_hash TEXT NOT NULL UNIQUE,      -- store-wide chained head (A3)
   legacy_event_json TEXT)                    -- verbatim imported audit-v1/v2 event, else NULL
 
 audit_effects(                               -- one row per changed item in a transaction
   txn_id, ordinal, row_id, item_key, effect TEXT CHECK (effect IN ('insert','update','held','resume')),
-  effect_label TEXT,                         -- kind-dependent: correction|revision|replan|edit|transition|type_migration
+  effect_label TEXT,                         -- kind-dependent: correction|revision|replan|edit|transition|type_migration|view_move
   version_before, version_after, hash_before, hash_after, source_ref,
   PRIMARY KEY (txn_id, ordinal))
 
 held_candidates(held_id TEXT PRIMARY KEY, collection_id, kind TEXT CHECK (kind IN
-  ('write-refusal','view-correction')), candidate_json, diagnostics_json, view_path,
+  ('write-refusal','view-correction')), code TEXT,  -- VIEW_CONFLICT|VIEW_INVALID|VIEW_FOREIGN|VIEW_MOVED|...
+  candidate_json, held_bytes BLOB, diagnostics_json, view_path,
   base_row_version, created_txn, updated_at)
 
 projection_state(path TEXT PRIMARY KEY, collection_id, row_id, kind TEXT CHECK (kind IN
-  ('manifest','item','log','held','history')), rendered_generation INTEGER,
-  rendered_row_version INTEGER, rendered_sha256 TEXT, state TEXT CHECK (state IN
-  ('current','pending','held')))
+  ('manifest','item','log','held','history','type')),
+  published_row_version INTEGER, published_sha256 TEXT,   -- last install known on disk
+  pending_row_version INTEGER, pending_sha256 TEXT,       -- staged in the main transaction (A7)
+  stat_identity TEXT,                                     -- (inode, size, mtime_ns) fast path (A1)
+  state TEXT CHECK (state IN ('current','pending','held')))
 ```
 
 **Invariants**
@@ -227,28 +238,28 @@ Every canonical object has a rendered view at today's path:
 | Item (items layout) | `item_filename` recipe path, else `<source>/<item_key>.md` | yes, as a governed `update` (Planning: `update`, or `triage` for triage-only fields) |
 | Log (log layout) | the declared log file | yes, per block: a changed block is an update; a new or removed block is held |
 | Held candidate | `<collection>/Held/<held_id>.md` | no; read-only, resumed through the tool |
-| History | `<collection>/_history.md`, plus `<collection>/_history/<YYYY>.md` | no; read-only, rewritten if touched |
+| History | `<collection>/_history.md` (newest), plus `<collection>/_history/<NNNN>.md` pages of 500 transitions (A6) | no; read-only, rewritten if touched |
 
 **Log frame.** For the log layout, the prose outside the declared item section (headings, legend, notation), the BOM, the newline style and the final-newline state are stored in `collections.log_frame_json` and re-emitted byte-identically. An edit to the frame is recorded as a content-free `view_frame_edit` transaction, and it never touches items.
 
-**Rendering** reuses today's renderers: `render_markdown_item`, `render_markdown_log_item`, the managed presentation blocks and the filename recipes. The system frontmatter stays (`type`, `collection_id`, `record_id` / `plan_id`, `schema_version`), so identity is visible in the file. The audit marker comments and the manifest `record_audit` / `plan_audit` mappings are no longer rendered.
+**Rendering** reuses today's renderers: `render_markdown_item`, `render_markdown_log_item`, the managed presentation blocks and the filename recipes. The system frontmatter stays (`type`, `collection_id`, `record_id` / `plan_id`, `schema_version`), so identity is visible in the file. Every item and manifest view also carries the **view stamp** `exomem_view: {s, i, v, h}` (store id, instance id, row version, payload-hash prefix), and every log block carries the same stamp as a comment (§16 A2). The audit marker comments and the manifest `record_audit` / `plan_audit` mappings are no longer rendered.
 
 **Views are normalized on re-render.** Frontmatter is emitted in canonical order and style. The authored body is canonical data (`items.body`) and is re-emitted exactly. Only YAML formatting that is not data (quoting style, key order, comments inside frontmatter) is not preserved. This replaces the byte-preservation contract of today's update splicer (ruled R5).
 
 **Item views are published before the acknowledgement; aggregate views follow asynchronously.** This follows #1457's measurement and recommendation: sync projection costs 2.6–3.8 ms at 1,000 and 10,000 items, while async projection lagged 4–34 ms and is unbounded under a stalled worker. Any reader of the vault file (`get_page`, a script, Obsidian, the next agent turn) therefore sees the write it was acknowledged for.
-- **Changed item, manifest and held views are published synchronously.** Inside the transaction the writer renders each one to a target-adjacent staging file and fsyncs it, and marks its `projection_state` row `pending`. It then `COMMIT`s, renames the staging file over the view, and records `rendered_sha256`, `rendered_row_version` and `current`. Only then does it acknowledge.
+- **Changed item, manifest and held views are published synchronously.** Inside the transaction the writer renders each one to a target-adjacent staging file and fsyncs it, and records `pending_sha256` / `pending_row_version` in `projection_state` (A7). It then `COMMIT`s and installs staging by **check-then-swap** (§16 A1): the current view goes aside, staging is installed no-clobber, and an aside that differs from the expected hash is held as `VIEW_CONFLICT` with its bytes. It never overwrites an unseen edit. Only then does it acknowledge. There is no second commit.
   - A crash before `COMMIT` leaves only a staging file, which bounded crash recovery removes.
   - A crash after `COMMIT` and before the rename leaves the row `pending`, and the view is re-rendered on restart.
   - A view is never ahead of the store.
   - A rename failure, such as a Windows open-file lock, does not fail the committed mutation. The row stays `pending` and is retried, and the receipt carries a `projection_pending` warning.
-- **Log views (log layout), history pages, per-year pages and type views** are rewritten asynchronously by one coalescing projector. They can be large, and they are not what a following read of the changed item needs. They use the same `pending` / staging / rename protocol with bounded lag, and are drained on restart and on quiesce.
+- **Log views (log layout), history pages and type views** are rewritten asynchronously by one coalescing projector. They can be large, and they are not what a following read of the changed item needs. They use the same pending, staging and check-then-swap protocol with bounded lag, and are drained on restart and on quiesce. A startup and periodic reconcile hashes every `projection_state` path before the projector runs (A1).
 - **Index sync of views is never on the acknowledgement path.** Lexical, resolver, memory-refs and graph sync of a published view goes to the derived drain. Records and Planning views are already excluded from recall, so a following `find` is unaffected. Structured readers (due-state, plan progress, capture sweeps, the working set, evidence bundles) read the store directly, so they have read-your-writes by construction (§15, item 7).
 - `inspect` reports pending views (Planning: diagnostics code `PROJECTION_PENDING`; Records: an additive `projection` summary). Projection failure never fails a committed mutation. It raises attention and retries.
 
 **History page.** It is generated from `txns` and `audit_effects` and readable like today's `log.md` entries: `## <date> <operation>`, then the actor, the reason, and wikilinks to the changed item views, newest first.
-- The main page holds the latest 200 transitions. Older transitions go to per-year pages, and only the current year page is rewritten.
+- The main page holds the latest 200 transitions. Older transitions go to numbered pages of 500 transitions each, and only the newest numbered page is ever rewritten (A6).
 - It carries no item values, only content-free facts, as audit events do today.
-- It is rendered for the collection-level release decision. Effects on rows that the collection-level audience could not read are omitted, and a transaction touching only such rows is omitted entirely, so the page never discloses more than its own path's release. Full per-row history remains available through `inspect` / `include_agent_history` under per-row authorization.
+- It is rendered for the **intersection** of the audiences that can read the page's path (A8). An effect appears only if every such audience can read its item. A transaction touching only omitted effects is omitted entirely, and a mixed bulk transaction with any omitted effect is shown without its `why`. So the page never discloses more than its own path's release. Full per-row history remains available through `inspect` / `include_agent_history` under per-row authorization.
 - Edits to history pages are ignored and the page is re-rendered. It is read-only by contract, and no edit-back exists for audit.
 
 **Indexing.** Views stay ordinary vault files. Recall exclusion is unchanged (`recall_policy.is_recall_candidate` already excludes `Knowledge Base/Records` and `Knowledge Base/Planning` descendants except manifests). The lexical, resolver and graph sync of a published view goes to the derived drain, so it is not on the mutation's acknowledgement path.
@@ -257,23 +268,26 @@ Every canonical object has a rendered view at today's path:
 
 `file_watcher` gains one hook: a changed path that `projection_state` owns goes to `collection_store.edit_back` instead of only the index publishers. Only the writer-lease holder applies edit-back. On other hosts the edit reaches the writer through vault replication and is handled there.
 
+**Detection does not depend on the watcher.** The watcher hook is the fast path. The A1 reconcile (on start, then every 60 s, stat-identity pre-check) is the guaranteed path, and every publish is check-then-swap. So an edit is never lost even when `watchdog` is absent, the service is offline, or an agent write lands inside a settle window.
+
 **Settling.** Editors autosave every keystroke burst. Edit-back acts on a path once it has been quiet for 2 s. A parse or validation failure is held only once the file has stayed invalid for 10 s. A later valid save supersedes that path's held correction, because the held id derives from `(view_path, base_row_version)`, so re-holding replaces it in place.
 
-**Classification**, in order, for an item view:
+**Classification**, in order, for an item view. The **stamp rules of §16 A2 run first**: a foreign stamp is divergence, an older stamp is `VIEW_CONFLICT`, a hash-mismatched stamp is `VIEW_INVALID`, and only imported legacy bytes may be unstamped. The rows below then apply to views whose stamp names the current row version.
 
 | Observation | Result |
 | --- | --- |
-| `sha256(bytes) == rendered_sha256` | own write or no change; nothing happens |
+| `sha256(bytes)` equals `published_sha256` or `pending_sha256` | own write or no change; nothing happens |
 | parses to the same values and body as the row | formatting-only edit; re-render, no transaction |
-| `rendered_row_version != items.row_version` (row changed since this view was rendered, e.g. projection pending) | held `VIEW_CONFLICT` with both versions; the view is re-rendered to current and the human's bytes are kept in the held correction |
+| stamp `v` older than `items.row_version` (a stale buffer, a second device, or a pending projection) | held `VIEW_CONFLICT` with both versions; the view is re-rendered to current and the human's bytes are kept in the held correction |
 | parse failure, undeclared field, type or enum failure, system-field change (`collection_id`, id, `schema_version`), natural-key conflict, Planning lifecycle or hierarchy violation | held `VIEW_INVALID` with the field-addressed diagnostics the tool would return |
 | valid change to declared values and/or body, current base version | governed `update` (Planning: `update`; `triage` when only triage fields changed) through the ordinary writer: same validation, governance precommit, audit transition, receipt; actor `owner:view-edit`, `why: "edited view <path>"`, request identity per §4; then re-render |
 | file deleted | held `VIEW_DELETED`; the view is re-rendered, because no delete exists |
-| file moved or renamed | the new path is an unbound file (next row); the canonical path is re-rendered |
+| file moved or renamed within the collection's source root, current stamp intact | governed `view_move` (§16 A10): `view_path` updated and audited, no re-render at the old path |
+| file moved out of the root or into another collection | held `VIEW_MOVED` with its bytes; the canonical path is re-rendered |
 | unbound `.md` file created under a projection root | held `VIEW_UNBOUND` as a proposed insert, resumable with `append(held=...)` for Records or `add` for Planning |
 | sync-conflict copy (`*.sync-conflict-*`, `* (conflicted copy)*`) | held `VIEW_CONFLICT_COPY`; never applied |
 
-A **manifest view** edit becomes a governed `revise` when it validates as a revision of the current `manifest_version`. Otherwise it is held, with the same classification. Schema-breaking revisions follow today's revise rules. A **log view** is diffed block by block using the `exomem-record-id` binding. A changed block is an update. A block with no binding, or a removed block, is held. Reordering is ignored and re-rendered. Held **view corrections** appear in `inspect` coverage, in the attention queue, and as read-only views under `Held/`. They are resolved by resuming, by discarding with a reason, or implicitly by a later valid edit of the same view.
+A **manifest view** edit becomes a governed `revise` when it validates as a revision of the current `manifest_version`. Otherwise it is held, with the same classification. Schema-breaking revisions follow today's revise rules. A **log view** is diffed block by block using each block's stamp (§16 A2) and the `exomem-record-id` binding. A changed block is an update. A block with no binding, or a removed block, is held. Reordering is ignored and re-rendered. Held **view corrections** appear in `inspect` coverage, in the attention queue, and as read-only views under `Held/`. They are resolved by resuming, by discarding with a reason, or implicitly by a later valid edit of the same view.
 
 The watcher is the human's write path, not a bypass. It uses the same leaf functions as MCP, REST and CLI, so the surface-consistency rule holds.
 
@@ -302,6 +316,8 @@ No per-row audience column is added. Governance stays in one authored place, and
 2. The authorized set goes into a temporary table, and filtering, sort, pagination, totals, aggregates, hierarchy and continuation are computed only over it.
 
 The same set feeds `snapshot` (§3). Withheld rows are indistinguishable from absent rows: they do not count, bound caps, create ambiguity or change continuations.
+
+**Caching and leak surfaces.** Release decisions are cached per `(audience, policy fingerprint, collection)` and re-evaluated only for changed rows (§16 A7). The reserved `_Collections/` directory and every surface that can expose a title-bearing view path (listing, backlinks and graph, resolver, indexes, refusal shapes, attention, history links, held views, inventory, sync-conflict copies) authorize the item first (§16 A8), each with a test.
 
 **Composition with existing governance**
 - **Mutation** still requires the complete authorized state. If any row of the collection is withheld from the caller, append, update, bulk upsert, revise and rebaseline refuse `COLLECTION_NOT_FOUND`, as they do today. Relaxing this would let a uniqueness conflict or a generation bump reveal a hidden row. It is now a cheap check: the uniform-release decision, or one identity-only pass.
@@ -335,6 +351,10 @@ The same set feeds `snapshot` (§3). Withheld rows are indistinguishable from ab
 | C17 | `plan_memory` | a facade over the generic operations (§14.7); wire unchanged | unchanged |
 | C18 | manifests | `collection_type:` names the type; `semantic_profile: records\|planning` remain accepted aliases; `link` fields may declare `target.collection_type` and `pin: version` (§14.3) | additive |
 | C19 | `activate_context` packet | `generation.collection_types_hash`; the `collections` lane replaces the `records` and `planning` lanes (both kept as aliases); `ANCHOR_KINDS` gains `item` | additive |
+| C20 | lease coordinator wire | renew and release carry `collection_store_head: {store_id, instance_id, commit_seq, head_hash}`, which is coordination metadata only; a coordinator schema bump that migration fences (§16 A3, A5) | multi-host vaults need a coordinator at the new schema before migrating; preflight refuses otherwise |
+| C21 | refusal and hold codes | `COLLECTION_STORE_SYNC_PENDING` (retryable), `COLLECTION_STORE_DIVERGED`, `COLLECTION_VIEW_PATH`; held `VIEW_FOREIGN`, `VIEW_MOVED`; the `view_move` effect label (§16) | additive |
+| C22 | views | every item and manifest view gains the reserved `exomem_view` stamp, and every log block gains a stamp comment replacing the audit marker (§16 A2) | the stamp is refused in `item` / `changes` and ignored by the payload hash |
+| C23 | CLI | `exomem collections migrate`, `adopt-local`, `backup --to/--stdout` | additive |
 | C14 | receipts | `receipt_version: 1` shapes unchanged. `audit_correlation` is the 24-hex `transition_id` of the one transaction | unchanged |
 
 **Frozen hosted candidates** are unchanged. `hosted_legacy_profile_schemas.json` pins v1–v4 and `test_hosted_legacy_profile_pin.py` re-derives the pin. `minimum_records_reader_version` stays 2: `audit_reader_version` (1 or 2) is kept per collection and reported as today, and the store has its own `schema_version` that the wire does not expose. The local surface, the v5 candidate, the command binding and the derived artifacts are regenerated only for C11 and C12.
@@ -365,7 +385,7 @@ The option-B "bulk audit event" that #1452 deferred is simply the native shape h
 
 ### 10. Migration: verifiable, reversible, zero-downtime
 
-**Switch.** A per-vault store mode lives in `store_meta` and the state root: `files` (the default until migrated) or `store`. Code for both ships in the same release. File mode keeps today's machinery until the deletion phase (§13). This is the default-off seam.
+**Switch.** The single authority for a vault's mode is the vault-side marker `Knowledge Base/_Collections/mode.json` (`files`, `store` or `exported`, §16 A5). The state-root flag only caches it and is checked against it at startup. A replica is adopted only when the marker says `store` with the matching `store_id`. Code for both ships in the same release. File mode keeps today's machinery until the deletion phase (§13). This is the default-off seam.
 
 **Preflight (`maintain_memory(mode="collections-store", dry_run=true)`)** reports, per collection:
 - the rows found;
@@ -378,7 +398,7 @@ Blockers are duplicate or ambiguous identities, schema violations, unsupported v
 **Import and verification** (the migrator, pure and deterministic). For each collection:
 1. Read the files with today's adapters (`MarkdownItemsAdapter` / `MarkdownLogAdapter`), with full authority.
 2. Write the rows with the same `item_key`, `natural_key`, `values_json`, `body`, `payload_hash` and `view_path`. Write the manifest text verbatim as `manifest_version` 1, and the held candidates with their existing ids.
-3. Parse the legacy events from `log.md` and the archives using a read-only legacy parser, which is the extracted `_audit_events` / `_audit_event_syntax` / `_reconstruct_audit_chain`. Import every reachable event as a `txns` row with `operation: legacy_import`, `legacy_event_json` verbatim, and `prev_event_hash` chaining. Then append one `legacy_import` checkpoint transaction. `legacy_audit_status` is set to the legacy inspector's result, so a `gap` stays a `gap` and is never blessed.
+3. Parse the legacy events from `log.md` and every archive with the uncapped streaming reader filtered per collection (§16 A6), not the bounded `_audit_events` (which returns empty past 8 MB, 10k events or 128 archives) or the 2048-deep chain walk. Import every reachable event as a `txns` row with `operation: legacy_import`, `legacy_event_json` verbatim, and `prev_event_hash` chaining. Then append one `legacy_import` checkpoint transaction. `legacy_audit_status` is set to the legacy inspector's result, so a `gap` stays a `gap` and is never blessed.
 4. **Round-trip proof.** It must pass for the vault to migrate:
    - (a) row count equals legacy item count;
    - (b) for every row, `parse(render(row))` equals the row's values, body, key and natural key;
@@ -387,13 +407,13 @@ Blockers are duplicate or ambiguous identities, schema violations, unsupported v
    - (e) the manifest text is byte-equal;
    - (f) the legacy inspect status equals `legacy_audit_status`.
    Render drift, where `render(row)` differs in bytes from the current file, is recorded, is not a failure, and changes nothing. Files are not rewritten at migration.
-5. Record `projection_state` with `rendered_sha256` equal to the **current file hash**. The existing files are therefore already "current views", and a later human edit is detected against them.
+5. Record `projection_state` with `published_sha256` equal to the hash of **the exact bytes the importer parsed**, captured in the same read (§16 A5). The existing files are therefore already "current views", unstamped until their first re-render. A file changed between parse and publication is a human edit by construction.
 
 **Zero downtime** uses `managed-service-upgrades`:
 1. The target release declares the offline migration `collections-store-v1`.
 2. The standby worker, which holds no lease and no ownership, pre-imports into a staging store from the live vault read-only, and records the per-collection basis: the legacy container hash and audit head.
 3. The active worker keeps serving reads and writes.
-4. At handoff, after the old worker has provably exited, the migrator re-checks each basis. Collections that changed in the meantime are re-imported, which is a small delta. The whole round-trip proof re-runs, the store is published atomically into the state root, and the mode is set to `store`. Then the standby is promoted.
+4. At handoff, after the old worker has provably exited, the migrator re-checks each basis. Unchanged collections carry their pre-import proof forward. Only changed collections are re-imported and re-proved, which must fit the ~40 s cutover budget (`service_manager.py:607`), or the upgrade is abandoned cleanly and stays in file mode (§16 A11). The store is then published atomically into the state root. Then the migrator writes the mode marker, advances the coordinator schema fence, records the `collections-store-v1` state descriptor (§16 A5), and promotes the standby.
 5. Writes pause only for the ordinary bounded handoff. A failed proof leaves the mode at `files`, the vault untouched and the old release restorable. The upgrade reports the failing collection and check.
 
 **Reversal**
@@ -403,20 +423,20 @@ Blockers are duplicate or ambiguous identities, schema violations, unsupported v
   - manifests with `record_audit` / `plan_audit` heads;
   - per collection, one legacy-valid v2 `rebaseline`-shaped checkpoint event naming the store transitions it summarizes, content-free.
 
-  Legacy inspect then reads `acknowledged_gap` with the discontinuity documented, never a silent `ok`. The export is atomic per collection through `batch_atomic_write` and preview-first. After it runs, the mode is set to `files`.
+  Legacy inspect then reads `acknowledged_gap` with the discontinuity documented, never a silent `ok`. The export is atomic per collection through `batch_atomic_write` and preview-first. After it runs, the mode marker is set to `exported` and the replica is tombstoned by renaming it to `collections.sqlite.exported-<utc>`, so no host can adopt it (§16 A5). Downgrading to a pre-store release requires this export first, because `state_migration` refuses the unknown descriptor.
 - **Test:** files → store → export → files is byte-equal for collections not written in store mode, and legacy-valid for collections that were.
 
 ### 11. Backup, restore and hosted cells
 
 - **Consistent snapshot primitive.** `sqlite3.Connection.backup` into a staging file, `journal_mode=DELETE`, `PRAGMA integrity_check`, fsync, atomic rename. The vault replica (§1) uses it, and so do `exomem collections backup --to <file>` (and `--stdout` for `restic backup --stdin`) and portability export. The spike measures 77 ms at 10,450 rows (15.8 MB with history).
-- **restic and vault copies** back up the vault. The replica is a single consistent file, and the WAL files of the live store are never in the vault. Operators who back up the state root directly are told to use the `backup` command or to exclude `-wal` / `-shm`, because copying a live WAL database is not consistent.
+- **restic and vault copies** back up the vault. The replica is a single consistent file, and no part of the live store is ever in the vault. The live store is **excluded entirely** from file-level backups: copying its main file without or with its WAL is not consistent. The existing restic timer runs `exomem collections backup --to <staging>` first and backs up that snapshot (§16 A9).
 - **WAL checkpoint.** A passive checkpoint runs after the projector drains, and a truncating checkpoint runs on quiesce, so the WAL stays bounded.
 - **Restore.**
   - Check the snapshot's `integrity_check`, `schema_version`, and that its `store_id` matches or restore is explicit.
   - Re-render every view into a staging tree and compare it with the vault.
   - Publish the store, then drain the projector.
   - A restored store older than the vault's views surfaces the difference as held `VIEW_CONFLICT` corrections, never as silent overwrites.
-- **Hosted cells.** The live store sits in the cell state root on the tenant volume (`external-canonical`), one per cell, so tenant isolation is unchanged. Quiesce flushes the replica. Portability export includes the quiesced snapshot at its vault path as canonical data, excluding `-wal` / `-shm`. Restore stages and validates as above before publication. `hosted-vault-portability` is modified accordingly.
+- **Hosted cells.** The live store sits in the cell state root on the tenant volume (`external-canonical`), one per cell, so tenant isolation is unchanged. Quiesce flushes the replica. Portability export includes the quiesced snapshot at its vault path as canonical data. It is a single-file `journal_mode=DELETE` backup-API copy, and the live store's files are never exported. Restore stages and validates as above before publication. `hosted-vault-portability` is modified accordingly.
 
 ### 12. Performance
 
@@ -460,6 +480,8 @@ Removed from the acknowledgement path:
 - manifest discovery and parsing;
 - `log.md` read-rewrite;
 - synchronous view index sync (≈ 50–133 ms), which moves to the derived drain.
+
+**Non-uniform collections and fsyncs.** The release-decision cache and the in-transaction `pending_sha256` (§16 A7) keep the budget for non-uniform collections and avoid a second fsync. The P1a.15 gate includes a 10% ref-withheld 10,000-row collection and a Windows/NTFS run.
 
 **Query parity.** The parity path runs `query_data.evaluate_rows` over the rows the store returns, so filter operators, NFC normalization, type coercion and aggregates are the same code as today. SQL push-down is used only on the uniform-release fast path, and only for operators with a passing parity test against the file adapter on a generated parity corpus. The fast path covers eq, ne, lt/lte/gt/gte on declared scalar fields, sort, limit and count/min/max/sum/avg. Any other operator falls back to the parity path. Declared-field expression indexes are created per collection for the fields its saved views filter or sort on.
 
@@ -611,7 +633,10 @@ A declaration may narrow its kind's roles (`surfacing.roles`, a subset). It may 
 
 The vocabulary grows only by shipped revision (ruled R9), because each kind needs a compiler mapping and version wording.
 
-#### 14.3 Pinned version references
+#### 14.3 Pinned version references (follow-up change, §16 A11)
+
+*Deferred by ruling to a follow-up change; described here so the store schema (`item_versions`) keeps it possible.*
+
 
 A `link` field may target a collection type and declare `pin: version`:
 - its value is `exomem://<item_type>/<collection_id>/<item_key>@<row_version>`;
@@ -619,7 +644,10 @@ A `link` field may target a collection type and declare `pin: version`:
 
 Resolution of a pinned link reads `item_versions`, which already hold every version. The pinned target is authorized as the item itself (the same governance subject), so a withheld target projects to `None`, exactly as `_LinkProjector` does today. Write-time validation checks that the pinned version exists and was authorized for the writer. The natural key and `payload_hash` include the full pinned value, so two runs that followed different revisions are different observations. Query `group` and `filters` may use the pinned value, or its two parts: `<field>.item` and `<field>.version`.
 
-#### 14.4 Surfacing: when a turn is served a type's items
+#### 14.4 Surfacing: when a turn is served a type's items (compiler-lane rewrite deferred, §16 A11)
+
+*The generic `collections` lane, `collection_kinds` and `item` anchors below are deferred by ruling to the same follow-up change. In this change a declaration's `surfacing` block is validated and stored, and types surface only as today's Records (`current_state`) and Planning (`active_plans`) do.*
+
 
 Today the compiler knows exactly two collection shapes:
 - `context_roles.LANES` has a `records` lane and a `planning` lane (`context_roles.py:68`), and `working_set._lane` dispatches them with a hard-coded chain (`working_set.py:727-758`).
@@ -738,7 +766,7 @@ The result is one transaction holding type version 1, collection `Weeknight reci
 
 The history page shows both. The item view carries the "Revision 3" footer. Version 2 remains readable through a pinned reference.
 
-**3. Log executions in a Records collection.** "Recipe Executions" is an ordinary collection of the built-in `records` type (`kind: observed`):
+**3. Log executions in a Records collection.** *(The pinned link and step 4's surfacing are delivered by the follow-up change, §16 A11. In this change the link is unpinned.)* "Recipe Executions" is an ordinary collection of the built-in `records` type (`kind: observed`):
 
 ```yaml
 collection_type: records
@@ -802,17 +830,17 @@ Schema and rows therefore change together, atomically, under one audit chain. Th
 - The replica is published after commits (coalesced) and synchronously on quiesce, lease release, shutdown, handoff and export. A restic snapshot or a folder copy of the vault is therefore a complete, consistent backup.
 - **A vault copy is not a read-only mirror.** Starting a service on the copy adopts the replica as its live store (same `store_id`, §1 takeover rule), and it is writable from then on.
 - **Restore** is: restore the vault, start the service, adopt the replica, re-render views into staging, and compare. A difference becomes a held correction, never an overwrite (§11).
-- The exposure is the replica's coalescing window for a crash between commit and publication, bounded at 1 s. It is flushed synchronously at every orderly boundary. Operators who need zero window use `exomem collections backup --stdout` as the restic source.
+- The exposure is the replica publish interval for a crash between commit and publication, at most 60 s under steady writes (§16 A9). It is flushed synchronously at every orderly boundary. Operators who need zero window use `exomem collections backup --stdout` as the restic source.
 
 **4. Obsidian visibility and edits.** Views are not read-only in effect. The owner chose governed edit-back (option 2): a valid edit becomes an audited update, and an invalid, ambiguous or conflicting one becomes a held correction. An edit is never silently overwritten by the next projection, because edit-back runs on the changed file before any re-render, and a stale-base edit is held with the human's bytes (§6).
 
 **5. Sync tools and two machines writing.** This is the one place the store design is genuinely weaker than files. Today two machines writing different items merge through ordinary file sync, and a same-file conflict becomes a sync conflict copy.
 - **With the multi-host writer lease** (the supported multi-writer setup), only the lease holder writes the store. Edits made on another machine are view edits. They reach the writer's vault through sync and go through edit-back there, so no store merge is ever needed (§1, §6). Sync conflict copies of views are held `VIEW_CONFLICT_COPY`.
-- **Without the lease**, two services each writing their own live store on one synced vault diverge. The takeover check detects it: same `store_id`, and each store has transactions the other lacks. Collection writes then fail closed with `COLLECTION_STORE_DIVERGED`, while reads and knowledge writes continue.
+- **Without the lease**, two services each writing their own live store on one synced vault diverge. That includes a Windows and a WSL service on one vault, which have different state roots and locks. Instance identity, replica check-then-swap and stamps (§16 A4) detect it immediately. Collection writes then fail closed with `COLLECTION_STORE_DIVERGED`, while reads and knowledge writes continue.
 - **Nothing is lost.** An operator command, `maintain_memory(mode="collections-store-reconcile", dry_run=...)`, takes the divergent store's transactions after the fork point. It turns every changed item into a held view correction on the surviving store, carrying that store's values and diagnostics, and records the reconciliation as one content-free transaction. A human then resolves each one, as with a sync conflict copy today.
 - Running two writers without the lease becomes explicitly unsupported for collection writes. `describe` and the doctor probe say so. Knowledge Markdown is unaffected.
 
-**6. Out-of-band edit policy.** This is a product decision the file design does not need, and the owner has made it: ingest through the governed write path, or hold (§6). Detection is exact. `projection_state.rendered_sha256` identifies the design's own writes, and a changed file is classified against the row version it was rendered from.
+**6. Out-of-band edit policy.** This is a product decision the file design does not need, and the owner has made it: ingest through the governed write path, or hold (§6). Detection is exact and does not depend on the watcher. `projection_state.published_sha256` / `pending_sha256` identify the design's own writes, and every view carries a stamp naming the store, instance and row version it was rendered from (§16 A1, A2), so a stale or foreign edit can never pass as a current one.
 
 **7. Everything else that reads items as pages; read-your-writes.**
 - **Item views are published before the acknowledgement** (§5). Any file reader, including `get_page` and the next agent turn, sees the acknowledged write. That costs about 3 ms, as #1457 measured. Only aggregate views (log layout, history and type pages) and index sync are asynchronous.
@@ -822,7 +850,7 @@ Schema and rows therefore change together, atomically, under one audit chain. Th
 
 **8. Hosted cells.**
 - One writer lease per cell makes SQLite a natural fit, and the live store sits in the cell state root on the tenant volume.
-- Cell export and restore gain the store snapshot as canonical data, excluding `-wal`/`-shm` (§11; the `hosted-vault-portability` delta). Restore stages, validates and re-renders before publication.
+- Cell export and restore gain the store snapshot as canonical data: a single-file backup-API copy, never the live store's files (§11; the `hosted-vault-portability` delta). Restore stages, validates and re-renders before publication.
 - `cloud_import` of a file-canonical vault runs the §10 importer and proof in staging before the cell starts.
 - Evidence bundles read rows.
 
@@ -841,6 +869,153 @@ Schema and rows therefore change together, atomically, under one audit chain. Th
 
 **12. Recommendation for the middle path (a derived SQLite sidecar with files authoritative).** It is superseded by the owner's decision. Its revisit conditions are now met, because bulk upsert (#1452) and declarable collection types (§14) make multi-row transactions and larger collections first-class. The sidecar's benefits (O(1) guard, O(1) natural-key lookup) are the store's primary indexes, and the stat-generation item cache that #1457 added (`record_item_cache.py`) becomes unnecessary for store collections. It stays useful for file mode during the legacy window (R7).
 
+### 16. Safety amendments (critic review, ruled)
+
+An independent review returned AMEND FIRST. The core decision stands. The amendments below are ruled, and they change the P1a schema. Where earlier sections disagree, this section wins, and those sections have been edited to point here.
+
+#### A1. Publishing never overwrites an unseen edit (check-then-swap)
+
+Earlier, §5 renamed staging over a view and §6 relied on the watcher to have seen any edit first. The watcher can miss one:
+- `watchdog` is optional, and the watcher is a no-op without it (`file_watcher.py:16-18`);
+- the reconcile interval is 300 s (`:77`);
+- the settle windows are 2 s and 10 s;
+- the service may be offline.
+
+An agent write landing in any of those gaps would rename staging over a human's edit, record the new `rendered_sha256`, and lose the edit.
+
+**Every publish is now check-then-swap.** This covers the synchronous item, manifest and held views and the asynchronous projector alike:
+1. Atomically rename the current view to a target-adjacent aside name (`.<name>.exomem-aside-<txn>`).
+2. Install staging at the view path with **no-clobber** semantics: `link` then unlink staging on POSIX, `MoveFileEx` without `REPLACE_EXISTING` on Windows (`renameat2(RENAME_NOREPLACE)` where available). A file that an editor created in the gap between the two renames is therefore never replaced. The install fails, and that file is treated exactly like a changed aside (step 4).
+3. Hash the aside copy.
+4. Compare the hash:
+   - If it equals the view's expected on-disk hash (`published_sha256`, or `pending_sha256` when a previous install completed without being recorded, see A7), delete the aside.
+   - Otherwise the aside is an unseen human edit. It is held as `VIEW_CONFLICT` carrying its bytes, its stamp (A2) and both row versions, and removed from the view path. The newly installed view reflects the store. The human's bytes are never lost.
+5. A rename that is blocked (a Windows open-file lock) leaves the view `pending` and is retried. It never falls back to an overwrite.
+
+**Startup and periodic reconcile.** Before the projector runs, on every start and every 60 s, the service hashes every `projection_state` path and feeds any mismatch to edit-back classification (A2). Views whose on-disk hash equals `published_sha256` are skipped by an `(inode, size, mtime_ns)` pre-check, so a quiet vault costs one `stat` per view. This does not depend on `watchdog`, so a missing watcher only delays edit-back, never loses an edit.
+
+#### A2. Every view and log block carries a stamp
+
+Earlier, §5 rendered only the identity properties and §6 took the edit's base from `projection_state`. So a stale Obsidian buffer or a second device writing v4-based bytes over v5 would classify as a valid current-base edit and silently revert v5 under `owner:view-edit`. The same held for log blocks, and a forked store's views would be adopted as owner edits. The spike already had the right shape (`spike.py:379-383`).
+
+**The stamp.** Every item and manifest view renders one system property:
+
+```yaml
+exomem_view: {s: <store_id>, i: <instance_id>, v: <row_version>, h: <payload_hash[:12]>}
+```
+
+Each log block carries the same stamp as an HTML comment (`<!-- exomem-view s=… i=… v=… h=… -->`), replacing today's `exomem-record-audit` marker line. The stamp is a reserved system property: it is refused in `item` and `changes`, and ignored by the payload hash. `instance_id` is the physical store instance that rendered the view (A4).
+
+**Classification by stamp**, ahead of every other row in §6:
+
+| Stamp on the edited view | Result |
+| --- | --- |
+| `s` is not this store's `store_id`, or `i` is not in this store's instance lineage (A4) | foreign view → `COLLECTION_STORE_DIVERGED` (A4); the file is held `VIEW_FOREIGN`, never applied |
+| `v` < the row's current `row_version` | stale base → held `VIEW_CONFLICT`, carrying both versions and the human's bytes |
+| `v` = current and `h` matches the row | current base → the ordinary §6 classification (formatting-only, governed update, invalid → held) |
+| `v` = current but `h` does not match the row | a stamp that was tampered with or copied → held `VIEW_INVALID` |
+| no stamp, and the bytes are exactly the file parsed at import (A5) | a legacy view that has not been re-rendered yet; its base is the import version |
+| no stamp, otherwise | held `VIEW_INVALID` (a missing stamp is never read as the current base) |
+
+Only imported legacy files may be unstamped. The first re-render stamps them. Log views are diffed block by block with the same rules per block.
+
+#### A3. Cross-host freshness uses a coordinator-recorded store head
+
+Earlier, §1 checked freshness against the synced replica only. Idle release after 60 s (`writer_lease.py:1726-1731`) makes handoffs routine, so a new holder could write on a replica that sync had not yet caught up, forking the store. The rule "local head appears in replica" was also undefined: `txn_id` integers collide across forks, and the hash chain is per collection.
+
+**Store-wide chained head.** Each transaction also advances a store-wide chain:
+- `txns.store_head_hash = sha256("exomem-store-head:v1\0" + prev_store_head_hash + "\0" + commit_seq + "\0" + event_hash)`;
+- `store_meta` keeps `commit_seq` and `store_head_hash`.
+
+A fork is exactly "same `commit_seq`, different head", or "my head is not an ancestor of yours". Ancestry is decided by walking `txns.store_head_hash`, never by comparing `txn_id`.
+
+**The coordinator records the head.** The lease holder sends `collection_store_head: {store_id, instance_id, commit_seq, head_hash}` on every renew and on release. This is coordination metadata only, which the "Provider-neutral coordinator contract" allows. It is a coordinator schema bump, and migration advances the schema fence to it (A5).
+
+**What the new holder does:**
+- If the recorded head came from **another instance**, which is a real cross-host handoff, the new holder compares it with its vault replica.
+  - Replica at the recorded `(commit_seq, head_hash)`: adopt the replica, then write.
+  - Replica behind: collection writes refuse with the retryable **`COLLECTION_STORE_SYNC_PENDING`**, naming the recorded and local `commit_seq` and saying what to do: "wait for vault sync to deliver `Knowledge Base/_Collections/collections.sqlite`, or run `exomem collections adopt-local` to continue from this host's copy".
+  - Replica at the same `commit_seq` with a different head: `COLLECTION_STORE_DIVERGED` (A4).
+- If **no foreign head was ever recorded**, the new holder never waits. That covers a single-host vault, the same instance re-acquiring after idle release, and every non-multi-host install.
+- **Bounded.** The refusal is re-checked on every replica change (the `_Collections/` watch, A4) and every 10 s. After 15 minutes it also raises attention with the same remedy. Reads and knowledge writes are never blocked.
+
+**Explicit adopt-local.** `exomem collections adopt-local --why "…"` (also `maintain_memory(mode="collections-store-adopt-local")`) is owner-only and preview-first. It continues from the local store deliberately:
+- it records a fork point, meaning the foreign head it is not waiting for, in `store_meta.forks`;
+- it adds a lineage entry;
+- it proceeds.
+
+If the other side's transactions later arrive in a replica, they are reconciled exactly like divergence (§15 item 5): every item they changed after the fork point becomes a held correction. So a switched-off sync tool can never lock the owner out, and choosing to go ahead never silently drops the other side.
+
+#### A4. Instance identity and immediate divergence detection
+
+Earlier, divergence was not always detected. The state directory is keyed on the resolved vault path (`state_paths.py:260-275`), and mutation locks live under the state root (`mutation_lock.py:1936`). So a Windows service and a WSL service on one vault, or a moved vault, get separate live stores and separate locks, and fork silently.
+
+- **Instance identity.** Each live store mints an `instance_id` when it is created or adopted. `store_meta.lineage` records `(instance_id, adopted_from_instance_id, adopted_at_commit_seq, head_hash)`. A stamp or replica from an instance in the lineage, at or before its handoff point, is this store's own history. Any other instance is foreign.
+- **Replica check-then-swap.** Before publishing, the publisher hashes the replica on disk and compares it with `store_meta.last_published_replica_sha256`, the last replica **this instance** published. A mismatch means another instance published. The publisher then does not overwrite: it marks the store `DIVERGED` and keeps the foreign replica aside as `.foreign-<instance>`. The swap uses the no-clobber install from A1.
+- **Watching `_Collections/`.** The directory is watched, and polled by the A1 reconcile. Any foreign replica, or any view stamp from a foreign instance, sets `COLLECTION_STORE_DIVERGED` immediately: collection writes refuse, and reads and knowledge writes continue. Reconciliation is the §15 item 5 command.
+- **Moved vaults.** Opening the same store from a new resolved path (same `store_id` in the mode marker, A5; no local store at the new key) is an adoption, and gets a new lineage entry. It is not a fork.
+
+#### A5. One mode marker, fenced migration, no second source of truth
+
+Earlier, §10 stored the mode twice with no ordering, adopted a replica whenever no local store existed regardless of mode, and left the replica behind after reverse export. Old-release hosts could keep writing files that the store would then read as view edits.
+
+- **One vault-side mode marker.** `Knowledge Base/_Collections/mode.json` holds `{mode: "files"|"store"|"exported", store_id, migrated_at, exported_at, fence_schema}`, published atomically. Adoption reads only this. A replica is adopted only when the marker says `store` with the same `store_id`. With `files` or `exported`, no replica is ever adopted. The state-root mode flag becomes a cache of the marker and is checked against it at startup.
+- **Export tombstones the replica.** Reverse export sets the marker to `exported` and renames the replica to `collections.sqlite.exported-<utc>`, so no host can adopt it. Re-migration mints a new `store_id`.
+- **Fencing old releases.** Migration advances the coordinator schema fence (`required_schema_version`, `schema_fence_generation`, `writer_lease.py:1812-1838`) to the store-aware schema, so an old-release host cannot hold the writer lease and write files. Single-host installs record `collections-store-v1` as a state descriptor. `state_migration` refuses a downgrade over an unknown descriptor (`state_migration.py:543-547`), so an old release refuses to start on a migrated vault. The documented path is **export before downgrade**, and the doctor probe says so.
+- **Import binds to exact bytes.** In §10 step 5, `published_sha256` is the hash of the bytes the importer actually parsed, captured in the same read, not re-read later. A file that changes between parse and publication is therefore a human edit by construction.
+
+#### A6. The legacy importer has no ceiling
+
+Today `_audit_events` returns empty past its source-byte, event and archive bounds (8 MB, 10k events, 128 archive entries; `records.py:2437-2495`, `:1945`), and `_reconstruct_audit_chain` stops at depth 2048 (`:2124`). An importer built on them would silently lose history.
+- **An uncapped streaming reader for the importer only.** It reads `log.md` and every archive segment in order, filters by `collection_id`, and verifies the chain incrementally in constant memory per collection. The bounded readers stay for file-mode inspection.
+- **The P1b.1 test vaults include** a vault whose logs exceed 8 MB across more than 128 archives, and a collection chain deeper than 2048.
+- **A verified-through watermark.** `collections.verified_through_txn` records where the chain was last verified. `inspect` verifies only the transactions after it, which is O(new transactions).
+- **History pages split by entry count** (500 transitions per page, `_history/0001.md`, …), not by year. Only the newest page is rewritten, so no page grows without bound.
+
+#### A7. Budget holds for non-uniform collections; no second fsync
+
+Earlier, §12 assumed uniformly released collections. Two changes fix that:
+- **Release-decision cache.** Decisions are cached per `(audience, policy fingerprint, collection_id)`. The cache holds an "all rows visible" flag and per-row decisions keyed by `(row_id, row_version)` of the row's governance subject. A policy change invalidates by fingerprint, and a row change re-evaluates only that row. A non-uniform 10,000-row collection then pays per-row evaluation once per policy fingerprint, not per call.
+- **No second transaction.** `projection_state.pending_sha256` (the staged bytes' hash) and `pending_row_version` are written inside the main transaction, because the bytes are rendered before commit. After a successful install the pair is promoted to `published_*` lazily, by the next transaction that touches the view or by the reconcile. There is no extra commit or fsync on the acknowledgement path. A1 step 4 accepts either `published_sha256` or `pending_sha256` as expected on disk.
+- **The P1a.15 gate adds** a non-uniform 10,000-row collection (a ref-scoped rule withholding 10% of rows) and a Windows/NTFS run.
+
+#### A8. Withheld-as-absent: the remaining leak surfaces
+
+- **The replica and markers are reserved.** `Knowledge Base/_Collections/` (the replica, `mode.json`, staging, aside, `.foreign-*` and `.exported-*` copies, and sync-conflict copies of any of them) is reserved in `reserved_paths`. It is denied on every egress path: `get_page`, `find`, `list_directory`, the hosted gateway, the lexical, embedding and graph indexes, and the resolver.
+- **History pages are rendered for the intersection of audiences** that can read the page's path. An effect appears only if every such audience can read its item. A mixed bulk transaction with any withheld effect is rendered without its `why`.
+- **Filename-recipe view paths** can carry titles. Each surface below authorizes the item behind a view path before exposing the path, and each has a test in P2.4:
+  - `list_directory` and directory counts;
+  - `list_inbound_links` and graph neighbours or backlinks;
+  - the wikilink resolver and title lookup;
+  - lexical and memory-refs indexes of views;
+  - `get_page` refusal shapes (withheld equals missing);
+  - `move_file` / `delete_file` refusal messages;
+  - attention-queue and due-state entries;
+  - history-page links;
+  - held-correction views;
+  - activation item anchors (for types that surface);
+  - inventory counts;
+  - sync-conflict copies of views.
+
+#### A9. Backup: the live store is never copied as a file
+
+"Exclude `-wal`/`-shm`" (§11) was wrong for a live WAL database: copying the main file alone is also inconsistent.
+- The live store is **excluded entirely** from file-level backups.
+- The existing restic timer runs `exomem collections backup --to <staging>` first and backs up that consistent snapshot, alongside the vault replica.
+- The P1b.8 gate measures **replica sync churn**. A full replica is about 15.8 MB at 10,000 rows (spike), so publication is coalesced to at most one publish per 60 s under steady writes (and always at the §1 boundaries). The gate reports bytes per hour at 1, 10 and 60 writes per minute.
+
+#### A10. Moves and renames: `VIEW_MOVED`
+
+A moved view keeps its item identity through its stamp, and Obsidian rewrites links to the new path, so re-rendering at the old path would break those links.
+- **A move within the collection's source root** with an intact current stamp is a governed `view_move` transaction. It updates `items.view_path`, is audited, is re-authorized because the governance path changed, and the view is not re-rendered at the old path. The next filename-recipe render keeps the moved path until an explicit representation maintenance runs, matching today's `filename_drift`.
+- **A move out of the root or into another collection** is held as `VIEW_MOVED`. The item keeps its canonical path, which is re-rendered, and the moved file is held with its bytes.
+
+#### A11. Scope, stdio installs and the cutover budget
+
+- **Split into a follow-up change**: pinned version links (§14.3) and the compiler-lane rewrite (§14.4, formerly P4.5). The worked example's pinned executions and surfacing turns are delivered there. In this change, Recipe Executions uses an unpinned link, and types surface only as today's Records and Planning do.
+- **Non-managed installs** (stdio MCP, no service manager) migrate with `exomem collections migrate`. It is offline, takes the mutation lock, refuses if a service holds the vault, and runs the same preflight, import, proof, mode marker and descriptor steps.
+- **Handoff within the ~40 s cutover** (`service_manager.py:607`). The proofs of collections whose basis is unchanged since pre-import are carried forward. Only changed collections are re-imported and re-proved at handoff. If that delta is not proved within the cutover budget, the upgrade is abandoned cleanly: the vault stays in file mode, and it retries at the next window.
+
 ## Risks / Trade-offs
 
 - **Opaque storage.** Canonical rows are no longer greppable Markdown. *Mitigation:* views at today's paths, the replica as one portable file, the reverse exporter, and the history page.
@@ -854,7 +1029,26 @@ Schema and rows therefore change together, atomically, under one audit chain. Th
 
 ## Rulings
 
-Needs ruling: **None.** The orchestrator's rulings on #1459 are folded into the sections cited.
+The orchestrator's rulings on #1459 are folded into the sections cited. The critic's amendments 1–11 are ruled and folded into §16 (A1–A11) and the sections it names. Four points need a ruling; each is implemented as stated below unless ruled otherwise.
+
+### Needs ruling
+
+- **N1. Amendments 2 and 4 conflict as literally worded.** Amendment 2 stamps views with the "store instance id". Amendment 4 mints a new instance id at every adoption. A legitimate lease handoff adopts the replica, so under the literal wording every view rendered by the previous holder would read as foreign and trip `COLLECTION_STORE_DIVERGED` on every routine handoff. Idle release makes these routine: 60 s, `writer_lease.py:1726-1731`.
+  - *As implemented (§16 A2, A4):* stamps carry `store_id` (the lineage) plus `instance_id`. Each store keeps a lineage of `(instance_id, adopted_from, adopted_at_commit_seq, head_hash)`. A stamp or replica from an instance in the lineage, at or before its handoff point, is own history. Only instances outside the lineage are foreign.
+  - *To rule:* confirm the lineage reading.
+- **N2. Amendment 1's literal sequence leaves a gap.** "Rename the current view aside, install staging" with an ordinary rename would silently replace a file an editor writes between the two renames. That is the same loss the amendment exists to prevent.
+  - *As implemented (§16 A1 step 2):* install is no-clobber (`link` then unlink staging on POSIX, `MoveFileEx` without `REPLACE_EXISTING` on Windows, `RENAME_NOREPLACE` where available). A file that appears in the gap is held like a changed aside.
+  - *To rule:* confirm.
+- **N3. Amendment 3 needs a coordinator schema bump.** The coordinator today stores only holder, expiry and fencing token (`lease_coordinator.py:134-183`). It must now record `collection_store_head`. That fits "coordination metadata only" in `multi-host-writer-lease`, but a self-hosted or managed coordinator that has not implemented it would give the new holder no foreign head, and the vault would silently fall back to the unsafe replica-only rule.
+  - *As implemented (§8 C20, §16 A5):* a multi-host vault cannot migrate until its coordinator reports the new schema. Preflight refuses and names the requirement, and migration advances the fence to that schema.
+  - *To rule:* confirm, rather than allow migration with a degraded check.
+- **N4. The replica interval.** A full replica is about 15.8 MB at 10,000 rows (spike `results-10000.json`), so the earlier 1 s coalescing would push that much sync traffic per write burst.
+  - *As implemented (§16 A9):* at most one publish per 60 s under steady writes, plus synchronous publication at every orderly boundary (lease release, shutdown, quiesce, handoff, export). That raises the crash-only recovery point from about 1 s to at most 60 s. Handoff correctness does not depend on the interval, because A3's coordinator head makes a lagging replica wait rather than fork. The P1b.8 gate reports bytes per hour.
+  - *To rule:* confirm 60 s as the default (configurable). The alternative, an incremental changeset replica, would add a second on-disk format and is not proposed.
+
+Not a ruling, noted for the owner: amendment 11 moves the worked example's pinned executions and surfacing turns (from the owner's Recipes addendum) to the follow-up change. §14.8 keeps the example and marks those steps.
+
+### Earlier rulings
 
 - **R1 accepted.** The live store is under the per-vault state root (`external-canonical`), plus the integrity-checked single-file replica at `Knowledge Base/_Collections/collections.sqlite` (§1, §11).
 - **R2 amended.** #1457 lands now as the interim. #1452 ships now on files with its enforced per-call row cap (lease held for about 5 s at most). The store adopts #1452's API unchanged, drops `BULK_UPSERT_AUDIT_DEPTH`, and raises the cap to 500 (§9 "Sequencing", §8 C12).

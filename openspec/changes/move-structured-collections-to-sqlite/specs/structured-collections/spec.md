@@ -43,15 +43,32 @@ Each collection SHALL carry a generation that increments exactly once per commit
 - **THEN** the caller's snapshot is unchanged and the continuation resumes
 
 ### Requirement: Collection views are Markdown projections of the store
-The substrate SHALL render every collection manifest, item, log-layout collection, and held candidate as a Markdown view at the same vault-relative path the file-canonical layout used, using the existing item, log, filename and managed-presentation renderers and keeping the visible system identity properties. Views SHALL NOT be canonical.
+The substrate SHALL render every collection manifest, item, log-layout collection, and held candidate as a Markdown view at the same vault-relative path the file-canonical layout used, using the existing item, log, filename and managed-presentation renderers and keeping the visible system identity properties. Views SHALL NOT be canonical. Every item and manifest view, and every log block, SHALL carry a view stamp naming the store identity, the rendering store instance, the row version and a payload-hash prefix. The stamp SHALL be a reserved system property that callers cannot write and the payload hash ignores.
 
-The item, manifest and held views changed by a mutation SHALL be staged and fsynced inside the mutation's transaction and published after commit, before the mutation is acknowledged, so that any reader of the vault file sees the acknowledged write. A view SHALL never be published ahead of its committed row. Log-layout views, history pages and type views SHALL be published asynchronously with bounded lag. Every view's pending state SHALL be recorded durably in the same transaction as the mutation, so that a crash after commit re-renders it on restart. A projection failure SHALL NOT turn a committed mutation into a refusal: it SHALL be retried, and reported as a receipt warning and in inspection.
+The item, manifest and held views changed by a mutation SHALL be staged and fsynced inside the mutation's transaction and published after commit, before the mutation is acknowledged, so that any reader of the vault file sees the acknowledged write. A view SHALL never be published ahead of its committed row. Every publish, synchronous or asynchronous, SHALL be check-then-swap:
+- move the current view aside atomically;
+- install the staged view without replacing any file that appeared in between;
+- hash the aside copy, and hold it as `VIEW_CONFLICT` with its bytes when it differs from the view's expected on-disk hash.
+
+A publish SHALL NEVER overwrite a view edit the substrate has not classified. On every start and periodically, the substrate SHALL hash every view path before the projector runs, and SHALL send mismatches to edit-back classification, so detection does not depend on a file-system watcher. The staged view's hash SHALL be recorded inside the mutation's transaction, adding no second commit to the acknowledgement path. Log-layout views, history pages and type views SHALL be published asynchronously with bounded lag. Every view's pending state SHALL be recorded durably in the same transaction as the mutation, so that a crash after commit re-renders it on restart. A projection failure SHALL NOT turn a committed mutation into a refusal: it SHALL be retried, and reported as a receipt warning and in inspection.
 
 Index synchronization of views SHALL NOT be on the acknowledgement path. Structured readers SHALL read the store rather than views. Vault file tools SHALL refuse to delete, move or recover a path owned by a collection view, with a remediation naming the collection operation. Views SHALL be normalized on re-render: values and the authored body SHALL be emitted exactly, while YAML formatting that is not data need not be preserved. Audit markers and manifest audit heads SHALL NOT be rendered.
 
 #### Scenario: A committed append appears as a view
 - **WHEN** an append is acknowledged
 - **THEN** the item's view already exists at the path its filename recipe names, with its values, body and managed presentation, and a following `get_page` of that path returns them
+
+#### Scenario: An agent write never overwrites an unseen edit
+- **WHEN** a human edits an item view and, before the watcher has classified the edit (or while no watcher runs, or while the service is offline), an agent update to the same item commits
+- **THEN** the publish finds the aside copy differs from the expected hash, holds it as `VIEW_CONFLICT` with the human's bytes and both versions, and installs the agent's version; nothing the human wrote is lost
+
+#### Scenario: A file created between the two renames is not replaced
+- **WHEN** an editor writes the view path after the current view was moved aside and before staging is installed
+- **THEN** the no-clobber install fails, the editor's file is held exactly like a changed aside, and the view is retried
+
+#### Scenario: Startup reconcile finds edits made while offline
+- **WHEN** a view was edited while the service was stopped
+- **THEN** the startup reconcile classifies the edit before any projection runs
 
 #### Scenario: A view is never ahead of the store
 - **WHEN** the process stops after a view is staged but before the transaction commits
@@ -70,7 +87,13 @@ Index synchronization of views SHALL NOT be on the acknowledgement path. Structu
 - **THEN** the manifest and every item are readable Markdown files with typed properties and bodies, without a plugin or database tool
 
 ### Requirement: Edited views return through the governed write path
-When a view file changes and its bytes differ from the last rendered bytes, the file watcher on the writer-lease holder SHALL, after the file has been quiet for a settle window, classify the edit deterministically without interpreting prose. A formatting-only edit SHALL be re-rendered without a transaction. A valid change to declared values or body, made against the item's current row version, SHALL be applied as an ordinary governed `update` (or Planning `update` or `triage`) through the same leaf functions, validation, governance precommit, audit transition and receipt as a tool call, with actor `owner:view-edit`, a reason naming the view, and a request identity derived from the view path, base row version and file hash so that a replay is a no-op; the view SHALL then be re-rendered. A valid manifest edit SHALL be applied as a governed `revise`. An edit that is ambiguous, schema-breaking, violates Planning lifecycle or hierarchy rules, changes a system property, conflicts with a newer row version, deletes or moves a view, adds an unbound file under a projection root, or is a file-sync conflict copy SHALL become a held view correction carrying the human's bytes and field-addressed diagnostics, and SHALL NEVER silently overwrite or discard either the store row or the human's edit. A later valid edit of the same view SHALL supersede its held correction. History pages SHALL be read-only: edits to them SHALL be ignored and re-rendered.
+When a view file changes and its bytes differ from the last published or pending bytes, as found by the file watcher or the reconcile on the writer-lease holder, the substrate SHALL classify the view stamp first:
+- a stamp from another store or from an instance outside this store's lineage SHALL set `COLLECTION_STORE_DIVERGED` and be held `VIEW_FOREIGN`;
+- a stamp older than the item's current row version SHALL be held `VIEW_CONFLICT`;
+- a stamp whose payload-hash prefix does not match the row SHALL be held `VIEW_INVALID`;
+- only a view whose bytes are exactly the bytes parsed at import MAY be unstamped, and any other unstamped view SHALL be held `VIEW_INVALID`.
+
+For a view stamped with the current row version, it SHALL, after the file has been quiet for a settle window, classify the edit deterministically without interpreting prose. A formatting-only edit SHALL be re-rendered without a transaction. A valid change to declared values or body, made against the item's current row version, SHALL be applied as an ordinary governed `update` (or Planning `update` or `triage`) through the same leaf functions, validation, governance precommit, audit transition and receipt as a tool call, with actor `owner:view-edit`, a reason naming the view, and a request identity derived from the view path, base row version and file hash so that a replay is a no-op; the view SHALL then be re-rendered. A valid manifest edit SHALL be applied as a governed `revise`. An edit that is ambiguous, schema-breaking, violates Planning lifecycle or hierarchy rules, changes a system property, conflicts with a newer row version, deletes a view, moves a view out of its collection's source root, adds an unbound file under a projection root, or is a file-sync conflict copy SHALL become a held view correction carrying the human's bytes and field-addressed diagnostics, and SHALL NEVER silently overwrite or discard either the store row or the human's edit. A move of a view within its collection's source root with an intact current stamp SHALL be a governed `view_move` transition that updates the item's view path, re-authorized for the new path, and SHALL NOT re-render the old path. A later valid edit of the same view SHALL supersede its held correction. History pages SHALL be read-only: edits to them SHALL be ignored and re-rendered.
 
 #### Scenario: A value edit in Obsidian becomes an audited update
 - **WHEN** a user changes one declared field in an item view and saves
@@ -88,6 +111,18 @@ When a view file changes and its bytes differ from the last rendered bytes, the 
 - **WHEN** a user adds an undeclared property or writes a value of the wrong type in a view
 - **THEN** the row is unchanged, a held `VIEW_INVALID` correction carries the edit and its field-addressed diagnostics, and inspection and attention report it
 
+#### Scenario: A stale buffer cannot revert a newer version
+- **WHEN** a second device or an editor buffer opened at row version 4 saves over a view whose item is at version 5
+- **THEN** the save is held `VIEW_CONFLICT` with both versions and the human's bytes, and version 5 is not reverted
+
+#### Scenario: A foreign store's view is not adopted
+- **WHEN** a view stamped by a store instance outside this store's lineage appears
+- **THEN** collection writes refuse `COLLECTION_STORE_DIVERGED` and the view is held `VIEW_FOREIGN`, never applied as an owner edit
+
+#### Scenario: A moved view keeps its identity
+- **WHEN** a user renames an item view within its collection folder and the editor rewrites links to it
+- **THEN** a `view_move` transition records the new path and the old path is not re-rendered
+
 #### Scenario: Deleting a view does not delete the item
 - **WHEN** a user deletes an item view file
 - **THEN** the item remains in the store, a held `VIEW_DELETED` correction is reported, and the view is re-rendered
@@ -97,7 +132,7 @@ When a view file changes and its bytes differ from the last rendered bytes, the 
 - **THEN** only the valid state is applied and no held correction remains for that view
 
 ### Requirement: Collection audit is an append-only store table with a rendered history view
-Every committed collection mutation SHALL be exactly one audit transition in the store, carrying its 24-lowercase-hex transition identifier, the operation, the actor, the sanitized reason, the before and after collection generation and manifest version, the commit time, the recorded receipt, and a hash chain over its predecessor, with one content-free audit effect per changed item naming its row, effect, and before and after versions and hashes. A bulk mutation SHALL be one transition with one effect per written row. Audit transitions SHALL copy no item values. The transition SHALL commit in the same transaction as the change it describes, so no committed change can lack its transition. Records and Planning mutations SHALL NOT write audit events to `Knowledge Base/log.md`. The substrate SHALL render, per collection, a read-only history page generated from the audit table, newest first and readable like an activity log: date, operation, actor, reason, and links to the changed item views. The page SHALL be bounded, with older transitions on per-year pages. It SHALL disclose no more than the collection-level release of its path, omitting effects on items that audience could not read.
+Every committed collection mutation SHALL be exactly one audit transition in the store, carrying its 24-lowercase-hex transition identifier, the operation, the actor, the sanitized reason, the before and after collection generation and manifest version, the commit time, the recorded receipt, and a hash chain over its predecessor, with one content-free audit effect per changed item naming its row, effect, and before and after versions and hashes. A bulk mutation SHALL be one transition with one effect per written row. Audit transitions SHALL copy no item values. The transition SHALL commit in the same transaction as the change it describes, so no committed change can lack its transition. Records and Planning mutations SHALL NOT write audit events to `Knowledge Base/log.md`. The substrate SHALL render, per collection, a read-only history page generated from the audit table, newest first and readable like an activity log: date, operation, actor, reason, and links to the changed item views. The page SHALL be bounded, with older transitions on numbered pages of a fixed number of transitions, and only the newest numbered page SHALL be rewritten. It SHALL be rendered for the intersection of the audiences that can read its path: an effect SHALL appear only when every such audience can read its item, and a transaction with any omitted effect SHALL be shown without its reason. Inspection SHALL verify the audit chain incrementally from a recorded verified-through point.
 
 #### Scenario: Change and audit are atomic
 - **WHEN** a mutation commits or is interrupted at any point
@@ -120,15 +155,35 @@ Every committed collection mutation SHALL be exactly one audit transition in the
 - **THEN** `Knowledge Base/log.md` is not read or rewritten by it
 
 ### Requirement: Collection store snapshots are consistent and portable
-The substrate SHALL produce consistent snapshots of the collection store only through the SQLite online backup API into a staging file that is switched to a single-file journal mode, integrity-checked and atomically renamed. It SHALL publish such a snapshot as a replica inside the vault after committed transactions, coalesced off the acknowledgement path, and synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export. The replica SHALL NEVER be opened for writing in place. A host acquiring the writer lease, or a service starting on a copied vault, SHALL adopt the replica when it continues the same store further than the local store, or when no local store exists, after which it is writable. It SHALL refuse collection writes with a divergence error, while serving reads and knowledge writes, when the local store holds transactions the replica lacks. A preview-first operator reconciliation SHALL turn every item changed by the divergent store after the fork point into a held view correction on the surviving store, so divergence never silently loses a write. Running more than one collection writer on one vault without the multi-host writer lease SHALL be explicitly unsupported, and `describe` and the doctor probe SHALL say so. Restore SHALL validate integrity, schema version and store identity, and SHALL surface any difference between the restored rows and existing views as held view corrections rather than overwriting either.
+The live store's files SHALL NEVER be copied by file-level backup or export. The substrate SHALL produce consistent snapshots of the collection store only through the SQLite online backup API into a staging file that is switched to a single-file journal mode, integrity-checked and atomically renamed. It SHALL publish such a snapshot as a replica inside the vault after committed transactions, coalesced off the acknowledgement path, and synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export. The replica SHALL NEVER be opened for writing in place. A replica SHALL be adopted only when the vault-side mode marker names store mode and the same store identity.
+
+Every transaction SHALL advance a store-wide sequence and chained head hash. The writer-lease holder SHALL report `(store_id, instance_id, commit_seq, head_hash)` to the coordinator on renew and release. A new holder facing a head recorded by another instance SHALL adopt the replica only once it reaches that head, and until then SHALL refuse collection writes with the retryable `COLLECTION_STORE_SYNC_PENDING`, naming both sequences and the remedy. A store for which no foreign head was ever recorded SHALL never wait. An owner-only, preview-first `adopt-local` operation SHALL let the holder continue from local state, recording the fork point, and the other side's later-arriving changes SHALL be reconciled as held corrections.
+
+Each live store SHALL carry an instance identity and lineage. Replica publication SHALL be check-then-swap against the last replica this instance published. Any foreign replica or foreign view stamp SHALL set the divergence state immediately. A service on a copied or moved vault with no local store SHALL adopt the replica as a new lineage entry and be writable. It SHALL refuse collection writes with a divergence error, while serving reads and knowledge writes, when the local store holds transactions the replica lacks. A preview-first operator reconciliation SHALL turn every item changed by the divergent store after the fork point into a held view correction on the surviving store, so divergence never silently loses a write. Running more than one collection writer on one vault without the multi-host writer lease SHALL be explicitly unsupported, and `describe` and the doctor probe SHALL say so. Restore SHALL validate integrity, schema version and store identity, and SHALL surface any difference between the restored rows and existing views as held view corrections rather than overwriting either.
 
 #### Scenario: Backup of the vault is consistent
 - **WHEN** restic or a vault copy captures the vault while agents are writing
 - **THEN** the captured replica opens, passes `integrity_check`, and reflects a committed state
 
 #### Scenario: Takeover adopts the newer replica
-- **WHEN** a second host acquires the writer lease and the vault replica is ahead of its local store for the same store identity
+- **WHEN** a second host acquires the writer lease, the coordinator holds the previous holder's head, and the vault replica has reached that head
 - **THEN** it adopts the replica before accepting collection writes
+
+#### Scenario: Takeover on a lagging replica waits, boundedly
+- **WHEN** the coordinator holds a foreign head that the host's replica has not yet reached
+- **THEN** collection writes refuse `COLLECTION_STORE_SYNC_PENDING` naming both sequences and the remedy, reads and knowledge writes continue, and writes resume once the replica arrives
+
+#### Scenario: A single-host store never waits
+- **WHEN** the only head ever recorded for the vault came from this instance, including after idle lease release and re-acquisition
+- **THEN** collection writes proceed without any sync wait
+
+#### Scenario: Adopt-local cannot lose the other side
+- **WHEN** the owner runs adopt-local while a foreign head is pending, and the other host's replica later arrives
+- **THEN** the fork point is recorded, writes proceed, and every item the other side changed after the fork point becomes a held correction
+
+#### Scenario: Two services on one vault with different state roots
+- **WHEN** a second service with its own state root starts writing the same vault without the lease
+- **THEN** the first replica publish or view stamp it meets from the other instance sets `COLLECTION_STORE_DIVERGED` immediately
 
 #### Scenario: Divergence fails closed
 - **WHEN** the local store holds transactions absent from the replica
@@ -143,7 +198,7 @@ The substrate SHALL produce consistent snapshots of the collection store only th
 - **THEN** it adopts the vault's replica as its live store and accepts collection writes
 
 ### Requirement: Collection store migration is verifiable and reversible
-A vault SHALL move from file-canonical collections to the store only through a declared offline migration that imports every Records and Planning collection and proves a round trip before the store becomes canonical. The proof requires all of the following: item counts equal; every row, rendered and parsed back, yields equal values, body, identity and natural key; payload hashes equal the legacy derivation; the imported legacy audit chain has the same head and length; manifest text is byte-equal; and the legacy audit status is preserved, never upgraded. Import SHALL rewrite no vault file and SHALL record the current file bytes as the current views. A vault with duplicate identities, schema violations or unsupported versions SHALL NOT migrate until they are fixed. The migration SHALL run under the managed standby-upgrade handoff: pre-import on the standby without ownership, re-verification of changed collections after the previous worker exits, and atomic publication, so that writes pause only for the ordinary bounded handoff. The substrate SHALL provide a preview-first reverse export that renders the store into the legacy file layout with a content-free checkpoint transition per collection, so the legacy inspector reports `acknowledged_gap` for any collection written in store mode.
+A vault SHALL move from file-canonical collections to the store only through a declared offline migration that imports every Records and Planning collection and proves a round trip before the store becomes canonical. The proof requires all of the following: item counts equal; every row, rendered and parsed back, yields equal values, body, identity and natural key; payload hashes equal the legacy derivation; the imported legacy audit chain has the same head and length; manifest text is byte-equal; and the legacy audit status is preserved, never upgraded. Import SHALL rewrite no vault file and SHALL record the current file bytes as the current views. A vault with duplicate identities, schema violations or unsupported versions SHALL NOT migrate until they are fixed. The vault's collection mode SHALL have one authority: a vault-side mode marker that adoption reads. Migration SHALL write it, advance the coordinator schema fence so older releases cannot hold the writer lease, and record a state descriptor so older releases refuse to start. The importer SHALL read legacy audit history with an uncapped streaming reader filtered per collection. It SHALL record each view's expected hash as the hash of the exact bytes it parsed. Non-managed installs SHALL migrate through an offline command with the same proof. The migration SHALL run under the managed standby-upgrade handoff: pre-import on the standby without ownership, re-verification of only the collections changed since pre-import (carrying forward the proofs of unchanged ones) within the cutover budget, abandoning the upgrade cleanly when it cannot, and atomic publication, so that writes pause only for the ordinary bounded handoff. The substrate SHALL provide a preview-first reverse export that renders the store into the legacy file layout with a content-free checkpoint transition per collection, so the legacy inspector reports `acknowledged_gap` for any collection written in store mode. Export SHALL set the mode marker to exported and tombstone the replica so no host can adopt it. Downgrade to a pre-store release SHALL require export first.
 
 #### Scenario: Import proves its round trip
 - **WHEN** a vault with Records and Planning collections is migrated
@@ -157,6 +212,14 @@ A vault SHALL move from file-canonical collections to the store only through a d
 - **WHEN** an agent writes to a collection while the standby is pre-importing
 - **THEN** that collection is re-imported and re-verified at handoff
 
+#### Scenario: Legacy history beyond the file-mode bounds is imported
+- **WHEN** a vault's activity logs exceed 8 MB across more than 128 archives and a collection's chain is deeper than 2048 transitions
+- **THEN** every reachable event is imported and the proof's chain-length check passes
+
+#### Scenario: An exported vault cannot be re-adopted
+- **WHEN** a migrated vault is exported and a host later starts with a stale local store or finds the tombstoned replica
+- **THEN** the mode marker says exported and no replica or local store is adopted as canonical
+
 #### Scenario: Reverse export restores files
 - **WHEN** a migrated vault is exported back to files
 - **THEN** collections never written in store mode are byte-equal to their pre-migration files, and written collections are legacy-valid and report `acknowledged_gap`
@@ -165,8 +228,8 @@ A vault SHALL move from file-canonical collections to the store only through a d
 With the store canonical, the release acceptance harness SHALL measure, and the delivery SHALL meet: a guarded single append p95 under 20 ms end to end at 10,000 items, measured through the real dispatcher, idempotency ledger, writer lease, collection resolution, governance and synchronous item-view publication, with a per-stage timer and budget for each; a 500-row bulk upsert under 1 s end to end; and structured query results identical to the file-canonical path on the parity corpus, with query latency no worse than the file path at every measured size. A client guard refresh through `inspect` SHALL have p95 under 15 ms. The acknowledgement path SHALL NOT include reading other items, hashing the collection, discovering or parsing a manifest file, rendering or publishing views other than the changed item, manifest and held views, index synchronization of views, or reading or rewriting `Knowledge Base/log.md`.
 
 #### Scenario: Append stays flat as the collection grows
-- **WHEN** guarded appends are measured at 1,000 and 10,000 items through the real dispatcher
-- **THEN** both p95 values are under 20 ms, and no stage exceeds its budget
+- **WHEN** guarded appends are measured at 1,000 and 10,000 items through the real dispatcher, including a collection where row-level policy withholds a tenth of the rows, on Linux and on Windows NTFS
+- **THEN** every p95 is under 20 ms, and no stage exceeds its budget
 
 #### Scenario: Collection resolution does not read the manifest file
 - **WHEN** an append resolves its collection
@@ -232,7 +295,7 @@ The substrate SHALL implement structured collections as one generic mechanism pa
 - optional named product-owned validators from a closed registry;
 - a surfacing rule, a default audience (`owner` or `policy`), presentation recipes and saved views.
 
-A declaration SHALL NOT carry code, model instructions, or unbounded patterns. A new type's placement segment SHALL be refused with `COLLECTION_TYPE_PLACEMENT_OCCUPIED`, naming the folder, when it already holds any file that is not a collection view, so rendered views never mix with hand-written notes. A file without a collection binding under a type's placement SHALL never be read as an item. Records and Planning SHALL be built-in declarations shipped with the product, changed only by release. Only built-in declarations MAY carry wire aliases for legacy property, receipt and error names. A collection manifest SHALL name its type, with `semantic_profile: records` and `semantic_profile: planning` accepted as aliases for the built-in types. The kind SHALL change only version semantics and compiler surfacing: identity, natural keys, guards, transactions, audit, governance, projection, edit-back, query, snapshots and migration SHALL be the same code for every type.
+A declaration SHALL NOT carry code, model instructions, or unbounded patterns. A new type's placement segment SHALL be refused with `COLLECTION_TYPE_PLACEMENT_OCCUPIED`, naming the folder, when it already holds any file that is not a collection view, so rendered views never mix with hand-written notes. A file without a collection binding under a type's placement SHALL never be read as an item. Records and Planning SHALL be built-in declarations shipped with the product, changed only by release. Only built-in declarations MAY carry wire aliases for legacy property, receipt and error names. A collection manifest SHALL name its type, with `semantic_profile: records` and `semantic_profile: planning` accepted as aliases for the built-in types. The kind SHALL change only version semantics (and, in a follow-up change, compiler surfacing): identity, natural keys, guards, transactions, audit, governance, projection, edit-back, query, snapshots and migration SHALL be the same code for every type.
 
 #### Scenario: A built-in type is a declaration, not a code path
 - **WHEN** the Records and Planning declarations are loaded
@@ -262,7 +325,6 @@ A collection type saved through `schema_memory` SHALL be usable by the very next
 - Markdown views under its placement layer, with governed edit-back and held corrections;
 - recall exclusion and hosted placement pinning as a structured layer;
 - bulk upsert, query with saved views, snapshots and migration;
-- context-compiler surfacing through the roles of its kind.
 
 Lifecycle transitions SHALL be validated against the declared state machine, per-state constraints and named validators.
 
@@ -282,7 +344,7 @@ Lifecycle transitions SHALL be validated against the declared state machine, per
 - A save SHALL refuse wholly if any item would fail validation or collide on a recomputed natural key, and SHALL require the caller's complete authorized view of every collection of the type.
 - Changing the name, item type, kind or placement SHALL be refused.
 - A `release-widening` change SHALL be saved only by the owner principal.
-- Item identities SHALL never change, so references, including version-pinned ones, remain valid.
+- Item identities SHALL never change, so references to items remain valid.
 - Type versions SHALL be append-only and `restore` SHALL re-save a prior version under the same rules.
 - The type SHALL be rendered as a read-only view whose edits are held as a type proposal, never applied.
 
@@ -302,13 +364,12 @@ Lifecycle transitions SHALL be validated against the declared state machine, per
 - **WHEN** a proposal changes an existing type's kind
 - **THEN** `diff` classifies it `refused` and the save refuses
 
-### Requirement: Kind selects version semantics and surfacing
+### Requirement: Kind selects version semantics
 Every change to an item SHALL be a new row version with one audit effect regardless of kind. The kind SHALL select:
-- the effect label and history wording: `correction` for `observed`, `replan` for `intended`, `revision` superseding the previous revision for `procedural`, `edit` for `reference`, plus `transition` and `type_migration` for every kind;
-- the default served version: for `procedural` and `reference`, the current version of items in served states only; for `intended`, items in active lifecycle states; for `observed`, current items newest-observation first;
-- the compiler roles that may serve its items: `observed` → `current_state`, `recent_change`, `baseline`, `evidence`; `intended` → `active_plans`; `procedural` → `methods`; `reference` → `resources`.
+- the effect label and history wording: `correction` for `observed`, `replan` for `intended`, `revision` superseding the previous revision for `procedural`, `edit` for `reference`, plus `transition`, `type_migration` and `view_move` for every kind;
+- the default served version: for `procedural` and `reference`, the current version of items in served states only; for `intended`, items in active lifecycle states; for `observed`, current items newest-observation first.
 
-A declaration MAY narrow its kind's roles and SHALL NOT name others.
+A declaration's `surfacing` block SHALL be validated and stored. Serving declared types through kind-mapped compiler roles, and version-pinned links, are outside this change.
 
 #### Scenario: A procedural edit is a revision
 - **WHEN** a current recipe's steps are edited
@@ -317,17 +378,6 @@ A declaration MAY narrow its kind's roles and SHALL NOT name others.
 #### Scenario: An observed edit is a correction
 - **WHEN** a recorded execution's duration is changed
 - **THEN** the new row version is labelled a correction of that observation, and storage, guards, audit and governance behave exactly as for the recipe
-
-### Requirement: Links may pin an item version
-A `link` field MAY declare a target collection type and `pin: version`. Its value SHALL then be the item reference with an `@<row_version>` suffix. Writes SHALL verify that the pinned version exists and is authorized for the writer. Resolution SHALL read that historical version and project it exactly as the item itself is projected, so a withheld target reads as absent. Natural keys, payload hashes, filters and grouping SHALL use the full pinned value or its `item` and `version` parts. Later revisions and type migrations SHALL NOT change what an existing pinned reference names.
-
-#### Scenario: Outcomes compare across recipe revisions
-- **WHEN** executions pin revisions 2 and 3 of one recipe and a query groups average duration by `recipe.version`
-- **THEN** each revision's executions aggregate separately, and a later revision 4 leaves both groups unchanged
-
-#### Scenario: Pinned reference to a withheld item reads as absent
-- **WHEN** the caller may not read the pinned recipe
-- **THEN** the execution's link projects as withheld, with no title, version values or existence revealed
 
 ## MODIFIED Requirements
 
