@@ -1119,6 +1119,7 @@ def test_sidecar_present_but_model_not_cached_skips_probe(
 ) -> None:
     """doctor never downloads: an uncached model → skip the live probe, not fetch."""
     _sidecar(vault)
+    monkeypatch.setenv("EXOMEM_RECALL_REEMBED", "off")  # Keep the legacy probe on an empty sidecar.
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(doctor_module, "_module_available", lambda _m: True)
     monkeypatch.setattr(doctor_module, "_model_cached", lambda _hub, _dir: False)
@@ -1136,6 +1137,7 @@ def test_sidecar_present_but_probe_raises_fails(
     from exomem import embeddings as embeddings_module
 
     _sidecar(vault)
+    monkeypatch.setenv("EXOMEM_RECALL_REEMBED", "off")  # Keep the legacy probe on an empty sidecar.
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(doctor_module, "_module_available", lambda _m: True)
     monkeypatch.setattr(doctor_module, "_model_cached", lambda _hub, _dir: True)

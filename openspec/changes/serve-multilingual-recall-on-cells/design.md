@@ -26,6 +26,10 @@ The cloud image builds on the hosted image. A `builder-cloud-model` stage fetche
 
 The job runs on a cell. `preload_serving_encoder` already does nothing on a cell, so the old model is never loaded. `EmbeddingIndex.encoding` keeps refusing the old sidecar on a cell. Queries get `vector_space_mismatch`, and a write's encode soft-fails (`embedding_encode_failed`) and leaves the page for the build's mtime-driven catch-up. The build, cutover and next-start retirement are the personal server's, unchanged. The alternative, serving the old sidecar with a second resident model, costs ~680 MiB for the length of the build on every migrating cell. Doctor reports a cell's refused sidecar as dense recall off rather than as serving.
 
+### D3. Initial builds reuse the resumable migration
+
+An absent or empty active sidecar has no serving space. The job plans an initial build into the recall encoder's space, using the existing committed batches, restart recovery, catch-up and atomic active-pointer cutover. An empty active path already naming that space still permits the build. Lexical recall serves meanwhile; doctor reports the initial build's pending state or disk progress instead of asking an operator to reconcile. No previous encoder is loaded or serving sidecar retired for this initial build. Hosted-mode runtimes still start no job.
+
 ## Risks / Trade-offs
 
 - **Dense recall is off during an existing cell's re-embed.** Lexical, keyword, graph and temporal lanes serve. Doctor and `exomem status` report progress and ETA. The only existing cloud cell is the owner's.

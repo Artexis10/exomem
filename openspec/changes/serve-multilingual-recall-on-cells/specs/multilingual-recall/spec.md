@@ -42,6 +42,11 @@ A background job SHALL build a sidecar for the recall encoder's space beside the
 - **WHEN** a cloud cell's sidecar holds English vectors and the cell starts on bge-m3
 - **THEN** the English encoder is never loaded, the vector lane is `unavailable` with `vector_space_mismatch` while lexical recall answers, doctor warns that dense recall is off until the cutover, a page written meanwhile is in the bge-m3 sidecar after the cutover, and dense recall answers from the bge-m3 sidecar after the cutover
 
+#### Scenario: A vault present before the first start is embedded without an operator
+
+- **WHEN** a personal server or cloud cell starts over pages and semantic units already present in its vault, with no embedding sidecar or an empty one and no write receipts
+- **THEN** its background job builds every eligible chunk and semantic unit in the recall encoder's space using committed batches, resumes without re-encoding committed work after interruption, catches up and atomically publishes the active pointer, and dense recall participates after cutover without an operator or a second encoder; lexical recall serves during the build and doctor reports the pending build or its progress rather than recommending CLI reconcile
+
 #### Scenario: A failed cutover changes nothing
 
 - **WHEN** writing the active pointer fails

@@ -135,6 +135,48 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     readiness.reset()
 
 
+@pytest.fixture
+def preseeded_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An imported corpus, with semantic units but no sidecar or write receipts."""
+    vault = tmp_path / "vault"
+    for index, (rel, (title, body)) in enumerate(_PAGES.items()):
+        page = vault / kb_dirname() / rel
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(
+            f"---\ntype: note\ntitle: {title}\nupdated: 2026-09-01\n"
+            f"exomem_id: 00000000-0000-4000-8000-{index + 1:012d}\n---\n\n"
+            f"# {title}\n\n{body}\n\n## Observations\n\n- [fact] {body} ^seed\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv(recall_migration.REEMBED_ENV, raising=False)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    monkeypatch.setattr(embeddings, "MODEL_NAME", NEW)
+    monkeypatch.setattr(embeddings, "_MODEL", None)
+    monkeypatch.setattr(recall_migration, "BATCH_CHUNKS", 2)
+    log: list[tuple[str, str, bool, str]] = []
+    loads: list[tuple[str, str]] = []
+
+    def load(name: str, **_kwargs) -> _Model:
+        loads.append((name, threading.current_thread().name))
+        return _Model(name, log)
+
+    monkeypatch.setattr(embedding_backend, "load_encoder", load)
+    readiness.reset()
+    find_module.clear_cache()
+    embeddings.clear_embedding_indexes()
+    recall_migration.reset_for_tests()
+    yield vault, log, loads
+    recall_space.unload_previous()
+    embeddings.unload_model()
+    embeddings.clear_embedding_indexes()
+    recall_migration.reset_for_tests()
+    find_module.clear_cache()
+    readiness.reset()
+
+
 def _warm(vault: Path) -> None:
     """What the service warm-up preloads, on a thread of its own."""
 
@@ -182,6 +224,158 @@ def _chunk_texts(vault: Path, path: Path | None = None) -> dict[str, list[str]]:
         f"{kb_dirname()}/{rel}": index.stored_chunks_for(f"{kb_dirname()}/{rel}")[0]
         for rel in _PAGES
     }
+
+
+@pytest.mark.parametrize("sidecar", ["missing", "empty"])
+def test_cell_builds_preseeded_vault_without_sidecar(preseeded_world, monkeypatch, sidecar) -> None:
+    from exomem import semantic_index
+
+    vault, log, loads = preseeded_world
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
+    if sidecar == "empty":
+        empty = index_paths.sidecar_path(vault)
+        empty.parent.mkdir(parents=True, exist_ok=True)
+        empty.touch()
+    assert embeddings.get_embedding_index(vault).identity is None
+    _warm(vault)
+    assert _explained(vault, "retry backoff")["hits"]
+    assert _vector_lane(vault)["status"] != "participated"
+
+    job = recall_migration.start(vault, threading.Event())
+    job.join(timeout=60)
+    assert not job.is_alive()
+    assert recall_migration.status(vault)["state"] == "current"
+
+    active = embeddings.get_embedding_index(vault)
+    assert active.identity is not None and active.identity.model == NEW
+    assert index_paths.active_sidecar_name(vault) == active.path.name
+    assert active.path != index_paths.legacy_sidecar_path(vault)
+    metadata, vectors = active.all_vectors()
+    expected_chunks = []
+    for rel in _PAGES:
+        path = vault / kb_dirname() / rel
+        page = find_module._CACHE.get(path, vault)
+        expected_chunks.extend(embeddings._chunks_for_page(vault, page))
+        state = semantic_index.build_parent_index_state(vault, path)
+        assert state is not None
+        refs = frozenset(unit.unit_ref for unit in state.document.units if unit.unit_ref is not None)
+        assert refs
+        assert active.semantic_unit_parent_states()[page.rel_path] == (
+            frozenset({state.parent_generation}), refs
+        )
+    assert len(metadata) == len(expected_chunks)
+    assert vectors.shape == (len(expected_chunks), _DIMS[NEW])
+    unit_vectors = active.all_semantic_unit_vectors()
+    assert sum(len(rows) for rows in unit_vectors.values()) == len(_PAGES)
+    assert all(row.vector.shape == (_DIMS[NEW],) for rows in unit_vectors.values() for row in rows)
+    assert sorted(chunk for chunks in _chunk_texts(vault).values() for chunk in chunks) == sorted(
+        expected_chunks
+    )
+    assert {name for name, _thread in loads} == {NEW}
+    assert all(thread != threading.current_thread().name for _name, thread in loads)
+    log.clear()
+    assert _vector_lane(vault)["status"] == "participated"
+    assert _query_encoders(log) == [NEW]
+
+
+def test_initial_build_resumes_after_interruption(preseeded_world, monkeypatch) -> None:
+    vault, log, _loads = preseeded_world
+    stop = threading.Event()
+    encode = _Model.encode
+
+    def stop_after_first_batch(self, texts, **kwargs):
+        result = encode(self, texts, **kwargs)
+        stop.set()
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_Model, "encode", stop_after_first_batch)
+        job = recall_migration.start(vault, stop)
+        job.join(timeout=60)
+        assert not job.is_alive()
+    assert recall_migration.status(vault)["state"] == "paused"
+    first = _passages_by(log, NEW)
+    assert 0 < len(first) < len(_PAGES)
+    assert index_paths.active_sidecar_name(vault) is None
+    assert recall_migration.status(vault)["serving"] is None
+
+    embeddings.unload_model()
+    embeddings.clear_embedding_indexes()
+    recall_migration.reset_for_tests()
+    find_module.clear_cache()
+    job = recall_migration.start(vault, threading.Event())
+    job.join(timeout=60)
+    assert not job.is_alive()
+    assert recall_migration.status(vault)["state"] == "current"
+    encoded = _passages_by(log, NEW)
+    assert encoded[: len(first)] == first
+    assert all(encoded.count(text) == 1 for text in first)
+    assert len(encoded) == len(set(encoded))
+    assert len(embeddings.get_embedding_index(vault).semantic_unit_parent_states()) == len(_PAGES)
+    assert _vector_lane(vault)["status"] == "participated"
+
+
+def test_initial_build_allows_an_empty_active_target_path(preseeded_world) -> None:
+    vault, _log, _loads = preseeded_world
+    target = recall_migration._target_identity()
+    name = index_paths.space_sidecar_name(target.fingerprint)
+    path = index_paths.legacy_sidecar_path(vault).parent / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    index_paths.publish_active_sidecar(vault, name)
+    plan = recall_migration.plan(vault)
+    assert plan is not None and plan.serving is None
+    assert plan.shadow_path == path
+    assert recall_migration.run(vault, threading.Event()) == "current"
+    assert embeddings.get_embedding_index(vault).identity.model == NEW
+    assert _vector_lane(vault)["status"] == "participated"
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_doctor_reports_the_initial_build(preseeded_world, started) -> None:
+    from exomem import doctor
+
+    vault, log, loads = preseeded_world
+    if started:
+        plan = recall_migration.plan(vault)
+        assert plan is not None
+        assert not recall_migration.build(
+            vault, plan, should_stop=lambda: len(_passages_by(log, NEW)) >= 2
+        )
+        embeddings.unload_model()
+        embeddings.clear_embedding_indexes()
+        recall_migration.reset_for_tests()
+    loads.clear()
+    check = doctor._check_recall_reembed(vault)
+    assert check is not None and check.status == "warn"
+    assert "initial" in check.message.lower()
+    assert "pages built" in check.message
+    assert check.details["serving"] is None
+    assert check.details["paths_total"] == len(_PAGES)
+    if started:
+        assert 0 < check.details["building"]["paths_done"] < len(_PAGES)
+    else:
+        assert "pending" in check.message
+        assert f"0/{len(_PAGES)}" in check.message
+    sidecar_check = doctor._check_embedding_sidecar(vault)
+    assert sidecar_check.status == "warn"
+    assert "initial" in sidecar_check.message.lower()
+    assert "maintain --reconcile" not in (sidecar_check.remediation or "")
+    assert loads == []
+
+
+def test_doctor_keeps_missing_sidecar_warning_when_initial_build_is_disabled(
+    preseeded_world, monkeypatch
+) -> None:
+    from exomem import doctor
+
+    vault, _log, loads = preseeded_world
+    monkeypatch.setenv(recall_migration.REEMBED_ENV, "off")
+    check = doctor._check_embedding_sidecar(vault)
+    assert check.status == "warn"
+    assert "Embedding sidecar is missing" in check.message
+    assert "maintain --reconcile" in check.remediation
+    assert loads == []
 
 
 def test_dense_recall_serves_from_the_old_sidecar_until_the_cutover(world) -> None:

@@ -60,9 +60,9 @@ _WARM_POLL_SECONDS = 1.0
 
 @dataclass(frozen=True, slots=True)
 class MigrationPlan:
-    """The serving sidecar's space, the recall encoder's, and where the new sidecar goes."""
+    """The serving space (None for an initial build), target space and new sidecar."""
 
-    serving: recall_space.SpaceIdentity
+    serving: recall_space.SpaceIdentity | None
     target: recall_space.SpaceIdentity
     shadow_path: Path
 
@@ -138,14 +138,12 @@ def plan(vault_root: Path) -> MigrationPlan | None:
 
     active = embeddings.get_embedding_index(vault_root)
     serving = active.identity
-    if serving is None:
-        return None
     target = _target_identity()
-    if serving.accepts(target.model, target.fingerprint):
+    if serving is not None and serving.accepts(target.model, target.fingerprint):
         return None
     key = target.fingerprint or f"{target.model}|{target.dim}"
     shadow_path = active.path.parent / index_paths.space_sidecar_name(key)
-    if shadow_path == active.path:
+    if serving is not None and shadow_path == active.path:
         return None
     return MigrationPlan(serving, target, shadow_path)
 
@@ -504,6 +502,10 @@ def disk_status(vault_root: Path) -> dict[str, Any]:
         "building": None,
         "reembed": "on" if reembed_enabled() else "off",
     }
+    if serving is None:
+        result["paths_total"] = sum(
+            1 for md in paths.iter_index_markdown(vault_root) if paths.is_embeddable_path(md)
+        )
     if not active_path.parent.is_dir():
         return result
     for candidate in sorted(active_path.parent.iterdir()):
