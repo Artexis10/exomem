@@ -557,3 +557,28 @@ def test_doctor_reads_the_build_from_disk(world) -> None:
     assert details["building"]["model"] == NEW
     assert details["building"]["sidecar"] == plan.shadow_path.name
     assert 0 < details["building"]["paths_done"] < details["paths_total"] == len(_PAGES)
+
+
+def test_doctor_reports_a_cells_refused_sidecar_as_dense_recall_off(world, monkeypatch) -> None:
+    # A cell does not serve the sidecar another model wrote, so doctor must
+    # not report it as serving while the re-embed runs.
+    from exomem import doctor
+
+    vault, log, _loads = world
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
+    _warm(vault)
+    plan = recall_migration.plan(vault)
+    recall_migration.build(vault, plan, should_stop=lambda: len(_passages_by(log, NEW)) >= 2)
+    recall_migration.reset_for_tests()
+
+    check = doctor._check_recall_reembed(vault)
+
+    assert check.status == "warn"
+    assert f"refuses its {OLD} sidecar" in check.message
+    assert "dense recall is off until the re-embed cuts over" in check.message
+    assert "pages built" in check.message
+
+    monkeypatch.setenv(recall_migration.REEMBED_ENV, "off")
+    check = doctor._check_recall_reembed(vault)
+    assert check.status == "warn"
+    assert "EXOMEM_RECALL_REEMBED=off keeps it off" in check.message
