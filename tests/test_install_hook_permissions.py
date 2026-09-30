@@ -78,6 +78,8 @@ def test_install_accepts_private_group_writable_config(
         assert result["wired"] is True
         assert json.loads(config.read_text())["theme"] == "dark"
         assert Path(result["backup"]).read_bytes() == original
+        assert stat.S_IMODE(config.stat().st_mode) == 0o644
+        assert stat.S_IMODE(Path(result["backup"]).stat().st_mode) == 0o644
         assert home.stat().st_mode & 0o777 == 0o775
         assert hooks.stat().st_mode & 0o777 == 0o775
         report = hook_module.check_hooks(clients=(client,), hook_dir=hooks, settings_path=config)
@@ -365,7 +367,7 @@ def test_acl_probe_errors_fail_closed_except_unsupported(
     config.write_text("{}\n")
     config.chmod(0o664)
 
-    def unavailable_xattrs(_target):
+    def unavailable_xattrs(_target, **_kwargs):
         raise OSError(error_code, "xattr probe failed")
 
     monkeypatch.setattr(os, "listxattr", unavailable_xattrs)
@@ -373,7 +375,7 @@ def test_acl_probe_errors_fail_closed_except_unsupported(
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux user-private-group exception")
-def test_private_group_enumeration_cached_across_install_and_check(
+def test_private_group_enumeration_cached_within_each_install_and_check(
     tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pwd = pytest.importorskip("pwd")
@@ -396,5 +398,161 @@ def test_private_group_enumeration_cached_across_install_and_check(
     hooks.mkdir()
     hooks.chmod(0o775)
     assert hook_module.install_hook(hook_dir=hooks, settings_path=config)["wired"]
-    hook_module.check_hooks(clients=("claude",), hook_dir=hooks, settings_path=config)
     assert calls == 1
+    hook_module.check_hooks(clients=("claude",), hook_dir=hooks, settings_path=config)
+    assert calls == 2
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("umask", [0o002, 0o022], ids=["0002", "0022"])
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux POSIX default ACLs")
+def test_install_default_acl_never_grants_write(
+    tmp_path: Path, private_group, client: str, umask: int,
+) -> None:
+    home = tmp_path / client
+    home.mkdir()
+    config = home / ("hooks.json" if client == "codex" else "settings.json")
+    original = b'{"theme":"dark"}\n'
+    config.write_bytes(original)
+    config.chmod(0o664)
+    # Use a mapped UID even in single-UID sandboxes; inheritance still exercises
+    # the named-user entry and the access ACL's write mask.
+    acl = struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, permissions, uid)
+        for tag, permissions, uid in (
+            (0x01, 7, 0xFFFFFFFF), (0x02, 7, os.geteuid()),
+            (0x04, 5, 0xFFFFFFFF), (0x10, 7, 0xFFFFFFFF),
+            (0x20, 5, 0xFFFFFFFF),
+        )
+    )
+    try:
+        os.setxattr(home, "system.posix_acl_default", acl)
+    except OSError as error:
+        if error.errno in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}:
+            pytest.skip("Filesystem does not support POSIX default ACLs")
+        raise
+    previous = os.umask(umask)
+    try:
+        try:
+            result = hook_module.install_hook(
+                hook_dir=home / "hooks", settings_path=config, client=client,
+            )
+        except OSError:
+            assert config.read_bytes() == original
+            assert not list(home.glob("*.backup-*"))
+            return
+        for path in (config, Path(result["backup"])):
+            assert stat.S_IMODE(path.stat().st_mode) & 0o022 == 0
+            if "system.posix_acl_access" in os.listxattr(path):
+                access = os.getxattr(path, "system.posix_acl_access")
+                entries = list(struct.iter_unpack("<HHI", access[4:]))
+                assert all(not permissions & 2 for tag, permissions, _ in entries if tag == 0x10)
+    finally:
+        os.umask(previous)
+
+
+@pytest.mark.parametrize("reason", ["other-write", "foreign-owner", "access-acl"])
+def test_rewrite_refuses_unsafe_created_temp(
+    tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch, reason: str,
+) -> None:
+    from exomem._hooks import exomem_continuation_checkpoint as safe
+
+    config = tmp_path / "settings.json"
+    original = b'{"theme":"dark"}\n'
+    config.write_bytes(original)
+    real_open = safe._open_secure_file_at
+    real_fstat = os.fstat
+    temporary_identity = None
+
+    def unsafe_temp(directory, name, flags, mode=0o600):
+        nonlocal temporary_identity
+        fd = real_open(directory, name, flags, mode)
+        if name.startswith(".settings.json.tmp-"):
+            info = real_fstat(fd)
+            temporary_identity = (info.st_dev, info.st_ino)
+            if reason == "access-acl":
+                _set_extended_access_acl(directory.path / name)
+            elif reason == "other-write":
+                os.fchmod(fd, 0o666)
+        return fd
+
+    def foreign_temp(fd):
+        info = real_fstat(fd)
+        if reason == "foreign-owner" and (info.st_dev, info.st_ino) == temporary_identity:
+            attrs = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+            attrs["st_uid"] = os.geteuid() + 1
+            return SimpleNamespace(**attrs)
+        return info
+
+    monkeypatch.setattr(safe, "_open_secure_file_at", unsafe_temp)
+    monkeypatch.setattr(os, "fstat", foreign_temp)
+    with pytest.raises(OSError, match="unsafe|writable|owned"):
+        hook_module._rewrite_hooks(config, lambda data: {**data, "changed": True})
+    assert config.read_bytes() == original
+    assert not list(tmp_path.glob("*.backup-*"))
+    assert not list(tmp_path.glob(".settings.json.tmp-*"))
+
+
+@pytest.mark.parametrize("acl", ["system.nfs4_acl", "system.cifs_acl"])
+@pytest.mark.parametrize("target", ["path", "fd"])
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux private-group acceptance")
+def test_group_write_refuses_network_acl(
+    tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch, acl: str, target: str,
+) -> None:
+    config = tmp_path / "settings.json"
+    config.write_text("{}\n")
+    config.chmod(0o664)
+    monkeypatch.setattr(os, "listxattr", lambda _target, **_kwargs: [acl])
+    if target == "path":
+        assert hook_module._safe_file_status(config)["mode_ok"] is False
+    else:
+        with pytest.raises(OSError, match="unsafe|writable"):
+            hook_module._snapshot_config(config)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux private-group acceptance")
+def test_file_status_acl_probe_does_not_follow_symlinks(
+    tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    config.write_text("{}\n")
+    config.chmod(0o664)
+    probes = []
+
+    def list_xattrs(target, **kwargs):
+        probes.append((target, kwargs))
+        return []
+
+    monkeypatch.setattr(os, "listxattr", list_xattrs)
+    assert hook_module._safe_file_status(config)["mode_ok"] is True
+    assert probes == [(config, {"follow_symlinks": False})]
+
+
+@pytest.mark.parametrize("entrypoint", ["install_all_hooks", "check_hooks"])
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux private-group acceptance")
+def test_entrypoint_rechecks_cached_private_group(
+    tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch, entrypoint: str,
+) -> None:
+    pwd = pytest.importorskip("pwd")
+    user = pwd.getpwuid(os.geteuid())
+    home = tmp_path / "client"
+    home.mkdir()
+    home.chmod(0o775)
+    config = home / "settings.json"
+    config.write_text("{}\n")
+    hooks = home / "hooks"
+    assert hook_module._is_private_group(private_group.gr_gid) is True
+    other = SimpleNamespace(pw_name="another-user", pw_uid=user.pw_uid + 1, pw_gid=user.pw_gid)
+    monkeypatch.setattr(pwd, "getpwall", lambda: [user, other])
+    if entrypoint == "install_all_hooks":
+        monkeypatch.setattr(hook_module, "SUPPORTED_CLIENTS", ("claude",))
+        monkeypatch.setattr(hook_module, "_default_hook_dir", lambda _client: hooks)
+        monkeypatch.setattr(hook_module, "_default_settings", lambda _client: config)
+        report = hook_module.install_all_hooks()
+        assert report["success"] is False
+    else:
+        report = hook_module.check_hooks(clients=("claude",), hook_dir=hooks, settings_path=config)
+        assert next(
+            row for row in report["clients"][0]["checks"] if row["id"] == "config.file"
+        )["status"] == "fail"
+    assert hook_module._is_private_group(private_group.gr_gid) is False

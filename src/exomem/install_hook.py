@@ -217,6 +217,7 @@ def _is_private_group(gid: int) -> bool:
 @cache
 def _private_group_for_user(euid: int, gid: int) -> bool:
     """Require the user-private-group convention and no other known members."""
+    # A cached private answer lasts for the process lifetime unless explicitly cleared.
     try:
         import grp
         import pwd
@@ -257,9 +258,13 @@ def _has_untrusted_writers(info: os.stat_result, target: int | Path) -> bool:
         or not _is_private_group(info.st_gid)
     ):
         return True
-    # With an access ACL, the mode's group bits describe its mask, not its writers.
+    # ACLs can grant writers beyond the private group described by the mode bits.
     try:
-        return "system.posix_acl_access" in os.listxattr(target)
+        attrs = (
+            os.listxattr(target) if isinstance(target, int)
+            else os.listxattr(target, follow_symlinks=False)
+        )
+        return bool({"system.posix_acl_access", "system.nfs4_acl", "system.cifs_acl"}.intersection(attrs))
     except OSError as error:
         return error.errno not in {errno.ENOTSUP, errno.EOPNOTSUPP}
 
@@ -887,6 +892,7 @@ def check_hooks(
     at current `exomem_*` hooks instead of legacy `kb_*` hooks, and reports where
     logs/cooldown state land. Returns a JSON-serializable report.
     """
+    _private_group_for_user.cache_clear()
     normalized = tuple(_normalize_client(c) for c in clients)
     if len(normalized) != len(set(normalized)):
         raise ValueError(f"duplicate clients requested: {clients!r}")
@@ -1344,8 +1350,14 @@ def _write_unique_at(directory, name: str, raw: bytes, mode: int) -> None:
         mode,
     )
     try:
+        info = os.fstat(fd)
+        if os.name != "nt" and (info.st_uid != os.geteuid() or _has_untrusted_writers(info, fd)):
+            raise OSError(f"created hook config is unsafe or writable: {directory.path / name}")
         safe._write_all(fd, raw)
         os.fsync(fd)
+    except BaseException:
+        safe._unlink_at(directory, name)
+        raise
     finally:
         os.close(fd)
 
@@ -1383,7 +1395,8 @@ def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
                 continue
             raw = (json.dumps(merged, indent=2) + "\n").encode("utf-8")
             temporary = f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(6)}"
-            _write_unique_at(parent, temporary, raw, initial["mode"])
+            write_mode = initial["mode"] & ~0o022
+            _write_unique_at(parent, temporary, raw, write_mode)
             latest = _snapshot_config_at(parent, path.name, path)
             if not _same_snapshot(initial, latest):
                 safe._unlink_at(parent, temporary)
@@ -1392,7 +1405,7 @@ def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
             if initial["exists"]:
                 stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
                 backup_name = f"{path.name}.backup-{stamp}-{secrets.token_hex(6)}"
-                _write_unique_at(parent, backup_name, initial["raw"], initial["mode"])
+                _write_unique_at(parent, backup_name, initial["raw"], write_mode)
             final = _snapshot_config_at(parent, path.name, path)
             if not _same_snapshot(initial, final):
                 safe._unlink_at(parent, temporary)
@@ -1519,6 +1532,7 @@ def install_hook(
 
 
 def install_all_hooks(*, wire: bool = True, timeout: int = 10) -> dict:
+    _private_group_for_user.cache_clear()
     reports: list[dict] = []
     for client in SUPPORTED_CLIENTS:
         try:
