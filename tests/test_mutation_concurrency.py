@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import faulthandler
 import io
 import os
 import shutil
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -155,6 +157,44 @@ class _BarrierStream(io.BytesIO):
         return super().read(size)
 
 
+@pytest.mark.parametrize("dump_error", [None, OSError("diagnostic stream unavailable")])
+def test_upload_timeout_reports_worker_stacks_without_suppressing_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dump_error: Exception | None,
+) -> None:
+    failure = TimeoutError("synthetic upload deadline")
+    dumps = []
+
+    class Future:
+        def result(self, timeout):
+            assert timeout == 5.0
+            raise failure
+
+    class Pool:
+        def __init__(self, *, max_workers):
+            assert max_workers == 2
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(sys.modules[__name__], "ThreadPoolExecutor", Pool)
+    def dump(**kwargs):
+        dumps.append(kwargs)
+        if dump_error is not None:
+            raise dump_error
+
+    monkeypatch.setattr(faulthandler, "dump_traceback", dump)
+    with pytest.raises(TimeoutError) as caught:
+        test_independent_vault_real_uploads_commit_concurrently(tmp_path)
+    assert caught.value is failure
+    assert dumps == [{"all_threads": True}]
+
+
 def test_independent_vault_real_uploads_commit_concurrently(tmp_path: Path) -> None:
     fixture = Path(__file__).parent / "fixtures"
     vault_a = tmp_path / "vault-a"
@@ -178,8 +218,17 @@ def test_independent_vault_real_uploads_commit_concurrently(tmp_path: Path) -> N
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(upload, vault_a, "alpha.bin")
         second = pool.submit(upload, vault_b, "beta.bin")
-        assert first.result(timeout=5.0).endswith("alpha.bin")
-        assert second.result(timeout=5.0).endswith("beta.bin")
+        try:
+            assert first.result(timeout=5.0).endswith("alpha.bin")
+            assert second.result(timeout=5.0).endswith("beta.bin")
+        except TimeoutError:
+            # Capture the workers before executor shutdown waits for them. A
+            # diagnostic failure must never replace the original test failure.
+            try:
+                faulthandler.dump_traceback(all_threads=True)
+            except Exception:  # noqa: BLE001 -- diagnostics must preserve the original timeout
+                pass
+            raise
 
     assert (vault_a / "Knowledge Base/Evidence/Concurrent/Uploads/alpha.bin").exists()
     assert (vault_b / "Knowledge Base/Evidence/Concurrent/Uploads/beta.bin").exists()
