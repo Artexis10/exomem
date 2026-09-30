@@ -109,7 +109,8 @@
   - preserve the legacy stop through Helm upgrades: either enabled Cloud control workload or `legacyHosted.paused: true` renders zero old gateway/provisioner/volume-worker replicas, suspends every legacy-only CronJob, and omits the old provisioner database migration/validation hook; the Cloud lifecycle scheduler stays active while Cloud is enabled, an explicit pause survives disabling Cloud, and hosted-only defaults remain unchanged;
   - Extend the existing SOPS handoff, ciphertext validation and apply path to accept complete, exact-key-set Cloud platform Secret bundles while retaining scalar destinations; test bundle rotation shapes and reject incomplete, malformed or plaintext artifacts before publication or apply.
 - [x] 3.9a Classify every hosted scheduler job explicitly in chart values and render `exomem-reconcile` unsuspended whenever either Cloud control workload is enabled, while legacy-only jobs remain suspended; cover Cloud-on, legacy-pause-only and all-off renders.
-- [ ] 3.9b Before deploying the lifecycle scheduler chart change, gate Substrate's legacy hosted lifecycle lane inside `/api/cron/exomem-reconcile` when Cloud is enabled, while retaining the Paddle and Cloud lanes.
+- [x] 3.9b Before deploying the lifecycle scheduler chart change, gate Substrate's legacy hosted lifecycle lane inside `/api/cron/exomem-reconcile` when Cloud is enabled, while retaining the Paddle and Cloud lanes. Substrate #190 is deployed; the authenticated production sweep returned zero legacy operations and a successful Cloud reconciliation on 2026-09-30.
+- [ ] 3.9c Deploy the scheduler chart after the Substrate gate and verify a successful scheduled Cloud sweep while every legacy-only job remains suspended.
 - [ ] 3.10 Integration test on disposable K3s:
   - create, then pod kill with a governed write after it;
   - owner-only modes asserted after first start, pod replacement and restore;
