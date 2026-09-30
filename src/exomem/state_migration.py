@@ -1441,7 +1441,17 @@ def _is_manifest_bookkeeping(name: str) -> bool:
     return name.startswith(f".{MANIFEST_NAME}.") and name.endswith(".tmp")
 
 
+def _is_external_canonical(name: str) -> bool:
+    from . import reserved_paths
+
+    classification = reserved_paths.classify_logical(name)
+    return classification.descriptor_id in {
+        descriptor.id for descriptor in reserved_paths.external_canonical_descriptors()
+    }
+
+
 def _external_state_present(state_dir: Path) -> bool:
+    """Whether the external root holds machine-local state (canonical data excluded)."""
     try:
         entries = os.scandir(state_dir)
     except FileNotFoundError:
@@ -1449,7 +1459,10 @@ def _external_state_present(state_dir: Path) -> bool:
     except OSError as error:
         raise OSError("external state root cannot be inspected") from error
     with entries:
-        return any(not _is_manifest_bookkeeping(entry.name) for entry in entries)
+        return any(
+            not _is_manifest_bookkeeping(entry.name) and not _is_external_canonical(entry.name)
+            for entry in entries
+        )
 
 
 @contextmanager
@@ -1570,7 +1583,9 @@ def _adopt_state_offline(vault_root: Path, keep: str) -> dict[str, Any]:
         with _migration_lock(state_dir):
             with os.scandir(state_dir) as entries:
                 for entry in entries:
-                    if entry.name == _LOCK_NAME:
+                    if entry.name == _LOCK_NAME or _is_external_canonical(entry.name):
+                        # Canonical data is never machine-local state: keeping
+                        # the vault's copy of state must not discard it.
                         continue
                     path = state_dir / entry.name
                     mode = path.lstat().st_mode

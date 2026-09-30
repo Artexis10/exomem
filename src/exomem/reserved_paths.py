@@ -73,6 +73,10 @@ class StatePlacement(StrEnum):
 
     VAULT_CANONICAL = "vault-canonical"
     EXTERNAL_STATE = "external-state"
+    #: Canonical data under the external state root (the live collection
+    #: store): placed like external state, but never rebuilt, reset, wiped or
+    #: moved by the machine-local state migration.
+    EXTERNAL_CANONICAL = "external-canonical"
     TARGET_ADJACENT = "target-adjacent"
 
 
@@ -518,6 +522,15 @@ _REGISTRY = (
         trees=(".authorization-projections",),
     ),
     InternalStateDescriptor(
+        "collection-store",
+        "collection_store",
+        StatePlacement.EXTERNAL_CANONICAL,
+        # The live structured-collection store. Canonical, so it is not in
+        # the machine-local migration set; its in-vault replica and mode
+        # marker are vault-canonical and are reserved by their own phase.
+        exact=_sqlite_family("collections.sqlite"),
+    ),
+    InternalStateDescriptor(
         "batch-workspace",
         "vault.batch",
         StatePlacement.TARGET_ADJACENT,
@@ -679,6 +692,21 @@ def external_state_descriptors() -> tuple[InternalStateDescriptor, ...]:
     )
 
 
+def external_canonical_descriptors() -> tuple[InternalStateDescriptor, ...]:
+    """Canonical families under the external state root.
+
+    They share the state root and its resolver seam with external state, but
+    nothing that rebuilds, resets, wipes or migrates machine-local state may
+    touch them.
+    """
+
+    return tuple(
+        descriptor
+        for descriptor in _REGISTRY
+        if descriptor.placement is StatePlacement.EXTERNAL_CANONICAL
+    )
+
+
 def state_target_descriptor_id(vault_root: Path, target: Path) -> str | None:
     """Classify one absolute private-state target against its placement anchor.
 
@@ -826,7 +854,10 @@ def _require_owner_placement(relative: Path, *, external: bool, operation: str) 
         raise RuntimeError(f"private {operation} target has no registered placement")
     if descriptor.placement is StatePlacement.TARGET_ADJACENT:
         return
-    expected_external = descriptor.placement is StatePlacement.EXTERNAL_STATE
+    expected_external = descriptor.placement in (
+        StatePlacement.EXTERNAL_STATE,
+        StatePlacement.EXTERNAL_CANONICAL,
+    )
     if external != expected_external:
         raise RuntimeError(
             f"private {operation} target violates descriptor placement "

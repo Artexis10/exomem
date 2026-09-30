@@ -150,6 +150,18 @@ _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
     "governance-tree",
 }
 
+#: Canonical data outside the vault: under the state root, but never rebuilt,
+#: reset or wiped, and not part of the machine-local migration set.
+_SOURCE_DESCRIBED_EXTERNAL_CANONICAL_FAMILIES = {
+    "collection-store",
+}
+
+
+def _external_canonical_constructor_map():
+    from exomem.collection_store import connection
+
+    return {"collection-store": (connection.store_path,)}
+
 
 def _external_root() -> Path:
     # The autouse fixture injects EXOMEM_STATE_ROOT at a tmpdir for every test.
@@ -172,6 +184,18 @@ def test_every_machine_local_constructor_resolves_under_the_external_root(
             assert vault not in path.parents, (
                 f"{descriptor_id}: {path} still resolves inside the vault"
             )
+
+
+def test_every_external_canonical_constructor_resolves_under_the_external_root(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    root = _external_root()
+    for descriptor_id, constructors in _external_canonical_constructor_map().items():
+        for constructor in constructors:
+            path = Path(constructor(vault))
+            assert root in path.parents, f"{descriptor_id}: {path} is outside {root}"
+            assert vault not in path.parents, f"{descriptor_id}: {path} is inside the vault"
 
 
 def test_source_inventory_and_registry_inventory_agree_independently() -> None:
@@ -198,7 +222,14 @@ def test_source_inventory_and_registry_inventory_agree_independently() -> None:
         for descriptor in reserved_paths.internal_state_registry()
         if descriptor.placement is reserved_paths.StatePlacement.VAULT_CANONICAL
     }
+    external_canonical = {
+        descriptor.id
+        for descriptor in reserved_paths.internal_state_registry()
+        if descriptor.placement.value == "external-canonical"
+    }
 
+    assert external_canonical == _SOURCE_DESCRIBED_EXTERNAL_CANONICAL_FAMILIES
+    assert set(_external_canonical_constructor_map()) == external_canonical
     assert external == _SOURCE_DESCRIBED_EXTERNAL_FAMILIES
     assert target_adjacent == _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES
     assert vault_canonical == _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES
@@ -245,6 +276,7 @@ def test_every_descriptor_has_exactly_one_explicit_placement() -> None:
         _SOURCE_DESCRIBED_EXTERNAL_FAMILIES
         | _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES
         | _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES
+        | _SOURCE_DESCRIBED_EXTERNAL_CANONICAL_FAMILIES
     )
     assert {descriptor.id for descriptor in registry} == partition
     assert sum(
@@ -254,6 +286,7 @@ def test_every_descriptor_has_exactly_one_explicit_placement() -> None:
             _SOURCE_DESCRIBED_EXTERNAL_FAMILIES,
             _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES,
             _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES,
+            _SOURCE_DESCRIBED_EXTERNAL_CANONICAL_FAMILIES,
         )
     ) == len(registry), (
         "every registered family must appear in exactly one placement partition"
