@@ -206,6 +206,8 @@ def test_rebuild_publication_failure_rolls_back_rows_identity_tokens_and_mirror(
 ):
     from exomem import vecstore
 
+    if backend == "sqlite-vec":
+        pytest.importorskip("sqlite_vec", reason="vec0 mirror checks require the embeddings extra")
     monkeypatch.setenv("EXOMEM_VEC_BACKEND", backend)
     vecstore.reset_load_memo()
     index = EmbeddingIndex(root)
@@ -264,6 +266,7 @@ def test_rebuild_publication_failure_rolls_back_rows_identity_tokens_and_mirror(
 def test_batch_failure_after_mirror_and_token_rolls_back_entire_parent_group(root, monkeypatch):
     from exomem import vecstore
 
+    pytest.importorskip("sqlite_vec", reason="vec0 mirror checks require the embeddings extra")
     monkeypatch.setenv("EXOMEM_VEC_BACKEND", "sqlite-vec")
     vecstore.reset_load_memo()
     index = EmbeddingIndex(root)
