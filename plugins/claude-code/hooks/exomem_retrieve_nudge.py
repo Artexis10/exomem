@@ -983,17 +983,18 @@ _INJECTED_MARKERS = ("[Exomem working set", "[Exomem retrieval check]", "KB rout
 #: Codex's environment, instruction and skill bodies. A block that starts with
 #: ANY tag is refused (the allowlist below), and a block that carries one of
 #: these anywhere is refused too, so a reminder appended to typed text cannot
-#: ride along with it.
+#: ride along with it. Each is a PREFIX: an attribute form
+#: (`<system-reminder priority="high">`) is refused like the bare tag.
 _MACHINE_TAGS = (
     "<bash-",
-    "<task-notification>",
-    "<system-reminder>",
+    "<task-notification",
+    "<system-reminder",
     "<command-",
     "<local-command",
-    "<environment_context>",
-    "<user_instructions>",
-    "<skill>",
-    "<instructions>",
+    "<environment_context",
+    "<user_instructions",
+    "<skill",
+    "<instructions",
 )
 #: A block opening with a tag is client plumbing, never a typed turn.
 _LEADING_TAG_RE = re.compile(r"\A\s*<[A-Za-z][A-Za-z0-9_-]*[ >/]")
