@@ -121,3 +121,47 @@ def test_get_call_noop_when_disabled(
     monkeypatch.setattr(query_log, "READS_PATH", rpath)
     query_log.log_get_call(read_path="Knowledge Base/Notes/Insights/a.md")
     assert not rpath.exists()
+
+
+def test_content_private_logging_disables_all_three_journals_in_cloud_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design D1.2 "Journals": the query, read and write journals are off
+    whenever content-private logging is enabled, checked in `query_log`
+    itself so this fails closed even if the manifest forgets to set
+    `EXOMEM_DISABLE_QUERY_LOG`. `EXOMEM_DISABLE_EMBEDDINGS` is explicitly
+    removed here -- the suite's conftest sets it, which also disables
+    `query_log` on its own and is exactly why the earlier version of this
+    test suite missed this finding."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_QUERY_LOG", raising=False)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    qpath = tmp_path / "queries.jsonl"
+    wpath = tmp_path / "writes.jsonl"
+    rpath = tmp_path / "reads.jsonl"
+    monkeypatch.setattr(query_log, "QUERIES_PATH", qpath)
+    monkeypatch.setattr(query_log, "WRITES_PATH", wpath)
+    monkeypatch.setattr(query_log, "READS_PATH", rpath)
+
+    hits = [_FakeHit("Knowledge Base/Notes/Insights/a.md", "insight", {})]
+    query_log.log_find_call(
+        query="a distinctive query phrase",
+        mode="hybrid",
+        scope="kb",
+        types=None,
+        projects=None,
+        tags=None,
+        limit=10,
+        rerank=False,
+        prefer_compiled=True,
+        graph=True,
+        hits=hits,
+    )
+    query_log.log_get_call(read_path="Knowledge Base/Notes/Insights/a.md")
+    query_log.log_write_call(
+        tool="note", written_path="Knowledge Base/Notes/Insights/a.md", cited_sources=[]
+    )
+
+    assert not qpath.exists()
+    assert not rpath.exists()
+    assert not wpath.exists()

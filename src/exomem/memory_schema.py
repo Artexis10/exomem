@@ -393,7 +393,17 @@ def infer_relation_registry(
         observations = [
             item for item in observations if item["source_path"] in included_paths
         ]
-    census = _relation_census(pages, observations, included_paths, denominators)
+    # The census is read from the published graph when it is current, so infer
+    # and the relation census share one definition. The snapshot holds one
+    # project per page, so a project-scoped infer keeps the Markdown count, as
+    # does any call made while the graph is unavailable. A caller the relation
+    # census refuses (any audience but the owner under a governed policy) gets
+    # the refusal on every path: the Markdown count is not release-filtered.
+    census = _relation_census_refusal(vault_root)
+    if census is None and project is None:
+        census = _snapshot_relation_census(vault_root, page_type=page_type, start=start, end=end)
+    if census is None:
+        census = _relation_census(pages, observations, included_paths, denominators)
     grouped: dict[str, dict[str, Any]] = {}
     for item in observations:
         key = str(item["raw_relation"])
@@ -544,6 +554,27 @@ def infer_relation_registry(
         if include_model_suggestions
         else None,
     }
+
+
+def _relation_census_refusal(vault_root: Path) -> dict[str, Any] | None:
+    from . import relation_census
+
+    return relation_census.refusal(vault_root)
+
+
+def _snapshot_relation_census(
+    vault_root: Path,
+    *,
+    page_type: str | None,
+    start: dt.date | None,
+    end: dt.date | None,
+) -> dict[str, Any] | None:
+    """Infer's census keys from the current graph snapshot, or None."""
+    from . import relation_census
+
+    return relation_census.infer_counts(
+        vault_root, page_type=page_type, start=start, end=end
+    )
 
 
 def _relation_census(

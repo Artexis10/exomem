@@ -58,11 +58,11 @@ The system SHALL default hookless surfaces — the hosted service, and assistant
 
 ### Requirement: The Level Changes Behaviour, Not Only Prose
 
-Each level SHALL map to concrete nudge-hook tunables. An explicitly set tunable MUST continue to win over the level's value, so the level moves the default and never overrides an operator's own configuration. Selecting `off` MUST stop both nudges before any other work.
+Each level resolved from the operator environment or the machine configuration file SHALL map to concrete nudge-hook tunables. An explicitly set tunable MUST continue to win over the level's value, so the level moves the default and never overrides an operator's own configuration. Selecting `off` through either of those tiers MUST stop both nudges before any other work. A level saved through the agent-accessible preference reaches the hooks only through the mirror defined by `agent-prominence-control`.
 
 #### Scenario: Level supplies the default cadence
 
-- **WHEN** a level is active and a tunable is unset
+- **WHEN** a level is exported or stored in the machine configuration file and a tunable is unset
 - **THEN** the hook uses that level's value for the tunable
 
 #### Scenario: Explicit configuration still wins
@@ -72,7 +72,7 @@ Each level SHALL map to concrete nudge-hook tunables. An explicitly set tunable 
 
 #### Scenario: Off disables both nudges
 
-- **WHEN** the active level is `off`
+- **WHEN** `off` is exported or stored in the machine configuration file
 - **THEN** the capture nudge and the retrieve nudge each return without emitting a reminder
 
 ### Requirement: Standalone Hook Copies Cannot Drift

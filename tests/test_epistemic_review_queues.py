@@ -299,6 +299,10 @@ def test_default_attention_union_is_pinned() -> None:
     than beside the dated queues because what it reports is not yet due — it is
     an item the vault still holds open while events about it have already landed,
     which is a discrepancy to read, not an obligation that has expired.
+
+    Claims-derived observation gaps join after their 24-hour grace window.
+    Collection-candidate suggestions remain opt-in. Authored role and current-state
+    review join by the surface-artifact-role-and-transient-state-review contract.
     """
     assert attention_module.DEFAULT_ATTENTION_CATEGORIES == (
         "bridge_review",
@@ -310,6 +314,9 @@ def test_default_attention_union_is_pinned() -> None:
         "relation_debt",
         "entity_type_unregistered",
         "unreflected_outcomes",
+        "unreflected_observations",
+        "artifact_role_promotion",
+        "transient_state_review",
     )
 
 

@@ -446,8 +446,8 @@ own — or just start writing; the writer auto-registers new keys as you use the
 > an observed measurement uses only compatible existing Records. Fleeting
 > preferences, one-off activity, incidental associations, trivial metrics, and
 > tentative claims stay quiet. A concise observation or narrow Entity facet follows
-> `proactive_capture`; an affiliation relation requires `link_acceptance`; Entity
-> creation or substantial curation requires confirmed `restructure_execution`.
+> `proactive_capture`; an affiliation relation requires `link_acceptance`; a new Entity follows `proactive_capture`;
+> merge or substantial curation requires confirmed `restructure_execution`.
 >
 > **Other MCP clients.** ChatGPT, Codex, Cursor, Gemini, Windsurf, or any client
 > without Skill support should call `bootstrap()` once after connecting. It returns
@@ -582,18 +582,48 @@ the defaults (tuned for English) can under-fire. (These tunables were renamed fr
 **Opt-in: upgrade the read-side reminder to real retrieved content.** By default
 the `UserPromptSubmit` hook only reminds Claude to run `ask_memory` — set
 `EXOMEM_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
-(keyword mode, no embeddings) for the same gated prompt and appends them to the
-reminder, so relevant prior KB pages are already in context before Claude
-decides whether to search. It tries a short transport ladder and never blocks
-on a slow path: REST first (one `POST /api/ask_memory`, ~2s timeout) — only
-attempted when `EXOMEM_REST_API_KEY` is set **in the shell that launches the
-client** (not just the server's service environment — the hook can't read another
-process's env, so export it in the same profile Claude Code or Codex inherits from);
-then, only if you also set `EXOMEM_RETRIEVE_INJECT_CLI=1`, an `exomem ask_memory --json`
-subprocess call (~5s timeout, slower — cold Python start). If neither is
-configured or reachable, it falls straight back to the plain reminder — no
-network call is ever attempted unless `EXOMEM_RETRIEVE_INJECT` is on. (The legacy
-`KB_RETRIEVE_INJECT` / `KB_RETRIEVE_INJECT_CLI` names still work too.)
+(hybrid mode, so a pasted ticket or a sentence with punctuation still finds its
+pages; keyword mode is an all-tokens gate that real prompts never pass) for the
+same gated prompt and appends them to the reminder, so relevant prior KB pages
+are already in context before Claude decides whether to search. It tries a short
+transport ladder and never blocks on a slow path: REST first (one
+`POST /api/ask_memory`, 4s timeout) — attempted when `EXOMEM_REST_API_KEY` is set
+in the client's environment **or** persisted in the managed install's
+`service.env` (`~/.config/exomem/service.env` on Linux,
+`~/Library/Application Support/Exomem/service.env` on macOS; override the location
+with `EXOMEM_SERVICE_ENV`). A key read from that file is only ever sent to a
+loopback host: point `EXOMEM_HOST` elsewhere and the REST rung is skipped for it.
+Then, only if you also set `EXOMEM_RETRIEVE_INJECT_CLI=1`, an
+`exomem ask_memory --json` subprocess call (~5s timeout, slower — cold Python
+start). The two rungs share one 8s budget under the hook's 10s timeout, measured
+on elapsed time: a REST call that dribbles bytes past the budget is abandoned and
+the CLI rung gets what is left. If
+neither is configured or reachable, it falls straight back to the plain reminder
+— no network call is ever attempted unless `EXOMEM_RETRIEVE_INJECT` is on. The
+stub block is cut by whole lines (600 characters), never inside a path, with a
+`… N more not shown` marker when a hit was dropped. Each fired nudge writes one line to
+`~/.claude/exomem-retrieve-nudge.log` (or `~/.codex/...`) naming the lane that
+answered (`lane=rest|cli|none|off`) and the hit count, so a silent fall-through
+to the plain reminder is visible. (The legacy `KB_RETRIEVE_INJECT` /
+`KB_RETRIEVE_INJECT_CLI` names still work too.)
+
+**Opt-in: a compiled working set instead of routing stubs.** Set
+`EXOMEM_RETRIEVE_INJECT=working_set` and the same gated prompt goes to
+`activate_context` instead of `ask_memory`: one `POST /api/activate_context` over
+the same ladder and the same 8s budget, and the returned working-memory packet
+*replaces* the reminder under a fixed header that names it as retrieved memory
+rather than instructions. It carries current state first, then units, then
+pointers, each with the provenance ref you can `read_memory`, keeping whole items
+only under `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default 4,000 characters) and
+dropping trailing ones rather than cutting one in half. A packet that abstains as
+`ambiguous` injects the competing anchors and asks the agent to call again with
+`anchor` set — it is the only decider of which sense a turn meant; every other
+abstention leaves exactly the plain reminder, as does any failure. The packet's
+`continuity` token is kept per client and session beside the continuation
+checkpoint and handed back on the next prompt, and the checkpoint hook drops it
+on each session lifecycle event, so consecutive turns do not re-resolve the world
+but a new session or a compaction starts clean. This mode injects far more per
+prompt than the stub block does, which is the trade it exists to let you make.
 
 (Hooks are local-client only — claude.ai web/mobile can't run them, so there the
 skill or `bootstrap()` contract stays best-effort: nudge it with *"save that to
@@ -659,7 +689,7 @@ inline example; paste it into the Claude app at **Settings → Profile → "What
 personal preferences should Claude consider in responses?"**:
 
 ```
-I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Exomem prominence: BALANCED. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, recognized pattern, or stable preference, recurring routine, historical baseline, or durable affiliation when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise write one concise compiled observation; an observed measurement uses only compatible existing Records. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. A concise observation or narrow Entity facet follows `proactive_capture`; an affiliation relation requires `link_acceptance`; Entity creation or structural change requires confirmed `restructure_execution`. Save a short compiled note, not a transcript, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
+I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Exomem prominence: BALANCED. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, recognized pattern, or stable preference, recurring routine, historical baseline, or durable affiliation when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise write one concise compiled observation; an observed measurement uses only compatible existing Records. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. A concise observation, narrow Entity facet or new Entity follows `proactive_capture`; an affiliation relation requires `link_acceptance`; merge or structural change requires confirmed `restructure_execution`. Save a short compiled note, not a transcript, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
 ```
 
 Optionally paste this separate response-style block too (or trim it to taste):

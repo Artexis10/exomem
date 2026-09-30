@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, structured_filters
+from exomem import commands, memory_refs, structured_filters
 from exomem import find as find_module
 from exomem.vault import kb_dirname
 
@@ -121,7 +121,7 @@ def test_sentinel_counts_a_real_walk(
 
 
 def test_cold_refs_sidecar_declines_instead_of_walking(
-    vault: Path, warm_managed_cell, walk_sentinel
+    vault: Path, warm_managed_cell, walk_sentinel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The spec's other decline case, unpinned until now.
 
@@ -133,8 +133,16 @@ def test_cold_refs_sidecar_declines_instead_of_walking(
     owes the typed warming outcome there for the same reason it owes it for a
     filter it cannot answer from an index, and one background rebuild pays for
     the scan off the request.
+
+    The background rebuild is recorded here rather than started. It walks this
+    same vault by design, and the sentinel counts every thread, so a rebuild
+    that got going before the assertion below was read as a walk on the request.
     """
     warm_managed_cell(vault, prebuild_refs=False)
+    requested: list[Path] = []
+    monkeypatch.setattr(
+        memory_refs, "request_rebuild", lambda root: requested.append(Path(root)) or True
+    )
     sentinel = walk_sentinel(*_scope_roots(vault))
 
     sentinel.reset()
@@ -149,3 +157,4 @@ def test_cold_refs_sidecar_declines_instead_of_walking(
         )
 
     assert sentinel.count == 0, sentinel.report()
+    assert requested == [vault], "the decline owes exactly one background rebuild"

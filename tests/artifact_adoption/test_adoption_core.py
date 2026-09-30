@@ -1009,7 +1009,7 @@ def test_ordinary_calls_render_no_adoption_block_and_keep_existing_response_shap
         files=[_handle("file-one", "ordinary.bin", "application/octet-stream")],
     )
 
-    assert result["summary"] == {"stored": 1, "failed": 0}
+    assert result["summary"] == {"stored": 1, "already_stored": 0, "failed": 0}
     assert "adoption" not in result["files"][0]
     page = vault / f"{result['files'][0]['stored_path']}.md"
     assert "artifact_adoption:" not in page.read_text(encoding="utf-8")
@@ -1435,34 +1435,44 @@ def test_receipt_string_identities_round_trip_yaml_line_characters_losslessly(
     assert replay["files"][0]["adoption"] == committed["files"][0]["adoption"]
 
 
-def test_invalid_evidence_destination_only_fails_the_selected_handle(
+def test_invalid_evidence_destination_refuses_the_whole_call(
     vault: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An adoption block does not make a malformed destination a per-file matter.
+
+    The destination is a call-level argument, so a malformed one is a malformed
+    call, refused before any handle is fetched. This used to report the selected
+    handle as `failed` and the others as `unselected`, which presents a defect in
+    the call as three per-file verdicts and tells the caller two of its handles
+    were merely not chosen.
+    """
     from exomem import client_artifacts
+    from exomem.cli_ops import OpError
 
     monkeypatch.setattr(
         client_artifacts,
         "stage_artifact",
         lambda *_args, **_kwargs: pytest.fail("invalid destination must not fetch"),
     )
-    result = client_artifacts.preserve_artifacts(
-        vault,
-        scope="..",
-        category="outputs",
-        files=[
-            _handle("file-a", "a.bin", "application/octet-stream"),
-            _handle("file-b", "b.bin", "application/octet-stream"),
-            _handle("file-c", "c.bin", "application/octet-stream"),
-        ],
-        adoption=_adoption("invalid-destination"),
-    )
 
-    assert [row["outcome"] for row in result["files"]] == [
-        "unselected",
-        "failed",
-        "unselected",
-    ]
+    with pytest.raises(OpError) as refused:
+        client_artifacts.preserve_artifacts(
+            vault,
+            scope="..",
+            category="outputs",
+            files=[
+                _handle("file-a", "a.bin", "application/octet-stream"),
+                _handle("file-b", "b.bin", "application/octet-stream"),
+                _handle("file-c", "c.bin", "application/octet-stream"),
+            ],
+            adoption=_adoption("invalid-destination"),
+        )
+
+    assert refused.value.code == "INVALID_PRESERVE"
+    assert refused.value.details["field"] == "scope"
+    assert "one path segment" in refused.value.details["accepted_form"]
+    assert not (vault / "Knowledge Base" / "Evidence" / "outputs").exists()
 
 
 def test_adoption_key_surrounding_whitespace_is_not_an_identity_alias(

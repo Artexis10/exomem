@@ -98,6 +98,18 @@ def test_observability_check_warns_on_unparseable_jsonl_tail(
     assert "queries.jsonl" in check.message
 
 
+#: The start-of-process receipt sweep's report for a store that opened on an
+#: empty table -- what every store in these tests opens on, because the rows
+#: below are seeded after construction.
+_NOTHING_SWEPT = {
+    "ran": True,
+    "examined": 0,
+    "resolved": 0,
+    "retained": 0,
+    "limit_reached": False,
+}
+
+
 @pytest.fixture()
 def _isolated_lease_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from exomem import writer_lease as writer_lease_module
@@ -147,6 +159,9 @@ def test_idempotency_store_check_warns_on_stale_live_receipt(_isolated_lease_man
         "pending": 3,
         "abandoned": 0,
         "oldest_pending_age_seconds": pytest.approx(time.time(), abs=1.0),
+        # The store was constructed before these rows were seeded, so its
+        # start-of-process sweep found nothing to reap.
+        "start_sweep": _NOTHING_SWEPT,
     }
     assert "live-key-secret" not in json.dumps(check.details)
     assert "live-digest-secret" not in json.dumps(check.details)
@@ -173,9 +188,85 @@ def test_idempotency_store_check_warns_on_completed_outcome_unknown(
         "pending": 0,
         "abandoned": 1,
         "oldest_pending_age_seconds": None,
+        "start_sweep": _NOTHING_SWEPT,
     }
     assert "unknown-key-secret" not in json.dumps(check.details)
     assert "unknown-digest-secret" not in json.dumps(check.details)
+
+
+def test_managed_hook_refresh_check_passes_when_never_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import install_hook as hook_module
+
+    monkeypatch.setattr(hook_module, "read_last_upgrade_refresh", lambda home=None: None)
+    check = doctor_module._check_managed_hook_refresh()
+    assert check.status == "pass"
+
+
+def test_managed_hook_refresh_check_warns_on_aggregate_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import install_hook as hook_module
+
+    report = {"skipped": False, "success": False, "profiles": [], "error": "refresh failed"}
+    monkeypatch.setattr(hook_module, "read_last_upgrade_refresh", lambda home=None: report)
+    check = doctor_module._check_managed_hook_refresh()
+    assert check.status == "warn"
+    assert check.details == report
+
+
+def test_managed_hook_refresh_check_warns_on_a_failed_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import install_hook as hook_module
+
+    failed_settings = str(tmp_path / "profile-one" / "settings.json")
+    ok_settings = str(tmp_path / "profile-two" / "settings.json")
+    report = {
+        "skipped": False,
+        "success": False,
+        "profiles": [
+            {"settings_path": failed_settings, "success": False, "error": "boom"},
+            {"settings_path": ok_settings, "success": True, "error": None},
+        ],
+    }
+    monkeypatch.setattr(hook_module, "read_last_upgrade_refresh", lambda home=None: report)
+    check = doctor_module._check_managed_hook_refresh()
+    assert check.status == "warn"
+    assert failed_settings in check.message
+    assert ok_settings not in check.message
+    assert check.details == report
+
+
+def test_managed_hook_refresh_check_passes_when_all_profiles_refreshed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import install_hook as hook_module
+
+    report = {
+        "skipped": False,
+        "success": True,
+        "profiles": [
+            {"settings_path": str(tmp_path / "settings.json"), "success": True, "error": None}
+        ],
+    }
+    monkeypatch.setattr(hook_module, "read_last_upgrade_refresh", lambda home=None: report)
+    check = doctor_module._check_managed_hook_refresh()
+    assert check.status == "pass"
+
+
+def test_managed_hook_refresh_check_passes_when_opted_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import install_hook as hook_module
+
+    report = {
+        "skipped": True,
+        "reason": "EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH is set",
+        "profiles": [],
+        "success": True,
+    }
+    monkeypatch.setattr(hook_module, "read_last_upgrade_refresh", lambda home=None: report)
+    check = doctor_module._check_managed_hook_refresh()
+    assert check.status == "pass"
+    assert "EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH" in check.message
 
 
 def test_lexical_check_uses_escaped_immutable_query_only_snapshot(
@@ -1009,7 +1100,10 @@ def test_models_cache_does_not_demand_torch_models_on_the_onnx_lane(
     `exomem warm` — the stated remediation — cannot fetch them there either, so
     the WARN is permanent noise that no action clears.
     """
+    from exomem import embeddings as embeddings_module
+
     monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "onnx")
+    monkeypatch.setattr(embeddings_module, "MODEL_NAME", "BAAI/bge-base-en-v1.5")
     monkeypatch.setattr(
         doctor_module, "_model_cached", lambda _hub, dirname: "bge-base" in dirname
     )
@@ -1055,6 +1149,52 @@ def test_sidecar_present_but_probe_raises_fails(
 
     assert check.status == "fail"
     assert "probe failed" in check.message
+
+
+def test_sidecar_probe_reports_the_resident_encoder_s_fingerprint(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A served model's fingerprint names the bytes it runs (revision,
+    quantisation, artefact digest); doctor reports that one, never the bare
+    `model|cls|l2` a served model's vectors are not stored under."""
+    import numpy as np
+
+    from exomem import embedding_backend
+    from exomem import embeddings as embeddings_module
+
+    _sidecar(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(doctor_module, "_module_available", lambda _m: True)
+    monkeypatch.setattr(doctor_module, "_model_cached", lambda _hub, _dir: True)
+    profile = embedding_backend.EncoderProfile(
+        model="BAAI/bge-m3",
+        pooling="cls",
+        query_prefix="",
+        passage_prefix="",
+        max_seq=512,
+        pad_token="<pad>",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        quantization=embedding_backend.ORT_DYNAMIC_INT8,
+        file_format=embedding_backend.ONNX_EXTERNAL_DATA,
+        artifact_digest="7b9a0b3b0b292643",
+    )
+    monkeypatch.setattr(embeddings_module, "_MODEL", SimpleNamespace(profile=profile))
+
+    class Index:
+        def search(self, _vector, k: int = 1):
+            return [("Notes/probe.md", 0.9)][:k]
+
+        def all_vectors(self):
+            return [{"path": "Notes/probe.md"}], np.zeros((1, 4), dtype=np.float32)
+
+    monkeypatch.setattr(embeddings_module, "get_embedding_index", lambda _root: Index())
+    monkeypatch.setattr(embeddings_module, "embed_texts", lambda *_a, **_k: np.zeros((1, 4), dtype=np.float32))
+
+    check = doctor_module._check_embedding_sidecar(vault)
+
+    assert check.status == "pass", check.message
+    assert check.details["fingerprint"] == profile.fingerprint()
+    assert profile.fingerprint() in check.message
 
 
 @pytest.mark.embeddings

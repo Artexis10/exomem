@@ -3889,6 +3889,28 @@ def enroll_initial_activation_tuple(
     return acknowledgement
 
 
+def require_activation_acknowledgement_available(vault_root: Path) -> None:
+    """Refuse known-unwritable local custody before new canonical effects.
+
+    This is a capability preflight, not a reservation or a guarantee against a
+    later permission/mount change. Later failures still require exact committed-
+    publication recovery. Windows custody uses its native
+    held-filesystem publication path rather than POSIX access checks.
+    """
+    if os.name == "nt":
+        return
+    try:
+        external = load_external_custody(Path(vault_root))
+        parent = external.control_path.parent
+        options = {"effective_ids": True} if os.access in os.supports_effective_ids else {}
+        if not os.access(parent, os.W_OK | os.X_OK, **options):
+            raise AuthorizationCustodyUnavailable
+        if os.statvfs(parent).f_flag & os.ST_RDONLY:
+            raise AuthorizationCustodyUnavailable
+    except (OSError, RuntimeError, TypeError, ValueError):
+        raise AuthorizationCustodyUnavailable from None
+
+
 def acknowledge_activation_tuple(
     vault_root: Path,
     *,

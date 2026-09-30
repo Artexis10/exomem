@@ -1,0 +1,221 @@
+scenario_id: f29-claimed-routing-v1
+family_id: f29
+kind: operational
+public_coverage: none
+phases:
+- phase_id: hookless-observed
+  ops:
+  - op: configure
+    ref: hookless-maximal
+  - op: snapshot
+    ref: s-hookless-observed-seed
+  - op: agent_turn
+    ref: t01-published
+    at: '2026-09-01'
+    detail: 'Published from the studio account on bulletin on 2026-09-01, reference
+      studio-2026-09-01-1. The attachment publication-1.txt is proof and contains
+      the final text.
+
+
+      <attachment filename="publication-1.txt" media_type="text/plain">
+
+      Publication confirmation
+
+      Reference: studio-2026-09-01-1
+
+      Published: 2026-09-01
+
+      Platform: bulletin
+
+      Account: studio
+
+
+      Studio update 1.
+
+      The new print run is ready.
+
+
+      </attachment>'
+  - op: agent_turn
+    ref: t01-draft
+    at: '2026-09-01'
+    detail: I might publish another update tomorrow; this is only an idea.
+  - op: agent_turn
+    ref: t02-published
+    at: '2026-09-04'
+    detail: 'Published from the studio account on bulletin on 2026-09-04, reference
+      studio-2026-09-04-2. The attachment publication-2.txt is proof and contains
+      the final text.
+
+
+      <attachment filename="publication-2.txt" media_type="text/plain">
+
+      Publication confirmation
+
+      Reference: studio-2026-09-04-2
+
+      Published: 2026-09-04
+
+      Platform: bulletin
+
+      Account: studio
+
+
+      Studio update 2.
+
+      The new print run is ready.
+
+
+      </attachment>'
+  - op: agent_turn
+    ref: t03-published
+    at: '2026-09-08'
+    detail: 'Published from the studio account on bulletin on 2026-09-08, reference
+      studio-2026-09-08-3. The attachment publication-3.txt is proof and contains
+      the final text.
+
+
+      <attachment filename="publication-3.txt" media_type="text/plain">
+
+      Publication confirmation
+
+      Reference: studio-2026-09-08-3
+
+      Published: 2026-09-08
+
+      Platform: bulletin
+
+      Account: studio
+
+
+      Studio update 3.
+
+      The new print run is ready.
+
+
+      </attachment>'
+  - op: snapshot
+    ref: s-hookless-observed
+  expect:
+  - assert: claimed_observation_reflected
+    subject: f29-claimed-routing-v1
+  - assert: no_structured_write_beyond_expectation
+    subject: f29-claimed-routing-v1
+- phase_id: hooked-observed
+  ops:
+  - op: configure
+    ref: hooked-balanced
+  - op: snapshot
+    ref: s-hooked-observed-seed
+  - op: agent_turn
+    ref: t01-published
+    at: '2026-09-01'
+    detail: 'Published from the studio account on bulletin on 2026-09-01, reference
+      studio-2026-09-01-1. The attachment publication-1.txt is proof and contains
+      the final text.
+
+
+      <attachment filename="publication-1.txt" media_type="text/plain">
+
+      Publication confirmation
+
+      Reference: studio-2026-09-01-1
+
+      Published: 2026-09-01
+
+      Platform: bulletin
+
+      Account: studio
+
+
+      Studio update 1.
+
+      The new print run is ready.
+
+
+      </attachment>'
+  - op: agent_turn
+    ref: t01-draft
+    at: '2026-09-01'
+    detail: I might publish another update tomorrow; this is only an idea.
+  - op: agent_turn
+    ref: t02-published
+    at: '2026-09-04'
+    detail: 'Published from the studio account on bulletin on 2026-09-04, reference
+      studio-2026-09-04-2. The attachment publication-2.txt is proof and contains
+      the final text.
+
+
+      <attachment filename="publication-2.txt" media_type="text/plain">
+
+      Publication confirmation
+
+      Reference: studio-2026-09-04-2
+
+      Published: 2026-09-04
+
+      Platform: bulletin
+
+      Account: studio
+
+
+      Studio update 2.
+
+      The new print run is ready.
+
+
+      </attachment>'
+  - op: agent_turn
+    ref: t03-published
+    at: '2026-09-08'
+    detail: 'Published from the studio account on bulletin on 2026-09-08, reference
+      studio-2026-09-08-3. The attachment publication-3.txt is proof and contains
+      the final text.
+
+
+      <attachment filename="publication-3.txt" media_type="text/plain">
+
+      Publication confirmation
+
+      Reference: studio-2026-09-08-3
+
+      Published: 2026-09-08
+
+      Platform: bulletin
+
+      Account: studio
+
+
+      Studio update 3.
+
+      The new print run is ready.
+
+
+      </attachment>'
+  - op: snapshot
+    ref: s-hooked-observed
+  expect:
+  - assert: claimed_observation_reflected
+    subject: f29-claimed-routing-v1
+  - assert: no_structured_write_beyond_expectation
+    subject: f29-claimed-routing-v1
+fairness:
+  why_neutral: Ordinary observed events must reach durable state without naming its
+    storage; tentative events must not.
+  public_coverage_subtraction: No public coverage is claimed for these operational
+    journeys.
+  mechanisms:
+  - provider_role: subject
+    mechanism: Documented collection and review surfaces projected into neutral snapshots.
+    verdict: satisfiable
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+  privileged_endpoint_matrix:
+  - driver_surface_id: state.read
+    provider: exomem
+    variant: native
+    disposition: equivalent
+    audit_scope: Read-only collection and candidate projection
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+    reason: Reads the same state the client can inspect.
+    competitor_surface: Documented collection and review read endpoint
+  acceptance_predicate: PREREGISTRATION.md section 4, sequence-four replay predicates.

@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change add-mcp-call-ledger. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Every MCP Call Produces Exactly One Ledger Row
 
 The system SHALL append exactly one ledger row for each completed MCP tool call — read or
@@ -68,7 +70,12 @@ Every row SHALL carry the latency of the call it records, for reads as well as w
 refusals as well as successes: `duration_ms` for the tool leaf, and `total_ms` for the wall
 clock the caller actually waited, including work done before the leaf. `duration_ms` SHALL keep
 its existing meaning, so that the prose trace and the per-tool duration metric are not silently
-redefined. Rows SHALL also record the total serialized size of the arguments.
+redefined. Rows SHALL also record the total serialized size of the arguments. Rows SHALL carry the
+call's stage `spans` (name, count and milliseconds per stage, bounded in count and name length),
+including `recall.<stage>` spans for recall calls, and a `budget` block (`seconds`,
+`remaining_ms`, `skipped`) whenever a request budget applied, so a slow row can be attributed by
+stage without a second call. Spans and budget blocks SHALL carry no query text, path, excerpt or
+other content.
 
 #### Scenario: A slow call reports how long it took
 
@@ -93,6 +100,17 @@ redefined. Rows SHALL also record the total serialized size of the arguments.
 - **WHEN** two calls carry arguments of very different sizes
 - **THEN** their rows record correspondingly different `request_bytes`
 - **AND** no argument value is recorded to produce that figure
+
+#### Scenario: A recall row attributes its time by stage
+
+- **WHEN** an `ask_memory` call runs inside an MCP call
+- **THEN** the row's `spans` include `recall.` entries for the stages that ran, with milliseconds
+- **AND** no span carries the query text, a hit path or an excerpt
+
+#### Scenario: A budgeted row records what the budget did
+
+- **WHEN** a request budget applied to the call and a stage was skipped
+- **THEN** the row's `budget` names the budget in seconds, the remaining milliseconds at return, and the skipped stages
 
 ### Requirement: Every Row Names The Calling Client
 
@@ -121,11 +139,13 @@ of an MCP context SHALL yield null fields rather than an error.
 - **AND** the row is still appended and the call still succeeds
 
 ### Requirement: Arguments Are Recorded As Shape And Hash, Never Values
-
 The system SHALL record call arguments as their names, per-argument byte length and sha256, and
 structural target paths only. It SHALL NOT record any argument value, note content, or raw
 caller credential. Caller identity SHALL be recorded as the pre-hashed principal scope, never a
-raw token or subject.
+raw token or subject. For artifact and evidence writes (`preserve_artifacts`, `preserve_evidence`,
+`capture_source` with files), the committed vault-relative paths from the outcome SHALL be recorded
+in `target_paths` so the ledger can state what landed; filenames derived from content stay
+structural paths, and no file content or handle URL is recorded.
 
 #### Scenario: Query text never reaches the ledger
 
@@ -144,6 +164,12 @@ raw token or subject.
 - **WHEN** a call is made with a verified principal or a bearer credential
 - **THEN** `caller_principal_hash` is the hashed principal scope
 - **AND** no raw token, authorization header, or subject value appears in the row
+
+#### Scenario: Artifact write records what landed
+
+- **WHEN** `preserve_artifacts` stores two files and fails a third
+- **THEN** the ledger row's `target_paths` holds the two committed vault-relative paths and nothing for the failed file
+- **AND** no `download_url`, file content, or handle identifier appears in the row
 
 ### Requirement: The Ledger Writes On A Read-Only Vault Replica
 

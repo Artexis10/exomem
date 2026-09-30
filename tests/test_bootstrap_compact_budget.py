@@ -347,6 +347,88 @@ from exomem import commands
 #: and both are surface decisions rather than trims, which is why this change did
 #: not take them; but a payload carrying 10.6 KB of duplication has no business
 #: raising this ceiling a sixth time before it takes one of them.
+#:
+#: 2026-09-18, `activate-context-on-host-turns`, +183 B and NO raise. The
+#: activation carrier line (182 B of served JSON plus its separating space) went
+#: into the `balanced` and `maximal` recall contracts. The measurement that
+#: matters here is the one this file did not previously take: headroom BY
+#: ENGAGEMENT LEVEL, `(default surface, claude-code)` --
+#:
+#:     off       2,755 / 2,746
+#:     light     2,471 / 2,462
+#:     balanced    557 /   548   <- the default level, and the warning margin
+#:     maximal     192 /   183   <- the real worst case
+#:
+#: `maximal` was ALREADY inside the 512-byte warning band before this change
+#: (375 B), and it is the level whose entire purpose is to spend prose budget, so
+#: the margin is not claimed there and the ceiling is. The prior belief that a
+#: hook-capable surface and `maximal` could not combine was wrong --
+#: `hook_cadence` is served at every level -- and that mistake is why the tight
+#: case went unmeasured for five raises. The level matrix now lives in
+#: `tests/test_bootstrap_activation_carrier.py`.
+#:
+#: 192 bytes is not a budget, and the next addition at `maximal` trips the
+#: ceiling. The two redundancies above are still the place to get them from; do
+#: not raise this to buy room for one more sentence.
+#:
+#: `close-memory-loop`'s `episode_memory` command (2026-09-24) spent that
+#: margin: it added the command to `product_commands` (primary, routes,
+#: `first_run_safe`) and to the `capture` action's `advanced` list, ~110 bytes
+#: at every engagement level alike because none of it is level-gated text.
+#: Measured `(default surface, claude-code)`: balanced 447 / 438, maximal
+#: 82 / 73. `HEADROOM_WARNING_BYTES` was dropped to 400 as a stopgap so the
+#: planned, reviewed command could land without an emergency trim; the ceiling
+#: itself did not move.
+#:
+#: TRIMMED, restoring the margin the stopgap deferred. Bytes came back from
+#: REDUNDANCY, the same method as the two entries above: text the payload
+#: already states somewhere else, not a rule dropped.
+#:
+#:   authoring_contract.post_write.capture_sweep_handling   115  restated, in
+#:       full, the "worth keeping" bar `engagement.contract.capture`'s episode
+#:       pass already spells out ("a later decision, lookup, repeated task,
+#:       comparison or continuation"); the handling entry now says only to
+#:       make that pass, and a code comment points at the section that still
+#:       defines the bar
+#:   records.manual_first / planning.manual_first            48  both said
+#:       "direct human edits and work without an agent are supported product
+#:       paths" verbatim; shortened to "manual edits without Exomem are a
+#:       supported path" in both, losing no clause
+#:   epistemic_contract.commitments.state_the_expectation_first
+#:     and .capture_nudge                                    54  both restated
+#:       "about a future observation"; `records.intent_boundary.prediction`
+#:       (pinned exactly by `test_bootstrap.py`) already carries that same
+#:       clause on the same concept, so dropping it from these two loses
+#:       nothing the payload states nowhere else
+#:
+#: 217 bytes recovered, all from compact-wide text served at every engagement
+#: level, so the fix lifts every level's headroom by the same amount rather
+#: than trading one level's margin for another's. Measured
+#: `(default surface, claude-code)`: balanced 664 / 655, maximal 299 / 290 --
+#: `HEADROOM_WARNING_BYTES` restored to 512 below. `MINIMUM_SAVING_RATIO` is
+#: untouched.
+#:
+#: What did NOT leave: no rule and no tool mention. `episode_memory` keeps its
+#: place in `product_commands` and the `capture` action's `advanced` list;
+#: every commitment, capture class and post-write advisory still says what it
+#: said, only without repeating a clause the payload already states elsewhere.
+#:
+#: `capture-identities-at-write-time` (authored 2026-09-19, merged onto the trim
+#: above 2026-09-28), PAID rather than spent. Added `LINK_NAMED_IDENTITIES_LINE`
+#: (91 B) to `balanced` and `maximal` capture, and "central or " into the
+#: "recurring entity" phrase each already carried (+11 B each) -- +102 B at both
+#: levels. Paid for by tightening existing sentences without changing what they
+#: instruct: `ACTIVATION_CARRIER_LINE` 182 B -> 138 B (-44 B; reordered its two
+#: clauses and dropped words the reordering made redundant),
+#: `_EPISODE_SWEEP_CAPTURE` 421 B -> 392 B (-29 B; an em-dash "for example"
+#: became a plain-ASCII "e.g.", and two adjectives came off two of five
+#: already-non-exhaustive examples), and the Entity routing sentence at both
+#: levels ("there; otherwise use one ... ; use Records only" -> "there, else one
+#: ... ; Records only", -13 B) plus two `maximal`-only conjunctions (-7 B). No
+#: ceiling raise. Measured on a scratch vault `(default surface, claude-code)`:
+#:
+#:     balanced    644 /   635
+#:     maximal     287 /   278   <- inside the 512 band, clear of maximal's 256
 COMPACT_BYTE_CEILING = 63_300
 
 #: The defect was compact and full being near-identical. A profile that does not
@@ -372,6 +454,11 @@ def _size(payload: dict) -> int:
 #: Warn rather than fail: the remaining bytes are still legitimately spendable,
 #: and turning "nearly full" into a failure would just be the ceiling moved down
 #: without the argument the ceiling's own docstring demands.
+#: 400 -> 512 (2026-09-25): the stopgap drop for `episode_memory` is repaid. The
+#: compact-bootstrap trim recorded on `COMPACT_BYTE_CEILING` above recovered 217
+#: bytes of redundant prose, restoring the default level to 664/655 bytes of
+#: headroom `(default surface, claude-code)` -- clear of the 512-byte band this
+#: constant re-asserts, and of the 256-byte floor `maximal` is held to below.
 HEADROOM_WARNING_BYTES = 512
 
 
@@ -400,6 +487,38 @@ def test_compact_stays_under_its_byte_ceiling(payloads):
 
 def test_compact_clears_the_warning_headroom(payloads):
     assert COMPACT_BYTE_CEILING - _size(payloads["compact"]) >= HEADROOM_WARNING_BYTES
+
+
+def test_a_hook_capable_client_still_clears_the_ceiling(monkeypatch):
+    """A hook-capable client at the DEFAULT level, which is what this measures.
+
+    The previous version of this docstring claimed `engagement.hook_cadence`
+    rides on the coding context while `maximal` rides on the conversational one,
+    so "neither surface is the worst case for the other". That is wrong, and it
+    hid the real worst case: `hook_cadence` is served at every level, `maximal`
+    included, so the hook-capable surface and the longest contract prose combine.
+    Measured 2026-09-18: `maximal` on `claude-code` is 63,117 bytes, 183 under
+    the ceiling, against 62,752 (548 under) at the default level here.
+
+    So this test is not the worst case and does not claim to be. It covers the
+    level a real install without a stored preference resolves through, and keeps
+    the warning margin for that one.
+    `tests/test_bootstrap_activation_carrier.py` carries the full
+    level-by-surface matrix, where the hard ceiling is asserted everywhere and
+    the margin only at the default level.
+    """
+    monkeypatch.setenv("EXOMEM_SURFACE", "claude-code")
+    monkeypatch.delenv("EXOMEM_PROMINENCE", raising=False)
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "Knowledge Base").mkdir()
+    payload = commands.op_bootstrap(root, profile="compact")
+    size = _size(payload)
+
+    assert "hook_cadence" in payload["engagement"]
+    assert COMPACT_BYTE_CEILING - size >= HEADROOM_WARNING_BYTES, (
+        f"compact bootstrap for a hook-capable client is {size:,} bytes, within "
+        f"{COMPACT_BYTE_CEILING - size:,} of the {COMPACT_BYTE_CEILING:,} ceiling"
+    )
 
 
 def test_compact_is_materially_smaller_than_full(payloads):

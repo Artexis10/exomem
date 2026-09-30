@@ -149,7 +149,7 @@ def test_local_download_authorizes_before_reading_response_bytes(
     monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "sek")
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     client = TestClient(server.build_server(require_auth=False).http_app())
-    token = upload_tokens.mint("sek", scope="download")
+    token = upload_tokens.mint_bound("sek", audience="owner")
     original_read = server_transfer.reserved_paths.read_generic_bytes
 
     def guarded_read(root: Path, relative: str):

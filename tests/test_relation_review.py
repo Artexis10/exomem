@@ -655,6 +655,59 @@ def test_exact_prepared_artifact_recovery_reuses_artifact_and_reapplies_auxiliar
     ]
 
 
+def test_resumed_prepared_creation_keeps_extra_vocabulary_guards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    artifact = relation_review.review_artifact_path(tmp_path, _ID_B)
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        json.dumps(_artifact_payload(validation), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    prepared = relation_review.prepare_commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+    guard = vault.PathGuard.capture(tmp_path, "concurrency-sentinel", leaf_policy="absent")
+    from exomem import vocabulary_auxiliaries
+
+    original_seal = vocabulary_auxiliaries.seal
+
+    def seal_without_replayed_artifact(*args, **kwargs):  # noqa: ANN001
+        return original_seal(*args, primary=kwargs["primary"], derived=())
+
+    monkeypatch.setattr(vocabulary_auxiliaries, "seal", seal_without_replayed_artifact)
+    original_batch = vault.batch_atomic_write
+
+    def invalidate_guard(*args, **kwargs):  # noqa: ANN001
+        (tmp_path / "concurrency-sentinel").write_text("appeared", encoding="utf-8")
+        return original_batch(*args, **kwargs)
+
+    monkeypatch.setattr(vault, "batch_atomic_write", invalidate_guard)
+
+    with pytest.raises(relation_review.RelationReviewError) as error:
+        relation_review.commit_prepared_creation_draft(
+            tmp_path,
+            prepared,
+            path=_PAGE_B,
+            source=source,
+            operation="create",
+            relation_disposition="reviewed_none",
+            relation_review_hash=validation.draft_hash,
+            extra_required_guards=(guard,),
+        )
+
+    assert error.value.code == "STALE_VOCABULARY_BINDING"
+    assert not (tmp_path / _PAGE_B).exists()
+
+
 def test_nonexact_prepared_auxiliary_sequence_remains_reserved(tmp_path: Path) -> None:
     source, validation = _reviewed_validation(tmp_path)
     original = (vault.PlannedWrite(tmp_path / "Knowledge Base/nav.md", "one\n"),)

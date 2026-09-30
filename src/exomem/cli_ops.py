@@ -86,8 +86,10 @@ _REMEDIATION: dict[str, str] = {
         "only with the same identity."
     ),
     "MUTATION_OUTCOME_UNKNOWN": (
-        "Verify whether the mutation actually landed before retrying; an identical retry "
-        "is safe again after the abandonment grace period."
+        "Read the target to verify whether the mutation actually landed. This "
+        "identity stays outcome-unknown and every identical retry returns this "
+        "code, so if the change is still wanted, send it again under a new "
+        "idempotency key."
     ),
     "MUTATION_LOCK_UNAVAILABLE": (
         "Check that the runtime state root is writable and supports host file locking."
@@ -152,11 +154,15 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
 _NOT_FOUND_CODES = frozenset({"NOT_FOUND", "OLD_NOT_FOUND", "SOURCES_NOT_FOUND", "NOT_IN_TRASH"})
 _CONFLICT_CODES = frozenset(
     {
+        "PREFERENCE_CONFLICT",
+        "PREFERENCE_OPERATOR_OVERRIDE",
         "ARTIFACT_EXISTS",
         "FILE_EXISTS",
         "DEST_EXISTS",
         "ENTITY_EXISTS",
         "ENTITY_AMBIGUOUS",
+        "STALE_IDENTITY_DECISION",
+        "IDENTITY_DECISION_REQUIRED",
         "ALREADY_SUPERSEDED",
         "ALREADY_TRASHED",
         "STALE_EDIT",

@@ -1263,6 +1263,15 @@ def _route_apply(
             project=payload.get("project"),
             decision_status=payload.get("decision_status"),
         )
+        if result.get("identity_preparation") is not None:
+            # The name already denotes other identities; an adoption carries
+            # no distinct decision, so it refuses rather than guessing.
+            raise ValueError(
+                "IDENTITY_DECISION_REQUIRED: the name already denotes other active "
+                "entities; create it through connect_memory with an explicit "
+                "identity_decision (candidate_fingerprint: "
+                f"{result['identity_preparation']['candidate_fingerprint']})"
+            )
         return {"result_path": result.get("path"), "result_ref": result.get("ref"), "raw": result}
 
     if kind == "relation":

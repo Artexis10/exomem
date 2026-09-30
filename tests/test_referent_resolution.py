@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import time
 from pathlib import Path
 
 import pytest
@@ -499,9 +498,30 @@ def test_anchor_beyond_cap_does_not_corroborate() -> None:
     assert out.resolved == ()
 
 
-def test_qualifier_anchor_scan_is_hoisted_for_large_graph_fanout() -> None:
+def test_qualifier_anchor_scan_is_hoisted_for_large_graph_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     rr = _rr()
+    token_visits = 0
+    qualifier_scans = 0
+
+    class CountedTokens(tuple):
+        def __iter__(self):
+            nonlocal token_visits
+            for token in super().__iter__():
+                token_visits += 1
+                yield token
+
+    match_qualifiers = rr._tokens_match_qualifiers
+
+    def counted_match(*args):
+        nonlocal qualifier_scans
+        qualifier_scans += 1
+        return match_qualifiers(*args)
+
+    monkeypatch.setattr(rr, "_tokens_match_qualifiers", counted_match)
     anchor = "Knowledge Base/Notes/Research/large-topic.md"
+    tokens = CountedTokens(f"topic{index}" for index in range(1000))
     entities = tuple(
         _entity(
             f"Knowledge Base/Entities/People/fanout-{index:03d}.md",
@@ -514,16 +534,17 @@ def test_qualifier_anchor_scan_is_hoisted_for_large_graph_fanout() -> None:
         rr.EdgeFact(anchor, entity.path, "relates_to", "outbound", "epistemic")
         for entity in entities
     )
-    started = time.perf_counter()
     out = _resolve(
         "my two verdant friends route timing details",
         entities=entities,
-        hits=(_hit(anchor, descriptor_tokens=tuple(f"topic{index}" for index in range(1000))),),
+        hits=(_hit(anchor, descriptor_tokens=tokens),),
         edges=edges,
     )
-    elapsed_ms = (time.perf_counter() - started) * 1000
     assert out.resolved == ()
-    assert elapsed_ms < 250
+    # One stem pass and one prefix pass per anchor, independent of graph fanout
+    # and the amount of CPU time a shared runner gives this process.
+    assert qualifier_scans == 1
+    assert 0 < token_visits <= 2 * len(tokens)
 
 
 def test_attribute_overlap_matches_stem_or_prefix() -> None:
@@ -696,3 +717,34 @@ def test_resolution_is_permutation_invariant() -> None:
     first = rr.resolve_referents(cue=cue, hits=(h1, h2), entities=(a, b), edges=()).as_dict()
     second = rr.resolve_referents(cue=cue, hits=(h2, h1), entities=(b, a), edges=()).as_dict()
     assert first == second
+
+
+def test_attribute_overlap_reads_accent_folded_and_script_stemmed_words() -> None:
+    folded = _entity(tags=("Zürich",), relationship="colleague")
+    out = _resolve("which zurich colleague", entities=(folded,))
+    evidence = next(e for e in out.candidates[0].evidence if e.kind == "attribute")
+    assert set(evidence.detail["matched"]) == {"colleague", "zurich"}
+
+    cyrillic = _entity(tags=("книги",), relationship="colleague")
+    out = _resolve("which книгами colleague", entities=(cyrillic,))
+    evidence = next(e for e in out.candidates[0].evidence if e.kind == "attribute")
+    assert set(evidence.detail["matched"]) == {"colleague", "книгами"}
+
+
+@pytest.mark.parametrize(
+    ("query", "descriptor_token"),
+    [("which zurich friend", "zürich"), ("which 東京 friend", "東京")],
+)
+def test_qualifier_seed_reads_folded_and_cjk_descriptor_tokens(
+    query: str, descriptor_token: str
+) -> None:
+    rr = _rr()
+    entity = _entity(relationship="friend")
+    anchor = "Knowledge Base/Notes/Research/lake-trip.md"
+    out = _resolve(
+        query,
+        entities=(entity,),
+        hits=(_hit(anchor, descriptor_tokens=(descriptor_token,)),),
+        edges=(rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", "entity"),),
+    )
+    assert {e.kind for e in out.resolved[0].evidence} == {"attribute", "graph"}

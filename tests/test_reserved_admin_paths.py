@@ -269,6 +269,13 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
             ),
             "due-state",
         ),
+        (due_state.emission_path(root), "due-state"),
+        (
+            due_state.emission_path(root).with_name(
+                f".{due_state.EMISSION_FILENAME}.abc123_4.tmp"
+            ),
+            "due-state",
+        ),
         (
             lexical_live.with_name(f"{lexical_live.name}.rebuild-{token32}.tmp"),
             "lexical-rebuild",
@@ -1724,6 +1731,10 @@ def test_due_state_projection_and_its_temporaries_are_not_reachable_vault_conten
     projection.write_text('{"categories":{},"version":1}\n', encoding="utf-8")
     temporary = projection.with_name(f".{due_state.STATE_FILENAME}.abc123_4.tmp")
     temporary.write_text("DUE-STATE-SENTINEL-9c1a\n", encoding="utf-8")
+    ledger = projection.with_name(due_state.EMISSION_FILENAME)
+    ledger.write_text('{"writes":1,"emissions":1}\n', encoding="utf-8")
+    ledger_temporary = ledger.with_name(f".{due_state.EMISSION_FILENAME}.abc123_4.tmp")
+    ledger_temporary.write_text("DUE-STATE-SENTINEL-9c1b\n", encoding="utf-8")
 
     result = list_directory(
         tmp_path,
@@ -1738,6 +1749,8 @@ def test_due_state_projection_and_its_temporaries_are_not_reachable_vault_conten
         {
             projection.relative_to(tmp_path).as_posix(),
             temporary.relative_to(tmp_path).as_posix(),
+            ledger.relative_to(tmp_path).as_posix(),
+            ledger_temporary.relative_to(tmp_path).as_posix(),
         }
     )
 

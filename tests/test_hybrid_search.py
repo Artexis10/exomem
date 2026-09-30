@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from exomem import bm25, embeddings, fusion
+from exomem import bm25, embeddings, fusion, recall_space
 from exomem import find as find_module
 
 # ============================================================================
@@ -641,8 +641,9 @@ def embeddings_enabled(monkeypatch):
 def test_embed_query_and_passage_shapes(embeddings_enabled) -> None:
     qvec = embeddings.embed_texts(["metabolic health"], is_query=True)
     pvec = embeddings.embed_texts(["insulin sensitivity matters"], is_query=False)
-    assert qvec.shape == (1, embeddings.VECTOR_DIM)
-    assert pvec.shape == (1, embeddings.VECTOR_DIM)
+    width = recall_space.declared_dim(embeddings.MODEL_NAME)
+    assert qvec.shape == (1, width)
+    assert pvec.shape == (1, width)
     # Unit-norm after normalize_embeddings=True
     assert float(np.linalg.norm(qvec[0])) == pytest.approx(1.0, abs=1e-3)
     assert float(np.linalg.norm(pvec[0])) == pytest.approx(1.0, abs=1e-3)

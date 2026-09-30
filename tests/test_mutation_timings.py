@@ -769,3 +769,268 @@ def test_publish_after_an_eviction_leaves_the_next_preflight_warm(
     assert calls == [], f"expected an event-hit with no census walk, got {len(calls)}"
     assert builds == [], f"expected an event-hit with no corpus rebuild, got {len(builds)}"
     assert preflight.census_token is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 1.15: the collected stages reach the ledger, and the window they sit in
+# is accounted for.
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _call_token(name: str):
+    from exomem import call_spans
+
+    call_spans.reset()
+    handle = call_spans.MCP_CALL_TOKEN.set(name)
+    try:
+        yield name
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+
+
+def test_the_write_stages_reach_the_ledger_without_the_envelope_flag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`EXOMEM_WRITE_TIMINGS` governs the caller's envelope, not the operator's row.
+
+    The stages have existed for a year and never reached a ledger row, because
+    the one flag gated both. On the 0.84.1 personal service that left 46 s of a
+    78 s write inside `derived.canonical_to_committed` with no span and no log
+    line, while `commit.stamp_check` and its siblings had measured pieces of it
+    the whole time and threw them away.
+    """
+    from exomem import call_spans
+
+    monkeypatch.delenv("EXOMEM_WRITE_TIMINGS", raising=False)
+
+    with _call_token("stage-emission") as token:
+        payload = _run_edit(tmp_path)
+        spans = {span["name"]: span for span in call_spans.pop_call_spans(token)}
+
+    assert "timings" not in payload, (
+        "the response envelope must stay exactly as it was without the flag"
+    )
+    for name in _ALWAYS_TAKEN_STAGES:
+        assert name in spans, f"stage {name!r} never reached the ledger: {sorted(spans)}"
+        assert spans[name]["count"] >= 1
+        assert spans[name]["ms"] >= 0.0
+
+
+def test_a_governed_edit_records_the_advisory_sweep_with_what_it_encoded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The advisory's encode was invisible, and its size is half the diagnosis.
+
+    On 0.84.1 an `embeddings.encode` of 15.6 s with `count=1` sat entirely
+    outside `index.embeddings` on one write, and 8.5 s of 30.4 s outside it on
+    the next. Nothing said which caller it belonged to. The sweep is now timed
+    where the encode happens and reports what it encoded, so a duration and a
+    whole-note body are no longer the same reading.
+
+    The encoder itself is stubbed: this asserts the instrumentation, and
+    loading bge-base to do it would make a measurement test a model test.
+    """
+    import numpy as np
+
+    from exomem import call_spans, corpus_aware, embeddings
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+
+    encoded: list[list[str]] = []
+
+    class _Index:
+        def search(self, _vector, *, k=15, allowed_paths=None):
+            return []
+
+        def search_many(self, _vectors, _k, *, admits):
+            return []
+
+    monkeypatch.setattr(
+        embeddings, "chunk_text", lambda title, body: [f"{title}\n{body}"[:200]], raising=True
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, **_kw: (
+            encoded.append(list(texts)),
+            np.zeros((len(texts), 4), dtype=np.float32),
+        )[1],
+        raising=True,
+    )
+    monkeypatch.setattr(
+        embeddings, "get_embedding_index", lambda _root: _Index(), raising=True
+    )
+
+    with _call_token("advisory-sweep") as token:
+        _run_edit(tmp_path)
+        spans = {span["name"]: span for span in call_spans.pop_call_spans(token)}
+
+    assert encoded, "the advisory never reached the encoder, so this proves nothing"
+    sweep = spans.get("advisory.best_cosine")
+    assert sweep is not None, (
+        f"the advisory's cosine sweep is still unattributed: {sorted(spans)}"
+    )
+    assert sweep["ms"] > 0.0
+    fields = sweep.get("fields") or {}
+    assert fields.get("texts", 0) >= 1, (
+        "a duration with no text count cannot separate a cold model from a "
+        f"caller handing the encoder a whole note body: {sweep}"
+    )
+    assert fields.get("chars", 0) > 0, sweep
+    assert corpus_aware is not None  # the sweep under test lives here
+
+
+def test_the_leaf_spans_account_for_the_canonical_to_committed_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The attribution guarantee: the window is explained, not merely measured.
+
+    `derived.canonical_to_committed` was an umbrella with 46 s of a 78 s write
+    inside it and no span underneath. A span that only says how long something
+    took, with nothing accounting for it, is the shape of the defect this
+    instrumentation exists to remove. Pin the phase inventory here and the
+    duration of fallback work with a controlled clock below; real wall-clock
+    coverage ratios include uninstrumented scheduler pauses between phases.
+    """
+    from types import SimpleNamespace
+
+    from exomem import call_spans, semantic_index
+    from exomem import vault as vault_module
+
+    # The synchronous fan-out route, deliberately: with fast durable ack on,
+    # the derived work moves out of this window and is reported under
+    # `derived.acknowledgement` instead, and the umbrella measures the route
+    # rather than the work.
+    monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
+
+    path = _seed(tmp_path)
+    after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
+
+    def leaf(vault_root: Path) -> dict:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(path, after_source)],
+            vault_root=vault_root,
+            semantic_states={
+                PAGE: semantic_index.build_parent_index_state(
+                    vault_root, PAGE, source=after_source
+                )
+            },
+        )
+        return {"path": PAGE}
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "lease-state")
+    )
+    command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+
+    # One warm-up write first: the first governed write in a process pays
+    # one-off lazy imports inside the fan-out, and they land in whichever span
+    # happens to be open rather than in the step that owns them.
+    manager.invoke(
+        command,
+        (tmp_path,),
+        {},
+        idempotency_key="attribution-warm-up",
+        mutation_request_id="44444444-4444-4444-8444-444444444444",
+    )
+    with _call_token("attribution") as token:
+        manager.invoke(
+            command,
+            (tmp_path,),
+            {},
+            idempotency_key="attribution-window",
+            mutation_request_id="33333333-3333-4333-8333-333333333333",
+        )
+        spans = {span["name"]: span for span in call_spans.pop_call_spans(token)}
+
+    umbrella = spans.get("derived.canonical_to_committed")
+    assert umbrella is not None, f"spans: {sorted(spans)}"
+    assert "derived.fanout" in spans, (
+        "the umbrella must be split, or a large number still says only that it "
+        f"was large: {sorted(spans)}"
+    )
+    assert "derived.terminal_persist" in spans, sorted(spans)
+    halves = spans["derived.fanout"]["ms"] + spans["derived.terminal_persist"]["ms"]
+    assert halves >= umbrella["ms"] * 0.9, (
+        f"the two halves do not partition the umbrella: {halves} vs {umbrella['ms']}"
+    )
+
+    # Every expected step inside this fixture's window is named.
+    for name in (
+        "index.upsert_after_write",
+        "index.self_write_registration",
+        "index.graph_epoch_handoff",
+        "index.path_partition",
+        "index.semantic_states",
+        "index.policy_revalidate",
+        "index.corpus_publish",
+        "index.semantic_purge",
+        "index.path_custody",
+        "index.completion_check",
+    ):
+        assert name in spans, (
+            f"{name!r} is a step inside the fan-out with no span, which is the "
+            f"shape of the 0.84.1 defect: {sorted(spans)}"
+        )
+
+
+@pytest.mark.parametrize("dispatch_fails", [False, True])
+def test_completion_and_fallback_work_have_exact_timing_spans(
+    tmp_path: Path, monkeypatch, dispatch_fails: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from exomem import call_spans, file_watcher, graph_sync, index_sync
+    from exomem import vault as vault_module
+
+    clock = [100.0]
+    monkeypatch.setattr(
+        call_spans, "time",
+        SimpleNamespace(perf_counter=lambda: clock[0], monotonic=lambda: clock[0]),
+    )
+    monkeypatch.setattr(file_watcher, "register_self_write", lambda *a, **kw: ([], False))
+    monkeypatch.setattr(graph_sync, "register_outer_fanout_failure", lambda *a: None)
+    report = index_sync.IndexSyncReport(
+        "upsert", (PAGE,), (PAGE,),
+        tuple(
+            index_sync.IndexComponentOutcome(name, "not_required", "NOT_REQUIRED")
+            for name in ("lexstore", "memory_refs", "resolver", "epistemic_graph", "embeddings", "watcher")
+        ),
+    )
+    calls = []
+
+    def dispatch(*args, **kwargs):
+        if dispatch_fails:
+            raise RuntimeError("injected dispatch failure")
+        return report
+
+    def completion(root, paths, observed):
+        assert (root, paths, observed) == (tmp_path, [tmp_path / PAGE], report)
+        calls.append("check")
+        clock[0] += 0.020
+        return False
+
+    def persist(root, paths):
+        assert (root, paths) == (tmp_path, [tmp_path / PAGE])
+        calls.append("store")
+        clock[0] += 0.030
+        return 1
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", dispatch)
+    monkeypatch.setattr(index_sync, "full_upsert_succeeded", completion)
+    monkeypatch.setattr(index_sync, "record_failed_refresh", persist)
+    with _call_token("fallback-attribution") as token:
+        assert vault_module.post_commit_batch_fanout(
+            tmp_path, [tmp_path / PAGE], None, None
+        ) is False
+        spans = {item["name"]: item for item in call_spans.pop_call_spans(token)}
+
+    assert calls == (["store"] if dispatch_fails else ["check", "store"])
+    assert spans["index.full_refresh_store"]["ms"] == 30.0
+    assert spans["index.full_refresh_store"]["count"] == 1
+    assert spans["index.full_refresh_store"]["fields"]["paths"] == 1
+    if dispatch_fails:
+        assert "index.completion_check" not in spans
+    else:
+        assert spans["index.completion_check"]["ms"] == 20.0

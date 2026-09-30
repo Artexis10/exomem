@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
 
-from . import call_spans, capabilities, reserved_paths
+from . import call_spans, capabilities, request_budget, reserved_paths
 from .call_spans import (  # noqa: F401 - re-exported for existing importers
     pop_call_spans,
     record_span,
@@ -218,6 +218,7 @@ GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
     "manage_memory_file": ("content",),
     "record_memory": ("manifest_text", "body"),
     "plan_memory": ("manifest_text", "body"),
+    "episode_memory": ("subject", "summary"),
 }
 
 
@@ -253,6 +254,7 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
         "manage_memory_file",
         "maintain_memory",
         "schema_memory",
+        "configure_memory",
         "record_memory",
         "plan_memory",
         *({"govern_memory"} if governance_tool_is_destructive() else set()),
@@ -478,6 +480,7 @@ def bind_vault(
             retry_scope = None if invocation_read_only else mcp_retry_scope()
             t0 = time.perf_counter()
             try:
+                call_spans.mark("command.leaf_start")
                 result = invoke_command(
                     command,
                     *injected,
@@ -485,6 +488,11 @@ def bind_vault(
                     implicit_idempotency_scope=retry_scope,
                     **kwargs,
                 )
+                # Two spans that together are the leaf's `duration_ms`: the
+                # command itself, and the MCP-layer post-filter and scrub that
+                # run on its result. A slow call then says which side it was on.
+                call_spans.record_span_since("command.leaf", "command.leaf_start")
+                call_spans.mark("command.leaf_done")
                 # MCP-layer second pass (design D1): defense in depth where
                 # the FastMCP context is live. `postfilter` is idempotent —
                 # an already-replaced credential matches nothing — so running
@@ -521,6 +529,7 @@ def bind_vault(
                         ],
                         structured_content=dict(result),
                     )
+                call_spans.record_span_since("command.postfilter", "command.leaf_done")
                 _log_tool_success(
                     tool=tool_name,
                     duration_ms=round((time.perf_counter() - t0) * 1000, 2),
@@ -696,18 +705,36 @@ def canonical_request_id(value: object) -> str | None:
 
 
 @contextmanager
-def mcp_request_context(request_id: str):
+def mcp_request_context(
+    request_id: str,
+    *,
+    tool: str | None = None,
+    arguments: Mapping[str, object] | None = None,
+):
     """Bind the middleware correlation ID through the synchronous tool wrapper.
 
     Yields the minted per-call token: the failure-signal key that stays unique
     even when concurrent calls share a client-supplied request id.
+
+    The request-scoped deadline is created here, beside the call token, because
+    this is the one place every MCP tool call passes through: a budget minted
+    anywhere further in would be a bound on some paths and not others. `tool`
+    and `arguments` are read only to exempt the reconcile-class commands, whose
+    terminal is the derived state and whose graph join is unbounded by design.
     """
     token = _MCP_REQUEST_ID.set(request_id)
     call_token = uuid.uuid4().hex
     call_reset = _MCP_CALL_TOKEN.set(call_token)
+    budget = (
+        None
+        if request_budget.is_reconcile_class(tool, arguments)
+        else request_budget.RequestBudget(seconds=request_budget.budget_seconds())
+    )
+    budget_reset = request_budget.set_current(budget)
     try:
         yield call_token
     finally:
+        request_budget.reset_current(budget_reset)
         _MCP_CALL_TOKEN.reset(call_reset)
         _MCP_REQUEST_ID.reset(token)
 

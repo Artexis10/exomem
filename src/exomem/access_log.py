@@ -15,13 +15,17 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from . import local_ingress
 from .command_surface import canonical_request_id
 from .log_events import log_event
+from .cloud_cell import cloud_mode_enabled
+from .privacy_log import content_private_logging_enabled, log_http_method, log_session_ref
 
 ASGIMessage = dict[str, Any]
 Receive = Callable[[], Awaitable[ASGIMessage]]
@@ -32,6 +36,25 @@ logger = logging.getLogger("exomem.access")
 _REQUEST_ID_HEADER = b"x-exomem-request-id"
 _SESSION_ID_HEADER = b"mcp-session-id"
 _CF_RAY_HEADER = b"cf-ray"
+_HOST_HEADER = b"host"
+#: Cloudflare's own ray shape. Under content-private logging a `cf-ray` of any
+#: other shape is caller-chosen text, so it is dropped rather than logged. A
+#: cloud cell has no Cloudflare in front of it at all, so it never logs one.
+_CF_RAY_SHAPE = re.compile(r"[0-9a-f]{16}(-[A-Z]{3})?")
+_HOST_SHAPE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
+
+
+def _request_host(value: str | None) -> str | None:
+    """The hostname a request named, lowercased and without its port, or None
+    when the header is absent or is not shaped like a hostname."""
+    if not value:
+        return None
+    host = value.strip().lower()
+    if host.count(":") == 1:
+        host, _, port = host.partition(":")
+        if not port.isdigit():
+            return None
+    return host if _HOST_SHAPE.fullmatch(host) else None
 
 
 def access_log_disabled(env: dict[str, str] | None = None) -> bool:
@@ -73,6 +96,10 @@ class AccessLogMiddleware:
         path = str(scope.get("path") or "")
         session_id = _header_value(headers, _SESSION_ID_HEADER)
         cf_ray = _header_value(headers, _CF_RAY_HEADER)
+        try:
+            host = _request_host(_header_value(headers, _HOST_HEADER))
+        except Exception:  # noqa: BLE001 - classifying a log field must never break a request
+            host = None
         client = scope.get("client")
         client_ip = client[0] if client else None
 
@@ -94,14 +121,24 @@ class AccessLogMiddleware:
         finally:
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
             fields: dict[str, Any] = {
-                "method": method,
+                "method": log_http_method(method),
                 "status": response_status.get("status"),
                 "duration_ms": duration_ms,
                 "request_id": request_id,
             }
-            if session_id:
-                fields["session_id"] = session_id
-            if cf_ray:
+            session_ref = log_session_ref(session_id)
+            if session_ref:
+                fields["session_id"] = session_ref
+            # Only a local-ingress request gains these; the public record's
+            # shape is unchanged. The client id is the operator's issuance
+            # label, never the token.
+            grant = local_ingress.current_grant()
+            if grant is not None:
+                fields["ingress"] = "local"
+                fields["client_id"] = grant.client_id
+            if cf_ray and not cloud_mode_enabled() and (
+                not content_private_logging_enabled() or _CF_RAY_SHAPE.fullmatch(cf_ray)
+            ):
                 fields["cf_ray"] = cf_ray
             # The raw path is client-controlled text (any URL a client requests
             # is logged, including 404 probes), so it is content-classified:
@@ -110,6 +147,11 @@ class AccessLogMiddleware:
             content: dict[str, Any] = {"path": path[:512]}
             if client_ip:
                 content["client_ip"] = client_ip
+            # Which public address a request arrived on is what shows an old
+            # hostname has gone quiet before it is retired; the header is client
+            # text, so it is content-classified with the path.
+            if host:
+                content["host"] = host
             log_event(
                 logger,
                 logging.INFO,

@@ -152,7 +152,12 @@ async def test_live_observation_blocks_before_recording_or_dispatching_effects(
     registry, _job = _registry(owner)
     effects = []
 
-    async def record(*args):
+    async def authority():
+        effects.append("claim-guard")
+
+    async def record(*args, effect_guard=None):
+        if effect_guard is not None:
+            await effect_guard()
         effects.append("record-operation")
 
     async def resources(**kwargs):
@@ -181,11 +186,12 @@ async def test_live_observation_blocks_before_recording_or_dispatching_effects(
         metadata.fence_generation,
         checkpoint=checkpoint,
         wire_protocol=WIRE_PROTOCOL_V2,
+        effect_guard=authority,
     )
     request = {"_providerRecoveryEnvelopes": _envelopes(metadata)}
     if allowed:
         await plane.observe_operation(context, request)
-        assert effects == ["record-operation"]
+        assert effects == ["claim-guard", "record-operation"]
     else:
         pending = await plane.observe_operation(context, request)
         assert pending == DriverPending(context.checkpoint, 30)
@@ -205,7 +211,7 @@ async def test_lifecycle_propagates_pending_observation_before_dispatch():
     driver = CellLifecycleDriver(
         plane=SimpleNamespace(observe_operation=observe, observed_fence=fence),
         volume_worker=None,
-        config=SimpleNamespace(),
+        config=SimpleNamespace(migration_mode="none"),
     )
     assert await driver.execute("resume", {}, context) is pending
 
@@ -223,7 +229,7 @@ async def test_unrelated_action_cannot_adopt_a_migration_checkpoint(action):
     driver = CellLifecycleDriver(
         plane=SimpleNamespace(observed_fence=fence, observe_operation=observe),
         volume_worker=None,
-        config=SimpleNamespace(),
+        config=SimpleNamespace(migration_mode="none"),
     )
     context = EffectContext(
         "internal-operation",

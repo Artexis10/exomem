@@ -14,7 +14,7 @@ import types
 
 import pytest
 
-from exomem import accel, embeddings, model_reaper, readiness
+from exomem import accel, embedding_backend, embeddings, model_reaper, readiness
 
 
 def _stop_test_reaper() -> None:
@@ -104,8 +104,12 @@ def test_reload_after_unload_reconstructs(monkeypatch: pytest.MonkeyPatch) -> No
     st = types.ModuleType("sentence_transformers")
     st.SentenceTransformer = lambda name, device=None: _Fake()
     monkeypatch.setitem(sys.modules, "sentence_transformers", st)
+    monkeypatch.setattr(embedding_backend, "require_tokenizer", lambda _name: "tokenizer.json")
     monkeypatch.setattr(embeddings, "_maybe_half", lambda m, d: m)
     monkeypatch.setattr(accel, "select_device", lambda **k: "cpu")
+    # A served model always runs its ONNX artefact; the torch lane is the
+    # English model's (tests/test_recall_switch.py).
+    monkeypatch.setattr(embeddings, "MODEL_NAME", "BAAI/bge-base-en-v1.5")
 
     m1 = embeddings.get_model()
     assert len(constructions) == 1

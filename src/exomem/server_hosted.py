@@ -92,6 +92,12 @@ _HOSTED_MUTATION_ERROR_SHAPES = {
     "MUTATION_WARMING": ("retryable", False),
     "MUTATION_ACKNOWLEDGEMENT_PENDING": ("uncertain", None),
     "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN": ("committed", True),
+    # The one code a connector most needs to interpret. Without an entry here
+    # `_hosted_mutation_error_details` returns `{}`, so the client saw prose
+    # where it needed to tell "never executed" from "committed, outcome
+    # unknown" -- and the same-identity retry that reaches this code is
+    # precisely where that distinction decides what the caller does next.
+    "MUTATION_OUTCOME_UNKNOWN": ("uncertain", None),
 }
 _RECEIPT_TAG = re.compile(r"[0-9a-f]{16}")
 

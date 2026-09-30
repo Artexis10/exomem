@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from .. import find_corpus, reserved_paths, vault
+from .. import find_corpus, recall_space, reserved_paths, vault
 from . import (
     authorization_custody,
     membership,
@@ -302,6 +302,35 @@ def mutation_from_planned_write(
             "catalog publication predecessor hash is invalid"
         )
     return MarkdownCatalogMutation(relative, write.content, expected)
+
+
+def _planned_navigation_adoptions(
+    writes: tuple[vault.PlannedWrite, ...],
+    mutations: tuple[MarkdownCatalogMutation, ...],
+) -> frozenset[str]:
+    """Return only guarded legacy navigation rows eligible for catalog adoption."""
+
+    by_path = {mutation.path: mutation for mutation in mutations}
+    adopted: set[str] = set()
+    for write in writes:
+        guard = write.guard
+        if guard is None:
+            continue
+        mutation = by_path.get(guard.target)
+        if (
+            mutation is not None
+            and PurePosixPath(mutation.path).name.casefold()
+            in find_corpus.NAVIGATION_BASENAMES
+            and guard.leaf_policy == "content"
+            and mutation.expected_before_hash is not None
+            and (
+                write.expected_hash is None
+                or write.expected_hash == mutation.expected_before_hash
+            )
+            and guard.expected_content_hash == mutation.expected_before_hash
+        ):
+            adopted.add(mutation.path)
+    return frozenset(adopted)
 
 
 def _search_fields(page: find_corpus.ParsedPage) -> dict[str, str]:
@@ -681,7 +710,7 @@ def _target_vector_measurements(
     expected_dimension = (
         active_root.vector_dimension
         if active_root.vector_dimension is not None
-        else embeddings.VECTOR_DIM
+        else recall_space.declared_dim(embeddings.MODEL_NAME)
     )
     if (
         len(target_dimensions) > 1
@@ -1189,6 +1218,7 @@ def _prepare_markdown_batch(
             custody=custody,
             now=moment,
         )
+        authorization_custody.require_activation_acknowledgement_available(root)
         control = custody.control
         if (
             not control.governance_enrolled
@@ -1243,6 +1273,7 @@ def _prepare_markdown_batch(
         connection.close()
 
     _validate_catalog_content_paths(content_paths)
+    navigation_adoptions: frozenset[str] = frozenset()
     if normalized is None:
         assert planned_writes is not None
         if type(planned_writes) is not tuple:
@@ -1258,6 +1289,7 @@ def _prepare_markdown_batch(
             for write in planned_writes
             if (mutation := mutation_from_planned_write(root, write)) is not None
         )
+        navigation_adoptions = _planned_navigation_adoptions(planned_writes, mutations)
         normalized = _normalize_markdown_mutations(root, mutations)
     normalized_removals = _normalize_catalog_removals(root, removals)
     membership_aliases = [
@@ -1290,10 +1322,11 @@ def _prepare_markdown_batch(
         if mutation.expected_before_hash is None:
             if predecessor is not None:
                 raise CatalogPublicationError("catalog creation target already exists")
-        elif (
-            predecessor is None
-            or predecessor.content_hash != mutation.expected_before_hash
-        ):
+        elif predecessor is None and relative not in navigation_adoptions:
+            raise CatalogPublicationError(
+                "catalog content identity no longer matches the reviewed predecessor"
+            )
+        elif predecessor is not None and predecessor.content_hash != mutation.expected_before_hash:
             raise CatalogPublicationError(
                 "catalog content identity no longer matches the reviewed predecessor"
             )

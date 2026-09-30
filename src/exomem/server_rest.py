@@ -19,7 +19,15 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import capabilities, cf_access, cli_ops, edit_operations, runtime_resources, upload_tokens
+from . import (
+    capabilities,
+    cf_access,
+    cli_ops,
+    edit_operations,
+    local_ingress,
+    runtime_resources,
+    upload_tokens,
+)
 from . import commands as commands_module
 from .command_surface import canonical_request_id
 from .governance import authorization_request, authorization_transport
@@ -263,7 +271,9 @@ def register_rest_facade(
             header = request.headers.get("authorization", "")
             if header.startswith("Bearer "):
                 presented = header[len("Bearer ") :].strip()
-                if secrets.compare_digest(presented, rest_api_key):
+                # Bytes: `compare_digest` raises on a non-ASCII str.
+                if secrets.compare_digest(presented.encode(), rest_api_key.encode()):
+                    local_ingress.note_owner_credential("rest_api_key", request.headers)
                     return True, None
                 if upload_tokens.verify(presented, rest_api_key, scope="rest"):
                     return True, None
@@ -326,9 +336,22 @@ def register_rest_facade(
     def _register_rest(cmd: commands_module.Command) -> None:
         @mcp_app.custom_route(f"/api/{cmd.name}", methods=["POST"])
         async def _handler(request: Request, _cmd: commands_module.Command = cmd) -> JSONResponse:
-            gate, principal_scope = _rest_gate(request)
-            if gate is not None:
-                return gate
+            # On local ingress the gate in front of this route already verified
+            # a local client token; nothing else is accepted there.
+            local_grant = local_ingress.current_grant()
+            if local_grant is None:
+                gate, principal_scope = _rest_gate(request)
+                if gate is not None:
+                    return gate
+            else:
+                principal_scope = None
+            log_scope = (
+                "local"
+                if local_grant is not None
+                else "cf_access"
+                if principal_scope
+                else "api_key"
+            )
             if (
                 "authorization_session_credential" in request.query_params
                 or "principal" in request.query_params
@@ -356,7 +379,11 @@ def register_rest_facade(
             try:
                 from .governance import principal as principal_module
 
-                principal = principal_module.resolve_rest_principal(principal_scope)
+                principal = (
+                    principal_module.local_owner_principal(surface="rest")
+                    if local_grant is not None
+                    else principal_module.resolve_rest_principal(principal_scope)
+                )
                 admission = await run_in_threadpool(
                     authorization_request.verify_authorization_context,
                     vault_root,
@@ -419,7 +446,7 @@ def register_rest_facade(
                     code=str(err.get("code") or "MODEL_BUSY"),
                     duration_ms=round((time.perf_counter() - t0) * 1000, 2),
                     message=str(err.get("message") or ""),
-                    scope="cf_access" if principal_scope else "api_key",
+                    scope=log_scope,
                 )
                 return RestJSONResponse(
                     cli_ops.envelope(False, error=err),
@@ -439,7 +466,7 @@ def register_rest_facade(
                     code=str(err.get("code") or "OP_ERROR"),
                     duration_ms=round((time.perf_counter() - t0) * 1000, 2),
                     message=str(err.get("message") or ""),
-                    scope="cf_access" if principal_scope else "api_key",
+                    scope=log_scope,
                 )
                 return RestJSONResponse(
                     cli_ops.envelope(False, error=err),

@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: c29752b4969560fe1781f0487c2bb39bdcb300cabc8ff9f145d91da49a7bebe2
+  skill_contract: d7c1cfcd59a688b504a849c38119d0696342bd676692f38a2bcdcb010b8e6c02
   version: "0.1.0"
 ---
 
@@ -39,12 +39,22 @@ interpretation, or decision value are clear. Attach a facet or affiliation to a
 uniquely resolved Entity; otherwise write one concise compiled observation. Use
 Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
-metrics, and tentative claims stay quiet. Eligibility never creates an Entity,
+metrics, and tentative events stay quiet. Durable interpretations retain explicit
+attribution and uncertainty rather than becoming established facts. Eligibility never creates an Entity,
 collection, or schema. Concise observations and narrow additive facts follow
-`proactive_capture`; affiliation relations use `link_acceptance`; Entity creation or
+`proactive_capture`; affiliation relations use `link_acceptance`; a new Entity follows `proactive_capture`; merge or
 substantial curation uses confirmed `restructure_execution`.
 
 ## Workflow
+Before choosing a destination, partition the exchange into independently reusable
+objects by retrieval question, subject/domain, temporal episode, and epistemic
+role. Reuse current relevant recall and resolve each meaningful cluster against
+canonical homes. The open note has no priority; keep details within one coherent
+scope together. Preserve durable hypotheses as attributed, uncertain claims.
+Perform one completeness/destination review for the whole write plan, not a new
+review after every write. During development, repository/specification artifacts
+carry transient progress; capture reusable decisions and verified milestones.
+
 1. Decide whether the material is raw evidence or a compiled conclusion.
 2. Use `capture_source` for raw captured text or source material. Classify it on
    two open axes when you can: `source_kind` (what it is) and `domain` (what it
@@ -60,11 +70,45 @@ substantial curation uses confirmed `restructure_execution`.
    then call `connect_memory(operation="resolve-entity", name=...)` before writing.
 7. When one active entity matches, use `edit_memory` for a small stable-fact
    correction or the canonical relation workflow for a new connection.
-8. Only when no entity matches and the identity is stable, recurring, central,
-   and useful beyond this source, use `connect_memory(operation="create-entity")`.
+8. Only when no entity matches and the identity is stable, and central or
+   recurring, and useful beyond this source, use `connect_memory(operation="create-entity")`.
+   When the name you write is in another script than the user's own spelling
+   of it, add a native-script alias (`aliases=[...]` at create, or the
+   `aliases` field through `edit_memory` on an existing page); see
+   `references/writing.md` § Names in another script.
 
 ## Lifecycle
 Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `record_memory(action="append")`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome.
+
+## Artifact role and current state
+Read the supporting units for `artifact_role_promotion` and
+`transient_state_review`; neither signal grants mutation authority. Choose a home
+by role even within one topic: a repeatable successful procedure belongs in a
+suitable reusable note, and an attributed multi-source synthesis in a research
+note. Search existing eligible homes first. Keep exact source-unit provenance:
+reference both the procedure and outcome units when extracting a method, or the
+synthesis unit and its distinct sources when compiling a research note. Retain
+the experiment history. A title match or parent backlink does not establish that
+the identified material has a home; exact represented content does, while a
+paraphrase remains a review candidate for the reader to assess.
+
+For example, a batch may contain two separately successful reusable methods and
+a synthesis across two sources. Give each method its own evidence and check the
+synthesis independently; extracting one does not settle the others. A protocol
+without reusable success or a list of citations alone needs no such promotion.
+For a single batch, “No taste results yet” alongside an observed taste result
+invites a current-wording correction; “Previously no taste results existed” is
+history, and taste results do not settle an awaited safety result or a new trial.
+Preserve that history through a governed edit or exact valid supersession.
+
+Extraction/restructuring uses confirmed `restructure_execution`; an
+already-authorized local correction acquires no additional confirmation step.
+Observed transaction state still follows the existing Records claims handoff,
+never an automatic append from a review signal. Item triage changes presentation,
+not evidence coverage. Explicit review exposes complete/capped/unknown coverage;
+compact omission is not proof of a clean page. Apply this role-first reasoning to
+visible conversation transitions before writing too. An MCP-only server cannot
+guarantee detection or capture of a tool-free turn.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific

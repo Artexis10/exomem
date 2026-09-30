@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[1]
 PREPARE = ROOT / "infra/scripts/prepare_hosted_release.py"
@@ -24,9 +25,13 @@ LEGACY_MANIFEST = (
     ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-manifest-0.39.2.json"
 )
 SUBSTRATE_TRUST = (
-    ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/substrate-trust-0.57.2.json"
+    ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/substrate-trust-0.77.0.json"
 )
 LOCK_PAIR = ROOT / "infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
+LEGACY_CONTRACT_0731 = (
+    ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.73.1.json"
+)
+LOCK_SCHEMA = ROOT / "infra/contracts/exomem-hosted-deployment-lock-v2.schema.json"
 
 
 def _module(path: Path = PREPARE):
@@ -49,12 +54,15 @@ def test_historical_rollback_manifest_remains_strict_release_evidence() -> None:
     assert (manifest["release"], manifest["hostedProtocol"]) == ("0.39.2", "1")
 
 
-def test_canonical_lock_pair_is_exact_0572_with_no_live_legacy_dependency() -> None:
+def test_canonical_lock_pair_is_exact_0770_without_live_legacy_dependencies() -> None:
     pair = json.loads(LOCK_PAIR.read_text(encoding="utf-8"))
     forward_contract = json.loads(FORWARD_CONTRACT.read_text(encoding="utf-8"))
     authority = json.loads(AUTHORITATIVE_LEGACY_SET.read_text(encoding="utf-8"))
     trust = json.loads(SUBSTRATE_TRUST.read_text(encoding="utf-8"))
+    legacy_contract = json.loads(LEGACY_CONTRACT_0731.read_text(encoding="utf-8"))
 
+    assert forward_contract["releaseVersion"] == "0.77.0"
+    assert legacy_contract["releaseVersion"] == "0.73.1"
     assert authority["units"] == []
     assert len(pair["locks"]) == 2
     expand, contract = pair["locks"]
@@ -63,6 +71,10 @@ def test_canonical_lock_pair_is_exact_0572_with_no_live_legacy_dependency() -> N
 
     for member in (expand, contract):
         assert member["composition"]["legacyCatalog"] == []
+        assert (
+            member["composition"]["authoritativeLegacyReleaseSetSha256"]
+            == hashlib.sha256(AUTHORITATIVE_LEGACY_SET.read_bytes()).hexdigest()
+        )
         assert member["runtimeTarget"] == {
             key: forward_contract[key]
             for key in (
@@ -74,6 +86,7 @@ def test_canonical_lock_pair_is_exact_0572_with_no_live_legacy_dependency() -> N
                 "schemaDigest",
             )
         }
+        assert member["runtimeUpgrade"]["migrationMode"] == "governance-v3-to-v4"
         assert (
             member["rollback"]["legacyManifestSha256"]
             == hashlib.sha256(LEGACY_MANIFEST.read_bytes()).hexdigest()
@@ -82,7 +95,7 @@ def test_canonical_lock_pair_is_exact_0572_with_no_live_legacy_dependency() -> N
             member["runtimeUpgrade"]["substrateTrustSha256"]
             == hashlib.sha256(SUBSTRATE_TRUST.read_bytes()).hexdigest()
         )
-        assert trust["target"]["releaseVersion"] == "0.57.2"
+        assert trust["target"]["releaseVersion"] == "0.77.0"
 
 
 def _member(mode: str) -> dict[str, object]:
@@ -191,6 +204,29 @@ def _pair() -> dict[str, object]:
         "schemaVersion": 2,
         "locks": [expand, contract],
     }
+
+
+def test_lock_schema_admits_the_governance_migration_mode_and_still_refuses_unknown_ones() -> None:
+    validator = Draft202012Validator(json.loads(LOCK_SCHEMA.read_text(encoding="utf-8")))
+    pair = _pair()
+    members = pair["locks"]
+    assert isinstance(members, list)
+    for member in members:
+        member["runtimeUpgrade"] = {
+            "compatibilityDigest": "9" * 64,
+            "migrationMode": "governance-v3-to-v4",
+            "substrateConsumerCommit": "8" * 40,
+            "substrateTrustSha256": "7" * 64,
+        }
+
+    assert not list(validator.iter_errors(pair))
+
+    for member in members:
+        member["runtimeUpgrade"]["migrationMode"] = "governance-v4-to-v5"
+
+    errors = list(validator.iter_errors(pair))
+    assert errors
+    assert all(error.json_path.endswith("migrationMode") for error in errors)
 
 
 def _v3_member() -> dict[str, object]:
@@ -339,6 +375,41 @@ def test_empty_legacy_catalog_still_accepts_a_valid_rollback_manifest() -> None:
 
     manifest["sourceCommit"] = "not-a-commit"
     with pytest.raises(ValueError, match="source commit"):
+        verifier._validate_legacy_manifest(manifest, lock)
+
+
+def test_rollback_baseline_outside_the_legacy_catalog_is_accepted() -> None:
+    """The D0 rollback tuple outlives the legacy fleet it was first bound to."""
+
+    verifier = _module(VERIFIER)
+    lock = _member("expand")
+    catalog = lock["composition"]["legacyCatalog"]  # type: ignore[index]
+    assert catalog, "the fixture pair must carry a reviewed legacy unit"
+    manifest = json.loads(LEGACY_MANIFEST.read_text(encoding="utf-8"))
+    assert all(
+        (manifest["release"], manifest["hostedProtocol"])
+        != (unit["contract"]["releaseVersion"], unit["contract"]["protocolVersion"])
+        for unit in catalog
+    )
+
+    verifier._validate_legacy_manifest(manifest, lock)
+
+
+def test_rollback_manifest_must_agree_with_the_legacy_unit_it_names() -> None:
+    verifier = _module(VERIFIER)
+    lock = _member("expand")
+    contract = lock["composition"]["legacyCatalog"][0]["contract"]  # type: ignore[index]
+    manifest = json.loads(LEGACY_MANIFEST.read_text(encoding="utf-8"))
+    manifest["release"] = contract["releaseVersion"]
+    manifest["hostedProtocol"] = contract["protocolVersion"]
+    manifest["runtimeImage"] = contract["runtimeImage"]
+    manifest["sourceCommit"] = contract["sourceCommit"]
+    manifest["publishedTag"] = f"ghcr.io/artexis10/exomem:{contract['sourceCommit']}-hosted"
+
+    verifier._validate_legacy_manifest(manifest, lock)
+
+    manifest["runtimeImage"] = "ghcr.io/artexis10/exomem@sha256:" + "f" * 64
+    with pytest.raises(ValueError, match="contradicts the reviewed legacy runtime identity"):
         verifier._validate_legacy_manifest(manifest, lock)
 
 

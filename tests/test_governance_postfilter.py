@@ -295,6 +295,34 @@ def test_identifier_shaped_fields_are_structural() -> None:
         assert scrubber._is_structural_field(name), name
 
 
+def test_a_continuity_token_crosses_the_boundary_intact() -> None:
+    """`activate_context` returns a `continuity` token that the caller echoes
+    on its next turn: base64 of a compact payload naming a random thread, so
+    the entropy heuristic read it as a credential and every caller behind the
+    dispatcher received the notice instead of its thread. The explicit
+    credential patterns still apply to it."""
+    from exomem import working_set_runtime
+
+    token = working_set_runtime.encode_continuity(
+        identity="7f3a9c2e41d85b06",
+        roles_hash="c0ffee1234567890",
+        conventions_hash="5eed0badc0de4242",
+        generation=0,
+        refs=[],
+        roles=[],
+        minted_ns=1_780_000_000_000_000_000,
+        thread="Qm7vX2kLp9TzR4wN8bYc1A",
+        thread_ns=1_780_000_000_000_000_000,
+    )
+    assert scrubber.scrub_text(token)[1], "the token must be entropy-shaped, or this proves nothing"
+
+    assert scrubber._is_structural_field("continuity")
+    assert scrubber.scrub_value({"continuity": token}) == ({"continuity": token}, False)
+    cleaned, blocked = scrubber.scrub_value({"continuity": PRIVATE_KEY})
+    assert blocked
+    assert "BEGIN RSA PRIVATE KEY" not in json.dumps(cleaned)
+
+
 def test_credential_named_fields_are_never_structural() -> None:
     """The suffix rule must widen coverage of identifiers, never open a hole
     for a field whose own name says it holds a secret."""

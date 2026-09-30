@@ -52,8 +52,22 @@ _REQUEST_FIELDS = frozenset(
 class HostedGovernanceJobError(RuntimeError):
     """Content-free refusal at the private migration Job boundary."""
 
+    code = "HOSTED_GOVERNANCE_JOB_FAILED"
+
     def __init__(self) -> None:
-        super().__init__("HOSTED_GOVERNANCE_JOB_FAILED")
+        super().__init__(self.code)
+
+
+class HostedGovernanceStoreAbsent(HostedGovernanceJobError):
+    """No governance sidecar exists on the bound PVC at all."""
+
+    code = "HOSTED_GOVERNANCE_STORE_ABSENT"
+
+
+class HostedGovernanceStoreUnreadable(HostedGovernanceJobError):
+    """A governance sidecar exists but this Job could not read its schema."""
+
+    code = "HOSTED_GOVERNANCE_STORE_UNREADABLE"
 
 
 def _canonical(value: object) -> bytes:
@@ -185,7 +199,15 @@ def _custody(request: dict[str, Any], *, now: int) -> authorization_custody.Auth
 
 def _run(request: dict[str, Any], *, now: int) -> dict[str, Any]:
     custody = _custody(request, now=now)
-    version = store.authorization_session_schema_version(VAULT_ROOT)
+    # An absent store and an unreadable one are different operator problems:
+    # the first needs a cell that has never been served, the second needs the
+    # mount or the file looked at. Both stay content-free.
+    try:
+        version = store.authorization_session_schema_version(VAULT_ROOT)
+    except store.GovernanceStoreUnreadable:
+        raise HostedGovernanceStoreUnreadable from None
+    if version is None:
+        raise HostedGovernanceStoreAbsent
     phase = request["phase"]
     if version not in (3, 4) or (
         phase != "commit" and (version != 3 or custody.control.governance_enrolled)
@@ -287,6 +309,10 @@ def execute(raw: bytes, *, now: int | None = None) -> dict[str, Any]:
         if len(_canonical(result)) > MAX_TERMINAL_BYTES:
             raise HostedGovernanceJobError
         return result
+    except HostedGovernanceJobError as refusal:
+        # Re-raised as a fresh instance so a classified refusal still reaches
+        # the boundary with no chained exception text behind it.
+        raise type(refusal)() from None
     except (OSError, RuntimeError, ValueError, TypeError, sqlite3.Error):
         raise HostedGovernanceJobError from None
 
@@ -296,10 +322,14 @@ def main() -> int:
     try:
         result = execute(os.environ.get(REQUEST_ENV, "").encode("utf-8"))
         status = 0
+    except HostedGovernanceJobError as refusal:
+        # `code` is a fixed class attribute, never request- or exception-derived.
+        result = {"code": type(refusal).code}
+        status = 1
     except Exception:  # noqa: BLE001 - content-free process boundary
         # This is the process boundary: even unexpected library failures must
         # not put credential-bearing exception text into Kubernetes pod logs.
-        result = {"code": "HOSTED_GOVERNANCE_JOB_FAILED"}
+        result = {"code": HostedGovernanceJobError.code}
         status = 1
     try:
         TERMINATION_LOG.write_bytes(_canonical(result))

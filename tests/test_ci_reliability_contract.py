@@ -564,6 +564,8 @@ def test_governance_vector_cpu_wire_characterization_is_exact_and_required() -> 
     assert "tests/test_governance_projection_wire_gate.py" in command
     assert step["env"] == {
         "EXOMEM_GOVERNANCE_TIMING_PROFILE": "vectors-cpu-torch-v1",
+        # The profile certifies the English torch model hosted cells serve.
+        "EXOMEM_RECALL_MODEL": "BAAI/bge-base-en-v1.5",
         "EXOMEM_GOVERNANCE_TIMING_ROUTE": "${{ matrix.route }}",
         "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
         "EXOMEM_DISABLE_CLIP": "1",

@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -257,6 +257,10 @@ class CollectionItem(StrictModel):
     natural_key: dict[str, str] = Field(default_factory=dict)
     lifecycle: str | None = None
     status: str | None = None
+    #: Authored field values, preserving exact text and link arrays for replay.
+    values: dict[str, JsonValue] = Field(default_factory=dict)
+    #: The actual item file, needed to distinguish represented records from orphans.
+    locator: str | None = None
 
 
 class CollectionProjection(StrictModel):
@@ -275,6 +279,8 @@ class CollectionProjection(StrictModel):
     storage_source: str = ""
     natural_key: tuple[str, ...] = ()
     items: tuple[CollectionItem, ...] = ()
+    #: Authored domain declarations; the projector does not infer missing claims.
+    claims: dict[str, tuple[str, ...]] = Field(default_factory=dict)
 
 
 class EpistemicStateSnapshot(StrictModel):

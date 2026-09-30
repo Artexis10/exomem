@@ -133,6 +133,58 @@ rather than assumed.
 - **THEN** the graph becomes available on its own
 - **AND** a client that polls a graph-backed read observes it become available
 
+### Requirement: An externally fenced graph barrier recovers through durable full debt
+
+When a graph read barrier remains after an external-pending epoch, the drain SHALL
+not treat a declined barrier recovery as settled. It SHALL persist the existing
+full-rebuild marker and let the guarded marker convergence reconcile and rebuild
+the complete recall corpus. It SHALL retain the existing publication-refusal
+backoff and active-owner coalescing behavior, and SHALL NOT create duplicate
+markers while one is pending.
+
+Before reconciliation clears an observed external epoch, it SHALL evict the
+resolver and inbound caches affected by that recall publication. Clearing SHALL
+remain limited to the sampled epoch, leaving any newer mark pending and the graph
+unavailable until it is itself reconciled and published.
+An eviction or cache clear SHALL revoke publication by a resolver or inbound
+builder that was already walking the old vault state; that detached request may
+complete, but it SHALL NOT repopulate the shared cache.
+
+#### Scenario: An external mark with a barrier converges through the full marker
+
+- **WHEN** the graph has a persisted read barrier, the per-path queue is empty,
+  and an external epoch is pending
+- **THEN** the drain creates one full-rebuild marker
+- **AND** guarded marker convergence publishes a current graph only after a
+  complete recall reconciliation
+
+#### Scenario: Cold recovery includes unqueued recall content
+
+- **WHEN** a replacement process has a suspended graph, an observed external
+  path, and an additional recall file not named by that event
+- **THEN** the recovered graph includes both files before it becomes available
+
+#### Scenario: A newer mark remains fenced
+
+- **WHEN** a newer external mark arrives after reconciliation sampled an older
+  mark and before its clear-through
+- **THEN** clear-through retires only the older mark
+- **AND** the graph remains unavailable until the newer mark is reconciled
+
+#### Scenario: Backoff and active ownership retain one marker
+
+- **WHEN** publication backoff is active, or another rebuild owner holds the
+  graph claim
+- **THEN** the drain does not spend a duplicate full rebuild
+- **AND** at most one durable full-rebuild marker remains pending
+
+#### Scenario: Cache eviction revokes an in-flight builder
+
+- **WHEN** recovery evicts an inbound or recall resolver cache while its builder
+  has already read the prior vault state
+- **THEN** the builder may return its detached snapshot to its original caller
+- **AND** it does not publish that old snapshot for a later request
+
 ### Requirement: The changed-path set is enqueued durably, never discarded
 
 When a canonical batch writes a graph sync checkpoint, the checkpoint's changed and
@@ -310,6 +362,155 @@ registered rebuild: the caller that joins is precisely the caller that must not 
 - **WHEN** the queue write fails and the pass falls back to a whole-vault rebuild
 - **THEN** the dispatch does not claim the repair is queued
 
+### Requirement: Whole-vault graph repair is paid once and waits out a write burst
+
+Whole-vault graph debt is one durable marker, and more than one owner can run the
+rebuild that pays it. Every whole-vault publication SHALL retire the marker it
+observed before its epoch sample, and SHALL do so by compare-and-swap on the
+marker's raise count as well as its value, so any debt raised after that
+observation survives, including a repeat that leaves the value unchanged. The
+full-marker dispatcher SHALL clear its marker by the same comparison.
+
+A whole-vault pass publishes only when no write lands while it runs, so the
+drain SHALL hold a whole-vault attempt until the vault has been quiet since the
+last write's debt signal for one measured whole-vault pass, or for a 5 s floor
+before any pass has been measured. The hold SHALL NOT exceed 120 s past the first
+debt signal the attempt was held for; after that the attempt runs, paced by the
+no-progress backoff. A debt signal the drain raises itself SHALL NOT start the
+window, and per-path repair and its drain SHALL NOT be held.
+
+#### Scenario: A publication retires the debt it observed and nothing newer
+
+- **WHEN** a whole-vault publication lands while the full marker it observed
+  before its epoch sample stands, and further debt was raised after that
+  observation at the same marker value
+- **THEN** the marker survives the publication and the drain pays the newer debt
+- **AND** without that further debt, the publication retires the marker and no
+  owner rebuilds the same graph again
+
+#### Scenario: Whole-vault repair waits one measured pass, for at most 120 s
+
+- **WHEN** a whole-vault marker stands and writes keep arriving
+- **THEN** the drain starts no whole-vault attempt until the vault has been quiet
+  for one measured pass since the last write
+- **AND** if the writes never pause that long, the attempt still starts within
+  120 s of the first debt signal it was held for, and later attempts follow the
+  no-progress backoff
+
+### Requirement: A drain keeps the queue converging under a steady writer
+
+A drain SHALL record the resolver topology fingerprint it derived its rows under, in the
+transaction that writes them, so the next topology-changing write can prove its old
+resolver instead of falling back to a whole-vault rebuild.
+
+A drain SHALL land the rows it proved against their own bytes at commit even when the
+projection moved elsewhere during its pass, and retire their receipts; its marker,
+lineage and acknowledgement wait for a drain the projection holds still for. A page the
+drain indexed moving under it SHALL roll the pass back.
+
+A write's incremental refresh that finds its own generation already acknowledged -- a
+drain derived its batch first -- and the availability marker current SHALL do nothing
+rather than fall back: nothing is owed, and the fallback would withdraw a current marker.
+When the marker is not current -- the write's registry update landed after the drain
+acknowledged -- the refresh SHALL queue its paths, so a per-path drain republishes the
+marker without a whole-vault rebuild.
+
+#### Scenario: A drain that repairs a created page keeps the next write incremental
+
+- **WHEN** a drain repairs a page a write created, and a later write changes topology
+- **THEN** the later write proves its old resolver against the stored fingerprint and
+  does not fall back on a fingerprint mismatch
+
+#### Scenario: A drain keeps the rows it proved when the vault moves elsewhere
+
+- **WHEN** a write to another page moves the projection during every drain pass
+- **THEN** each drain lands the rows it proved and retires their receipts
+
+#### Scenario: A late refresh of an acknowledged generation is a no-op
+
+- **WHEN** a drain has acknowledged a write's generation before that write's own refresh
+  runs, and the marker is current
+- **THEN** the refresh returns without work and the graph stays readable
+
+#### Scenario: A late refresh behind a late registry update queues its page
+
+- **WHEN** a drain acknowledges a write's generation, the write's registry update lands
+  after it, and the write's own refresh then runs
+- **THEN** the refresh queues the page, one per-path drain makes the graph readable again,
+  and no whole-vault pass runs
+
+### Requirement: An underivable receipt is quarantined, not rotated forever
+
+A queued path whose isolated drain attempt fails on its own bytes -- they are not UTF-8,
+or reading them raises an operating-system error that persists past a minimum age of
+minutes since its first failure -- SHALL be counted, and after a bounded number of such
+failures its receipt SHALL be quarantined: it leaves the queue by exact revision so the
+queue can empty around it. Quarantine SHALL only stop hot retries: the rows of a page
+that still exists SHALL NOT be deleted. A movement or readiness refusal SHALL NOT count:
+anything raised out of the drain pass -- a busy mutation boundary, a locked store -- and
+a page that reads and decodes when checked rotate their receipt, however long they last.
+A queued path that derived to no rows -- deleted, or no longer recall Markdown -- SHALL
+retire its receipt with the deletion.
+
+A quarantined path SHALL be queued again when its stat signature changes, no sooner than
+a backoff after its last failure that grows with each failed attempt, and otherwise on a
+slow periodic retry. Any pass that derives the page, including a whole-vault
+rebuild, SHALL clear its failure record. The residual lag and the doctor SHALL report
+quarantined paths.
+
+#### Scenario: One unreadable page does not keep the queue from emptying
+
+- **WHEN** a queued page's bytes cannot be read on every drain attempt for longer than
+  the minimum age
+- **THEN** after the bounded attempts its receipt is quarantined, its existing rows stay,
+  the rest of the queue converges, and the lag and doctor report one quarantined path
+
+#### Scenario: A busy boundary or a brief lock never quarantines a page
+
+- **WHEN** the drain pass is refused by a busy boundary or a locked store, or a page is
+  unreadable for a few drain ticks and then reads normally
+- **THEN** its receipt rotates without counting, its rows stay, and the drain repairs it
+  once the refusal ends
+
+#### Scenario: A quarantined page is retried and its record cleared once it derives
+
+- **WHEN** a quarantined page changes, its retry interval passes, or a whole-vault
+  rebuild derives it
+- **THEN** it is queued again or derived, and a pass that derives it clears its record
+  and the doctor's warning
+
+### Requirement: Residual graph lag is reported
+
+When graph unavailability is reported because the graph is catching up, the system SHALL
+report the residual lag: the acknowledged and committed generations, how many
+generations the graph is behind, the queued path count, the age of the oldest queued
+debt, whether the gap is covered by durable debt records, whether a full rebuild is
+pending, and how many paths are quarantined. It SHALL be readable without a vault walk.
+The graph is catching up when it is behind or has work queued, every skipped generation
+is receipt-covered, and neither a full-rebuild marker nor a recovery barrier stands; a
+deferral's own withdrawal is not a recovery barrier, because the queue is its repair.
+
+When the graph is catching up, `graph_context`'s unavailable payload SHALL say "graph
+catching up" and carry the lag; every other refusal keeps its payload. The doctor SHALL
+warn rather than fail on a receipt-covered lag younger than its recovery age, and SHALL
+still fail an uncovered gap, a standing full marker, a persisted recovery barrier and a
+malformed checkpoint. The drain's settled log line SHALL carry the lag.
+
+The read fence stays fail-closed: a lagging graph is reported, not served.
+
+#### Scenario: A catching-up graph says so with its lag
+
+- **WHEN** a committed generation's paths are queued behind the acknowledgement and a
+  caller asks for graph context
+- **THEN** the unavailable payload says the graph is catching up and carries the lag
+
+#### Scenario: The doctor warns on a covered lag and fails an uncovered gap
+
+- **WHEN** the graph lags behind a receipt-covered gap younger than the recovery age
+- **THEN** the doctor reports a warning with the lag
+- **AND** when a generation in the gap has neither a durable debt record nor a queued
+  receipt, the doctor still fails
+
 ### Requirement: A graph rebuild and a canonical write may run concurrently without either losing
 
 A graph rebuild in flight SHALL NOT cause a concurrent canonical write to refuse, and a
@@ -343,6 +544,22 @@ replacing against a stale one.
 Publication epoch sampling SHALL observe a canonical batch from outside, never from
 within: it SHALL be serialized against the canonical mutation hold so it cannot read a
 generation floor installed without its checkpoint.
+
+Graph work that holds the writers' canonical boundary SHALL NOT wait on the in-process
+batch commit: a batch holding it may be in its post-commit fan-out waiting for that
+boundary. A recovery checkpoint write under the boundary SHALL be skipped while a batch
+commits and left for the next attempt. `reconcile` is exempt: it holds the boundary for
+its whole command, so a fan-out waiting on that boundary waits reconcile out either way;
+the inversion only turns that wait into the fan-out's own bounded refusal and adds one
+bounded wait per recovery write (reconcile has two), while skipping the write would fail
+the repair its caller asked for.
+
+#### Scenario: The full-marker dispatcher does not queue behind a committing batch
+
+- **WHEN** the dispatcher holds the canonical boundary, finds the epoch recoverable, and
+  a canonical batch in the same process is committing
+- **THEN** the dispatcher returns without writing the recovery checkpoint, and no
+  writer is refused the boundary while it waits
 
 #### Scenario: A rebuild's scratch files do not fail an unrelated write
 
@@ -393,3 +610,78 @@ interchangeably.
 
 - **WHEN** a test asserts that a write's graph outcome is `completed`
 - **THEN** it joins the active rebuild itself rather than relying on the write to have waited
+
+### Requirement: A whole-vault rebuild outcome names its reason
+
+Every whole-vault rebuild attempt SHALL log one outcome line naming the attempt's
+generation, its elapsed time and a reason: the error code of a failure, or its exception
+type when it carries none. A rebuild that found another owner holding the rebuild claim
+SHALL be logged as coalesced rather than failed, because it ran no pass and its
+durable work waits for that owner. This SHALL hold for every caller that runs a
+whole-vault pass, including start-up graph validation and the reconcile path that
+rebuilds after releasing the boundary. The drain's whole-vault request SHALL say which
+condition queued it: an unreadable graph with no barrier, or a barrier with an
+unpublished external epoch.
+
+#### Scenario: A refused rebuild claim is not reported as a failure
+
+- **WHEN** a rebuild attempt finds another owner holding the rebuild claim
+- **THEN** its outcome line says `outcome=coalesced` and names the in-progress code
+
+#### Scenario: A defeated pass names its class
+
+- **WHEN** a whole-vault pass exhausts its stabilization attempts
+- **THEN** its outcome line says `outcome=failed` and names the publication-failure code
+
+### Requirement: A replayed path is proved against the graph before any whole-vault rebuild
+
+A refresh called by the deferred full-index receipt replay, which marks its dispatch
+as replayed, SHALL first try to prove each named path outside the recall delta since
+the graph's stored checkpoint against the graph's stored rows. Any other caller naming
+such a path -- reconcile and explicit repair refresh unchanged pages on purpose to
+reproject derived rows -- SHALL keep the whole-vault fallback. The proof SHALL hold only
+when the event registry is live and records the path exactly as the disk has it (the
+same stat signature, or absent from both), so the registry is not behind the disk for
+it. A path so proved SHALL be current when the graph's file row carries the source hash
+of the path's current bytes and the page's stored semantic-unit rows match its current
+projection generation and parser version, or when the path has no row and is not an
+indexed page; a current path SHALL be a no-op for the graph, and the refresh SHALL continue with the
+recall delta alone. A proved path that is not current SHALL be queued as durable graph
+repair with the delta, the availability marker SHALL be withdrawn, and a caller that
+needs a converged graph SHALL have that scope drained incrementally, with the drain's
+own topology widening and publication proof. Only a path that cannot be proved, or a
+drain that cannot converge the scope, SHALL fall back to the whole-vault rebuild.
+
+#### Scenario: A replayed receipt the graph already reflects rebuilds nothing
+
+- **WHEN** a deferred full-index receipt is replayed for a page whose bytes match the
+  graph's stored source hash and whose change predates the stored checkpoint
+- **THEN** the graph refresh runs no whole-vault pass, changes no rows, and the graph's
+  edges still equal those of a whole-vault rebuild
+
+#### Scenario: A replayed page whose rows are stale is repaired incrementally
+
+- **WHEN** a replayed page is outside the recall delta but its stored row does not
+  match its current bytes, and the registry records the page as the disk has it
+- **THEN** the page is queued and drained incrementally with its link dependants, no
+  whole-vault pass runs, and the edges equal those of a whole-vault rebuild
+
+#### Scenario: A replayed page with stale-generation unit rows is repaired
+
+- **WHEN** a replayed page's bytes match its stored file row but its stored unit rows
+  carry a projection generation other than the page's current one
+- **THEN** the page is judged stale and repaired, and its unit rows carry the current
+  generation
+
+#### Scenario: A caller that is not a replay keeps the fallback
+
+- **WHEN** reconcile or another non-replay caller refreshes a page outside the recall
+  delta whose bytes match its stored row
+- **THEN** the refresh falls back with reason `caller_path_outside_delta`, so derived
+  rows are reprojected
+
+#### Scenario: A replayed page the registry does not vouch for still rebuilds
+
+- **WHEN** a replayed page's stored row is stale and the registry's record of it differs
+  from the disk
+- **THEN** the refresh falls back as before, with reason `caller_path_outside_delta`

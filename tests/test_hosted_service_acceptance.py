@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 import threading
+import urllib.error
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -287,6 +289,123 @@ def test_tool_results_marked_as_errors_are_not_usable_as_recall_evidence() -> No
 
     with pytest.raises(runner.AcceptanceError, match="unsuccessful"):
         runner._tool_result({"isError": True, "structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/sentinel.md", "text": "forged"}]}}})
+
+
+def test_mcp_http_error_retains_bounded_catalog_reason_without_credentials(monkeypatch) -> None:
+    runner = _load()
+    token = "private-fixture-access-token"
+    body = json.dumps({"error": {
+        "code": "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+        "message": "the active governance catalog cannot be verified " + token,
+        "headers": {"Authorization": "another-private-value"},
+    }}).encode()
+    failure = urllib.error.HTTPError("https://mcp.example.test", 400, "Bad Request", {}, io.BytesIO(body))
+    monkeypatch.setattr(runner, "_open", lambda *a, **kw: (_ for _ in ()).throw(failure))
+    client = runner.MCPClient(endpoint="https://mcp.example.test", access_token=token)
+    with pytest.raises(runner.AcceptanceError) as caught:
+        client.call("tools/call", {"name": "remember", "arguments": {}})
+    message = str(caught.value)
+    assert "HTTP 400" in message
+    assert "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED" in message
+    assert "active governance catalog cannot be verified" in message
+    assert token not in message
+    assert "another-private-value" not in message
+    assert failure.closed
+
+
+@pytest.mark.parametrize("body", [b"<html>private proxy response</html>", b"x" * 65_537])
+def test_mcp_http_error_never_echoes_unknown_or_oversized_bodies(monkeypatch, body) -> None:
+    runner = _load()
+    failure = urllib.error.HTTPError("https://mcp.example.test", 502, "Bad Gateway", {}, io.BytesIO(body))
+    monkeypatch.setattr(runner, "_open", lambda *a, **kw: (_ for _ in ()).throw(failure))
+    client = runner.MCPClient(endpoint="https://mcp.example.test", access_token="fixture-access")
+    with pytest.raises(runner.AcceptanceError) as caught:
+        client.call("tools/list")
+    assert "HTTP 502" in str(caught.value)
+    assert "private proxy" not in str(caught.value)
+    assert "xxxxx" not in str(caught.value)
+    assert len(str(caught.value)) < 600
+    assert failure.closed
+
+
+@pytest.mark.parametrize("payload", [
+    {"error": {"code": "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED", "message": "catalog creation target already exists"}},
+    {"result": {"error": {"code": "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED", "message": "catalog creation target already exists"}}},
+])
+def test_tool_error_preserves_structured_reason_without_accepting_result(payload) -> None:
+    runner = _load()
+    with pytest.raises(runner.AcceptanceError) as caught:
+        runner._tool_result({"isError": True, "structuredContent": payload})
+    assert "unsuccessful" in str(caught.value)
+    assert "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED" in str(caught.value)
+    assert "catalog creation target already exists" in str(caught.value)
+
+
+def test_tool_error_text_json_is_supported_and_bearer_text_is_redacted() -> None:
+    runner = _load()
+    with pytest.raises(runner.AcceptanceError) as caught:
+        runner._tool_result({"isError": True, "content": [{"type": "text", "text": json.dumps({
+            "error": {"code": "REQUEST_REFUSED", "message": "refused Bearer private-secret"},
+            "private": "must-not-escape",
+        })}]})
+    assert "REQUEST_REFUSED" in str(caught.value)
+    assert "private-secret" not in str(caught.value)
+    assert "must-not-escape" not in str(caught.value)
+
+
+@pytest.mark.parametrize("payload", [
+    {"content": [{"type": "text", "text": "Error executing tool remember: GOVERNANCE_CATALOG_PUBLICATION_BLOCKED: catalog content identity no longer matches the reviewed predecessor"}]},
+    {"error": {"code": -32603, "message": "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED: catalog content identity no longer matches the reviewed predecessor"}},
+])
+def test_mcp_error_preserves_coded_framework_text(payload) -> None:
+    runner = _load()
+    detail = runner._mcp_error_detail(payload)
+    assert "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED" in detail
+    assert "catalog content identity no longer matches the reviewed predecessor" in detail
+    assert "Error executing tool" not in detail
+
+
+def test_mcp_error_does_not_echo_uncoded_framework_text() -> None:
+    runner = _load()
+    assert runner._mcp_error_detail({"content": [{"type": "text", "text": "unexpected private response"}]}) == ""
+
+
+@pytest.mark.parametrize("flag", ["true", "false", 1, 0, None, {}, []])
+def test_malformed_tool_error_flag_cannot_certify_recall_or_commit(monkeypatch, flag) -> None:
+    runner = _load()
+    result = {"isError": flag, "structuredContent": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}
+    assert runner.committed_tool_receipt(result) is False
+    with pytest.raises(runner.AcceptanceError, match="malformed"):
+        runner._tool_result(result)
+
+    def respond(request, **kwargs):
+        request_id = json.loads(request.data)["id"]
+        response = io.BytesIO(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}).encode())
+        response.headers = {"Content-Type": "application/json"}
+        return response
+
+    monkeypatch.setattr(runner, "_open", respond)
+    client = runner.MCPClient(endpoint="https://mcp.example.test", access_token="fixture-access")
+    with pytest.raises(runner.AcceptanceError, match="malformed"):
+        client.call("tools/call", {"name": "remember", "arguments": {}})
+
+
+@pytest.mark.parametrize("coded_text", [False, True])
+def test_error_diagnostics_strip_terminal_controls(coded_text) -> None:
+    runner = _load()
+    message = "refused \x1b]52;c;fixture\x07\x00\x9b"
+    payload = ({"content": [{"type": "text", "text": "REQUEST_REFUSED: " + message}]}
+               if coded_text else {"error": {"code": "REQUEST_REFUSED", "message": message}})
+    detail = runner._mcp_error_detail(payload)
+    assert "REQUEST_REFUSED" in detail
+    assert all(ord(character) >= 32 and not 127 <= ord(character) <= 159 for character in detail)
+
+
+@pytest.mark.parametrize("control", ["\x1b", "\x00", "\x9b"])
+def test_terminal_control_normalization_cannot_reveal_bearer_credentials(control) -> None:
+    runner = _load()
+    detail = runner._mcp_error_detail({"code": "REQUEST_REFUSED", "message": "refused Bearer" + control + " private-secret"})
+    assert "private-secret" not in detail
 
 
 def test_remember_review_journal_replays_the_exact_prepared_commit_after_lost_ack(

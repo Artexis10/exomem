@@ -20,3 +20,9 @@ variable "bucket_prefix" {
     error_message = "bucket_prefix must be 5-40 lowercase DNS-safe characters."
   }
 }
+
+variable "cloud_backup_enabled" {
+  description = "Create separate Cloud cell backup storage and its controller key."
+  type        = bool
+  default     = false
+}

@@ -187,6 +187,29 @@ def _wait_for_policy_typecheck(k3s: str, policy_name: str) -> None:
     raise AssertionError(f"K3s did not type-check {policy_name}")
 
 
+def _wait_for_admission_refusal(k3s: str, documents: list[dict[str, Any]], message: str) -> None:
+    """Wait until the API server enforces a freshly applied policy binding.
+
+    A type-checked policy is not yet an enforced one: the binding reaches the
+    admission plugin through an informer, so for a moment after `apply` a
+    request the policy forbids is still admitted. A server-side dry run goes
+    through the same admission chain without persisting anything.
+    """
+    last: subprocess.CompletedProcess[str] | None = None
+    for _ in range(30):
+        last = _kubectl(
+            k3s,
+            ["apply", "--dry-run=server", "--filename=-"],
+            documents=documents,
+            check=False,
+        )
+        if last.returncode != 0 and message in last.stderr:
+            return
+        time.sleep(1)
+    assert last is not None
+    raise AssertionError(f"K3s never enforced the policy: {last.stdout}{last.stderr}")
+
+
 def _pod(workload: dict[str, Any], *, name: str, namespace: str) -> dict[str, Any]:
     template = workload["spec"]["template"]
     return {
@@ -731,6 +754,9 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
             },
         },
     }
+    _wait_for_admission_refusal(
+        k3s, [insecure_namespace], "restricted-v1.35 tenant namespace contract"
+    )
     insecure_create = _kubectl(
         k3s,
         ["apply", "--filename=-"],
@@ -3151,6 +3177,10 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
         if item.get("kind") in {"ServiceAccount", "ClusterRole", "ClusterRoleBinding"}
         and item["metadata"]["name"] == "exomem-cell-provisioner"
     ]
+    runtime_class = next(
+        item for item in platform
+        if item.get("kind") == "RuntimeClass" and item["metadata"]["name"] == "exomem-storage-init"
+    )
     _kubectl(
         k3s,
         ["apply", "--filename=-"],
@@ -3199,6 +3229,7 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
             },
             *access,
             *policies,
+            runtime_class,
         ],
     )
     for name in ("exomem-tenant-boundary", "exomem-provisioner-scope"):
@@ -3220,6 +3251,73 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
 
     provisioner = "system:serviceaccount:exomem-platform:exomem-cell-provisioner"
     controller = "system:serviceaccount:kube-system:job-controller"
+    from exomem_provisioner.governance_storage_binding import (
+        KubernetesGovernanceStorageBindingAdapter,
+    )
+
+    binder = KubernetesGovernanceStorageBindingAdapter(
+        core_v1=None, batch_v1=None, apps_v1=None,
+        identity_verifier=None,
+        runtime_image="ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+        cell=None,
+    )._job_body(metadata, "signed-binding-envelope")
+    binder.update(apiVersion="batch/v1", kind="Job")
+    assert admit(binder, provisioner).returncode == 0
+    binder_pod = {"apiVersion": "v1", "kind": "Pod", **copy.deepcopy(binder["spec"]["template"])}
+    binder_pod["metadata"].update(
+        name=namespace + "-init-binding", namespace=namespace,
+        ownerReferences=[{
+            "apiVersion": "batch/v1", "kind": "Job", "name": namespace + "-init",
+            "uid": "11111111-1111-4111-8111-111111111111", "controller": True,
+        }],
+    )
+    binder_pod["metadata"]["labels"].update(
+        {"job-name": namespace + "-init", "batch.kubernetes.io/job-name": namespace + "-init"}
+    )
+    assert admit(binder_pod, controller).returncode == 0
+    scheduled_elsewhere = copy.deepcopy(binder_pod)
+    scheduled_elsewhere["spec"]["schedulerName"] = "untrusted-scheduler"
+    rejected_scheduler = admit(scheduled_elsewhere, controller)
+    assert rejected_scheduler.returncode != 0
+    assert "Storage binding" in rejected_scheduler.stderr
+    for mutation in (
+        "deadline", "ttl", "mount", "env", "nodeName", "schedulerName",
+        "tolerations", "priorityClassName", "topologySpreadConstraints", "sidecar", "init",
+    ):
+        wrong = copy.deepcopy(binder)
+        spec = wrong["spec"]
+        pod_spec = spec["template"]["spec"]
+        container = pod_spec["containers"][0]
+        if mutation == "deadline":
+            spec["activeDeadlineSeconds"] = 3600
+        elif mutation == "ttl":
+            spec["ttlSecondsAfterFinished"] = 300
+        elif mutation == "mount":
+            container["volumeMounts"] = [{"name": "data", "mountPath": "/var/lib/exomem"}]
+        elif mutation == "env":
+            container["env"] = [{"name": "EXOMEM_HOSTED_CELL", "value": "1"}]
+        elif mutation == "nodeName":
+            pod_spec["nodeName"] = "k3s-node"
+        elif mutation == "schedulerName":
+            pod_spec["schedulerName"] = "untrusted-scheduler"
+        elif mutation == "tolerations":
+            pod_spec["tolerations"] = [{"key": "restricted-node", "operator": "Exists"}]
+        elif mutation == "priorityClassName":
+            pod_spec["priorityClassName"] = "system-node-critical"
+        elif mutation == "topologySpreadConstraints":
+            pod_spec["topologySpreadConstraints"] = [{
+                "maxSkew": 1, "topologyKey": "kubernetes.io/hostname",
+                "whenUnsatisfiable": "ScheduleAnyway",
+                "labelSelector": {"matchLabels": {"exomem.io/storage-binding": "true"}},
+            }]
+        elif mutation == "sidecar":
+            pod_spec["containers"].append(copy.deepcopy(container))
+        else:
+            pod_spec["initContainers"] = [copy.deepcopy(container)]
+        refused = admit(wrong, provisioner)
+        assert refused.returncode != 0, mutation + refused.stdout
+        if mutation in {"schedulerName", "tolerations", "priorityClassName", "topologySpreadConstraints"}:
+            assert "Storage binding" in refused.stderr, mutation + refused.stderr
     for phase in ("inspect", "prepare", "commit"):
         request = MigrationJobRequest(
             metadata,
@@ -3232,6 +3330,12 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
             "d" * 64 if phase == "commit" else None,
         )
         job = build_governance_migration_job(request, recovery_envelope="signed-migration-envelope")
+        template_spec = job["spec"]["template"]["spec"]
+        # Data is read-write in every phase; custody stays a read-only mount.
+        assert template_spec["volumes"][0]["persistentVolumeClaim"]["readOnly"] is False
+        assert [
+            mount.get("readOnly", False) for mount in template_spec["containers"][0]["volumeMounts"]
+        ] == [False, False, True, True, False]
         accepted = admit(job, provisioner)
         assert accepted.returncode == 0, accepted.stdout + accepted.stderr
         pod = {"apiVersion": "v1", "kind": "Pod", **copy.deepcopy(job["spec"]["template"])}
@@ -3266,10 +3370,9 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
             "secret-env",
             "mixed-label",
             "extra-init",
-            "inspect-write",
+            "data-mount-readonly",
+            "data-claim-readonly",
         ):
-            if kind == "inspect-write" and phase != "inspect":
-                continue
             mutated = copy.deepcopy(pod)
             spec = mutated["spec"]
             if kind == "image":
@@ -3287,8 +3390,12 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
             elif kind == "extra-init":
                 spec["initContainers"].append(copy.deepcopy(spec["initContainers"][0]))
                 spec["initContainers"][1]["name"] = "additional-execution"
+            elif kind == "data-mount-readonly":
+                # The pre-2026-09-09 read-only inspect shape: the policy still
+                # cares about the data mount, it now requires it read-write.
+                spec["containers"][0]["volumeMounts"][0]["readOnly"] = True
             else:
-                spec["containers"][0]["volumeMounts"][0]["readOnly"] = False
+                spec["volumes"][0]["persistentVolumeClaim"]["readOnly"] = True
             denied = admit(mutated, controller)
             assert denied.returncode != 0, kind
             assert "denied request" in denied.stderr, denied.stderr
@@ -3805,3 +3912,97 @@ print(json.dumps({'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}))
     finally:
         for image in (old_image, target_image):
             _run(["docker", "image", "rm", "--force", image], check=False)
+
+
+def test_exact_k3s_admits_only_the_pending_helm_release_configmap_delete(k3s: str) -> None:
+    platform = _render(PLATFORM, PLATFORM / "values.validation.yaml", "exomem-platform")
+    route_crds = [
+        item
+        for item in platform
+        if item.get("kind") == "CustomResourceDefinition"
+        and item.get("metadata", {}).get("name")
+        in {"ingressroutes.traefik.io", "middlewares.traefik.io"}
+    ]
+    assert len(route_crds) == 2
+    _kubectl(k3s, ["apply", "--filename=-"], documents=route_crds)
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            item
+            for item in platform
+            if item.get("kind") in {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
+        ],
+    )
+    _wait_for_policy_typecheck(k3s, "exomem-provisioner-scope")
+
+    namespace = "exo-helm-pending"
+    provisioner = "system:serviceaccount:exomem-platform:exomem-cell-provisioner"
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "exomem-platform"}},
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}},
+        ],
+    )
+    # The authority under test is the shipped one: the ServiceAccount, ClusterRole
+    # and ClusterRoleBinding rendered from provisioner-rbac.yaml, not a role
+    # written for this test.
+    shipped_rbac = [
+        item
+        for item in platform
+        if item.get("kind") in {"ServiceAccount", "ClusterRole", "ClusterRoleBinding"}
+        and item.get("metadata", {}).get("name") == "exomem-cell-provisioner"
+    ]
+    assert {item["kind"] for item in shipped_rbac} == {
+        "ServiceAccount",
+        "ClusterRole",
+        "ClusterRoleBinding",
+    }
+    _kubectl(k3s, ["apply", "--filename=-"], documents=shipped_rbac)
+
+    pending = f"sh.helm.release.v1.{namespace}.v2"
+    unrelated = namespace + "-not-a-release"
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": pending,
+                    "namespace": namespace,
+                    "labels": {
+                        "owner": "helm",
+                        "name": namespace,
+                        "status": "pending-upgrade",
+                        "version": "2",
+                    },
+                },
+                "data": {"release": "SDRzSUFBQUFBQUFBLw=="},
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": unrelated, "namespace": namespace},
+                "data": {"release": "SDRzSUFBQUFBQUFBLw=="},
+            },
+        ],
+    )
+
+    admitted = _kubectl(
+        k3s,
+        ["delete", "configmap", pending, f"--namespace={namespace}", f"--as={provisioner}"],
+        check=False,
+    )
+    assert admitted.returncode == 0, admitted.stdout + admitted.stderr
+
+    refused = _kubectl(
+        k3s,
+        ["delete", "configmap", unrelated, f"--namespace={namespace}", f"--as={provisioner}"],
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "exact fixed names derived from the tenant namespace" in refused.stderr

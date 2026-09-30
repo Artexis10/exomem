@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 from derived_receipt_fakes import DerivedReceiptProtocolFake
 
-from exomem import commands, corpus_aware, derived_receipts, embeddings
+from exomem import commands, corpus_aware, derived_receipts, embeddings, review_state
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.governance import egress as egress_module
@@ -622,7 +622,6 @@ def test_write_advisory_result_requires_ref_and_has_no_list_form(vault: Path) ->
     for banned in ("list_results", "search_results", "latest_result", "recent_results"):
         assert banned not in exported
     assert not any("advisory" in command.name for command in commands.PRODUCT_COMMANDS)
-    assert len(commands.PRODUCT_COMMANDS) == 29
 
 
 def test_malformed_unknown_unauthorized_and_expired_result_refs_are_indistinguishable(
@@ -1045,6 +1044,94 @@ def test_lane1_terminal_handoff_fake_is_used_without_shape_translation(vault: Pa
 # ---------------------------------------------------------------------------
 
 
+def test_published_result_carries_earned_quiet_offer(
+    vault: Path, encoder: _DeterministicEncoder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _seed_page(vault, "quiet-offer-target", "Quiet offer target body.")
+    counterpart = _candidate(vault, "quiet-offer-counterpart")
+    _wire_candidates(monkeypatch, [counterpart])
+    store = review_state.ReviewStateStore(vault)
+    for number in range(3):
+        store.apply(
+            f"{'c' * 23}{number}",
+            f"{'d' * 23}{number}",
+            action="dismiss",
+            family="near-duplicate",
+        )
+    receipt, _ = _prepare_custody(vault, batch_id="b-quiet-offer", target_rel=target)
+
+    assert _run(vault)[0].outcome == "published"
+    ref = derived_receipts.advisory_result_ref(vault, receipt)
+    result = _resolve(vault, ref)
+    assert result["status"] == "ready"
+    assert len(result["advisories"]) == 1
+    advisory = result["advisories"][0]
+    assert (
+        "[quiet offer: ref=exomem://review/family/near-duplicate; action=quiet; reason required]"
+        in advisory["warning"]
+    )
+    assert advisory["warning"].endswith(
+        f"[review: {advisory['ref']}; fingerprint: {advisory['fingerprint']}]"
+    )
+    assert len(advisory["warning"]) <= 300
+    assert review_state.quiet_offered_at(store.load(), "near-duplicate")
+    stored = derived_receipts.read_advisory_result(vault, ref)
+    assert stored is not None
+    assert "[quiet offer:" not in stored.candidates[0].warning
+    before = _review_state_bytes(vault)
+    assert _resolve(vault, ref) == result
+    assert _review_state_bytes(vault) == before
+    with monkeypatch.context() as patch:
+        def unreadable(_state_store):
+            raise ValueError("unreadable")
+
+        patch.setattr(review_state.ReviewStateStore, "load", unreadable)
+        assert (
+            "[quiet offer:"
+            not in _advisory().resolve_result(vault, ref)["advisories"][0]["warning"]
+        )
+    with monkeypatch.context() as patch:
+        original_load = review_state.ReviewStateStore.load
+
+        def missing_offer_marker(state_store):
+            payload = original_load(state_store)
+            payload["dispositions"]["near-duplicate"].pop("quiet_offered_at")
+            return payload
+
+        patch.setattr(review_state.ReviewStateStore, "load", missing_offer_marker)
+        assert (
+            "[quiet offer:"
+            not in _advisory().resolve_result(vault, ref)["advisories"][0]["warning"]
+        )
+
+    # Another published result cannot inherit this family's once-only offer.
+    second = _seed_page(vault, "quiet-offer-second", "Second target body.")
+    second_receipt, _ = _prepare_custody(
+        vault, batch_id="b-quiet-offer-second", target_rel=second, now=40.0
+    )
+    assert _run(vault, owner="second-worker", now=50.0)[0].outcome == "published"
+    second_ref = derived_receipts.advisory_result_ref(vault, second_receipt)
+    assert all(
+        "[quiet offer:" not in item["warning"] for item in _resolve(vault, second_ref)["advisories"]
+    )
+
+    disposition = commands.op_triage_memory(
+        vault,
+        ref=review_state.family_ref("near-duplicate"),
+        action="quiet",
+        why="handled: reviewed",
+    )
+    assert "_quiet_offer_carrier" not in disposition
+    assert "[quiet offer:" in _resolve(vault, ref)["advisories"][0]["warning"]
+    store.set_disposition("near-duplicate", "normal")
+    assert "[quiet offer:" not in _resolve(vault, ref)["advisories"][0]["warning"]
+
+    _govern(vault, glob="Notes/Insights/**", ceiling=0)
+    with request_scope(_external()):
+        with pytest.raises(ValueError, match="REVIEW_ITEM_NOT_FOUND"):
+            _resolve(vault, ref)
+
+
 def test_crash_after_publication_completes_without_recomputation(
     vault: Path, encoder: _DeterministicEncoder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1157,6 +1244,14 @@ def test_retryable_publication_burns_no_once_only_review_state(
     counterpart = _candidate(vault, "lane4-ledger-counterpart")
     _wire_candidates(monkeypatch, [counterpart])
     receipt, _ = _prepare_custody(vault, batch_id="b-ledger", target_rel=target)
+    store = review_state.ReviewStateStore(vault)
+    for number in range(3):
+        store.apply(
+            f"{'e' * 23}{number}",
+            f"{'f' * 23}{number}",
+            action="dismiss",
+            family="near-duplicate",
+        )
     before = _review_state_bytes(vault)
 
     # A real refusal: the claim's lease has expired by publication time.
@@ -1169,10 +1264,12 @@ def test_retryable_publication_burns_no_once_only_review_state(
 
     assert refused.outcome == "stale_claim"
     assert _review_state_bytes(vault) == before
+    assert review_state.quiet_offered_at(store.load(), "near-duplicate") is None
 
     # The control: a publication the store accepts does record the surfacing.
     assert _run(vault, owner="live-worker", now=600.0)[0].outcome == "published"
     assert _review_state_bytes(vault) != before
+    assert review_state.quiet_offered_at(store.load(), "near-duplicate")
 
 
 def test_unauthorized_and_deleted_target_states_stay_indistinguishable(

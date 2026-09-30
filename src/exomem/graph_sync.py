@@ -106,6 +106,8 @@ _RECEIPT_TERMINAL_FIELDS = frozenset(
         "operation_id",
         "result_sha256",
         "additive_authority",
+        "vocabulary_resolution",
+        "derived_sync",
     }
 )
 _RECEIPT_TERMINAL_STATES = frozenset({"committed", "rejected"})
@@ -234,6 +236,16 @@ def _is_receipt_terminal_projection(value: object) -> bool:
             from .vocabulary_receipts import valid_projection
 
             if not valid_projection(item):
+                return False
+        if key == "vocabulary_resolution":
+            from .vocabulary_resolution import valid_public_resolution
+
+            if not valid_public_resolution(item):
+                return False
+        if key == "derived_sync":
+            from .mutation_terminal import DERIVED_SYNC_OUTCOMES
+
+            if not isinstance(item, str) or item not in DERIVED_SYNC_OUTCOMES:
                 return False
         if key == "_terminal" and item != "exomem.mutation-terminal":
             return False
@@ -1550,6 +1562,24 @@ def registry_epoch_writes(
     )
 
 
+def _is_utf8_stream(stream: BinaryIO) -> bool:
+    """Whether a seekable staged payload is strict UTF-8, leaving its position."""
+    import codecs
+
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    position = stream.tell()
+    try:
+        stream.seek(0)
+        while chunk := stream.read(1024 * 1024):
+            decoder.decode(chunk)
+        decoder.decode(b"", final=True)
+    except UnicodeDecodeError:
+        return False
+    finally:
+        stream.seek(position)
+    return True
+
+
 def _epoch_writes_with_predecessor(
     vault_root: Path, writes: Iterable[PlannedWrite]
 ) -> tuple[PlannedWrite, PlannedWrite, GraphSyncCheckpoint | None] | None:
@@ -1559,7 +1589,12 @@ def _epoch_writes_with_predecessor(
     """
     from . import recall_policy, relation_registry
     from .kbdir import kb_dirname
-    from .vault import PlannedWrite, content_hash, in_excluded_scan_dir
+    from .vault import (
+        PlannedWrite,
+        PreparedBinaryContent,
+        content_hash,
+        in_excluded_scan_dir,
+    )
 
     # Keep emitted internal writes in the caller's path namespace.  On Windows
     # a caller may legitimately use an 8.3 or case variant while ``resolve``
@@ -1598,11 +1633,20 @@ def _epoch_writes_with_predecessor(
             or recall_policy.is_structured_only_path(root, relative)
         ):
             continue
-        if not isinstance(write.content, str):
+        if isinstance(write.content, str):
+            digest = content_hash(write.content)
+        elif isinstance(write.content, PreparedBinaryContent) and _is_utf8_stream(
+            write.content.stream
+        ):
+            # A preserved `.md` artifact arrives as staged bytes. The graph scan
+            # reads it as strict UTF-8, and the staged SHA-256 of valid UTF-8 is
+            # exactly the text's content hash.
+            digest = write.content.sha256
+        else:
             raise GraphEpochIncoherent(
                 "graph-relevant batch content is not Markdown text"
             )
-        paths.append((relative, content_hash(write.content)))
+        paths.append((relative, digest))
         if not write.path.exists():
             created_paths.append(relative)
     if registry_write is None and not paths:
@@ -3053,6 +3097,80 @@ def join_registered_if_settled(
         wait_for_registered(
             vault_root,
             _SETTLED_JOIN_TIMEOUT_SECONDS,
+            state_root=state_root,
+        )
+    except TimeoutError:
+        return False
+    return True
+
+
+#: `seamless-managed-worker-handoff` D4. The bound on a *standalone* join -- a
+#: caller with no response envelope to carry `pending`, which is why it joins at
+#: all rather than polling like every request-serving site. Sized well above a
+#: small-vault pass, so the library contract's "converged result" still holds for
+#: the ordinary case, and well below the 20-175 s a production whole-vault pass
+#: costs. A request deadline in scope wins whenever it is nearer.
+STANDALONE_JOIN_BUDGET_SECONDS = 15.0
+
+#: Set while the receipt-owned fan-out of a fast-acknowledged write runs. That
+#: caller starts a registered rebuild exactly as a standalone caller does, but
+#: its own durable receipt -- not a converged graph -- is its contract, and it
+#: already counts a started graph handoff as convergent. It therefore has no
+#: budget to spend waiting: a wait only held the fan-out's next component
+#: (embeddings) behind a whole-vault pass for up to the budget above.
+_STANDALONE_JOIN_WAIVED: ContextVar[bool] = ContextVar(
+    "exomem_graph_standalone_join_waived", default=False
+)
+
+
+@contextlib.contextmanager
+def standalone_join_waived():  # noqa: ANN201 - context manager
+    """Start registered rebuilds as usual, but spend no time joining them."""
+    token = _STANDALONE_JOIN_WAIVED.set(True)
+    try:
+        yield
+    finally:
+        _STANDALONE_JOIN_WAIVED.reset(token)
+
+
+def standalone_join_budget_seconds() -> float:
+    """How long a standalone join may wait, in seconds from now.
+
+    Two bounds, and the earlier one wins, exactly as
+    `writer_lease.acknowledgement_budget_deadline` composes them: this module's
+    own bound, and what is left of the request budget minus its delivery reserve
+    when a request is in scope at all. A caller inside `standalone_join_waived`
+    has no budget at all.
+    """
+    if _STANDALONE_JOIN_WAIVED.get():
+        return 0.0
+    from . import request_budget
+
+    budget = request_budget.current()
+    if budget is None:
+        return STANDALONE_JOIN_BUDGET_SECONDS
+    remaining = budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS
+    return max(0.0, min(STANDALONE_JOIN_BUDGET_SECONDS, remaining))
+
+
+def join_registered_within_budget(
+    vault_root: Path, *, state_root: Path | None = None
+) -> bool:
+    """Join a registered rebuild under the standalone budget.
+
+    The second seam beside `join_registered_if_settled`, and the reason there are
+    exactly two: a request-serving caller polls and never waits, a standalone
+    caller waits but never without a bound. Returns True when the flight
+    converged, False when the budget expired -- in which case the canonical bytes
+    are durable, the flight keeps running on its own thread, and the caller owes
+    its own caller an honest "the derived graph is still catching up". Every
+    other failure still raises, so a real rebuild failure is not laundered into
+    "still pending".
+    """
+    try:
+        wait_for_registered(
+            vault_root,
+            timeout=standalone_join_budget_seconds(),
             state_root=state_root,
         )
     except TimeoutError:

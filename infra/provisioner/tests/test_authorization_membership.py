@@ -715,15 +715,47 @@ def test_enrollment_rejects_missing_or_tampered_custody(enrollment_source, file)
             )
 
 
-def test_enrollment_refuses_serving_and_expired_generations(enrollment_source) -> None:
+def test_enrollment_refuses_a_control_issued_ahead_of_the_clock(enrollment_source) -> None:
+    # Enrollment tolerates a closed window, so it must bound the issue time itself
+    # rather than trust its caller. Mint the custody ahead of the clock while the
+    # keyring stays valid at that clock, so only the issue time can refuse.
+    _initial, drained, identity, target = enrollment_source
+    ahead = transition_hosted_authorization_bundle(
+        drained.files,
+        **identity,
+        target_state="DRAINING",
+        target_no_in_flight=True,
+        now=drained.expires_at - 600,
+        renew=True,
+    )
+    clock = drained.expires_at - 1_200
+    assert json.loads(ahead.control)["issued_at"] > clock
+    with pytest.raises(MetadataConflict):
+        authorization_membership.enroll_hosted_governance_bundle(
+            ahead.files,
+            **identity,
+            **{**target, "now": clock},
+        )
+
+
+def test_enrollment_refuses_a_serving_generation_but_accepts_a_closed_window(
+    enrollment_source,
+) -> None:
     initial, drained, identity, target = enrollment_source
-    for files, now in ((initial.files, target["now"]), (drained.files, drained.expires_at)):
-        with pytest.raises(MetadataConflict):
-            authorization_membership.enroll_hosted_governance_bundle(
-                files,
-                **identity,
-                **{**target, "now": now},
-            )
+    with pytest.raises(MetadataConflict):
+        authorization_membership.enroll_hosted_governance_bundle(
+            initial.files,
+            **identity,
+            **target,
+        )
+    # Enrollment records a drained generation and preserves its window rather than
+    # renewing it, so a closed window is the state it is meant to accept.
+    enrolled = authorization_membership.enroll_hosted_governance_bundle(
+        drained.files,
+        **identity,
+        **{**target, "now": drained.expires_at},
+    )
+    assert enrolled.governance_enrolled
 
 
 def test_enrollment_refuses_authenticated_drain_without_no_in_flight(enrollment_source) -> None:

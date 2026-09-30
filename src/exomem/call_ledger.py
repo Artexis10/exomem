@@ -32,7 +32,14 @@ Redaction is a property of what the row builder puts in the row, never of a
 downstream filter: arguments are recorded as name, byte length, and sha256 of
 the value, and the value itself is never written. That has to hold by
 construction, because `privacy_log`'s process-wide redactor is gated on
-`EXOMEM_HOSTED_CELL` and is simply off for local installs.
+`EXOMEM_HOSTED_CELL`/`EXOMEM_CLOUD_CELL` and is simply off for local installs.
+
+Under content-private logging (`privacy_log.content_private_logging_enabled()`,
+true for a hosted or cloud cell, design D1.2), a row goes further: no target
+paths, positional argument names (`arg0`, `arg1`, ...) instead of the
+caller-chosen ones, and no per-argument sha256 -- a hash of a short guessed
+value is an offline confirmation oracle, so hashing is itself content there.
+Byte length always survives; it is not content.
 
 **Single writer.** The chain head is held in-process under a cheap lock rather
 than behind a cross-process file lock, because every MCP tool call is dispatched
@@ -51,11 +58,19 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import threading
+import time
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
+
+#: The closed set `principal_kind` may record; anything else is written as null.
+_PRINCIPAL_KINDS = frozenset(
+    {"owner", "owner-oauth", "owner-local", "principal", "unresolved"}
+)
 
 #: The `prev_hash` of the very first row of a fresh ledger.
 GENESIS_HASH = "0" * 64
@@ -135,20 +150,32 @@ def _argument_shape(arguments: dict[str, Any]) -> tuple[list[str], dict[str, dic
     The serialized form is hashed rather than `repr`, so the same argument
     hashes identically across calls and processes -- which is what makes the
     ledger answer "is this client sending the same call over and over?".
+
+    Under content-private logging (design D1.2), a caller-chosen argument
+    name and a value's sha256 are both content: a hash of a short guessed
+    value is an offline confirmation oracle, and a name like a distinctive
+    query phrase would defeat the redaction this function exists to do. A
+    hosted or cloud cell keeps only positional names and byte lengths.
     """
+    from .privacy_log import content_private_logging_enabled
+
     names = sorted(str(name) for name in arguments)
     truncated = len(names) > _MAX_ARGS
+    private = content_private_logging_enabled()
     shape: dict[str, dict] = {}
-    for name in names[:_MAX_ARGS]:
+    clipped_names: list[str] = []
+    for index, name in enumerate(names[:_MAX_ARGS]):
         try:
             raw = canonical_json({"v": arguments[name]})
         except (TypeError, ValueError):
             raw = repr(arguments[name]).encode("utf-8", "replace")
-        shape[_clip(name)] = {
-            "len": len(raw),
-            "sha256": hashlib.sha256(raw).hexdigest(),
-        }
-    return [_clip(name) for name in names[:_MAX_ARGS]], shape, truncated
+        key = f"arg{index}" if private else _clip(name)
+        clipped_names.append(key)
+        entry: dict[str, Any] = {"len": len(raw)}
+        if not private:
+            entry["sha256"] = hashlib.sha256(raw).hexdigest()
+        shape[key] = entry
+    return clipped_names, shape, truncated
 
 
 #: Argument names that address a page rather than carry content. Recorded
@@ -157,7 +184,16 @@ def _argument_shape(arguments: dict[str, Any]) -> tuple[list[str], dict[str, dic
 _TARGET_ARG_NAMES = ("path", "old_path", "new_path", "paths", "target", "targets", "file")
 
 
-def _target_paths(arguments: dict[str, Any]) -> tuple[list[str], bool]:
+def _target_paths(
+    arguments: dict[str, Any], committed: Sequence[str] | None = None
+) -> tuple[list[str], bool]:
+    from .privacy_log import content_private_logging_enabled
+
+    if content_private_logging_enabled():
+        # A note path is content under D1.2 -- a hosted or cloud row keeps no
+        # target paths at all, the same way mutation_journal keeps only
+        # `target_count` (see its docstring).
+        return [], False
     found: list[str] = []
     for name in _TARGET_ARG_NAMES:
         value = arguments.get(name)
@@ -165,8 +201,86 @@ def _target_paths(arguments: dict[str, Any]) -> tuple[list[str], bool]:
             found.append(_clip(value.strip()))
         elif isinstance(value, (list, tuple)):
             found.extend(_clip(item) for item in value if isinstance(item, str) and item.strip())
-    truncated = len(found) > _MAX_TARGET_PATHS
-    return found[:_MAX_TARGET_PATHS], truncated
+    # An artifact write addresses no path-shaped argument: its destination is
+    # assembled from `scope`/`category` and a filename the server derives, so
+    # every `preserve_artifacts` row said `target_paths: []` and the ledger
+    # could not state what landed. The outcome knows; the arguments never did.
+    for value in committed or ():
+        if isinstance(value, str) and value.strip():
+            found.append(_clip(value.strip()))
+    deduplicated = list(dict.fromkeys(found))
+    truncated = len(deduplicated) > _MAX_TARGET_PATHS
+    return deduplicated[:_MAX_TARGET_PATHS], truncated
+
+
+#: Committed target paths for one in-flight call, keyed by the call token.
+#: Bridged through the token for the same reason `call_spans` is: these are
+#: recorded deep inside the synchronous tool wrapper on FastMCP's threadpool,
+#: and a ContextVar mutation there never propagates back to the middleware that
+#: writes the row.
+_targets_lock = threading.Lock()
+_committed_targets: dict[str, dict[str, Any]] = {}
+#: Calls tracked at once, so a missed pop cannot leak indefinitely, and how long
+#: an unpopped entry survives. The same two independent guards `call_spans` uses,
+#: for the same reason: the middleware pops unconditionally, but a direct test
+#: harness or an abandoned call never reaches it. Eviction is by age, not by
+#: insertion order, so a long-running call's targets are not dropped to make
+#: room for a short one that arrived later.
+_MAX_TRACKED_CALLS = 256
+_TARGETS_TTL_SECONDS = 300.0
+
+
+def _sweep_targets_locked(now: float) -> None:
+    for token in [
+        token
+        for token, entry in _committed_targets.items()
+        if now - float(entry["at"]) > _TARGETS_TTL_SECONDS
+    ]:
+        _committed_targets.pop(token, None)
+
+
+def note_committed_targets(paths: Iterable[Any]) -> None:
+    """Record the vault-relative paths this call actually committed.
+
+    Structural paths only -- the same thing `target_paths` already carries for a
+    note write. A no-op outside an MCP call, so CLI, watcher and test paths that
+    mint no token are unaffected. Never raises into the call path.
+    """
+    try:
+        from . import call_spans
+
+        token = call_spans.MCP_CALL_TOKEN.get()
+        if token is None:
+            return
+        clean = [
+            _clip(value.strip())
+            for value in paths
+            if isinstance(value, str) and value.strip()
+        ]
+        now = time.monotonic()
+        with _targets_lock:
+            _sweep_targets_locked(now)
+        if not clean:
+            return
+        with _targets_lock:
+            if token not in _committed_targets and len(_committed_targets) >= _MAX_TRACKED_CALLS:
+                oldest = min(_committed_targets, key=lambda key: _committed_targets[key]["at"])
+                _committed_targets.pop(oldest, None)
+            entry = _committed_targets.setdefault(token, {"at": now, "paths": []})
+            slot: list[str] = entry["paths"]
+            slot.extend(clean[: _MAX_TARGET_PATHS - len(slot)])
+    except Exception:  # noqa: BLE001 - the ledger must never break a call
+        pass
+
+
+def pop_committed_targets(token: str | None) -> list[str]:
+    """Pop this call's committed targets. Unconditional, like the span pop."""
+    if token is None:
+        return []
+    with _targets_lock:
+        _sweep_targets_locked(time.monotonic())
+        entry = _committed_targets.pop(token, None)
+    return list(entry["paths"]) if entry else []
 
 
 def build_row(
@@ -181,16 +295,26 @@ def build_row(
     error_code: str | None = None,
     arguments: dict[str, Any] | None = None,
     caller_principal_hash: str | None = None,
+    principal_kind: str | None = None,
     client_name: str | None = None,
     client_version: str | None = None,
     transport: str | None = None,
     session_id: str | None = None,
     spans: list[dict[str, Any]] | None = None,
+    budget: Mapping[str, Any] | None = None,
     timestamp: str | None = None,
+    committed_targets: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble one complete, self-hashing ledger row."""
+    from .privacy_log import log_client_label, log_client_version, log_session_ref
+
+    # Caller-chosen header and handshake text: bounded under content-private
+    # logging, verbatim otherwise.
+    session_id = log_session_ref(session_id)
+    client_name = log_client_label(client_name)
+    client_version = log_client_version(client_version)
     arg_names, args, args_truncated = _argument_shape(arguments or {})
-    targets, targets_truncated = _target_paths(arguments or {})
+    targets, targets_truncated = _target_paths(arguments or {}, committed_targets)
     row: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "sequence": sequence,
@@ -204,6 +328,15 @@ def build_row(
         "transport": _clip(transport) if transport else None,
         "caller_principal_hash": _clip(caller_principal_hash)
         if caller_principal_hash
+        else None,
+        # Which kind of caller that hash is: `owner`, `owner-oauth` (a remote
+        # session the host bound as the owner), `owner-local` (a local client
+        # token over the supervisor's local listener), `principal` or
+        # `unresolved`.
+        # The hash stays the remote identity's, so a bound remote owner's
+        # action is still traceable to the remote door.
+        "principal_kind": principal_kind
+        if principal_kind in _PRINCIPAL_KINDS
         else None,
         "tool": _clip(tool),
         "arg_names": arg_names,
@@ -229,6 +362,11 @@ def build_row(
         # would have named them. Empty for an uninstrumented path -- absence
         # means "nothing reported", never "nothing happened".
         "spans": _clip_spans(spans),
+        # What the request deadline cost this call, when it cost anything.
+        # `None` on every unbudgeted row, so "the budget was not reached" and
+        # "there was no budget" are the same absence — which is correct: both
+        # mean the caller got the whole answer it asked for.
+        "budget": _clip_budget(budget),
         "truncated": bool(args_truncated or targets_truncated),
     }
     row["row_hash"] = row_hash(row)
@@ -263,9 +401,80 @@ def _clip_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
             count = int(entry.get("count", 1))
         except (TypeError, ValueError):
             continue
-        shaped.append({"name": _clip(name), "count": count, "ms": ms})
+        row: dict[str, Any] = {"name": _clip(name), "count": count, "ms": ms}
+        fields = _clip_span_fields(entry.get("fields"))
+        if fields:
+            # Only when something was measured. A span that carried no fields
+            # keeps the exact shape it has always had, so no row already
+            # written -- and `verify` re-hashes rows as stored -- changes.
+            row["fields"] = fields
+        shaped.append(row)
     shaped.sort(key=lambda item: item["ms"], reverse=True)
     return shaped[:_MAX_SPANS]
+
+
+#: Named integer measurements one span may carry beside its duration. Bounded
+#: like `_MAX_SPANS`, and integers only: a hash-chained row must not grow a key
+#: whose meaning a later reader has to guess.
+_MAX_SPAN_FIELDS = 4
+
+
+#: A field key is a measurement name, never a value. Enforced here as well as at
+#: the producer (`call_spans.FIELD_KEY_PATTERN`), because this is the last seam
+#: before a hash-chained row: a key shaped like a path, title or identifier
+#: cannot pass either gate, and a producer that bypassed the first still cannot
+#: write content into a row through the second.
+_SPAN_FIELD_KEY = re.compile(r"^[a-z_]{1,32}$")
+
+
+def _clip_span_fields(fields: object) -> dict[str, int]:
+    """Normalize a span's named counts into a bounded, canonical shape."""
+    if not isinstance(fields, Mapping):
+        return {}
+    shaped: dict[str, int] = {}
+    for key in sorted(str(name) for name in fields):
+        if len(shaped) >= _MAX_SPAN_FIELDS:
+            break
+        if not _SPAN_FIELD_KEY.match(key):
+            continue
+        try:
+            shaped[key] = int(fields[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return shaped
+
+
+#: Stage names kept in one row's budget block. Bounded for the same reason
+#: `_MAX_SPANS` is: the row is hash-chained, and no single call may grow it
+#: without limit.
+_MAX_BUDGET_STAGES = 16
+
+
+def _clip_budget(budget: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize the budget outcome into a bounded, canonical shape.
+
+    Rebuilt field by field rather than passed through, like `_clip_spans`:
+    these rows are hashed, so an unexpected key from a future caller would
+    change a row's identity without any reader knowing what it meant. Stage
+    names only — nothing here may carry a query, a path or an excerpt.
+    """
+    if not budget:
+        return None
+    try:
+        seconds = round(float(budget.get("seconds", 0.0)), 3)
+        remaining_ms = int(budget.get("remaining_ms", 0))
+    except (TypeError, ValueError):
+        return None
+    skipped = [
+        _clip(name)
+        for name in (budget.get("skipped") or [])
+        if isinstance(name, str) and name
+    ]
+    return {
+        "seconds": seconds,
+        "remaining_ms": remaining_ms,
+        "skipped": skipped[:_MAX_BUDGET_STAGES],
+    }
 
 
 def _read_chain_head(path: Path) -> tuple[int, str]:
@@ -367,11 +576,13 @@ def record_call(
     error_code: str | None = None,
     arguments: dict[str, Any] | None = None,
     caller_principal_hash: str | None = None,
+    principal_kind: str | None = None,
     client_name: str | None = None,
     client_version: str | None = None,
     transport: str | None = None,
     session_id: str | None = None,
     spans: list[dict[str, Any]] | None = None,
+    budget: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Append exactly one ledger row. Never raises into the call path.
 
@@ -379,6 +590,9 @@ def record_call(
     is disabled or the append could not be made. A ledger that breaks a call it
     was only supposed to describe is worse than no ledger.
     """
+    from . import call_spans
+
+    committed_targets = pop_committed_targets(call_spans.MCP_CALL_TOKEN.get())
     if not enabled():
         return None
     try:
@@ -401,11 +615,14 @@ def record_call(
                 error_code=error_code,
                 arguments=arguments,
                 caller_principal_hash=caller_principal_hash,
+                principal_kind=principal_kind,
                 client_name=client_name,
                 client_version=client_version,
                 transport=transport,
                 session_id=session_id,
                 spans=spans,
+                budget=budget,
+                committed_targets=committed_targets,
             )
             append_row(row, path=path)
             _state.update(sequence=row["sequence"], prev_hash=row["row_hash"])
@@ -520,6 +737,13 @@ DERIVED_PHASES: frozenset[str] = frozenset(
         # to infer it by subtracting other spans would be approximating the one
         # measurement that must not be approximate.
         "derived.post_canonical",
+        # The two halves of `derived.canonical_to_committed` (task 1.15), and
+        # the durable-defer arm of the semantic dispatch. Constants like every
+        # name above, so the vocabulary stays closed and a phase name still
+        # cannot carry a path.
+        "derived.fanout",
+        "derived.terminal_persist",
+        "derived.deferred_index_store",
     }
 )
 
@@ -586,6 +810,7 @@ def derived_diagnostics(vault_root: Any) -> dict[str, Any]:
         "fast_durable_ack": "inactive",
         "due_components": 0,
         "recoverable_batches": 0,
+        "stranded_batches": 0,
         "counters": derived_counters(),
         "pending_visibility": {},
         "last_drain_pass": {},
@@ -606,6 +831,7 @@ def derived_diagnostics(vault_root: Any) -> dict[str, Any]:
         diagnostics["recoverable_batches"] = derived_receipts.recoverable_batch_count(
             root
         )
+        diagnostics["stranded_batches"] = derived_receipts.stranded_batch_count(root)
     except Exception:  # noqa: BLE001
         diagnostics["unavailable"].append("custody_depth")
     try:

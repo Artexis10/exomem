@@ -45,6 +45,7 @@ from . import (
     reserved_paths,
     semantic_contract,
     semantic_writes,
+    tag_variants,
     temporal,
 )
 from . import find as find_module
@@ -254,8 +255,10 @@ def edit(
         fm_text = _set_or_append(fm_text, "updated", date_iso)
 
     # Patch tags: if provided.
+    tag_warnings: list[str] = []
     if tags is not None:
         tags_clean = _clean_tags(tags)
+        tag_warnings = tag_variants.advise_authored(vault_root, tags_clean)
         fm_text = _remove_yaml_key(fm_text, "tags")
         if tags_clean:
             fm_text = fm_text.rstrip() + "\ntags: [" + ", ".join(tags_clean) + "]"
@@ -378,7 +381,7 @@ def edit(
         date_iso=date_iso,
         why=why,
         changed=changed,
-        extra_warnings=body_warnings,
+        extra_warnings=body_warnings + tag_warnings,
         expected_before_hash=editable.semantic_before_hash,
         semantic_transition_token=semantic_transition_token,
         relation_disposition=relation_disposition,
@@ -430,12 +433,38 @@ def _existing_page_outside_kb(vault_root: Path, given: str) -> str | None:
     return rel if resolved.is_file() else None
 
 
+def _write_target_withheld(vault_root: Path, rel: str) -> bool:
+    from .governance import egress
+
+    return egress.write_target_withheld(vault_root, rel)
+
+
 def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     if not path or not path.strip():
         raise EditError(code="INVALID_PATH", missing=["path"], reason="path is empty")
     # Shared with `replace._resolve_kb_path` and the hosted protected-tree
     # guard. See `kbdir.kb_relative_form` for why this must not be inlined.
     candidate, rel = kb_page_target(vault_root, path)
+    # The literal (NFKC) spelling may be absent because the on-disk name is a
+    # different Unicode normalization -- a macOS-origin NFD name on a
+    # byte-exact filesystem (Linux ext4) -- or it may sit beside such a twin.
+    # Resolving never renames: see `reserved_paths.physical_spelling_refusal`.
+    # A collision is refused even when the NFKC spelling exists, so reads and
+    # writes agree on the path; a non-canonical name only when the NFKC
+    # spelling does not open, because a normalization-insensitive filesystem
+    # (APFS) opens it through the NFD name and that edit always worked.
+    refusal = reserved_paths.physical_spelling_refusal(vault_root, rel)
+    if refusal is not None and (refusal[0] == "AMBIGUOUS_PATH" or not candidate.exists()):
+        from .get_page import path_withheld
+
+        if path_withheld(vault_root, rel):
+            # A withheld page answers exactly like a missing one.
+            raise EditError(
+                code="NOT_FOUND",
+                missing=["path"],
+                reason=f"file does not exist: {rel}",
+            )
+        raise EditError(code=refusal[0], missing=["path"], reason=refusal[1])
     try:
         resolved = candidate.resolve()
         kb_relative = resolved.relative_to(kb_root(vault_root).resolve())
@@ -445,7 +474,9 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
             missing=["path"],
             reason=f"path escapes {kb_prefix()}: {e}",
         ) from None
-    if not candidate.exists():
+    # A page the caller may not see is answered exactly as a missing one, and
+    # never loaded (see `egress.write_target_withheld`).
+    if not candidate.exists() or _write_target_withheld(vault_root, rel):
         # The read side (`get_page`) accepts a vault-relative path and will read
         # a page living OUTSIDE the governed Knowledge Base/ root. Governed edits
         # re-root every bare path under Knowledge Base/, so a caller re-using
@@ -926,8 +957,28 @@ def commit_edit(
     # `write.*` service histograms are unconditional); only the response key
     # is gated.
     timings = MutationTimings()
+    from . import writer_lease
+
+    # The default sweep reads only the new body's bare paragraphs, and only when
+    # the body changed. Under fast acknowledgement the batch's `write_advisory`
+    # component runs it with these exact inputs; an edit that does not touch
+    # the body declares that it has no sweep, so it takes no advisory custody.
+    body_changed = any(item.startswith("body") for item in changed)
+    body_match = _FM_PATTERN.match(new_text)
+    advisory_inputs = (
+        corpus_aware.WriteAdvisoryInputs(
+            route="edit",
+            target_rel_path=rel_path,
+            self_path=rel_path,
+            body=body_match.group(2) if body_match is not None else new_text,
+        )
+        if body_changed
+        else None
+    )
     try:
-        with semantic_contract.call_context("write"):
+        with semantic_contract.call_context("write"), writer_lease.declare_write_advisory(
+            advisory_inputs
+        ):
             preflight = semantic_writes.preflight_existing(
                 vault_root,
                 path=rel_path,
@@ -964,27 +1015,23 @@ def commit_edit(
     # Suggestions are measurements, never dispositions. They run only after
     # the guarded semantic batch succeeds, so validation/blocking paths cannot
     # mutate model/cache state or spend embedding work.
-    body_changed = any(item.startswith("body") for item in changed)
-    if body_changed and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        match = _FM_PATTERN.match(new_text)
+    if (
+        advisory_inputs is not None
+        and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")
+        and not writer_lease.write_advisory_deferred(vault_root, advisory_inputs)
+    ):
         try:
-            candidates = corpus_aware.detect_contradictions(
-                vault_root,
-                title="",
-                body=match.group(2) if match is not None else new_text,
-                self_path=rel_path,
-            )
             warnings.extend(
-                corpus_aware.emit_write_advisory_groups(
-                    vault_root,
-                    self_path=rel_path,
-                    groups=corpus_aware.detected_overlap_advisory_groups(candidates),
-                )
+                emitted.warning
+                for emitted in corpus_aware.write_advisory_for(vault_root, advisory_inputs)
             )
         except Exception as error:  # noqa: BLE001 — nudges never break an edit
             log.debug(
                 "corpus-aware contradiction check failed (non-fatal): %s", error
             )
+    # The ledger gets the stages whatever the envelope flag says; see
+    # `MutationTimings.emit_call_spans`.
+    timings.emit_call_spans()
     return CommitEditResult(
         warnings,
         committed.as_dict(),

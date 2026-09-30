@@ -35,6 +35,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import (
     audit as audit_module,
@@ -48,7 +49,9 @@ from . import (
     semantic_units,
     semantic_writes,
     source_closure,
+    tag_variants,
     temporal,
+    vocabulary_resolution,
 )
 from . import (
     find as find_module,
@@ -75,6 +78,7 @@ from .vault import (
     resolve_filename_slug,
     rotate_log_if_needed,
     unique_path,
+    writer_link_visibility,
     yaml_scalar,
 )
 
@@ -261,6 +265,9 @@ class NoteResult:
             out["write_feedback"] = self.write_feedback
         if self.creation:
             out["creation"] = self.creation
+            resolution = self.creation.get("vocabulary_resolution")
+            if isinstance(resolution, dict):
+                out["vocabulary_resolution"] = resolution
         return out
 
 
@@ -596,6 +603,7 @@ def _legacy_note(
     date_iso = temporal.render_date(now)
     stamp_iso = temporal.stamp(now)
     tags_clean = _clean_tags(tags)
+    tag_warnings = tag_variants.advise_authored(vault_root, tags_clean)
     exomem_id = memory_refs.new_id()
 
     note_path = _resolve_path(
@@ -756,6 +764,7 @@ def _legacy_note(
         + list(source_warnings)
         + list(body_warnings)
         + list(advisory_warnings)
+        + tag_warnings
     )
     if not sources_norm:
         provenance_warning = _empty_sources_warning(note_type)
@@ -1124,9 +1133,8 @@ def _resolve_path(
 
 
 def _domain_folder(domain: str) -> str:
-    """Lowercase domain to subfolder name. Sanitize to avoid path traversal."""
-    safe = re.sub(r"[^a-z0-9-]", "", domain.strip().lower())
-    return safe or "misc"
+    """Return the strict resolver's already-validated path projection exactly."""
+    return domain
 
 
 def _medium_folder(medium: str) -> str:
@@ -1315,6 +1323,7 @@ def _normalize_sources(
     """
     if not sources:
         return [], []
+    visible = writer_link_visibility(vault_root)
     out: list[str] = []
     seen: set[str] = set()
     warnings: list[str] = []
@@ -1338,7 +1347,7 @@ def _normalize_sources(
                 warning = "stable source reference is unavailable"
         else:
             canonical, warning = normalize_wikilink(
-                cleaned, vault_root, resolver=resolver, strict=False
+                cleaned, vault_root, resolver=resolver, strict=False, visible=visible
             )
             if warning:
                 canonical = cleaned
@@ -1379,6 +1388,7 @@ def _normalize_bridge_sources(
                 vault_root,
                 resolver=resolver,
                 strict=False,
+                visible=writer_link_visibility(vault_root),
             )
             if warning or not canonical:
                 raise NoteError(
@@ -1601,6 +1611,7 @@ def note(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: dict[str, Any] | None = None,
     _return_prepared: bool = False,
     _supersedes_target: str | None = None,
     _preflight_operation: str = "create",
@@ -1621,6 +1632,7 @@ def note(
 
     key_candidates = [value for value in ([project] + list(projects or [])) if value]
     token_value: semantic_writes.DraftToken | None = None
+    domain_binding: vocabulary_resolution.DomainBinding | None = None
     replay: tuple[project_keys_module.ProjectKeyIntroduction, ...] = ()
     if draft_token is not None:
         try:
@@ -1629,6 +1641,19 @@ def note(
             raise NoteError(error.code, ["draft_token"], error.reason) from error
         if token_value.writer != "note" or token_value.operation != _preflight_operation:
             raise NoteError("INVALID_DRAFT_TOKEN", ["draft_token"], "draft token writer mismatch")
+        if note_type == "experiment":
+            if token_value.vocabulary_binding is None:
+                raise NoteError(
+                    "STALE_VOCABULARY_BINDING",
+                    ["draft_token"],
+                    "experiment draft requires fresh vocabulary validation",
+                )
+            try:
+                domain_binding = vocabulary_resolution.binding_from_dict(
+                    root, token_value.vocabulary_binding
+                )
+            except vocabulary_resolution.VocabularyResolutionError as error:
+                raise NoteError(error.code, ["domain"], error.reason, error.details) from error
         replay = tuple(
             project_keys_module.ProjectKeyIntroduction(item.key, item.folder, item.category)
             for item in token_value.registrations
@@ -1670,6 +1695,20 @@ def note(
     )
     if err is not None:
         raise NoteError(err.code, err.missing, err.reason)
+    if note_type == "experiment" and domain_binding is None:
+        try:
+            domain_binding = vocabulary_resolution.resolve_notes_domain(
+                root, domain, decision=vocabulary_decision
+            )
+        except vocabulary_resolution.VocabularyResolutionError as error:
+            preparation = error.details.get("vocabulary_preparation")
+            if error.code == "VOCABULARY_DECISION_REQUIRED" and isinstance(preparation, dict):
+                return vocabulary_resolution.VocabularyPreparation(preparation)
+            if error.code == "VOCABULARY_DEFERRED":
+                return vocabulary_resolution.VocabularyPreparation(
+                    {"family": "domain", "requested": str(domain)}, deferred=True
+                )
+            raise NoteError(error.code, ["domain"], error.reason, error.details) from error
 
     identity = draft_id or memory_refs.new_id()
     # The draft token pins the *path* date across the draft->commit gap, so a
@@ -1689,7 +1728,7 @@ def note(
             note_type=note_type,
             project=project,
             slug=filename_slug,
-            domain=domain,
+            domain=domain_binding.destination if domain_binding is not None else domain,
             medium=medium,
             started=started,
             date_iso=render_date,
@@ -1708,6 +1747,7 @@ def note(
             render_date,
             registrations,
             render_stamp=stamp_iso,
+            vocabulary_binding=(domain_binding.as_dict() if domain_binding is not None else None),
         )
         encoded_token = token_value.encode()
     else:
@@ -1725,6 +1765,7 @@ def note(
     )
     body_clean, body_warnings = normalize_body_wikilinks(content, root, resolver=resolver)
     tags_clean = _clean_tags(tags)
+    tag_warnings = tag_variants.advise_authored(root, tags_clean)
     source = _render_note(
         note_type=note_type,
         title=title,
@@ -1737,7 +1778,7 @@ def note(
         content=body_clean,
         severity=severity,
         pattern_type=pattern_type,
-        domain=domain,
+        domain=domain_binding.canonical if domain_binding is not None else domain,
         started=started,
         duration=duration,
         hypothesis=hypothesis,
@@ -1773,6 +1814,7 @@ def note(
             relation_disposition=relation_disposition,
             predecessor_path=_predecessor_path,
             predecessor_content_hash=_predecessor_content_hash,
+            vocabulary_binding=domain_binding,
         )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
         raise NoteError(
@@ -1784,7 +1826,7 @@ def note(
     preflight_ms = (time.perf_counter() - write_started) * 1000.0
     if draft_hash is not None and preflight.draft_hash != draft_hash:
         raise NoteError("DRAFT_HASH_MISMATCH", ["draft_hash"], "draft requires fresh validation")
-    warnings = list(slug_warnings) + list(source_warnings) + list(body_warnings)
+    warnings = list(slug_warnings) + list(source_warnings) + list(body_warnings) + tag_warnings
     if not sources_norm:
         provenance_warning = _empty_sources_warning(note_type)
         if provenance_warning is not None:
@@ -1801,6 +1843,7 @@ def note(
     backrefs_planned = len(sources_norm)
 
     kb = kb_root(root)
+    canonical_domain = domain_binding.canonical if domain_binding is not None else domain
     activity_summary = _activity_summary(
         rel_note_no_ext=rel_note_no_ext,
         title=title,
@@ -1809,7 +1852,7 @@ def note(
         projects=projects,
         severity=severity,
         pattern_type=pattern_type,
-        domain=domain,
+        domain=canonical_domain,
         medium=medium,
         status=status,
     )
@@ -1846,7 +1889,7 @@ def note(
                 sources=sources_norm,
                 severity=severity,
                 pattern_type=pattern_type,
-                domain=domain,
+                domain=canonical_domain,
                 medium=medium,
                 status=status,
                 started=started,
@@ -1888,16 +1931,29 @@ def note(
             encoded_token,
         )
     commit_started = time.perf_counter()
+    from . import writer_lease
+
+    advisory_inputs = corpus_aware.WriteAdvisoryInputs(
+        route="remember",
+        target_rel_path=destination,
+        self_path=rel_note_no_ext,
+        title=title,
+        body=body_clean,
+        note_type=note_type,
+    )
     try:
-        committed = semantic_writes.commit_creation(
-            root,
-            preflight=preflight,
-            auxiliary_writes=tuple(auxiliary),
-            relation_disposition=relation_disposition,
-            relation_review_hash=relation_review_hash,
-            relation_review_reason=relation_review_reason,
-            operation="create",
-        )
+        # Under fast acknowledgement the default sweep below is handed to the
+        # batch's `write_advisory` component with these exact inputs.
+        with writer_lease.declare_write_advisory(advisory_inputs):
+            committed = semantic_writes.commit_creation(
+                root,
+                preflight=preflight,
+                auxiliary_writes=tuple(auxiliary),
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
+                operation="create",
+            )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
         raise NoteError(
             error.code,
@@ -1919,8 +1975,13 @@ def note(
     # The near-dup/contradiction sweep is a dedupe guardrail and stays on in
     # every mode (locked by tests/test_note_suggestions_knob.py). Its latency
     # lives inside the widened edge budget; `note write timings ...
-    # advisory_ms` keeps both attributable when they grow.
-    if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+    # advisory_ms` keeps both attributable when they grow. Under fast durable
+    # acknowledgement the sweep still runs, but not here: the batch's
+    # `write_advisory` component runs it with the same inputs, and the terminal
+    # carries its exact result reference.
+    if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and not (
+        writer_lease.write_advisory_deferred(root, advisory_inputs)
+    ):
         try:
             if suggestions:
                 corpus_suggestions = [
@@ -1935,30 +1996,12 @@ def note(
                     )
                     if item.path != destination
                 ]
-            cosines = corpus_aware._best_cosine_per_file(root, title=title, body=body_clean)
-            duplicate_candidates = corpus_aware.detect_duplicates(
-                root,
-                title=title,
-                body=body_clean,
-                self_path=rel_note_no_ext,
-                types_filter=[note_type],
-                precomputed=cosines,
-            )
-            overlap_candidates = corpus_aware.detect_contradictions(
-                root,
-                title=title,
-                body=body_clean,
-                self_path=rel_note_no_ext,
-                precomputed=cosines,
-            )
-            advisory_warnings = corpus_aware.emit_write_advisory_groups(
-                root,
-                self_path=rel_note_no_ext,
-                groups=[
-                    ("near-duplicate", duplicate_candidates),
-                    *corpus_aware.detected_overlap_advisory_groups(overlap_candidates),
-                ],
-            )
+            # Post-commit: the commit just published this page's chunk vectors,
+            # so the sweep reads them back instead of encoding the draft again.
+            advisory_warnings = [
+                emitted.warning
+                for emitted in corpus_aware.write_advisory_for(root, advisory_inputs)
+            ]
         except Exception:  # noqa: BLE001 — optional suggestions are best-effort
             log.debug("corpus-aware nudges failed (non-fatal)", exc_info=True)
     warnings.extend(advisory_warnings)

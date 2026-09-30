@@ -801,7 +801,7 @@ def _authorize_operation(
         who = _principal(kwargs.get("principal"))
         if who.verified_authorization_session is None:
             if (
-                store.authorization_session_schema_version(vault_root)
+                store.authorization_session_schema_version_if_readable(vault_root)
                 != store.SCHEMA_USER_VERSION
             ):
                 raise GovernanceError(
@@ -1194,7 +1194,7 @@ def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         )
     patterns = sorted(set(raw_patterns))
     now = float(kwargs.get("now", time.time()))
-    schema_version = store.authorization_session_schema_version(vault_root)
+    schema_version = store.authorization_session_schema_version_if_readable(vault_root)
     active_snapshot = (
         _v4_active_policy_snapshot(vault_root, now=int(now))
         if schema_version == schema_v4.SCHEMA_USER_VERSION
@@ -4890,7 +4890,7 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     if not proposal_id:
         raise GovernanceError("PROPOSAL_UNKNOWN", "proposal_id is required")
     now = float(kwargs.get("now", time.time()))
-    if store.authorization_session_schema_version(vault_root) == schema_v4.SCHEMA_USER_VERSION:
+    if store.authorization_session_schema_version_if_readable(vault_root) == schema_v4.SCHEMA_USER_VERSION:
         connection = store.open_authorization_session_connection(vault_root)
         try:
             row = connection.execute(
@@ -5971,7 +5971,7 @@ def _toggle_rules(vault_root: Path, operation: str, **kwargs: Any) -> dict[str, 
         raise GovernanceError("INVALID_RULE_SET", "rule_ids must be a non-empty list")
     rule_ids = set(raw_ids)
     now = float(kwargs.get("now", time.time()))
-    schema_version = store.authorization_session_schema_version(vault_root)
+    schema_version = store.authorization_session_schema_version_if_readable(vault_root)
     if schema_version == schema_v4.SCHEMA_USER_VERSION:
         request_digest = _active_semantic_request_digest()
         recovered = _resume_v4_semantic_policy_operation(
@@ -6180,7 +6180,7 @@ def _undo(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     if reconciliation["blocked"]:
         raise GovernanceError("GOVERNANCE_BLOCKED", "pending operation needs manual repair")
     now = float(kwargs.get("now", time.time()))
-    if store.authorization_session_schema_version(vault_root) == schema_v4.SCHEMA_USER_VERSION:
+    if store.authorization_session_schema_version_if_readable(vault_root) == schema_v4.SCHEMA_USER_VERSION:
         request_digest = _active_semantic_request_digest()
         recovered = _resume_v4_semantic_policy_operation(
             vault_root,

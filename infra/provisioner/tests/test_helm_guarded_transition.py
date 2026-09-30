@@ -8,17 +8,96 @@ import pytest
 from test_provider_adapters import _metadata
 
 from exomem_provisioner.adapters import HelmCliAdapter
+from exomem_provisioner.conflict_reason import ConflictReason
 from exomem_provisioner.driver import DriverRetryable
 from exomem_provisioner.lifecycle import MetadataConflict
 from exomem_provisioner.repository import ClaimConflict
 
+CHART = "exomem-cell-0.1.0"
+CHART_YAML = "apiVersion: v2\nname: exomem-cell\ndescription: One cell.\nversion: 0.1.0\n"
+TARGET = {"workloadMode": "serve", "image": "target"}
+
+
+class ApiError(Exception):
+    def __init__(self, status: int) -> None:
+        super().__init__("private-provider-sentinel")
+        self.status = status
+
+
+class HelmReleaseConfigMaps:
+    """Only the two Kubernetes calls the pending-record cleanup is allowed to make.
+
+    Deletion answers the way a real apiserver did: the UID and resourceVersion
+    preconditions are enforced, and a request carrying a propagation policy takes
+    the finalizer path, which leaves the record listed and terminating instead of
+    removing it -- exactly the state Helm's ConfigMap driver still reports.
+    """
+
+    def __init__(self, history: list[dict]):
+        self.history = history
+        self.reads: list[tuple[str, str]] = []
+        self.deletes: list[tuple[str, str, dict]] = []
+        self.records: dict[str, SimpleNamespace] = {}
+        self.delete_error: Exception | None = None
+
+    def record(
+        self,
+        name: str,
+        *,
+        namespace: str,
+        labels: dict[str, str],
+        deletion_timestamp: str | None = None,
+    ) -> None:
+        self.records[name] = SimpleNamespace(
+            metadata=SimpleNamespace(
+                name=name,
+                namespace=namespace,
+                uid="uid-" + name,
+                resource_version="rv-" + name,
+                labels=labels,
+                deletion_timestamp=deletion_timestamp,
+            )
+        )
+
+    def read_namespaced_config_map(self, name, namespace):
+        self.reads.append((name, namespace))
+        if name not in self.records:
+            raise ApiError(404)
+        return self.records[name]
+
+    def delete_namespaced_config_map(self, name, namespace, body=None):
+        self.deletes.append((name, namespace, body))
+        if self.delete_error is not None:
+            raise self.delete_error
+        record = self.records.get(name)
+        preconditions = (body or {}).get("preconditions", {})
+        if (
+            record is None
+            or preconditions.get("uid") != record.metadata.uid
+            or preconditions.get("resourceVersion") != record.metadata.resource_version
+        ):
+            raise ApiError(409)
+        if (body or {}).get("propagationPolicy") is not None:
+            record.metadata.deletion_timestamp = "2026-09-09T00:00:00Z"
+            return
+        self.records.pop(name, None)
+        revision = int(name.rsplit(".v", 1)[1])
+        self.history[:] = [item for item in self.history if item["revision"] != revision]
+
 
 class HelmTransport:
-    def __init__(self, tmp_path: Path):
+    def __init__(self, tmp_path: Path, *, with_client: bool = True):
         self.calls = []
         self.lost = False
         self.fail = None
         self.current = {"workloadMode": "serve", "image": "old"}
+        self.history = [{"revision": 1, "status": "deployed", "chart": CHART}]
+        self.revision_values: dict[int, dict] = {}
+        self.history_failure: tuple[int, str] | None = None
+        self.revision_values_failure: tuple[int, str] | None = None
+        self.chart_yaml = CHART_YAML
+        self.chart_failure: tuple[int, str] | None = None
+        self.core = HelmReleaseConfigMaps(self.history)
         self.adapter = HelmCliAdapter(
             binary="helm",
             expected_version="3.19.4",
@@ -26,17 +105,57 @@ class HelmTransport:
             chart_version="0.1.0",
             runner=self.run,
             temporary_directory=tmp_path,
+            core_v1=self.core if with_client else None,
         )
 
+    def leave_pending(self, status, *, revision, values=None, chart=CHART, record=True):
+        """Arm the record a provisioner killed mid `helm upgrade --wait` leaves behind."""
+        namespace = _metadata().resource_name
+        if status == "pending-install":
+            self.history[:] = []
+        self.history.append({"revision": revision, "status": status, "chart": chart})
+        self.revision_values[revision] = TARGET if values is None else values
+        name = f"sh.helm.release.v1.{namespace}.v{revision}"
+        if record:
+            self.core.record(
+                name,
+                namespace=namespace,
+                labels={
+                    "owner": "helm",
+                    "name": namespace,
+                    "status": status,
+                    "version": str(revision),
+                },
+            )
+        return name
+
     async def run(self, argv, environment):
-        assert environment == {"HELM_DRIVER": "configmap"}
+        assert environment == {"HELM_DRIVER": "configmap", "HELM_DEBUG": "false"}
         self.calls.append(argv)
         if argv[1] == "version":
             stdout = "v3.19.4\n"
+        elif argv[1:3] == ("show", "chart"):
+            if self.chart_failure is not None:
+                code, message = self.chart_failure
+                return SimpleNamespace(returncode=code, stdout="", stderr=message)
+            stdout = self.chart_yaml
         elif argv[1:3] == ("get", "values"):
-            stdout = json.dumps(self.current)
+            if "--revision" in argv:
+                if self.revision_values_failure is not None:
+                    code, message = self.revision_values_failure
+                    return SimpleNamespace(returncode=code, stdout="", stderr=message)
+                stdout = json.dumps(self.revision_values[int(argv[argv.index("--revision") + 1])])
+            else:
+                stdout = json.dumps(self.current)
         elif argv[1] == "history":
-            stdout = json.dumps([{"revision": 1, "status": "deployed"}])
+            if self.history_failure is not None:
+                code, message = self.history_failure
+                return SimpleNamespace(returncode=code, stdout="", stderr=message)
+            if not self.history:
+                return SimpleNamespace(
+                    returncode=1, stdout="", stderr="Error: release: not found\n"
+                )
+            stdout = json.dumps(self.history)
         else:
             assert argv[1] == "upgrade"
             values_path = Path(argv[argv.index("--values") + 1])
@@ -81,6 +200,35 @@ async def test_guard_runs_after_predecessor_reads_and_immediately_before_helm_up
     assert "--atomic" not in h.calls[-1]
     assert "--wait" in h.calls[-1] and "--wait-for-jobs" in h.calls[-1]
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_governance_storage_shell_apply_does_not_wait_for_first_consumer(tmp_path):
+    h = HelmTransport(tmp_path)
+    await h.adapter.ensure_release(
+        _metadata(),
+        {"workloadMode": "restore", "migrationMode": "none", "image": "target"},
+        rollback_on_failure=False,
+        effect_guard=h.guard,
+        wait_for_ready=False,
+    )
+    command = h.calls[-1]
+    assert command[1] == "upgrade"
+    assert "--wait" not in command and "--wait-for-jobs" not in command
+    assert "--atomic" not in command
+    assert h.calls[-2] == ("guard",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("values", [TARGET, {"workloadMode": "initialize", "migrationMode": "none"}])
+async def test_nonwaiting_helm_refuses_other_workload_modes(tmp_path, values):
+    h = HelmTransport(tmp_path)
+    with pytest.raises(MetadataConflict):
+        await h.adapter.ensure_release(
+            _metadata(), values, rollback_on_failure=False, effect_guard=h.guard,
+            wait_for_ready=False,
+        )
+    assert not any(len(call) > 1 and call[1] == "upgrade" for call in h.calls)
 
 
 @pytest.mark.asyncio
@@ -167,3 +315,596 @@ async def test_guard_error_is_not_reclassified_as_an_uncertain_helm_effect(tmp_p
         await h.transition("ensure", rollback_on_failure=False, effect_guard=guard)
     assert not any(call[1:2] == ("upgrade",) for call in h.calls)
     assert not list(tmp_path.iterdir())
+
+
+def _upgrades(transport: HelmTransport) -> int:
+    return sum(call[1:2] == ("upgrade",) for call in transport.calls)
+
+
+@pytest.mark.asyncio
+async def test_own_pending_upgrade_record_is_cleared_once_then_the_exact_target_retried(
+    tmp_path,
+):
+    h = HelmTransport(tmp_path)
+    name = h.leave_pending("pending-upgrade", revision=2)
+    # The same values, written back in a different key order: equality is canonical.
+    h.revision_values[2] = dict(reversed(list(TARGET.items())))
+
+    await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    # Verbatim: no propagation policy, so the record leaves at once instead of
+    # lingering behind a foreground finalizer that the clearance proof would see.
+    assert h.core.deletes == [
+        (
+            name,
+            _metadata().resource_name,
+            {"preconditions": {"uid": "uid-" + name, "resourceVersion": "rv-" + name}},
+        )
+    ]
+    assert h.calls[h.calls.index(("guard",)) + 1][1] != "upgrade"
+    assert h.calls[-2] == ("guard",) and h.calls[-1][1] == "upgrade"
+    assert _upgrades(h) == 1
+    assert h.history == [{"revision": 1, "status": "deployed", "chart": CHART}]
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_own_pending_install_record_is_cleared_with_no_deployed_predecessor(tmp_path):
+    h = HelmTransport(tmp_path)
+    name = h.leave_pending("pending-install", revision=1)
+
+    await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert [call[0] for call in h.core.deletes] == [name]
+    assert h.history == []
+    assert _upgrades(h) == 1
+    assert "--install" in h.calls[-1]
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pending",
+    [
+        {"values": {"workloadMode": "serve", "image": "someone-elses"}},
+        {"chart": "exomem-cell-0.2.0"},
+    ],
+)
+async def test_foreign_pending_release_is_terminal_without_a_delete_or_an_upgrade(
+    tmp_path, pending
+):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-upgrade", revision=2, **pending)
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_a_pending_record_behind_the_latest_revision_is_never_cleared(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.history[:] = [
+        {"revision": 1, "status": "pending-upgrade", "chart": CHART},
+        {"revision": 2, "status": "deployed", "chart": CHART},
+    ]
+    h.revision_values[1] = dict(TARGET)
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error", [ApiError(409), ApiError(503), OSError("private-provider-sentinel")]
+)
+async def test_a_lost_delete_acknowledgement_is_retryable_and_never_deleted_twice(tmp_path, error):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-upgrade", revision=2)
+    h.core.delete_error = error
+
+    with pytest.raises(DriverRetryable) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert "private-provider-sentinel" not in str(raised.value)
+    assert len(h.core.deletes) == 1
+    assert _upgrades(h) == 0
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_an_unproven_pending_removal_is_retryable_and_never_upgrades(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-upgrade", revision=2)
+    h.core.records.clear()  # the API acknowledges nothing; the record still stands
+
+    with pytest.raises(DriverRetryable):
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_lost_claim_prevents_the_pending_record_delete(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-upgrade", revision=2)
+    h.lost = True
+
+    with pytest.raises(ClaimConflict, match="claim lost"):
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_an_ungoverned_call_never_touches_a_pending_record(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-upgrade", revision=2)
+
+    await h.transition("ensure")
+
+    assert h.core.reads == [] and h.core.deletes == []
+    assert _upgrades(h) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_terminating_release_record_is_uncertain_and_never_deleted_again(tmp_path):
+    h = HelmTransport(tmp_path)
+    name = h.leave_pending("pending-upgrade", revision=2)
+    h.core.records[name].metadata.deletion_timestamp = "2026-09-09T00:00:00Z"
+
+    with pytest.raises(DriverRetryable):
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_relabelled_release_record_is_uncertain_rather_than_foreign(tmp_path):
+    h = HelmTransport(tmp_path)
+    name = h.leave_pending("pending-upgrade", revision=2)
+    h.core.records[name].metadata.labels = dict(
+        h.core.records[name].metadata.labels, status="deployed"
+    )
+
+    with pytest.raises(DriverRetryable):
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_release_that_was_never_recorded_lets_the_governed_install_proceed(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.history_failure = (1, "Error: release: not found\n")
+
+    await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.reads == [] and h.core.deletes == []
+    assert _upgrades(h) == 1
+    assert "--install" in h.calls[-1]
+
+
+@pytest.mark.asyncio
+async def test_helm_debug_is_pinned_off_so_the_absent_line_stays_last(tmp_path):
+    # With HELM_DEBUG inherited from the pod environment, Helm appends a
+    # stack dump after the `Error:` line, so an absent release would read as
+    # uncertain forever. Every Helm call therefore pins the flag off.
+    class Recording(HelmTransport):
+        environments: list[dict[str, str]] = []
+
+        async def run(self, argv, environment):
+            self.environments.append(dict(environment))
+            return await super().run(argv, environment)
+
+    h = Recording(tmp_path)
+    h.history_failure = (1, "Error: release: not found\n")
+
+    await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.environments and all(
+        env["HELM_DEBUG"] == "false" and env["HELM_DRIVER"] == "configmap" for env in h.environments
+    )
+    assert _upgrades(h) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_absent_release_is_recognized_only_by_its_exact_error_line(tmp_path):
+    h = HelmTransport(tmp_path)
+    # Helm prints kubeconfig warnings ahead of the error on the same stream.
+    h.history_failure = (
+        1,
+        "WARNING: Kubernetes configuration file is group-readable. "
+        "This is insecure. Location: /tmp/kubeconfig\n"
+        "Error: release: not found\n",
+    )
+
+    await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.reads == [] and h.core.deletes == []
+    assert _upgrades(h) == 1
+    assert "--install" in h.calls[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "Error: query: failed to query with labels: release: not found\n",
+        "Error: release: not found: context deadline exceeded\n",
+        "Error: release: not found\nError: Kubernetes cluster unreachable\n",
+        "error: release: not found\n",
+    ],
+)
+async def test_a_history_error_that_merely_mentions_absence_stays_uncertain(tmp_path, stderr):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-upgrade", revision=2)
+    h.history_failure = (1, stderr)
+
+    with pytest.raises(DriverRetryable):
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.reads == [] and h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rollback", [True, False])
+async def test_an_unanswered_history_read_never_walks_into_the_helm_lock(tmp_path, rollback):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-upgrade", revision=2)
+    h.history_failure = (1, "Error: Kubernetes cluster unreachable: i/o timeout\n")
+
+    with pytest.raises(DriverRetryable):
+        await h.transition("ensure", rollback_on_failure=rollback, effect_guard=h.guard)
+
+    assert h.core.reads == [] and h.core.deletes == []
+    assert _upgrades(h) == 0
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_an_unanswered_revision_values_read_is_retryable_not_terminal(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-upgrade", revision=2)
+    h.revision_values_failure = (1, "Error: Kubernetes cluster unreachable: i/o timeout\n")
+
+    with pytest.raises(DriverRetryable):
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_invalid_revision_values_stay_terminal(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-upgrade", revision=2, values=["not", "an", "object"])
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HISTORICAL_HELM_VALUES_ARE_INVALID
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_helm_number_coercion_still_authenticates_the_operations_own_record(tmp_path):
+    class FloatTarget(HelmTransport):
+        async def transition(self, api, **kwargs):
+            return await self.adapter.ensure_release(
+                _metadata(), {"workloadMode": "serve", "image": "target", "n": 5.0}, **kwargs
+            )
+
+    h = FloatTarget(tmp_path)
+    # Helm stores numbers as float64 and re-emits an integral one without its
+    # fractional part; that is the same value, not a foreign record.
+    name = h.leave_pending(
+        "pending-upgrade",
+        revision=2,
+        values={"workloadMode": "serve", "image": "target", "n": 5},
+    )
+
+    await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert [call[0] for call in h.core.deletes] == [name]
+    assert _upgrades(h) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_pending_install_under_a_foreign_chart_name_is_refused(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-install", revision=1, chart="totally-other-chart-0.1.0")
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["no-name", "two-names", "cli-failure", "oversized"])
+async def test_an_unreadable_pinned_chart_is_a_terminal_wiring_defect(tmp_path, shape):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-upgrade", revision=2)
+    if shape == "no-name":
+        h.chart_yaml = "apiVersion: v2\nversion: 0.1.0\n"
+    elif shape == "two-names":
+        h.chart_yaml = CHART_YAML + "name: other\n"
+    elif shape == "cli-failure":
+        h.chart_failure = (1, 'Error: path "chart" not found\n')
+    else:
+        h.chart_yaml = CHART_YAML + "description: " + "x" * 70_000 + "\n"
+
+    # The chart is baked into the provisioner image; it cannot become readable
+    # by waiting, so retrying with the routes closed only hides the defect.
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PINNED_CHART_IS_UNREADABLE
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_non_adjacent_deployed_predecessor_is_a_recovered_state(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.history[:] = [
+        {"revision": 1, "status": "deployed", "chart": CHART},
+        {"revision": 2, "status": "failed", "chart": CHART},
+    ]
+    name = h.leave_pending("pending-upgrade", revision=3)
+
+    await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert [call[0] for call in h.core.deletes] == [name]
+    assert _upgrades(h) == 1
+    assert [item["revision"] for item in h.history] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_a_reconcile_without_a_release_record_client_is_terminal(tmp_path):
+    h = HelmTransport(tmp_path, with_client=False)
+    h.leave_pending("pending-upgrade", revision=2)
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_RELEASE_RECORD_CLIENT_IS_UNAVAILABLE
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+def _failed_only(h: HelmTransport, *, attempts: int, chart: str = CHART) -> None:
+    """Arm the history a first provision that never once succeeded leaves behind.
+
+    Every attempt timed out waiting on a claim no consumer could bind, so the
+    retained history holds failed revisions and no deployed predecessor at all.
+    """
+    h.history[:] = [
+        {"revision": revision, "status": "failed", "chart": chart}
+        for revision in range(1, attempts + 1)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_own_pending_upgrade_is_cleared_when_every_earlier_attempt_failed(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    name = h.leave_pending("pending-upgrade", revision=4)
+
+    await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert [call[0] for call in h.core.deletes] == [name]
+    assert [item["status"] for item in h.history] == ["failed"] * 3
+    assert _upgrades(h) == 1
+    assert h.calls[-2] == ("guard",) and h.calls[-1][1] == "upgrade"
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_a_failed_only_history_still_refuses_a_differing_recorded_target(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    h.leave_pending("pending-upgrade", revision=4, values={"workloadMode": "serve", "image": "x"})
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_only_history_carrying_a_foreign_chart_is_refused(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=2)
+    h.history[0]["chart"] = "exomem-cell-0.2.0"
+    h.leave_pending("pending-upgrade", revision=3)
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_second_pending_record_in_a_failed_only_history_is_refused(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=2)
+    h.leave_pending("pending-upgrade", revision=3)
+    h.leave_pending("pending-upgrade", revision=4)
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_pending_record_behind_a_failed_latest_revision_is_never_cleared(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.history[:] = [
+        {"revision": 1, "status": "pending-upgrade", "chart": CHART},
+        {"revision": 2, "status": "failed", "chart": CHART},
+    ]
+    h.revision_values[1] = dict(TARGET)
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_revision_in_a_failed_only_history_stays_retryable(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    h.leave_pending("pending-upgrade", revision=4)
+    h.revision_values_failure = (1, "Error: release: not found\n")
+
+    with pytest.raises(DriverRetryable):
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+def _identity() -> dict:
+    from exomem_provisioner.lifecycle import provider_identity_values
+
+    return provider_identity_values(_metadata())
+
+
+def _owned_values() -> dict:
+    identity = _identity()
+    return {**TARGET, "providerIdentity": identity, "initOperationId": identity["operationId"]}
+
+
+@pytest.mark.asyncio
+async def test_recovery_reads_retained_records_as_its_own_from_their_identity(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    h.leave_pending("pending-upgrade", revision=4, values=_owned_values())
+
+    assert await h.adapter.retained_records_are_own(_metadata(), identity=_identity()) is True
+    # Read-only: nothing was deleted and no upgrade was attempted.
+    assert h.core.deletes == [] and _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_recovery_refuses_retained_records_carrying_another_identity(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    foreign = {**_owned_values(), "providerIdentity": {**_identity(), "fence": "99"}}
+    h.leave_pending("pending-upgrade", revision=4, values=foreign)
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.adapter.retained_records_are_own(_metadata(), identity=_identity())
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_refuses_a_retained_history_holding_another_chart(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    h.history[0]["chart"] = "exomem-cell-0.2.0"
+    h.leave_pending("pending-upgrade", revision=4, values=_owned_values())
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.adapter.retained_records_are_own(_metadata(), identity=_identity())
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+
+
+@pytest.mark.asyncio
+async def test_recovery_accepts_a_retained_history_with_nothing_abandoned(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+
+    assert await h.adapter.retained_records_are_own(_metadata(), identity=_identity()) is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_accepts_a_release_that_was_never_recorded(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.history[:] = []
+
+    assert await h.adapter.retained_records_are_own(_metadata(), identity=_identity()) is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_refuses_retained_records_whose_init_operation_differs(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    h.leave_pending(
+        "pending-upgrade",
+        revision=4,
+        values={**_owned_values(), "initOperationId": "other-operation"},
+    )
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.adapter.retained_records_are_own(_metadata(), identity=_identity())
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "history",
+    [
+        # A pending install may never sit on top of any other retained revision.
+        [
+            {"revision": 1, "status": "failed", "chart": CHART},
+            {"revision": 2, "status": "pending-install", "chart": CHART},
+        ],
+        # A deployed predecessor, when one exists, must be exactly one.
+        [
+            {"revision": 1, "status": "deployed", "chart": CHART},
+            {"revision": 2, "status": "deployed", "chart": CHART},
+            {"revision": 3, "status": "pending-upgrade", "chart": CHART},
+        ],
+    ],
+)
+async def test_recovery_refuses_every_history_the_apply_refuses_on_structure(tmp_path, history):
+    h = HelmTransport(tmp_path)
+    h.history[:] = [dict(item) for item in history]
+    newest = history[-1]["revision"]
+    # Carries this operation's identity, so only the structural rule can refuse it.
+    h.revision_values[newest] = _owned_values()
+
+    with pytest.raises(MetadataConflict) as preflight:
+        await h.adapter.retained_records_are_own(_metadata(), identity=_identity())
+    assert preflight.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+
+    # Matches the target exactly, so only the structural rule can refuse the apply.
+    h.revision_values[newest] = dict(TARGET)
+    with pytest.raises(MetadataConflict) as applied:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+    assert applied.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == [] and _upgrades(h) == 0

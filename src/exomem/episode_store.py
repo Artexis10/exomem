@@ -1,0 +1,456 @@
+"""Internal episode history owned by the existing curation persistence boundary.
+
+Only trusted owners may call this module, after authorizing retention/disclosure
+of all supplied evidence and intent. It supplies no public API, permission grant,
+evidence resolver or executor. Reconstructed coverage is historical, not current.
+Accepted events preserve verified commitments without replaying mutable readback.
+The hash chain detects corruption; it is not authentication against a vault owner.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+from . import curation
+from . import episode_model as model
+from .episode_reconciliation import current_coverage, reconcile_curation_leaf
+from .vault import (
+    BatchWriteError,
+    ContentHashMismatchError,
+    CreateOnlyConflict,
+    PlannedWrite,
+    batch_atomic_write,
+)
+from .writer_lease import active_manager
+
+MAX_TRANSITIONS = 512
+MAX_JOURNAL_BYTES = curation.MAX_PLAN_BYTES * 4
+#: Journal and state bytes held back per uncertain leaf, so its reconcile fits.
+RECONCILE_RESERVE_BYTES = 4 * 1024
+_FIELDS = {
+    "append_input_revision": {"input_evidence"},
+    "declare_candidate": {"key"},
+    "revise_proposal": {"candidate", "proposal"},
+    "set_disposition": {"candidate", "disposition", "reason"},
+    "bind_curation_leaf": {
+        "candidate",
+        "leaf",
+        "run_id",
+        "plan_id",
+        "plan_fingerprint",
+        "ordinal",
+    },
+    "attest_precommit": {"input_revision"},
+    "mark_attempt_started": {"candidate", "leaf"},
+    "reconcile_curation_leaf": {"candidate", "leaf"},
+    "attest_postcommit": {"input_revision", "leaf_ids"},
+}
+
+
+def _error(code: str, reason: str) -> model.EpisodeError:
+    return model.EpisodeError(code, reason)
+
+
+def _uncertain(state: Mapping[str, Any]) -> int:
+    return sum(
+        leaf["outcome"] == "uncertain"
+        for candidate in state["candidates"]
+        for leaf in candidate["leaves"]
+    )
+
+
+def _byte_room(journal: Mapping[str, Any], state: Mapping[str, Any], reserved: int) -> int:
+    """Bytes the journal and the state can both still take beyond `reserved` reconciles."""
+    return (
+        min(
+            MAX_JOURNAL_BYTES - len(model._json(journal).encode()),
+            model.MAX_STATE_BYTES - len(model._json(state).encode()),
+        )
+        - RECONCILE_RESERVE_BYTES * reserved
+    )
+
+
+def _validate_args(action: Any, args: Any) -> None:
+    if (
+        not isinstance(action, str)
+        or action not in _FIELDS
+        or not isinstance(args, dict)
+        or set(args) != _FIELDS[action]
+    ):
+        raise _error("EPISODE_TRANSITION_INVALID", "transition fields are invalid")
+    for field in ("input_revision", "ordinal"):
+        if field in args and type(args[field]) is not int:
+            raise _error("EPISODE_TRANSITION_INVALID", "revision and ordinal must be integers")
+
+
+def _apply_event(state: Mapping[str, Any], event: Mapping[str, Any]) -> dict[str, Any]:
+    """Replay accepted finite transitions without consulting mutable external state."""
+    action, args, evidence = event["action"], event["args"], event["evidence"]
+    _validate_args(action, args)
+    evidence_fields = {
+        "bind_curation_leaf": {"sealed_plan"},
+        "reconcile_curation_leaf": {"outcome"},
+    }.get(action, set())
+    if not isinstance(evidence, dict) or set(evidence) != evidence_fields:
+        raise _error("EPISODE_TRANSITION_INVALID", "accepted evidence fields are invalid")
+    if action == "append_input_revision":
+        return model.append_input_revision(state, args["input_evidence"])
+    if action == "declare_candidate":
+        return model.declare_candidate(state, args["key"])
+    if action == "revise_proposal":
+        return model.revise_proposal(state, args["candidate"], args["proposal"])
+    if action == "set_disposition":
+        return model.set_disposition(state, args["candidate"], args["disposition"], args["reason"])
+    if action == "bind_curation_leaf":
+        plan = evidence["sealed_plan"]
+        ordinal = args["ordinal"]
+        if not 0 <= ordinal < len(plan["steps"]):
+            raise _error("EPISODE_BINDING_INVALID", "ordinal is invalid")
+        step = plan["steps"][ordinal]
+        binding = {key: args[key] for key in ("run_id", "plan_id", "plan_fingerprint", "ordinal")}
+        binding.update(
+            sealed_plan=plan,
+            step_id=step["step_id"],
+            operation_id=curation.operation_id(args["plan_id"], ordinal, step["step_id"]),
+        )
+        return model.bind_curation_leaf(state, args["candidate"], args["leaf"], binding)
+    if action == "attest_precommit":
+        return model.attest_precommit(state, args["input_revision"])
+    if action == "mark_attempt_started":
+        return model.mark_attempt_started(state, args["candidate"], args["leaf"])
+    if action == "reconcile_curation_leaf":
+        outcome = model.VerifiedLeafOutcome(**evidence["outcome"])
+        if (outcome.candidate_id, outcome.leaf_id, outcome.outcome) != (
+            args["candidate"],
+            args["leaf"],
+            "committed",
+        ):
+            raise _error("EPISODE_TRANSITION_INVALID", "accepted outcome differs from command")
+        return model.reconcile_leaf(state, outcome)
+    return model.attest_postcommit(state, args["input_revision"], args["leaf_ids"])
+
+
+class EpisodeStore:
+    """Persist bounded accepted history; callers never supply materialized state."""
+
+    def __init__(self, vault_root: Path, *, owner_audience_id: str | None = None):
+        self.vault_root = Path(vault_root)
+        self.curation = curation.CurationStore(self.vault_root)
+        self.root = self.curation.root.parent / "episodes"
+        if owner_audience_id is not None and (
+            not isinstance(owner_audience_id, str)
+            or not owner_audience_id.strip()
+            or "\x00" in owner_audience_id
+        ):
+            raise _error("EPISODE_OWNER_INVALID", "episode owner is invalid")
+        self.owner_audience_id = owner_audience_id
+
+    def _owner_directory(self) -> str:
+        assert self.owner_audience_id is not None
+        return model._hash("exomem-episode-owner-directory-v2", self.owner_audience_id)
+
+    def path(self, identity: str) -> Path:
+        if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity):
+            raise _error("EPISODE_ID_INVALID", "episode identity is invalid")
+        if self.owner_audience_id is None:
+            return self.root / f"{identity}.json"
+        return self.root / self._owner_directory() / f"{identity}.json"
+
+    def _guard(self):
+        return active_manager().consistency_guard(
+            self.vault_root, operation="episode-store", holder_kind="command"
+        )
+
+    @staticmethod
+    def _encoded(journal: Mapping[str, Any]) -> str:
+        encoded = model._json(journal)
+        if len(encoded.encode()) > MAX_JOURNAL_BYTES:
+            raise _error("EPISODE_TOO_LARGE", "episode journal exceeds its byte cap")
+        return encoded
+
+    def _reconstruct(self, identity: str, journal: Any) -> dict[str, Any]:
+        try:
+            if not isinstance(journal, dict) or type(journal.get("version")) is not int:
+                raise ValueError("invalid envelope")
+            version = journal["version"]
+            expected_fields = (
+                {"version", "episode_key", "input_evidence", "root_hash", "transitions"}
+                if version == 1
+                else {
+                    "version",
+                    "owner_audience_id",
+                    "episode_key",
+                    "input_evidence",
+                    "root_hash",
+                    "transitions",
+                }
+            )
+            if (
+                version not in {1, 2}
+                or set(journal) != expected_fields
+                or (version == 1 and self.owner_audience_id is not None)
+                or (
+                    version == 2
+                    and (
+                        not isinstance(journal["owner_audience_id"], str)
+                        or not journal["owner_audience_id"].strip()
+                        or "\x00" in journal["owner_audience_id"]
+                        or journal["owner_audience_id"] != self.owner_audience_id
+                    )
+                )
+                or not isinstance(journal["transitions"], list)
+                or len(journal["transitions"]) > MAX_TRANSITIONS
+            ):
+                raise ValueError("invalid envelope")
+            self._encoded(journal)
+            state = model.start_episode(journal["episode_key"], journal["input_evidence"])
+            if state["episode_id"] != identity:
+                raise ValueError("wrong episode")
+            digest = model._hash(
+                f"exomem-episode-journal-v{version}",
+                {
+                    key: value
+                    for key, value in journal.items()
+                    if key not in {"transitions", "root_hash"}
+                },
+            )
+            if journal["root_hash"] != digest:
+                raise ValueError("invalid original evidence digest")
+            for revision, event in enumerate(journal["transitions"], start=2):
+                if (
+                    not isinstance(event, dict)
+                    or set(event)
+                    != {"revision", "previous_hash", "hash", "action", "args", "evidence"}
+                    or type(event["revision"]) is not int
+                    or event["revision"] != revision
+                    or event["previous_hash"] != digest
+                ):
+                    raise ValueError("invalid event chain")
+                digest = model._hash(
+                    "exomem-episode-event-v1",
+                    {key: value for key, value in event.items() if key != "hash"},
+                )
+                if digest != event["hash"]:
+                    raise ValueError("invalid event digest")
+                state = _apply_event(state, event)
+            return {
+                "revision": len(journal["transitions"]) + 1,
+                "journal_digest": digest,
+                "state": state,
+                "coverage_current": "unchecked",
+            }
+        except (KeyError, TypeError, ValueError, IndexError, RecursionError) as error:
+            raise _error("EPISODE_JOURNAL_INVALID", "episode history is invalid") from error
+
+    def _load(self, identity: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        journal = self.curation._read_json(self.path(identity))
+        return journal, self._reconstruct(identity, journal)
+
+    def read(self, identity: str) -> dict[str, Any]:
+        """Return historical state; no current evidence/disclosure claim is made."""
+        with self._guard():
+            return self._load(identity)[1]
+
+    def _write(self, identity: str, journal: Mapping[str, Any], prior: Any = None) -> None:
+        path = self.path(identity)
+        self.curation._assert_safe(path)
+        encoded = self._encoded(journal)
+        try:
+            batch_atomic_write(
+                [
+                    PlannedWrite(
+                        path=path, content=encoded, create_only=prior is None, expected_hash=prior
+                    )
+                ],
+                vault_root=self.vault_root,
+                # Operational JSON is not an admitted knowledge/index input.
+                post_commit_fanout=False,
+            )
+        except (
+            BatchWriteError,
+            ContentHashMismatchError,
+            CreateOnlyConflict,
+            OSError,
+            ValueError,
+        ) as error:
+            raise _error(
+                "EPISODE_STORE_WRITE_FAILED", "episode history write was refused"
+            ) from error
+
+    def create(self, key: str, input_evidence: Mapping[str, Any]) -> dict[str, Any]:
+        """Retain already-authorized minimal evidence without resetting an episode."""
+        initial = model.start_episode(key, input_evidence)
+        evidence = {
+            k: v for k, v in initial["input_revisions"][0]["evidence"].items() if k != "recovery"
+        }
+        identity = initial["episode_id"]
+        journal = {
+            "version": 2 if self.owner_audience_id is not None else 1,
+            "episode_key": key,
+            "input_evidence": evidence,
+            "transitions": [],
+        }
+        if self.owner_audience_id is not None:
+            journal["owner_audience_id"] = self.owner_audience_id
+        journal["root_hash"] = model._hash(
+            f"exomem-episode-journal-v{journal['version']}",
+            {key: value for key, value in journal.items() if key != "transitions"},
+        )
+        with self._guard():
+            try:
+                stored, state = self._load(identity)
+            except curation.CurationError as error:
+                if error.code != "CURATION_RUN_NOT_FOUND":
+                    raise
+            else:
+                if stored["episode_key"] != key or stored["input_evidence"] != evidence:
+                    raise _error("EPISODE_IDENTITY_COLLISION", "original episode evidence differs")
+                return state
+            state = self._reconstruct(identity, journal)
+            self._write(identity, journal)
+            return state
+
+    def _accepted_evidence(
+        self, state: dict[str, Any], action: str, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        if action == "bind_curation_leaf":
+            plan = self.curation.load_plan(args["run_id"])
+            identities = self.curation.identities(args["run_id"])
+            if identities != (args["plan_id"], args["plan_fingerprint"]):
+                raise _error("EPISODE_BINDING_INVALID", "stored curation identities differ")
+            return {"sealed_plan": plan}
+        if action == "reconcile_curation_leaf":
+            verified = reconcile_curation_leaf(
+                self.vault_root, state, args["candidate"], args["leaf"]
+            )
+            leaf = model._owned(verified, args["candidate"], args["leaf"])
+            proof = leaf["outcome_proof"]
+            return {
+                "outcome": asdict(
+                    model.VerifiedLeafOutcome(
+                        candidate_id=args["candidate"],
+                        leaf_id=args["leaf"],
+                        effect_digest=leaf["effect_digest"],
+                        outcome="committed",
+                        **proof,
+                    )
+                )
+            }
+        if action == "attest_postcommit":
+            # Historical commitment per leaf, current coverage per path: a
+            # later leaf may edit what an earlier one wrote, and only the last
+            # leaf on each path answers to the live page.
+            if not all(current_coverage(self.vault_root, state).values()):
+                raise _error("EPISODE_OUTCOME_UNCERTAIN", "current commit proof differs")
+        return {}
+
+    @staticmethod
+    def headroom(current: Mapping[str, Any]) -> int:
+        """Transitions still available once every uncertain leaf keeps one to reconcile."""
+        return MAX_TRANSITIONS - (current["revision"] - 1) - _uncertain(current["state"])
+
+    def room(self, identity: str) -> tuple[int, int]:
+        """Transitions and bytes still free once every uncertain leaf keeps its reconcile."""
+        with self._guard():
+            journal, current = self._load(identity)
+        return self.headroom(current), _byte_room(
+            journal, current["state"], _uncertain(current["state"])
+        )
+
+    def transition(
+        self,
+        identity: str,
+        *,
+        expected_revision: int,
+        expected_digest: str,
+        action: str,
+        args: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Accept a finite command under CAS, then persist its validated result event.
+
+        No command executes a curation effect. An owner must first durably record
+        mark_attempt_started, then separately call the existing authorized writer.
+        """
+        return self.transitions(
+            identity,
+            expected_revision=expected_revision,
+            expected_digest=expected_digest,
+            commands=[(action, args)],
+        )
+
+    def transitions(
+        self,
+        identity: str,
+        *,
+        expected_revision: int,
+        expected_digest: str,
+        commands: Sequence[tuple[str, Mapping[str, Any]]],
+    ) -> dict[str, Any]:
+        """Accept finite commands under one CAS and persist them in one write.
+
+        Every event is validated before anything is written, so a refused
+        command leaves none of its sequence behind. Every command but a
+        reconcile must leave one transition and `RECONCILE_RESERVE_BYTES` of
+        journal and state per uncertain leaf, so an attempt mark can always be
+        followed by its reconcile.
+        """
+        commands = [(action, model._copy(args)) for action, args in commands]
+        for action, args in commands:
+            _validate_args(action, args)
+        with self._guard():
+            journal, current = self._load(identity)
+            if (
+                type(expected_revision) is not int
+                or expected_revision != current["revision"]
+                or expected_digest != current["journal_digest"]
+            ):
+                raise _error("EPISODE_REVISION_CONFLICT", "episode revision or digest changed")
+            prior = curation._digest(journal)
+            accepted = current
+            for action, args in commands:
+                if action == "reconcile_curation_leaf":
+                    leaf = model._owned(accepted["state"], args["candidate"], args["leaf"])
+                    if leaf["outcome"] == "committed":
+                        continue
+                if len(journal["transitions"]) >= MAX_TRANSITIONS:
+                    raise _error("EPISODE_TOO_LARGE", "episode transition cap reached")
+                try:
+                    evidence = self._accepted_evidence(accepted["state"], action, args)
+                    event = {
+                        "revision": accepted["revision"] + 1,
+                        "previous_hash": accepted["journal_digest"],
+                        "action": action,
+                        "args": args,
+                        "evidence": evidence,
+                    }
+                    state = _apply_event(accepted["state"], event)
+                except (KeyError, TypeError, IndexError) as error:
+                    raise _error(
+                        "EPISODE_TRANSITION_INVALID", "transition values are invalid"
+                    ) from error
+                event["hash"] = model._hash("exomem-episode-event-v1", event)
+                journal["transitions"].append(event)
+                accepted = {
+                    **accepted,
+                    "revision": event["revision"],
+                    "journal_digest": event["hash"],
+                    "state": state,
+                }
+                reserved = 0 if action == "reconcile_curation_leaf" else _uncertain(state)
+                if action != "reconcile_curation_leaf" and self.headroom(accepted) < 0:
+                    raise _error(
+                        "EPISODE_TOO_LARGE", "no transition would remain to reconcile an attempt"
+                    )
+                if _byte_room(journal, state, reserved) < 0:
+                    raise _error(
+                        "EPISODE_TOO_LARGE", "no room would remain to reconcile an attempt"
+                    )
+            if accepted is current:
+                return current
+            result = self._reconstruct(identity, journal)
+            self._write(identity, journal, prior)
+            return result

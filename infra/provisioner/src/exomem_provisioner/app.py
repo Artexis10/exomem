@@ -28,6 +28,7 @@ from .repository import (
     IdempotencyConflict,
     OperationRepository,
     StaleFence,
+    legacy_targets_from,
 )
 from .schemas import (
     FailureCode,
@@ -142,6 +143,7 @@ def create_app(
             mode=lock.admission_mode,
             legacy_catalog=lock.legacy_catalog,
             forward_target=forward_target,
+            legacy_targets=legacy_targets_from(lock.legacy_targets),
         )
 
     @app.exception_handler(RequestValidationError)

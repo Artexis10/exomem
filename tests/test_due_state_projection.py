@@ -505,6 +505,9 @@ def test_removing_the_vanished_path_drop_fails_this_module(
     assert _served(vault) is None
 
     monkeypatch.setattr(due_state_module, "_page_exists", lambda *a, **k: True)
+    # The served memo filed an empty build under the unpatched check; a
+    # mechanism patched at runtime is exactly what the reset exists for.
+    due_state_module.reset_serve_cache()
 
     stale = _served(vault)
     assert stale is not None and stale["total"] == 1

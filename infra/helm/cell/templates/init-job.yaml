@@ -75,6 +75,8 @@ spec:
               mountPath: /run/exomem/operator-requests/init.json
               subPath: init.json
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -87,4 +89,7 @@ spec:
           configMap:
             name: {{ .Values.resourceName }}-init-request
             defaultMode: 0444
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
 {{- end }}

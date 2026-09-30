@@ -325,8 +325,9 @@ def test_lock_validation_accepts_runtime_source_anchor_independent_of_platform_c
     composer.validate_deployment_lock(lock)
 
 
+@pytest.mark.parametrize("migration_mode", ("none", "governance-v3-to-v4"))
 def test_composer_binds_runtime_upgrade_compatibility_and_migration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, migration_mode: str
 ) -> None:
     composer = _module()
     request = _request(composer, tmp_path)
@@ -352,7 +353,7 @@ def test_composer_binds_runtime_upgrade_compatibility_and_migration(
         evidence,
         {
             "compatibilityDigest": "9" * 64,
-            "migrationMode": "none",
+            "migrationMode": migration_mode,
             "substrateConsumerCommit": consumer_commit,
             "substrateTrustSha256": trust_digest,
         },
@@ -378,13 +379,13 @@ def test_composer_binds_runtime_upgrade_compatibility_and_migration(
     assert [lock["runtimeUpgrade"] for lock in pair["locks"]] == [
         {
             "compatibilityDigest": "9" * 64,
-            "migrationMode": "none",
+            "migrationMode": migration_mode,
             "substrateConsumerCommit": consumer_commit,
             "substrateTrustSha256": trust_digest,
         },
         {
             "compatibilityDigest": "9" * 64,
-            "migrationMode": "none",
+            "migrationMode": migration_mode,
             "substrateConsumerCommit": consumer_commit,
             "substrateTrustSha256": trust_digest,
         },

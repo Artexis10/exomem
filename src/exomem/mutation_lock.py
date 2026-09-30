@@ -68,6 +68,18 @@ _STATUS_TIMEOUT_SECONDS = 0.25
 # 100ms pair demoted the entire band below it, which hid a 55ms contended
 # acquire -- exactly the signal these thresholds exist to preserve.
 _QUIET_HOLD_MS = 5.0
+# Background boundaries publish a holder sidecar but run at machine frequency
+# beside ordinary traffic: graph drains, derived-receipt proofs, watcher
+# freshness, media commits. Their acquire/release pairs rotated the service log
+# about every fifteen minutes. Tens to hundreds of milliseconds is their normal
+# cost, so only a hold past this bound reports itself on its own row; the rest
+# are folded into the periodic hold summary below.
+_MACHINE_HOLDER_KINDS = frozenset({"background", "graph", "derived-worker"})
+_BACKGROUND_QUIET_HOLD_MS = 250.0
+# One INFO `mutation_lock_hold_summary` row per window stands in for every
+# demoted hold in it, so the log keeps hours of boundary evidence.
+_HOLD_SUMMARY_INTERVAL_SECONDS = 60.0
+_HOLD_SUMMARY_MAX_OPERATIONS = 16
 _HOLDER_SCHEMA = 1
 # Contention attribution window.  A boundary flag can never explain a stream of
 # short holds starving a bounded waiter: every one-shot probe lands in a gap and
@@ -139,8 +151,9 @@ def _boundary_event_level(
     wait_ms: float,
     hold_ms: float | None,
     poll_interval_seconds: float,
+    holder_kind: str | None = None,
 ) -> int:
-    """Return DEBUG only for a short, uncontended, metadata-free reserved hold.
+    """Return DEBUG only for a short, uncontended reserved or background hold.
 
     Three separate things have to be true before a boundary row is demoted, and
     each of them is the reason one of the escalations survives:
@@ -155,16 +168,116 @@ def _boundary_event_level(
       the cheapest honest definition of contention this code can measure.
     * the hold was short, so a slow hold still reports itself.
 
+    A machine-frequency background kind (`_MACHINE_HOLDER_KINDS`) publishes a
+    sidecar too, but is judged like the reserved class against the longer
+    `_BACKGROUND_QUIET_HOLD_MS`. Any other kind, known or not, keeps its INFO
+    pair.
+
     Anything else is INFO.  `hold_ms` is `None` at acquire time, where the wait
     is the only thing measured yet.
     """
+    quiet_hold_ms = _QUIET_HOLD_MS
     if publish_holder_metadata:
-        return logging.INFO
+        if holder_kind not in _MACHINE_HOLDER_KINDS:
+            return logging.INFO
+        quiet_hold_ms = _BACKGROUND_QUIET_HOLD_MS
     if wait_ms >= poll_interval_seconds * 1000.0:
         return logging.INFO
-    if hold_ms is not None and hold_ms >= _QUIET_HOLD_MS:
+    if hold_ms is not None and hold_ms >= quiet_hold_ms:
         return logging.INFO
     return logging.DEBUG
+
+
+class _HoldSummary:
+    """Demoted holds since the last summary row, per operation."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.started_at = time.monotonic()
+        self.operations: dict[str, dict[str, Any]] = {}
+
+
+_HOLD_SUMMARY = _HoldSummary()
+
+
+def _reset_hold_summary() -> None:
+    global _HOLD_SUMMARY
+    _HOLD_SUMMARY = _HoldSummary()
+
+
+def _note_quiet_hold(
+    operation: str, holder_kind: str, *, wait_ms: float, hold_ms: float
+) -> None:
+    """Fold one DEBUG-level hold into the window; emit the window when due."""
+    try:
+        if not logger.isEnabledFor(logging.INFO):
+            return
+        summary = _HOLD_SUMMARY
+        with summary.lock:
+            key = _safe_label(operation, fallback="unknown")
+            entry = summary.operations.get(key)
+            if entry is None:
+                entry = summary.operations[key] = {
+                    "holder_kind": _safe_label(holder_kind, fallback="unknown"),
+                    "count": 0,
+                    "hold_ms_total": 0.0,
+                    "hold_ms_max": 0.0,
+                    "wait_ms_max": 0.0,
+                }
+            entry["count"] += 1
+            entry["hold_ms_total"] = round(entry["hold_ms_total"] + hold_ms, 2)
+            entry["hold_ms_max"] = max(entry["hold_ms_max"], hold_ms)
+            entry["wait_ms_max"] = max(entry["wait_ms_max"], float(wait_ms))
+        flush_hold_summary()
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        pass
+
+
+def flush_hold_summary() -> None:
+    """Emit the hold summary window if it is due and holds anything.
+
+    Called after every demoted hold and on every metrics snapshotter tick, so
+    the last window before holds stop is logged too.
+    """
+    try:
+        summary = _HOLD_SUMMARY
+        now = time.monotonic()
+        with summary.lock:
+            window_s = now - summary.started_at
+            if not summary.operations or window_s < _HOLD_SUMMARY_INTERVAL_SECONDS:
+                return
+            operations = summary.operations
+            summary.operations = {}
+            summary.started_at = now
+        # Emitted outside the window lock, after the boundary was released.
+        ranked = sorted(
+            operations.items(), key=lambda item: item[1]["hold_ms_total"], reverse=True
+        )
+        kept = dict(ranked[:_HOLD_SUMMARY_MAX_OPERATIONS])
+        _log_mutation_lock_event(
+            "mutation_lock_hold_summary",
+            window_s=round(window_s, 1),
+            holds=sum(entry["count"] for entry in operations.values()),
+            hold_ms_total=round(
+                sum(entry["hold_ms_total"] for entry in operations.values()), 2
+            ),
+            operations=kept,
+            operations_dropped=len(operations) - len(kept),
+        )
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        pass
+
+
+def _register_hold_summary_flush() -> None:
+    try:
+        from . import metrics
+
+        metrics.register_flush_hook(flush_hold_summary)
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        pass
+
+
+_register_hold_summary_flush()
 
 
 def _bump_boundary_metric(name: str, labels: dict[str, str] | None = None) -> None:
@@ -188,7 +301,11 @@ def _observe_boundary_ms(name: str, value_ms: float) -> None:
 def canonical_mutation_identity(vault_or_cell: os.PathLike[str] | str) -> str:
     """Return a stable, non-display identity for a vault path or opaque cell ID."""
     if isinstance(vault_or_cell, os.PathLike):
-        resolved = Path(vault_or_cell).expanduser().resolve(strict=False)
+        from . import state_paths
+
+        # Identity, not evidence: the same path resolves to the same vault for
+        # the whole of a request, so it goes through the request-scoped memo.
+        resolved = state_paths.resolved_vault_path(vault_or_cell)
         return f"vault:{os.path.normcase(str(resolved))}"
     value = str(vault_or_cell).strip()
     if not value:
@@ -1881,6 +1998,18 @@ def _state_for(lock_path: Path) -> _LocalLockState:
         return state
 
 
+def current_thread_holds_boundary() -> bool:
+    """Whether this thread holds any mutation boundary in this process.
+
+    For schedulers that must never pause work while a boundary is held: every
+    writer queued on it would wait out the pause too.
+    """
+    ident = threading.get_ident()
+    with _LOCAL_STATES_GUARD:
+        states = tuple(_LOCAL_STATES.values())
+    return any(state.owner_thread == ident for state in states)
+
+
 def _reset_in_forked_child() -> None:
     """Drop inherited thread state and close inherited lock descriptors.
 
@@ -1897,6 +2026,7 @@ def _reset_in_forked_child() -> None:
                 pass
     _LOCAL_STATES = {}
     _LOCAL_STATES_GUARD = threading.Lock()
+    _reset_hold_summary()
 
 
 if hasattr(os, "register_at_fork"):
@@ -1921,7 +2051,12 @@ class VaultMutationCoordinator:
             raise ValueError("mutation lock poll interval must be positive")
         if long_holder_seconds <= 0:
             raise ValueError("mutation long-holder threshold must be positive")
-        self.state_root = Path(state_root).expanduser().resolve(strict=False)
+        from . import state_paths
+
+        # Where the lock files live is configuration, resolved once per request
+        # like every other placement answer. The lock files themselves are
+        # never memoised: `hold` reads their real state every time.
+        self.state_root = state_paths.resolved_vault_path(state_root)
         self.identity = canonical_mutation_identity(vault_or_cell)
         digest = hashlib.sha256(self.identity.encode("utf-8")).hexdigest()
         lock_root = self.state_root / "mutation-locks"
@@ -1955,6 +2090,23 @@ class VaultMutationCoordinator:
             raise ValueError(
                 "metadata-free holds are limited to reserved-state coordination"
             )
+        if request_id is None:
+            # Every background holder -- the file watcher's guard sites, the
+            # media worker's commits, startup media reconciliation -- has no
+            # request to correlate with, and used to publish the shared literal
+            # `untracked` through `_safe_label`. Two concurrent background
+            # holders were then indistinguishable, and a long-holder warning
+            # named none of them. Mint one opaque id PER ACQUISITION instead:
+            # content-free by construction (a random hex string identifies
+            # nothing about the vault, the caller, or the work), and minted
+            # here rather than at a dozen call sites so a background holder
+            # added later cannot silently rejoin the shared label. A re-entrant
+            # hold returns through the depth fast path below without publishing
+            # anything, so the outer acquisition's id stands -- correct, since
+            # that is one acquisition of the boundary.
+            # `untracked` survives as what it should always have meant -- a
+            # holder record whose label could not be read at all.
+            request_id = uuid.uuid4().hex
         timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         if timeout < 0:
             raise ValueError("mutation lock timeout must be non-negative")
@@ -2009,6 +2161,7 @@ class VaultMutationCoordinator:
                     wait_ms=wait_ms,
                     hold_ms=None,
                     poll_interval_seconds=self.poll_interval_seconds,
+                    holder_kind=holder_kind,
                 ),
                 operation=operation,
                 holder_kind=holder_kind,
@@ -2087,20 +2240,22 @@ class VaultMutationCoordinator:
                     )
                 if overdue:
                     _bump_boundary_metric("exomem_boundary_overdue_total")
+                # An overdue hold is interesting by construction, whatever
+                # its measurements say about the routine case.
+                released_level = (
+                    logging.INFO
+                    if overdue
+                    else _boundary_event_level(
+                        publish_holder_metadata=publish_holder_metadata,
+                        wait_ms=wait_ms,
+                        hold_ms=hold_ms,
+                        poll_interval_seconds=self.poll_interval_seconds,
+                        holder_kind=holder_kind,
+                    )
+                )
                 _log_mutation_lock_event(
                     "mutation_lock_released",
-                    # An overdue hold is interesting by construction, whatever
-                    # its measurements say about the routine case.
-                    level=(
-                        logging.INFO
-                        if overdue
-                        else _boundary_event_level(
-                            publish_holder_metadata=publish_holder_metadata,
-                            wait_ms=wait_ms,
-                            hold_ms=hold_ms,
-                            poll_interval_seconds=self.poll_interval_seconds,
-                        )
-                    ),
+                    level=released_level,
                     operation=operation,
                     holder_kind=holder_kind,
                     # Carried so an INFO release row stands on its own: its
@@ -2108,6 +2263,10 @@ class VaultMutationCoordinator:
                     wait_ms=wait_ms,
                     hold_ms=hold_ms,
                 )
+                if released_level < logging.INFO:
+                    _note_quiet_hold(
+                        operation, holder_kind, wait_ms=wait_ms, hold_ms=hold_ms
+                    )
                 _observe_boundary_ms("exomem_boundary_hold_ms", hold_ms)
         finally:
             state.guard.release()

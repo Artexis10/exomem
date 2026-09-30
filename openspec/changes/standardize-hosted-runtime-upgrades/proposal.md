@@ -1,3 +1,5 @@
+> **Superseded (2026-09-23)** by `adopt-exomem-cloud-plain-cells`. Not to be implemented further; removed with its code in that change's retirement phase.
+
 ## Why
 
 Exomem Hosted has no reusable, end-to-end runtime-upgrade contract: adopting a new release changes the platform default, while existing tenant cells remain on their birth release unless they are changed out of band. Releases need one governed process that verifies immutable artifacts, preserves every tenant, rolls cells forward under control-plane authority, and contracts only after the whole fleet is proven current.

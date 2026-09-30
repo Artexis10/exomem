@@ -32,19 +32,19 @@
     "durationHistogramMetric": "exomem_hosted_scheduler_duration_seconds",
     "lastSuccessMetric": "exomem_hosted_scheduler_last_success_unixtime",
     "failureCounterMetric": "exomem_hosted_scheduler_failures_total",
-    "missedRunAlertAfterSeconds": 180,
+    "missedRunAlertAfterSeconds": 900,
     "consecutiveFailureAlertThreshold": 2
   },
   "jobs": [
     {
       "name": "exomem-access-delivery",
       "path": "/api/cron/exomem-access-delivery",
-      "schedule": "* * * * *"
+      "schedule": "*/5 * * * *"
     },
     {
       "name": "exomem-reconcile",
       "path": "/api/cron/exomem-reconcile",
-      "schedule": "* * * * *"
+      "schedule": "*/5 * * * *"
     },
     {
       "name": "exomem-export-gc",

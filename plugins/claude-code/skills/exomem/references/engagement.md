@@ -11,7 +11,10 @@ only prompt to check, so read it as standing instruction rather than advice.)
 **Prominence level.** How strongly the two behaviours below apply is tunable.
 `bootstrap()` reports the active level under `engagement`; the user changes it with
 `exomem prominence <level>`, or by editing the level block in their assistant's
-custom instructions. The section below describes **balanced**, the default where
+custom instructions. When `engagement` carries a `hook_cadence` block, this client
+runs nudge hooks that read only its own machine, so after setting a level tell the
+user that the nudge cadence changes separately, with `exomem prominence <level>` run
+on their machine. The section below describes **balanced**, the default where
 hooks exist. The other levels shift it:
 
 | Level | Shift from the baseline below |
@@ -32,8 +35,17 @@ entity, or phrasings like "what did I conclude about X," "have I looked at Y,"
 "where did we land on Z" — run a quiet `ask_memory` **first** and fold what you find
 into the answer. Don't narrate the search; mention the KB only when it returned
 something relevant, and cite the page(s) you used. A miss means "not found in
-what I searched," never "it doesn't exist" — an empty `ask_memory` result means *no coverage
-yet*, which is a reason to consider capturing, not to disengage.
+what I searched," never "it doesn't exist." An empty result does not itself
+create a reason to write.
+
+**Development cadence.** Reuse relevant context already retrieved for the current
+task. Refresh when a dependency, decision, topic, or source version changes, or
+when the user asks for recall. Expand exact units before whole programme pages.
+Keep implementation steps, test logs, and transient PR/CI status in the repository
+and its specification system. Capture reusable decisions, constraints, diagnosed
+failures, and verified milestone outcomes in one consolidated pass at a meaningful
+boundary. A checkpoint or tool call alone is not a capture trigger. This cadence
+does not suppress an explicit save request or a substantive durable landing.
 
 **Stepping-stone capture (write) — then report.** When the conversation reaches
 a **stepping-stone** — a durable conclusion lands, a durable recurring entity
@@ -48,8 +60,10 @@ is made**, or **an observed outcome or event is reported** — capture it:
   Entity; otherwise save one concise compiled observation. Use Records only for an
   observed measurement accepted by a compatible existing collection. Fleeting
   preferences, one-off activity, incidental associations, trivial metrics, and
-  tentative claims stay quiet. Eligibility never creates an Entity, collection, or
-  schema: an affiliation relation uses `link_acceptance`; entity creation or substantial curation
+  tentative events stay quiet. Durable interpretations may be preserved with
+  explicit attribution and uncertainty; they are not established facts or
+  observed events. Eligibility never creates an Entity, collection, or
+  schema: an affiliation relation uses `link_acceptance`; a new Entity follows `proactive_capture`; merge or substantial curation
   uses confirmed `restructure_execution`; concise observations and narrow additive
   facts follow `proactive_capture` and its active disposition.
 
@@ -126,6 +140,99 @@ landing, not during the flight.
 
 Do not wait to be asked. "Did you save that?" arriving after a result already
 landed is the failure, not the prompt.
+
+**Decompose before choosing destinations.** Before the first compiled write,
+partition durable candidates by retrieval question, subject/domain, temporal
+episode, and epistemic role. Inspect canonical destination fitness for each
+meaningful cluster; neither an open page nor semantic similarity establishes
+ownership. Keep coherent details together, and fan out independently reusable
+objects only where that improves future use. Preserve source/speaker attribution
+and uncertainty for durable hypotheses and interpretations. Uncertainty changes
+their representation; it does not automatically make them disposable.
+
+**Review the episode once.** Include a bounded completeness and destination
+review in that write plan for anything else that passes
+the same reuse-value test — would it materially improve a later decision, lookup,
+repeated task, comparison or continuation? For example: a conclusion, an outcome
+or state change, a stable preference, a method or parameter, an entity facet, an
+operational or vendor quirk, evidence worth preserving, a relation, a planning
+implication, a record implication. That list is examples rather than a boundary.
+Do not repeat a completed review after every destination write. Never re-write
+what a write response lists as written recently, and stay silent when nothing
+qualifies. A write response may carry a
+`capture_sweep` block saying this is the first write after a quiet interval; it
+prompts a pass if one has not already been completed for that episode, never a
+demand that something be written.
+
+**Record the conversation.** At a decision or stopping point, record one bounded
+recap with `episode_memory(action="record")`: a one-line subject and summary,
+what was worked on, decided and left open, and at most three verbatim user
+statements worth keeping. It is raw material about the conversation, not a
+compiled conclusion, and it is what the next session on any client sees first in
+`recent_context`. Reuse the `episode` key a hook named or an earlier record
+returned; an identical retry writes nothing. A Stop hook's episode check or an
+`episode_due` block in an activation packet asks for one; skip it when nothing
+durable happened. At `off`, record only when the user asks; at `light`, also
+when a hook's episode check asks.
+
+**Episode candidates, where the service runs them.** When
+`episode_memory(action="candidates")` reports `execution: enabled`, the same
+decomposition can run as typed candidates against the recorded recap. `prepare`
+each durable change with its route, its home (an existing page's `target`, or a
+new page's `title`), the pages you inspected as other homes with their scope in
+a line and the `content_hash` you read, and your reason; then give every
+candidate a `disposition`, including honest `no_capture`, `deferred` or
+`rejected`. Review that plan against the recap before `resume`: every
+identified candidate is decided, and no independently useful synthesis is
+appended to a narrower page because it ranked highly. After `resume`, make the
+final pass once: `action="coverage"` puts the input ref beside each receipt and
+its readback; read the input, compare, prepare anything omitted or misrouted,
+then attest with `resume` and `postcommit=true`. A committed note or a Saved
+marker is not coverage, and the server never claims your candidates exhaust
+the input.
+
+## Activation conventions and learning from corrections
+
+Every activation packet's `generation` says which registries shaped it:
+`conventions_source` and `conventions_hash` (anchor folders, skip folders,
+state fields, stopwords, rarity), `conventions_turn_hash` (the referential
+cues), `roles_source`, and any `conventions_findings` or
+`learned_aliases_rejected`. When a turn abstains although the page exists,
+check those first: an anchor folder the conventions do not cover, or a word
+this vault uses that the registry does not know, is the usual cause. Propose a
+fix to the user; never save one they have not agreed to, unless it is the
+learning advisory below.
+
+**Correct the packet with a pick.** When the user says which page they meant,
+call `activate_context` again with the same turn and `anchor` set to that
+page. If the turn's words never reached it, the packet may carry one
+`learning` advisory: the user's own words (`turn_terms`), the target, how
+often this happened, and the writers that would teach the vault, each with the
+`expected_hash` it must carry. It writes nothing.
+
+- **A name** (`family: "name"`): `edit_memory` with
+  `{kind: "patch_frontmatter", field: "learned_aliases", value: [...current,
+  "<the user's name for it>"], expected_hash}` and a `why`. The list replaces
+  the field, so keep `current`. A learned name changes what activates only:
+  never a link, an owner alias or who the page is. It needs a word of its
+  own (not a stopword or filler), a single ASCII word needs three letters,
+  at most eight per page and 64 characters each; `edit_memory` warns about one
+  the index will skip.
+- **A referential cue** (`family: "referential_cue"`): the words this user
+  says to mean "continue". `schema_memory(subject="activation-conventions",
+  operation="validate", proposal=...)` and `diff` first, then
+  `save-conventions` with `why` and the advisory's `expected_hash`. Add under
+  `referential.add_cues` or `referential.add_filler` (one word), optionally as
+  `{value, why, at, evidence}` with the advisory's `review` ref as evidence.
+- **Neither**: the words were a one-off. `triage_memory` with the `review`
+  ref, `action="dismiss"`, a `why` and the `fingerprint`; it stays quiet until
+  new misses arrive. `review/family/activation-naming` quiets the kind.
+
+A stale hash refuses the write: re-read and decide again. To undo a learned
+name, edit it out of `learned_aliases`. To undo a registry change,
+`schema_memory(operation="history")` lists the kept versions with their
+reasons, and `restore` takes a `version`, a `why` and the current
+`expected_hash`.
 
 ## Generated artifact adoption
 

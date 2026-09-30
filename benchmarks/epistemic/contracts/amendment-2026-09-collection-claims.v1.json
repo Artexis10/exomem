@@ -1,0 +1,20 @@
+{
+  "acknowledged_on": null,
+  "affected_sections": [
+    "\u00a71 Scenario families",
+    "\u00a72 Assertion registry",
+    "\u00a74 Acceptance predicates",
+    "\u00a77 Amendments"
+  ],
+  "amended_on": "2026-09-12",
+  "artifact_type": "preregistration-amendment-receipt.v1",
+  "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
+  "contract_sha256": "6a72ac63e5f410332f8e8c2f6ba2b6b630cbd4f4f5e2f49b00e200e6a13f3dcd",
+  "effective_policy": "Applies after founder acknowledgment. Until then f28 and f29 cannot support comparative runs, scores or claims; development artifacts describe harness/runtime findings only and harness faults block their arm.",
+  "parent_contract_sha256": "f978f0f5aeab0b8edf1441bbfae93cc3d57f0c072078319e09e9ef9eee1e44c9",
+  "ratifier": null,
+  "rationale": "Register collection-promotion and claimed-observation routing replays with quiet and false-write controls. Additive projector 0.6.0 preserves authored claims, item values/locators, declared page identities, candidate metadata, exact Evidence body and observed artifact hashes; canonical non-Markdown Evidence/Records files are inventoried to expose orphans. No operation kind, catastrophic assertion or budget constant changes.",
+  "repository_revision": null,
+  "schema_version": 1,
+  "sequence": 4
+}

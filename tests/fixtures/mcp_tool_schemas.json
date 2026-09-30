@@ -20,6 +20,114 @@
       "type": "object"
     }
   },
+  "activate_context": {
+    "description": "Compile durable context for a raw conversational turn, without a query.\n\nCall this ONCE at the start of a substantive turn, before deciding what to\nsearch for. Pass the user's words verbatim — this is not a search query and\nmust not be rewritten into one. It returns a bounded working-memory packet:\nwhich durable anchors the turn is about (entities, resources, hubs, Records\ncollections, active plans, projects), the context roles it filled, short\nprovenance-bearing units, pointers to what did not fit the budget, and the\ncurrent state of any resource whose collection records one.\n\nEvery packet leads with `recent_context`: up to eight pages this vault has\nrecently been worked on — edited, read, captured as a session, recorded as a\nconversation recap, or left open in Planning — each with its title, why it\nis recent, the date of that contact and, where the page carries one, its own\nauthored `status` or `summary` line. A recap entry (`why: \"episode\"`) is the\nnewest revision of one conversation's `episode_memory` record and carries\nthat conversation's `episode` key; follow it with `read_memory`. That line is the page's, not a current-state reading: these\npages are chosen by recency rather than by the turn, so the block never\nqueries a Records collection the turn did not name. `current_state[]`\nremains the carrier for the resolved anchors' governed state.\nIt is served whether or not the turn resolved anything, so a fresh session\nopening on \"continue\" receives the thread it is picking up. `as_of` dates\nthe CONTACT, not the event the page describes. With `session` or\n`workspace` passed, this conversation's own pages come first.\n\nA turn that names nothing (\"continue\", \"where were we\") is answered from\nrecent work: the thread your `continuity` token names, else what was last\nworked on, picked with `anchor`, or named by a recorded episode, in this\nconversation first, then its workspace, then the vault. Reads rank below\nany of those, and a maintenance batch counts as nobody's work. An anchor\nreached this way resolves with `recency` in its evidence. A single\nordinary page reached this way is served as `kind: \"page\"`, `status:\n\"resolved\"`, evidence `[\"recency\"]` and `generation.carried_by:\n\"recency\"`; a page tied with anything else abstains `ambiguous`, listing\nboth, for you to pick with `anchor`. Without `session`, `workspace` or a\n`continuity` token, other conversations' recent work orders\n`recent_context` but is never taken as the referent.\n\nA short follow-up that names nothing new (\"what about the second one?\",\n\"and the results?\") is answered from this conversation's own thread:\nwhere that thread holds one page clearly ahead of the rest, it is carried\nas a single `partial` anchor with `generation.carried_by: \"follow_up\"`;\nwhere two are close, both are listed under `ambiguity` for `anchor`.\n\nRead-only and abstaining by construction. It writes nothing, changes no\n`ask_memory`/`find` result, runs no model beyond the retrieval scorers recall\nalready runs, and returns `abstained: true` with a reason rather than guessing\nwhen the turn resolves nothing (`unresolved`), names two competing senses\n(`ambiguous`), is served while the derived index is still warming\n(`index_warming`), or is switched off (`disabled`). An ambiguous turn lists\nboth anchors under `ambiguity` and runs no role lane — you pick the sense and\ncall again with `anchor` set to the ref you mean.\n\nA turn that named no anchor but whose own distinctive words clearly reach one\ncompiled page is served from that page instead of abstaining, and says so:\nits single `anchors[]` entry has `kind: \"page\"` and `status:\n\"retrieval_carried\"`, and `generation.carried_by` is `\"retrieval\"`. Read that\nas \"nothing was named; recall alone put this here\" — no anchor was resolved,\nyet the packet's continuity token names that page, so a following\n\"continue\" resumes it; a turn with nothing distinctive in it abstains\n`unresolved` rather than guessing between pages. Naming that\nSAME page yourself with `anchor` instead resolves it outright, at `status:\n\"resolved\"` and `generation.carried_by: \"agent_choice\"` — your choice, not\nrecall's guess.\n\nWhen a turn names SEVERAL pages this way, nothing is carried and the packet\nabstains `unresolved`, listing them under `anchors[]` at `status:\n\"retrieval_named\"`. That is not `ambiguity`, which reports two anchors that\nboth resolved: nothing resolved here. Call again with `anchor` set to the\nref you mean — an ordinary compiled page takes it exactly as a page reached\nby `retrieval_carried` above does — and that page's own units are served.\n\nOn the MCP door a packet may also carry `episode_due`: after several\nactivations with no `episode_memory` record from this caller, it asks you to\nrecord one at the conversation's next decision or stopping point. It is\nadvice, at most once per half hour, and absent when proactive capture is off.\n\nAt the start of your session a packet may also carry `upkeep`: at most one\nitem the background upkeep pass proposed, such as two notes that could be\nconnected or an entity page that newer facts have outgrown. It carries its\nown `route`, a `context_route` to read first, and a `dispose` route\n(`triage_memory` dismiss or snooze). Consideration does not authorize\nmutation: act through the route under its own rules, or dispose of it.\n\nUse `ask_memory` instead when you already know what you are looking for; use\nthis when you do not, and follow it with `read_memory` on whatever ref the\npacket points at.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "turn": {
+          "default": "",
+          "description": "The user's turn, verbatim. Empty abstains.",
+          "type": "string"
+        },
+        "max_chars": {
+          "default": 4000,
+          "description": "Character ceiling for the packet's text. Default 4,000, clamped to 500..8,000. Overflow becomes pointers, never truncated claims.",
+          "type": "integer"
+        },
+        "purpose": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional declared purpose for this request, e.g. \"audit\" or \"due-diligence\". Governance rules may widen or narrow what a given audience may see for a stated purpose; leaving it unset is deterministic, not a wildcard. Never affects ranking, and never enters the packet cache key."
+        },
+        "continuity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The opaque `continuity` token the previous packet of this conversation returned: pass it back verbatim on every call. Every packet returns one, an abstention too. It identifies this conversation, so a client that passes no `session` still has its own thread; only a salted hash of that identity is stored, and it lapses after six idle hours. On a turn that names nothing (\"continue\", \"where were we\") the anchors or page it names are the first thing the turn is taken to refer to, and may resolve on that alone. On any other turn it only strengthens anchors the turn already reaches on its own"
+        },
+        "anchor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "One ref the agent is naming on its own authority: the sense meant from a previous `ambiguity` block, or any ordinary compiled page a packet already listed (`recent_context`, `retrieval_named`, or an `unresolved` turn's candidates) — not raw `Sources`/`Evidence` material, which stays a `read_memory` target. That anchor or page is then treated as resolved on your choice alone, its roles run, and any competing senses are omitted. A ref that names nothing eligible this way, or one this audience may not see, is refused identically and no packet is built. When the user corrects which page they meant, call again with the same turn and `anchor` set to it."
+        },
+        "include_timings": {
+          "default": false,
+          "description": "Include per-stage timings for diagnostics.",
+          "type": "boolean"
+        },
+        "client": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional lowercase label for the calling client, e.g. `claude-code`, `codex` or `chatgpt`. Recorded host-locally only; an invalid label is ignored, never refused."
+        },
+        "session": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional opaque conversation identifier, at most 256 characters, such as the `episode` key an `episode_memory` record returned. Pass the same one on every turn of a conversation: a turn that names nothing (\"continue\") is then answered from THIS conversation's own last thread and picks first, before anything other conversations touched, and `recent_context` lists its pages first. Only a salted hash of it is stored, on this machine. It also names whose session start an `upkeep` item may arrive at."
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional opaque key for the project or folder the conversation runs in, at most 256 characters, such as a hash of the working directory. A fresh conversation in the same workspace continues that workspace's thread before the rest of the vault's. Only a salted hash of it is stored. Omitting both keys, a turn that names nothing is answered from this conversation's `continuity` thread alone, never from other conversations' work."
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
+        }
+      },
+      "type": "object"
+    }
+  },
   "adopt_vault": {
     "description": "Adopt an existing vault safely without replacing originals.\n\nDefault mode scans only. Copy/compile modes write under the governed\nKnowledge Base layer and preserve original path/hash provenance.",
     "inputSchema": {
@@ -808,7 +916,7 @@
     }
   },
   "capture_source": {
-    "description": "Capture raw source material and optionally return compile guidance.\n\nTakes `content` for text or `files` for attached file handles, stored\nlosslessly under `Sources/`. This command is for raw material; proof-bearing\nartifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the\nartifact is for, not by what the client can carry.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
+    "description": "Capture raw source material and optionally return compile guidance.\n\nTakes `content` for text or `files` for attached file handles (a local\nclient passes the handle `exomem attach --lane source` prints), stored\nlosslessly under `Sources/`. This command is for raw material; proof-bearing\nartifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the\nartifact is for, not by what the client can carry.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1075,6 +1183,87 @@
       "required": [
         "sources"
       ],
+      "type": "object"
+    }
+  },
+  "configure_memory": {
+    "description": "Inspect, set or clear your saved Exomem engagement level for this vault.\n\nInspect first, then set off, light, balanced or maximal with the returned\nrevision as expected_revision. The choice follows this authenticated identity\non later requests without a restart. It changes recall/capture eagerness, never\ncompute mode or authority. Other identities and vaults remain independent.\nPass context \"coding\" or \"conversation\" to set a level for that kind of client\nalone, leaving the identity-wide value untouched, and use clear with that\ncontext and expected_revision to remove it again. The context that applies to\na request is detected from the calling client, never chosen by an argument.\nAdopt the returned engagement contract in the current conversation.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "default": "inspect",
+          "description": "\"inspect\" reads the saved state, \"set\" writes a level, and \"clear\" removes one context value.",
+          "enum": [
+            "inspect",
+            "set",
+            "clear"
+          ],
+          "type": "string"
+        },
+        "prominence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The level to save — off, light, balanced or maximal; required by set and rejected by clear."
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The revision a prior inspect returned, so a stale write is refused rather than overwriting a later choice."
+        },
+        "context": {
+          "anyOf": [
+            {
+              "enum": [
+                "coding",
+                "conversation"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Which saved context value to write or clear; the context applied to a request is always derived from the client surface, never from this argument."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
+        }
+      },
       "type": "object"
     }
   },
@@ -1506,6 +1695,21 @@
           "default": null,
           "description": "Decision status."
         },
+        "aliases": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Other names the entity answers to, in any script; give the native-script spelling of a name written in another script."
+        },
         "ref": {
           "anyOf": [
             {
@@ -1577,6 +1781,74 @@
           ],
           "default": null,
           "description": "Exact reviewed vocabulary fingerprint; grants no write permission."
+        },
+        "identity_decision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "outcome": {
+                  "enum": [
+                    "distinct"
+                  ]
+                },
+                "candidate_fingerprint": {
+                  "description": "candidate_fingerprint returned for this name.",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "outcome",
+                "candidate_fingerprint"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "create-entity only. When the name already denotes\nother active entities, `{outcome: \"distinct\", candidate_fingerprint}`\nfrom that preparation or refusal commits a separate identity;\nomit it to reuse a candidate or abstain."
+        },
+        "facets": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 16,
+                    "type": "array"
+                  }
+                ]
+              },
+              "maxProperties": 16,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "create-entity only. Values for the facets the registry\ndeclares for entity_type (string for single, list for multi)."
+        },
+        "entity_family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Parent family from the entity registry. On resolve-entity it matches every leaf type in that family; on context and graph-context it keeps only entity neighbours of it."
         },
         "response_detail": {
           "default": "compact",
@@ -2263,6 +2535,34 @@
           "description": "Preview the edit without committing it. Accepted here or as `operation.validate_only`; giving it in both places is fine when they agree. Same meaning as on `remember` and `replace_memory`.",
           "type": "boolean"
         },
+        "identity_decision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "outcome": {
+                  "enum": [
+                    "distinct"
+                  ]
+                },
+                "candidate_fingerprint": {
+                  "description": "candidate_fingerprint returned for this name.",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "outcome",
+                "candidate_fingerprint"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -2290,6 +2590,396 @@
         "path",
         "why",
         "operation"
+      ],
+      "type": "object"
+    }
+  },
+  "episode_memory": {
+    "description": "Record what a conversation worked on, decided and left open, for the next session on any client.\n\nCall `record` once when a conversation reaches a decision or a stopping\npoint, and skip it when nothing durable happened. You write the recap:\nshort one-line items, never a transcript. It is kept as a bounded Source\nunder `Sources/Episodes/`, and the newest recap of each conversation leads\nthe `recent_context` block `activate_context` serves on every client.\nRecording again under the same `episode` with changed content adds a\nrevision and retires the previous one; an identical retry writes nothing.\n\nA recorded episode can also carry typed candidates for its durable\nchanges: `prepare` one candidate's destination, set its `disposition`\n(including honest no_capture, deferred or rejected ones), and `resume`\nto execute the routed ones. A leaf is one typed step for an existing\nwriter, of a kind its route owns: focused_note creates a note, entity an\nentity, relation_only accepts a relation, existing_page and semantic_unit\nedit or supersede, and records appends one item to a Records collection\n(append-record: {collection, item, item_key?, body?, why,\nexpected_container_hash}). It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this\nservice enables episode execution. After it runs, make one final\n`coverage` pass: compare the input it names with each receipt and its\nreadback, prepare anything omitted or misrouted, then attest with\n`resume` and `postcommit`. A committed note is not coverage.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "`record` writes a recap revision; `inspect` reads this episode's revision history back; `candidates` reads its candidates; `prepare`, `disposition` and `resume` plan and execute them; `coverage` reads the final pass's evidence.",
+          "enum": [
+            "record",
+            "inspect",
+            "candidates",
+            "prepare",
+            "disposition",
+            "resume",
+            "coverage"
+          ],
+          "type": "string"
+        },
+        "episode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The `ep-` key a previous record returned, or the one a hook named. Omit it on a conversation's first record and reuse the returned key for the rest of that conversation. Required for every other action."
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the conversation was about, one line, at most 120 characters."
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "One line on where it stands, at most 180 characters."
+        },
+        "worked_on": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Up to 5 one-line items, 200 characters each."
+        },
+        "decided": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Up to 5 one-line items, 200 characters each."
+        },
+        "open": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Up to 5 one-line items left open, 200 characters each. At least one of `worked_on`, `decided` or `open` is required."
+        },
+        "said": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Up to 3 verbatim user statements worth keeping, 300 characters each."
+        },
+        "about": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Up to 3 `exomem://` refs of pages the conversation concerned. Recording marks them as this conversation's latest work, so a following \"continue\" resumes them. Refs you cannot see are dropped and counted in `about_skipped`."
+        },
+        "client": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional lowercase client label, e.g. `claude-code` or `chatgpt`."
+        },
+        "candidate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `prepare`/`disposition`: a stable key you choose for one durable change, reused when you revise it."
+        },
+        "proposal": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "route": {
+                  "enum": [
+                    "existing_page",
+                    "semantic_unit",
+                    "focused_note",
+                    "entity",
+                    "records",
+                    "planning",
+                    "experiment",
+                    "source",
+                    "evidence",
+                    "relation_only",
+                    "no_capture"
+                  ]
+                },
+                "target": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "alternatives": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "target": {
+                        "type": "string"
+                      },
+                      "scope": {
+                        "type": "string"
+                      },
+                      "version": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target",
+                      "scope",
+                      "version"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 8,
+                  "type": "array"
+                },
+                "evidence": {
+                  "enum": [
+                    "complete",
+                    "truncated",
+                    "missing"
+                  ]
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "leaves": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "leaf_key": {
+                        "type": "string"
+                      },
+                      "effect_revision": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "kind": {
+                        "enum": [
+                          "create-note",
+                          "create-entity",
+                          "accept-relation",
+                          "edit",
+                          "supersede",
+                          "append-record"
+                        ]
+                      },
+                      "args": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "leaf_key",
+                      "effect_revision",
+                      "kind",
+                      "args"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 16,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "route",
+                "alternatives",
+                "evidence",
+                "reason",
+                "leaves"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `prepare`: {route, target?, title?, alternatives,\nevidence, reason, leaves: [{leaf_key, effect_revision, kind,\nargs}]}. The destination is your call: `alternatives` lists up to\n8 pages you inspected as possible homes, each {target: its\n`exomem://` ref, scope: its declared scope in a line, version: the\n`content_hash` you read}; an open page has no priority among them.\nexisting_page and semantic_unit name the `target` every leaf\nwrites. A changed leaf needs the next `effect_revision`; a\ncommitted one cannot change."
+        },
+        "disposition": {
+          "anyOf": [
+            {
+              "enum": [
+                "routed",
+                "no_capture",
+                "uncertain",
+                "rejected",
+                "deferred",
+                "awaiting_authority"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `disposition`: routed, no_capture, uncertain, rejected, deferred or awaiting_authority."
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `disposition`: why, in one or two sentences."
+        },
+        "input_revision": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `resume`: the input revision your coverage review covered, the current one."
+        },
+        "journal_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `resume`: the `journal_digest` your last candidates, prepare or disposition result returned. A resume after any later change is refused with EPISODE_REVISION_CONFLICT."
+        },
+        "order": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `resume`: leaf ids to run, in this order."
+        },
+        "max_leaves": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `resume`: at most this many leaves this pass, 1 to 16 (default 8); the rest stay pending."
+        },
+        "postcommit": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `resume`: true attests your review of the committed results instead of executing anything."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
+        }
+      },
+      "required": [
+        "action"
       ],
       "type": "object"
     }
@@ -2652,20 +3342,21 @@
     }
   },
   "maintain_memory": {
-    "description": "Maintain vault health with explicit write-capable modes.\n\nDefault mode is read-only audit. `mode=\"fix\"` and `mode=\"backfill-ids\"`\nrewrite content (wikilinks, frontmatter, stable IDs) and default to\ndry-run here as a safety net. `mode=\"reconcile\"` only heals index-count\nand sidecar drift from out-of-band edits — the same canonical default as\n`op_reconcile` itself (idempotent, non-destructive) — so it defaults to\nwriting; pass `dry_run=true` to preview instead.\n\nMCP, REST, and hosted callers may audit or preview with `dry_run=true`, but\nwrite-mode maintenance is operator-only: run `exomem maintain --fix` or\n`exomem maintain --reconcile` on the host. Remote write attempts return\n`MAINTENANCE_REQUIRES_CLI` before acquiring the mutation boundary.\n\n`mode=\"structured-files\"` is the exception: it previews one Planning or\nRecords collection's manifest-declared human filenames and managed readable\nbodies, including governed inbound-link rewrites. Preview is read-only;\napply requires its exact plan and source snapshot and commits atomically.\nDurable identity and mutable state stay in frontmatter, not filenames.\n\n`mode=\"curation\"` is the governed multi-step exception. The active agent\nauthors a closed typed plan from explicit context; Exomem validates and\nfingerprints it, records one exact-plan approval, and executes at most one\ncontent step per apply or resume request. Work-item, preview, and status are\nread-only. Proposal, execution, and separately reviewed compensation use the\nshared mutation terminal. Curation cannot target raw Sources or Evidence,\nPlanning, Records, workflow contracts, schema/admin state, or trash internals.\n\n`mode=\"fix\"` also collapses media sidecars that accumulated nested copies of\nthemselves (audit category `duplicated_sidecar`, reportable on its own via\n`mode=\"audit\", categories=[\"duplicated_sidecar\"]`). It keeps the longest\nsurviving `## Extracted text` — for a sidecar whose top-level block was\nblanked by a re-render, that is the one buried in a nested copy — and refuses\nany rewrite that would leave less transcript than it found. Frontmatter is\nuntouched, so a still-`pending` sidecar is re-extracted normally and the\nrecovered text is only the fallback.",
+    "description": "Maintain vault health with explicit write-capable modes.\n\nDefault mode is read-only audit. `mode=\"fix\"` and `mode=\"backfill-ids\"`\nrewrite content (wikilinks, frontmatter, stable IDs) and default to\ndry-run here as a safety net. `mode=\"reconcile\"` only heals index-count\nand sidecar drift from out-of-band edits — the same canonical default as\n`op_reconcile` itself (idempotent, non-destructive) — so it defaults to\nwriting; pass `dry_run=true` to preview instead.\n\nMCP, REST, and hosted callers may audit or preview with `dry_run=true`, but\nwrite-mode maintenance is operator-only: run `exomem maintain --fix` or\n`exomem maintain --reconcile` on the host. Remote write attempts return\n`MAINTENANCE_REQUIRES_CLI` before acquiring the mutation boundary.\n\n`mode=\"structured-files\"` is the exception: it previews one Planning or\nRecords collection's manifest-declared human filenames and managed readable\nbodies, including governed inbound-link rewrites. Preview is read-only;\napply requires its exact plan and source snapshot and commits atomically.\nDurable identity and mutable state stay in frontmatter, not filenames.\n\n`mode=\"curation\"` is the governed multi-step exception. The active agent\nauthors a closed typed plan from explicit context; Exomem validates and\nfingerprints it, records one exact-plan approval, and executes at most one\ncontent step per apply or resume request. Work-item, preview, and status are\nread-only. Proposal, execution, and separately reviewed compensation use the\nshared mutation terminal. Curation cannot target raw Sources or Evidence,\nPlanning, Records, workflow contracts, schema/admin state, or trash internals.\n\n`mode=\"tag-variants\"` lists tags that differ only by case, separator, or\nplural, grouped with the page counts you may see and the most-used written\nform as canonical; a tie is listed, never rewritten. Preview is read-only;\n`apply=true` with the preview's `plan_id` and a one-line `why` rewrites one\nbounded batch of minority variants to the canonical tag and logs a rollback\nrecord. Only the `tags` key changes; Sources, Evidence, Records, Planning\nand other owned trees are untouched. Preview again for the next batch.\n`exclude_groups` keeps named groups out of preview and apply alike.\n\n`mode=\"fix\"` also collapses media sidecars that accumulated nested copies of\nthemselves (audit category `duplicated_sidecar`, reportable on its own via\n`mode=\"audit\", categories=[\"duplicated_sidecar\"]`). It keeps the longest\nsurviving `## Extracted text` — for a sidecar whose top-level block was\nblanked by a re-render, that is the one buried in a nested copy — and refuses\nany rewrite that would leave less transcript than it found. Frontmatter is\nuntouched, so a still-`pending` sidecar is re-extracted normally and the\nrecovered text is only the fallback.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "mode": {
           "default": "audit",
-          "description": "audit, fix, reconcile, backfill-ids, structured-files, or curation.",
+          "description": "audit, fix, reconcile, backfill-ids, structured-files, curation, or tag-variants.",
           "enum": [
             "audit",
             "fix",
             "reconcile",
             "backfill-ids",
             "structured-files",
-            "curation"
+            "curation",
+            "tag-variants"
           ],
           "type": "string"
         },
@@ -2756,7 +3447,7 @@
             }
           ],
           "default": null,
-          "description": "Exact structured-files preview identity required for apply."
+          "description": "Exact structured-files or tag-variants preview identity for apply."
         },
         "source_snapshot": {
           "anyOf": [
@@ -2780,7 +3471,7 @@
             }
           ],
           "default": null,
-          "description": "Bounded audit reason required for structured-files apply."
+          "description": "Bounded audit reason required for structured-files or tag-variants apply."
         },
         "curation_action": {
           "anyOf": [
@@ -2918,6 +3609,21 @@
           ],
           "default": null,
           "description": "Exact reviewed vocabulary fingerprint; grants no write permission."
+        },
+        "exclude_groups": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Tag-variant group keys to leave out; part of the plan_id."
         },
         "response_detail": {
           "default": "compact",
@@ -3926,16 +4632,16 @@
     }
   },
   "preserve_artifacts": {
-    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\ntemporary HTTPS file handles. Exomem retrieves each handle server-side and\nreturns one stored or failed outcome per file; no binary data is passed as\nbase64 through model-visible arguments. Clients without file handles keep\nusing `transfer_artifact(operation=\"upload\")` followed by `/upload`.",
+    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\nfile handles: a chat client's attachments, or the handle `exomem attach`\nprints on a local client (single use: storing its file spends it, while a\nrefused or failed file leaves it redeemable until it expires). When a\nshared file is evidence, preserve the original first and put any\ntranscription in `transcriptions`, never instead. Exomem retrieves each handle server-side and returns one terminal\nstate per file — `stored`, `already_stored`, or\n`failed`. `already_stored` means those exact bytes are already under that\ndestination, so nothing was written and the outcome names the existing path\nand ref; retrying a lost response with the same identity replays the batch\nrather than duplicating it. No binary data is passed as base64 through\nmodel-visible arguments. Clients without file handles keep using\n`transfer_artifact(operation=\"upload\")` followed by `/upload`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "scope": {
-          "description": "Incident, case, project, or domain key.",
+          "description": "Incident, case, project, or domain key. One path segment, never a path. A separator or reserved character is refused, not rewritten.",
           "type": "string"
         },
         "category": {
-          "description": "Evidence category within the scope.",
+          "description": "Evidence category within the scope. One path segment, not a path; nest with this argument rather than with `/` in `scope`.",
           "type": "string"
         },
         "files": {
@@ -4004,6 +4710,32 @@
           "default": null,
           "description": "Optional explicit adoption identity selecting exactly one\nsupplied handle. This establishes eligibility, not write consent;\nagent-initiated use obeys proactive_capture."
         },
+        "transcriptions": {
+          "default": [],
+          "description": "Optional transcriptions of supplied originals, each {file_id, text}. Each is saved on its original's Evidence page, bound to the original's bytes, and only when that original is stored. Files must have unique file_id values when transcriptions are supplied.",
+          "items": {
+            "description": "A transcription an AI client derived from one supplied original.",
+            "properties": {
+              "file_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "text": {
+                "maxLength": 100000,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_id",
+              "text"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -4036,16 +4768,16 @@
     }
   },
   "preserve_evidence": {
-    "description": "Preserve text evidence as append-only proof material.\n\nUse for receipts, letters, transcripts, warranty records, legal/dispute\nmaterial, and other factual artifacts. For binary files supplied as client\nfile handles, use `preserve_artifacts`; otherwise use `transfer_artifact`\nplus `/upload`. Bytes never pass through the model.",
+    "description": "Preserve text evidence as append-only proof material.\n\nUse for receipts, letters, transcripts, warranty records, legal/dispute\nmaterial, and other factual artifacts. For binary files supplied as client\nfile handles, use `preserve_artifacts`; otherwise use `transfer_artifact`\nplus `/upload`. Bytes never pass through the model.\n\nThe outcome carries a terminal `state`: `stored`, or `already_stored` when\nthose exact bytes are already under that destination, in which case nothing\nis written and the outcome names the existing path and ref.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "scope": {
-          "description": "Incident, case, project, or domain key.",
+          "description": "Incident, case, project, or domain key. One path segment, never a path. A separator or reserved character is refused, not rewritten.",
           "type": "string"
         },
         "category": {
-          "description": "Evidence category within the scope.",
+          "description": "Evidence category within the scope. One path segment, not a path; nest with this argument rather than with `/` in `scope`.",
           "type": "string"
         },
         "filename": {
@@ -4449,7 +5181,7 @@
       "additionalProperties": false,
       "properties": {
         "action": {
-          "description": "Exactly one of describe, validate, inspect, query, create, append, update, revise, or rebaseline.",
+          "description": "Exactly one of describe, validate, inspect, query, create, append, update, revise, rebaseline, or discard.",
           "enum": [
             "describe",
             "validate",
@@ -4459,7 +5191,8 @@
             "append",
             "update",
             "revise",
-            "rebaseline"
+            "rebaseline",
+            "discard"
           ],
           "type": "string"
         },
@@ -4473,7 +5206,7 @@
             }
           ],
           "default": null,
-          "description": "Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, and rebaseline."
+          "description": "Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, rebaseline, and discard."
         },
         "manifest_path": {
           "anyOf": [
@@ -4726,7 +5459,7 @@
             }
           ],
           "default": null,
-          "description": "Values for append."
+          "description": "Values for append; shallow overrides when resuming a held candidate."
         },
         "item_key": {
           "anyOf": [
@@ -4738,7 +5471,7 @@
             }
           ],
           "default": null,
-          "description": "Stable item ID for append or update."
+          "description": "The item's internal UUID identity, required for update. Omit it on append and identity derives from the collection's declared natural key."
         },
         "expected_container_hash": {
           "anyOf": [
@@ -4904,6 +5637,30 @@
           "default": null,
           "description": "Guardedly rebuild the managed Markdown presentation during update."
         },
+        "held": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reference to a held candidate: resumes it on append or update, with item or changes supplying overrides and a null value removing a field; names the candidate to remove on discard."
+        },
+        "hold": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Set false to refuse an invalid candidate without holding it. A refused append or update otherwise preserves the complete candidate as a held file under the collection and returns its reference beside the refusal."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -4939,7 +5696,7 @@
       "additionalProperties": false,
       "properties": {
         "content": {
-          "description": "Full markdown body to write after frontmatter. Semantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.",
+          "description": "Full markdown body to write after frontmatter. Semantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading. Wikilink the people, organisations, places, equipment and products this note names, whether or not a page exists yet.",
           "type": "string"
         },
         "title": {
@@ -5321,6 +6078,47 @@
           "default": null,
           "description": "Audit reason for a reviewed-none disposition."
         },
+        "vocabulary_decision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "evidence_fingerprint": {
+                  "description": "Fingerprint returned by vocabulary_preparation.",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "outcome": {
+                  "enum": [
+                    "reuse",
+                    "create",
+                    "defer"
+                  ]
+                },
+                "canonical": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "evidence_fingerprint",
+                "outcome",
+                "canonical"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -5361,7 +6159,7 @@
           "type": "string"
         },
         "content": {
-          "description": "Full markdown body for the new page. Semantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.",
+          "description": "Full markdown body for the new page. Semantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading. Wikilink the people, organisations, places, equipment and products this note names, whether or not a page exists yet.",
           "type": "string"
         },
         "title": {
@@ -5750,6 +6548,47 @@
           "default": null,
           "description": "Audit reason for a reviewed-none disposition."
         },
+        "vocabulary_decision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "evidence_fingerprint": {
+                  "description": "Fingerprint returned by vocabulary_preparation.",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "outcome": {
+                  "enum": [
+                    "reuse",
+                    "create",
+                    "defer"
+                  ]
+                },
+                "canonical": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "evidence_fingerprint",
+                "outcome",
+                "canonical"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -5787,7 +6626,7 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference. An `exomem://review/adoption/<id>` ref returns the bounded Adoption Studio proposal context (proposal record, live binding check, and target-page summary) instead.",
+          "description": "Stable `exomem://review/<id>` reference. An `exomem://review/adoption/<id>` ref returns the bounded Adoption Studio proposal context (proposal record, live binding check, and target-page summary) instead. An `exomem://review/upkeep/<id>` ref returns one upkeep item's revalidated proposal with bounded excerpts of its subject and evidence pages and its route.",
           "type": "string"
         },
         "expected_fingerprint": {
@@ -5870,7 +6709,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, dispositions, vocabulary, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, or write-advisory-result. `write-advisory-result` resolves exactly one opaque `exomem://write-advisory-result/<id>` reference returned by a committed write and reports only that job's current `pending`, `ready`, `failed`, or `superseded` state; it requires `ref`, has no list, browse, search, rank, count, continuation, or implicit-current form, and a malformed, unknown, unauthorized, or expired reference returns the shared not-found outcome. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
+          "description": "attention, activation, item, audit, dispositions, vocabulary, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, plan-progress, or write-advisory-result. `write-advisory-result` resolves exactly one opaque `exomem://write-advisory-result/<id>` reference returned by a committed write and reports only that job's current `pending`, `ready`, `failed`, or `superseded` state; it requires `ref`, has no list, browse, search, rank, count, continuation, or implicit-current form, and a malformed, unknown, unauthorized, or expired reference returns the shared not-found outcome. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`. `upkeep` lists the background worker's bounded upkeep proposals (default 10), each with its evidence, the governed route that would act on it, and triage verbs; a proposal authorizes nothing. Link items carry a relation-queue ref and source path.",
           "type": "string"
         },
         "categories": {
@@ -5886,7 +6725,7 @@
             }
           ],
           "default": null,
-          "description": "Optional category filter for attention/activation/audit."
+          "description": "Optional category filter for attention/activation/audit, or an upkeep family filter for upkeep."
         },
         "limit": {
           "anyOf": [
@@ -6007,7 +6846,7 @@
             }
           ],
           "default": null,
-          "description": "Stable `exomem://review/<id>` reference for item mode, or the opaque `exomem://write-advisory-result/<id>` reference for write-advisory-result mode. Required by both. For a vocabulary relation-type question, optionally provide a current relation-queue candidate ref alongside its source path and your meaning question. This reviews both endpoints and returns the exact application route."
+          "description": "Stable `exomem://review/<id>` reference for item mode (an `exomem://review/upkeep/<id>` ref revalidates that one upkeep item), or the opaque `exomem://write-advisory-result/<id>` reference for write-advisory-result mode. Required by both. For a vocabulary relation-type question, optionally provide a current relation-queue candidate ref alongside its source path and your meaning question. This reviews both endpoints and returns the exact application route."
         },
         "detail": {
           "default": "actionable",
@@ -6059,7 +6898,7 @@
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "For `relations`, `propose-relation` returns a reviewed delta without writing and `save-relations` commits that delta with expected_hash and why. For `entity-types`, `resolve-entity-type` reads matching definitions using query and optional requested_type; `save-entity-types` saves a reviewed proposal with why and expected_hash when updating. The current entity registry is included in bootstrap. For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
+          "description": "For `relations`, `propose-relation` returns a reviewed delta without writing and `save-relations` commits that delta with expected_hash and why. For `entity-types`, `resolve-entity-type` reads matching definitions using query and optional requested_type; `save-entity-types` saves a reviewed proposal with why and expected_hash when updating. The current entity registry is included in bootstrap. For `relations`, `census` returns counts-only relation quality from the published graph (optional detail, date_from, date_to) and never writes. For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations. For `context-roles` and `activation-conventions`, `validate` returns a proposal's findings plus the current registry's content_hash; `diff` compares a proposal against the effective registry; `save-roles`/`save-conventions` (matched to their subject) commit a reviewed proposal with why and expected_hash, refusing a proposal that has any finding; `history` lists the kept versions (newest first: time, why, before and after hash); `restore` reinstates one `version` with why and expected_hash, validated like a save; `infer` is refused for both, since the server does not propose conventions or roles.",
           "type": "string"
         },
         "name": {
@@ -6076,7 +6915,7 @@
         },
         "subject": {
           "default": "contract",
-          "description": "`contract`, `categories`, `entity-types`, `relations`, `traversal-profiles`, or `workflow-contracts`. Workflow contracts support inventory, inspect, validate, resolve, preview, save, and refresh with their exact argument matrix.",
+          "description": "`contract`, `categories`, `entity-types`, `relations`, `traversal-profiles`, `context-roles`, `activation-conventions`, or `workflow-contracts`. Workflow contracts support inventory, inspect, validate, resolve, preview, save, and refresh with their exact argument matrix.",
           "type": "string"
         },
         "project": {
@@ -6118,7 +6957,7 @@
             }
           ],
           "default": null,
-          "description": "Current relation registry hash required by save-relations, or\ncurrent workflow hash required for workflow save updates and refresh."
+          "description": "Current relation registry hash required by save-relations, current\nworkflow hash required for workflow save updates and refresh, or the current\nroles_hash/conventions_hash required by save-roles/save-conventions."
         },
         "strict": {
           "default": false,
@@ -6147,7 +6986,7 @@
             }
           ],
           "default": null,
-          "description": "Reviewed relation definition for propose-relation, reviewed delta\nfor save-relations, or workflow proposal for workflow modes.\npropose-relation requires requested_label (the name portion), parent\n(one core relation key), description, and direction (directed or symmetric);\nnamespace supplies the prefix and defaults to vault. Optional fields are\naliases, inverse, origins, source_kinds, target_kinds, projects, page_types,\nand query. Pass this mapping directly without an extensions wrapper.\nsave-relations takes the returned delta and expected_hash."
+          "description": "Reviewed relation definition for propose-relation, reviewed delta\nfor save-relations, workflow proposal for workflow modes, or a complete\noverride document (the same shape as the vault file) for context-roles'\nvalidate/diff/save-roles and activation-conventions' validate/diff/save-conventions.\npropose-relation requires requested_label (the name portion), parent\n(one core relation key), description, and direction (directed or symmetric);\nnamespace supplies the prefix and defaults to vault. Optional fields are\naliases, inverse, origins, source_kinds, target_kinds, projects, page_types,\nand query. Pass this mapping directly without an extensions wrapper.\nsave-relations takes the returned delta and expected_hash."
         },
         "why": {
           "anyOf": [
@@ -6159,7 +6998,7 @@
             }
           ],
           "default": null,
-          "description": "Required audit reason for relation delta save, workflow save/refresh,\nand entity-type saves."
+          "description": "Required audit reason for relation delta save, workflow save/refresh,\nentity-type saves, and save-roles/save-conventions."
         },
         "include_model_suggestions": {
           "default": false,
@@ -6302,6 +7141,34 @@
           "default": null,
           "description": "Exact reviewed vocabulary fingerprint; grants no write permission."
         },
+        "detail": {
+          "anyOf": [
+            {
+              "enum": [
+                "counts",
+                "keys"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Relation census detail: `counts` (default) or `keys`, which adds predicate keys and counts."
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A kept registry version from `history`, for `restore` on `context-roles` or `activation-conventions`."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -6378,7 +7245,7 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`). An `exomem://review/family/<family>` ref addresses a whole signal FAMILY instead of one item.",
+          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`). An `exomem://review/family/<family>` ref addresses a whole signal FAMILY instead of one item. An `exomem://review/upkeep/<id>` ref dismisses, snoozes or reopens one upkeep proposal, bound to its current fingerprint.",
           "type": "string"
         },
         "action": {

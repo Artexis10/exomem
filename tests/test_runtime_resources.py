@@ -183,6 +183,48 @@ def test_server_bootstrap_keeps_hosted_dotenv_resource_budget_isolated(tmp_path:
     assert probe.read_text(encoding="utf-8") == "ok"
 
 
+def test_server_bootstrap_keeps_cloud_dotenv_resource_budget_isolated(tmp_path: Path) -> None:
+    """Design D1.6: "no `.env` file is loaded" covers every loader, not only
+    the server's later one -- this pre-bootstrap read must be gated on cloud
+    mode too, or a cwd `.env` still reaches the native env before `serve`'s
+    own dotenv gate ever runs. Exercises the real `preload_local_dotenv_policy`
+    end-to-end (not a spy on `server.load_dotenv`, which this finding showed
+    does not cover this call site)."""
+    probe = tmp_path / "cloud-dotenv-probe"
+    (tmp_path / ".env").write_text("EXOMEM_CPU_THREADS=3\n", encoding="utf-8")
+    (tmp_path / "numpy.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "assert os.environ['OMP_NUM_THREADS'] == '1'\n"
+        "Path(os.environ['EXOMEM_RUNTIME_PROBE']).write_text('ok')\n",
+        encoding="utf-8",
+    )
+    env = os.environ | {
+        "EXOMEM_CLOUD_CELL": "1",
+        "EXOMEM_RUNTIME_PROBE": str(probe),
+        "PYTHONPATH": f"{tmp_path}{os.pathsep}{Path(__file__).parents[1] / 'src'}",
+    }
+    env.pop("EXOMEM_CPU_THREADS", None)
+    env.pop("EXOMEM_HOSTED_CELL", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import exomem.__main__ as entry; "
+            "entry._dispatch_main = lambda _raw: __import__('numpy') and 0; "
+            "raise SystemExit(entry.main(['serve']))",
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert probe.read_text(encoding="utf-8") == "ok"
+
+
 def test_media_child_bootstrap_replaces_native_env_before_model_import(tmp_path: Path) -> None:
     probe = tmp_path / "media-probe"
     (tmp_path / "numpy.py").write_text(
@@ -283,6 +325,90 @@ def test_model_admission_is_reentrant_serial_and_preserves_status_capacity() -> 
     assert overlap == 1
 
 
+def test_one_admission_spans_a_bulk_encode_s_execution_turns() -> None:
+    """A bulk encode is one unit of admitted work, but it holds the execution slot
+    only per batch: between two turns another caller runs without waiting."""
+    gate = runtime_resources.ModelAdmissionGate(2)
+    turns: list[int] = []
+    between: list[int] = []
+
+    def other_turn() -> None:
+        with gate.execution(wait=False):
+            between.append(gate.admitted_count())
+
+    with gate.admission():
+        assert gate.admitted_count() == 1
+        with gate.execution():
+            turns.append(gate.admitted_count())
+        worker = threading.Thread(target=other_turn)
+        worker.start()
+        worker.join(timeout=1)
+        with gate.execution():
+            turns.append(gate.admitted_count())
+        with gate.admission():  # reentrant for its owner
+            assert gate.admitted_count() == 1
+
+    assert turns == [1, 1]
+    assert between == [2]
+    assert gate.admitted_count() == 0
+
+
+def test_an_admission_is_refused_without_waiting_when_capacity_is_spent() -> None:
+    gate = runtime_resources.ModelAdmissionGate(1)
+    refused: list[float] = []
+
+    def admit() -> None:
+        started = time.monotonic()
+        try:
+            with gate.admission():
+                pass
+        except runtime_resources.ModelBusyError:
+            refused.append(time.monotonic() - started)
+
+    with gate.admission():
+        worker = threading.Thread(target=admit)
+        worker.start()
+        worker.join(timeout=1)
+
+    assert len(refused) == 1 and refused[0] < 0.25
+    assert gate.admitted_count() == 0
+
+
+def test_the_process_gate_admits_a_bulk_encode_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_resources, "_gate", None)
+    monkeypatch.setattr(runtime_resources, "_gate_capacity", None)
+
+    with runtime_resources.model_admission():
+        gate = runtime_resources._gate
+        assert gate is not None and gate.admitted_count() == 1
+        with runtime_resources.model_execution():
+            assert gate.admitted_count() == 1
+
+    assert gate.admitted_count() == 0
+
+
+def test_a_default_thread_count_applies_only_while_the_budget_is_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The served encoder asks for two intra-op threads; an explicit
+    EXOMEM_CPU_THREADS still wins, and a one-CPU host is never oversubscribed."""
+
+    def configured(**kwargs) -> tuple[int, int]:
+        options = types.SimpleNamespace()
+        runtime_resources.configure_onnx_session_options(options, **kwargs)
+        return options.intra_op_num_threads, options.inter_op_num_threads
+
+    monkeypatch.delenv("EXOMEM_CPU_THREADS", raising=False)
+    monkeypatch.setattr(runtime_resources, "effective_online_cpus", lambda: 16)
+    assert configured(default_threads=2) == (2, 1)
+    assert configured() == (1, 1)
+    monkeypatch.setattr(runtime_resources, "effective_online_cpus", lambda: 1)
+    assert configured(default_threads=2) == (1, 1)
+    monkeypatch.setattr(runtime_resources, "effective_online_cpus", lambda: 16)
+    monkeypatch.setenv("EXOMEM_CPU_THREADS", "1")
+    assert configured(default_threads=2) == (1, 1)
+    monkeypatch.setenv("EXOMEM_CPU_THREADS", "3")
+    assert configured(default_threads=2) == (3, 1)
+
+
 def test_cold_product_getters_reserve_sync_status_capacity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -312,6 +438,17 @@ def test_cold_product_getters_reserve_sync_status_capacity(
             ]
             try:
                 assert await anyio.to_thread.run_sync(started.wait)
+                # `started` proves only that ONE caller is inside the loader.
+                # The refusal below is about a FULL gate, so wait for all four
+                # admissions: a caller whose worker thread starts late would
+                # otherwise lose its slot to the fifth call, which then blocks
+                # instead of being refused.
+                for _ in range(200):
+                    gate = runtime_resources._gate
+                    if gate is not None and gate.admitted_count() == 4:
+                        break
+                    await asyncio.sleep(0.01)
+                assert runtime_resources._gate.admitted_count() == 4
                 status_started = time.monotonic()
                 status = await asyncio.wait_for(
                     anyio.to_thread.run_sync(resource_status.collect, tmp_path), 1
@@ -416,6 +553,7 @@ def test_framework_adapters_receive_explicit_thread_budget(monkeypatch: pytest.M
     )
     from exomem import embedding_backend, extract
 
+    monkeypatch.setattr(embedding_backend, "_resolve", lambda *_args: "model-file")
     embedding_backend._TorchEncoder("model", "cpu", False)
 
     options = types.SimpleNamespace()
@@ -429,6 +567,7 @@ def test_framework_adapters_receive_explicit_thread_budget(monkeypatch: pytest.M
     tokenizer = types.SimpleNamespace(
         enable_truncation=lambda **_kwargs: None,
         enable_padding=lambda **_kwargs: None,
+        token_to_id=lambda _token: 0,
     )
     monkeypatch.setitem(sys.modules, "onnxruntime", ort)
     monkeypatch.setitem(
@@ -436,7 +575,6 @@ def test_framework_adapters_receive_explicit_thread_budget(monkeypatch: pytest.M
         "tokenizers",
         types.SimpleNamespace(Tokenizer=types.SimpleNamespace(from_file=lambda _path: tokenizer)),
     )
-    monkeypatch.setattr(embedding_backend, "_resolve", lambda *_args: "model-file")
     monkeypatch.setattr(embedding_backend, "_max_seq_length", lambda _name: 4)
     embedding_backend._OnnxEncoder("model", "cpu")
 

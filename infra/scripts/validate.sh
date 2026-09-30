@@ -55,15 +55,30 @@ for root in foundation durability bootstrap hcp-bootstrap; do
   "${tflint_bin}" --chdir="${infra_dir}/terraform/${root}" --format=compact
 done
 
+# add-cloud-node-provisioning: the agent pool module has its own lock and
+# mocked-provider test suite; the foundation root carries a mocked wiring
+# test. Neither suite needs credentials or reaches a provider API.
+agent_module="${infra_dir}/terraform/foundation/modules/k3s-agents"
+"${terraform_bin}" -chdir="${agent_module}" init -backend=false -input=false
+"${terraform_bin}" -chdir="${agent_module}" validate
+"${tflint_bin}" --chdir="${agent_module}" --format=compact
+"${terraform_bin}" -chdir="${agent_module}" test
+"${terraform_bin}" -chdir="${infra_dir}/terraform/foundation" test
+
 "${checkov_bin}" --directory "${infra_dir}/terraform" --framework terraform --quiet --compact
 
 "${ansible_playbook_bin}" --syntax-check "${infra_dir}/ansible/site.yml"
+"${ansible_playbook_bin}" --syntax-check "${infra_dir}/ansible/remove-agent.yml" \
+  -e k3s_remove_node=exomem-agent-validate
 "${ansible_lint_bin}" --profile production "${infra_dir}/ansible"
 
 "${helm_bin}" repo add hcloud https://charts.hetzner.cloud \
   --repository-config "${helm_repository_config}" \
   --repository-cache "${helm_repository_cache}"
 "${helm_bin}" repo add traefik https://traefik.github.io/charts \
+  --repository-config "${helm_repository_config}" \
+  --repository-cache "${helm_repository_cache}"
+"${helm_bin}" repo add jetstack https://charts.jetstack.io \
   --repository-config "${helm_repository_config}" \
   --repository-cache "${helm_repository_cache}"
 "${helm_bin}" dependency build "${infra_dir}/helm/platform" \

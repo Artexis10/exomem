@@ -745,3 +745,129 @@ async def test_swapped_ciphertext_fails_closed_during_session_listing() -> None:
 
     with pytest.raises(SessionStoreUnavailable, match="storage key"):
         await authority.list_sessions()
+
+
+@pytest.mark.anyio
+async def test_rejected_sessions_name_their_reason_without_leaking_material(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every rejection reaches the client as an identical 401.
+
+    Without a server-side reason an operator cannot tell an expiry from a
+    rotated signing key from a bumped generation, and the records are
+    encrypted at rest so the files answer nothing either.
+    """
+    store = AtomicMemoryStore()
+    moment = 1_800_000_000.0
+    authority = _authority(store, clock=lambda: moment)
+    bearer, record, _refresh = await authority.issue_offline(
+        client_id="client",
+        scopes=("offline_access", "exomem:read"),
+        identity=_identity(),
+    )
+
+    with caplog.at_level("INFO", logger="exomem.auth_sessions"):
+        assert await authority.validate(bearer) is not None
+        assert not [r for r in caplog.records if "session_rejected" in r.getMessage()]
+
+        expired = _authority(
+            store, clock=lambda: moment + ACCESS_TOKEN_TTL_SECONDS + 1
+        )
+        caplog.clear()
+        assert await expired.validate(bearer) is None
+        expiry_messages = [
+            r.getMessage() for r in caplog.records if "session_rejected" in r.getMessage()
+        ]
+
+        caplog.clear()
+        assert await authority.validate("exo_a2.notarealsession000000.x") is None
+        unknown_messages = [
+            r.getMessage() for r in caplog.records if "session_rejected" in r.getMessage()
+        ]
+
+    assert any("reason=expired" in message for message in expiry_messages)
+    assert any("reason=no_matching_record" in message for message in unknown_messages)
+    for message in expiry_messages + unknown_messages:
+        assert bearer not in message
+        assert record.token_digest not in message
+        assert str(record.github_user_id) not in message
+        assert record.github_login not in message
+
+
+def _allowing(store: AtomicMemoryStore, allowed: int | None) -> SessionAuthority:
+    return SessionAuthority(
+        storage=store,
+        signing_root="test-signing-root",
+        issuer="https://memory.example",
+        audience="https://memory.example/mcp",
+        clock=lambda: 1_800_000_000.0,
+        allowed_github_user_id=allowed,
+    )
+
+
+@pytest.mark.anyio
+async def test_changing_the_allowed_account_suspends_but_does_not_end_sessions(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The documented contract: moving the allowed account from A to B refuses
+    A's sessions and refresh families while B is allowed; moving back to A
+    resumes them (nothing was revoked); only `revoke --all`, a generation
+    bump, ends them for good. The takeover runbook relies on exactly this."""
+    store = AtomicMemoryStore()
+    issuing = _allowing(store, 123456)
+    legacy, legacy_record = await issuing.issue(
+        client_id="codex", scopes=("exomem:read",), identity=_identity()
+    )
+    access, access_record, refresh = await issuing.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access", "exomem:read"),
+        identity=_identity(),
+    )
+    assert await issuing.validate(legacy) == legacy_record
+    assert await issuing.validate(access) == access_record
+
+    # Suspended while another account is allowed.
+    rotated = _allowing(store, 654321)
+    with caplog.at_level("INFO", logger="exomem.auth_sessions"):
+        assert await rotated.validate(legacy) is None
+        assert await rotated.validate(access) is None
+    assert await rotated.validate_refresh(refresh, client_id="chatgpt") is None
+    with pytest.raises(InvalidRefreshToken):
+        await rotated.rotate_refresh(
+            refresh, client_id="chatgpt", scopes=("offline_access", "exomem:read")
+        )
+    rejections = [r.getMessage() for r in caplog.records if "session_rejected" in r.getMessage()]
+    assert rejections and all("reason=identity_not_allowed" in m for m in rejections)
+    assert not any("123456" in m or "654321" in m for m in caplog.messages)
+
+    # Resumed when the former account is allowed again: a suspension, not an end.
+    restored = _allowing(store, 123456)
+    assert await restored.validate(legacy) == legacy_record
+    assert await restored.validate_refresh(refresh, client_id="chatgpt") is not None
+    resumed_access, _, next_refresh = await restored.rotate_refresh(
+        refresh, client_id="chatgpt", scopes=("offline_access", "exomem:read")
+    )
+    assert await restored.validate(resumed_access) is not None
+
+    # Only the generation bump (`exomem auth revoke --all`) ends them for good,
+    # even when the account stays allowed.
+    await restored.replace_generation()
+    for bearer in (legacy, resumed_access):
+        assert await restored.validate(bearer) is None
+    assert await restored.validate_refresh(next_refresh, client_id="chatgpt") is None
+
+
+@pytest.mark.anyio
+async def test_an_install_without_an_allowed_account_validates_as_before() -> None:
+    store = AtomicMemoryStore()
+    authority = _allowing(store, None)
+    bearer, record = await authority.issue(
+        client_id="codex", scopes=("exomem:read",), identity=_identity()
+    )
+    assert await authority.validate(bearer) == record
+
+
+def test_allowed_account_must_be_a_positive_integer() -> None:
+    for bad in (0, -1, True):
+        with pytest.raises(ValueError):
+            _allowing(AtomicMemoryStore(), bad)

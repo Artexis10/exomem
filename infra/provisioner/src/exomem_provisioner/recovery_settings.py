@@ -27,6 +27,10 @@ _RECOVERY_ENVIRONMENT = {
     "EXOMEM_RECOVERY_RUNTIME_SELECTION": "runtime_selection",
     "EXOMEM_RECOVERY_HCLOUD_TOKEN": "hcloud_token",
     "EXOMEM_RECOVERY_HCLOUD_LOCATION": "hcloud_location",
+    "EXOMEM_RECOVERY_HELM_BINARY": "helm_binary",
+    "EXOMEM_RECOVERY_HELM_VERSION": "helm_version",
+    "EXOMEM_RECOVERY_CELL_CHART_PATH": "cell_chart_path",
+    "EXOMEM_RECOVERY_CELL_CHART_VERSION": "cell_chart_version",
 }
 
 
@@ -57,6 +61,13 @@ class RecoverySettings(BaseModel):
     runtime_selection: Literal["active", "rollback"]
     hcloud_token: SecretStr = Field(min_length=32, max_length=4096)
     hcloud_location: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")
+    # The pinned Helm CLI and the chart baked into this image. Recovery reads
+    # retained release records through the same client that wrote them rather
+    # than decoding their stored form itself.
+    helm_binary: str = Field(min_length=1, max_length=4096)
+    helm_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
+    cell_chart_path: str = Field(min_length=1, max_length=4096)
+    cell_chart_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
 
     @field_validator("database_url")
     @classmethod

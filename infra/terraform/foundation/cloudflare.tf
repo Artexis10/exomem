@@ -19,7 +19,7 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "alpha" {
   source     = "cloudflare"
 
   config = {
-    ingress = concat([
+    ingress = [
       {
         hostname = var.control_hostname
         service  = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
@@ -33,20 +33,11 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "alpha" {
         origin_request = {
           http_host_header = var.transfer_hostname
         }
-      }
-      ], var.gateway_hostname == "" ? [] : [
-      {
-        hostname = var.gateway_hostname
-        service  = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
-        origin_request = {
-          http_host_header = var.gateway_hostname
-        }
-      }
-      ], [
+      },
       {
         service = "http_status:404"
       }
-    ])
+    ]
   }
 }
 
@@ -75,11 +66,24 @@ resource "cloudflare_dns_record" "gateway" {
 
   zone_id = var.cloudflare_zone_id
   name    = var.gateway_hostname
-  type    = "CNAME"
-  content = "${cloudflare_zero_trust_tunnel_cloudflared.alpha.id}.cfargotunnel.com"
-  proxied = true
-  ttl     = 1
-  comment = "Exomem canonical OAuth MCP gateway origin"
+  type    = "A"
+  content = hcloud_primary_ip.node.ip_address
+  proxied = false
+  ttl     = 300
+  comment = "Exomem Cloud MCP direct TLS ingress"
+}
+
+resource "cloudflare_dns_record" "database" {
+  # DNS-only (not proxied): PgBouncer needs a raw TLS TCP listener, which
+  # Cloudflare's HTTP(S)/Tunnel proxy path cannot carry, and clients verify
+  # the server's own certificate (verify-full) rather than Cloudflare's.
+  zone_id = var.cloudflare_zone_id
+  name    = var.database_hostname
+  type    = "A"
+  content = hcloud_primary_ip.control_db.ip_address
+  proxied = false
+  ttl     = 300
+  comment = "Exomem control database PgBouncer TLS listener"
 }
 
 resource "cloudflare_zero_trust_access_service_token" "substrate" {

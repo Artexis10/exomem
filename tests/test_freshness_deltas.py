@@ -404,3 +404,442 @@ def test_sidecar_delta_apply_rolls_back_rows_and_checkpoint_together(
         }
     assert any(content.strip().endswith("original") for content in contents)
     assert not any("patched" in content for content in contents)
+
+
+# --- adopted origins: a checkpoint this process did not publish --------------
+
+
+def _foreign(checkpoint: freshness.RecallFreshnessCheckpoint):
+    """The same checkpoint as another process instance would have stamped it."""
+    return checkpoint._replace(instance_id=uuid.uuid4().hex)
+
+
+def test_a_foreign_recall_origin_is_unbridgeable_until_it_is_adopted(
+    tmp_path: Path,
+) -> None:
+    """The refusal that made a replacement worker rebuild its whole vault.
+
+    A worker replacement inherits a derived sidecar stamped with the previous
+    process's instance id. Nothing here has seen that checkpoint, so every delta
+    from it is incomplete and the graph's bounded repair -- which is a delta
+    from exactly that point -- has no lineage to advance
+    (`seamless-managed-worker-handoff`).
+    """
+    page = _kb_file(tmp_path, "adopted-origin.md")
+    _seed(tmp_path, [page])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+
+    assert freshness.recall_delta_since(tmp_path, "vault", inherited).complete is False
+
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is True
+    adopted = freshness.recall_delta_since(tmp_path, "vault", inherited)
+
+    assert adopted.complete is True
+    assert adopted.changed == frozenset() and adopted.deleted == frozenset()
+
+
+def test_an_adopted_origin_still_reports_what_changed_after_it(tmp_path: Path) -> None:
+    """Adoption sets the origin; the ordinary event history supplies the delta."""
+    page = _kb_file(tmp_path, "adopted-then-edited.md")
+    other = _kb_file(tmp_path, "adopted-sibling.md")
+    _seed(tmp_path, [page, other])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is True
+
+    page.write_text(page.read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, [page], [])
+
+    delta = freshness.recall_delta_since(tmp_path, "vault", inherited)
+
+    assert delta.complete is True
+    assert delta.changed == frozenset({str(page)})
+    assert delta.deleted == frozenset()
+
+
+def test_adoption_refuses_a_cold_scope_and_a_different_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a live scope projecting the same corpus may adopt."""
+    page = _kb_file(tmp_path, "adopted-refusal.md")
+    _seed(tmp_path, [page])
+    current = freshness.recall_checkpoint(tmp_path, "vault")
+    inherited = _foreign(current)
+
+    other_policy = inherited._replace(policy_version="a-different-policy")
+    assert freshness.adopt_recall_origin(tmp_path, "vault", other_policy) is False
+    assert freshness.recall_delta_since(tmp_path, "vault", other_policy).complete is False
+
+    freshness.invalidate(tmp_path)
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is False
+
+
+def test_invalidating_a_scope_drops_the_origin_adopted_against_it(
+    tmp_path: Path,
+) -> None:
+    """An adopted origin is a statement about a map; it goes with that map."""
+    page = _kb_file(tmp_path, "adopted-invalidated.md")
+    _seed(tmp_path, [page])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is True
+
+    freshness.invalidate(tmp_path)
+    _seed(tmp_path, [page])
+
+    assert freshness.adopted_recall_origin(tmp_path, "vault", inherited) is None
+    assert freshness.recall_delta_since(tmp_path, "vault", inherited).complete is False
+
+
+def test_this_process_own_checkpoint_needs_no_adoption(tmp_path: Path) -> None:
+    page = _kb_file(tmp_path, "adopted-own.md")
+    _seed(tmp_path, [page])
+    own = freshness.recall_checkpoint(tmp_path, "vault")
+
+    assert freshness.adopt_recall_origin(tmp_path, "vault", own) is True
+    assert freshness.adopted_recall_origin(tmp_path, "vault", own) is None
+
+
+def test_an_edit_published_during_the_proof_is_not_swallowed_by_the_origin(
+    tmp_path: Path,
+) -> None:
+    """The adoption window, and the silent drift it used to hide.
+
+    The proof a caller runs before adopting walks the whole corpus -- seconds on
+    a real vault -- and the watcher publishes unattributed edits while it runs.
+    An origin recorded at the generation the proof *ended* on declares those
+    edits already accounted for: the next delta comes back complete and empty,
+    and the bounded repair advances a snapshot that never indexed the edited
+    page. The origin is therefore the minimum of the pre-proof and post-proof
+    samples.
+    """
+    page = _kb_file(tmp_path, "adoption-window-page.md")
+    victim = _kb_file(tmp_path, "adoption-window-victim.md")
+    _seed(tmp_path, [page, victim])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+
+    sampled = freshness.recall_generation(tmp_path, "vault")
+    assert sampled is not None
+    # Inside the proof's window: an edit the process did not author, published
+    # by the watcher while the proof is still walking.
+    victim.write_text(victim.read_text(encoding="utf-8") + "\nexternal\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, [victim], [])
+    assert freshness.recall_generation(tmp_path, "vault") > sampled
+
+    assert (
+        freshness.adopt_recall_origin(
+            tmp_path, "vault", inherited, sampled_generation=sampled
+        )
+        is True
+    )
+
+    delta = freshness.recall_delta_since(tmp_path, "vault", inherited)
+    assert delta.complete is True
+    assert str(victim) in delta.changed, (
+        "an edit published during the proof must still be in the next delta; "
+        f"changed={sorted(delta.changed)}"
+    )
+
+
+def test_the_adopted_origin_never_moves_forward_on_a_second_adoption(
+    tmp_path: Path,
+) -> None:
+    """Re-proving must not retire work the first origin still owes."""
+    page = _kb_file(tmp_path, "adoption-monotonic.md")
+    _seed(tmp_path, [page])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+    first = freshness.recall_generation(tmp_path, "vault")
+    assert freshness.adopt_recall_origin(
+        tmp_path, "vault", inherited, sampled_generation=first
+    )
+
+    page.write_text(page.read_text(encoding="utf-8") + "\nmore\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, [page], [])
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is True
+
+    assert freshness.adopted_recall_origin(tmp_path, "vault", inherited) == first
+    assert str(page) in freshness.recall_delta_since(tmp_path, "vault", inherited).changed
+
+
+# --- the adopted origin has to be reachable from the history (task 1.16) -----
+#
+# Measured on the first standby-promoted 0.85.0 worker. Two clean adoptions --
+# the standby's at 10:22:13 (`adopted=True residue=0`) and the promoted
+# worker's own at 10:23:03 -- and a watcher that admitted a coherent graph at
+# 10:23:38. Then the first governed write at 10:24:49 fell back
+# `recall_delta_incomplete` with `external_pending=False` and registered a
+# whole-vault rebuild at generation 3075. The second write was incremental.
+#
+# Naming an origin is only half an adoption. The promoted worker's watcher
+# re-seeds the recall registry -- a seed is a fresh baseline, so the retained
+# history starts empty at a NEW generation -- while the adopted origin, held at
+# the older generation by the deliberate `min`, survives it. The origin was
+# therefore below the front of the very history that had to serve it, and
+# `recall_delta_since` refused the bridge it had just been told to make.
+
+
+def _readopt_after_a_registry_reseed(tmp_path: Path, pages: list[Path]):
+    """The promotion shape: adopt, let the watcher re-seed, adopt again."""
+    _seed(tmp_path, pages)
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+    first = freshness.recall_generation(tmp_path, "vault")
+    assert freshness.adopt_recall_origin(
+        tmp_path, "vault", inherited, sampled_generation=first
+    )
+    # The promoted worker's watcher seeds the registry wholesale on start-up.
+    # `seed` resets the retained history to empty at a new generation; unlike
+    # `invalidate` it does NOT drop the adopted origin, so the origin outlives
+    # the history that could reach it.
+    _seed(tmp_path, pages)
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is True
+    assert freshness.adopted_recall_origin(tmp_path, "vault", inherited) == first
+    return inherited
+
+
+def test_an_origin_readopted_across_a_registry_reseed_is_still_bridgeable(
+    tmp_path: Path,
+) -> None:
+    """The 10:24:49 write, as a test: complete and empty, not a whole-vault pass."""
+    page = _kb_file(tmp_path, "reseeded-origin.md")
+    inherited = _readopt_after_a_registry_reseed(tmp_path, [page])
+
+    delta = freshness.recall_delta_since(tmp_path, "vault", inherited)
+
+    assert delta.complete is True, (
+        "a checkpoint this process has adopted -- against a proof that its "
+        "sources match disk -- must be bridgeable from the history it was "
+        "adopted into, or the first governed write rebuilds the whole vault"
+    )
+    assert delta.changed == frozenset() and delta.deleted == frozenset()
+
+
+def test_a_bridged_origin_reports_exactly_what_changed_after_the_reseed(
+    tmp_path: Path,
+) -> None:
+    """The floor must not swallow the events it sits under."""
+    page = _kb_file(tmp_path, "reseeded-then-edited.md")
+    other = _kb_file(tmp_path, "reseeded-sibling.md")
+    inherited = _readopt_after_a_registry_reseed(tmp_path, [page, other])
+
+    page.write_text(page.read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, [page], [])
+
+    delta = freshness.recall_delta_since(tmp_path, "vault", inherited)
+
+    assert delta.complete is True
+    assert delta.changed == frozenset({str(page)})
+    assert delta.deleted == frozenset()
+
+
+def test_a_third_adoption_cannot_raise_the_floor_above_an_older_origin(
+    tmp_path: Path,
+) -> None:
+    """`min` is monotonic downwards, and so is the floor it seeds.
+
+    Re-proving must not retire work the first origin still owes, which is why
+    the stored origin only ever falls. The floor is seeded at that same stored
+    value, so a later adoption can lower it or leave it, never raise it out
+    from under a delta that is already bridging from it.
+    """
+    page = _kb_file(tmp_path, "adoption-floor-monotonic.md")
+    inherited = _readopt_after_a_registry_reseed(tmp_path, [page])
+    first = freshness.adopted_recall_origin(tmp_path, "vault", inherited)
+
+    page.write_text(page.read_text(encoding="utf-8") + "\nmore\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, [page], [])
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is True
+
+    assert freshness.adopted_recall_origin(tmp_path, "vault", inherited) == first
+    delta = freshness.recall_delta_since(tmp_path, "vault", inherited)
+    assert delta.complete is True
+    assert delta.changed == frozenset({str(page)})
+
+
+def test_real_history_overflow_still_refuses_an_adopted_origin(tmp_path: Path) -> None:
+    """The control. A bridged origin must not become an unbridgeable one in disguise.
+
+    `recall_delta_incomplete` still has a job: a window that has genuinely
+    overflowed `DELTA_HISTORY_LIMIT` has lost the paths it would have reported,
+    and the whole-vault rebuild is the honest repair for that. The floor is an
+    ordinary history entry and is trimmed like one, so once the limit has
+    passed over it the guard refuses again -- which is the right answer.
+    """
+    page = _kb_file(tmp_path, "adoption-overflowed.md")
+    churn = _kb_file(tmp_path, "adoption-overflow-churn.md")
+    inherited = _readopt_after_a_registry_reseed(tmp_path, [page, churn])
+    assert freshness.recall_delta_since(tmp_path, "vault", inherited).complete is True
+
+    for index in range(freshness.DELTA_HISTORY_LIMIT + 2):
+        # Rewritten through `_kb_file` so each edit stays a *projected* entry
+        # and really advances the recall history: a raw overwrite drops out of
+        # the projection and records nothing after the first one, and a
+        # same-length body can land inside one mtime tick and coalesce. A body
+        # that grows by a byte each time changes the signature every time.
+        _kb_file(tmp_path, "adoption-overflow-churn.md", body="x" * (index + 1))
+        freshness.on_files_changed(tmp_path, [churn], [])
+
+    delta = freshness.recall_delta_since(tmp_path, "vault", inherited)
+    assert delta.complete is False, (
+        "an origin whose history really has overflowed must still rebuild; "
+        "the floor is a bridge over a cold start, not a licence to forget"
+    )
+
+
+def test_overflow_inside_the_proof_window_is_never_floored_over(tmp_path: Path) -> None:
+    """The floor must not span a hole. It bridges a cold start, not a loss.
+
+    `origin` is `min(current, sampled_generation)` and the sample is taken
+    BEFORE the proof walk, so a walk long enough to see `DELTA_HISTORY_LIMIT`
+    events pulls the origin back behind entries that have since been trimmed
+    off the front of the history. A floor written there would span them, and
+    the delta would come back `complete` with real edits silently absent --
+    worse than the rebuild it was trying to avoid, because nothing reports it.
+
+    The shape: a page is edited while the proof is reading, the vault then
+    churns past the limit, and the adoption lands. Either the victim is
+    reported or the delta refuses; `complete` without the victim is the bug.
+    """
+    victim = _kb_file(tmp_path, "proof-window-victim.md")
+    churn = _kb_file(tmp_path, "proof-window-churn.md")
+    _seed(tmp_path, [victim, churn])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+    sampled = freshness.recall_generation(tmp_path, "vault")
+
+    # The proof walk has already read `victim`; now it changes underneath.
+    _kb_file(tmp_path, "proof-window-victim.md", body="edited during the proof")
+    freshness.on_files_changed(tmp_path, [victim], [])
+    # ...and the vault churns hard enough to trim that event off the front.
+    for index in range(freshness.DELTA_HISTORY_LIMIT + 2):
+        _kb_file(tmp_path, "proof-window-churn.md", body="x" * (index + 1))
+        freshness.on_files_changed(tmp_path, [churn], [])
+
+    assert freshness.adopt_recall_origin(
+        tmp_path, "vault", inherited, sampled_generation=sampled
+    )
+    delta = freshness.recall_delta_since(tmp_path, "vault", inherited)
+
+    assert not (delta.complete and str(victim) not in delta.changed), (
+        "the delta claimed to be complete while omitting a page edited inside "
+        "the proof window: a floor was written over a trimmed hole"
+    )
+    assert delta.complete is False, (
+        "a window that overflowed during the proof is unbridgeable, so the "
+        "guard has to refuse and let the rebuild repair it"
+    )
+
+
+def test_an_adopted_origin_survives_the_watchers_boot_seed(tmp_path: Path) -> None:
+    """A seed empties the history but keeps the adopted origins pinned to it.
+
+    This is the promoted worker's shape. Its activation is deferred, so the
+    standby adopts with no watcher running; the watcher starts at `release()`,
+    strictly after promotion, and its boot pass seeds the registry -- which
+    empties the retained history under the floor the adoption just wrote. With
+    `graph_handoff` carried forward nothing re-adopts to replace it, so without
+    re-flooring the first governed write rebuilds the whole vault.
+    """
+    page = _kb_file(tmp_path, "boot-seed-survivor.md")
+    _seed(tmp_path, [page])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+    sampled = freshness.recall_generation(tmp_path, "vault")
+    assert freshness.adopt_recall_origin(
+        tmp_path, "vault", inherited, sampled_generation=sampled
+    )
+    assert freshness.recall_delta_since(tmp_path, "vault", inherited).complete is True
+
+    # The watcher boots and seeds. No second adoption: the carry skipped it.
+    _seed(tmp_path, [page])
+
+    delta = freshness.recall_delta_since(tmp_path, "vault", inherited)
+    assert delta.complete is True, (
+        "the origin the standby adopted must outlive the watcher's boot seed, "
+        "or the first write after a promotion rebuilds the whole vault"
+    )
+    assert delta.changed == frozenset() and delta.deleted == frozenset()
+
+
+def test_a_seed_drops_an_origin_whose_window_it_cannot_honestly_bridge(
+    tmp_path: Path,
+) -> None:
+    """Re-flooring is only allowed where the zero-path claim is exactly true.
+
+    If real edits landed between the adopted origin and the seed, the seed is
+    about to discard the history describing them. Re-flooring over that would
+    drop those paths from every later delta; dropping the origin instead makes
+    the guard refuse, which is the behaviour before any of this and the one
+    answer that cannot lose a page.
+    """
+    page = _kb_file(tmp_path, "seed-drop-page.md")
+    other = _kb_file(tmp_path, "seed-drop-other.md")
+    _seed(tmp_path, [page, other])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+    sampled = freshness.recall_generation(tmp_path, "vault")
+    assert freshness.adopt_recall_origin(
+        tmp_path, "vault", inherited, sampled_generation=sampled
+    )
+
+    # A real edit after the origin, recorded in the history the seed discards.
+    _kb_file(tmp_path, "seed-drop-page.md", body="edited before the seed")
+    freshness.on_files_changed(tmp_path, [page], [])
+    _seed(tmp_path, [page, other])
+
+    assert freshness.adopted_recall_origin(tmp_path, "vault", inherited) is None
+    assert freshness.recall_delta_since(tmp_path, "vault", inherited).complete is False
+
+
+def test_a_projection_identity_change_is_not_revived_by_a_later_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The identity branch's promise has to survive the next seed.
+
+    `reconcile` clears the retained history on a projection-identity change
+    because "no checkpoint from the prior projection may be resumed through the
+    new one". Clearing the history alone does not keep that promise: the
+    adopted origin outlives it, and the next `seed` sees an empty pre-seed
+    history, reads it as a cold start, and re-floors that origin -- reviving a
+    checkpoint the transition had already ruled out. An edit made under the old
+    projection then goes missing from a delta that calls itself complete.
+
+    The origin is a statement about the projection being replaced, so it is
+    dropped with it, the way `invalidate` drops it.
+
+    Driven through the real `reconcile` rather than by hand: the defect lives
+    in what that branch forgets to do, so a hand-written wipe would be testing
+    the test.
+    """
+    from exomem import recall_policy
+
+    identity = {"fingerprint": "fingerprint-before"}
+    real_identity = recall_policy.recall_policy_identity
+    monkeypatch.setattr(
+        recall_policy,
+        "recall_policy_identity",
+        lambda root: (real_identity(root)[0], identity["fingerprint"]),
+    )
+
+    victim = _kb_file(tmp_path, "identity-revival-victim.md")
+    _seed(tmp_path, [victim])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is True
+
+    _kb_file(tmp_path, "identity-revival-victim.md", body="edited under the old projection")
+    freshness.on_files_changed(tmp_path, [victim], [])
+
+    # The projection's proof authority changes: a hard boundary.
+    identity["fingerprint"] = "fingerprint-after"
+    freshness.reconcile(
+        tmp_path, "vault", [(str(victim), freshness.stat_signature(victim))]
+    )
+    assert freshness.recall_delta_since(tmp_path, "vault", inherited).complete is False
+
+    # A later seed -- a watcher restart -- must not bring the origin back.
+    _seed(tmp_path, [victim])
+
+    delta = freshness.recall_delta_since(tmp_path, "vault", inherited)
+    assert freshness.adopted_recall_origin(tmp_path, "vault", inherited) is None, (
+        "an origin ruled out by a projection change must not be revived by the "
+        "next seed's cold-start re-floor"
+    )
+    assert not (delta.complete and str(victim) not in delta.changed), (
+        "the delta claimed to be complete while omitting an edit made under the "
+        "projection the transition replaced"
+    )
+    assert delta.complete is False

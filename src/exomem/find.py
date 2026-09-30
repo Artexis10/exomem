@@ -32,6 +32,8 @@ from . import (
     find_types,
     freshness,
     recall_policy,
+    recall_space,
+    request_budget,
     runtime_resources,
     structured_filters,
 )
@@ -155,6 +157,25 @@ def _accelerated_device(device: str) -> bool:
     return d == "mps" or d == "cuda" or d.startswith("cuda:")
 
 
+def _rerank_reserve_seconds() -> float:
+    """The rerank reserve, larger when the singleton is not resident.
+
+    The reaper unloads the cross-encoder after 15 idle minutes and the next
+    request reloads it synchronously, inside itself — so on a cold process the
+    reserve has to cover a model load as well as the scoring, or the budget
+    would admit a stage it cannot pay for. Residency is read from the same fact
+    `model_reaper.default_slots()` reads, not from a second bookkeeping.
+    """
+    from . import embeddings as emb
+
+    resident = getattr(emb, "_RERANKER", None) is not None
+    return (
+        request_budget.RERANK_RESERVE_SECONDS
+        if resident
+        else request_budget.RERANK_COLD_RESERVE_SECONDS
+    )
+
+
 def auto_rerank_allowed_by_policy() -> bool:
     """True when unset `rerank` may invoke the CrossEncoder automatically.
 
@@ -207,6 +228,12 @@ _RECALL_PATH_CACHE: OrderedDict[
 _RECALL_PATH_CACHE_LOCK = threading.Lock()
 _RECALL_PATH_CACHE_SIZE = 32
 MAX_RERANK_CANDIDATES = 300
+#: Why a reranker that cannot judge across languages is skipped, by the way
+#: fusion saw the request cross scripts (`find_candidates.CROSSING_*`).
+_RERANK_CROSSING_REASONS = {
+    find_candidates.CROSSING_VOTES_WITHHELD: "cross_language_not_covered",
+    find_candidates.CROSSING_UNMATCHED: "cross_script_lead_not_covered",
+}
 _FOREGROUND_LEXICAL_REPAIR_PAGE_CAP = 64
 _FIND_CACHE_DELTA_PATH_CAP = 64
 
@@ -958,7 +985,12 @@ def _freshness_key(
     if (mode in ("hybrid", "vector") and graph) or relation_filter:
         from . import epistemic_graph
 
-        parts.append((".graph.sqlite", epistemic_graph.cache_token(vault_root) or "absent"))
+        # Graph recall never stacks a second cold proof behind a running one;
+        # a relation filter's semantics require the proved sidecar.
+        token = epistemic_graph.cache_token(
+            vault_root, prove=True if relation_filter else epistemic_graph.SINGLE_FLIGHT
+        )
+        parts.append((".graph.sqlite", token or "absent"))
     if mode in ("hybrid", "keyword"):
         # Which lexical backend serves (fts5 vs python) changes bm25-lane
         # scores, so a mid-process flip must not hit entries cached under the
@@ -1214,7 +1246,10 @@ def find(
     # where a reader would look for it.
     with _span(timings, "recall_projection", source=find_types.SOURCE_INDEX):
         admission = readiness.retrieval_admission()
-        if managed_runtime and admission["state"] == "unavailable":
+        if managed_runtime and (
+            admission["state"] == "unavailable"
+            or (not admission["admitted"] and readiness.required_warm_finished())
+        ):
             # A background repair may have published the exact catalog after its
             # one promotion callback lost a race.  Re-prove once before scheduling
             # another whole-corpus rebuild; normal ready requests keep one proof.
@@ -1508,7 +1543,13 @@ def find(
         if not query_vector_ready:
             from . import embeddings
 
-            query_vector = embeddings.embed_texts([query], is_query=True)[0]
+            # Encoded for the serving sidecar, or refused before encoding. The
+            # sidecar's identity travels with the vector, so a lane that finds
+            # another sidecar serving by then refuses it (`require_same_space`).
+            index = embeddings.get_embedding_index(vault_root)
+            encoded_for = getattr(index, "identity", None)
+            with recall_space.encoding_for(index):
+                query_vector = (encoded_for, embeddings.embed_texts([query], is_query=True)[0])
             query_vector_ready = True
         return query_vector
 
@@ -1936,7 +1977,23 @@ def find(
     # would keep serving the degraded ranking after the warm completes. A
     # post-warm lane FAILURE (`failed`) is skipped for the same reason: the
     # failure may be transient, so don't pin a BM25-only result in the cache.
-    if cache_key is not None and not degraded and not failed:
+    # A budget-skipped rerank is specific to this request. Do not reuse its
+    # unreranked hits for a later call that can afford the requested stage.
+    active_budget = request_budget.current()
+    budget_skipped_rerank = active_budget is not None and "rerank" in active_budget.skipped
+    # A key computed while another reader's proof ran says "unproven", but the
+    # proof may have landed before candidate collection and let the graph lane
+    # run: never pin such a result under a key that claims the lane was absent.
+    unproven_graph_key = cache_key is not None and (
+        (".graph.sqlite", ("unproven",)) in cache_key[1]
+    )
+    if (
+        cache_key is not None
+        and not degraded
+        and not failed
+        and not budget_skipped_rerank
+        and not unproven_graph_key
+    ):
         with _FIND_CACHE_LOCK:
             _FIND_CACHE[cache_key] = copy.deepcopy(hits)
             if cache_checkpoints is not None:
@@ -2169,7 +2226,7 @@ def _python_unit_scores(
     """Deterministic in-process lexical rung when the FTS sidecar is absent."""
     from . import bm25
 
-    query_tokens = bm25.tokenize(query)
+    query_tokens = bm25.tokenize(query, query=True)
     if not query_tokens:
         return {}
     refs = list(records)
@@ -2194,7 +2251,7 @@ def _unit_text_match_refs(
     """Exact OR/stemming membership shared with both lexical rungs."""
     from . import bm25
 
-    wanted = set(bm25.tokenize(query))
+    wanted = set(bm25.tokenize(query, query=True))
     if not wanted:
         return set()
     return {
@@ -2271,7 +2328,7 @@ def _vector_unit_candidates(
     query_vector_provider: Callable[[], Any] | None = None,
 ) -> tuple[list[Any], dict[str, Any], str]:
     """Return bounded vector candidates without opening every Markdown parent."""
-    model_name = "BAAI/bge-base-en-v1.5"
+    model_name = recall_space.recall_model()
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return (
             [],
@@ -2290,11 +2347,13 @@ def _vector_unit_candidates(
 
         index = embeddings.get_embedding_index(vault_root)
         with _span(timings, "vector.unit.embed"):
-            query_vector = (
-                query_vector_provider()
-                if query_vector_provider is not None
-                else embeddings.embed_texts([query], is_query=True)[0]
-            )
+            if query_vector_provider is not None:
+                encoded_for, query_vector = query_vector_provider()
+            else:
+                encoded_for = getattr(index, "identity", None)
+                with recall_space.encoding_for(index):
+                    query_vector = embeddings.embed_texts([query], is_query=True)[0]
+        recall_space.require_same_space(index, encoded_for, query_vector)
         hits = index.search_semantic_units(
             query_vector,
             k=candidate_limit,
@@ -2305,7 +2364,7 @@ def _vector_unit_candidates(
         profile = {
             "status": "participated" if hits else "available_nonmatching",
             "backend": type(index).__name__,
-            "model": embeddings.MODEL_NAME,
+            "model": recall_space.serving_model(index),
             "metric": {
                 "name": "cosine_similarity",
                 "direction": "higher",
@@ -2323,6 +2382,28 @@ def _vector_unit_candidates(
         )
     except runtime_resources.ModelBusyError:
         raise
+    except recall_space.ServingEncoderCold as error:
+        log.info("semantic-unit vector search deferred (%s); using lexical ranking", error)
+        if degraded_out is not None:
+            degraded_out.append("embeddings")
+        return (
+            [],
+            {"status": "warming", "reason": recall_space.ServingEncoderCold.reason, "model": model_name},
+            "kb",
+        )
+    except recall_space.VectorSpaceMismatch as error:
+        log.info("semantic-unit vector search unavailable (%s); using lexical ranking", error)
+        if degraded_out is not None:
+            degraded_out.append("embeddings")
+        return (
+            [],
+            {
+                "status": "unavailable",
+                "reason": recall_space.VectorSpaceMismatch.reason,
+                "model": model_name,
+            },
+            "kb",
+        )
     except Exception as error:  # noqa: BLE001 - vector lane soft-falls back
         log.warning("semantic-unit vector search failed: %s; using lexical ranking", error)
         _record_degradation("vector")
@@ -2347,6 +2428,11 @@ def _find_semantic_units(
     retrieval_trace: Any | None = None,
     timings: FindTimings | None = None,
     query_vector_provider: Callable[[], Any] | None = None,
+    allowed_parent_paths: set[str] | None = None,
+    recall_checkpoint: Any | None = None,
+    repair: bool | None = None,
+    max_catalog_candidates: int | None = None,
+    truncated_out: list[bool] | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
@@ -2382,7 +2468,13 @@ def _find_semantic_units(
             # so FTS absence cannot change the catalog outcome.
             with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
                 exact_freshness = snapshot.for_scope(scope)
-                exact_repair = _bounded_lexical_repair_allowed(exact_freshness)
+                exact_repair = (
+                    _bounded_lexical_repair_allowed(exact_freshness)
+                    if repair is None
+                    else repair
+                )
+                exact_checkpoint = recall_checkpoint
+                exact_allow_delta = True if repair is None else repair
                 bounded_filter_only = (
                     not query.strip() and limit is not None and not algebra.post_filter_required
                 )
@@ -2396,6 +2488,8 @@ def _find_semantic_units(
                     # moving boundary. The common eligible path still opens only
                     # max(8, requested_limit) rows.
                     prefix_size = max(8, requested_limit)
+                    if max_catalog_candidates is not None:
+                        prefix_size = min(prefix_size, max_catalog_candidates)
                     indexed = []
                     records = {}
                     while True:
@@ -2406,8 +2500,11 @@ def _find_semantic_units(
                             clauses=dnf_clauses,
                             scope=scope,
                             freshness=exact_freshness,
+                            recall_checkpoint=exact_checkpoint,
+                            allowed_parent_paths=allowed_parent_paths,
                             _repair_stale=True,
                             repair=exact_repair,
+                            allow_delta=exact_allow_delta,
                         )
                         _set_catalog_timing_profile(timings, catalog_result.readiness)
                         if not catalog_result.readiness.complete:
@@ -2416,7 +2513,18 @@ def _find_semantic_units(
                         records = _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
                         if len(records) >= requested_limit or len(indexed) < prefix_size:
                             break
-                        prefix_size *= 2
+                        if (
+                            max_catalog_candidates is not None
+                            and prefix_size >= max_catalog_candidates
+                        ):
+                            if truncated_out is not None:
+                                truncated_out.append(True)
+                            break
+                        prefix_size = (
+                            min(prefix_size * 2, max_catalog_candidates)
+                            if max_catalog_candidates is not None
+                            else prefix_size * 2
+                        )
                 else:
                     # Category/kind rows are only the exact seed. Page
                     # predicates and other canonical filters run after
@@ -2430,9 +2538,12 @@ def _find_semantic_units(
                         clauses=dnf_clauses,
                         scope=scope,
                         freshness=exact_freshness,
+                        recall_checkpoint=exact_checkpoint,
+                        allowed_parent_paths=allowed_parent_paths,
                         literal_all=mode == "keyword" and bool(query.strip()),
                         _repair_stale=True,
                         repair=exact_repair,
+                        allow_delta=exact_allow_delta,
                     )
                     _set_catalog_timing_profile(timings, catalog_result.readiness)
                     if not catalog_result.readiness.complete:
@@ -2576,7 +2687,7 @@ def _find_semantic_units(
             vector_profile = {
                 "status": "failed",
                 "reason": "incomplete_exact_candidates",
-                "model": vector_profile.get("model", "BAAI/bge-base-en-v1.5"),
+                "model": vector_profile.get("model", recall_space.recall_model()),
             }
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
@@ -2599,7 +2710,7 @@ def _find_semantic_units(
             vector_profile = {
                 "status": "failed",
                 "reason": "stale_candidates",
-                "model": vector_profile.get("model", "BAAI/bge-base-en-v1.5"),
+                "model": vector_profile.get("model", recall_space.recall_model()),
             }
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
@@ -4492,6 +4603,23 @@ def _find_semantic(
         do_rerank = False  # EXOMEM_DISABLE_RANKING — hard off, even for explicit rerank=True
         rerank_outcome = {"decision": "skipped", "reason": "hard_disabled"}
 
+    if do_rerank:
+        # A reranker judges only what it declares it can: the script most of the
+        # query is written in, and a query against a passage in another language
+        # only if it is cross-lingual. Outside that it reorders by the wrong
+        # signal (find_policy._RERANKER_COVERAGE), so the fused order stands,
+        # explicit rerank=True included.
+        coverage = find_policy.reranker_coverage(embeddings.RERANKER_NAME)
+        if not find_policy.reranker_reads_query(coverage, query):
+            do_rerank = False
+            rerank_outcome = {"decision": "skipped", "reason": "query_script_not_covered"}
+        elif bundle.lexical_crossing is not None and not coverage.cross_lingual:
+            do_rerank = False
+            rerank_outcome = {
+                "decision": "skipped",
+                "reason": _RERANK_CROSSING_REASONS[bundle.lexical_crossing],
+            }
+
     if do_rerank and readiness.should_defer("reranker"):
         # Background warm-up owns the reranker load right now — calling
         # rerank_pairs would block on the singleton lock. Skip; caller marks
@@ -4500,6 +4628,21 @@ def _find_semantic(
             degraded_out.append("reranker")
         do_rerank = False
         rerank_outcome = {"decision": "deferred", "reason": "model_warming"}
+
+    if do_rerank and hits:
+        # Last, after every other reason the reranker might already be off: a
+        # stage that was never going to run must not be reported as a cost the
+        # budget imposed. Checked before the stage starts rather than cancelled
+        # inside it — `rerank_pairs` does not poll a flag, and a half-applied
+        # rerank would reorder the prefix unpredictably, which is the one
+        # outcome the caller cannot reason about from the hits alone.
+        active_budget = request_budget.current()
+        if active_budget is not None and not active_budget.can_afford(
+            _rerank_reserve_seconds()
+        ):
+            active_budget.note_skipped("rerank")
+            do_rerank = False
+            rerank_outcome = {"decision": "skipped", "reason": "request_budget"}
 
     if timings is not None and not (do_rerank and hits):
         timings.skipped("rerank")
@@ -4947,34 +5090,34 @@ def _any_stem_present(page: ParsedPage, query_norm: str) -> bool:
     """True if at least ONE query stem appears in title+body.
 
     The relaxed counterpart to `_stem_tokens_present` (which requires ALL).
-    Tokenizes the query the SAME way BM25 tokenizes text (split on `[a-z0-9]+`,
-    then stem) so a hyphenated query like `cognitive-core-marker-xyz` matches a
-    body that contains those words split on the hyphens.
+    Tokenizes the query the SAME way BM25 tokenizes a query (split into words
+    and unspaced-script bigrams, then stem) so a hyphenated query like
+    `cognitive-core-marker-xyz` matches a body that contains those words split
+    on the hyphens.
     """
     if not query_norm:
         return False
     from . import bm25 as bm25_module
 
-    return any(qs in page.stem_set for qs in bm25_module.tokenize(query_norm))
+    return any(qs in page.stem_set for qs in bm25_module.tokenize(query_norm, query=True))
 
 
-def _query_word_stem_groups(query_norm: str) -> list[tuple[list[str], bool]]:
-    """Per whitespace word: (BM25 subtoken stems, is_function_word).
+def _query_word_stem_groups(query_norm: str) -> list[tuple[list[str], bool, int]]:
+    """Per query word: (distinct BM25 stems, is_function_word, stems required).
 
     Loop-invariant precompute for `_stem_word_coverage` — the query is
     tokenized and classified once per query, not once per candidate page. A
     word is a function word only when EVERY subtoken stem is a function-word
     stem, so a compound like `state-of-the-art` stays a content word. Words
-    with no `[a-z0-9]` content tokenize to nothing and are skipped; the
-    tokenizer is ASCII-only, so non-ASCII words drop out of the denominator
-    (known limit: mixed-script queries are gated more permissively than
-    v0.36.0's all-stems veto).
+    with no letter or digit tokenize to nothing and are skipped. An unspaced
+    run (Japanese, Chinese, Thai...) is its own word, present when a strict
+    majority of its bigrams are (see `find_policy.query_word_stem_groups`).
     """
     return find_policy.query_word_stem_groups(query_norm)
 
 
 def _stem_word_coverage(
-    page: ParsedPage, word_stem_groups: list[tuple[list[str], bool]]
+    page: ParsedPage, word_stem_groups: list[tuple[list[str], bool, int]]
 ) -> tuple[int, int, int]:
     """(present, total, content_present) coverage over precomputed word groups.
 
@@ -4983,7 +5126,8 @@ def _stem_word_coverage(
     one of its BM25 subtoken stems appears in title+body: a compound like
     `alpha-beta-gamma` needs all three parts (so exact-marker queries stay
     precise), while trailing punctuation (`measure?` → `measur`) cannot mask
-    a real match. `content_present` counts present words that are NOT
+    a real match. An unspaced run is one word too, present when a strict
+    majority of its bigrams appear. `content_present` counts present words that are NOT
     function words: the degraded-corroboration gate requires a strict
     majority present (2 * present > total) AND at least one content word
     among them, so "what is the … of the …" phrasing cannot ride its
@@ -5248,6 +5392,7 @@ def _outbound_wikilink_paths(
     resolver=None,
     *,
     allowed_paths: AbstractSet[str] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> list[str]:
     """Vault-relative POSIX paths (no .md) that this page's body links to.
 
@@ -5261,6 +5406,8 @@ def _outbound_wikilink_paths(
     ``allowed_paths`` may provide that request's exact checkpoint-bound recall
     projection, avoiding a filesystem policy walk for every resolved link.
     Callers without such a snapshot retain the live policy check.
+    ``visible`` is a reader's view (`None` for the owner): targets then
+    resolve over the pages it admits, as in a vault without the others.
     """
     from .vault import (
         find_body_wikilinks,
@@ -5278,7 +5425,7 @@ def _outbound_wikilink_paths(
             continue
         try:
             canonical, warning = normalize_wikilink(
-                target, vault_root, resolver=resolver, strict=False
+                target, vault_root, resolver=resolver, strict=False, visible=visible
             )
         except Exception:  # noqa: BLE001 - malformed links are skipped during ranking.
             continue
@@ -5314,6 +5461,10 @@ _RESOLVER_CHECKPOINTS: dict[Path, freshness.FreshnessCheckpoint] = {}
 # that produced its maps.  The cache identity is deliberately kept separate
 # for compatibility with callers that supply a direct-disk freshness proof.
 _RECALL_RESOLVER_CHECKPOINTS: dict[Path, freshness.RecallFreshnessCheckpoint] = {}
+#: An eviction must also revoke a resolver that is still building outside
+#: `_RESOLVER_LOCK`.  Tokens are never reset: clearing a cache cannot make an
+#: old builder's captured generation current again.
+_RECALL_RESOLVER_GENERATIONS: dict[Path, int] = {}
 _RESOLVER_LOCK = threading.Lock()
 
 #: Vaults with a projected-resolver build already running.
@@ -5403,6 +5554,7 @@ def _evict_recall_resolver(root: Path) -> None:
     Scheduling the rebuild here is what makes the eviction cheap for everyone
     except a daemon thread.
     """
+    _RECALL_RESOLVER_GENERATIONS[root] = _RECALL_RESOLVER_GENERATIONS.get(root, 0) + 1
     _RECALL_RESOLVER_CACHE.pop(root, None)
     _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
     _schedule_recall_resolver_rebuild(root)
@@ -5601,6 +5753,7 @@ def recall_resolver_snapshot(
             status="temporarily_unavailable",
         )
     with _RESOLVER_LOCK:
+        generation = _RECALL_RESOLVER_GENERATIONS.setdefault(root, 0)
         cached = _RECALL_RESOLVER_CACHE.get(root)
         if cached and cached[0] == identity:
             return cached[1].fork()
@@ -5673,11 +5826,12 @@ def recall_resolver_snapshot(
             # A later caller with changed disk/policy identity cannot reuse it;
             # graph rebuild performs its stronger direct before/after proof
             # around sidecar publication.
-            _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
-            if checkpoint is not None:
-                _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
-            else:
-                _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+            if _RECALL_RESOLVER_GENERATIONS.get(root) == generation:
+                _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
+                if checkpoint is not None:
+                    _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
+                else:
+                    _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
     finally:
         if leader:
             with _RECALL_REBUILD_LOCK:
@@ -6067,6 +6221,8 @@ def unload_ram_caches(
             resolver_entries += len(_RECALL_RESOLVER_CACHE)
             _RECALL_RESOLVER_CACHE.clear()
             _RECALL_RESOLVER_CHECKPOINTS.clear()
+            for root in _RECALL_RESOLVER_GENERATIONS:
+                _RECALL_RESOLVER_GENERATIONS[root] += 1
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         _FIND_CACHE.clear()
@@ -6129,10 +6285,26 @@ def cache_status() -> dict:
         "pages": {
             "entries": len(page_entries),
             "body_chars": sum(len(p.body) for p in page_entries),
+            "hits": int(_CACHE.hits),
         },
         "resolvers": {"entries": resolver_entries},
         "hot_find": {"entries": hot_entries, "hits": hot_hits},
     }
+
+
+def cache_activity() -> tuple[int, int, int, int]:
+    """A cheap fingerprint of find-cache USE for the idle reaper: it changes when a
+    page is served from cache or parsed into it, and when the hot find cache is
+    consulted. Static across ticks means nobody asked."""
+    status = cache_status()
+    pages = status.get("pages") or {}
+    hot = status.get("hot_find") or {}
+    return (
+        int(pages.get("hits") or 0),
+        int(pages.get("entries") or 0),
+        int(hot.get("entries") or 0),
+        int(hot.get("hits") or 0),
+    )
 
 
 def clear_cache() -> None:

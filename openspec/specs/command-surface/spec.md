@@ -2403,3 +2403,104 @@ No-allocation resource status and doctor output SHALL report the effective nativ
 - **WHEN** a durable media job is blocked by a compute-runtime failure
 - **THEN** status reports the failure class and bounded remediation
 - **AND** it does not present source-file repair as the next action
+
+### Requirement: Compiled and Evidence writes may return one advisory Records routing hint
+When a compiled-note mutation or an Evidence preserve commits, the system SHALL compare the written page's terms with the effective claims of every routing-target collection the caller may read. When exactly one collection is covered at or above the minimum coverage and strictly more than any other, the successful result SHALL include at most one `records_routing` advisory, projected into the default compact terminal as a bounded top-level field, carrying the collection's manifest path and title, the sorted matched terms (at most six), the collection's declared natural-key field names, and a `strength` of exactly `strong` or `moderate`. It SHALL NOT report a numeric confidence. It SHALL name no page other than a manifest the caller may read. It is advisory: it SHALL NOT alter `status`, `mutated`, `path`, `warnings_count`, mutation identity or replay behaviour, SHALL be absent rather than null when nothing qualifies, and a failure in its computation SHALL cost the caller the advisory and never the write. The runtime SHALL NOT append a record as a consequence of the advisory.
+
+#### Scenario: A preserved publication artifact names its collection
+- **WHEN** an Evidence artifact whose tags and description carry a platform and an account value that one collection's effective claims cover is preserved
+- **THEN** the write commits unchanged and the compact response carries one `records_routing` advisory naming that collection and the matched terms
+
+#### Scenario: A compiled observation names its collection
+- **WHEN** a compiled note's units carry tags covering exactly one collection's claims
+- **THEN** the committed response carries the advisory with the same shape as for Evidence
+
+#### Scenario: Ties and misses stay silent
+- **WHEN** two collections are covered equally, or no collection reaches the minimum coverage
+- **THEN** the response contains no `records_routing` key
+
+#### Scenario: A withheld collection is never named
+- **WHEN** the only covering collection is withheld from the caller
+- **THEN** the response contains no `records_routing` key and the write is unchanged
+
+#### Scenario: Advisory failure leaves the write committed
+- **WHEN** the routing computation raises
+- **THEN** the mutation remains committed with its existing terminal and no `records_routing`, warning or error is produced
+
+### Requirement: Compact write responses may carry one bounded capture-sweep advisory
+
+Default compact responses to a committed durable write — the compiled page writers `remember`, `edit_memory`, `observe_memory` and `replace_memory`, and the structured writers `record_memory` and `plan_memory` — MAY carry one `capture_sweep` block under exactly these keys:
+
+- `boundary`: the boundary that produced the block, drawn from a closed vocabulary.
+- `rule`: the bounded pass the agent is asked to make. Its own text SHALL state that the class list is examples rather than a closed set, because it is the only prose the block carries.
+- `consider`: the open list of example classes.
+- `written_recently`: at most eight `exomem://` references to that caller's recent writes, newest first. Optional, and absent rather than empty.
+- `unpaged_mentions`: at most five bounded names the committed page reaches for without a page of their own. Optional, and absent rather than empty.
+
+No other key SHALL appear in the block on the wire; the terminal rebuilds the block from the named keys and never passes a leaf through.
+
+The block SHALL follow the established advisory posture: produced at the post-commit seam, validated and bounded again at the mutation terminal rather than trusted, never a key a client branches on for the mutation outcome, and absent — never null, never empty — when there is nothing to say. It SHALL NOT alter `status`, `mutated`, `path`, `warnings_count`, mutation identity, or replay behaviour. The `legacy` response detail SHALL omit it. Tool descriptions, tool input schemas and the packaged tool-surface digest SHALL NOT change.
+
+A fault anywhere in producing, validating or attaching the block SHALL cost the caller the advisory and never the write.
+
+#### Scenario: The first write after a quiet interval carries the block
+
+- **WHEN** a caller commits a durable write and that caller has not written durably within the quiet interval
+- **THEN** the default compact response carries a `capture_sweep` block whose `boundary` is `quiet-interval`
+
+#### Scenario: A following write inside the interval is silent
+
+- **WHEN** the same caller commits a second durable write inside the quiet interval
+- **THEN** that response carries no `capture_sweep` key and the write is otherwise unchanged
+
+#### Scenario: The legacy detail omits the advisory
+
+- **WHEN** a write that produced the block is projected at `legacy` detail
+- **THEN** the returned leaf contains no `capture_sweep` key
+
+#### Scenario: A malformed or oversized block is dropped rather than widened
+
+- **WHEN** a leaf attaches a block whose boundary is outside the closed vocabulary, or whose references or mentions exceed their bounds
+- **THEN** the terminal discards the whole block, never repairing it to fit, and the response stays valid
+
+#### Scenario: A multi-write command emits at most once
+
+- **WHEN** one product-command invocation commits many governed writes
+- **THEN** the invocation's response carries at most one `capture_sweep` block
+
+### Requirement: The capture-sweep advisory is governed by a caller-scoped quiet interval
+
+The advisory SHALL be governed by its own emission rule and SHALL NOT change the due-state governor, its batch scope, or its first-surfaced ledger. The rule SHALL be a quiet interval over an in-memory ledger keyed on the calling principal scope, the calling client, and the vault; a first-ever write from a key SHALL qualify as after-quiet. Every successful durable write SHALL update the ledger whether or not a block was emitted. The ledger SHALL be bounded and SHALL NOT be persisted, so a restart re-arms each caller once rather than letting a durable file decide what an agent is told. The interval SHALL be a module constant with no environment override.
+
+Where the transport supplies no usable stable caller scope — an HTTP call whose scope is session-derived or absent — the system SHALL emit nothing rather than collapse distinct callers into one bucket. Outside any call, where identity is absent by design, a process-lifetime key SHALL apply.
+
+The advisory SHALL be emitted only while the resolved delegation envelope permits proactive capture, read through the existing prominence and envelope resolution rather than a parallel table.
+
+#### Scenario: Distinct callers are not collapsed
+
+- **WHEN** an HTTP call carries no stable principal or credential scope
+- **THEN** no `capture_sweep` block is emitted for that call
+
+#### Scenario: A quiet profile never emits
+
+- **WHEN** the resolved envelope disposition for proactive capture is `off`
+- **THEN** no response carries a `capture_sweep` block
+
+#### Scenario: The ledger records a write that emitted nothing
+
+- **WHEN** a durable write is committed while the caller is inside the quiet interval
+- **THEN** the ledger still records that write, so the interval is measured from the latest write rather than the latest advisory
+
+### Requirement: Validate-Only Edit Is Classified Read-Only
+`invocation_is_read_only` SHALL classify `edit_memory` as read-only only when `validate_only` is exactly true. That invocation SHALL run structural and semantic validation without writer-lease acquisition, idempotency receipt creation, or entry into the vault mutation boundary. Every non-validate edit invocation SHALL remain a mutation.
+
+`edit_memory` SHALL expose the transition token and reviewed-relation fields returned by validate-only semantic preflight so a client can commit the exact reviewed transition without bypassing the semantic contract.
+
+#### Scenario: Validate-only edit overlaps a live mutation
+- **WHEN** `edit_memory(validate_only=true)` runs while another operation owns the vault mutation boundary
+- **THEN** validation reads guarded current state without returning `MUTATION_BUSY` solely because of that owner
+- **AND** it creates no canonical, index, log, receipt, or sidecar mutation
+
+#### Scenario: Ordinary edit remains guarded
+- **WHEN** `edit_memory` omits `validate_only` or sets it false
+- **THEN** the command is classified as a mutation and uses normal writer, idempotency, and vault-boundary safeguards

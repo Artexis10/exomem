@@ -37,12 +37,35 @@ closed, bounded derived-batch receipt that binds the mutation attempt, canonical
 generation, affected safe relative paths, exact before and intended after hashes
 or tombstones, and the required component set. The receipt MUST carry no
 arbitrary vault content. A prepared receipt SHALL authorize derived publication
-only after exact canonical state proves the intended after-state. Rollback,
+only after exact canonical state proves, for every path, either the intended
+after-state or a later state that a newer exact receipt covers with live or
+retired pending custody for that path, or a later state whose current bytes
+both persistent recall lanes (the lexical catalogue and the reference sidecar)
+already hold. A path back at its recorded before-bytes is not such a later
+state: it is covered only when a newer proven receipt, carrying live or retired
+pending custody for that path, recorded exactly those bytes (or that absence)
+as its after-state; or, for a page the receipt itself created, when the
+receipt was already proven committed and both recall lanes hold the page's
+absence. Successful proof SHALL remain durable across recovery-state changes
+and restarts, including before pending custody is published. Plain newer
+coverage of the path, or the lanes holding before-bytes the receipt did not
+create, SHALL NOT cover it, since those bytes may be the receipt's own torn
+write. Rollback,
 partial state, or an unrelated later state MUST NOT activate it. The recorded
 canonical generation is lineage for ordering and supersession; proof SHALL NOT
 require it to equal the vault-wide checkpoint, which advances on every write to
-any page. A later exact receipt MAY supersede older work only when it covers
-the same path/component demand without a visibility gap.
+any page. A later exact receipt MAY take over an older receipt's demand path
+by path, only for a path it covers without a visibility gap; the older receipt
+still converges the paths it owns, and is superseded as a whole only when newer
+receipts cover every path/component demand. The same per-path predicate SHALL
+hold at the acknowledgement's proof, at every re-proof before a component is
+dispatched, and at component completion.
+
+Additive receipt sequence migration SHALL atomically install its schema,
+backfill and compatibility support without committing a caller's outer
+transaction. Reopening SHALL repair missing sequence values left by an
+interrupted older migration, preserving coverage by existing proven receipts
+and bounded ordinary lookup cost.
 
 #### Scenario: Process dies after canonical replacement
 
@@ -62,11 +85,61 @@ the same path/component demand without a visibility gap.
 - **THEN** the older receipt cannot republish the stale generation
 - **AND** it is retired only after newer exact custody or full reconciliation covers the path and component
 
+#### Scenario: Distinct pages sharing navigation and cited pages converge
+
+- **WHEN** several governed pages are each written once in a burst and every write also rewrites shared pages (the knowledge base log and index, a cited source's back-reference)
+- **THEN** every batch completes or is superseded, and none is left in `reconcile_required`
+- **AND** every pending-visibility row retires, and managed recall stays ready
+
+#### Scenario: A shared page returned to its earlier bytes is handed on
+
+- **WHEN** a newer write re-renders a shared page exactly as it was before an older batch's write
+- **THEN** the older batch hands that page to the newer batch, whose proven after-state those bytes are
+- **AND** it converges its own paths instead of being held in `reconcile_required`
+
+#### Scenario: A path reverted by hand to its before-bytes stays owed
+
+- **WHEN** a path an older proven batch wrote is returned by a hand edit to that batch's before-bytes, and no newer proven batch recorded those bytes as its after-state
+- **THEN** the older batch is held in `reconcile_required`, even when a newer batch carries the path or both recall lanes hold the reverted bytes
+- **AND** `doctor` fails its custody check until `maintain --reconcile` converges the batch from current bytes
+
+#### Scenario: A coverer not yet proven heals on the next pass
+
+- **WHEN** an older batch is re-proven after a newer committed write moved one of its shared paths but before the newer batch's own proof
+- **THEN** the older batch is held in `reconcile_required`
+- **AND** the next recovery pass proves the newer batch and then the older one, which converges its own paths
+
+#### Scenario: An out-of-band edit heals once the recall lanes hold it
+
+- **WHEN** a page an unconverged batch wrote is edited outside any governed write
+- **THEN** the batch is held in `reconcile_required` while either recall lane lacks the edited bytes
+- **AND** once both lanes hold them, recovery hands the page on and the batch converges its other paths, or is superseded when it owns none
+
+#### Scenario: A new page deleted by hand before it converges heals
+
+- **WHEN** a page a proven batch created is deleted outside any governed write before the batch converges
+- **THEN** the batch is held while either recall lane still holds the page, and once both hold its absence recovery hands the page on and the batch converges its other paths, with no operator step
+- **AND** managed recall is ready once the lanes hold the absence, and the page's advisory result is superseded
+
 #### Scenario: Multi-page burst keeps every batch provable
 
 - **WHEN** several governed pages are each written more than once in one burst
 - **THEN** every older batch retires as `superseded` and every newest batch completes, with no batch left in `reconcile_required`
 - **AND** every pending-visibility row of the superseded batches is retired
+
+#### Scenario: Recovery before watcher removal preserves unpublished proof
+
+- **WHEN** a created page's receipt was proven committed but pending custody was not published, the page is deleted, and recovery runs before the watcher removes the stale recall entries
+- **THEN** the receipt remains owed until both recall lanes hold the absence, retaining its prior proof through recovery and restart
+- **AND** it then hands the page on without an operator step, regardless of whether recovery or watcher removal ran first
+- **AND** a receipt never proven committed does not gain proof from the page's absence
+
+#### Scenario: Interrupted sequence migration preserves receipt coverage
+
+- **WHEN** a receipt sequence migration is interrupted between adding its column and backfilling existing rows
+- **THEN** reopening completes or repairs the migration before using sequence-based coverage
+- **AND** existing completed receipts with retired pending custody still cover the same older paths
+- **AND** a caller's outer transaction remains under that caller's control
 
 ### Requirement: Post-Canonical Waiting Has One Shared Two-Second Budget
 
@@ -114,11 +187,49 @@ the advisory SHALL reuse those vectors rather than encode the same generation
 again. `suggestions=true` SHALL remain an explicit enriched synchronous opt-in
 whose added latency is outside the default fast-acknowledgement guarantee.
 
+For a route that sweeps inline, the deferred sweep SHALL compute exactly what
+that route's inline sweep computes, through the same function over the same
+inputs, and the route SHALL NOT also sweep inline when its committed batch holds
+the advisory custody: `remember` scores the draft title and normalized body,
+reuses the page's published vectors where the chunk text matches, flags
+near-duplicates of the note's own type only, and flags overlaps, in the inline
+tie order; `edit` scores the new body's bare paragraphs for overlaps only, and
+an edit that leaves the body unchanged takes no advisory custody; a vault-scope
+write reports the same counterparts, including pages outside the knowledge
+base. The route's inputs are held in the committing process only; a component
+that runs where they are unavailable falls back to its generic sweep over the
+page's published vectors rather than leaving the job pending. `capture` keeps
+its inline sweep and takes no advisory custody.
+
 #### Scenario: Default compiled write needs an advisory sweep
 
 - **WHEN** a default compact compiled write commits and its near-duplicate or overlap sweep is unfinished
 - **THEN** the terminal reports `advisory_sync="pending"`, returns its stable result reference, and does not run the sweep inline
 - **AND** exact lookup later returns ready, failed, or superseded rather than leaving a finished or failed job permanently pending
+
+#### Scenario: A fast-acknowledged remember or edit returns its sweep by reference
+
+- **WHEN** fast acknowledgement is active and a default `remember`, or an `edit` that changes the body, commits a batch holding the advisory custody
+- **THEN** the write computes no inline duplicate or overlap sweep and returns none of its warnings
+- **AND** the ready result reached through `advisory_result_ref` carries, in order, exactly the warnings the same write returns with fast acknowledgement off
+
+#### Scenario: Deferred warnings preserve an earned quiet offer
+
+- **WHEN** a family has earned its one-time quiet offer and an advisory candidate is successfully published and recorded as surfaced
+- **THEN** its exact ready result carries the same bounded quiet-offer clause as an inline warning, after current target and counterpart authority and fingerprints are checked
+- **AND** concurrent publications in the serving process bind the offer to only one result/candidate identity; refused publication does not consume it
+- **AND** exact lookup is read-only, and replay of a published result neither recomputes its candidates nor rearms the offer
+- **AND** quiet/off decisions preserve internal offer ownership without exposing it in triage output, while explicit normal reset clears it
+
+#### Scenario: An edit that leaves the body unchanged has no advisory job
+
+- **WHEN** fast acknowledgement is active and an edit changes only frontmatter
+- **THEN** the terminal reports `advisory_sync="not_required"` and carries no result reference, as the inline sweep computes nothing for it
+
+#### Scenario: Fast acknowledgement off leaves every inline sweep unchanged
+
+- **WHEN** `EXOMEM_FAST_DURABLE_ACK` is not `1`
+- **THEN** `remember`, `edit` and `capture` compute their inline sweeps and return their warnings exactly as before
 
 #### Scenario: Exact retry replays the advisory reference
 
@@ -143,6 +254,44 @@ whose added latency is outside the default fast-acknowledgement guarantee.
 - **WHEN** one background pass encodes a page for both vector publication and advisory comparison
 - **THEN** both consumers use that exact generation's vectors
 - **AND** the advisory does not invoke a second encode of the same chunks
+
+### Requirement: Stranded Derived Receipts Are Visible And Repairable
+
+A derived batch held in `reconcile_required` SHALL be reported apart from
+crash-cut recovery work: the store SHALL count stranded batches separately from
+batches a drain pass will prove on its own, and `doctor` SHALL report, in one
+content-free line, whether fast acknowledgement is active, the due component
+count and its oldest age, the stranded and recovering batch counts, and the
+pending-visibility outcome with its closed failure code. `doctor` SHALL fail
+while any batch is stranded and SHALL NOT mutate custody to compute the line.
+Operator reconciliation (`maintain --reconcile`) SHALL converge each stranded
+batch's paths from their current canonical bytes through the ordinary writer
+fan-out and SHALL retire the batch as `superseded`, with its pending rows,
+once both recall lanes hold every path's current bytes; a batch the lanes still
+lack SHALL stay stranded and be counted as remaining. Reconciliation SHALL
+retire receipt custody only: a `ready` or `failed` advisory result SHALL stay
+as published, and only an advisory result that never ran SHALL be settled -- as
+`failed` with code `advisory_unavailable` when its target page is unchanged, or
+`superseded` when the target moved. The reconcile report SHALL carry counts
+only.
+
+#### Scenario: Doctor names stranded custody
+
+- **WHEN** a batch is held in `reconcile_required`
+- **THEN** `doctor` fails its fast-acknowledgement custody check with a line that carries counts, one age and closed codes, and no path, title or identifier
+- **AND** the remediation names `maintain --reconcile`
+
+#### Scenario: Reconcile retires a stranded batch from current bytes
+
+- **WHEN** an operator runs `maintain --reconcile` while a batch is stranded
+- **THEN** the batch's pages are converged from their current bytes and the batch is retired once both recall lanes hold them
+- **AND** managed recall is ready afterwards, and a dry run reports the same counts without changing custody
+
+#### Scenario: A ready advisory survives reconcile
+
+- **WHEN** a batch was stranded by a shared page while its own page stayed in its after-state, and its advisory result is `ready`
+- **THEN** reconciliation retires the batch and leaves the advisory result `ready`, so the warnings it carries still resolve
+- **AND** an advisory result for such a batch that never ran resolves as `failed` with code `advisory_unavailable` rather than `superseded`
 
 ### Requirement: Fast Acknowledgement Is Proven End To End
 

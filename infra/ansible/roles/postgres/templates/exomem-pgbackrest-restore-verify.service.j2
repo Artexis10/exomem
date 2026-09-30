@@ -1,0 +1,7 @@
+[Unit]
+Description=Exomem control database weekly pgBackRest restore verification
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/exomem-pgbackrest-restore-verify.sh

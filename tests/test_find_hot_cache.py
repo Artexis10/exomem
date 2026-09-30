@@ -210,15 +210,28 @@ def test_the_graph_rebuild_unload_seam_leaves_receipt_covered_pages(
     Pinned in both directions -- the seam the graph actually calls, and what
     that seam does -- because either half alone can drift without the other
     noticing.
+
+    Two guarantees, and they are separate. The page cache: every call site takes
+    the page-preserving default, so none may pass a `pages=` or receipt
+    override. The recall resolver: those same sites keep it
+    (`seamless-managed-worker-handoff`), because it is revalidated against the
+    projection identity and the live checkpoint at every read -- a stale entry
+    can only miss -- while dropping it sends the next governed write down the
+    whole-vault path.
     """
     import inspect
+    import re
 
     from exomem import epistemic_graph
 
     graph_source = inspect.getsource(epistemic_graph)
-    assert "unload_ram_caches()" in graph_source, (
-        "the graph rebuild no longer takes the page-preserving default"
-    )
+    call_arguments = re.findall(r"unload_ram_caches\(([^)]*)\)", graph_source)
+    assert call_arguments, "the graph rebuild no longer reaches the unload seam at all"
+    for arguments in call_arguments:
+        assert arguments.strip() == "keep_recall_resolver=True", (
+            "a graph rebuild's unload must keep the recall resolver and take the "
+            f"page-preserving default; found unload_ram_caches({arguments})"
+        )
     assert "unload_ram_caches(pages=True)" not in graph_source, (
         "a graph rebuild must not discard receipt-covered page rows"
     )

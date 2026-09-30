@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import (
     access,
+    deferred_index,
     held_fs,
     media_jobs,
     media_types,
@@ -207,18 +208,40 @@ def _is_automatic_media_candidate(vault: Path, binary: Path) -> bool:
     return False
 
 
+def _derived_batch_carries_fanout(vault: Path) -> bool:
+    """Whether a fast-acknowledgement session already owns this vault's derived work."""
+    from .writer_lease import active_derived_batch_custody
+
+    return active_derived_batch_custody(vault)
+
+
+def _defer_until_terminal(work: Callable[[], list[object]]) -> bool:
+    from .writer_lease import defer_until_terminal_persisted
+
+    return defer_until_terminal_persisted(work)
+
+
 def reconcile_media(
     vault_root: Path,
     binary_path: str | Path,
     *,
     explicit: bool = True,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    defer_fanout_to_terminal: bool = False,
 ) -> ReconcileResult | None:
     """Converge one governed media artifact to a sidecar and durable job.
 
     The binary is only read for provenance.  Sidecar work is atomic and repeated
     calls preserve already-converged bytes while the ledger's media key deduplicates
     enqueue requests.
+
+    `commit_guard` narrows the held boundary to the sidecar write itself, so the
+    index and graph fan-out runs outside it. `defer_fanout_to_terminal` moves
+    that fan-out off the request as well: to the fast-acknowledgement session's
+    derived batch when this vault has one, otherwise to the position after the
+    mutation's terminal is persisted. Opt-in because it changes when a caller's
+    own follow-up reads see the refreshed index; the preservation lanes, whose
+    receipt is what the client is waiting for, are the callers that need it.
     """
     vault = Path(vault_root).resolve()
     binary = Path(binary_path)
@@ -333,29 +356,63 @@ def reconcile_media(
     result: ReconcileResult | None = None
     boundary = commit_guard() if commit_guard is not None else nullcontext()
 
+    def _run_fanout() -> list[object]:
+        from . import index_sync
+
+        index_reports: list[object] = []
+        replaced = list(dict.fromkeys(deferred_fanout))
+        try:
+            completed = post_commit_batch_fanout(
+                vault,
+                replaced,
+                index_reports,
+                None,
+                created_paths=list(dict.fromkeys(deferred_created)),
+                publication_intents=publication_intents,
+            )
+            if completed is not True:
+                _abort_publication_intents()
+            if not index_reports:
+                index_reports.append(
+                    index_sync.unverified_upsert_report(vault, replaced)
+                    if completed is True
+                    else index_sync.failed_upsert_report(vault, replaced)
+                )
+        except Exception:
+            _abort_publication_intents()
+            raise
+        return index_reports
+
     @contextmanager
     def _commit_scope():
         try:
             with boundary:
                 yield
         finally:
-            if deferred_fanout:
-                try:
-                    completed = post_commit_batch_fanout(
-                        vault,
-                        list(dict.fromkeys(deferred_fanout)),
-                        None,
-                        None,
-                        created_paths=list(dict.fromkeys(deferred_created)),
-                        publication_intents=publication_intents,
-                    )
-                    if completed is not True:
-                        _abort_publication_intents()
-                except Exception:
-                    _abort_publication_intents()
-                    raise
-            else:
+            if not deferred_fanout:
                 _abort_publication_intents()
+            elif not defer_fanout_to_terminal:
+                _run_fanout()
+            elif _derived_batch_carries_fanout(vault):
+                # A fast-acknowledgement session registered a derived batch for
+                # these same writes while they were committed, and that batch
+                # is drained behind the response and reported through
+                # `derived_sync`. Running the fan-out here as well would put
+                # the work straight back onto the request it was moved off.
+                _abort_publication_intents()
+            else:
+                # Persist the sidecar demand before the terminal. The background
+                # drain owns retirement: clearing here could delete a newer
+                # same-path receipt whose revision was reused after an ABA race.
+                deferred_index.add_full(
+                    vault,
+                    [path.relative_to(vault).as_posix() for path in deferred_fanout],
+                )
+                if not _defer_until_terminal(_run_fanout):
+                    # No mutation to defer to: a CLI or direct caller. Doing it
+                    # here is still correct — the guard is already released by
+                    # this point — and dropping it would not be.
+                    _run_fanout()
 
     with _commit_scope():
         commit_tier = access.access_tier(vault, rel_binary)

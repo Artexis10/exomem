@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from .crypto import EnvelopeCodec
+from .driver import DriverTerminal
 from .governance_migration_checkpoint import CHECKPOINT_VERSION as GOVERNANCE_CHECKPOINT_VERSION
+from .governance_migration_checkpoint import MigrationCheckpoint
+from .governance_migration_checkpoint import _binding as _canonical_binding
 from .models import (
     BackupRecord,
     CapacityDestructiveFence,
@@ -33,7 +40,25 @@ from .models import (
     WireProtocol,
 )
 from .provider_identity import cell_resource_name
-from .wire_protocol import WIRE_PROTOCOL_V1, WIRE_PROTOCOL_V2
+from .wire_protocol import (
+    FORWARD_ONLY_ACTIONS,
+    RUNTIME_IDENTITY_FIELDS,
+    SINGLE_PHASE_ACTIONS,
+    WIRE_PROTOCOL_V1,
+    WIRE_PROTOCOL_V2,
+)
+
+GOVERNANCE_PROVISION_CHECKPOINT_VERSION = "gpi1"
+GOVERNANCE_PROVISION_CHECKPOINT_PHASES = frozenset(
+    {"binding", "registering", "registered", "initializing", "complete", "drained"}
+)
+INITIAL_RETRY_AFTER_SECONDS = 2
+_GOVERNANCE_RECOVERY_MARKER = "_governance_recovery_v1"
+_GOVERNANCE_RECOVERY_DOMAIN = b"exomem.hosted-governance-recovery-snapshot.v1\0"
+_GOVERNANCE_RECOVERY_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+# "Ineligible" must never be expressible by a caller. A shared ``None`` would
+# compare equal to a ``None`` digest and requeue exactly the rows this refuses.
+_GOVERNANCE_RECOVERY_INELIGIBLE = object()
 
 
 class RepositoryConflict(RuntimeError):
@@ -61,10 +86,12 @@ class ClaimConflict(RepositoryConflict):
 
 
 def _holds_governance_checkpoint(operation: Operation, checkpoint: str) -> bool:
-    return (
-        operation.action in {OperationAction.PROVISION, OperationAction.ROLLFORWARD}
-        and operation.wire_protocol == WireProtocol.V2
-        and checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":")
+    if operation.wire_protocol != WireProtocol.V2:
+        return False
+    if checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":"):
+        return operation.action in {OperationAction.PROVISION, OperationAction.ROLLFORWARD}
+    return operation.action == OperationAction.PROVISION and checkpoint.startswith(
+        GOVERNANCE_PROVISION_CHECKPOINT_VERSION + ":"
     )
 
 
@@ -78,10 +105,20 @@ def _foreign_governance_barrier(operation: Any):
             barrier.id != operation.id,
             barrier.tenant_id == operation.tenant_id,
             or_(barrier.cell_id == operation.cell_id, operation.action == OperationAction.DESTROY),
-            barrier.action.in_({OperationAction.PROVISION, OperationAction.ROLLFORWARD}),
             barrier.wire_protocol == WireProtocol.V2,
-            barrier.checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":"),
-            barrier.state.in_({OperationState.PENDING, OperationState.CLAIMED, OperationState.ERROR}),
+            or_(
+                and_(
+                    barrier.action.in_({OperationAction.PROVISION, OperationAction.ROLLFORWARD}),
+                    barrier.checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":"),
+                ),
+                and_(
+                    barrier.action == OperationAction.PROVISION,
+                    barrier.checkpoint.startswith(GOVERNANCE_PROVISION_CHECKPOINT_VERSION + ":"),
+                ),
+            ),
+            barrier.state.in_(
+                {OperationState.PENDING, OperationState.CLAIMED, OperationState.ERROR}
+            ),
         )
         .exists()
     )
@@ -98,6 +135,135 @@ def _terminal_failure_checkpoint(operation: Operation) -> str:
     return "failed"
 
 
+def _is_effect_free_terminal(operation: Operation) -> bool:
+    """Whether a terminal row still describes work that was submitted and never done.
+
+    Only a single-phase action qualifies -- one whose dispatch settles or raises
+    without parking on a checkpoint of its own. A terminal failure collapses any
+    non-governance checkpoint to "failed", so for a multi-phase action the row no
+    longer says how far the attempt got: a rollforward that failed while releasing
+    its maintenance lease, with the new image already live and serving, reads
+    exactly like one that never started. Restarting that would close the routes of
+    a healthy cell to redo work it had already finished.
+
+    Within the single-phase set, failure state and retained progress are still
+    distinct. A governance checkpoint, a counted retry attempt, a stored result, a
+    live claim, provider identity drift -- any of them means the attempt reached
+    something, and only a reviewed recovery may restart it.
+    """
+
+    return (
+        operation.action.value in SINGLE_PHASE_ACTIONS
+        and operation.state is OperationState.ERROR
+        and operation.checkpoint == "failed"
+        and not operation.progress
+        and operation.result_ciphertext is None
+        and not operation.result_redacted
+        and operation.claim_owner is None
+        and operation.claim_token is None
+        and operation.claim_expires_at is None
+        and operation.finalized_at is not None
+        and operation.external_operation_id == operation.provider_operation_id
+        and operation.fence_generation == operation.provider_fence_generation
+    )
+
+
+def _retained_governance_checkpoint(operation: Operation) -> bool:
+    # A retained hint is preserved for inspection even when malformed, so a
+    # recovery path must decode it here rather than trust the denial prefix.
+    checkpoint = operation.checkpoint
+    if not _holds_governance_checkpoint(operation, checkpoint):
+        return False
+    if checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":"):
+        try:
+            MigrationCheckpoint.decode(checkpoint)
+        except DriverTerminal:
+            return False
+        return True
+    _, _, remainder = checkpoint.partition(":")
+    phase, _, binding = remainder.partition(":")
+    return phase in GOVERNANCE_PROVISION_CHECKPOINT_PHASES and _canonical_binding(binding)
+
+
+def _snapshot_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return _as_utc(value).isoformat()
+    if isinstance(value, dict):
+        return {str(key): _snapshot_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_snapshot_value(item) for item in value]
+    return value
+
+
+def _governance_recovery_digest(operation: Operation, fence_generation: int) -> str:
+    # Cover every stored column, not only the eligibility predicates: a row
+    # mutated between preflight and resume must never requeue under the digest
+    # the operator actually read and approved.
+    payload: dict[str, Any] = {
+        column.name: _snapshot_value(getattr(operation, column.name))
+        for column in Operation.__table__.columns
+    }
+    payload["tenant_fence_generation"] = fence_generation
+    return hashlib.sha256(
+        _GOVERNANCE_RECOVERY_DOMAIN
+        + json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _governance_recovery_snapshot(
+    operation: Operation,
+    fence: TenantFence | None,
+    request: dict[str, Any] | None,
+) -> str:
+    """Digest exactly one terminal, unclaimed, current-fence, same-operation row."""
+    if (
+        fence is None
+        or operation.state is not OperationState.ERROR
+        or operation.finalized_at is None
+        or operation.error_code is None
+        or operation.claim_owner is not None
+        or operation.claim_token is not None
+        or operation.claim_expires_at is not None
+        or operation.result_ciphertext is not None
+        or operation.result_redacted != {}
+        or operation.external_operation_id != operation.provider_operation_id
+        or operation.fence_generation != operation.provider_fence_generation
+        or operation.fence_generation != fence.fence_generation
+        or request is None
+        or canonical_request_sha256(request) != operation.canonical_request_sha256
+        or not _retained_governance_checkpoint(operation)
+    ):
+        raise RepositoryConflict("operation is not an eligible governance recovery")
+    return _governance_recovery_digest(operation, fence.fence_generation)
+
+
+# One restart per row. A caller that must retry gets its work re-attempted once;
+# if it fails again the row stays terminal, so the refusal reaches the caller and
+# counts against its own budget instead of hiding a repeatable failure behind a
+# perpetual pending.
+_REPLAY_RESTART_MARKER = "_replay_restart_v1"
+
+LegacyTarget = tuple[tuple[str, str], ...]
+
+
+def legacy_target_key(target: Mapping[str, object]) -> LegacyTarget:
+    """Reduce a runtime target to the six identity fields a legacy contract carries."""
+
+    return tuple((field, str(target.get(field))) for field in RUNTIME_IDENTITY_FIELDS)
+
+
+def legacy_targets_from(contracts: Iterable[Mapping[str, object]]) -> frozenset[LegacyTarget]:
+    return frozenset(legacy_target_key(contract) for contract in contracts)
+
+
 @dataclass(frozen=True, slots=True)
 class AdmissionPolicy:
     """Immutable deployment admission inputs supplied by the selected lock."""
@@ -105,6 +271,10 @@ class AdmissionPolicy:
     mode: str
     legacy_catalog: frozenset[tuple[str, str]]
     forward_target: dict[str, str]
+    # Exact six-field identities of the cataloged legacy contracts. A v2 request
+    # names its runtime by these fields plus a compatibility digest, so a live
+    # legacy cell is admitted by identity, never by release label alone.
+    legacy_targets: frozenset[LegacyTarget] = frozenset()
 
 
 def _admit_submission(
@@ -113,6 +283,7 @@ def _admit_submission(
     wire_protocol: str,
     request: dict[str, Any],
     existing: Operation | None,
+    action: str | None = None,
 ) -> None:
     if wire_protocol not in {WIRE_PROTOCOL_V1, WIRE_PROTOCOL_V2}:
         raise AdmissionRejected("unsupported wire protocol")
@@ -130,8 +301,25 @@ def _admit_submission(
             if identity not in policy.legacy_catalog:
                 raise AdmissionRejected("legacy runtime is not cataloged")
         return
-    if "runtimeTarget" in request and request["runtimeTarget"] != policy.forward_target:
-        raise AdmissionRejected("runtime target does not match deployment lock")
+    if "runtimeTarget" not in request:
+        return
+    target = request["runtimeTarget"]
+    if target == policy.forward_target:
+        return
+    if (
+        action not in FORWARD_ONLY_ACTIONS
+        and isinstance(target, Mapping)
+        and legacy_target_key(target) in policy.legacy_targets
+    ):
+        # A cell still on a cataloged legacy release keeps renewing, checking and
+        # stopping through the expand window; only the actions that place a runtime
+        # image must name the forward target. Contract mode refuses only a fresh
+        # legacy submission, mirroring v1: an operation already accepted may be
+        # replayed for its acknowledgement until it settles.
+        if policy.mode == "expand" or existing is not None:
+            return
+        raise AdmissionRejected("fresh legacy runtime is not admitted in contract mode")
+    raise AdmissionRejected("runtime target does not match deployment lock")
 
 
 def canonical_request_bytes(request: dict[str, Any]) -> bytes:
@@ -156,6 +344,8 @@ def _claim_condition(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    include_checkpoint_prefixes: frozenset[str] = frozenset(),
+    exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
     allowed_actions: frozenset[OperationAction] | None = None,
     excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
@@ -175,9 +365,14 @@ def _claim_condition(
         .scalar_subquery()
     )
     if include_checkpoints is not None:
-        claimable &= Operation.checkpoint.in_(include_checkpoints)
+        claimable &= or_(
+            Operation.checkpoint.in_(include_checkpoints),
+            *(Operation.checkpoint.startswith(prefix) for prefix in include_checkpoint_prefixes),
+        )
     if exclude_checkpoints:
         claimable &= Operation.checkpoint.not_in(exclude_checkpoints)
+    for prefix in exclude_checkpoint_prefixes:
+        claimable &= ~Operation.checkpoint.startswith(prefix)
     cell_available = or_(
         Operation.cell_id.is_(None),
         ~select(CellOperationLock.cell_id)
@@ -201,6 +396,8 @@ def _claim_candidate_statement(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    include_checkpoint_prefixes: frozenset[str] = frozenset(),
+    exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
     allowed_actions: frozenset[OperationAction] | None = None,
     excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
@@ -211,6 +408,8 @@ def _claim_candidate_statement(
                 claimed_at,
                 include_checkpoints=include_checkpoints,
                 exclude_checkpoints=exclude_checkpoints,
+                include_checkpoint_prefixes=include_checkpoint_prefixes,
+                exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                 allowed_actions=allowed_actions,
                 excluded_actions=excluded_actions,
             )
@@ -226,6 +425,8 @@ def _claim_statement(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    include_checkpoint_prefixes: frozenset[str] = frozenset(),
+    exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
     allowed_actions: frozenset[OperationAction] | None = None,
     excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
@@ -237,6 +438,8 @@ def _claim_statement(
                 claimed_at,
                 include_checkpoints=include_checkpoints,
                 exclude_checkpoints=exclude_checkpoints,
+                include_checkpoint_prefixes=include_checkpoint_prefixes,
+                exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                 allowed_actions=allowed_actions,
                 excluded_actions=excluded_actions,
             ),
@@ -496,7 +699,11 @@ async def _release_completed_capacity(
         },
     }
     required = proof_fields.get(operation.action)
-    if required is None or set(result) != required or any(result[key] is not True for key in required):
+    if (
+        required is None
+        or set(result) != required
+        or any(result[key] is not True for key in required)
+    ):
         return
     if operation.action is OperationAction.DISCARD and operation.cell_id is None:
         raise ImmutableMetadataConflict("discard capacity release has no authenticated cell")
@@ -529,8 +736,7 @@ async def _release_completed_capacity(
             and not (
                 operation.action is OperationAction.DISCARD
                 and reservation.resource_name == cell_resource_name(operation.cell_id)
-                and reservation.reserving_provider_operation_id
-                == operation.external_operation_id
+                and reservation.reserving_provider_operation_id == operation.external_operation_id
             )
         )
         for reservation in reservations
@@ -653,7 +859,7 @@ class OperationRepository:
         wire_protocol: str = WIRE_PROTOCOL_V1,
         admission: AdmissionPolicy | None = None,
         fresh_rejection: str | None = None,
-        retry_after_seconds: int = 2,
+        retry_after_seconds: int = INITIAL_RETRY_AFTER_SECONDS,
     ) -> OperationSnapshot:
         action_value = OperationAction(action)
         digest = canonical_request_sha256(request)
@@ -677,7 +883,9 @@ class OperationRepository:
                         .with_for_update()
                     )
                     if existing is not None and str(existing.wire_protocol) != wire_protocol:
-                        raise IdempotencyConflict("idempotency key is bound to another wire protocol")
+                        raise IdempotencyConflict(
+                            "idempotency key is bound to another wire protocol"
+                        )
                     if existing is not None and existing.canonical_request_sha256 != digest:
                         raise IdempotencyConflict("idempotency key is bound to another request")
                     if fence is not None and fence_generation < fence.fence_generation:
@@ -689,8 +897,34 @@ class OperationRepository:
                         wire_protocol=wire_protocol,
                         request=request,
                         existing=existing,
+                        action=action_value.value,
                     )
                     if existing is not None:
+                        if _is_effect_free_terminal(existing) and not await session.scalar(
+                            select(func.count())
+                            .select_from(Resource)
+                            .where(Resource.operation_id == existing.id)
+                        ):
+                            # The caller is asking for exactly this work again and the
+                            # row proves the first attempt did nothing. Answering the
+                            # replay with a permanent refusal strands it: a control
+                            # plane whose own contract requires it to retry has no
+                            # other move, and no operator stands in that loop.
+                            restarted_at = datetime.now(UTC)
+                            existing.state = OperationState.PENDING
+                            existing.checkpoint = "queued"
+                            existing.error_code = None
+                            existing.finalized_at = None
+                            existing.available_at = restarted_at
+                            existing.retry_after_seconds = retry_after_seconds
+                            # Recording the restart also spends it: the predicate
+                            # requires empty progress, so this row can never be
+                            # restarted a second time.
+                            existing.progress = {
+                                **existing.progress,
+                                _REPLAY_RESTART_MARKER: restarted_at.isoformat(),
+                            }
+                            await session.flush()
                         return _operation_snapshot(existing)
                     if fence is None:
                         session.add(
@@ -747,11 +981,39 @@ class OperationRepository:
     ) -> tuple[FleetOperationSnapshot, ...]:
         """Decrypt requests internally and return no credential-bearing fields."""
 
+        destruction = aliased(Operation)
+        destroyed_history = (
+            select(destruction.id)
+            .where(
+                destruction.action.in_({OperationAction.DESTROY, OperationAction.DISCARD}),
+                destruction.state == OperationState.FINAL,
+                destruction.tenant_id == Operation.tenant_id,
+                or_(
+                    and_(
+                        destruction.action == OperationAction.DESTROY,
+                        destruction.cell_id.is_(None),
+                    ),
+                    destruction.cell_id == Operation.cell_id,
+                ),
+                destruction.fence_generation >= Operation.fence_generation,
+                destruction.created_at >= Operation.created_at,
+            )
+            .exists()
+        )
         observations: list[FleetOperationSnapshot] = []
         async with self._sessions() as session:
             operations = await session.scalars(
                 select(Operation)
-                .where(Operation.cell_id.is_not(None))
+                .where(
+                    Operation.cell_id.is_not(None),
+                    # A completed tenant-wide destroy has no cell ID. Apply its
+                    # scope before replaying obsolete runtime/rollback history,
+                    # without changing the ledger or hiding unfinished work.
+                    ~and_(
+                        Operation.state.in_({OperationState.FINAL, OperationState.ERROR}),
+                        destroyed_history,
+                    ),
+                )
                 .order_by(Operation.created_at, Operation.id)
             )
             for operation in operations:
@@ -766,8 +1028,7 @@ class OperationRepository:
                 runtime_identity: dict[str, str] | None = None
                 target = request.get("runtimeTarget")
                 if isinstance(target, dict) and all(
-                    isinstance(key, str) and isinstance(value, str)
-                    for key, value in target.items()
+                    isinstance(key, str) and isinstance(value, str) for key, value in target.items()
                 ):
                     runtime_identity = dict(target)
                 elif isinstance(request.get("releaseVersion"), str) and isinstance(
@@ -864,6 +1125,8 @@ class OperationRepository:
         now: datetime | None = None,
         include_checkpoints: frozenset[str] | None = None,
         exclude_checkpoints: frozenset[str] = frozenset(),
+        include_checkpoint_prefixes: frozenset[str] = frozenset(),
+        exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
         allowed_actions: frozenset[OperationAction] | None = None,
         excluded_actions: frozenset[OperationAction] = frozenset(),
     ) -> OperationSnapshot | None:
@@ -882,6 +1145,8 @@ class OperationRepository:
                             claimed_at,
                             include_checkpoints=include_checkpoints,
                             exclude_checkpoints=exclude_checkpoints,
+                            include_checkpoint_prefixes=include_checkpoint_prefixes,
+                            exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                             allowed_actions=allowed_actions,
                             excluded_actions=excluded_actions,
                         )
@@ -934,6 +1199,8 @@ class OperationRepository:
                         claimed_at,
                         include_checkpoints=include_checkpoints,
                         exclude_checkpoints=exclude_checkpoints,
+                        include_checkpoint_prefixes=include_checkpoint_prefixes,
+                        exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                         allowed_actions=allowed_actions,
                         excluded_actions=excluded_actions,
                     )
@@ -949,6 +1216,8 @@ class OperationRepository:
                     claimed_at,
                     include_checkpoints=include_checkpoints,
                     exclude_checkpoints=exclude_checkpoints,
+                    include_checkpoint_prefixes=include_checkpoint_prefixes,
+                    exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                     allowed_actions=allowed_actions,
                     excluded_actions=excluded_actions,
                 )
@@ -992,6 +1261,8 @@ class OperationRepository:
         now: datetime | None = None,
         include_checkpoints: frozenset[str] | None = None,
         exclude_checkpoints: frozenset[str] = frozenset(),
+        include_checkpoint_prefixes: frozenset[str] = frozenset(),
+        exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
         allowed_actions: frozenset[OperationAction] | None = None,
         excluded_actions: frozenset[OperationAction] = frozenset(),
     ) -> OperationSnapshot | None:
@@ -1010,9 +1281,14 @@ class OperationRepository:
                 Operation.claim_expires_at > checked_at,
             )
             if include_checkpoints is not None:
-                claim_scope &= Operation.checkpoint.in_(include_checkpoints)
+                claim_scope &= or_(
+                    Operation.checkpoint.in_(include_checkpoints),
+                    *(Operation.checkpoint.startswith(prefix) for prefix in include_checkpoint_prefixes),
+                )
             if exclude_checkpoints:
                 claim_scope &= Operation.checkpoint.not_in(exclude_checkpoints)
+            for prefix in exclude_checkpoint_prefixes:
+                claim_scope &= ~Operation.checkpoint.startswith(prefix)
             if allowed_actions is not None:
                 claim_scope &= Operation.action.in_(allowed_actions)
             if excluded_actions:
@@ -1124,6 +1400,7 @@ class OperationRepository:
         claim_generation: int,
         checkpoint: str,
         retry_after_seconds: int,
+        capacity_wait_reason: str | None = None,
         now: datetime | None = None,
     ) -> OperationSnapshot:
         async with self._sessions.begin() as session:
@@ -1135,6 +1412,15 @@ class OperationRepository:
                 claim_generation=claim_generation,
                 now=now,
             )
+            if _holds_governance_checkpoint(operation, operation.checkpoint):
+                if operation.checkpoint.startswith(
+                    GOVERNANCE_CHECKPOINT_VERSION + ":"
+                ) and checkpoint.startswith(GOVERNANCE_PROVISION_CHECKPOINT_VERSION + ":"):
+                    raise ClaimConflict("governance migration cannot return to initialization")
+                if not _holds_governance_checkpoint(operation, checkpoint):
+                    # Capacity waits and other scheduling outcomes must not
+                    # discard the plan binding or release the denial barrier.
+                    checkpoint = operation.checkpoint
             if _holds_governance_checkpoint(operation, checkpoint) and not (
                 _holds_governance_checkpoint(operation, operation.checkpoint)
             ):
@@ -1166,6 +1452,11 @@ class OperationRepository:
             operation.progress = {
                 **operation.progress,
                 "pending_count": int(operation.progress.get("pending_count", 0)) + 1,
+                **(
+                    {"last_capacity_wait_reason": capacity_wait_reason}
+                    if capacity_wait_reason is not None
+                    else {}
+                ),
             }
             operation.retry_after_seconds = retry_after_seconds
             operation.available_at = pending_at + timedelta(seconds=retry_after_seconds)
@@ -1245,6 +1536,120 @@ class OperationRepository:
             await _release_cell_operation_lock(session, operation)
             await session.flush()
             return _operation_snapshot(operation)
+
+    def _governance_recovery_request(self, operation: Operation) -> dict[str, Any] | None:
+        try:
+            return self._codec.decrypt_json(
+                operation.request_ciphertext,
+                purpose=(f"operation-request:{operation.action.value}:{operation.idempotency_key}"),
+            )
+        except Exception:  # noqa: BLE001 - an undecodable envelope is only ever ineligible
+            return None
+
+    async def preflight_governance_recovery(
+        self,
+        operation_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        """Digest one eligible terminal governance row without writing anything."""
+        # Eligibility here is structural, not scheduled: nothing about this row
+        # expires, so the caller's clock only matters when the resume commits.
+        del now
+        async with self._sessions() as session:
+            operation = await session.get(Operation, operation_id)
+            if operation is None:
+                raise RepositoryConflict("operation does not exist")
+            fence = await session.get(TenantFence, operation.tenant_id)
+            return _governance_recovery_snapshot(
+                operation,
+                fence,
+                self._governance_recovery_request(operation),
+            )
+
+    async def resume_governance_recovery(
+        self,
+        operation_id: str,
+        *,
+        expected_digest: str,
+        now: datetime | None = None,
+    ) -> str:
+        """Requeue the same operation at the same checkpoint under its exact digest.
+
+        This changes scheduling only. The worker's claim, fence, PVC and custody
+        rechecks remain the sole authority over the live cell, and the retained
+        governance checkpoint keeps blocking successors until it completes.
+        """
+        if not isinstance(expected_digest, str) or (
+            _GOVERNANCE_RECOVERY_DIGEST.fullmatch(expected_digest) is None
+        ):
+            raise RepositoryConflict("governance recovery digest is invalid")
+        async with self._sessions.begin() as session:
+            operation = await _lock_operation_fence_first(session, operation_id)
+            resumed_at = await _database_now(session, now)
+            fence = await session.get(TenantFence, operation.tenant_id)
+            current: object
+            try:
+                current = _governance_recovery_snapshot(
+                    operation,
+                    fence,
+                    self._governance_recovery_request(operation),
+                )
+            except RepositoryConflict:
+                current = _GOVERNANCE_RECOVERY_INELIGIBLE
+            if current != expected_digest:
+                # Only the digest recorded by the latest committed requeue is an
+                # acknowledgement replay. Any older one refers to a row state
+                # that a later failure or edit has already replaced.
+                marker = operation.progress.get(_GOVERNANCE_RECOVERY_MARKER)
+                if isinstance(marker, dict) and marker.get("preflight_sha256") == expected_digest:
+                    return "already-queued"
+                raise RepositoryConflict("governance recovery digest does not match the row")
+            if operation.cell_id is not None and (
+                await session.get(CellOperationLock, operation.cell_id, with_for_update=True)
+                is not None
+            ):
+                raise RepositoryConflict("cell operation lease is unresolved")
+            if await session.scalar(select(_foreign_governance_barrier(operation))):
+                raise RepositoryConflict("operation overlaps unfinished governance migration")
+            overlapping = await session.scalar(
+                select(Operation.id)
+                .where(
+                    Operation.id != operation.id,
+                    Operation.tenant_id == operation.tenant_id,
+                    or_(
+                        and_(
+                            Operation.action == OperationAction.DESTROY,
+                            Operation.state != OperationState.FINAL,
+                        ),
+                        and_(
+                            Operation.cell_id == operation.cell_id,
+                            Operation.state == OperationState.CLAIMED,
+                        ),
+                    ),
+                )
+                .limit(1)
+            )
+            if overlapping is not None:
+                raise RepositoryConflict("governance recovery overlaps an existing operation")
+            operation.state = OperationState.PENDING
+            operation.error_code = None
+            operation.finalized_at = None
+            operation.available_at = resumed_at
+            operation.retry_after_seconds = INITIAL_RETRY_AFTER_SECONDS
+            operation.progress = {
+                **operation.progress,
+                "failure_attempts": 0,
+                _GOVERNANCE_RECOVERY_MARKER: {
+                    "schema": 1,
+                    "preflight_sha256": expected_digest,
+                    "claim_generation": operation.claim_generation,
+                    "committed_at": resumed_at.isoformat(),
+                },
+            }
+            operation.updated_at = resumed_at
+            await session.flush()
+            return "queued"
 
     async def complete(
         self,

@@ -6,8 +6,14 @@ from pathlib import Path
 
 from record_fixtures import copy_x3_fixture
 
-from exomem import commands, mutation_terminal, record_formats, record_memory, records
-from exomem import graph_sync
+from exomem import (
+    commands,
+    graph_sync,
+    mutation_terminal,
+    record_formats,
+    record_memory,
+    records,
+)
 from exomem import hosted_gateway as gateway
 from exomem import structured_collections as collections
 from exomem.writer_lease import LeaseConfig, LeaseManager
@@ -22,7 +28,14 @@ RECORD_ACTIONS = (
     "update",
     "revise",
     "rebaseline",
+    "discard",
 )
+
+#: What `hosted-alpha-agent-v2` published, frozen. A historical Hosted candidate
+#: is an immutable release identity whose contract must not follow the live
+#: registry (see `hosted_legacy_schemas`), so a new action lands on the current
+#: profile and leaves this list where its promotion record found it.
+HOSTED_V2_RECORD_ACTIONS = tuple(action for action in RECORD_ACTIONS if action != "discard")
 
 
 def test_record_command_exposes_the_lifecycle_arguments_and_selector_routing() -> None:
@@ -63,7 +76,7 @@ def test_record_command_exposes_the_lifecycle_arguments_and_selector_routing() -
     )
     assert all(
         not commands.invocation_is_read_only(command, {"action": action})
-        for action in ("create", "append", "update", "revise", "rebaseline")
+        for action in ("create", "append", "update", "revise", "rebaseline", "discard")
     )
 
 
@@ -100,19 +113,49 @@ def test_compact_bootstrap_puts_record_route_before_semantic_authoring() -> None
     # contract inside `engagement`, which precedes the action catalogue by
     # design, and 8,192 had no margin left for anything that legitimately sits
     # in front. 10 KiB is still the first sixth of a ~63 KB payload.
-    assert serialized.find(b'"record"') < 10_240
+    #
+    # Re-cut again to 12 KiB, and the same way: two further additions landed in
+    # front, both inside `engagement` and both legitimate. #1233's per-identity
+    # prominence preference took the offset from 10,075 to 10,233 -- seven bytes
+    # under the old proxy, which is not headroom -- and the capture contract's
+    # episode-completeness clause added 418 more, for 10,651. That is 17% of a
+    # 62 KB payload, and 12 KiB is its first fifth; `record` is still reachable
+    # early by any reading of the word.
+    assert serialized.find(b'"record"') < 12_288
     assert serialized.find(b'"record"') < serialized.find(b'"semantic_authoring"')
     # The compact payload's SIZE budget is not asserted here. It lives in
     # `tests/test_bootstrap_compact_budget.py::COMPACT_BYTE_CEILING`, which owns
     # the constraint and records why the number is what it is. This test's
     # subject is placement -- that `record` is reachable early and ahead of
-    # `semantic_authoring` -- and the `< 8192` offsets above are what pin that.
+    # `semantic_authoring` -- and the two offsets above are what pin that. (They
+    # are named generically here on purpose: this sentence still said `< 8192`
+    # two re-cuts after that number stopped being the one on the line.)
     #
     # A duplicate ceiling used to sit on this line, undocumented and 656 bytes
     # lower than the real one. The lower number silently became the gate, so
     # growth that the owning test had deliberately pre-authorised failed here
     # instead, in a test that says nothing about budgets and offers no rationale
     # to weigh the failure against. One budget, in the file that explains it.
+
+
+def test_the_hook_cadence_block_does_not_push_record_past_the_proxy(monkeypatch) -> None:
+    """The cadence block lands inside `engagement`, which is in FRONT of the catalogue.
+
+    That is the same place the last two re-cuts of the proxy came from, so the
+    block is measured rather than assumed to be small. The surfaceless fixture
+    above already carries it -- the block rides on the coding context and an
+    undetected client is coding -- so this pins the named client, whose longer
+    surface string is the larger of the two.
+    """
+    monkeypatch.setenv("EXOMEM_SURFACE", "claude-code")
+    root = Path(tempfile.mkdtemp())
+    (root / "Knowledge Base").mkdir()
+    payload = commands.op_bootstrap(root, profile="compact")
+    serialized = json.dumps(payload, ensure_ascii=False).encode()
+
+    assert payload["engagement"]["hook_cadence"]["saved_preference_reaches_hooks"] is False
+    assert serialized.find(b'"record"') < 12_288
+    assert serialized.find(b'"record"') < serialized.find(b'"semantic_authoring"')
 
 
 def test_hosted_records_v2_is_additive_and_v1_remains_unchanged() -> None:
@@ -126,7 +169,11 @@ def test_hosted_records_v2_is_additive_and_v1_remains_unchanged() -> None:
     assert descriptor.product_commands == tuple(command.name for command in v2)
     contract = gateway.build_agent_gateway_contract(profile="hosted-alpha-agent-v2")
     record_tool = next(entry["mcp_tool"] for entry in contract["commands"] if entry["name"] == "record_memory")
-    assert record_tool["inputSchema"]["properties"]["action"]["enum"] == list(RECORD_ACTIONS)
+    assert record_tool["inputSchema"]["properties"]["action"]["enum"] == list(
+        HOSTED_V2_RECORD_ACTIONS
+    )
+    assert "held" not in record_tool["inputSchema"]["properties"]
+    assert "hold" not in record_tool["inputSchema"]["properties"]
 
 
 def test_public_revise_keeps_the_closed_receipt_through_graph_handoff_and_replay(

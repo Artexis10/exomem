@@ -26,6 +26,10 @@ from .crypto import AesGcmEnvelopeCodec
 from .database import ProvisionerDatabase
 from .durability_driver import DurabilityActionDriver
 from .entrypoint import help_requested
+from .governance_migration_coordinator import HostedGovernanceMigrationCoordinator
+from .governance_migration_job import KubernetesGovernanceMigrationAdapter
+from .governance_storage_binding import KubernetesGovernanceStorageBindingAdapter
+from .governance_storage_init import KubernetesGovernanceStorageInitAdapter
 from .lifecycle import CellLifecycleDriver, LifecycleConfig
 from .live import (
     KubernetesProviderRegistry,
@@ -36,6 +40,7 @@ from .main import _require_production_database
 from .provider_identity import ProviderRecoveryIdentityVerifier
 from .repository import OperationRepository
 from .worker import ProvisionerWorker
+from .worker_loop import run_polling_loop
 from .worker_ownership import ROUTINE_OPERATION_ACTIONS
 
 
@@ -92,6 +97,7 @@ def build_routine_operation_worker(
         driver,
         worker_id=worker_id,
         exclude_checkpoints=frozenset({"volume-registration-required"}),
+        exclude_checkpoint_prefixes=frozenset({"gpi1:registering:"}),
         allowed_actions=ROUTINE_OPERATION_ACTIONS,
         capacity_admission=capacity_admission,
     )
@@ -187,6 +193,7 @@ def build_live_provider_components(
             expected_version=settings.helm_version,
             chart_path=settings.cell_chart_path,
             chart_version=settings.cell_chart_version,
+            core_v1=core_v1,
         ),
         runtime=PrivateCellApiAdapter(
             request=requester,
@@ -204,9 +211,33 @@ def build_live_provider_components(
         capacity=capacity,
         identity_verifier=identity_verifier,
         config=lifecycle_config,
+        storage_init=KubernetesGovernanceStorageInitAdapter(
+            core_v1=core_v1,
+            batch_v1=batch_v1,
+            apps_v1=apps_v1,
+            identity_verifier=identity_verifier,
+            runtime_image=lifecycle_config.image,
+        ),
+        storage_binding=KubernetesGovernanceStorageBindingAdapter(
+            core_v1=core_v1,
+            batch_v1=batch_v1,
+            apps_v1=apps_v1,
+            identity_verifier=identity_verifier,
+            runtime_image=lifecycle_config.image,
+            cell=cell,
+        ),
+        governance_migration=HostedGovernanceMigrationCoordinator(
+            cell=cell,
+            jobs=KubernetesGovernanceMigrationAdapter(
+                core_v1=core_v1,
+                apps_v1=apps_v1,
+                batch_v1=batch_v1,
+            ),
+        ),
         fingerprint=KubernetesVaultFingerprintAdapter(
             core_v1=core_v1,
             batch_v1=batch_v1,
+            apps_v1=apps_v1,
             image=lock.components.provisioner.image,
         ),
     )
@@ -274,9 +305,11 @@ async def _run_worker() -> None:
             capacity_admission=components.capacity,
         )
         try:
-            while True:
-                if not await worker.run_once():
-                    await asyncio.sleep(provider.poll_seconds)
+            await run_polling_loop(
+                worker,
+                poll_seconds=provider.poll_seconds,
+                idle_poll_seconds=provider.idle_poll_seconds,
+            )
         finally:
             await database.dispose()
             await asyncio.to_thread(api_client.close)

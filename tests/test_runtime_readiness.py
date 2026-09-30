@@ -643,3 +643,46 @@ def test_coordination_graph_health_requires_a_readable_sidecar(
     snapshot = manager.status(missing)
     assert snapshot["graph_sync"] == {"state": "unavailable", "generation": 1}
     assert str(missing) not in repr(snapshot)
+
+
+def test_cutover_block_names_each_component_and_the_promotion_gate() -> None:
+    snapshot = build_runtime_readiness(
+        coordination={
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+        },
+        release="1.2.3",
+        mcp_tool_surface_sha256="a" * 64,
+        cutover={
+            "components": {"lexical": "ready", "graph_snapshot": "waiting"},
+            "cutover_ready": False,
+            "standby": True,
+        },
+    )
+    # A standby serves its own probe while it warms; only cutover is gated.
+    assert snapshot["status"] == "ready"
+    assert snapshot["cutover"] == {
+        "components": {"lexical": "ready", "graph_snapshot": "waiting"},
+        "cutover_ready": False,
+        "standby": True,
+    }
+
+
+def test_runtime_readiness_publishes_the_live_cutover_block(monkeypatch) -> None:
+    from exomem import readiness, runtime_readiness, service_standby
+
+    service_standby.reset_for_tests()
+    readiness.reset()
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    try:
+        service_standby.enter_standby()
+        readiness.mark_ready("lexical")
+        snapshot = runtime_readiness.runtime_readiness(mcp_tool_surface_sha256="a" * 64)
+        assert snapshot["cutover"]["standby"] is True
+        assert snapshot["cutover"]["cutover_ready"] is False
+        assert snapshot["cutover"]["components"]["graph_snapshot"] == "waiting"
+    finally:
+        service_standby.reset_for_tests()
+        readiness.reset()

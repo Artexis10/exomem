@@ -44,7 +44,7 @@ variable "transfer_hostname" {
 }
 
 variable "gateway_hostname" {
-  description = "Optional canonical MCP gateway origin on the existing tunnel; empty disables its DNS and route."
+  description = "Optional Cloud MCP hostname for DNS-only direct TLS to the fleet node; empty disables its DNS record. Use a dedicated hostname, not an existing desktop connector."
   type        = string
   default     = ""
 
@@ -156,4 +156,71 @@ variable "private_node_ip" {
   description = "Stable node address inside the private subnet."
   type        = string
   default     = "10.50.1.10"
+}
+
+variable "database_hostname" {
+  description = "DNS-only public hostname for the control database's PgBouncer TLS listener."
+  type        = string
+
+  validation {
+    condition = (
+      can(regex("^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$", var.database_hostname)) &&
+      var.database_hostname != var.control_hostname &&
+      var.database_hostname != var.transfer_hostname &&
+      var.database_hostname != var.gateway_hostname
+    )
+    error_message = "database_hostname must be a distinct lowercase ASCII DNS name."
+  }
+}
+
+variable "control_db_server_name" {
+  description = "Opaque host name for the dedicated control-database server."
+  type        = string
+  default     = "exomem-control-db-01"
+}
+
+variable "control_db_server_type" {
+  # cx23 (shared x86, 2 vCPU / 4 GiB) is the smallest x86 type Hetzner still
+  # sells in fsn1; cpx11 can no longer be ordered there (refused on
+  # 2026-09-26). The control database is metadata-sized (cell rows,
+  # capacity, rollout state), not vault data, so this is sized to the
+  # workload rather than padded for headroom that would never be used.
+  description = "Small x86 Hetzner instance type for the control database server."
+  type        = string
+  default     = "cx23"
+
+  validation {
+    condition     = contains(["cx23", "cx33"], var.control_db_server_type)
+    error_message = "The control database server must use an approved small x86 type."
+  }
+}
+
+variable "control_db_private_ip" {
+  description = "Stable private-network address for the control database server."
+  type        = string
+  default     = "10.50.1.20"
+}
+
+variable "pgbouncer_public_port" {
+  description = "Public TLS port the control database's PgBouncer listener binds."
+  type        = number
+  default     = 6432
+
+  validation {
+    condition     = var.pgbouncer_public_port > 1024 && var.pgbouncer_public_port < 65536
+    error_message = "pgbouncer_public_port must be an unprivileged TCP port."
+  }
+}
+
+variable "k3s_agent_nodes" {
+  # One entry is one K3s agent server (add-cloud-node-provisioning N1). Adding
+  # or removing an entry is the whole Terraform change; the module validates
+  # addresses against the subnet and the two reserved node addresses. Run
+  # infra/ansible/remove-agent.yml BEFORE removing an entry.
+  description = "K3s agent nodes keyed by a short DNS-label suffix: { private_ip, server_type }."
+  type = map(object({
+    private_ip  = string
+    server_type = string
+  }))
+  default = {}
 }

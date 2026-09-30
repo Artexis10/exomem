@@ -382,6 +382,181 @@ def test_feature_grants_limits_and_privacy_defaults_are_deterministic(
     assert error.value.code == "HOSTED_FEATURE_UNKNOWN"
 
 
+def test_a_planted_remote_owner_binding_never_reaches_a_hosted_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A personal owner binding is cleared from a hosted cell, and no hosted
+    principal or cell credential matches one even when it is present."""
+    from fastmcp.server import dependencies as fastmcp_dependencies
+    from fastmcp.server.auth.auth import AccessToken
+
+    from exomem.governance.principal import (
+        OWNER_AUDIENCE,
+        resolve_hosted_principal,
+        resolve_mcp_principal,
+    )
+
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    planted = {
+        "EXOMEM_OWNER_OAUTH_SUBJECT": "github:4242",
+        "EXOMEM_GITHUB_USER_ID": "4242",
+        "EXOMEM_BASE_URL": "https://planted.invalid",
+    }
+    process_env = dict(planted)
+    config.apply_process_environment(process_env)
+    assert "EXOMEM_OWNER_OAUTH_SUBJECT" not in process_env
+
+    # Even with the binding present in the environment, a hosted gateway
+    # principal and a cell service credential carrying copied claims stay
+    # non-owner: neither is the durable session proxy's token type.
+    for key, value in planted.items():
+        monkeypatch.setenv(key, value)
+    for scope in ("principal-scope-4242", "4242", "github:4242"):
+        hosted = resolve_hosted_principal(scope)
+        assert hosted.audience_id != OWNER_AUDIENCE
+        assert hosted.principal_kind == "principal"
+    cell_token = AccessToken(
+        token="hosted-cell-service",
+        client_id=config.cell_id,
+        scopes=["hosted:cell"],
+        claims={
+            "cell_id": config.cell_id,
+            "kind": "hosted-cell-service",
+            "sub": "4242",
+            "github_user_id": 4242,
+            "iss": "https://planted.invalid",
+        },
+    )
+    monkeypatch.setattr(fastmcp_dependencies, "get_access_token", lambda: cell_token)
+    resolved = resolve_mcp_principal()
+    assert resolved.audience_id != OWNER_AUDIENCE
+    assert resolved.remote_owner is False
+
+
+def test_a_legacy_named_owner_binding_cannot_be_promoted_back_into_a_hosted_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`env_compat.promote_legacy()` copies `KB_MCP_X` to an unset `EXOMEM_X`, and
+    later startup code calls it again; clearing only the canonical name would let
+    the legacy spelling re-arm the binding."""
+    from exomem import env_compat
+
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    monkeypatch.setenv("KB_MCP_OWNER_OAUTH_SUBJECT", "github:4242")
+    monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", "github:4242")
+    for name in ("EXOMEM_VAULT_PATH", "EXOMEM_HOSTED_STATE_ROOT", "EXOMEM_STATE_ROOT",
+                 "EXOMEM_WRITER_LEASE_STATE_DIR", "EXOMEM_LOG_DIR", "EXOMEM_UPLOAD_MAX_BYTES",
+                 "TMPDIR"):
+        monkeypatch.setenv(name, os.environ.get(name, ""))
+    config.apply_process_environment()
+    env_compat.promote_legacy()
+    # Compare names only, never the mapping: a failure must not print the
+    # process environment.
+    armed = [
+        name
+        for name in ("KB_MCP_OWNER_OAUTH_SUBJECT", "EXOMEM_OWNER_OAUTH_SUBJECT")
+        if name in os.environ
+    ]
+    assert armed == []
+
+
+def test_a_hosted_cell_never_inherits_an_activation_model_choice(tmp_path: Path) -> None:
+    """A cell is sized for its one recall encoder. An inherited
+    `EXOMEM_ACTIVATION_MODEL`, or its legacy spelling that `promote_legacy`
+    would copy back, would load a second, larger encoder beside it."""
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    process_env = {"EXOMEM_ACTIVATION_MODEL": "BAAI/bge-m3", "KB_MCP_ACTIVATION_MODEL": "BAAI/bge-m3"}
+
+    config.apply_process_environment(process_env)
+
+    assert [name for name in ("EXOMEM_ACTIVATION_MODEL", "KB_MCP_ACTIVATION_MODEL") if name in process_env] == []
+
+
+def _promote_legacy_into(monkeypatch: pytest.MonkeyPatch, process_env: dict[str, str]) -> None:
+    """Run the real `env_compat.promote_legacy()` against `process_env`, the way
+    a child process's own `import exomem` runs it over its inherited env."""
+    from types import SimpleNamespace
+
+    from exomem import env_compat
+
+    monkeypatch.setattr(env_compat, "os", SimpleNamespace(environ=process_env))
+    env_compat.promote_legacy()
+
+
+# A literal list, deliberately not derived from `hosted_runtime`: a derivation
+# that dropped an alias must fail here, not silently shrink the parameter set.
+_CLEARED_CANONICAL_SETTINGS = (
+    "EXOMEM_BASE_URL",
+    "EXOMEM_CF_ACCESS_AUD",
+    "EXOMEM_CF_ACCESS_TEAM_DOMAIN",
+    "EXOMEM_GITHUB_USERNAME",
+    "EXOMEM_HOSTED_SERVICE_CREDENTIAL",
+    "EXOMEM_LARGE_UPLOAD_BASE_URL",
+    "EXOMEM_OWNER_OAUTH_SUBJECT",
+    "EXOMEM_REST_API_KEY",
+    "EXOMEM_UPLOAD_TOKEN",
+    "EXOMEM_WRITER_LEASE_PREFERRED",
+    "EXOMEM_WRITER_LEASE_REPLICA_ID",
+    "EXOMEM_WRITER_LEASE_TIMEOUT",
+    "EXOMEM_WRITER_LEASE_TOKEN",
+    "EXOMEM_WRITER_LEASE_TTL",
+    "EXOMEM_WRITER_LEASE_URL",
+    "EXOMEM_WRITER_LEASE_VAULT_ID",
+)
+
+
+@pytest.mark.parametrize("canonical", _CLEARED_CANONICAL_SETTINGS)
+def test_a_cleared_setting_cannot_be_re_armed_by_its_legacy_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, canonical: str
+) -> None:
+    """Put only the legacy spelling into the inherited env, apply hosted mode,
+    then promote as a child process would: the canonical name stays absent."""
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    legacy = "KB_MCP_" + canonical[len("EXOMEM_"):]
+    process_env = {legacy: "legacy-value-sentinel"}
+    config.apply_process_environment(process_env)
+    _promote_legacy_into(monkeypatch, process_env)
+    assert canonical not in process_env
+
+
+@pytest.mark.parametrize(
+    ("grants", "canonical"),
+    [
+        ("", "EXOMEM_DIARIZE"),
+        ("diarization,embeddings,media,vision", "EXOMEM_DIARIZE"),
+        ("", "EXOMEM_VISION_CAPTION"),
+        ("embeddings", "EXOMEM_DISABLE_EMBEDDINGS"),
+        ("media", "EXOMEM_DISABLE_MEDIA_EXTRACTION"),
+        ("embeddings,media,vision", "EXOMEM_DISABLE_CLIP"),
+        ("file-watcher", "EXOMEM_DISABLE_FILE_WATCHER"),
+    ],
+)
+def test_a_gate_the_hosted_env_pops_cannot_be_re_armed_by_its_legacy_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grants: str, canonical: str
+) -> None:
+    """Diarization and captioning are denied without a grant, and a granted
+    feature's disable switch is popped; a child's promotion of an inherited
+    `KB_MCP_*` spelling must not turn either back on."""
+    values = {**_env(tmp_path, grants=grants), "EXOMEM_HOSTED_WORKER_LIMIT": "1"}
+    config = HostedCellConfig.from_env(values, require_provisioned=False)
+    legacy = "KB_MCP_" + canonical[len("EXOMEM_"):]
+    process_env = {legacy: "1"}
+    config.apply_process_environment(process_env)
+    assert canonical not in process_env
+    _promote_legacy_into(monkeypatch, process_env)
+    assert canonical not in process_env
+
+
+def test_a_set_hosted_path_keeps_no_legacy_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    process_env = {"KB_MCP_VAULT_PATH": str(tmp_path / "elsewhere")}
+    config.apply_process_environment(process_env)
+    assert "KB_MCP_VAULT_PATH" not in process_env
+    assert process_env["EXOMEM_VAULT_PATH"] == str(config.vault_root)
+
+
 def test_hosted_config_rejects_protocol_versions_not_implemented_by_this_release(
     tmp_path: Path,
 ) -> None:

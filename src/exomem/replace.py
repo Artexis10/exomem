@@ -24,6 +24,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import find as find_module
 from . import (
@@ -33,6 +34,7 @@ from . import (
     reserved_paths,
     semantic_writes,
     temporal,
+    vocabulary_resolution,
 )
 from . import note as note_module
 from .kbdir import kb_page_target, kb_prefix
@@ -122,6 +124,9 @@ class ReplaceResult:
         }
         if self.creation is not None:
             value["creation"] = self.creation
+            resolution = self.creation.get("vocabulary_resolution")
+            if isinstance(resolution, dict):
+                value["vocabulary_resolution"] = resolution
         return value
 
 
@@ -316,6 +321,26 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
     # Shared with `edit._resolve` and the hosted protected-tree guard. See
     # `kbdir.kb_relative_form` for why this must not be inlined.
     candidate, rel = kb_page_target(vault_root, path)
+    # The literal (NFKC) spelling may be absent because the on-disk name is a
+    # different Unicode normalization -- a macOS-origin NFD name on a
+    # byte-exact filesystem (Linux ext4) -- or it may sit beside such a twin.
+    # Resolving never renames: see `reserved_paths.physical_spelling_refusal`.
+    # A collision is refused even when the NFKC spelling exists, so reads and
+    # writes agree on the path; a non-canonical name only when the NFKC
+    # spelling does not open, because a normalization-insensitive filesystem
+    # (APFS) opens it through the NFD name and that edit always worked.
+    refusal = reserved_paths.physical_spelling_refusal(vault_root, rel)
+    if refusal is not None and (refusal[0] == "AMBIGUOUS_PATH" or not candidate.exists()):
+        from .get_page import path_withheld
+
+        if path_withheld(vault_root, rel):
+            # A withheld page answers exactly like a missing one.
+            raise ReplaceError(
+                code="OLD_NOT_FOUND",
+                missing=["old_path"],
+                reason=f"file does not exist: {rel}",
+            )
+        raise ReplaceError(code=refusal[0], missing=["old_path"], reason=refusal[1])
     try:
         resolved = candidate.resolve()
         resolved.relative_to(kb_root(vault_root).resolve())
@@ -325,7 +350,10 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
             missing=["old_path"],
             reason=f"path escapes {kb_prefix()}: {e}",
         ) from None
-    if not candidate.exists():
+    from .governance import egress
+
+    # A page the caller may not see is answered exactly as a missing one.
+    if not candidate.exists() or egress.write_target_withheld(vault_root, rel):
         raise ReplaceError(
             code="OLD_NOT_FOUND",
             missing=["old_path"],
@@ -521,7 +549,8 @@ def replace(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
-) -> ReplaceResult | semantic_writes.CreationPreflight:
+    vocabulary_decision: dict[str, Any] | None = None,
+) -> ReplaceResult | semantic_writes.CreationPreflight | vocabulary_resolution.VocabularyPreparation:
     """Supersede through one successor-last semantic creation batch."""
     root = Path(vault_root)
     old_resolved, rel_old_with_ext = _resolve_kb_path(root, old_path)
@@ -629,6 +658,7 @@ def replace(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
+            vocabulary_decision=vocabulary_decision,
             _return_prepared=True,
             _supersedes_target=old_link_target,
             _preflight_operation="replacement",
@@ -647,6 +677,8 @@ def replace(
                 {"applicability": "full", "mutated": False, "already_committed": True},
             )
         raise
+    if isinstance(prepared, vocabulary_resolution.VocabularyPreparation):
+        return prepared
     assert isinstance(prepared, note_module._PreparedNote)
     if prepared.preflight.applicability != "full":
         raise ReplaceError(

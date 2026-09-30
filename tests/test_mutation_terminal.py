@@ -373,6 +373,129 @@ def test_compact_does_not_repeat_artifact_receipt_warnings_at_the_top_level() ->
     assert "warnings" not in compact
 
 
+def _artifact_batch_terminal():
+    """One mixed batch: a fresh commit, a duplicate, and a failure."""
+    mutation_terminal = _terminal_module()
+    return mutation_terminal.committed_terminal(
+        {
+            "files": [
+                {
+                    "file_id": "f1",
+                    "outcome": "stored",
+                    "state": "stored",
+                    "stored_path": "Knowledge Base/Evidence/case/raw/one.bin",
+                    "path": "Knowledge Base/Evidence/case/raw/one.bin",
+                    "ref": "exomem://note/0123456789abcdef",
+                    "size": 10,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/octet-stream",
+                    "media_id": None,
+                    "warnings": [],
+                },
+                {
+                    "file_id": "f2",
+                    "outcome": "stored",
+                    "state": "already_stored",
+                    "duplicate_of": {
+                        "path": "Knowledge Base/Evidence/case/raw/one.bin",
+                        "ref": "exomem://note/0123456789abcdef",
+                    },
+                    "stored_path": "Knowledge Base/Evidence/case/raw/one.bin",
+                    "path": "Knowledge Base/Evidence/case/raw/one.bin",
+                    "ref": "exomem://note/0123456789abcdef",
+                    "size": 10,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/octet-stream",
+                    "media_id": None,
+                    "warnings": [],
+                },
+                {
+                    "file_id": "f3",
+                    "outcome": "failed",
+                    "state": "failed",
+                    "code": "SAFE_FETCH_FAILED",
+                    "reason": "download could not be retrieved",
+                },
+            ],
+            "summary": {"stored": 1, "already_stored": 1, "failed": 1},
+        },
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+
+def test_compact_artifact_rows_carry_the_terminal_state_and_duplicate() -> None:
+    """A compact client has to be able to tell a commit from a duplicate.
+
+    `outcome` mirrors `state` for one release, so `already_stored` arrives as
+    `stored` -- which is exactly why the state itself has to survive the
+    projection rather than being inferred from it.
+    """
+    mutation_terminal = _terminal_module()
+
+    compact = mutation_terminal.project_terminal(_artifact_batch_terminal(), "compact")
+
+    assert [row["state"] for row in compact["files"]] == [
+        "stored",
+        "already_stored",
+        "failed",
+    ]
+    assert compact["files"][1]["duplicate_of"] == {
+        "path": "Knowledge Base/Evidence/case/raw/one.bin",
+        "ref": "exomem://note/0123456789abcdef",
+    }
+    assert "duplicate_of" not in compact["files"][0]
+
+
+def test_compact_artifact_paths_count_only_what_this_call_stored() -> None:
+    """A duplicate was committed by an earlier call, not by this one."""
+    mutation_terminal = _terminal_module()
+
+    compact = mutation_terminal.project_terminal(_artifact_batch_terminal(), "compact")
+
+    assert compact["path"] == "Knowledge Base/Evidence/case/raw/one.bin"
+    assert "paths" not in compact
+    assert compact["summary"] == {"stored": 1, "already_stored": 1, "failed": 1}
+
+
+def test_compact_artifact_row_with_an_unknown_state_is_invalid() -> None:
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {
+            "files": [
+                {
+                    "file_id": "f1",
+                    "outcome": "stored",
+                    "state": "half-stored",
+                    "stored_path": "Knowledge Base/Evidence/case/raw/one.bin",
+                    "size": 10,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/octet-stream",
+                    "media_id": None,
+                    "warnings": [],
+                }
+            ],
+            "summary": {"stored": 1, "failed": 0},
+        },
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["files"][0] == {
+        "file_id": "f1",
+        "outcome": "failed",
+        "code": "INVALID_ARTIFACT_RECEIPT",
+        "reason": "artifact result was invalid",
+    }
+
+
 def test_compact_terminal_retains_completed_graph_sync_fields() -> None:
     mutation_terminal = _terminal_module()
     terminal = mutation_terminal.committed_terminal(
@@ -1073,6 +1196,65 @@ def test_acknowledgement_loss_replays_the_persisted_original_terminal(
     assert calls == 1
 
 
+def test_acknowledgement_loss_replays_bound_vocabulary_resolution(tmp_path) -> None:
+    from exomem import writer_lease
+
+    calls = 0
+    interrupt = True
+    resolution = {
+        "family": "domain",
+        "requested": "Health",
+        "canonical": "health",
+        "destination": "Health",
+        "match_kind": "normalized",
+        "snapshot": "a" * 64,
+    }
+
+    def leaf(vault):  # noqa: ANN001, ARG001
+        nonlocal calls
+        calls += 1
+        writer_lease.mark_active_mutation_committed()
+        return {"vocabulary_resolution": resolution}
+
+    def after_terminal_persisted() -> None:
+        nonlocal interrupt
+        if interrupt:
+            interrupt = False
+            raise asyncio.CancelledError
+
+    command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
+        after_terminal_persisted=after_terminal_persisted,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        manager.invoke(
+            command,
+            (vault,),
+            {"response_detail": "compact"},
+            idempotency_key="vocabulary-replay",
+        )
+
+    full_replay = manager.invoke(
+        command,
+        (vault,),
+        {"response_detail": "full"},
+        idempotency_key="vocabulary-replay",
+    )
+    compact_replay = manager.invoke(
+        command,
+        (vault,),
+        {"response_detail": "compact"},
+        idempotency_key="vocabulary-replay",
+    )
+
+    assert full_replay["vocabulary_resolution"] == resolution
+    assert compact_replay["vocabulary_resolution"] == resolution
+    assert calls == 1
+
+
 def test_result_without_active_commit_marker_keeps_its_existing_shape(tmp_path) -> None:
     from exomem import writer_lease
 
@@ -1147,3 +1329,133 @@ def test_mutation_response_detail_is_declared_once_for_every_shared_surface() ->
     assert cli_ops.coerce(command.params, {"response_detail": "full"}) == {
         "response_detail": "full"
     }
+
+
+# --------------------------------------------------------- capture-sweep advisory
+
+
+CAPTURE_SWEEP_LEAF = {
+    "boundary": "quiet-interval",
+    "rule": "one bounded pass over the recent exchange; stay silent when nothing qualifies",
+    "consider": ["conclusion", "outcome or state change", "entity facet"],
+    "written_recently": ["exomem://memory/11111111-1111-4111-8111-111111111111"],
+    "unpaged_mentions": ["Venue booking system"],
+}
+
+
+def _committed_terminal_with_leaf(leaf: dict):
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        leaf,
+        request_id="22222222-2222-4222-8222-222222222222",
+        receipt_id="receipt-sweep",
+        idempotency_key="sweep-key",
+    )
+    terminal["warnings_count"] = 0
+    return mutation_terminal, terminal
+
+
+def _sweep_leaf(container: str | None = None, **overrides):
+    block = {**CAPTURE_SWEEP_LEAF, **overrides}
+    leaf = {
+        "path": "Knowledge Base/Notes/Insights/sweep.md",
+        "warnings": [],
+        "mutated": True,
+    }
+    if container is None:
+        leaf["capture_sweep"] = block
+    else:
+        leaf[container] = {"capture_sweep": block}
+    return leaf
+
+
+@pytest.mark.parametrize("container", (None, "creation", "semantic", "source"))
+def test_capture_sweep_is_lifted_from_every_write_container(container) -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(container))
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["capture_sweep"] == CAPTURE_SWEEP_LEAF
+
+
+def test_capture_sweep_is_absent_rather_than_null_when_the_leaf_has_none() -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(
+        {"path": "Knowledge Base/Notes/Insights/sweep.md", "warnings": [], "mutated": True}
+    )
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert "capture_sweep" not in compact
+
+
+def test_capture_sweep_is_stripped_from_the_legacy_detail() -> None:
+    for container in (None, "creation", "semantic", "source"):
+        mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(container))
+
+        legacy = mutation_terminal.project_terminal(terminal, "legacy")
+
+        assert "capture_sweep" not in legacy
+        if container is not None:
+            assert "capture_sweep" not in legacy[container]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"boundary": "whenever-it-feels-right"},
+        {"boundary": 7},
+        {"consider": []},
+        {"consider": "conclusion"},
+        {"rule": ""},
+        {"rule": "x" * 4096},
+        {"written_recently": ["https://example.invalid/page"]},
+        {"written_recently": ["exomem://memory/" + "a" * 4096]},
+        {"written_recently": ["exomem://memory/1"] * 9},
+        {"unpaged_mentions": ["x" * 4096]},
+        {"unpaged_mentions": ["a", "b", "c", "d", "e", "f"]},
+        {"unpaged_mentions": [{"name": "a"}]},
+    ),
+)
+def test_an_out_of_bounds_capture_sweep_is_dropped_rather_than_widening_the_wire(
+    overrides,
+) -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None, **overrides))
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert "capture_sweep" not in compact
+
+
+def test_capture_sweep_is_not_a_key_a_client_branches_on() -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None))
+
+    with_block = mutation_terminal.project_terminal(terminal, "compact")
+    plain_terminal = mutation_terminal.committed_terminal(
+        {"path": "Knowledge Base/Notes/Insights/sweep.md", "warnings": [], "mutated": True},
+        request_id="22222222-2222-4222-8222-222222222222",
+        receipt_id="receipt-sweep",
+        idempotency_key="sweep-key",
+    )
+    plain_terminal["warnings_count"] = 0
+    without_block = mutation_terminal.project_terminal(plain_terminal, "compact")
+
+    assert {k: v for k, v in with_block.items() if k != "capture_sweep"} == without_block
+
+
+def test_one_invocation_carries_at_most_one_capture_sweep_block() -> None:
+    """A leaf that somehow carries the block twice still projects one, and the
+    container precedence is the one every other advisory already uses."""
+    mutation_terminal, terminal = _committed_terminal_with_leaf(
+        {
+            "path": "Knowledge Base/Notes/Insights/sweep.md",
+            "warnings": [],
+            "mutated": True,
+            "capture_sweep": CAPTURE_SWEEP_LEAF,
+            "semantic": {"capture_sweep": {**CAPTURE_SWEEP_LEAF, "unpaged_mentions": ["Other"]}},
+        }
+    )
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert isinstance(compact["capture_sweep"], dict)
+    assert compact["capture_sweep"]["unpaged_mentions"] == ["Other"]

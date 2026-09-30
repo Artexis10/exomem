@@ -137,41 +137,59 @@ def callback_url(base_url: str) -> str:
     return f"{base_url}/auth/callback"
 
 
+def _env_line_key(line: str) -> tuple[str | None, str]:
+    """`(KEY, prefix)` for an assignment line, else `(None, "")`.
+
+    A leading `export ` is part of the line's syntax, not of the key, exactly
+    as python-dotenv (which the service uses to load the file) reads it.
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None, ""
+    prefix = ""
+    parts = stripped.split(None, 1)
+    if len(parts) == 2 and parts[0] == "export":
+        prefix = "export "
+        stripped = parts[1]
+    key = stripped.partition("=")[0].strip()
+    return (key or None), prefix
+
+
 def parse_env(text: str) -> dict[str, str]:
     """Parse `.env` text into a {KEY: value} dict (last write wins).
 
-    Ignores blank lines, comments, and lines without `=`. Values are taken
-    verbatim after the first `=` (no quote stripping — the wizard never quotes).
+    Ignores blank lines, comments, and lines without `=`. A leading `export `
+    is accepted, as python-dotenv accepts it. Values are taken verbatim after
+    the first `=` (no quote stripping — the wizard never quotes).
     """
     out: dict[str, str] = {}
     for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
+        key, _prefix = _env_line_key(line)
+        if key is None:
             continue
-        key, _, value = stripped.partition("=")
-        out[key.strip()] = value.strip()
+        out[key] = line.partition("=")[2].strip()
     return out
 
 
-def patch_env(existing: str, updates: dict[str, str]) -> str:
+def patch_env(existing: str, updates: dict[str, str | None]) -> str:
     """Merge `updates` into `.env` text, preserving every unrelated line.
 
     An existing `KEY=` line is replaced IN PLACE (position, and any surrounding
-    comments/blank lines, preserved); a new key is appended. Comments and keys
-    the wizard doesn't own are never touched. Always returns text ending in a
-    single newline (empty input with no updates returns "").
+    comments/blank lines, preserved); a new key is appended. A `None` value
+    removes every `KEY=` line instead. `export KEY=` lines count as `KEY` and
+    keep their prefix when replaced. Comments and keys the wizard doesn't own
+    are never touched. Always returns text ending in a single newline (empty
+    input with no updates returns "").
     """
-    remaining = dict(updates)
+    remaining = {key: value for key, value in updates.items() if value is not None}
+    removed = {key for key, value in updates.items() if value is None}
     out: list[str] = []
     for line in existing.splitlines():
-        stripped = line.strip()
-        key = (
-            stripped.partition("=")[0].strip()
-            if stripped and not stripped.startswith("#") and "=" in stripped
-            else None
-        )
+        key, prefix = _env_line_key(line)
+        if key is not None and key in removed:
+            continue
         if key is not None and key in remaining:
-            out.append(f"{key}={remaining.pop(key)}")
+            out.append(f"{prefix}{key}={remaining.pop(key)}")
         else:
             out.append(line)
     # Append any keys not already present, in the caller's insertion order.
@@ -254,6 +272,7 @@ def run_remote_setup(
     github_client_secret: str | None = None,
     github_username: str | None = None,
     github_user_id: str | int | None = None,
+    remote_owner: bool | None = None,
     yes: bool = False,
     probe: bool = True,
     env_path: Path | None = None,
@@ -284,6 +303,24 @@ def run_remote_setup(
     print_fn("exomem setup --remote")
     print_fn("")
 
+    from .dotenv_guard import dotenv_load_guard
+
+    def refuse_vault_env(selected_vault: str | None) -> bool:
+        if dotenv_load_guard(
+            env_path, vault=Path(selected_vault) if selected_vault else None
+        ) is not None:
+            return False
+        print_fn(
+            f"setup --remote: refusing to write secrets to {env_path} -- it is "
+            "inside a vault, whose files remote principals can write through sync. "
+            "Re-run this command from a working directory outside the vault. "
+            "No changes were written."
+        )
+        return True
+
+    if refuse_vault_env(vault):
+        return 2
+
     existing_text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     existing = parse_env(existing_text)
 
@@ -312,6 +349,8 @@ def run_remote_setup(
         print_fn("setup --remote: a vault path is required.")
         return 2
     vault_path = str(Path(vault).expanduser())
+    if refuse_vault_env(vault_path):
+        return 2
     report("vault", f"[done] {vault_path}")
 
     # 3. Public base URL — validated (no trailing slash, no /mcp).
@@ -409,6 +448,22 @@ def run_remote_setup(
         print_fn(f"setup --remote: could not establish GitHub identity: {error}")
         return 2
 
+    # Whether remote sign-ins by this account act as the owner. Separate from
+    # who may sign in: an install may admit a delegate account, so this is
+    # asked, never inferred. `--yes` changes it only when a flag says so.
+    if remote_owner is None and not yes:
+        answer = input_fn(
+            f"Is {github_username} your own GitHub account? Remote sign-ins by it "
+            "will act as you, the owner. [Y/n]: "
+        )
+        remote_owner = answer.strip().casefold() in ("", "y", "yes")
+    if remote_owner is None:
+        report("remote_owner", "[skipped: unchanged]")
+    elif remote_owner:
+        report("remote_owner", "[done] remote sign-ins act as the owner")
+    else:
+        report("remote_owner", "[done] remote sign-ins stay a separate principal")
+
     # 5. JWT signing key — generate ONCE and keep it (rotating orphans the store).
     signing_key = _existing("EXOMEM_JWT_SIGNING_KEY")
     if signing_key:
@@ -471,7 +526,7 @@ def run_remote_setup(
         )
 
     # 6. Patch .env in place, preserving every other line.
-    updates = {
+    updates: dict[str, str | None] = {
         "EXOMEM_VAULT_PATH": vault_path,
         "EXOMEM_BASE_URL": base_url,
         "GITHUB_CLIENT_ID": github_client_id,
@@ -480,6 +535,10 @@ def run_remote_setup(
         "EXOMEM_GITHUB_USER_ID": str(resolved_user_id),
         "EXOMEM_JWT_SIGNING_KEY": signing_key,
     }
+    if remote_owner is not None:
+        updates["EXOMEM_OWNER_OAUTH_SUBJECT"] = (
+            f"github:{resolved_user_id}" if remote_owner else None
+        )
     if storage_credential is not None:
         updates.update(
             {
@@ -488,6 +547,8 @@ def run_remote_setup(
                 "EXOMEM_OAUTH_STORAGE_TOKEN": storage_credential,
             }
         )
+    if refuse_vault_env(vault_path):
+        return 2
     env_path.write_text(patch_env(existing_text, updates), encoding="utf-8")
     try:
         env_path.chmod(0o600)  # secrets — owner-only on POSIX; near-no-op on Windows
@@ -495,7 +556,11 @@ def run_remote_setup(
         pass
     report("env", f"[done] wrote {env_path}")
 
-    # 7. Reload the freshly-written .env, then run doctor as a HARD gate.
+    # 7. Reload the freshly-written .env, then run doctor as a HARD gate. A key
+    # this run removed must not survive in the process environment (inherited
+    # from the shell or service), or the gate would judge the old value.
+    for removed_key in [key for key, value in updates.items() if value is None]:
+        os.environ.pop(removed_key, None)
     load_env_fn(env_path)
     dr = doctor_fn(vault=vault_path, profile="remote", probe=probe)
     if dr.success:
@@ -567,6 +632,17 @@ def remote_setup_main(argv: list[str]) -> int:
         dest="github_user_id",
         help="Immutable positive numeric GitHub user ID (avoids the setup lookup).",
     )
+    owner = parser.add_mutually_exclusive_group()
+    owner.add_argument(
+        "--remote-owner", dest="remote_owner", action="store_const", const=True,
+        help="Remote sign-ins by this GitHub account act as you, the owner "
+        "(writes EXOMEM_OWNER_OAUTH_SUBJECT).",
+    )
+    owner.add_argument(
+        "--no-remote-owner", dest="remote_owner", action="store_const", const=False,
+        help="Remote sign-ins stay a separate non-owner principal "
+        "(removes EXOMEM_OWNER_OAUTH_SUBJECT).",
+    )
     parser.add_argument(
         "--yes", action="store_true",
         help="Non-interactive; requires --vault, --base-url, --tunnel, and the three --github-* flags.",
@@ -600,6 +676,7 @@ def remote_setup_main(argv: list[str]) -> int:
         github_client_secret=args.github_client_secret,
         github_username=args.github_username,
         github_user_id=args.github_user_id,
+        remote_owner=args.remote_owner,
         yes=args.yes,
         probe=args.probe,
     )

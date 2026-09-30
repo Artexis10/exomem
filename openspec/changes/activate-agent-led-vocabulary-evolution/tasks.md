@@ -14,7 +14,7 @@ verification passed 416 vocabulary/custody tests; an independent rerun passed
 three representative public-surface, application-replay and one-shot-authority
 cases. Repository-pinned OpenSpec 1.10.0 strict validation passed all 187 records.
 
-The remaining product integration is tracked by 4.3, 5.5 and 6.6:
+The remaining product integration is tracked by 4.3, 5.5, 6.6 and the programme scope extension in section 7:
 
 - Prepare the exact canonical owner intent for review, connect an authenticated
   owner decision to the existing finite control callbacks, and wire them through
@@ -81,3 +81,10 @@ require reimplementing the behavior already exercised by the shipped tests.
 - [x] 6.4 Run affected suites during development, then the full lean suite, required integration/capability checks, lint and public-artifact/privacy validation at the completion boundary; verify actual outputs and obtain independent end-to-end verification of the claimed tranche.
 - [x] 6.5 Publish the implementation PRs with conventional titles and verification evidence; after authorized merges, verify default-branch state and remove only clean, pushed task worktrees with no live processes.
 - [ ] 6.6 After all non-optional integrations and acceptance tasks are evidenced as shipped, synchronize these deltas without discarding later scenarios and archive through OpenSpec; verify `openspec validate --all --strict` before and after archive. A planning PR alone does not complete or archive this change.
+
+## 7. Closed-loop programme authority extension
+
+- [ ] 7.1 Add failing scope tests for explicit vault-wide `edge.add` over existing and future canonical endpoints; verify same-vault resolution, cross-vault refusal, no caller-label proof, separate entity/type authority and no widening of existing project-edge grants.
+- [ ] 7.2 Extend grant validation, scope matching and trusted owner review with the versioned vault-edge scope and compatible reader/writer floor; verify migration creates no grants and older runtimes cannot serve weaker structural writes.
+- [ ] 7.3 Exercise separately receipted create-then-link and any supported combined create/link leaf under current authority; verify interruption, grant expiry, revocation and unknown outcomes cannot duplicate effects or authorize unresolved endpoints.
+- [ ] 7.4 Include the extension in independent security review and ordinary-agent acceptance from `close-memory-loop`; verify the complete owner-controlled opt-in workflow and maintain separate authority for role/convention edits, non-additive changes and Planning commitments.

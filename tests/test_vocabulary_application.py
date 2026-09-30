@@ -621,3 +621,44 @@ def test_denied_entity_identity_is_exactly_approved_and_retried_with_the_same_ke
     assert retried == first
     assert authority.reserve(operation, principal=principal).authority_ids
     assert staged_identity() != memory_refs.new_id()
+
+
+def test_a_shared_name_create_entity_asks_for_an_identity_decision(tmp_path):
+    """The entity writer prepared a shared-name decision and wrote nothing.
+
+    A vocabulary-bound create-entity binds only type, name and summary, so it
+    cannot carry the `distinct` decision; it must say that, with the
+    fingerprint, rather than report a missing canonical path.
+    """
+    item = _proposed(tmp_path)
+    fingerprint = "ab" * 32
+
+    def leaf(vault, **kwargs):
+        return {
+            "mutated": False,
+            "identity_preparation": {
+                "name": "Acme Labs",
+                "entity_type": "organization",
+                "candidates": [],
+                "omitted_candidate_count": 0,
+                "candidate_fingerprint": fingerprint,
+                "outcomes": ["distinct"],
+            },
+            "identity_decision": "required",
+        }
+
+    command = SimpleNamespace(name="connect_memory", leaf=leaf, read_only=False)
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    kwargs = {
+        "operation": "create-entity",
+        "entity_type": "organization",
+        "name": "Acme Labs",
+        "summary": "A durable organization identity.",
+        "vocabulary_ref": item.ref,
+        "vocabulary_fingerprint": item.fingerprint,
+    }
+    with library_scope(), pytest.raises(ValueError, match="IDENTITY_DECISION_REQUIRED") as error:
+        manager.invoke(command, (tmp_path,), kwargs, idempotency_key="shared-name")
+    assert fingerprint in str(error.value)
+    assert "no canonical path" not in str(error.value)
+    assert VocabularyState(tmp_path).get(item.ref)["state"] != "applied"

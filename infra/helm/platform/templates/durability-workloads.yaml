@@ -2,6 +2,7 @@
 {{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
 {{- $lockFile := include "exomem.hostedDeploymentLockFileName" . -}}
 {{- $runtimeSelection := include "exomem.hostedRuntimeSelection" . -}}
+{{- $legacyPaused := eq (include "exomem.legacyHostedPaused" .) "true" -}}
 {{- $workloadsRaw := .Files.Get "files/durability-workloads-v1.json" -}}
 {{- $storageRaw := .Files.Get "files/durability-storage-v1.json" -}}
 {{- if ne .Values.durability.contractSha256 ($workloadsRaw | sha256sum) -}}
@@ -297,6 +298,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
   schedule: {{ $actions.schedule | quote }}
+  suspend: {{ $legacyPaused }}
   concurrencyPolicy: {{ $actions.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $actions.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: 1
@@ -450,6 +452,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
   schedule: {{ $delivery.schedule | quote }}
+  suspend: {{ $legacyPaused }}
   concurrencyPolicy: {{ $delivery.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $delivery.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: 1
@@ -532,6 +535,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
   schedule: {{ $backup.schedule | quote }}
+  suspend: {{ $legacyPaused }}
   concurrencyPolicy: {{ $backup.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $backup.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: 1
@@ -638,6 +642,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
   schedule: {{ $database.schedule | quote }}
+  suspend: {{ $legacyPaused }}
   concurrencyPolicy: {{ $database.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $database.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: 1
@@ -881,6 +886,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
   schedule: {{ $dispatcher.schedule | quote }}
+  suspend: {{ $legacyPaused }}
   concurrencyPolicy: {{ $dispatcher.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $dispatcher.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: 1
@@ -952,7 +958,7 @@ metadata:
     app.kubernetes.io/name: exomem-volume-worker
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
-  replicas: {{ $volume.replicas }}
+  replicas: {{ ternary 0 $volume.replicas $legacyPaused }}
   strategy: {type: Recreate}
   selector:
     matchLabels: {app.kubernetes.io/name: exomem-volume-worker}
@@ -1006,6 +1012,10 @@ spec:
                 secretKeyRef: {name: exomem-provisioner-hcloud-token, key: token}
             - name: EXOMEM_PROVISIONER_LOCATION
               value: {{ .Values.provisioner.location | quote }}
+            - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
+              value: {{ printf "/etc/exomem/deployment-lock/%s" $lockFile | quote }}
+            - name: EXOMEM_PROVISIONER_RUNTIME_SELECTION
+              value: {{ $runtimeSelection | quote }}
             - name: EXOMEM_PROVISIONER_CAPACITY_CONTRACT_PATH
               value: /etc/exomem/capacity/private-alpha-capacity-v1.json
             - name: EXOMEM_PROVISIONER_CAPACITY_RECEIPT_NAMESPACE
@@ -1035,6 +1045,7 @@ spec:
             - {name: temporary, mountPath: /tmp}
             # subPath so the file is regular, not a ..data/ symlink; see provisioner.yaml.
             - {name: capacity-contract, mountPath: /etc/exomem/capacity/private-alpha-capacity-v1.json, subPath: private-alpha-capacity-v1.json, readOnly: true}
+            - {name: deployment-lock, mountPath: /etc/exomem/deployment-lock, readOnly: true}
       volumes:
         - name: temporary
           emptyDir: {sizeLimit: 64Mi}
@@ -1043,3 +1054,8 @@ spec:
             name: exomem-capacity-contract
             items:
               - {key: private-alpha-capacity-v1.json, path: private-alpha-capacity-v1.json}
+        - name: deployment-lock
+          configMap:
+            name: {{ $lockName }}
+            items:
+              - {key: {{ $lockFile }}, path: {{ $lockFile }} }

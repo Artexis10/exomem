@@ -767,7 +767,7 @@ def test_local_download_route_consults_the_release_decision(
     monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "sek")
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     client = TestClient(server.build_server(require_auth=False).http_app())
-    token = upload_tokens.mint("sek", scope="download")
+    token = upload_tokens.mint_bound("sek", audience="owner")
     headers = {"Authorization": f"Bearer {token}"}
 
     def _get(path: str):
@@ -819,7 +819,7 @@ def test_local_download_route_allows_at_l6(
     govern(vault, ceiling=egress.LEVEL_FULL, audience="owner")
     _reset_policy_caches()
     client = TestClient(server.build_server(require_auth=False).http_app())
-    token = upload_tokens.mint("sek", scope="download")
+    token = upload_tokens.mint_bound("sek", audience="owner")
     response = client.get(
         "/download",
         params={"path": RESTRICTED_PATH},
@@ -846,7 +846,7 @@ def test_local_download_route_blocked_policy_denies(
 
     assert policy_module.load(vault).blocked is True
     client = TestClient(server.build_server(require_auth=False).http_app())
-    token = upload_tokens.mint("sek", scope="download")
+    token = upload_tokens.mint_bound("sek", audience="owner")
     response = client.get(
         "/download",
         params={"path": RESTRICTED_PATH},
@@ -901,8 +901,8 @@ def test_local_download_principal_separates_owner_from_cf_access(
         cf_aud=None,
         cf_jwks=None,
     )
-    # The shared token, and a token minted from it, are both the owner.
-    minted = upload_tokens.mint("sek", scope="download")
+    # The shared token, and a token the owner minted, are both the owner.
+    minted = upload_tokens.mint_bound("sek", audience="owner")
     for credential in ("sek", minted):
         who = server_transfer.download_principal(
             _request(authorization=f"Bearer {credential}"), owner_config

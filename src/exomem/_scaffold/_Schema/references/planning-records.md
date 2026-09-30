@@ -62,6 +62,57 @@ append or update it and the agent reports the mutation. Ask one focused question
 when collections compete or identity, date, provenance, or ownership is unclear.
 When no collection fits, use `record_memory(action="describe")` and propose a
 concise collection; the agent must not silently create a long-lived schema.
+A refused Record write is held rather than lost: the response names the failing
+field and returns a `held` reference, so fix the named field and resume by that
+reference (or `discard` it) instead of looping or preserving diagnostic
+breadcrumbs as Evidence.
+
+A committed Note or Evidence write may return `records_routing` when its authored
+terms have one clear existing Records home. Read the observation before appending
+under the active capture disposition, and resume a returned held candidate when
+needed; the advisory never writes a record by itself. A strong
+`collection_candidate` is likewise a proposal: use `record_memory(action="describe")`
+and `validate` to draft a concise schema, ask one question in the user's domain
+language, and create only after that inline confirmation. Backfill only exactly
+dated evidence units, citing each unit or artifact in `sources`; prose notes stay
+where they are.
+
+A Records collection says what belongs in it through its manifest's `claims`
+block: `tags` and `terms` name its vocabulary, and an optional `match` block
+declares membership outright from a page's frontmatter:
+
+```yaml
+claims:
+  tags: [example-product, incidents, regressions]
+  terms: [sync, login]
+  match:
+    type: [failure]
+    project: [example-product]
+```
+
+Every key under `match` must hold on the page (`type`, `category`, `project`
+or `tags`; `category` also reads the page's unit categories), and any value
+listed under a key may match. A page that satisfies every predicate routes to
+the collection as strong, even when its words share nothing with the claims.
+A page silent about a key can still route by shared words, but a page whose
+`type` or `project` contradicts the declaration (another project, say) never
+routes there; other `tags` or `category` values, or an Evidence page's
+`type: source`, do not count against it. When several
+collections' predicates all hold, the one holding the most predicates wins,
+then the one sharing more words; a full tie stays silent. Words come from the
+title and tags only, compared in a folded form, so `failure`/`failures` and
+`regression`/`regressions` meet, and function words such as "not" or "after"
+never count as shared vocabulary.
+
+A strong route of a failure-shaped note carries a `disposition`, set by the
+user's prominence: `file` (perform the ready `record_memory` payload without
+asking), `append_occurrence` (perform the ready update payload, which adds the
+note to the existing item it recurs), `ask` (put the one precomposed question
+once and act only on yes), or `hold` (leave it for review). Editing a note that
+is already filed raises none of these again. Creating a collection, or changing
+its claims, raises one grouped item naming the existing notes it now covers:
+ask the user about it once, at any prominence, and file nothing from it without
+a yes.
 
 For a Planning or Records collection stored as Markdown items, YAML frontmatter
 is the sole canonical value source and the UUID remains durable identity. A

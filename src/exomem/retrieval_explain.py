@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 SCHEMA_VERSION = 1
-TEXT_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 
 
 @dataclass(slots=True)
@@ -246,6 +245,20 @@ class RetrievalTrace:
             if fused:
                 evidence["fusion"] = {
                     "rrf_sum": bundle.raw_fused_score_by_path[hit.path]
+                }
+            withheld_lanes = bundle.lexical_votes_withheld.get(hit.path)
+            if withheld_lanes:
+                from .find_candidates import WITHHELD_REASON
+
+                # The lane ranks above are the ones fusion used; these are the
+                # ranks the lexical lanes gave before fusion withheld the vote.
+                # Deliberately not declared in `retrieval_models`: the schemas
+                # permit additive properties, and declaring it would move the
+                # published outputSchema and the connector-bound tool-surface
+                # fingerprint (the same boundary `commands` keeps for timings).
+                evidence["lexical_votes_withheld"] = {
+                    "reason": WITHHELD_REASON,
+                    "lanes": dict(withheld_lanes),
                 }
             if hit.rerank_raw_score is not None:
                 evidence["reranker"] = {

@@ -61,6 +61,8 @@ class FrontmatterCache:
     _signatures: dict[Path, tuple[int, int, int, int, int, bytes]] = field(
         default_factory=dict, repr=False
     )
+    #: Served-from-cache count: the use signal the idle reaper watches.
+    hits: int = 0
 
     def clear(self) -> None:
         """Discard every row, and record it as a whole-cache re-derivation.
@@ -180,6 +182,7 @@ class FrontmatterCache:
         cached = self.entries.get(path)
         if cached and self._signatures.get(path) == signature:
             self.entries.move_to_end(path)
+            self.hits += 1
             return cached
         parsed = parse_page(path, snapshot.mtime, vault_root, content=content)
         if parsed is not None:
@@ -260,6 +263,41 @@ def walk_freshness_key(paths) -> tuple[int, int, str]:
     return freshness.triple_from_entries(entries)
 
 
+def _walk_md_entry(anchor: Path, child: Path, reserved_paths) -> str | None:
+    """How `walk_md` treats one directory entry: "dir" to descend, "md" to yield.
+
+    None skips it. The walk's whole per-entry rule lives here so `walk_md_admits`
+    answers for one path by the same rule, not by a copy that can drift. Callers
+    import `reserved_paths` once per walk and pass it in, as the walk always did.
+    """
+    try:
+        relative = child.absolute().relative_to(anchor.absolute()).as_posix()
+    except ValueError:
+        return None
+    if reserved_paths.classify_logical(relative).blocked:
+        return None
+    try:
+        info = child.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or bool(
+        getattr(os.path, "isjunction", lambda _path: False)(child)
+    ):
+        return None
+    if stat.S_ISDIR(info.st_mode):
+        if child.name in EXCLUDED_DIR_NAMES or child.name.startswith(EXCLUDED_DIR_PREFIXES):
+            return None
+        return "dir"
+    if (
+        stat.S_ISREG(info.st_mode)
+        and info.st_nlink == 1
+        and child.suffix.lower() == ".md"
+        and ".sync-conflict-" not in child.name
+    ):
+        return "md"
+    return None
+
+
 def walk_md(root: Path):
     """Yield every .md path under root, skipping excluded subtrees.
 
@@ -276,35 +314,64 @@ def walk_md(root: Path):
         except OSError:
             return
         for child in children:
-            try:
-                relative = child.absolute().relative_to(anchor.absolute()).as_posix()
-            except ValueError:
-                continue
-            if reserved_paths.classify_logical(relative).blocked:
-                continue
-            try:
-                info = child.lstat()
-            except OSError:
-                continue
-            if stat.S_ISLNK(info.st_mode) or bool(
-                getattr(os.path, "isjunction", lambda _path: False)(child)
-            ):
-                continue
-            if stat.S_ISDIR(info.st_mode):
-                if child.name in EXCLUDED_DIR_NAMES or child.name.startswith(
-                    EXCLUDED_DIR_PREFIXES
-                ):
-                    continue
+            kind = _walk_md_entry(anchor, child, reserved_paths)
+            if kind == "dir":
                 yield from walk(child)
-            elif (
-                stat.S_ISREG(info.st_mode)
-                and info.st_nlink == 1
-                and child.suffix.lower() == ".md"
-                and ".sync-conflict-" not in child.name
-            ):
+            elif kind == "md":
                 yield child
 
     yield from walk(anchor)
+
+
+def walk_md_admits(
+    root: Path, path: Path, listings: dict[Path, frozenset[str] | None]
+) -> bool:
+    """Whether `walk_md(root)` yields exactly `path`, by visiting only its ancestry.
+
+    The walk yields a page when every directory above it lists (a directory it
+    cannot list contributes nothing), every step is an entry its parent lists
+    under exactly that name (the walk yields listed names, so on a
+    case-insensitive filesystem a differently-cased spelling that would still
+    stat is not one of them), each ancestor passes `_walk_md_entry` as a
+    directory and the page itself as Markdown. Admission is decided before a
+    directory is listed, so a reserved tree is never enumerated -- the same
+    order the walk keeps. `listings` memoizes directory listings (None for a
+    directory the walk would not enter) across calls on one pass.
+    """
+    from . import reserved_paths
+
+    anchor = Path(root)
+    try:
+        parts = Path(path).relative_to(anchor).parts
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    if anchor not in listings:
+        listings[anchor] = _listed_names(anchor)
+    current = anchor
+    names = listings[anchor]
+    for depth, part in enumerate(parts):
+        if names is None or part not in names:
+            return False
+        current = current / part
+        if depth == len(parts) - 1:
+            return _walk_md_entry(anchor, current, reserved_paths) == "md"
+        if current not in listings:
+            listings[current] = (
+                _listed_names(current)
+                if _walk_md_entry(anchor, current, reserved_paths) == "dir"
+                else None
+            )
+        names = listings[current]
+    return False
+
+
+def _listed_names(directory: Path) -> frozenset[str] | None:
+    try:
+        return frozenset(os.listdir(directory))
+    except OSError:
+        return None
 
 
 def _read_page_snapshot(path: Path, vault_root: Path):
@@ -312,7 +379,11 @@ def _read_page_snapshot(path: Path, vault_root: Path):
 
     try:
         relative = path.absolute().relative_to(vault_root.absolute()).as_posix()
-        return reserved_paths.read_generic_bytes(vault_root, relative)
+        # The corpus reads pages a walk of the disk found, so it opens the
+        # spelling the walk found: the freshness identity and the graph name a
+        # macOS-origin NFD page that way, and its NFKC form names no file on a
+        # byte-exact file system.
+        return reserved_paths.read_generic_bytes(vault_root, relative, physical=True)
     except (OSError, ValueError, reserved_paths.ReservedPathLeafError) as error:
         if privacy_log.content_private_logging_enabled():
             log.warning("hosted content parse failed code=HOSTED_CONTENT_READ_FAILED")

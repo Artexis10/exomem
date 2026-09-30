@@ -21,6 +21,7 @@ from kubernetes.client import ApiClient
 from .adapters import _retryable_kubernetes_error
 from .conflict_reason import ConflictReason
 from .driver import DriverRetryable, DriverTerminal
+from .job_execution import JOB_SPEC_SERVER_DEFAULTS, metadata_matches, pod_spec_matches
 from .lifecycle import MetadataConflict, OpaqueProviderMetadata
 from .repository import ClaimConflict, StaleFence
 
@@ -31,6 +32,8 @@ _BACKUP_PREFIX = "exomem-governance-v3-backup://sha256/"
 _ROOT = "/var/lib/exomem"
 _CUSTODY = "/run/exomem/authorization-session"
 _PREFIX = "exomem.io/governance-migration-"
+# Kubernetes stops the migration Job after this long; custody must stay valid for it.
+MIGRATION_JOB_DEADLINE_SECONDS = 600
 
 
 def _refuse() -> MetadataConflict:
@@ -283,7 +286,7 @@ def build_governance_migration_job(
                             "name": "data",
                             "mountPath": _ROOT + "/" + path,
                             "subPath": path,
-                            "readOnly": request.phase == "inspect" or path == "logs",
+                            "readOnly": path == "logs",
                         }
                         for path in ("vault", "state", "logs")
                     ],
@@ -301,7 +304,13 @@ def build_governance_migration_job(
                 "name": "data",
                 "persistentVolumeClaim": {
                     "claimName": resource + "-data",
-                    "readOnly": request.phase == "inspect",
+                    # Every phase mounts data read-write: the runner opens the
+                    # writer-lease store to read the schema even while
+                    # inspecting. Inspect never mutates the vault or the
+                    # governance store; it does write writer-lease coordination
+                    # state (locks, reserved-identity generation) under the
+                    # state root.
+                    "readOnly": False,
                 },
             },
             {
@@ -328,7 +337,7 @@ def build_governance_migration_job(
             "spec": {
                 "backoffLimit": 0,
                 "podReplacementPolicy": "Failed",
-                "activeDeadlineSeconds": 600,
+                "activeDeadlineSeconds": MIGRATION_JOB_DEADLINE_SECONDS,
                 "parallelism": 1,
                 "completions": 1,
                 "template": {
@@ -387,6 +396,13 @@ class KubernetesGovernanceMigrationAdapter:
                 return None
             raise
 
+    async def occupied(self, request: MigrationJobRequest) -> bool:
+        """Whether a Job or a candidate runner pod still holds the fixed slot."""
+
+        return await self._read(request) is not None or bool(
+            await self._candidate_pods(request, None)
+        )
+
     async def _stopped(self, request: MigrationJobRequest) -> None:
         resource = request.metadata.resource_name
         pvc = self._wire(
@@ -434,66 +450,14 @@ class KubernetesGovernanceMigrationAdapter:
 
     @staticmethod
     def _metadata(actual: dict[str, Any], expected: dict[str, Any]) -> None:
-        if any(
-            actual.get(field, {}).get(key) != value
-            for field in ("labels", "annotations")
-            for key, value in expected[field].items()
-        ):
-            raise _refuse()
-        if any(
-            key.startswith("exomem.io/") and key not in expected[field]
-            for field in ("labels", "annotations")
-            for key in actual.get(field, {})
-        ):
+        if not metadata_matches(actual, expected):
             raise _refuse()
 
     @staticmethod
     def _pod_spec(
         actual: dict[str, Any], expected: dict[str, Any], *, scheduled: bool = False
     ) -> None:
-        # Only API-server/controller defaults may supplement the closed spec.
-        defaults: dict[str, Any] = {
-            "dnsPolicy": "ClusterFirst",
-            "schedulerName": "default-scheduler",
-            "terminationGracePeriodSeconds": 30,
-            "enableServiceLinks": True,
-            "serviceAccount": expected["serviceAccountName"],
-            "preemptionPolicy": "PreemptLowerPriority",
-            "priority": 0,
-        }
-        value = copy.deepcopy(actual)
-        expected_value = copy.deepcopy(expected)
-        # Go's omitempty drops readOnly:false from writable mounts/PVC
-        # sources. Normalize only that observed API default, never true.
-        for spec in (value, expected_value):
-            for container in spec.get("containers", []) + spec.get("initContainers", []):
-                for mount in container.get("volumeMounts", []):
-                    if mount.get("readOnly") is False:
-                        mount.pop("readOnly")
-            for volume in spec.get("volumes", []):
-                claim = volume.get("persistentVolumeClaim", {})
-                if claim.get("readOnly") is False:
-                    claim.pop("readOnly")
-        for key, default in defaults.items():
-            if key in value:
-                if value.pop(key) != default:
-                    raise _refuse()
-        if scheduled:
-            if "nodeName" in value and not _matches(_IDENTITY, value.pop("nodeName")):
-                raise _refuse()
-            tolerations = value.pop("tolerations", [])
-            allowed = [
-                {
-                    "key": "node.kubernetes.io/" + key,
-                    "operator": "Exists",
-                    "effect": "NoExecute",
-                    "tolerationSeconds": 300,
-                }
-                for key in ("not-ready", "unreachable")
-            ]
-            if any(item not in allowed for item in tolerations) or len(tolerations) > 2:
-                raise _refuse()
-        if value != expected_value:
+        if not pod_spec_matches(actual, expected, scheduled=scheduled):
             raise _refuse()
 
     def _job(
@@ -520,14 +484,15 @@ class KubernetesGovernanceMigrationAdapter:
         for key, value in body["spec"].items():
             if key != "template" and (type(spec.get(key)) is not type(value) or spec[key] != value):
                 raise _refuse()
-        defaults = {
-            "completionMode": "NonIndexed",
-            "suspend": False,
-            "manualSelector": False,
-        }
+        defaults = JOB_SPEC_SERVER_DEFAULTS
         if set(spec) - set(body["spec"]) - set(defaults) - {"selector"}:
             raise _refuse()
-        if any(key in spec and spec[key] != default for key, default in defaults.items()):
+        # Fields the manifest sets are already compared exactly above; a default
+        # only applies where the manifest omitted the field.
+        if any(
+            key in spec and key not in body["spec"] and spec[key] != default
+            for key, default in defaults.items()
+        ):
             raise _refuse()
         self._metadata(spec["template"]["metadata"], body["spec"]["template"]["metadata"])
         self._pod_spec(spec["template"]["spec"], body["spec"]["template"]["spec"])

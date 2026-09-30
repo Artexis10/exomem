@@ -48,6 +48,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -391,8 +392,18 @@ def test_converge_checks_the_deadline_after_every_pass(
     # is the shape a missing deadline check runs forever in, so the fake stops
     # it and says so rather than hanging the suite.
     overrun: list[str] = []
+    # `drain_once` is module-level, and a `derived_drain` worker that another
+    # test in this process left running calls the same function -- it is woken
+    # by any derived receipt and polls on its own besides. Its claim is real
+    # work, but it is not this test's evidence, and counting it made a
+    # one-pass converge loop look like two. The loop's own pass count is
+    # `drain["passes"]`, asserted below; this keeps `limits` to the calls that
+    # can have come from it.
+    converge_thread = threading.get_ident()
 
     def fake_drain_once(vault_root, **kwargs):
+        if threading.get_ident() != converge_thread:
+            return 0
         limits.append(int(kwargs["limit"]))
         if len(limits) > 3:
             overrun.append("kept draining past the deadline")

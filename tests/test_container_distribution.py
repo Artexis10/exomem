@@ -47,6 +47,51 @@ def test_dockerfile_has_a_fixed_nonroot_immutable_hosted_target() -> None:
     assert "VOLUME" not in hosted
 
 
+def test_cell_images_bake_and_serve_the_model_their_cells_encode_with() -> None:
+    """A cell can fetch nothing under its no-egress policy and read-only root,
+    so each image carries and names exactly the model its cells resolve: the
+    English model in the hosted image, and bge-m3, which a personal server
+    also runs, in the cloud image. Each model's build stage fetches it and
+    loads it offline at its declared width."""
+    from exomem import recall_space
+
+    hosted_model = recall_space.configured_recall_model({"EXOMEM_HOSTED_CELL": "1"})
+    cloud_model = recall_space.configured_recall_model({"EXOMEM_CLOUD_CELL": "1"})
+    assert (hosted_model, cloud_model) == (recall_space.LEGACY_MODEL, recall_space.PERSONAL_MODEL)
+    text = _read("Dockerfile")
+
+    def stage(header: str) -> str:
+        return text.split(header, 1)[1].split("\nFROM ", 1)[0]
+
+    builder = stage("FROM builder-lean AS builder-hosted")
+    hosted = stage("FROM python:3.12-slim AS hosted")
+    cloud_builder = stage("FROM builder-hosted AS builder-cloud-model")
+    cloud = stage("FROM hosted AS cloud")
+
+    for part in (builder, hosted):
+        assert f"{recall_space.RECALL_MODEL_ENV}={hosted_model}" in part
+    for part in (cloud_builder, cloud):
+        assert f"{recall_space.RECALL_MODEL_ENV}={cloud_model}" in part
+    for part in (builder, cloud_builder):
+        assert "HF_HUB_OFFLINE=1" in part
+        assert "recall_space.declared_dim(MODEL_NAME)" in part
+    assert "COPY --from=builder-cloud-model /opt/exomem-models /opt/exomem-models" in cloud
+
+
+def test_dockerfile_cloud_target_sets_pod_local_log_dir_and_disables_fastmcp_egress() -> None:
+    """D1.2 "Log directory" and D2: the cloud stage's own defaults, not just the
+    manifest, must keep runtime logs off the tenant volume and avoid FastMCP's
+    startup update check stalling every cold start on a no-egress NetworkPolicy."""
+    text = _read("Dockerfile")
+    cloud = text.split("FROM hosted AS cloud", 1)[1].split(
+        "FROM python:3.12-slim AS lean", 1
+    )[0]
+
+    assert "EXOMEM_LOG_DIR=/tmp/exomem-logs" in cloud
+    assert "FASTMCP_CHECK_FOR_UPDATES=off" in cloud
+    assert "FASTMCP_SHOW_SERVER_BANNER=false" in cloud
+
+
 def test_release_workflow_publishes_cuda_tags() -> None:
     text = _read(".github/workflows/release-please.yml")
 
@@ -60,7 +105,8 @@ def test_release_workflow_publishes_hosted_image_with_immutable_build_time() -> 
     text = _read(".github/workflows/release-please.yml")
 
     assert text.count("target: hosted") == 2
-    assert text.count("EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}") == 2
+    # Two hosted builds (release and manual republish) plus the release's cloud build.
+    assert text.count("EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}") == 3
     assert text.count(
         "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-hosted"
     ) == 2
@@ -73,7 +119,7 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
     automatic = _workflow_job(text, "publish-image", "publish-existing-image")
     manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
 
-    for job in (automatic, manual):
+    for job, image_attestations in ((automatic, 4), (manual, 2)):
         proof_step = job.split(
             "\n      - name: Verify the hosted runtime image and signed candidate\n", 1
         )[1].split("\n      - name:", 1)[0]
@@ -88,12 +134,14 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
             in job
         )
         assert "org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}" in job
-        assert job.count(ATTEST_ACTION) == 2
+        # The hosted image and its candidate bundle, plus the cloud and cellctl
+        # images on release.
+        assert job.count(ATTEST_ACTION) == image_attestations
         assert "subject-name: ghcr.io/artexis10/exomem" in job
         assert "subject-digest: ${{ steps.hosted-build.outputs.digest }}" in job
         assert "subject-path: ${{ steps.runtime-candidate.outputs.candidate }}" in job
         assert "push-to-registry: true" in job
-        assert job.count("create-storage-record: false") == 2
+        assert job.count("create-storage-record: false") == image_attestations
         assert "infra/scripts/hosted_image_candidate.py record" in job
         assert "infra/scripts/hosted_image_candidate.py verify" in job
         assert "GH_TOKEN: ${{ github.token }}" in proof_step
@@ -119,6 +167,21 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
         assert "--clobber" not in job
         assert "exomem-hosted-release-v1.json" not in job
         assert "substrate-gateway-contract-selection" not in job
+
+
+def test_release_workflow_publishes_attested_cloud_image_by_digest() -> None:
+    text = _read(".github/workflows/release-please.yml")
+    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    cloud = automatic.split("\n      - name: Build and push Exomem Cloud cell image", 1)[1]
+
+    assert text.count("target: cloud") == 1
+    assert "id: cloud-build" in cloud
+    assert "EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}" in cloud
+    assert "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cloud" in cloud
+    assert "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-cloud" in cloud
+    assert "subject-digest: ${{ steps.cloud-build.outputs.digest }}" in cloud
+    assert 'cloud_image="ghcr.io/artexis10/exomem@${CLOUD_DIGEST}"' in cloud
+    assert "gh release edit" in cloud
 
 
 def test_manual_release_can_sign_an_explicit_records_rollback_runtime_target() -> None:
@@ -208,6 +271,18 @@ def _assert_parity_candidate_derivation(flow: str, command: str) -> None:
     assert "hosted-alpha-agent-v4" not in flow
 
 
+def _assert_baseline_candidate_derivation(flow: str, command: str) -> None:
+    assert 'baseline_candidate="$(uv run --frozen python - <<\'PY\'' in flow
+    assert "from exomem.hosted_plugins import BASELINE_CANDIDATE" in flow
+    assert "print(BASELINE_CANDIDATE)" in flow
+    assert 'PY\n          )"' in flow
+    assert (
+        f'{command} --candidate "$baseline_candidate" --platform all '
+        '--openai-app-id "$openai_app_id"'
+    ) in flow
+    assert "hosted-alpha-agent-v5" not in flow
+
+
 def test_release_workflow_refreshes_and_checks_release_managed_candidates() -> None:
     text = _read(".github/workflows/release-please.yml")
     sync = _workflow_job(text, "sync-hosted-artifacts", "build-artifacts")
@@ -222,6 +297,8 @@ def test_release_workflow_refreshes_and_checks_release_managed_candidates() -> N
     _assert_openai_app_id_derivation(check, "check")
     _assert_parity_candidate_derivation(render, "render")
     _assert_parity_candidate_derivation(check, "check")
+    _assert_baseline_candidate_derivation(render, "render")
+    _assert_baseline_candidate_derivation(check, "check")
 
 
 def test_compose_overrides_select_cpu_ml_and_cuda() -> None:
@@ -383,3 +460,38 @@ def test_unix_upgrade_documents_why_it_skips_the_cuda_repair() -> None:
 
     assert "cu132" not in upgrade
     assert "CUDA" in upgrade and "Windows" in upgrade
+
+
+def test_release_workflow_publishes_attested_cellctl_image_by_digest() -> None:
+    # The platform chart consumes cellctl by digest (cellctl.image), on the
+    # same release trigger as the Cloud cell image.
+    text = _read(".github/workflows/release-please.yml")
+    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    cellctl = automatic.split("\n      - name: Build and push Exomem Cloud cellctl image", 1)[1]
+
+    assert "id: cellctl-build" in cellctl
+    assert "context: infra/cellctl" in cellctl
+    assert "file: infra/cellctl/Dockerfile" in cellctl
+    assert "ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.version }}" in cellctl
+    assert "ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.source_commit }}" in cellctl
+    assert "subject-name: ghcr.io/artexis10/exomem-cellctl" in cellctl
+    assert "subject-digest: ${{ steps.cellctl-build.outputs.digest }}" in cellctl
+    assert 'cellctl_image="ghcr.io/artexis10/exomem-cellctl@${CELLCTL_DIGEST}"' in cellctl
+    assert "gh release edit" in cellctl
+
+
+def test_cellctl_dockerfile_is_digest_pinned_nonroot_and_frozen() -> None:
+    dockerfile = _read("infra/cellctl/Dockerfile")
+
+    assert re.search(r"^ARG PYTHON_IMAGE=python:3\.12-slim@sha256:[0-9a-f]{64}$", dockerfile, re.M)
+    assert [line for line in dockerfile.splitlines() if line.startswith("FROM ")] == [
+        "FROM ${PYTHON_IMAGE} AS build",
+        "FROM ${PYTHON_IMAGE}",
+    ]
+    assert "--require-hashes" in dockerfile
+    assert "uv sync --frozen --no-dev --no-install-project --compile-bytecode" in dockerfile
+    assert "USER 1000:1000" in dockerfile
+    assert 'ENTRYPOINT ["python3", "-m", "cellctl.main"]' in dockerfile
+    # Nothing is built from an unpinned build backend.
+    assert "--no-editable" not in dockerfile and "hatchling" not in dockerfile
+    assert "PYTHONDONTWRITEBYTECODE=1" in dockerfile

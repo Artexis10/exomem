@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import hashlib
 import hmac
 import json
 import os
+import shutil
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from test_hosted_governance_job import (
@@ -13,15 +16,17 @@ from test_hosted_governance_job import (
     _custody_bytes,
     _job,
     _prepare,
+    _replace_membership,
     _revision,
     _write_hosted_custody,
 )
 from test_hosted_governance_job import cell as cell
 from test_hosted_governance_migration import _offline_state as _offline_state
 
+from exomem import create_file
 from exomem.governance import authorization_custody as custody_module
 from exomem.governance import authorization_serving_membership as membership_module
-from exomem.governance import schema_migration, schema_v4, store
+from exomem.governance import projection_store, schema_migration, schema_v4, store
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="Hosted recovery uses Linux root ownership")
 
@@ -182,3 +187,98 @@ def test_expired_replay_never_reenters_cutover(cell, monkeypatch):
     monkeypatch.setattr(schema_v4, "migrate_v3_connection", forbidden)
     assert job.execute(_canonical(request), now=now + 3601)["replayed"]
     assert (store.sidecar_path(binding.vault_root).read_bytes(), _custody_bytes()) == before
+
+
+def test_hosted_serving_capture_preserves_navigation_catalog_history(
+    cell, monkeypatch
+) -> None:
+    binding, now, _request = cell
+    scaffold = Path(__file__).parents[1] / "src" / "exomem" / "_scaffold"
+    navigation = (
+        "index.md",
+        "log.md",
+        "Sources/index.md",
+        "Notes/index.md",
+        "Entities/index.md",
+    )
+    for relative in navigation:
+        target = binding.vault_root / "Knowledge Base" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(scaffold / relative, target)
+
+    binding, now, job, request, _custody = _enrolled(cell, monkeypatch)
+    result = job.execute(_canonical(request), now=now)
+    assert result["actualSchema"] == 4
+    _replace_membership(
+        binding,
+        now,
+        state="SERVING",
+        schema_version=4,
+        issuance_stopped=False,
+        no_in_flight=False,
+    )
+    custody = custody_module.load_authorization_custody(binding.vault_root, now=now)
+    connection = store.open_authorization_session_connection(binding.vault_root)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=custody.control.logical_vault_id,
+            expected_activation_store_id=custody.control.activation_store_id,
+            expected_activation_epoch=custody.control.activation_epoch,
+            expected_activation_state_digest=custody.control.activation_state_digest,
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    old_manifest, old_items = projection_store.load_projection_catalog(
+        binding.vault_root,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    expected_navigation = {f"Knowledge Base/{relative}" for relative in navigation}
+    assert {item.item_identity for item in old_items} == expected_navigation
+
+    arguments = {
+        "path": "Knowledge Base/Notes/Insights/new.md",
+        "content": "New governed note.\n",
+        "frontmatter": {"title": "New", "status": "draft", "type": "insight"},
+        "today": dt.date(2026, 9, 19),
+    }
+    validation = create_file.create_file(binding.vault_root, validate_only=True, **arguments)
+    committed = create_file.create_file(
+        binding.vault_root,
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        **arguments,
+    )
+
+    assert committed.path == "Knowledge Base/Notes/Insights/new.md"
+    assert (binding.vault_root / committed.path).exists()
+    successor = custody_module.load_authorization_custody(binding.vault_root, now=now + 1)
+    connection = store.open_authorization_session_connection(binding.vault_root)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=successor.control.logical_vault_id,
+            expected_activation_store_id=successor.control.activation_store_id,
+            expected_activation_epoch=successor.control.activation_epoch,
+            expected_activation_state_digest=successor.control.activation_state_digest,
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    _manifest, items = projection_store.load_projection_catalog(
+        binding.vault_root,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    assert {item.item_identity for item in items} == (
+        expected_navigation | {"Knowledge Base/Notes/Insights/new.md"}
+    )
+    _old_manifest, replayed_old = projection_store.load_projection_catalog(
+        binding.vault_root,
+        key=old_manifest.namespace_key,
+        expected_rows_digest=old_manifest.rows_digest,
+    )
+    assert {item.item_identity for item in replayed_old} == expected_navigation

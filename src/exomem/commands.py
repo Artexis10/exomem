@@ -23,8 +23,10 @@ import hashlib
 import inspect
 import json
 import logging
+import mimetypes
 import os
 import re
+import time
 import typing
 from collections.abc import Mapping
 from contextvars import ContextVar
@@ -38,9 +40,10 @@ from typing import Annotated, Any, Literal, NotRequired
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
-from pydantic import Field, StrictInt, StringConstraints, WithJsonSchema
+from pydantic import ConfigDict, Field, StrictInt, StringConstraints, WithJsonSchema
 from typing_extensions import TypedDict
 
+from . import activation_conventions as activation_conventions_module
 from . import add as add_module
 from . import adopt as adopt_module
 from . import adoption_proposals as adoption_proposals_module
@@ -49,9 +52,11 @@ from . import append_to_file as append_to_file_module
 from . import attention as attention_module
 from . import audit as audit_module
 from . import audit_fix as audit_fix_module
+from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
+from . import context_roles as context_roles_module
 from . import contradiction_stance as contradiction_stance_module
 from . import corpus_aware as corpus_aware_module
 from . import create_directory as create_directory_module
@@ -64,10 +69,23 @@ from . import edit_operations as edit_operations_module
 from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import envelope as envelope_module
+from . import episode_memory as episode_memory_module
+from . import episode_workflow as episode_workflow_module
+from . import episode_nudge as episode_nudge_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
-from . import find_types, query_log, retrieval_models, semantic_census, upload_tokens, vault
+from . import (
+    find_types,
+    foreground_priority,
+    query_log,
+    retrieval_models,
+    semantic_census,
+    upload_tokens,
+    vault,
+    vocabulary_resolution,
+)
+from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import hosted_legacy_schemas as hosted_legacy_schemas_module
 from . import knowledge_packs as knowledge_packs_module
@@ -93,10 +111,13 @@ from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
 from . import recover_from_trash as recover_from_trash_module
 from . import referent_runtime as referent_runtime_module
+from . import registry_history as registry_history_module
+from . import relation_census as relation_census_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import relation_vocabulary as relation_vocabulary_module
 from . import replace as replace_module
+from . import request_budget as request_budget_module
 from . import reserved_paths as reserved_paths_module
 from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
@@ -107,12 +128,18 @@ from . import semantic_unit_read as semantic_unit_read_module
 from . import semantic_units as semantic_units_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
+from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
 from . import vocabulary_evidence as vocabulary_evidence_module
 from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
 from . import workflow_skills as workflow_skills_module
+from . import working_set as working_set_module
+from . import working_set_heat as working_set_heat_module
+from . import working_set_index as working_set_index_module
+from . import working_set_learning as working_set_learning_module
+from . import working_set_runtime as working_set_runtime_module
 from .command_surface import (
     DESTRUCTIVE_OPS,  # noqa: F401 - re-exported for server.py
     GUARDED_WRITE_FIELDS,  # noqa: F401 - re-exported for server.py
@@ -195,6 +222,89 @@ _OptionalRelationText = Annotated[
 _OptionalRelationProposal = Annotated[
     dict | None,
     WithJsonSchema({"anyOf": [{"type": "object"}, {"type": "null"}]}),
+]
+class _DomainVocabularyDecision(TypedDict):
+    """Evidence-bound disposition for a prepared domain-vocabulary candidate."""
+
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    evidence_fingerprint: str
+    outcome: Literal["reuse", "create", "defer"]
+    canonical: str | None
+
+
+_DomainVocabularyDecisionArgument = Annotated[
+    _DomainVocabularyDecision | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["evidence_fingerprint", "outcome", "canonical"],
+                    "properties": {
+                        "evidence_fingerprint": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$",
+                            "description": "Fingerprint returned by vocabulary_preparation.",
+                        },
+                        "outcome": {"enum": ["reuse", "create", "defer"]},
+                        "canonical": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+#: create-entity's shared-name decision: `distinct` bound to the fingerprint a
+#: preparation or a same-name refusal returned. Nothing else is decidable here;
+#: reuse means not creating, and merging is governed restructuring.
+_IdentityDecisionArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["outcome", "candidate_fingerprint"],
+                    "properties": {
+                        "outcome": {"enum": ["distinct"]},
+                        "candidate_fingerprint": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$",
+                            "description": "candidate_fingerprint returned for this name.",
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+#: create-entity's vault-declared facets: declared names only, a string for a
+#: `single` facet and a list for a `multi` one (see `_Schema/entity-types.yaml`
+#: `facets`). The writer re-validates against the registry.
+_EntityFacetsArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "maxProperties": 16,
+                    "additionalProperties": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}, "maxItems": 16},
+                        ]
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
 ]
 _VocabularyDecisionArgument = Annotated[
     dict[str, Any] | None,
@@ -488,6 +598,29 @@ _OptionalClientArtifactFiles = Annotated[
 ]
 
 
+class ClientTranscription(TypedDict):
+    """A transcription an AI client derived from one supplied original."""
+
+    file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+    text: Annotated[str, StringConstraints(min_length=1, max_length=100_000)]
+
+
+#: Optional like `_OptionalClientArtifactFiles`, and for the same reason not
+#: `| None`: an empty list already means "no transcriptions supplied".
+_OptionalClientTranscriptions = Annotated[
+    list[ClientTranscription],
+    Field(
+        max_length=8,
+        description=(
+            "Optional transcriptions of supplied originals, each {file_id, text}. "
+            "Each is saved on its original's Evidence page, bound to the "
+            "original's bytes, and only when that original is stored. Files "
+            "must have unique file_id values when transcriptions are supplied."
+        ),
+    ),
+]
+
+
 class SearchResponse(TypedDict):
     results: list[SearchResult]
 
@@ -593,6 +726,96 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
     return projection
 
 
+def op_configure_memory(
+    vault_root: Path,
+    action: Literal["inspect", "set", "clear"] = "inspect",
+    prominence: str | None = None,
+    expected_revision: str | None = None,
+    context: Literal["coding", "conversation"] | None = None,
+) -> dict:
+    """Inspect, set or clear your saved Exomem engagement level for this vault.
+
+    Inspect first, then set off, light, balanced or maximal with the returned
+    revision as expected_revision. The choice follows this authenticated identity
+    on later requests without a restart. It changes recall/capture eagerness, never
+    compute mode or authority. Other identities and vaults remain independent.
+    Pass context "coding" or "conversation" to set a level for that kind of client
+    alone, leaving the identity-wide value untouched, and use clear with that
+    context and expected_revision to remove it again. The context that applies to
+    a request is detected from the calling client, never chosen by an argument.
+    Adopt the returned engagement contract in the current conversation.
+
+    Args:
+        action: "inspect" reads the saved state, "set" writes a level, and
+            "clear" removes one context value.
+        prominence: The level to save — off, light, balanced or maximal; required
+            by set and rejected by clear.
+        expected_revision: The revision a prior inspect returned, so a stale write
+            is refused rather than overwriting a later choice.
+        context: Which saved context value to write or clear; the context applied
+            to a request is always derived from the client surface, never from
+            this argument.
+    """
+    from . import prominence as prominence_module
+    from . import prominence_preferences
+    from .cli_ops import OpError
+
+    if (
+        action not in {"inspect", "set", "clear"}
+        or (
+            action == "inspect"
+            and (prominence is not None or expected_revision is not None or context is not None)
+        )
+        or (action == "set" and (prominence is None or expected_revision is None))
+        or (
+            action == "clear"
+            and (context is None or expected_revision is None or prominence is not None)
+        )
+    ):
+        raise OpError(
+            "INVALID_PREFERENCE_ARGUMENTS",
+            "inspect takes no setting; set requires prominence and expected_revision; "
+            "clear requires context and expected_revision and no prominence",
+        )
+    before = prominence_preferences.inspect(vault_root)
+    saved = before
+    if action == "set":
+        saved = prominence_preferences.set_preference(
+            vault_root, prominence, expected_revision, context=context
+        )
+    elif action == "clear":
+        saved = prominence_preferences.clear_preference(vault_root, context, expected_revision)
+    if action != "inspect":
+        prominence_module.refresh_request_preference(vault_root)
+        if saved.get("mutated"):
+            from . import writer_lease
+
+            writer_lease.mark_active_mutation_committed()
+    engagement = prominence_module.resolved()
+    engagement["change_with"] = prominence_module.configuration_route()
+    # The gate this request already resolved, not the level. Under the
+    # unreadable-record floor the level says `balanced` while capture is
+    # withheld, and an envelope derived from the level alone would hand the
+    # withheld write authority straight back one key over.
+    engagement["envelope"] = envelope_module.resolved(
+        level=engagement["level"],
+        capture_gate=engagement["contract"]["effective_capture"],
+    )
+    return {
+        "operation": "configure_memory",
+        "action": action,
+        "scope": "principal-and-vault",
+        **saved,
+        # The context this request resolves under, derived from the detected
+        # surface. `contexts` (from `saved`) is the saved map; this is the one
+        # that applied. They are deliberately different questions.
+        "context": engagement["context"],
+        "before_hash": before["revision"],
+        "after_hash": saved["revision"],
+        "engagement": engagement,
+    }
+
+
 def op_bootstrap(
     vault_root: Path,
     profile: str = "compact",
@@ -663,10 +886,21 @@ def op_bootstrap(
     # a command the active surface cannot call, and a ceiling that vanished on a
     # reduced surface would be a ceiling nobody was told about.
     engagement_policy["envelope"] = envelope_module.resolved(
-        level=engagement_policy["level"]
+        level=engagement_policy["level"],
+        capture_gate=engagement_policy["contract"]["effective_capture"],
     )
     active_descriptor = _active_bootstrap_descriptor()
     active_product_names = frozenset(active_descriptor.product_commands)
+    # `change_with` is seeded from the CLI string, which is right for a local
+    # install and wrong for every served surface. Take it from what this surface
+    # actually offers: the agent-accessible control when it is served, and
+    # otherwise the custom-instructions block — never the command line, which a
+    # connector-only user has no machine to type on.
+    engagement_policy["change_with"] = (
+        prominence_module.configuration_route()
+        if "configure_memory" in active_product_names
+        else prominence_module.custom_instructions_route()
+    )
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     workflow_inventory = workflow_contracts_module.inventory_contracts(vault_root)
@@ -1120,8 +1354,8 @@ def op_bootstrap(
                 "Records silently infer goals, success, failure, or personal judgments."
             ),
             "manual_first": (
-                "Canonical Records remain ordinary editable files; direct human edits and "
-                "work without an agent are supported product paths."
+                "Canonical Records remain ordinary editable files; manual edits without "
+                "Exomem are a supported path."
             ),
             "template_rule": (
                 "Templates are ordinary editable entry scaffolds; collection schema and "
@@ -1158,8 +1392,8 @@ def op_bootstrap(
             "uncommitted commitment, unknown health, and inbox horizon."
         ),
         "manual_first": (
-            "Canonical Planning remains ordinary editable Markdown; direct human edits and "
-            "work without an agent are supported product paths."
+            "Canonical Planning remains ordinary editable Markdown; manual edits without "
+            "Exomem are a supported path."
         ),
         "template_independence": (
             "Templates are optional editable scaffolds; Planning schema and validation do not "
@@ -1225,8 +1459,8 @@ def op_bootstrap(
             ),
             "state_the_expectation_first": (
                 "Write down what you expect before the answer arrives. A durable "
-                "expectation about a future observation is a prediction unit with a "
-                "check_by date; an expectation recorded afterwards proves nothing."
+                "expectation is a prediction unit with a check_by date; an expectation "
+                "recorded afterwards proves nothing."
             ),
             "judge_categorically": (
                 "Close a claim with one word from the outcome vocabulary below. This "
@@ -1269,10 +1503,10 @@ def op_bootstrap(
             },
         },
         "capture_nudge": (
-            "When the user states a durable expectation about a future observation, "
-            "capture it then as a prediction unit with a check_by date. Left in prose, "
-            "or in the assistant's own short-term memory, nothing can ever check it. "
-            "Skip passing speculation; capture what the user would want held to."
+            "When the user states a durable expectation, capture it then as a "
+            "prediction unit with a check_by date. Left in prose, or in the "
+            "assistant's own short-term memory, nothing can ever check it. Skip "
+            "passing speculation; capture what the user would want held to."
         ),
         "capture_the_outcome": (
             "When a concrete method was actually carried out and the user reports the "
@@ -1362,20 +1596,29 @@ def op_bootstrap(
         "source_taxonomy": source_taxonomy_projection,
         "entity_registry": {
             "types": [
-                ({
-                    "id": definition.id,
-                    "folder": definition.folder,
-                    "family": entity_type_registry.family_of(definition.id) or definition.id,
-                } if profile == "compact" else {
-                    "id": definition.id,
-                    "folder": definition.folder,
-                    "family": (
-                        entity_type_registry.family_of(definition.id) or definition.id
-                    ),
-                    "aliases": list(definition.aliases),
-                    "label": definition.label,
-                    "capture_guidance": definition.capture_guidance,
-                })
+                {
+                    **({
+                        "id": definition.id,
+                        "folder": definition.folder,
+                        "family": entity_type_registry.family_of(definition.id) or definition.id,
+                    } if profile == "compact" else {
+                        "id": definition.id,
+                        "folder": definition.folder,
+                        "family": (
+                            entity_type_registry.family_of(definition.id) or definition.id
+                        ),
+                        "aliases": list(definition.aliases),
+                        "label": definition.label,
+                        "capture_guidance": definition.capture_guidance,
+                    }),
+                    # Only a type with vault-declared facets carries this key.
+                    **({
+                        "facets": {
+                            facet.name: f"{facet.cardinality} {facet.value}"
+                            for facet in entity_type_registry.facets_for(definition.id)
+                        }
+                    } if entity_type_registry.facets_for(definition.id) else {}),
+                }
                 for definition in entity_type_registry.active_definitions
             ],
             "capture_rule": (
@@ -1486,6 +1729,21 @@ def op_bootstrap(
                 "structure_suggestion": "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': captures keep landing in the 'other' fallback within one domain, so a real kind probably exists",
                 "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
+                "records_routing": (
+                    "a committed note or Evidence write may name one Records collection whose "
+                    "claims or claims.match cover it; never append from the advisory alone. Its "
+                    "disposition carries its own instruction"
+                ),
+                "records_routing_handling": (
+                    "route the observation under the served capture disposition, resuming a "
+                    "held candidate; ask about a grouped backfill once at any prominence"
+                ),
+                "collection_candidate": (
+                    "a strong collection_candidate is a proposal: draft its schema through "
+                    "record_memory describe and validate, ask one question in domain language, "
+                    "and create only after that inline confirmation. Backfill only exactly dated "
+                    "evidence units, citing each unit or artifact in sources"
+                ),
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
                 # Deliberately command-free, exactly like the epistemic
                 # commitments: `_filter_bootstrap_payload` deletes any string
@@ -1494,7 +1752,24 @@ def op_bootstrap(
                 # would silently vanish.
                 "due_state": "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due",
                 "due_state_handling": "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy",
+                "artifact_role_state_handling": (
+                    "read supporting units for role/state review; choose a home by role, "
+                    "preserve exact source-unit provenance and history, and route observed "
+                    "state through Records claims. Extraction needs restructure_execution "
+                    "confirmation; already-authorized local corrections need no new approval. "
+                    "Signals grant no authority; compact omission proves no clean coverage. "
+                    "Handle visible role transitions before writing; "
+                    "MCP cannot observe tool-free turns"
+                ),
                 "due_state_authority": "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering",
+                # Command-free for the same reason as the due-state lines above,
+                # and it matters MOST here: the block arrives unasked on a
+                # hookless client's ordinary write response, and that client has
+                # no detector-aware skill behind it.
+                # The "worth keeping" bar is the same one `engagement.contract.capture`
+                # spells out in full (a later decision, lookup, repeated task,
+                # comparison or continuation); it is not repeated here.
+                "capture_sweep_handling": "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does",
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
                 "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
@@ -1690,8 +1965,14 @@ def op_bootstrap(
             },
             "binary_upload": {
                 "tool": "preserve_artifacts",
-                "fields": ["files", "scope", "category"],
+                # The tool schema already lists these, so compact leaves them to it.
+                **(
+                    {"fields": ["files", "scope", "category", "transcriptions"]}
+                    if profile != "compact"
+                    else {}
+                ),
                 "when": "the client can supply temporary file handles",
+                "custody": "original first; transcription beside, never instead",
                 "fallback": {
                     "tool": "transfer_artifact",
                     "args": {"operation": "upload"},
@@ -1801,6 +2082,20 @@ def op_bootstrap(
                 ),
             },
             {
+                "goal": "preserve an attached original with its transcription",
+                "call": (
+                    "preserve_artifacts(scope='...', category='...', files=[<handle>], "
+                    "transcriptions=[{'file_id': '<handle file_id>', 'text': '...'}])"
+                ),
+            },
+            {
+                "goal": "preserve a local client's file",
+                "call": (
+                    "run `exomem attach <file>`, then pass its printed `file` handle in "
+                    "preserve_artifacts(files=[...]); `--lane source` for capture_source"
+                ),
+            },
+            {
                 "goal": "preserve binaries when the client cannot supply file handles",
                 "call": (
                     "transfer_artifact(operation='upload') then POST multipart bytes to /upload; "
@@ -1862,16 +2157,38 @@ def op_bootstrap(
         **compact_payload,
     }
     if session_unavailable is not None:
-        return compact_payload | {"session_profile_unavailable": session_unavailable}
-    if session_requested:
-        return _session_bootstrap_projection(compact_payload)
-    return compact_payload
+        result = compact_payload | {"session_profile_unavailable": session_unavailable}
+    elif session_requested:
+        result = _session_bootstrap_projection(compact_payload)
+    else:
+        result = compact_payload
+    # After every projection, so the session profile's key whitelist cannot
+    # drop it: the client on a reduced surface is exactly the one with no other
+    # way to hear that its own recalls have gone slow. Absent when healthy, so a
+    # healthy bootstrap keeps today's shape on every profile.
+    latency_block = _bootstrap_latency_block()
+    if latency_block is not None:
+        result["latency"] = latency_block
+    return result
+
+
+def _bootstrap_latency_block() -> list[dict] | None:
+    """The calling client's recall-latency breaches, from the in-process watch only."""
+    try:
+        from . import latency_watch
+        from .command_surface import mcp_caller_identity
+
+        return latency_watch.bootstrap_block(mcp_caller_identity().get("client_name"))
+    except Exception:  # noqa: BLE001 — a watch failure never breaks a bootstrap
+        return None
 
 
 _SESSION_POST_WRITE_KEYS = (
     "due_state",
     "due_state_handling",
     "due_state_authority",
+    "capture_sweep_handling",
+    "artifact_role_state_handling",
     "review_reason",
     "family_disposition",
     "family_disposition_reading",
@@ -1988,6 +2305,11 @@ def _require_supported_projected_find_request(
         raise projection_runtime_module.ProjectionRuntimeUnavailable(
             "governed projected retrieval is unavailable"
         )
+
+
+#: Hit signals ranked or counted over the whole corpus, before any page is
+#: decided: a caller other than the owner does not receive them (see `op_find`).
+_CORPUS_RANK_SIGNALS = ("bm25_rank", "vector_rank", "keyword_rank", "clip_rank", "graph_in_degree")
 
 
 def op_find(
@@ -2263,6 +2585,22 @@ def op_find(
             explain=explain,
         )
     auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
+    # A caller other than the owner receives no retrieval diagnostics. Lane
+    # statuses, fusion weights, raw scores, the emit count, per-lane ranks,
+    # graph in-degree and the keyword-fallback marker are computed over the
+    # whole corpus before any page is decided, so each moves with pages the
+    # caller may not see. The hits themselves are unchanged.
+    restricted = (
+        projection_runtime is None
+        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+    )
+    if restricted:
+        explain = False
+        # Graph hops, in-degree and graph enrichment follow link resolution
+        # over the whole vault, and the shared recall cache is keyed by
+        # `graph`, so such a caller recalls without the graph lane.
+        graph = False
+        graph_enrich = False
     compute_profile: dict[str, str | bool] = {}
     if explain:
         from . import mode as mode_module
@@ -2290,7 +2628,13 @@ def op_find(
         if explain
         else None
     )
-    timings = find_module.FindTimings() if include_timings and projection_runtime is None else None
+    # Collected for every MCP call, returned only when asked for. The stage
+    # table is what makes a slow row attributable, and a diagnostic nobody
+    # turned on is a diagnostic that is never there for the call that needed
+    # it; the cost is a few microseconds of bookkeeping per stage, which the
+    # existing `unattributed_ms` accounting already shows is negligible.
+    collect_timings = include_timings or call_spans_module.MCP_CALL_TOKEN.get() is not None
+    timings = find_module.FindTimings() if collect_timings and projection_runtime is None else None
     timings_suppressed = (
         {"status": "governed_projection"} if projection_runtime is not None else None
     )
@@ -2432,13 +2776,50 @@ def op_find(
                 except Exception:  # noqa: BLE001 - optional enrichment soft-fails
                     referents = None
     pack_obj: dict | None = None
+    active_budget = request_budget_module.current()
     if pack:
-        with find_module._span(timings, "pack"):
-            pack_obj = context_pack_module.assemble_pack(
-                vault_root, hits, graph_enrich=graph_enrich
-            )
-            if release.active:
-                pack_obj = egress_module.annotate_pack(pack_obj, release)
+        # Two decisions, one point. `graph_enrich` runs only inside the pack, so
+        # what has to be left on the clock to start it is the pack's reserve
+        # plus its own — checking it against its reserve alone would admit an
+        # enrichment the pack it rides in cannot pay for.
+        if active_budget is not None and not active_budget.can_afford(
+            request_budget_module.PACK_RESERVE_SECONDS
+        ):
+            active_budget.note_skipped("pack")
+            if graph_enrich:
+                # It cannot run without the pack it rides in, so reporting it
+                # as having run would be a lie the caller cannot check.
+                active_budget.note_skipped("graph_enrich")
+        else:
+            if (
+                graph_enrich
+                and active_budget is not None
+                and not active_budget.can_afford(
+                    request_budget_module.PACK_RESERVE_SECONDS
+                    + request_budget_module.GRAPH_ENRICH_RESERVE_SECONDS
+                )
+            ):
+                active_budget.note_skipped("graph_enrich")
+                graph_enrich = False
+            with find_module._span(timings, "pack"):
+                pack_obj = context_pack_module.assemble_pack(
+                    vault_root,
+                    hits,
+                    graph_enrich=graph_enrich,
+                    deadline=None if active_budget is None else active_budget.deadline,
+                    graph_enrich_reserve_seconds=request_budget_module.GRAPH_ENRICH_RESERVE_SECONDS,
+                    timings=timings,
+                )
+                if active_budget is not None and context_pack_module.DEADLINE_TRUNCATION in (
+                    pack_obj.get("truncation") or []
+                ):
+                    active_budget.note_truncated("pack")
+                if active_budget is not None and context_pack_module.GRAPH_ENRICH_BUDGET_SKIP in (
+                    pack_obj.get("truncation") or []
+                ):
+                    active_budget.note_skipped("graph_enrich")
+                if release.active:
+                    pack_obj = egress_module.annotate_pack(pack_obj, release)
     with find_module._span(timings, "serialize"):
         # `project` is the ONLY serializer to a wire dict (design D3): the raw
         # `Hit.as_dict`/`as_compact_dict` calls that used to sit here are gone
@@ -2449,6 +2830,15 @@ def op_find(
             compact=(detail == "compact"),
             withheld_paths=release.withheld_paths,
         )
+        if restricted:
+            for hit in hit_dicts:
+                signals = hit.get("signals")
+                if not isinstance(signals, dict):
+                    continue
+                for name in _CORPUS_RANK_SIGNALS:
+                    signals.pop(name, None)
+                if not signals:
+                    hit.pop("signals", None)
         if projection_runtime is None:
             ref_index = memory_refs_module.ReferenceIndex(vault_root)
             # The recall serializer is the one caller the no-walk contract
@@ -2468,7 +2858,9 @@ def op_find(
             retrieval_explain_module.attach_hit_explanations(retrieval_trace, hit_dicts)
         # Notices occupy only the slots the over-fetch pool could not backfill.
         hit_dicts.extend(release.notices)
-    timings_dict = timings.as_dict() if timings is not None else None
+    timings_dict = (
+        timings.as_dict() if timings is not None and include_timings else None
+    )
     # Durable structured log → feeds the offline retrieval feedback loop.
     # Best-effort; never affects the returned result.
     if projection_runtime is None:
@@ -2502,7 +2894,17 @@ def op_find(
     # keyword. Distinct from `warming`: warming is the transient, expected boot
     # window; `degraded` means a lane broke (e.g. a corrupt embedding sidecar or
     # a crashing model) and the fallback should be investigated, not waited out.
+    if restricted:
+        # Whether any lane matched is decided over the whole corpus.
+        failed = [component for component in failed if component != "keyword"]
     degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
+    # Advisory, and present only when the budget actually cost the caller
+    # something: a block that always appeared would be a response-shape change
+    # for every client, to report that nothing happened. Read at return so
+    # `remaining_ms_at_return` is what the caller is being told it is.
+    budget_block = (
+        active_budget.as_response_block() if active_budget is not None else None
+    )
     if (
         timings_dict is None
         and timings_suppressed is None
@@ -2510,6 +2912,7 @@ def op_find(
         and degraded_marker is None
         and retrieval_trace is None
         and projected_continuation is None
+        and budget_block is None
     ):
         if not pack and referents is None:
             return hit_dicts
@@ -2536,6 +2939,8 @@ def op_find(
         out["retrieval_profile"] = retrieval_trace.profile()
     if referents is not None:
         out["referents"] = referents
+    if budget_block is not None:
+        out["budget"] = budget_block
     return out
 
 
@@ -2556,6 +2961,29 @@ def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
     if reserved_paths_module.classify_logical(resolved).blocked:
         raise ValueError("NOT_FOUND: memory identifier is unavailable")
     return resolved
+
+
+def _refuse_withheld_page_seed(vault_root: Path, path: str) -> None:
+    """Answer a withheld seed page exactly as an absent one, as `op_get` does.
+
+    A context seeded from a page is assembled from that page, so whether it
+    assembles at all is a fact about the page. An absent page already raises
+    here, through the same read `op_get` takes.
+    """
+    try:
+        page = get_page_module.get_page(vault_root, path=path)
+    except get_page_module.GetError as e:
+        raise ValueError(f"{e.code}: {e.reason}") from e
+    released = egress_module.annotate_page(
+        vault_root,
+        page.as_dict(include_raw=False),
+        snapshot_content=page.content,
+        stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
+    )
+    if released is None:
+        raise ValueError(
+            f"NOT_FOUND: file does not exist: {get_page_module.missing_path_for(path)}"
+        )
 
 
 def _snapshot_memory_ref(vault_root: Path, path: str, frontmatter: Mapping[str, Any]) -> str | None:
@@ -2794,6 +3222,7 @@ def op_fetch(
         frontmatter_only=False,
         include_history=False,
     )
+    working_set_heat_module.note_selection(vault_root, [page.path], "read")
     out = {
         "id": page.path,
         "title": _title_from_page(page.path, page.frontmatter, page.body),
@@ -2974,11 +3403,19 @@ def op_graph_context(
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
+    # A unit seed is a fact about its parent page: resolved against a withheld
+    # parent it answers as a unit of an absent page does (see
+    # `egress.unit_parent_withheld`).
+    graph_unit_ref = unit_ref
+    if unit_ref is not None and egress_module.unit_parent_withheld(
+        vault_root, unit_ref, purpose=purpose
+    ):
+        graph_unit_ref = egress_module.UNRESOLVABLE_UNIT_REF
     context = epistemic_graph_module.graph_context(
         vault_root,
         path=path,
         query=query,
-        unit_ref=unit_ref,
+        unit_ref=graph_unit_ref,
         categories=categories,
         kinds=kinds,
         depth=depth,
@@ -2987,6 +3424,7 @@ def op_graph_context(
         max_nodes=max_nodes,
         max_edges=max_edges,
         traversal_profile=traversal_profile,
+        keep=egress_module.restricted_release_filter(vault_root, purpose=purpose),
     )
     # A neighborhood is provenance: a sub-notice page must not appear as a
     # seed, a node, or an edge endpoint (design D4 / graph-find-ranking).
@@ -3022,6 +3460,12 @@ def op_suggest_relations(
         candidate includes from/to, relation_type, method, and evidence.
         `mutated` is always false.
     """
+    # Under a governed policy relation proposals are the owner's, like the
+    # relation queue they feed: their candidates are resolved over the whole
+    # vault. Another audience is refused before the path is resolved.
+    refusal = egress_module.owner_only_aggregate(vault_root)
+    if refusal is not None:
+        return refusal
     if path:
         path = _resolve_memory_identifier(vault_root, path)
     return epistemic_graph_module.suggest_relations(
@@ -3197,6 +3641,9 @@ def op_audit(
         presentation/truncation facts. Full detail preserves raw findings.
     """
     audit_module.validate_presentation_controls(detail, legacy_sample_limit)
+    refusal = egress_module.owner_only_aggregate(vault_root)
+    if refusal is not None:
+        return refusal
     report = audit_module.audit(
         vault_root,
         categories=categories,
@@ -3649,7 +4096,8 @@ def op_get(
         missing_path=prepared.missing_path,
     )
     try:
-        result = get_page_module.get_page(vault_root, path=path, _prepared=prepared)
+        with call_spans_module.span("read.page"):
+            result = get_page_module.get_page(vault_root, path=path, _prepared=prepared)
     except get_page_module.GetError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     if frontmatter_only:
@@ -3667,10 +4115,18 @@ def op_get(
         frontmatter_only=frontmatter_only,
         include_history=include_history,
     )
+    working_set_heat_module.note_selection(vault_root, [out["path"]], "read")
     if include_history:
-        out["history"] = vault.read_log_entries(vault_root, out["path"])
+        with call_spans_module.span("read.history", {}) as measured:
+            out["history"] = vault.read_log_entries(vault_root, out["path"])
+            if measured is not None:
+                measured["entries"] = len(out["history"] or [])
     if links:
-        out["links"] = _link_summary(vault_root, out.get("path", ""), out.get("body", ""))
+        with call_spans_module.span("read.links", {}) as measured:
+            out["links"] = _link_summary(vault_root, out.get("path", ""), out.get("body", ""))
+            if measured is not None:
+                measured["inbound"] = len((out["links"] or {}).get("inbound") or [])
+                measured["outbound"] = len((out["links"] or {}).get("outbound") or [])
     # Release gate for direct reads: render at the page's decision level, and
     # answer byte-identically to a missing path when it is below notice — a
     # withheld page must be indistinguishable from one that never existed.
@@ -3713,6 +4169,17 @@ def op_get(
         else:
             out["body_truncated"] = bool(out.get("body_truncated", False))
         out["body_chars"] = len(str(out.get("body", "")))
+    if "body" in out and not frontmatter_only:
+        # Pull-first sensing (default off): what released later notes did to
+        # this page. Absent when there is nothing to say, or when the snapshot
+        # read is not the one the projection modelled; never ranks anything.
+        from . import sensed_model
+
+        status = sensed_model.status_for(
+            vault_root, str(out["path"]), content_hash=result.content_hash
+        )
+        if status is not None:
+            out["epistemic_status"] = status
     return _attach_memory_ref(vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref)
 
 
@@ -3740,6 +4207,7 @@ def op_edit(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    identity_decision: dict | None = None,
 ) -> dict:
     """Lightweight in-place edit of a page (body, tags, a surgical snippet,
     a batch, an opinion row, or one frontmatter field).
@@ -3902,6 +4370,8 @@ def op_edit(
                 relation_review_reason=relation_review_reason,
             )
         elif field is not None:
+            if field == "aliases":
+                _refuse_claimed_aliases(vault_root, path, value, identity_decision)
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root,
                 path=path,
@@ -3986,6 +4456,7 @@ def op_replace(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: _DomainVocabularyDecisionArgument = None,
 ) -> dict:
     """Supersede an existing compiled page with a new one.
 
@@ -4016,6 +4487,8 @@ def op_replace(
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash covered by the relation review.
         relation_review_reason: Audit reason for a reviewed-none disposition.
+        vocabulary_decision: Evidence-bound `reuse`, `create`, or `defer` response
+            returned by an experiment-domain vocabulary preparation.
 
     Returns:
         {old_path, new_path, warnings}.
@@ -4059,6 +4532,7 @@ def op_replace(
         "draft_token": draft_token,
         "relation_disposition": relation_disposition,
         "relation_review_reason": relation_review_reason,
+        "vocabulary_decision": vocabulary_decision,
     }
     try:
         predecessor_hash = _replacement_predecessor_hash(vault_root, old_path)
@@ -4075,6 +4549,8 @@ def op_replace(
                     "REPLACEMENT_PREVIEW_UNSTABLE: predecessor changed during advisory preview"
                 )
             value = result.as_dict()
+            if "vocabulary_preparation" in value:
+                return value
             base_hash = str(value["draft_hash"])
             value.update(
                 validate_only=True,
@@ -4105,6 +4581,8 @@ def op_replace(
                 raise ValueError(
                     "DRAFT_HASH_MISMATCH: predecessor changed during fresh replacement validation"
                 )
+            if isinstance(fresh, vocabulary_resolution.VocabularyPreparation):
+                return fresh.as_dict()
             base_hash = fresh.draft_hash
             expected_hash = _replacement_review_hash(
                 str(base_hash),
@@ -4137,16 +4615,20 @@ def op_replace(
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     if written_path := getattr(result, "new_path", None):
         query_log.log_write_call(tool="replace", written_path=written_path, cited_sources=sources)
+        working_set_heat_module.note_citations(vault_root, sources or ())
     return result.as_dict()
 
 
 def _replacement_predecessor_hash(vault_root: Path, old_path: str) -> str:
+    unavailable = f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}"
+    # A predecessor the caller may not see is unavailable exactly as a missing
+    # one is, and is never read.
+    if egress_module.write_target_withheld(vault_root, old_path):
+        raise ValueError(unavailable)
     try:
         return hashlib.sha256((Path(vault_root) / old_path).read_bytes()).hexdigest()
     except OSError as error:
-        raise ValueError(
-            f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}"
-        ) from error
+        raise ValueError(unavailable) from error
 
 
 def _replacement_review_hash(
@@ -4187,6 +4669,9 @@ def op_link(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    identity_decision: _IdentityDecisionArgument = None,
+    facets: _EntityFacetsArgument = None,
+    aliases: list[str] | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -4218,15 +4703,31 @@ def op_link(
             `## Relations` as conservative `relates_to` edges. Same path
             conventions as `note.sources`.
         (per-type fields): see the bullet list above.
+        identity_decision: `{outcome: "distinct", candidate_fingerprint}` when
+            the name already denotes other active entities and this is a
+            different identity; the fingerprint comes from the preparation
+            or refusal for this exact name.
+        facets: Values for facets the registry declares for this type: a
+            string for a single facet, a list for a multi one. Undeclared
+            names are refused.
+        aliases: Other names the entity answers to, in any script, written to
+            its `aliases`. Give the native-script spelling of a name written
+            in another script (a Japanese name for an English-titled page) so
+            a turn in that script reaches it. At most 8, one line and 64
+            characters each; one any other page already answers to refuses.
 
     Returns:
-        {path, warnings}.
+        {path, warnings}, or a non-mutating `identity_preparation` when the
+        name already denotes active entities of other types only.
 
     Errors:
         ENTITY_TYPE_UNKNOWN (entity_type not in the active registry);
         INVALID_LINK (bad decision_status, missing required);
         ENTITY_EXISTS (update/link the returned active entity instead);
-        ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first).
+        ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first);
+        STALE_IDENTITY_DECISION (the candidates changed; decide again);
+        ENTITY_FACET_UNDECLARED / INVALID_ENTITY_FACET (facets outside the
+        type's declaration).
     """
     try:
         result = link_module.link(
@@ -4248,13 +4749,49 @@ def op_link(
             decided=decided,
             project=project,
             decision_status=decision_status,
+            identity_decision=identity_decision,
+            facets=facets,
+            aliases=aliases,
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
         if e.candidates:
             suffix += f" (candidates: {e.candidates})"
+        if e.candidate_fingerprint is not None:
+            suffix += f" (candidate_fingerprint: {e.candidate_fingerprint})"
         raise ValueError(f"{e.code}: {e.reason}{suffix}") from e
     return result.as_dict()
+
+
+def _note_committed_artifact_targets(result: object) -> None:
+    """Hand the ledger the vault-relative paths this write committed.
+
+    Structural paths only, taken from the outcome rather than the arguments --
+    an artifact write addresses none, so its ledger row could not say what
+    landed. Never a URL, a handle id, or content. Only rows whose terminal
+    state is `stored`: an `already_stored` row names a path an earlier call
+    committed, and recording it here would attribute that write to this one.
+    """
+    from . import call_ledger
+
+    def committed(item: Mapping[str, object]) -> bool:
+        return item.get("state", item.get("outcome")) == "stored"
+
+    paths: list[str] = []
+    if isinstance(result, Mapping):
+        files = result.get("files")
+        if isinstance(files, (list, tuple)):
+            for item in files:
+                if not isinstance(item, Mapping) or not committed(item):
+                    continue
+                value = item.get("path") or item.get("stored_path")
+                if isinstance(value, str):
+                    paths.append(value)
+        elif committed(result):
+            value = result.get("path") or result.get("stored_path")
+            if isinstance(value, str):
+                paths.append(value)
+    call_ledger.note_committed_targets(paths)
 
 
 def op_preserve(
@@ -4297,6 +4834,61 @@ def op_preserve(
         exists — Evidence is append-only, pick a new filename).
     """
     preserve_module = _preserve_module()
+    from .cli_ops import OpError
+
+    # Validated, never normalised: a separator in `scope` used to be deleted and
+    # the artifact written somewhere else, which forks one case across two trees.
+    for field, value in (("scope", scope), ("category", category)):
+        reason = preserve_module.destination_segment_refusal(value, field=field)
+        if reason is not None:
+            raise OpError(
+                "INVALID_PRESERVE",
+                reason,
+                "Supply the segment as one path segment and nest with `category`.",
+                details={
+                    "field": field,
+                    "reason": reason,
+                    "accepted_form": preserve_module.DESTINATION_ACCEPTED_FORM,
+                },
+            )
+    # Same destination-scoped lookup the batch command uses, run before the
+    # write: Evidence is append-only, so the same bytes under the same family
+    # are one fact, and reporting the copy that is already there beats adding a
+    # second one that no later reader can tell apart.
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if isinstance(content, str) else ""
+    duplicate = preserve_module.find_duplicate_artifact(
+        vault_root, scope=scope, category=category, sha256=digest
+    )
+    if duplicate is not None:
+        from .writer_lease import mark_active_mutation_committed
+
+        # Nothing is written, but the call has a terminal answer about canonical
+        # state, so it is marked committed and comes back inside the same
+        # terminal envelope the stored branch gets -- with the same field set,
+        # so one command does not have two response shapes.
+        mark_active_mutation_committed()
+        # Nothing is handed to the ledger: this call committed nothing, and the
+        # path it resolved to was recorded by the call that did.
+        return {
+            "path": duplicate.path,
+            "stored_path": duplicate.path,
+            "sidecar_path": duplicate.sidecar_path,
+            "ref": duplicate.ref,
+            "state": "already_stored",
+            "outcome": "stored",
+            "duplicate_of": {"path": duplicate.path, "ref": duplicate.ref},
+            "warnings": [],
+            "size": len(content.encode("utf-8")) if isinstance(content, str) else None,
+            "hash": digest or None,
+            "hash_algorithm": "sha256",
+            "media_id": f"sha256:{digest}" if digest else None,
+            # The same derivation the stored branch uses, from the sanitized
+            # filename: a name whose sanitized form has a different extension
+            # must not yield two content types for one set of bytes.
+            "content_type": mimetypes.guess_type(
+                preserve_module._sanitize_filename(filename)
+            )[0],
+        }
     try:
         result = preserve_module.preserve(
             vault_root,
@@ -4308,7 +4900,46 @@ def op_preserve(
         )
     except preserve_module.PreserveError as e:
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
-    return result.as_dict()
+    payload = result.as_dict()
+    _note_committed_artifact_targets(payload)
+    from . import semantic_writes
+
+    routing_tags = [
+        "evidence",
+        scope.lower().replace(" ", "-"),
+        category.lower().replace(" ", "-"),
+    ]
+    routing_terms = [
+        f"Evidence: {Path(result.path).name}",
+        *routing_tags,
+        description.strip() if description and description.strip() else "",
+    ]
+    # The facets the sidecar's own frontmatter carries, so `claims.match`
+    # decides an Evidence write exactly as the recompute will.
+    routing_facets = {"type": ["source"], "tags": routing_tags}
+    routing = semantic_writes._records_routing_from_terms(
+        vault_root, routing_terms, routing_facets
+    )
+    try:
+        from . import due_state
+
+        due_state.apply_observation_write_delta(
+            vault_root,
+            path=str(result.sidecar_path or ""),
+            observation_ref=str(result.ref or ""),
+            terms=routing_terms,
+            routing=routing,
+            observation_aliases=(str(result.path or ""),),
+            facets=routing_facets,
+        )
+    except Exception:  # noqa: BLE001 -- due-state advice never breaks Evidence custody
+        log.debug("Evidence observation due-state delta failed (non-fatal)", exc_info=True)
+    delivered_routing = semantic_writes._records_routing_for_delivery(
+        vault_root, routing
+    )
+    if delivered_routing is not None:
+        payload["records_routing"] = delivered_routing
+    return payload
 
 
 def op_note(
@@ -4347,6 +4978,7 @@ def op_note(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: _DomainVocabularyDecisionArgument = None,
 ) -> dict:
     """Create a compiled note in the Knowledge Base.
 
@@ -4457,6 +5089,9 @@ def op_note(
             reviewed_none when no honest relation exists.
         relation_review_hash: Draft hash covered by the relation review.
         relation_review_reason: Audit reason for a reviewed-none disposition.
+        vocabulary_decision: After a vocabulary_preparation response, submit its
+            evidence_fingerprint with outcome reuse, create, or defer and the
+            reviewed canonical value. The response is bound to that evidence.
 
     Returns:
         {path, warnings, suggestions?, write_feedback}. `write_feedback` is
@@ -4502,11 +5137,13 @@ def op_note(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
+            vocabulary_decision=vocabulary_decision,
         )
     except note_module.NoteError as e:
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     if written_path := getattr(result, "path", None):
         query_log.log_write_call(tool="note", written_path=written_path, cited_sources=sources)
+        working_set_heat_module.note_citations(vault_root, sources or ())
     return result.as_dict()
 
 
@@ -4924,6 +5561,11 @@ def op_move_file(
     return result.as_dict()
 
 
+_FOLDER_DELETE_REFUSAL = (
+    "AUDIENCE_RESTRICTED: folder deletes are served to the owner only under a governed policy"
+)
+
+
 def op_delete(
     vault_root: Path,
     path: str,
@@ -4984,12 +5626,34 @@ def op_delete(
             APPEND_ONLY; CURATED_PROTECTED; SUPERSEDED_HISTORY;
             INBOUND_LINKS; TRASH_FAILED; (dir) NOT_A_DIR; NOT_EMPTY.
     """
+    # Under a governed policy a folder is deleted by the owner only: a folder
+    # can hold pages the writer may not see, and every answer about them
+    # (counts, refusals, what was trashed) would move with them. One refusal
+    # for a folder the writer may see, whatever it holds; a declared
+    # recursive delete is refused before anything is read. A folder holding
+    # only pages withheld from the writer does not exist for it, as its
+    # listing says, and is answered as a missing path.
+    keep = egress_module.governed_release_filter(vault_root)
+    restricted = keep is not None
+    if restricted and recursive:
+        raise ValueError(_FOLDER_DELETE_REFUSAL)
     path = _resolve_memory_identifier(vault_root, path)
     try:
-        abs_path, _rel = resolve_under_vault(vault_root, path)
+        abs_path, rel = resolve_under_vault(vault_root, path)
         is_dir = abs_path.is_dir()
     except VaultPathError:
         is_dir = False  # let the file backend raise the precise path error
+    if restricted and is_dir:
+        from . import list_directory as list_directory_module
+
+        if not list_directory_module._withheld_target(
+            vault_root, rel, keep, True, {}, is_dir=True
+        ):
+            raise ValueError(_FOLDER_DELETE_REFUSAL)
+        if confirm:
+            requested = str(path).strip().replace("\\", "/").lstrip("/")
+            raise ValueError(f"NOT_FOUND: path does not exist: {requested}")
+        is_dir = False  # the file backend's unconfirmed refusal, as for a missing path
     try:
         if is_dir:
             result = delete_directory_module.delete_directory(
@@ -5148,8 +5812,13 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     """
     requested = str(target)
     target = _resolve_memory_identifier(vault_root, target)
+    # The caller's view (`None` for the owner): a bare link counts when the
+    # target's basename is unique among the pages the caller may see.
+    visible = egress_module.visible_page_filter(vault_root)
     try:
-        result = list_inbound_links_module.list_inbound_links(vault_root, target=target)
+        result = list_inbound_links_module.list_inbound_links(
+            vault_root, target=target, visible=visible
+        )
     except list_inbound_links_module.ListInboundLinksError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     payload = result.as_dict()
@@ -5175,6 +5844,15 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
         payload["target"] = requested.strip().replace("\\", "/").lstrip("/")
         payload["inbound"] = []
         payload["count"] = 0
+        return payload
+    # The count is the length of the list the caller receives: a link from a
+    # page it may not see is decided here, before counting, rather than left
+    # for the entry filter to drop beside a count that still includes it.
+    if visible is not None:
+        payload["inbound"] = [
+            row for row in payload["inbound"] if visible(str(row.get("path") or ""))
+        ]
+        payload["count"] = len(payload["inbound"])
     return payload
 
 
@@ -5204,8 +5882,15 @@ def _release_permits_link_target(vault_root: Path, target: object) -> bool:
     clean = target.strip().replace("\\", "/").strip("/")
     if "/" in clean:
         for candidate in {clean, f"{clean}.md"} if not clean.lower().endswith(".md") else {clean}:
-            if (Path(vault_root) / candidate).is_file():
-                return _permits(candidate)
+            try:
+                candidate_abs, confined = resolve_under_vault(vault_root, candidate)
+            except VaultPathError:
+                # Undecidable the same way a candidate that doesn't resolve
+                # under the vault at all is: not the release plane's
+                # business, and never stat'd or read to get there.
+                continue
+            if candidate_abs.is_file():
+                return _permits(confined)
         return True
     # Bare basename: resolve it the way the matcher does — by filename across
     # the vault. Ambiguity fails closed; a name that matches nothing is simply
@@ -5474,9 +6159,14 @@ def _with_due_state(
         # Inside the command's own disclosure boundary: the block aggregates
         # across pages, so every path is decided by the release plane before
         # anything is counted.
-        with egress_module.disclosure_boundary(vault_root, "ask_memory"):
+        with (
+            egress_module.disclosure_boundary(vault_root, "ask_memory"),
+            call_spans_module.span("recall.due_state", {}),
+        ):
             block = due_state_module.served(vault_root, purpose=purpose)
-        if not due_state_module.should_emit(block, vault_root=vault_root):
+        with call_spans_module.span("recall.due_state.emit", {}):
+            emit = due_state_module.should_emit(block, vault_root=vault_root)
+        if not emit:
             return result
     except Exception:  # noqa: BLE001 — a due-state count never breaks a recall
         log.debug("due-state projection unavailable for recall", exc_info=True)
@@ -5484,6 +6174,886 @@ def _with_due_state(
     if isinstance(result, dict):
         return {**result, "due_state": block}
     return {"hits": result, "due_state": block}
+
+
+#: Bounded own-page FTS corroborators; governed overfetch precedes release.
+#: A result limit alone never bounds an ordinary full-vault hybrid search.
+ACTIVATE_RETRIEVAL_LIMIT = 8
+
+
+#: The one refusal an unknown `anchor` ref, a withheld one, raw material, a
+#: navigation page, and a retired page all share. Distinguishable answers
+#: would turn the argument into an existence oracle: a caller could learn
+#: that a page exists, or which rule kept it out, precisely by being told it
+#: may not see it. Neither form names the ref back, and none says WHICH of
+#: those it was.
+ACTIVATE_ANCHOR_REFUSAL = (
+    "INVALID_ANCHOR: anchor must name an available anchor of this activation "
+    "index or a visible compiled page"
+)
+
+
+def _abstention_reason(packet: dict) -> str:
+    """The packet's abstention reason, or `""` when it did not abstain."""
+    abstention = packet.get("abstention")
+    if not isinstance(abstention, Mapping):
+        return ""
+    return str(abstention.get("reason") or "")
+
+
+def op_activate_context(
+    vault_root: Path,
+    turn: str = "",
+    max_chars: int = working_set_module.DEFAULT_BUDGET_CHARS,
+    purpose: str | None = None,
+    continuity: str | None = None,
+    anchor: str | None = None,
+    include_timings: bool = False,
+    client: str | None = None,
+    session: str | None = None,
+    workspace: str | None = None,
+) -> dict:
+    """Compile durable context for a raw conversational turn, without a query.
+
+    Call this ONCE at the start of a substantive turn, before deciding what to
+    search for. Pass the user's words verbatim — this is not a search query and
+    must not be rewritten into one. It returns a bounded working-memory packet:
+    which durable anchors the turn is about (entities, resources, hubs, Records
+    collections, active plans, projects), the context roles it filled, short
+    provenance-bearing units, pointers to what did not fit the budget, and the
+    current state of any resource whose collection records one.
+
+    Every packet leads with `recent_context`: up to eight pages this vault has
+    recently been worked on — edited, read, captured as a session, recorded as a
+    conversation recap, or left open in Planning — each with its title, why it
+    is recent, the date of that contact and, where the page carries one, its own
+    authored `status` or `summary` line. A recap entry (`why: "episode"`) is the
+    newest revision of one conversation's `episode_memory` record and carries
+    that conversation's `episode` key; follow it with `read_memory`. That line is the page's, not a current-state reading: these
+    pages are chosen by recency rather than by the turn, so the block never
+    queries a Records collection the turn did not name. `current_state[]`
+    remains the carrier for the resolved anchors' governed state.
+    It is served whether or not the turn resolved anything, so a fresh session
+    opening on "continue" receives the thread it is picking up. `as_of` dates
+    the CONTACT, not the event the page describes. With `session` or
+    `workspace` passed, this conversation's own pages come first.
+
+    A turn that names nothing ("continue", "where were we") is answered from
+    recent work: the thread your `continuity` token names, else what was last
+    worked on, picked with `anchor`, or named by a recorded episode, in this
+    conversation first, then its workspace, then the vault. Reads rank below
+    any of those, and a maintenance batch counts as nobody's work. An anchor
+    reached this way resolves with `recency` in its evidence. A single
+    ordinary page reached this way is served as `kind: "page"`, `status:
+    "resolved"`, evidence `["recency"]` and `generation.carried_by:
+    "recency"`; a page tied with anything else abstains `ambiguous`, listing
+    both, for you to pick with `anchor`. Without `session`, `workspace` or a
+    `continuity` token, other conversations' recent work orders
+    `recent_context` but is never taken as the referent.
+
+    A short follow-up that names nothing new ("what about the second one?",
+    "and the results?") is answered from this conversation's own thread:
+    where that thread holds one page clearly ahead of the rest, it is carried
+    as a single `partial` anchor with `generation.carried_by: "follow_up"`;
+    where two are close, both are listed under `ambiguity` for `anchor`.
+
+    Read-only and abstaining by construction. It writes nothing, changes no
+    `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
+    already runs, and returns `abstained: true` with a reason rather than guessing
+    when the turn resolves nothing (`unresolved`), names two competing senses
+    (`ambiguous`), is served while the derived index is still warming
+    (`index_warming`), or is switched off (`disabled`). An ambiguous turn lists
+    both anchors under `ambiguity` and runs no role lane — you pick the sense and
+    call again with `anchor` set to the ref you mean.
+
+    A turn that named no anchor but whose own distinctive words clearly reach one
+    compiled page is served from that page instead of abstaining, and says so:
+    its single `anchors[]` entry has `kind: "page"` and `status:
+    "retrieval_carried"`, and `generation.carried_by` is `"retrieval"`. Read that
+    as "nothing was named; recall alone put this here" — no anchor was resolved,
+    yet the packet's continuity token names that page, so a following
+    "continue" resumes it; a turn with nothing distinctive in it abstains
+    `unresolved` rather than guessing between pages. Naming that
+    SAME page yourself with `anchor` instead resolves it outright, at `status:
+    "resolved"` and `generation.carried_by: "agent_choice"` — your choice, not
+    recall's guess.
+
+    When a turn names SEVERAL pages this way, nothing is carried and the packet
+    abstains `unresolved`, listing them under `anchors[]` at `status:
+    "retrieval_named"`. That is not `ambiguity`, which reports two anchors that
+    both resolved: nothing resolved here. Call again with `anchor` set to the
+    ref you mean — an ordinary compiled page takes it exactly as a page reached
+    by `retrieval_carried` above does — and that page's own units are served.
+
+    On the MCP door a packet may also carry `episode_due`: after several
+    activations with no `episode_memory` record from this caller, it asks you to
+    record one at the conversation's next decision or stopping point. It is
+    advice, at most once per half hour, and absent when proactive capture is off.
+
+    At the start of your session a packet may also carry `upkeep`: at most one
+    item the background upkeep pass proposed, such as two notes that could be
+    connected or an entity page that newer facts have outgrown. It carries its
+    own `route`, a `context_route` to read first, and a `dispose` route
+    (`triage_memory` dismiss or snooze). Consideration does not authorize
+    mutation: act through the route under its own rules, or dispose of it.
+
+    Use `ask_memory` instead when you already know what you are looking for; use
+    this when you do not, and follow it with `read_memory` on whatever ref the
+    packet points at.
+
+    Args:
+        turn: The user's turn, verbatim. Empty abstains.
+        max_chars: Character ceiling for the packet's text. Default 4,000,
+            clamped to 500..8,000. Overflow becomes pointers, never truncated
+            claims.
+        purpose: Optional declared purpose for this request, e.g. "audit" or
+            "due-diligence". Governance rules may widen or narrow what a given
+            audience may see for a stated purpose; leaving it unset is
+            deterministic, not a wildcard. Never affects ranking, and never
+            enters the packet cache key.
+        continuity: The opaque `continuity` token the previous packet of this
+            conversation returned: pass it back verbatim on every call. Every
+            packet returns one, an abstention too. It identifies this
+            conversation, so a client that passes no `session` still has its
+            own thread; only a salted hash of that identity is stored, and it
+            lapses after six idle hours. On a turn that names nothing ("continue",
+            "where were we") the anchors or page it names are the first thing
+            the turn is taken to refer to, and may resolve on that alone. On any other turn it
+            only strengthens anchors the turn already reaches on its own
+            evidence: it never reaches one by itself there, and never turns an
+            `unresolved` turn into a resolved one. It is ignored and reported as
+            `generation.continuity = "stale"` when it was minted against another
+            vault's index or another role registry. Drop it on a new session or
+            after a compaction.
+        anchor: One ref the agent is naming on its own authority: the sense
+            meant from a previous `ambiguity` block, or any ordinary compiled
+            page a packet already listed (`recent_context`, `retrieval_named`,
+            or an `unresolved` turn's candidates) — not raw `Sources`/`Evidence`
+            material, which stays a `read_memory` target. That anchor or page
+            is then treated as resolved on your choice alone, its roles run,
+            and any competing senses are omitted. A ref that names nothing
+            eligible this way, or one this audience may not see, is refused
+            identically and no packet is built. When the user corrects which
+            page they meant, call again with the same turn and `anchor` set
+            to it.
+        include_timings: Include per-stage timings for diagnostics.
+        client: Optional lowercase label for the calling client, e.g.
+            `claude-code`, `codex` or `chatgpt`. Recorded host-locally only; an
+            invalid label is ignored, never refused.
+        session: Optional opaque conversation identifier, at most 256
+            characters, such as the `episode` key an `episode_memory` record
+            returned. Pass the same one on every turn of a conversation: a turn
+            that names nothing ("continue") is then answered from THIS
+            conversation's own last thread and picks first, before anything
+            other conversations touched, and `recent_context` lists its pages
+            first. Only a salted hash of it is stored, on this machine. It
+            also names whose session start an `upkeep` item may arrive at.
+        workspace: Optional opaque key for the project or folder the
+            conversation runs in, at most 256 characters, such as a hash of
+            the working directory. A fresh conversation in the same workspace
+            continues that workspace's thread before the rest of the vault's.
+            Only a salted hash of it is stored. Omitting both keys, a turn
+            that names nothing is answered from this conversation's
+            `continuity` thread alone, never from other conversations' work.
+
+    Returns: {recent_context, anchors, roles, units, pointers, current_state,
+             missing, ambiguity, budget, generation, abstained, abstention?,
+             continuity?, episode_due?, upkeep?, learning?}. `recent_context` is first and is present on an
+             abstained packet too. An abstained packet always empties
+             `roles`, `units`, `pointers` and `current_state` — no material
+             about an anchor that did not resolve — but `anchors` (a
+             `partial`, `retrieval_named` or competing `ambiguity` candidate),
+             `ambiguity` and `missing` may still be populated.
+             `generation.continuity` reports whether a token you passed was
+             `applied`, `stale` or `absent`; `generation.continuity_thread`
+             whether its conversation was continued (`applied`), had lapsed
+             or was unreadable (`stale`, answered as a new conversation, never
+             refused) or was not passed (`absent`). `generation.hot_profile` reports
+             the recent-work projection's `state` (`current`, `partial`,
+             `seeded`, `behind` or `empty`) and `session_start`, the date
+             its current working session began.
+             `learning` may ride on an `anchor` call whose turn never named
+             the page you chose: one advisory naming the writer that would
+             teach the vault the user's words — `edit_memory` adding to the
+             page's `learned_aliases`, or `schema_memory save-conventions`
+             adding a referential cue — each with the `expected_hash` it must
+             carry, plus `turn_terms`, the user's own words. It writes
+             nothing. Act on it only if those words should reach that page
+             next time; otherwise dismiss its `review` ref with
+             `triage_memory`.
+    """
+    # `RequestBudget` is bound in exactly one place, the MCP dispatch
+    # middleware: `request_budget.current()` is always None on the REST and
+    # CLI doors, which makes every stage-boundary check below dead code
+    # there — and those are the doors the shipped auto-activation hook uses
+    # (`_hooks/exomem_retrieve_nudge.py`: REST rung 4.0s, CLI rung 5.0s).
+    # Rather than binding a general REST/CLI budget (which would change
+    # `find`/pack behaviour for every other operation), activation binds its
+    # OWN short-lived budget here, only when none is already bound, for the
+    # duration of this one call. `try/finally` guarantees it cannot leak
+    # onto a later, unrelated call on a reused thread — including when the
+    # body below raises (e.g. the anchor-override `ValueError`).
+    #
+    # Only for a MANAGED runtime. `ACTIVATION_DOOR_BUDGET_SECONDS` exists to
+    # match the shipped hook's REST/CLI door timeouts against a managed
+    # server, where a request that gives up mid-stage costs nothing real: the
+    # background watcher keeps converging and the NEXT request succeeds. An
+    # unmanaged process (a bare offline `exomem` invocation, no watcher, no
+    # background convergence) has no such follow-up — cutting it off at 6s
+    # would just turn a legitimately slower one-off cold walk into a hard
+    # failure with nothing left to retry against. Unmanaged activation keeps
+    # running unbounded, exactly as it did before request budgets existed.
+    #
+    # The resolution scope wraps the WHOLE call, abstentions included. Where
+    # this vault's machine-local state lives is a placement answer that a
+    # dozen components ask for independently, and resolving a path costs one
+    # `lstat` per component — 72 full resolutions in one measured request, all
+    # returning the same directory. Inside the scope the answer is computed
+    # once and reused for the rest of the request, and outside one nothing is
+    # remembered at all. It has to cover the abstention paths too: a request
+    # that abstains still resolved placement several times on its way there,
+    # and the abstention paths are the ones a struggling server takes most.
+    #
+    # `client`, `session` and `workspace` never reach resolution or the
+    # continuity token. They rank the heat projection's tiers for a turn that
+    # names nothing (ruling S5-1), enter the packet cache key only as the
+    # digest of that ranking, and are recorded by the activation log after the
+    # packet exists — the session as a vault-keyed hash, the workspace not at
+    # all. `session` has one other reader, the upkeep carrier below, where it
+    # names the caller whose session start may carry one upkeep item.
+    started = time.perf_counter()
+    # A foreground request: in-process bulk passes (a whole-vault graph
+    # rebuild) pause at their next unit while this runs, instead of taking the
+    # GIL back after every SQLite call the request makes (5-15x per stage,
+    # measured). Activation is read-only and never waits on bulk work.
+    with state_paths_module.resolution_scope(), foreground_priority.foreground():
+        bound_token = None
+        if readiness_module.runtime_managed() and request_budget_module.current() is None:
+            bound_token = request_budget_module.set_current(
+                request_budget_module.RequestBudget(
+                    seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
+                )
+            )
+        try:
+            packet = _op_activate_context_body(
+                vault_root,
+                turn,
+                max_chars,
+                purpose=purpose,
+                continuity=continuity,
+                anchor=anchor,
+                include_timings=include_timings,
+                client=client,
+                session=session,
+                workspace=workspace,
+            )
+            # After the guard and outside the packet cache, like `continuity`:
+            # at a caller's session start, at most one upkeep item, and only in
+            # the process whose background worker proposed it. Never raises.
+            from . import sensed_model
+            from . import upkeep as upkeep_module
+
+            upkeep_module.for_packet(vault_root, packet, session=session)
+            # Also outside the cache: each resolved anchor page's sensed status.
+            sensed_model.for_packet(vault_root, packet)
+        except Exception as error:
+            query_log.log_activation_call(
+                vault_root,
+                packet=None,
+                client=client,
+                session=session,
+                outcome="refused" if isinstance(error, ValueError) else "error",
+                error_code=type(error).__name__,
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            )
+            raise
+        finally:
+            if bound_token is not None:
+                request_budget_module.reset_current(bound_token)
+    _carry_thread_through_abstention(packet, continuity)
+    _withhold_vault_generation(vault_root, packet, purpose=purpose)
+    query_log.log_activation_call(
+        vault_root,
+        packet=packet,
+        client=client,
+        session=session,
+        duration_ms=round((time.perf_counter() - started) * 1000, 3),
+    )
+    return packet
+
+
+#: Abstentions that say something about this server rather than the turn:
+#: the caller's token was never evaluated.
+_SERVER_ABSTENTIONS = frozenset(
+    {
+        working_set_runtime_module.WARMING,
+        working_set_runtime_module.UNAVAILABLE,
+        working_set_runtime_module.DISABLED,
+    }
+)
+
+
+def _carry_thread_through_abstention(packet: Any, continuity: str | None) -> None:
+    """Every packet reports `generation.continuity_thread`; a packet the
+    server abstained on before it could read the caller's token hands that
+    token back as it came, so a keyless caller's conversation survives a
+    warming index or a spent budget. Only a token that carries a thread, the
+    only kind a caller could lose that way; nothing in it is trusted here."""
+    if not isinstance(packet, dict):
+        return
+    generation = packet.setdefault("generation", {})
+    if not isinstance(generation, dict) or "continuity_thread" in generation:
+        return
+    generation["continuity_thread"] = working_set_runtime_module.unevaluated_continuity(continuity)
+    if "continuity" in packet or _abstention_reason(packet) not in _SERVER_ABSTENTIONS:
+        return
+    payload = working_set_runtime_module.decode_continuity(continuity)
+    if payload is not None and payload["thread"]:
+        packet["continuity"] = str(continuity).strip()
+
+
+#: Packet generation fields that move with every file in the vault: the
+#: freshness key counts and digests them, and the index generation advances on
+#: every write. A reader other than the owner does not receive them.
+_VAULT_GENERATION_FIELDS = ("freshness_key", "index_generation")
+
+
+def _withhold_vault_generation(vault_root: Path, packet: Any, *, purpose: str | None) -> None:
+    generation = packet.get("generation") if isinstance(packet, dict) else None
+    if (
+        isinstance(generation, dict)
+        and any(name in generation for name in _VAULT_GENERATION_FIELDS)
+        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+    ):
+        packet["generation"] = {
+            key: value for key, value in generation.items() if key not in _VAULT_GENERATION_FIELDS
+        }
+
+
+def _op_activate_context_body(
+    vault_root: Path,
+    turn: str = "",
+    max_chars: int = working_set_module.DEFAULT_BUDGET_CHARS,
+    purpose: str | None = None,
+    continuity: str | None = None,
+    anchor: str | None = None,
+    include_timings: bool = False,
+    client: str | None = None,
+    session: str | None = None,
+    workspace: str | None = None,
+) -> dict:
+    """`op_activate_context`'s implementation, called with a budget already
+    bound (either the caller's MCP budget, or the door budget the public
+    wrapper just bound). Kept separate so the wrapper's `try/finally` never
+    has to wrap this function's many early returns."""
+    timings = find_types.FindTimings() if include_timings else None
+    budget = working_set_module.clamp_budget(max_chars)
+    turn = str(turn or "")
+    anchor = str(anchor or "").strip() or None
+
+    generation_stub = {
+        "freshness_key": "",
+        "index_generation": 0,
+        "roles_hash": "",
+        "continuity": working_set_runtime_module.unevaluated_continuity(continuity),
+    }
+    # `(identity, thread, thread_ns, state, salt)` once the caller's thread has
+    # been read below: an abstention after that point still carries it forward.
+    thread_carry: tuple[str, str, int | None, str, str] | None = None
+
+    def _abstain(
+        reason: str,
+        *,
+        generation: Mapping[str, Any] | None = None,
+        budget_caused: bool = False,
+        carry_thread: bool = True,
+    ) -> dict:
+        """One abstained packet, always carrying timings when they were asked
+        for. Every early exit below must keep `serve`'s own promise — abstain,
+        never raise — including its promise to retain timings, which used to
+        stop at the first abstention this function built itself.
+
+        `budget_caused` attaches the SAME advisory `budget` block `op_find`
+        exposes (`RequestBudget.as_response_block()`) under `request_budget`
+        — not the packet's own pre-existing `budget` key, which already means
+        the character budget (`limit_chars`/`used_chars`) and would be
+        overwritten by a same-named block of a completely different shape.
+        Only set for an abstention `working_set.budget_exhausted` itself
+        caused, never for an unrelated failure that also resolves to
+        `unavailable` (release-plane/guard exceptions), so a caller reading
+        `request_budget` can trust it names the real cause.
+
+        Once the caller's thread is read, the packet carries it forward in a
+        token, minted after the vault generation is withheld from this
+        audience, exactly as a served packet's is: `generation` here is the
+        compiled packet's, which no guard has seen. `carry_thread=False` mints
+        nothing, for a packet the guard withheld whole.
+        """
+        packet = working_set_module.abstained_packet(
+            reason=reason,
+            max_chars=budget,
+            generation=generation_stub if generation is None else generation,
+        )
+        if timings is not None:
+            packet["timings"] = timings.as_dict()
+        if budget_caused:
+            active_budget = request_budget_module.current()
+            block = active_budget.as_response_block() if active_budget is not None else None
+            if block is not None:
+                packet["request_budget"] = block
+        if thread_carry is not None:
+            identity_now, thread_now, started, state, salt_now = thread_carry
+            _withhold_vault_generation(vault_root, packet, purpose=purpose)
+            token_now = (
+                working_set_runtime_module.mint_continuity(
+                    packet,
+                    identity=identity_now,
+                    thread=thread_now,
+                    thread_ns=started,
+                    salt=salt_now,
+                )
+                if carry_thread
+                else ""
+            )
+            if token_now:
+                packet["continuity"] = token_now
+            packet["generation"]["continuity_thread"] = state
+        return packet
+
+    if not turn.strip():
+        return _abstain("unresolved")
+    if working_set_index_module.disabled():
+        # The tool stays on the surface under the kill switch so the published
+        # tool-surface digest is independent of the environment; it just abstains.
+        return _abstain("disabled")
+
+    # The request budget is checked before EVERY stage below, not only here:
+    # `working_set_module.budget_exhausted(stage)` is the one shared helper,
+    # called again at each later boundary (readiness, lexical, release,
+    # then — inside `compile_packet`/`run_lanes` — semantic evidence, anchor
+    # resolution, role selection, current state, each role lane, and packet
+    # build) and finally before the guard. There is no safe point to
+    # interrupt a stage already running (see `rerank_max_candidates`'s
+    # docstring for the same constraint on a synchronous model call), so a
+    # budget that runs out mid-flight is caught at the NEXT boundary rather
+    # than only at entry — an entry-only check cannot fire for a request
+    # whose client gave up while the server kept working well past the
+    # 50s `request_budget.MCP_REQUEST_BUDGET_SECONDS` origin budget (or, on
+    # the REST/CLI doors, the `ACTIVATION_DOOR_BUDGET_SECONDS` the public
+    # wrapper bound above).
+    if working_set_module.budget_exhausted("working_set.freshness"):
+        return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+
+    # A managed reader with a live event index never reprojects broad entries
+    # or cold-walks the vault on the request thread. `require_live_recall`
+    # binds this request's freshness snapshot to the same fail-fast rule
+    # `find()` derives for itself (managed runtime + live event indexes) for
+    # the ESTABLISHED-but-MISMATCHED case; `managed_cold` covers the other
+    # half find() never has to, because find()'s own catalog-admission gate
+    # already proves the registry live before it ever reaches that rule.
+    #
+    # The final rule is in three parts, all sharing one `recall_is_live` read
+    # so they can never disagree about which case a request is in:
+    #   - ESTABLISHED and MISMATCHED (was live, now a different policy
+    #     identity): `require_live_recall=True` below fails fast — no
+    #     reprojection, no walk. Regression test:
+    #     `test_managed_activation_fails_fast_on_a_mismatched_recall_identity`.
+    #   - NEVER LIVE and ACTIVELY SEEDING (`managed_cold`): construct NO
+    #     projection at all — not even the offline-style cold-walk fallback.
+    #     A prior round's fix (the `recall_is_live` term above) stopped the
+    #     mismatched case from reprojecting, but left this case falling
+    #     through to `FreshnessSnapshot`'s offline branch, which calls
+    #     `freshness._cold_recall_projection_scope_snapshot` — a full
+    #     directory walk of the KB scope, ON THE REQUEST THREAD, racing the
+    #     watcher's own walk of the same tree (measured: 82 KB directory
+    #     enumerations for one cold managed request). `ensure_index` below
+    #     still runs and still reports `index_warming` honestly when the
+    #     anchor index is ALSO cold (existing test
+    #     `test_cold_activation_abstains_before_starting_retrieval` stays
+    #     green: same reason, same `_schedule_build` call, same
+    #     `working_set.readiness` stage). When the anchor index happens to be
+    #     warm anyway, activation abstains `index_warming` explicitly right
+    #     after readiness, rather than serving lexical/role evidence against a
+    #     recall registry it cannot prove current.
+    #
+    #     `managed_cold` requires `freshness.recall_seed_pending(vault_root,
+    #     "kb")`, not merely `not recall_live`, precisely so this abstention
+    #     stays bounded rather than becoming a second, silent way to hang
+    #     forever. "Not live yet" alone is true both while the watcher's boot
+    #     walk is genuinely in flight (seconds) AND whenever nothing is
+    #     seeding the scope at all — the watcher never started (e.g. the KB
+    #     directory does not exist yet) or its one seed attempt already
+    #     raised and nothing retries before the next 300s periodic reconcile.
+    #     Gating on `recall_is_live` alone could not tell those apart, and the
+    #     second case would abstain `index_warming` on every request
+    #     indefinitely instead of resolving. `recall_seed_pending` is
+    #     announced just before `freshness.seed(...)` starts its walk
+    #     (`file_watcher.py`'s `_reconcile_once`, `seed=True`) and cleared in
+    #     a `finally` the instant that walk ends, success or failure — so it
+    #     is `True` for exactly the bounded window worth waiting out, and
+    #     `False` the moment there is nothing left to wait for. When it is
+    #     `False`, `managed_cold` is `False` too and this request instead
+    #     takes the "not managed_cold" branch below with
+    #     `require_live_recall=False` — the same offline-style cold-walk
+    #     fallback a non-managed runtime always used, which cannot hang.
+    #   - LIVE and MATCHING: `require_live_recall=True` resolves from the live
+    #     registry with no walk — the ordinary fast path, unchanged.
+    managed_runtime = readiness_module.runtime_managed()
+    event_indexes_on = freshness_module.event_indexes_enabled()
+    recall_live = freshness_module.recall_is_live(vault_root, "kb")
+    managed_cold = (
+        managed_runtime
+        and event_indexes_on
+        and not recall_live
+        and freshness_module.recall_seed_pending(vault_root, "kb")
+    )
+    require_live_recall = managed_runtime and event_indexes_on and recall_live
+
+    freshness_key: Any = ""
+    lexical_freshness = None
+    snapshot = None
+    if not managed_cold:
+        with find_types.timing_span(timings, "working_set.freshness"):
+            try:
+                # No `timings` here: the snapshot would report its projection as
+                # a child of this span, and the table's stages must stay flat so
+                # they sum to no more than the total.
+                snapshot = find_module.FreshnessSnapshot(
+                    vault_root, require_live_recall=require_live_recall
+                )
+                freshness_key = snapshot.projection_key("kb")
+                lexical_freshness = snapshot.for_scope("kb")
+            except find_module.RetrievalIndexWarming as exc:
+                # A managed identity mismatch fails fast into the same typed
+                # warming/unavailable outcome a cold catalogue gets below — never a
+                # silent degrade to an empty freshness key, which would let the
+                # request keep serving against a registry it could not prove
+                # current for this principal's access policy.
+                reason = (
+                    working_set_runtime_module.WARMING
+                    if exc.status == "warming"
+                    else working_set_runtime_module.UNAVAILABLE
+                )
+                return _abstain(reason)
+            except Exception:  # noqa: BLE001 - unavailable freshness never grants disclosure
+                # Abstain right here rather than continuing in a half-state:
+                # freshness that could not be established grants nothing, and
+                # every later stage that needs it would either re-attempt the
+                # same unbounded work (lexical's `snapshot.recall_checkpoint`,
+                # and `_units_lane`'s own fallback `FreshnessSnapshot`
+                # reconstruction — `working_set.py`'s `_units_lane`, left
+                # unchanged for its other callers) or silently run without
+                # it. `snapshot` is therefore never None when lanes run on
+                # this path, so that fallback is unreachable from here.
+                log.warning("activation freshness unavailable; abstaining", exc_info=True)
+                return _abstain(working_set_runtime_module.UNAVAILABLE)
+
+    if working_set_module.budget_exhausted("working_set.readiness"):
+        return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+
+    # A cold managed index can only return an empty warming packet. Check it
+    # before optional retrieval evidence loads the hybrid corpus and models.
+    # The serving path still checks freshness after retrieval; readiness here
+    # grants neither a cached packet nor a disclosure decision.
+    with find_types.timing_span(timings, "working_set.readiness"):
+        try:
+            state, index, _stale = working_set_runtime_module.ensure_index(
+                vault_root, freshness_stamp=working_set_runtime_module._key_text(freshness_key)
+            )
+            evidence_token = index.token() if index is not None else None
+            anchor_rows = index.anchors() if index is not None else ()
+        except Exception:  # noqa: BLE001 - unreadable derived state abstains
+            log.warning("activation index readiness unavailable", exc_info=True)
+            state, index = working_set_runtime_module.UNAVAILABLE, None
+    if index is not None:
+        index.close()
+    if state != working_set_runtime_module.READY or index is None:
+        return _abstain(state)
+
+    if managed_cold:
+        # The anchor index happened to be warm even though the recall
+        # registry has never gone live: lexical evidence and role lanes
+        # would have nothing current to read against, so activation
+        # abstains here rather than either reprojecting or cold-walking.
+        return _abstain(working_set_runtime_module.WARMING)
+
+    if working_set_module.budget_exhausted("working_set.lexical"):
+        return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+
+    # Activation's search domain is its small anchor catalogue.
+    # Ordinary hybrid recall loads note-chunk and media matrices even for a
+    # small result limit; none belongs on this bounded request path. The release
+    # object is still mandatory: the final guard independently decides every
+    # packet reference under the current audience and purpose.
+    lexical_seconds = 0.0
+    try:
+        _policy, release_active = egress_module.gate_state(vault_root)
+        # Measured unconditionally, not read back off `timings`: the shipped
+        # hook calls this door WITHOUT `include_timings`, so there is no
+        # collector on the very path the carry's budget gate exists to
+        # protect. The carry runs the same query shape against the same
+        # catalogue, so what this pass cost is the best estimate of what the
+        # second one will, and the gate asks the budget for room in
+        # proportion to it.
+        lexical_started = time.monotonic()
+        # How many of the turn's units the bounded stage kept and dropped;
+        # counts only, so the diagnostic never carries the turn's words.
+        lexical_selection: dict[str, int] = {}
+        with find_types.timing_span(timings, "working_set.lexical"):
+            if anchor:
+                hits, lexical_state = [], "agent_choice"
+            else:
+                hits, lexical_state = working_set_runtime_module.lexical_evidence(
+                    vault_root,
+                    turn,
+                    anchor_rows,
+                    limit=(
+                        egress_module.pool_limit(ACTIVATE_RETRIEVAL_LIMIT)
+                        if release_active
+                        else ACTIVATE_RETRIEVAL_LIMIT
+                    ),
+                    freshness=lexical_freshness,
+                    recall_checkpoint=(snapshot.recall_checkpoint("kb") if snapshot else None),
+                    selection=lexical_selection,
+                )
+        lexical_seconds = max(0.0, time.monotonic() - lexical_started)
+        if timings is not None and lexical_selection:
+            timings.profile["working_set.lexical"] = dict(lexical_selection)
+        if working_set_module.budget_exhausted("working_set.release"):
+            return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+        with find_types.timing_span(timings, "working_set.release"):
+            release = egress_module.annotate_hits(
+                vault_root, hits, limit=ACTIVATE_RETRIEVAL_LIMIT, purpose=purpose
+            )
+    except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
+        log.warning("activation release plane unavailable; abstaining", exc_info=True)
+        return _abstain("unavailable")
+    # An `anchor` naming no row of THIS index but an eligible agent-picked
+    # page (design close-memory-loop, U7) is decided on the release plane
+    # HERE, before the compile that page would otherwise buy nothing for: a
+    # withheld page refuses identically whether or not it was ever compiled,
+    # and running the compile first is the entire cost difference measured
+    # between a withheld ref (80 ms) and an unknown one (15 ms). A ref naming
+    # no eligible page is refused at the same point, so every refused class
+    # leaves in one place. An `anchor` that DOES match a row of the index is
+    # untouched — that path's own timing is not this fix's scope — and any
+    # failure here only skips the early exit: the unmodified
+    # compile-then-guard sequence below still decides every ref exactly as
+    # it always has.
+    if anchor:
+        try:
+            named_rows = {
+                spelling
+                for row in anchor_rows
+                for spelling in (
+                    str(getattr(row, "ref", None) or ""),
+                    str(getattr(row, "path", "") or ""),
+                    str(getattr(row, "anchor_id", "") or ""),
+                )
+                if spelling
+            }
+            if anchor not in named_rows:
+                # Every refused class leaves HERE, at one point: a ref naming
+                # no eligible page (unknown, raw material, navigation, retired,
+                # non-canonical) exactly as a withheld one. Refused after the
+                # compile instead, the unknown classes took about 3 ms longer
+                # than a withheld page, which is its own answer.
+                agent_page = working_set_module._eligible_agent_page(vault_root, anchor)
+                if agent_page is None or not egress_module.quick_page_visible(
+                    vault_root, agent_page, purpose=purpose
+                ):
+                    raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+        except ValueError:
+            raise
+        except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
+            log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
+    # The caller's conversation (the token's thread): a valid one is this
+    # caller's session tier when it supplied no session key of its own. An
+    # invalid or lapsed one is reported and served as keyless, never refused,
+    # and every packet below carries a thread forward, a fresh one if need be.
+    identity = working_set_runtime_module.identity_for(vault_root)
+    # The key the thread's times are signed with: they are the caller's
+    # claim until the server's MAC over them verifies.
+    salt = working_set_heat_module.load(vault_root).salt
+    thread, thread_ns, thread_state = working_set_runtime_module.read_continuity_thread(
+        continuity, identity=identity, salt=salt
+    )
+    if thread_state != working_set_runtime_module.CONTINUITY_APPLIED:
+        thread, thread_ns = working_set_runtime_module.new_thread()
+        caller_thread = None
+    else:
+        caller_thread = thread
+    thread_carry = (identity, thread, thread_ns, thread_state, salt)
+    # The caller's derived keys, once: ruling S5-1's tiers, the pick's own
+    # attribution and the session's last served thread all use the same one.
+    attribution = (
+        working_set_heat_module.attribution_for(
+            vault_root,
+            client=client,
+            session=session,
+            workspace=workspace,
+            salt=salt or None,
+            thread=caller_thread,
+        )
+        if client or session or workspace or caller_thread
+        else None
+    )
+    packet = working_set_runtime_module.serve(
+        vault_root,
+        turn=turn,
+        max_chars=budget,
+        purpose=purpose,
+        timings=timings,
+        freshness_key=freshness_key,
+        continuity=continuity,
+        anchor=anchor,
+        retrieval_paths=frozenset(hit.path for hit in release.hits),
+        lexical_state=lexical_state,
+        evidence_token=evidence_token,
+        freshness_snapshot=snapshot,
+        lexical_seconds=lexical_seconds,
+        attribution=attribution,
+    )
+    # An override that resolved nothing named no anchor of this index. Refused
+    # here, before the guard, with the same words a withheld ref gets below —
+    # and deliberately NOT for the server's own abstentions (`index_warming`,
+    # `disabled`, `unavailable`), which say something about this server rather
+    # than about the ref the caller passed.
+    if anchor and _abstention_reason(packet) == "unresolved":
+        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+    # Only gated when `packet` actually carries content: an already-abstained
+    # packet (e.g. `compile_packet` gave up at an earlier budget boundary)
+    # has nothing for the guard to spend time on, so checking again here
+    # would just record a second, redundant `note_skipped` for a stage that
+    # was never really at risk — `note_skipped` should name the ONE stage
+    # that first ran out of room, not every boundary crossed afterward while
+    # carrying nothing.
+    if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
+        return _abstain(
+            working_set_runtime_module.UNAVAILABLE,
+            generation=packet.get("generation") or generation_stub,
+            budget_caused=True,
+        )
+    # Unconditional: every served packet crosses the guard. A guard that only ran
+    # when the retrieval lane happened to succeed is not a guard.
+    try:
+        with find_types.timing_span(timings, "working_set.guard"):
+            guarded = egress_module.guard_working_set(vault_root, packet, release, purpose=purpose)
+    except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
+        log.warning("activation egress guard failed; abstaining", exc_info=True)
+        return _abstain("unavailable", generation=packet.get("generation") or generation_stub)
+    # The release plane's own decision, reused rather than re-derived: the
+    # override anchor was the packet's ONLY anchor, so the guard emptying the
+    # packet IS the answer to "may this audience see that ref".
+    #
+    # What is equal between an unknown ref and a withheld one is the RESPONSE —
+    # same code, same words, neither naming the ref. The work is not: a withheld
+    # ref has been compiled and guarded by the time it is refused, an unknown one
+    # abstains before the guard, and the two are separable by latency (measured
+    # 168 ms against 375 ms, non-overlapping). That is left as it is rather than
+    # padded, because equalising it would mean either doing the withheld ref's
+    # work for every unknown one or timing the response, and neither buys
+    # anything: the same audience asking the same vault an ORDINARY turn already
+    # learns as much from `missing[].reason = "withheld"`, which is the honest
+    # marker saying a section lost something. A timing side channel that discloses
+    # strictly less than a documented field is not the thing to spend a request
+    # budget closing.
+    # The guard answers an L0 anchor as `unresolved` and a notice-level one as
+    # `withheld`; either way the override's one anchor is gone.
+    if anchor and (
+        guarded is None or _abstention_reason(guarded) in {"withheld", "unresolved"}
+    ):
+        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+    if guarded is None:
+        return _abstain(
+            "withheld",
+            generation=packet.get("generation") or generation_stub,
+            carry_thread=False,
+        )
+    packet = guarded
+    # Before the token is minted: it carries the index generation too.
+    _withhold_vault_generation(vault_root, packet, purpose=purpose)
+    token = working_set_runtime_module.mint_continuity(
+        packet, identity=identity, thread=thread, thread_ns=thread_ns, salt=salt
+    )
+    if token:
+        packet["continuity"] = token
+    packet.setdefault("generation", {})["continuity_thread"] = thread_state
+    # Whether the token names what this packet served: an abstention, or a
+    # packet whose only anchor is a `partial` carry, still carries a thread
+    # but no refs, and no served thread for the session to remember.
+    minted = working_set_runtime_module.decode_continuity(token) if token else None
+    served = bool(minted and minted["refs"])
+    if anchor:
+        # The pick is also the learning sensor (close-memory-loop step 5):
+        # classified after the guard admitted it and BEFORE it is recorded as
+        # heat, against the profile this request compiled with. Its advisory
+        # rides on this response only, like `episode_due`: never cached,
+        # never part of the key, and nothing it names is written.
+        learning = working_set_learning_module.observe_pick(
+            vault_root,
+            turn=turn,
+            packet=packet,
+            profile=working_set_heat_module.profile(vault_root),
+            attribution=attribution,
+            purpose=purpose,
+        )
+        if learning is not None:
+            packet["learning"] = learning
+        # The agent's admitted choice is a deliberate act (design D6): after the
+        # guard, so a refused or withheld pick never reaches here. Serving a
+        # packet is never heat; only this seam and the read and citation seams
+        # record a selection.
+        working_set_heat_module.note_selection(
+            vault_root,
+            [
+                str(item.get("path") or "")
+                for item in packet.get("anchors") or ()
+                if isinstance(item, Mapping) and item.get("status") == "resolved"
+            ],
+            "pick",
+            attribution=attribution,
+            ts_ns=working_set_runtime_module.continuity_minted_ns(token) if token else None,
+        )
+    if attribution is not None and attribution.session:
+        # The session's last served thread (ruling S5-1): what its token names,
+        # after the guard, so a compacted or resumed conversation that lost its
+        # token still continues its own work. Never an event in the ring:
+        # serving is not heat for anyone else's ranking.
+        working_set_heat_module.note_session(
+            vault_root,
+            working_set_heat_module.SessionMark(
+                session=attribution.session,
+                workspace=attribution.workspace,
+                client=attribution.client,
+                paths=tuple(
+                    str(item.get("path") or "")
+                    for item in (packet.get("anchors") or ())
+                    if served
+                    and isinstance(item, Mapping)
+                    and item.get("status") in working_set_runtime_module.MINTED_STATUSES
+                    and item.get("path")
+                ),
+                minted_ns=(
+                    working_set_runtime_module.continuity_minted_ns(token) or time.time_ns()
+                    if served
+                    else 0
+                ),
+                seen_ns=time.time_ns(),
+            ),
+        )
+    # After the guard and never cached: advice to this caller about recording
+    # its conversation, not material about the vault, and it names no page.
+    episode_due = episode_nudge_module.on_activation(vault_root)
+    if episode_due is not None:
+        packet["episode_due"] = episode_due
+    if timings is not None:
+        packet["timings"] = timings.as_dict()
+    # Deliberately NOT `_with_due_state`. That helper consults the emission
+    # ledger and marks it emitted, so an activation carrying the block would eat
+    # the next recall's delta — a read-only operation changing what a later read
+    # returns. Recall is the only `due_state` carrier.
+    return packet
 
 
 def op_read_memory(
@@ -5543,18 +7113,50 @@ def op_read_memory(
             )
         resolved_path = _resolve_memory_identifier(vault_root, path)
         try:
-            page = get_page_module.get_page(vault_root, path=resolved_path)
+            prepared = get_page_module.prepare_page_read(vault_root, path=resolved_path)
         except get_page_module.GetError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
+        _refuse_policy_tree_read(
+            prepared.resolved_relative,
+            missing_path=prepared.missing_path,
+        )
+        try:
+            page = get_page_module.get_page(vault_root, path=resolved_path, _prepared=prepared)
+        except get_page_module.GetError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        # The page decision `op_get` takes, taken BEFORE any unit is resolved.
+        # A unit, its parent citation and its surrounding Markdown are the
+        # page's own contents, and whether a reference resolves is itself a
+        # fact about the page. A unit is served only from a page released in
+        # full: its span and context are offsets into the raw body, and below
+        # L6 the released body is a projection no window of which is that
+        # span. Anything less answers exactly as an absent page does.
+        released = egress_module.annotate_page(
+            vault_root,
+            page.as_dict(include_raw=False),
+            snapshot_content=page.content,
+            stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
+        )
+        if (
+            released is None
+            or released.get("body") != page.body
+            or released.get("content_hash") != page.content_hash
+        ):
+            raise ValueError(
+                "NOT_FOUND: file does not exist: "
+                f"{get_page_module.missing_path_for(resolved_path)}"
+            )
         query_log.log_get_call(
             read_path=page.path,
             frontmatter_only=False,
             include_history=False,
         )
+        working_set_heat_module.note_selection(vault_root, [page.path], "read")
         return semantic_unit_read_module.read_semantic_unit(
             vault_root,
             page=page,
             unit_ref=unit_ref,
+            frontmatter=released.get("frontmatter"),
         ).as_dict()
     return op_get(
         vault_root,
@@ -5642,6 +7244,7 @@ def op_remember(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: _DomainVocabularyDecisionArgument = None,
 ) -> dict:
     """Remember a durable conclusion as compiled governed knowledge.
 
@@ -5710,6 +7313,9 @@ def op_remember(
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash covered by the relation review.
         relation_review_reason: Audit reason for a reviewed-none disposition.
+        vocabulary_decision: After a vocabulary_preparation response, submit its
+            evidence_fingerprint with outcome reuse, create, or defer and the
+            reviewed canonical value. The response is bound to that evidence.
     """
     return op_note(
         vault_root,
@@ -5747,7 +7353,52 @@ def op_remember(
         relation_disposition=relation_disposition,
         relation_review_hash=relation_review_hash,
         relation_review_reason=relation_review_reason,
+        vocabulary_decision=vocabulary_decision,
     )
+
+
+
+def _refuse_claimed_aliases(
+    vault_root: Path, path: str, value: object, identity_decision: dict | None = None
+) -> None:
+    """Refuse an `aliases` patch naming what another page already answers to.
+
+    The same guard `create-entity` runs (`entity_candidates.claimed_names`):
+    an alias another page holds would make a turn naming it resolve both. The
+    page's own title and current aliases are never a collision. A genuinely
+    shared name is admitted by an explicit `distinct` `identity_decision`
+    bound to that alias's candidate fingerprint; a page the caller may not see
+    never claims an alias, so a restricted caller is neither refused nor asked.
+    """
+    names = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    aliases = [str(item).strip() for item in names if isinstance(item, str) and str(item).strip()]
+    if not aliases:
+        return
+    rel = path if path.endswith(".md") else f"{path}.md"
+    claimed = entity_candidates_module.claimed_names(vault_root, aliases, exclude_path=rel)
+    if not claimed:
+        return
+    fingerprint = entity_candidates_module.claim_set_fingerprint(
+        vault_root, list(claimed), exclude_path=rel
+    )
+    if identity_decision is None:
+        alias, paths = next(iter(claimed.items()))
+        raise ValueError(
+            f"ENTITY_EXISTS: another page already answers to the alias {alias!r} "
+            f"({', '.join(paths)}); pick a name only this page answers to, or pass "
+            "identity_decision {outcome: distinct} with this candidate_fingerprint if it "
+            f"is a different identity (candidate_fingerprint: {fingerprint})"
+        )
+    try:
+        decision = link_module._identity_decision(identity_decision)  # noqa: SLF001
+    except link_module.LinkError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+    if decision["candidate_fingerprint"] != fingerprint:
+        raise ValueError(
+            "STALE_IDENTITY_DECISION: what these aliases resolve to changed since the "
+            "decision, or the decision was made for other names; decide again "
+            f"(candidate_fingerprint: {fingerprint})"
+        )
 
 
 def op_edit_memory(
@@ -5756,6 +7407,7 @@ def op_edit_memory(
     why: str,
     operation: edit_operations_module.EditOperation = None,  # type: ignore[assignment]
     validate_only: bool = False,
+    identity_decision: _IdentityDecisionArgument = None,
     **legacy: Any,
 ) -> dict:
     """Edit an existing memory page with an auditable reason.
@@ -5795,6 +7447,10 @@ def op_edit_memory(
         validate_only: Preview the edit without committing it. Accepted here or
             as `operation.validate_only`; giving it in both places is fine when
             they agree. Same meaning as on `remember` and `replace_memory`.
+        identity_decision: `{outcome: "distinct", candidate_fingerprint}` for an
+            `aliases` patch naming a name another page already answers to, when
+            the name is genuinely shared; the fingerprint comes from that
+            refusal. Not needed for names only withheld pages answer to.
 
     The previous flat keyword arguments remain accepted by direct Python/runtime
     callers for one compatibility release, but are deprecated and intentionally
@@ -5803,10 +7459,44 @@ def op_edit_memory(
     arguments: dict[str, Any] = {"path": path, "why": why, **legacy}
     if operation is not None:
         arguments["operation"] = operation
+    if identity_decision is not None:
+        arguments["identity_decision"] = identity_decision
     if validate_only:
         arguments["validate_only"] = True
     normalized = edit_operations_module.normalize_edit_arguments(arguments)
-    return op_edit(vault_root, **normalized)
+    result = op_edit(vault_root, **normalized)
+    if normalized.get("field") == working_set_index_module.LEARNED_ALIASES_FIELD:
+        _warn_on_skipped_learned_aliases(vault_root, normalized.get("value"), result)
+    return result
+
+
+def _warn_on_skipped_learned_aliases(vault_root: Path, value: Any, result: Any) -> None:
+    """Tell the agent now about a `learned_aliases` entry the activation index
+    will skip, with the index's own rules (`learned_alias_verdicts`). Never
+    blocks: the page write stands, the entry simply does nothing."""
+    if not isinstance(result, dict):
+        return
+    try:
+        conventions = activation_conventions_module.load_conventions(vault_root).conventions
+        _accepted, rejected = working_set_index_module.learned_alias_verdicts(
+            value,
+            stopwords=conventions.stopwords,
+            filler=activation_conventions_module.shipped_conventions().conventions.referential_filler,
+        )
+    except Exception:  # noqa: BLE001 - advice about a write must never fail it
+        log.debug("learned_aliases verdict unavailable", exc_info=True)
+        return
+    if not rejected:
+        return
+    warnings = result.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = list(warnings or ())
+        result["warnings"] = warnings
+    skipped = "; ".join(f"{entry!r} ({reason})" for entry, reason in rejected)
+    warnings.append(
+        f"learned_aliases: the activation index will skip {skipped}. "
+        "A learned name needs a word of its own that is not a function or filler word."
+    )
 
 
 def op_observe_memory(
@@ -5896,7 +7586,14 @@ def op_observe_memory(
             "INVALID_PATH: observe_memory requires a governed KB-relative path or reference"
         )
     try:
-        resolved_path = memory_refs_module.resolve_identifier_read_only(vault_root, path)
+        if raw_path.lower().startswith(
+            memory_refs_module.REF_PREFIX
+        ) and egress_module.restricted_release_filter(vault_root) is not None:
+            # A reference only a page withheld from the caller holds resolves as
+            # an unknown one, before anything is loaded or validated.
+            resolved_path = egress_module.resolve_visible_identifier(vault_root, path)
+        else:
+            resolved_path = memory_refs_module.resolve_identifier_read_only(vault_root, path)
     except memory_refs_module.ReferenceError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
     if raw_path.lower().startswith(("exomem://vault/", "exomem://source/")) and not (
@@ -5978,6 +7675,7 @@ def op_replace_memory(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: _DomainVocabularyDecisionArgument = None,
 ) -> dict:
     """Supersede an existing compiled memory with a new version.
 
@@ -6027,6 +7725,8 @@ def op_replace_memory(
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash covered by the relation review.
         relation_review_reason: Audit reason for a reviewed-none disposition.
+        vocabulary_decision: Evidence-bound `reuse`, `create`, or `defer` response
+            returned by an experiment-domain vocabulary preparation.
     """
     return op_replace(
         vault_root,
@@ -6065,6 +7765,7 @@ def op_replace_memory(
         relation_disposition=relation_disposition,
         relation_review_hash=relation_review_hash,
         relation_review_reason=relation_review_reason,
+        vocabulary_decision=vocabulary_decision,
     )
 
 
@@ -6088,7 +7789,8 @@ def op_capture_source(
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
 
-    Takes `content` for text or `files` for attached file handles, stored
+    Takes `content` for text or `files` for attached file handles (a local
+    client passes the handle `exomem attach --lane source` prints), stored
     losslessly under `Sources/`. This command is for raw material; proof-bearing
     artifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the
     artifact is for, not by what the client can carry.
@@ -6132,7 +7834,7 @@ def op_capture_source(
     if files or adoption is not None:
         from . import client_artifacts
 
-        return client_artifacts.capture_source_artifacts(
+        captured = client_artifacts.capture_source_artifacts(
             vault_root,
             source_schema=source_schema,
             title=title,
@@ -6146,6 +7848,8 @@ def op_capture_source(
             projects=projects,
             adoption=adoption,
         )
+        _note_committed_artifact_targets(captured)
+        return captured
     source = op_add(
         vault_root,
         source_schema,
@@ -6161,6 +7865,9 @@ def op_capture_source(
         projects=projects,
     )
     out: dict = {"source": source}
+    if "vocabulary_resolution" in source:
+        # The terminal reads the identity record from the leaf's top level.
+        out["vocabulary_resolution"] = source["vocabulary_resolution"]
     if compile_guidance:
         try:
             out["compile_guidance"] = op_propose_compilation(
@@ -6171,6 +7878,293 @@ def op_capture_source(
         except ValueError as exc:
             out["compile_guidance"] = {"available": False, "error": str(exc)}
     return out
+
+
+_EpisodeProposalArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["route", "alternatives", "evidence", "reason", "leaves"],
+                    "properties": {
+                        "route": {
+                            "enum": [
+                                "existing_page",
+                                "semantic_unit",
+                                "focused_note",
+                                "entity",
+                                "records",
+                                "planning",
+                                "experiment",
+                                "source",
+                                "evidence",
+                                "relation_only",
+                                "no_capture",
+                            ]
+                        },
+                        "target": {"type": "string"},
+                        "title": {"type": "string"},
+                        "alternatives": {
+                            "type": "array",
+                            "maxItems": 8,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["target", "scope", "version"],
+                                "properties": {
+                                    "target": {"type": "string"},
+                                    "scope": {"type": "string"},
+                                    "version": {"type": "string"},
+                                },
+                            },
+                        },
+                        "evidence": {"enum": ["complete", "truncated", "missing"]},
+                        "reason": {"type": "string"},
+                        "leaves": {
+                            "type": "array",
+                            "maxItems": 16,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["leaf_key", "effect_revision", "kind", "args"],
+                                "properties": {
+                                    "leaf_key": {"type": "string"},
+                                    "effect_revision": {"type": "integer", "minimum": 1},
+                                    "kind": {
+                                        "enum": [
+                                            "create-note",
+                                            "create-entity",
+                                            "accept-relation",
+                                            "edit",
+                                            "supersede",
+                                            "append-record",
+                                        ]
+                                    },
+                                    "args": {"type": "object"},
+                                },
+                            },
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+
+
+
+def op_episode_memory(
+    vault_root: Path,
+    source_schema: object,
+    action: Literal[
+        "record", "inspect", "candidates", "prepare", "disposition", "resume", "coverage"
+    ],
+    episode: str | None = None,
+    subject: str | None = None,
+    summary: str | None = None,
+    worked_on: list[str] | None = None,
+    decided: list[str] | None = None,
+    open: list[str] | None = None,  # noqa: A002 - the recap's own field name
+    said: list[str] | None = None,
+    about: list[str] | None = None,
+    client: str | None = None,
+    candidate: str | None = None,
+    proposal: _EpisodeProposalArgument = None,
+    disposition: Literal[
+        "routed", "no_capture", "uncertain", "rejected", "deferred", "awaiting_authority"
+    ]
+    | None = None,
+    reason: str | None = None,
+    input_revision: int | None = None,
+    journal_digest: str | None = None,
+    order: list[str] | None = None,
+    max_leaves: int | None = None,
+    postcommit: bool | None = None,
+) -> dict:
+    """Record what a conversation worked on, decided and left open, for the next session on any client.
+
+    Call `record` once when a conversation reaches a decision or a stopping
+    point, and skip it when nothing durable happened. You write the recap:
+    short one-line items, never a transcript. It is kept as a bounded Source
+    under `Sources/Episodes/`, and the newest recap of each conversation leads
+    the `recent_context` block `activate_context` serves on every client.
+    Recording again under the same `episode` with changed content adds a
+    revision and retires the previous one; an identical retry writes nothing.
+
+    A recorded episode can also carry typed candidates for its durable
+    changes: `prepare` one candidate's destination, set its `disposition`
+    (including honest no_capture, deferred or rejected ones), and `resume`
+    to execute the routed ones. A leaf is one typed step for an existing
+    writer, of a kind its route owns: focused_note creates a note, entity an
+    entity, relation_only accepts a relation, existing_page and semantic_unit
+    edit or supersede, and records appends one item to a Records collection
+    (append-record: {collection, item, item_key?, body?, why,
+    expected_container_hash}). It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
+    service enables episode execution. After it runs, make one final
+    `coverage` pass: compare the input it names with each receipt and its
+    readback, prepare anything omitted or misrouted, then attest with
+    `resume` and `postcommit`. A committed note is not coverage.
+
+    Args:
+        action: `record` writes a recap revision; `inspect` reads this
+            episode's revision history back; `candidates` reads its
+            candidates; `prepare`, `disposition` and `resume` plan and
+            execute them; `coverage` reads the final pass's evidence.
+        episode: The `ep-` key a previous record returned, or the one a hook
+            named. Omit it on a conversation's first record and reuse the
+            returned key for the rest of that conversation. Required for
+            every other action.
+        subject: What the conversation was about, one line, at most 120
+            characters.
+        summary: One line on where it stands, at most 180 characters.
+        worked_on: Up to 5 one-line items, 200 characters each.
+        decided: Up to 5 one-line items, 200 characters each.
+        open: Up to 5 one-line items left open, 200 characters each. At least
+            one of `worked_on`, `decided` or `open` is required.
+        said: Up to 3 verbatim user statements worth keeping, 300 characters
+            each.
+        about: Up to 3 `exomem://` refs of pages the conversation concerned.
+            Recording marks them as this conversation's latest work, so a
+            following "continue" resumes them.
+            Refs you cannot see are dropped and counted in `about_skipped`.
+        client: Optional lowercase client label, e.g. `claude-code` or
+            `chatgpt`.
+        candidate: For `prepare`/`disposition`: a stable key you choose for
+            one durable change, reused when you revise it.
+        proposal: For `prepare`: {route, target?, title?, alternatives,
+            evidence, reason, leaves: [{leaf_key, effect_revision, kind,
+            args}]}. The destination is your call: `alternatives` lists up to
+            8 pages you inspected as possible homes, each {target: its
+            `exomem://` ref, scope: its declared scope in a line, version: the
+            `content_hash` you read}; an open page has no priority among them.
+            existing_page and semantic_unit name the `target` every leaf
+            writes. A changed leaf needs the next `effect_revision`; a
+            committed one cannot change.
+        disposition: For `disposition`: routed, no_capture, uncertain,
+            rejected, deferred or awaiting_authority.
+        reason: For `disposition`: why, in one or two sentences.
+        input_revision: For `resume`: the input revision your coverage
+            review covered, the current one.
+        journal_digest: For `resume`: the `journal_digest` your last
+            candidates, prepare or disposition result returned. A resume
+            after any later change is refused with EPISODE_REVISION_CONFLICT.
+        order: For `resume`: leaf ids to run, in this order.
+        max_leaves: For `resume`: at most this many leaves this pass, 1 to
+            16 (default 8); the rest stay pending.
+        postcommit: For `resume`: true attests your review of the committed
+            results instead of executing anything.
+
+    Returns: record -> {episode, revision, source: {ref, path, title},
+        idempotent, recovery, ledger, about_skipped}; inspect -> {episode,
+        revisions: [{revision, recovery}], latest_source_ref,
+        coverage_current}; candidates/prepare/disposition -> {episode,
+        input_revision, candidates: [{candidate_key, route, disposition,
+        pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete,
+        execution}; resume adds {status, executed, replayed, stale,
+        diverged, reconciled, blocked, deferred, publication}; coverage adds
+        {input: {input_revision, ref, recovery}, receipts: [{candidate_key,
+        leaf_id, operation_id, receipt_digest, path, readback}]}. Every
+        candidates result carries coverage: {attempted, pending,
+        covered_through_input_revision, next}. Newlines, credential-shaped text and anything
+        over a cap are refused with nothing written.
+    """
+    recap = {
+        "subject": subject,
+        "summary": summary,
+        "worked_on": worked_on,
+        "decided": decided,
+        "open": open,
+        "said": said,
+        "about": about,
+        "client": client,
+    }
+    workflow = {
+        "candidate": candidate,
+        "proposal": proposal,
+        "disposition": disposition,
+        "reason": reason,
+        "input_revision": input_revision,
+        "journal_digest": journal_digest,
+        "order": order,
+        "max_leaves": max_leaves,
+        "postcommit": postcommit,
+    }
+    allowed, required = {
+        "record": (set(recap), set()),
+        "inspect": (set(), set()),
+        "candidates": (set(), set()),
+        "coverage": (set(), set()),
+        "prepare": ({"candidate", "proposal"}, {"candidate", "proposal"}),
+        "disposition": (
+            {"candidate", "disposition", "reason"},
+            {"candidate", "disposition", "reason"},
+        ),
+        "resume": (
+            {"input_revision", "journal_digest", "order", "max_leaves", "postcommit"},
+            {"input_revision", "journal_digest"},
+        ),
+    }.get(action, (None, None))
+    if allowed is None:
+        raise ValueError(
+            "EPISODE_INVALID: action must be record, inspect, candidates, prepare, "
+            "disposition, resume or coverage"
+        )
+    supplied = {**recap, **workflow}
+    if any(value is not None and name not in allowed for name, value in supplied.items()):
+        if action == "inspect":
+            raise ValueError("EPISODE_INVALID: inspect takes only an episode key")
+        raise ValueError(f"EPISODE_INVALID: {action} takes {sorted(allowed) or 'only an episode key'}")
+    if any(supplied[name] is None for name in required):
+        raise ValueError(f"EPISODE_INVALID: {action} requires {sorted(required)}")
+    if action == "inspect":
+        return episode_memory_module.inspect(vault_root, episode=episode)
+    if action == "record":
+        return episode_memory_module.record(
+            vault_root,
+            source_schema,
+            episode=episode,
+            subject=subject,
+            summary=summary,
+            worked_on=worked_on,
+            decided=decided,
+            open=open,
+            said=said,
+            about=about,
+            client=client,
+        )
+    if action == "candidates":
+        return episode_workflow_module.inspect(vault_root, episode=episode)
+    if action == "coverage":
+        return episode_workflow_module.coverage(vault_root, episode=episode)
+    if action == "prepare":
+        return episode_workflow_module.prepare(
+            vault_root, episode=episode, candidate=candidate, proposal=proposal
+        )
+    if action == "disposition":
+        return episode_workflow_module.disposition(
+            vault_root,
+            episode=episode,
+            candidate=candidate,
+            disposition=disposition,
+            reason=reason,
+        )
+    from . import due_state as due_state_module
+
+    with due_state_module.batch_scope(vault_root):
+        resumed = episode_workflow_module.resume(
+            vault_root,
+            episode=episode,
+            journal_digest=journal_digest,
+            input_revision=input_revision,
+            order=order,
+            max_leaves=max_leaves,
+            postcommit=bool(postcommit),
+        )
+    return _carrying_batch_advisories(vault_root, resumed)
 
 
 def op_compile_source(
@@ -6206,9 +8200,15 @@ def op_preserve_evidence(
     file handles, use `preserve_artifacts`; otherwise use `transfer_artifact`
     plus `/upload`. Bytes never pass through the model.
 
+    The outcome carries a terminal `state`: `stored`, or `already_stored` when
+    those exact bytes are already under that destination, in which case nothing
+    is written and the outcome names the existing path and ref.
+
     Args:
-        scope: Incident, case, project, or domain key.
-        category: Evidence category within the scope.
+        scope: Incident, case, project, or domain key. One path segment, never
+            a path. A separator or reserved character is refused, not rewritten.
+        category: Evidence category within the scope. One path segment, not a
+            path; nest with this argument rather than with `/` in `scope`.
         filename: Artifact filename, including extension.
         content: UTF-8 text to preserve as received.
         description: Optional sidecar description.
@@ -6229,23 +8229,36 @@ def op_preserve_artifacts(
     category: str,
     files: _ClientArtifactFiles,
     adoption: _OptionalArtifactAdoption = None,
+    transcriptions: _OptionalClientTranscriptions = (),  # noqa: B006 - read-only
 ) -> dict:
     """Preserve client-provided binary file handles as append-only Evidence.
 
     Use this canonical binary-preservation command when the client can supply
-    temporary HTTPS file handles. Exomem retrieves each handle server-side and
-    returns one stored or failed outcome per file; no binary data is passed as
-    base64 through model-visible arguments. Clients without file handles keep
-    using `transfer_artifact(operation="upload")` followed by `/upload`.
+    file handles: a chat client's attachments, or the handle `exomem attach`
+    prints on a local client (single use: storing its file spends it, while a
+    refused or failed file leaves it redeemable until it expires). When a
+    shared file is evidence, preserve the original first and put any
+    transcription in `transcriptions`, never instead. Exomem retrieves each handle server-side and returns one terminal
+    state per file — `stored`, `already_stored`, or
+    `failed`. `already_stored` means those exact bytes are already under that
+    destination, so nothing was written and the outcome names the existing path
+    and ref; retrying a lost response with the same identity replays the batch
+    rather than duplicating it. No binary data is passed as base64 through
+    model-visible arguments. Clients without file handles keep using
+    `transfer_artifact(operation="upload")` followed by `/upload`.
 
     Args:
-        scope: Incident, case, project, or domain key.
-        category: Evidence category within the scope.
+        scope: Incident, case, project, or domain key. One path segment, never
+            a path. A separator or reserved character is refused, not rewritten.
+        category: Evidence category within the scope. One path segment, not a
+            path; nest with this argument rather than with `/` in `scope`.
         files: Ordered temporary file handles. Each object requires `download_url`
             and `file_id`; `mime_type` and `file_name` are optional.
         adoption: Optional explicit adoption identity selecting exactly one
             supplied handle. This establishes eligibility, not write consent;
             agent-initiated use obeys proactive_capture.
+        transcriptions: Optional {file_id, text} transcriptions of supplied
+            files, recorded on each stored original's page.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -6254,14 +8267,20 @@ def op_preserve_artifacts(
     # one counters block rather than N: see `due_state.batch_scope`.
     with due_state_module.batch_scope(vault_root):
         result = client_artifacts.preserve_artifacts(
-            vault_root, scope=scope, category=category, files=files, adoption=adoption
+            vault_root,
+            scope=scope,
+            category=category,
+            files=files,
+            adoption=adoption,
+            transcriptions=transcriptions,
         )
+    _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,
     # experiments or supersession pointers, so this leaf's own writes never move
     # a projected category (design D3). The carriage value is the session
     # channel — a first qualifying response, and change-only deltas from
     # elsewhere in the conversation.
-    return _carrying_due_state(vault_root, result)
+    return _carrying_batch_advisories(vault_root, result)
 
 
 def op_transfer_artifact(
@@ -6291,12 +8310,18 @@ def op_transfer_artifact(
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
+    # `/download` decides every path under the audience the token carries, so
+    # it carries the caller's: the secret that signs it is the owner's, the
+    # caller need not be. An unresolved caller binds the fail-closed floor.
+    who = principal_module.effective_principal()
+    audience = who.audience_id if who.resolved else principal_module.MOST_RESTRICTIVE_AUDIENCE
     handoff = upload_tokens.mint_for_endpoint(
         secret,
         base_url,
         scope=operation,
         large_base_url=large_base_url if operation == "upload" else None,
         lane=lane if operation == "upload" else None,
+        audience=audience if operation == "download" else None,
     )
     if operation == "upload":
         handoff.update(handoff_status="handoff_prepared", committed=False)
@@ -6337,7 +8362,7 @@ def op_process_media(
     # `retry` re-enqueues in the machine-local job store and commits nothing, so
     # the commit gate inside the carrier keeps it silent — that is the contract,
     # not an omission.
-    return _carrying_due_state(vault_root, result)
+    return _carrying_batch_advisories(vault_root, result)
 
 
 def _process_media(
@@ -6688,7 +8713,7 @@ def op_review_memory(
     Args:
         mode: attention, activation, item, audit, dispositions, vocabulary, provenance,
             evolution, compilation, stale, contradiction, unprocessed-sources,
-            relation-debt, relation-queue, adoption, plan-progress, or
+            relation-debt, relation-queue, adoption, upkeep, plan-progress, or
             write-advisory-result. `write-advisory-result` resolves exactly one
             opaque `exomem://write-advisory-result/<id>` reference returned by a
             committed write and reports only that job's current `pending`,
@@ -6711,8 +8736,12 @@ def op_review_memory(
             proposal queue grouped per run (structured agent proposals with signal
             fingerprints); approve a proposal via
             `adoption_studio(action="apply-proposal")` or dismiss via
-            `triage_memory`.
-        categories: Optional category filter for attention/activation/audit.
+            `triage_memory`. `upkeep` lists the background worker's bounded
+            upkeep proposals (default 10), each with its evidence, the governed
+            route that would act on it, and triage verbs; a proposal authorizes
+            nothing. Link items carry a relation-queue ref and source path.
+        categories: Optional category filter for attention/activation/audit, or an
+            upkeep family filter for upkeep.
         limit: Attention/activation result cap. Vocabulary review defaults to four
             items; every other mode defaults to 25. On the topic evolution route, caps
             returned timelines; the path route returns one selected chain and does
@@ -6736,8 +8765,9 @@ def op_review_memory(
         state: For attention/activation, open (default), all, snoozed, or dismissed.
             Vocabulary review uses open for actionable work or all for decision history;
             each response is a non-exhaustive bounded pass.
-        ref: Stable `exomem://review/<id>` reference for item mode, or the
-            opaque `exomem://write-advisory-result/<id>` reference for
+        ref: Stable `exomem://review/<id>` reference for item mode (an
+            `exomem://review/upkeep/<id>` ref revalidates that one upkeep item), or
+            the opaque `exomem://write-advisory-result/<id>` reference for
             write-advisory-result mode. Required by both. For a vocabulary
             relation-type question, optionally provide a current relation-queue
             candidate ref alongside its source path and your meaning question.
@@ -6819,12 +8849,18 @@ def op_review_memory(
         )
     if family is not None:
         raise ValueError("INVALID_REVIEW_ARGUMENTS: family is only supported by vocabulary review")
-    if limit is None:
-        limit = 25
     if continuation is not None:
         raise ValueError(
             "INVALID_REVIEW_ARGUMENTS: continuation is only supported by vocabulary review"
         )
+    if mode == "upkeep":
+        from . import upkeep as upkeep_module
+
+        return upkeep_module.review(
+            vault_root, state=state, categories=categories, limit=limit
+        )
+    if limit is None:
+        limit = 25
     if mode == "plan-progress":
         # `path` is a collection selector here, not a memory identifier, so it
         # is passed through before the page-oriented resolution below.
@@ -6843,6 +8879,12 @@ def op_review_memory(
     if mode == "item":
         if not ref:
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
+        from . import upkeep as upkeep_module
+
+        if upkeep_module.is_upkeep_ref(ref):
+            # Before the attention scan: an upkeep item revalidates from its
+            # own pages and never runs the whole-vault union.
+            return upkeep_module.item(vault_root, ref)
         return attention_module.item_by_ref(vault_root, ref).as_dict()
     if mode == "write-advisory-result":
         return deferred_write_advisory_module.resolve_result(vault_root, ref)
@@ -6895,8 +8937,8 @@ def op_review_memory(
     raise ValueError(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "dispositions, provenance, evolution, compilation, stale, contradiction, "
-        "unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, "
-        "vocabulary, or write-advisory-result"
+        "unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, "
+        "plan-progress, vocabulary, or write-advisory-result"
     )
 
 
@@ -6923,7 +8965,9 @@ def op_review_item_context(
         ref: Stable `exomem://review/<id>` reference. An
             `exomem://review/adoption/<id>` ref returns the bounded Adoption
             Studio proposal context (proposal record, live binding check, and
-            target-page summary) instead.
+            target-page summary) instead. An `exomem://review/upkeep/<id>` ref
+            returns one upkeep item's revalidated proposal with bounded
+            excerpts of its subject and evidence pages and its route.
         expected_fingerprint: Optional reviewed fingerprint; a mismatch asks the
             caller to refresh instead of presenting stale context.
         max_body_chars: Maximum target body characters.
@@ -6957,6 +9001,26 @@ def op_review_item_context(
         )
     if continuation is not None:
         raise ValueError("INVALID_REVIEW_CONTEXT_ARGUMENTS: continuation requires a vocabulary ref")
+    from . import upkeep as upkeep_module
+
+    if upkeep_module.is_upkeep_ref(ref):
+        if (
+            max_graph_nodes != 30
+            or max_graph_edges != 60
+            or max_history != 10
+            or max_evolution_versions != 10
+        ):
+            raise ValueError(
+                "INVALID_UPKEEP_CONTEXT_ARGUMENTS: upkeep context accepts only "
+                "expected_fingerprint, max_body_chars, and max_related_pages"
+            )
+        return upkeep_module.context(
+            vault_root,
+            ref,
+            expected_fingerprint=expected_fingerprint,
+            max_body_chars=max_body_chars,
+            max_related_pages=max_related_pages,
+        )
     if adoption_proposals_module.is_adoption_ref(ref):
         return adoption_proposals_module.assemble_context(
             vault_root,
@@ -7112,6 +9176,55 @@ def _carrying_due_state(vault_root: Path, result: Any) -> Any:
     if not block:
         return result
     return {**result, "due_state": {**block, "_vault": str(vault_root)}}
+
+
+def _carrying_capture_sweep(vault_root: Path, result: Any) -> Any:
+    """Attach the post-batch capture-sweep advisory, at most once for the batch.
+
+    The mirror of `_carrying_due_state`, and it exists for the same structural
+    reason: an operation leaf commits many governed writes behind one response,
+    so the advisory belongs at the end of the batch rather than once per write.
+
+    It is also the ONLY place a batch's sweep can be decided. Inside
+    `due_state.batch_scope` the page and structured seams deliberately neither
+    produce nor record (see `capture_sweep.block`), because a batch is one
+    episode boundary: letting the first of twelve writes consume the quiet
+    interval would leave this carrier with nothing to report about the batch it
+    is reporting on.
+
+    Gated on an actual commit for the same reason `_carrying_due_state` is: a
+    clean-vault repair pass, already-valid media, a `retry` re-enqueue and a
+    verified replay all commit nothing and have no terminal to carry a block on.
+
+    A failure here costs the caller an advisory and never the committed batch.
+    """
+    from .writer_lease import active_mutation_committed
+
+    if not isinstance(result, dict) or "capture_sweep" in result:
+        return result
+    if not active_mutation_committed():
+        return result
+    try:
+        from . import capture_sweep as capture_sweep_module
+
+        block = capture_sweep_module.block(vault_root)
+    except Exception:  # noqa: BLE001 — an advisory never breaks a committed batch
+        log.debug("capture-sweep batch block failed (non-fatal)", exc_info=True)
+        return result
+    if not block:
+        return result
+    return {**result, "capture_sweep": block}
+
+
+def _carrying_batch_advisories(vault_root: Path, result: Any) -> Any:
+    """Both post-batch advisories, in one place, for every operation leaf.
+
+    One seam rather than two call chains: the two carriers answer different
+    questions but they attach at exactly the same moment — after the batch scope
+    has exited and the deltas have been applied — and a leaf that acquired one
+    but not the other would be a silent coverage gap rather than a visible one.
+    """
+    return _carrying_capture_sweep(vault_root, _carrying_due_state(vault_root, result))
 
 
 def _set_family_disposition(
@@ -7284,7 +9397,9 @@ def op_triage_memory(
             `exomem://review/adoption/<id>` ref triages an Adoption Studio
             proposal instead, keyed the same way (`review_id:fingerprint`). An
             `exomem://review/family/<family>` ref addresses a whole signal
-            FAMILY instead of one item.
+            FAMILY instead of one item. An `exomem://review/upkeep/<id>` ref
+            dismisses, snoozes or reopens one upkeep proposal, bound to its
+            current fingerprint.
         action: dismiss, snooze, or reopen for an item; quiet, off, or normal
             for a family. `quiet` drops that family from the default review
             union, every due-state carrier and the write-path advisories while
@@ -7374,9 +9489,30 @@ def op_triage_memory(
             why=why,
             expected_fingerprint=expected_fingerprint,
         )
+    if working_set_learning_module.is_advisory_ref(ref):
+        return working_set_learning_module.triage(
+            vault_root,
+            ref=ref,
+            action=action,
+            until=until,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+        )
     if adoption_proposals_module.is_adoption_ref(ref):
         _refuse_pairless_stance(ref, action)
         return adoption_proposals_module.triage(
+            vault_root,
+            ref=ref,
+            action=action,
+            until=until,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+        )
+    from . import upkeep as upkeep_module
+
+    if upkeep_module.is_upkeep_ref(ref):
+        _refuse_pairless_stance(ref, action)
+        return upkeep_module.triage(
             vault_root,
             ref=ref,
             action=action,
@@ -7526,12 +9662,16 @@ def op_connect_memory(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    aliases: list[str] | None = None,
     ref: str | None = None,
     expected_hash: str | None = None,
     why: str | None = None,
     expected_fingerprint: str | None = None,
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
+    identity_decision: _IdentityDecisionArgument = None,
+    facets: _EntityFacetsArgument = None,
+    entity_family: str | None = None,
 ) -> dict | list[dict]:
     """Connect memory through links, typed graph context, or entities.
 
@@ -7589,6 +9729,8 @@ def op_connect_memory(
         decided: Decision date.
         project: Decision project key.
         decision_status: Decision status.
+        aliases: Other names the entity answers to, in any script; give the
+            native-script spelling of a name written in another script.
         ref: Relation-queue item ref for accept-relation.
         expected_hash: Target page `content_hash` drift guard for accept-relation.
             Required for accept-relation.
@@ -7600,6 +9742,15 @@ def op_connect_memory(
             the queue read and this call also refuses.
         vocabulary_ref: Optional vocabulary decision correlated with this typed application.
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
+        identity_decision: create-entity only. When the name already denotes
+            other active entities, `{outcome: "distinct", candidate_fingerprint}`
+            from that preparation or refusal commits a separate identity;
+            omit it to reuse a candidate or abstain.
+        facets: create-entity only. Values for the facets the registry
+            declares for entity_type (string for single, list for multi).
+        entity_family: Parent family from the entity registry. On
+            resolve-entity it matches every leaf type in that family; on
+            context and graph-context it keeps only entity neighbours of it.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -7639,10 +9790,14 @@ def op_connect_memory(
             "decided": None,
             "project": None,
             "decision_status": None,
+            "aliases": None,
             "ref": None,
             "expected_hash": None,
             "why": None,
             "expected_fingerprint": None,
+            "identity_decision": None,
+            "facets": None,
+            "entity_family": None,
         }
         invalid = sorted(
             name
@@ -7712,6 +9867,12 @@ def op_connect_memory(
             requested_relation=requested_relation,
             edit_memory=_accept_relations_edit,
         )
+    if operation == "suggest-relations":
+        # Relation proposals are owner work under a governed policy (see
+        # `op_suggest_relations`); refused before the path is resolved.
+        refusal = egress_module.owner_only_aggregate(vault_root)
+        if refusal is not None:
+            return refusal
     if path:
         path = _resolve_memory_identifier(vault_root, path)
     if target:
@@ -7735,6 +9896,8 @@ def op_connect_memory(
             limit=limit,
         )
     if operation in ("context", "graph-context"):
+        if path:
+            _refuse_withheld_page_seed(vault_root, path)
         return memory_context_module.assemble_context(
             vault_root,
             path=path,
@@ -7750,6 +9913,7 @@ def op_connect_memory(
             traversal_profile=traversal_profile,
             limit=limit,
             max_body_chars=max_body_chars,
+            entity_type_families=[entity_family] if entity_family else None,
         )
     if operation == "inbound-links":
         target_path = target or path
@@ -7760,7 +9924,11 @@ def op_connect_memory(
         if not name:
             raise ValueError("INVALID_TARGET: resolve-entity requires `name`")
         return entity_candidates_module.resolve_entity_candidate(
-            vault_root, name=name, entity_type=entity_type, limit=limit
+            vault_root,
+            name=name,
+            entity_type=entity_type,
+            entity_family=entity_family,
+            limit=limit,
         )
     if operation == "create-entity":
         missing = [
@@ -7789,6 +9957,9 @@ def op_connect_memory(
             decided=decided,
             project=project,
             decision_status=decision_status,
+            identity_decision=identity_decision,
+            facets=facets,
+            aliases=aliases,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
@@ -7851,7 +10022,7 @@ def op_adopt_vault(
             semantic_example_limit=semantic_example_limit,
         )
         _apply_batch_deltas(vault_root, _adopted_paths(result))
-    return _carrying_due_state(vault_root, result)
+    return _carrying_batch_advisories(vault_root, result)
 
 
 _ADOPTION_STUDIO_ACTIONS = (
@@ -7996,7 +10167,7 @@ def op_adoption_studio(
                     only_paths=only_paths,
                 )
                 _apply_batch_deltas(vault_root, _adoption_run_paths(applied))
-            return _carrying_due_state(vault_root, applied)
+            return _carrying_batch_advisories(vault_root, applied)
         if action == "cancel":
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
         if action == "finish":
@@ -8028,7 +10199,7 @@ def op_adoption_studio(
                 why=why,
                 expected_hash=expected_hash,
             )
-        return _carrying_due_state(vault_root, applied_proposal)
+        return _carrying_batch_advisories(vault_root, applied_proposal)
     except adoption_run_module.AdoptionRunError as exc:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
     except Exception as exc:  # structured proposal errors carry code/reason
@@ -8042,7 +10213,13 @@ def op_adoption_studio(
 def op_maintain_memory(
     vault_root: Path,
     mode: Literal[
-        "audit", "fix", "reconcile", "backfill-ids", "structured-files", "curation"
+        "audit",
+        "fix",
+        "reconcile",
+        "backfill-ids",
+        "structured-files",
+        "curation",
+        "tag-variants",
     ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
@@ -8075,6 +10252,7 @@ def op_maintain_memory(
     expected_plan_fingerprint: str | None = None,
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
+    exclude_groups: list[str] | None = None,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
@@ -8104,6 +10282,15 @@ def op_maintain_memory(
     shared mutation terminal. Curation cannot target raw Sources or Evidence,
     Planning, Records, workflow contracts, schema/admin state, or trash internals.
 
+    `mode="tag-variants"` lists tags that differ only by case, separator, or
+    plural, grouped with the page counts you may see and the most-used written
+    form as canonical; a tie is listed, never rewritten. Preview is read-only;
+    `apply=true` with the preview's `plan_id` and a one-line `why` rewrites one
+    bounded batch of minority variants to the canonical tag and logs a rollback
+    record. Only the `tags` key changes; Sources, Evidence, Records, Planning
+    and other owned trees are untouched. Preview again for the next batch.
+    `exclude_groups` keeps named groups out of preview and apply alike.
+
     `mode="fix"` also collapses media sidecars that accumulated nested copies of
     themselves (audit category `duplicated_sidecar`, reportable on its own via
     `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest
@@ -8114,7 +10301,8 @@ def op_maintain_memory(
     recovered text is only the fallback.
 
     Args:
-        mode: audit, fix, reconcile, backfill-ids, structured-files, or curation.
+        mode: audit, fix, reconcile, backfill-ids, structured-files, curation,
+            or tag-variants.
         categories: Optional audit category filter.
         dry_run: Report without writing when true. Defaults to true for
             fix/backfill-ids (safety net) and false for reconcile (matches
@@ -8126,9 +10314,9 @@ def op_maintain_memory(
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
         collection: One Planning or Records collection for structured-files.
         apply: Omit for preview; true applies the exact reviewed plan.
-        plan_id: Exact structured-files preview identity required for apply.
+        plan_id: Exact structured-files or tag-variants preview identity for apply.
         source_snapshot: Exact structured-files preview snapshot required for apply.
-        why: Bounded audit reason required for structured-files apply.
+        why: Bounded audit reason required for structured-files or tag-variants apply.
         curation_action: Closed curation action when mode is curation.
         run_id: Governed curation run identity.
         plan: Agent-authored closed forward plan for curation propose.
@@ -8140,6 +10328,7 @@ def op_maintain_memory(
         expected_plan_fingerprint: Exact reviewed plan fingerprint for approval.
         vocabulary_ref: Optional vocabulary decision correlated with curation apply or resume.
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
+        exclude_groups: Tag-variant group keys to leave out; part of the plan_id.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -8147,6 +10336,8 @@ def op_maintain_memory(
     )
     if rebuild_graph and mode != "reconcile":
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
+    if exclude_groups is not None and mode != "tag-variants":
+        raise ValueError("INVALID_ARGUMENTS: exclude_groups applies only to tag-variants")
     if mode == "curation":
         from . import curation as curation_module
         from . import due_state as due_state_module
@@ -8268,7 +10459,7 @@ def op_maintain_memory(
             return invoke_curation()
         with due_state_module.batch_scope(vault_root):
             curated = invoke_curation()
-        return _carrying_due_state(vault_root, curated)
+        return _carrying_batch_advisories(vault_root, curated)
     if mode == "structured-files":
         if (
             not isinstance(collection, str)
@@ -8304,7 +10495,41 @@ def op_maintain_memory(
         # Renames and rendered bodies, not authored obligations, so no batch
         # deltas. A verified replay commits nothing and the carrier's commit
         # gate keeps its closed receipt shape untouched.
-        return _carrying_due_state(vault_root, migrated)
+        return _carrying_batch_advisories(vault_root, migrated)
+    if mode == "tag-variants":
+        from . import tag_variants as tag_variants_module
+
+        if (
+            categories is not None
+            or dry_run is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: tag-variants accepts only apply, plan_id, why, "
+                "and exclude_groups"
+            )
+        if apply is None:
+            if plan_id is not None or why is not None:
+                raise ValueError(
+                    "INVALID_ARGUMENTS: tag-variants preview does not accept apply guards"
+                )
+            return tag_variants_module.preview(vault_root, exclude=exclude_groups)
+        if apply is not True or plan_id is None or why is None:
+            raise ValueError(
+                "INVALID_ARGUMENTS: tag-variants apply requires true, plan_id, and why"
+            )
+        from . import due_state as due_state_module
+
+        with due_state_module.batch_scope(vault_root):
+            reconciled = tag_variants_module.apply(
+                vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
+            )
+        return _carrying_batch_advisories(vault_root, reconciled)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -8329,7 +10554,7 @@ def op_maintain_memory(
             # carries would describe the vault as it was BEFORE the pass that
             # just rewrote it (design D3, task 1.5).
             _apply_batch_deltas(vault_root, _audit_fix_paths(report))
-        return _carrying_due_state(vault_root, report)
+        return _carrying_batch_advisories(vault_root, report)
     if mode == "reconcile":
         with due_state_module.batch_scope(vault_root):
             # No batch deltas here on purpose: `op_reconcile` already runs
@@ -8340,17 +10565,17 @@ def op_maintain_memory(
                 dry_run=False if dry_run is None else dry_run,
                 rebuild_graph=rebuild_graph,
             )
-        return _carrying_due_state(vault_root, report)
+        return _carrying_batch_advisories(vault_root, report)
     if mode == "backfill-ids":
         with due_state_module.batch_scope(vault_root):
             report = memory_refs_module.backfill_ids(
                 vault_root, dry_run=True if dry_run is None else dry_run
             )
             _apply_batch_deltas(vault_root, list(report.get("updated") or []))
-        return _carrying_due_state(vault_root, report)
+        return _carrying_batch_advisories(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, structured-files, or curation"
+        "backfill-ids, structured-files, curation, or tag-variants"
     )
 
 
@@ -8455,6 +10680,8 @@ def op_schema_memory(
     requested_type: _OptionalRelationText = None,
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
+    detail: Literal["counts", "keys"] | None = None,
+    version: str | None = None,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
@@ -8469,28 +10696,43 @@ def op_schema_memory(
             and why. For `entity-types`, `resolve-entity-type` reads matching
             definitions using query and optional requested_type; `save-entity-types`
             saves a reviewed proposal with why and expected_hash when updating.
-            The current entity registry is included in bootstrap.
+            The current entity registry is included in bootstrap. For `relations`,
+            `census` returns counts-only relation quality from the published graph
+            (optional detail, date_from, date_to) and never writes.
             For `workflow-contracts`, exactly one of: inventory (no workflow
             fields); inspect (name); validate (exactly one of name or proposal);
             resolve (context plus at most one of name or proposal); preview (proposal,
             optional name); save (proposal and why, optional name plus expected_hash
             for updates); or refresh (name, expected_hash, and why). Other subjects
-            retain their existing operations.
+            retain their existing operations. For `context-roles` and
+            `activation-conventions`, `validate` returns a proposal's findings plus
+            the current registry's content_hash; `diff` compares a proposal against
+            the effective registry; `save-roles`/`save-conventions` (matched to their
+            subject) commit a reviewed proposal with why and expected_hash, refusing
+            a proposal that has any finding; `history` lists the kept versions
+            (newest first: time, why, before and after hash); `restore` reinstates
+            one `version` with why and expected_hash, validated like a save; `infer`
+            is refused for both, since the server does not propose conventions or
+            roles.
         name: A saved workflow key for inspect/refresh, validate as an alternative to
             proposal, resolve (or `@standalone`), and optional preview/save update.
-        subject: `contract`, `categories`, `entity-types`, `relations`, `traversal-profiles`, or
+        subject: `contract`, `categories`, `entity-types`, `relations`,
+            `traversal-profiles`, `context-roles`, `activation-conventions`, or
             `workflow-contracts`. Workflow contracts support inventory, inspect,
             validate, resolve, preview, save, and refresh with their exact argument matrix.
         project: Optional project scope for inference.
         page_type: Optional page-type scope for inference.
         save: Legacy inference flag. Ignored when false for workflow contracts and
             refused when true; workflow writes use operation=`save`.
-        expected_hash: Current relation registry hash required by save-relations, or
-            current workflow hash required for workflow save updates and refresh.
+        expected_hash: Current relation registry hash required by save-relations, current
+            workflow hash required for workflow save updates and refresh, or the current
+            roles_hash/conventions_hash required by save-roles/save-conventions.
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
         proposal: Reviewed relation definition for propose-relation, reviewed delta
-            for save-relations, or workflow proposal for workflow modes.
+            for save-relations, workflow proposal for workflow modes, or a complete
+            override document (the same shape as the vault file) for context-roles'
+            validate/diff/save-roles and activation-conventions' validate/diff/save-conventions.
             propose-relation requires requested_label (the name portion), parent
             (one core relation key), description, and direction (directed or symmetric);
             namespace supplies the prefix and defaults to vault. Optional fields are
@@ -8498,7 +10740,7 @@ def op_schema_memory(
             and query. Pass this mapping directly without an extensions wrapper.
             save-relations takes the returned delta and expected_hash.
         why: Required audit reason for relation delta save, workflow save/refresh,
-            and entity-type saves.
+            entity-type saves, and save-roles/save-conventions.
         include_model_suggestions: Request response-only optional relation suggestions.
         context: Exact optional workflow resolve mapping. Its only keys are project,
             domain, and activity; omit a key for unknown or set it null for known absent.
@@ -8510,17 +10752,38 @@ def op_schema_memory(
         requested_type: Entity-type label to resolve for resolve-entity-type.
         vocabulary_ref: Optional vocabulary decision correlated with a registry save.
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
+        detail: Relation census detail: `counts` (default) or `keys`, which adds
+            predicate keys and counts.
+        version: A kept registry version from `history`, for `restore` on
+            `context-roles` or `activation-conventions`.
 
     Returns:
         A structured profile/proposal, validation report, contract diff, or workflow result.
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    if detail is not None and not (subject == "relations" and operation == "census"):
+        raise ValueError(
+            "INVALID_SCHEMA_ARGUMENT: detail is only supported by the relations census"
+        )
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
         supported=operation == "save-entity-types"
         or (subject == "relations" and operation == "save-relations"),
     )
+    if subject in {"categories", "relations", "contract"} and (
+        operation == "infer"
+        or (
+            operation == "diff"
+            and proposal is None
+            and not (subject == "contract" and compare_to)
+        )
+    ):
+        # Inferring from the corpus (directly, or as the other side of a
+        # diff) reduces every page; it is the owner's under a governed policy.
+        refusal = egress_module.owner_only_aggregate(vault_root)
+        if refusal is not None:
+            return {"subject": subject, **refusal}
     if subject == "entity-types" and operation == "resolve-entity-type":
         if (
             any(
@@ -8572,6 +10835,27 @@ def op_schema_memory(
             page_type=page_type,
             strict=strict,
             compare_to=compare_to,
+            include_model_suggestions=include_model_suggestions,
+        )
+    if subject in ("context-roles", "activation-conventions"):
+        return _governed_registry_schema_operation(
+            vault_root,
+            subject=subject,
+            operation=operation,
+            version=version,
+            proposal=proposal,
+            why=why,
+            expected_hash=expected_hash,
+            save=save,
+            project=project,
+            page_type=page_type,
+            strict=strict,
+            compare_to=compare_to,
+            name=name,
+            context=context,
+            date_from=date_from,
+            date_to=date_to,
+            continuation=continuation,
             include_model_suggestions=include_model_suggestions,
         )
     if operation == "save-entity-types":
@@ -8678,6 +10962,34 @@ def op_schema_memory(
             return result
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject == "relations":
+        if operation == "census":
+            if (
+                save
+                or why is not None
+                or expected_hash is not None
+                or proposal is not None
+                or project is not None
+                or page_type is not None
+                or continuation is not None
+                or include_model_suggestions
+                or compare_to is not None
+                or strict
+                or name is not None
+                or context is not None
+                or limit != 20
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: census accepts only detail, date_from, "
+                    "and date_to"
+                )
+            # The census decides the view from the bound principal: served whole
+            # under an empty policy, to the owner only under a governed one.
+            return relation_census_module.census(
+                vault_root,
+                detail=detail or "counts",
+                date_from=date_from,
+                date_to=date_to,
+            )
         if operation == "propose-relation":
             relation_vocabulary_module.validate_candidate_limit(limit)
             if proposal is None or not isinstance(proposal, dict):
@@ -8884,10 +11196,25 @@ def op_schema_memory(
                     raise ValueError(
                         "INCOMPLETE_RELATION_PROPOSAL: save requires a reviewed proposal"
                     )
-                observed = {
-                    item["raw_relation"]
-                    for item in memory_schema_module.relation_observations(vault_root)
-                }
+                # The guard exists to stop a save deleting vocabulary that is in
+                # use, so it protects only observed labels that resolve to a
+                # currently registered extension: its key, and the alias when
+                # the label was one. Core and unregistered labels, in any case,
+                # are nothing a registry save can delete. The registry's own
+                # meaning-continuity check already refuses dropping a used key or
+                # alias, so this guard is defence in depth.
+                current = relation_registry_module.load_registry(vault_root)
+                observed: set[str] = set()
+                for item in memory_schema_module.relation_observations(
+                    vault_root, registry=current
+                ):
+                    canonical = item.get("canonical")
+                    if canonical not in current.extensions:
+                        continue
+                    observed.add(canonical)
+                    label = relation_registry_module.normalize_relation(item["raw_relation"])
+                    if current.aliases.get(label) == canonical:
+                        observed.add(label)
                 result["saved"] = relation_registry_module.save_registry(
                     vault_root,
                     proposal,
@@ -8971,7 +11298,7 @@ def op_schema_memory(
     if subject != "contract":
         raise ValueError(
             "INVALID_SCHEMA_SUBJECT: subject must be contract, categories, relations, "
-            "or traversal-profiles"
+            "traversal-profiles, context-roles, or activation-conventions"
         )
     if not name:
         raise ValueError("INVALID_CONTRACT: name is required for contract governance")
@@ -9129,8 +11456,13 @@ def _workflow_contract_schema_operation(
 
                 active_prominence = prominence_module.resolve()
                 result["active_prominence"] = active_prominence
+                # Capped by the capture level, not the served one. They differ
+                # only under the unreadable-record floor, and that is exactly
+                # the case where reporting the served level's gate here would
+                # grant proactive writes the request had already refused.
                 result["effective_capture"] = prominence_module.effective_capture(
-                    result["decision"]["capture"], active_prominence
+                    result["decision"]["capture"],
+                    prominence_module.effective_capture_level(),
                 )
             return result
         if operation == "preview":
@@ -9198,6 +11530,203 @@ def _workflow_contract_schema_operation(
     except workflow_contracts_module.WorkflowContractError as error:
         return {"resolved": False, "code": error.code}
     return invalid
+
+
+def _governed_registry_schema_operation(
+    vault_root: Path,
+    *,
+    subject: str,
+    operation: str,
+    version: str | None = None,
+    proposal: dict[str, Any] | None,
+    why: str | None,
+    expected_hash: str | None,
+    save: bool,
+    project: str | None,
+    page_type: str | None,
+    strict: bool,
+    compare_to: str | None,
+    name: str | None,
+    context: Mapping[str, str | None] | None,
+    date_from: str | None,
+    date_to: str | None,
+    continuation: str | None,
+    include_model_suggestions: bool,
+) -> dict[str, Any]:
+    """`context-roles`/`activation-conventions` through their shared shape.
+
+    Both are vault-owned policy registries with no inference (design.md
+    decision 7): `validate` and `diff` are read-only, a dedicated save
+    operation takes `proposal`, `why` and `expected_hash` on the
+    `save-relations` pattern (the generic `save` flag is refused), a
+    proposal holding any finding is never saved, and `infer` is refused
+    outright because the server does not propose conventions or roles. The
+    two subjects differ only in which module answers and which attribute
+    name carries the effective registry's hash, which is what lets one
+    function serve both -- mirroring how `_workflow_contract_schema_operation`
+    already factors the workflow-contracts family out of this dispatch.
+    """
+    if subject == "context-roles":
+        load_fn = context_roles_module.load_roles
+        save_fn = context_roles_module.save_roles
+        hash_attribute = "roles_hash"
+        save_operation = "save-roles"
+
+        def as_named_dict(registry: Any) -> dict[str, Any]:
+            return {key: role.as_dict() for key, role in registry.roles.items()}
+
+    else:
+        load_fn = activation_conventions_module.load_conventions
+        save_fn = activation_conventions_module.save_conventions
+        # The whole registry's identity: the index digest alone would let a
+        # stale proposal overwrite a concurrent change to the referential
+        # vocabulary, which only the turn digest records.
+        hash_attribute = "content_hash"
+        save_operation = "save-conventions"
+
+        def as_named_dict(registry: Any) -> dict[str, Any]:
+            return activation_conventions_module.registry_payload(registry.conventions)
+
+    if operation == "infer":
+        raise ValueError(
+            f"INVALID_SCHEMA_OPERATION: infer is refused for {subject}; "
+            "the server does not propose conventions or roles"
+        )
+    if operation not in ("validate", "diff", save_operation, "history", "restore"):
+        raise ValueError(
+            f"INVALID_SCHEMA_OPERATION: {subject} accepts validate, diff, {save_operation}, "
+            "history, or restore"
+        )
+    if (
+        save
+        or project is not None
+        or page_type is not None
+        or date_from is not None
+        or date_to is not None
+        or continuation is not None
+        or include_model_suggestions
+        or compare_to is not None
+        or strict
+        or name is not None
+        or context is not None
+    ):
+        raise ValueError(
+            f"INVALID_SCHEMA_ARGUMENT: {subject} accepts only proposal, why, and expected_hash"
+        )
+    stem = "context-roles" if subject == "context-roles" else "activation-conventions"
+    if version is not None and operation != "restore":
+        raise ValueError("INVALID_SCHEMA_ARGUMENT: version applies only to restore")
+    if operation == "history":
+        if proposal is not None or why is not None or expected_hash is not None:
+            raise ValueError(
+                f"INVALID_SCHEMA_ARGUMENT: {subject} history takes no proposal, why, "
+                "or expected_hash"
+            )
+        return {
+            "subject": subject,
+            "content_hash": getattr(load_fn(vault_root), hash_attribute),
+            "versions": registry_history_module.versions(vault_root, stem=stem),
+        }
+    if operation == "restore":
+        if proposal is not None:
+            raise ValueError("INVALID_SCHEMA_ARGUMENT: restore takes a version, not a proposal")
+        if not version:
+            raise ValueError("INVALID_SCHEMA_ARGUMENT: restore requires version")
+        if not why or not why.strip():
+            raise ValueError("WHY_REQUIRED: restore requires why")
+        if not expected_hash:
+            raise ValueError("EXPECTED_HASH_REQUIRED: restore requires expected_hash")
+        text = registry_history_module.read_version(vault_root, stem=stem, version=version)
+        import yaml
+
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise ValueError(f"UNKNOWN_REGISTRY_VERSION: {version!r} does not parse") from exc
+        candidate = load_fn(vault_root, proposal=data)
+        if candidate.findings:
+            return {
+                "subject": subject,
+                "valid": False,
+                "findings": [dict(item) for item in candidate.findings],
+                "saved": None,
+            }
+        saved = save_fn(
+            vault_root,
+            data,
+            expected_hash=expected_hash,
+            why=why.strip(),
+            rendered=text,
+            operation="restore",
+        )
+        return {
+            "subject": subject,
+            "valid": True,
+            "findings": [],
+            "why": why.strip(),
+            "restored": version,
+            "saved": saved,
+        }
+    if proposal is None or not isinstance(proposal, dict):
+        raise ValueError(
+            f"INCOMPLETE_REGISTRY_PROPOSAL: {operation} requires a reviewed proposal for {subject}"
+        )
+
+    current = load_fn(vault_root)
+    if operation == "validate":
+        if why is not None or expected_hash is not None:
+            raise ValueError(
+                "INVALID_SCHEMA_ARGUMENT: why and expected_hash apply only to "
+                f"{save_operation}"
+            )
+        candidate = load_fn(vault_root, proposal=proposal)
+        findings = [dict(item) for item in candidate.findings]
+        return {
+            "subject": subject,
+            "valid": not findings,
+            "findings": findings,
+            "content_hash": getattr(current, hash_attribute),
+        }
+    if operation == "diff":
+        if why is not None or expected_hash is not None:
+            raise ValueError(
+                "INVALID_SCHEMA_ARGUMENT: why and expected_hash apply only to "
+                f"{save_operation}"
+            )
+        candidate = load_fn(vault_root, proposal=proposal)
+        before = as_named_dict(current)
+        after = as_named_dict(candidate)
+        return {
+            "subject": subject,
+            "changed": before != after,
+            "content_hash": getattr(current, hash_attribute),
+            "before": before,
+            "after": after,
+            "findings": [dict(item) for item in candidate.findings],
+        }
+    # operation == save_operation
+    if not why or not why.strip():
+        raise ValueError(f"WHY_REQUIRED: {save_operation} requires why")
+    if not expected_hash:
+        raise ValueError(f"EXPECTED_HASH_REQUIRED: {save_operation} requires expected_hash")
+    candidate = load_fn(vault_root, proposal=proposal)
+    if candidate.findings:
+        return {
+            "subject": subject,
+            "valid": False,
+            "findings": [dict(item) for item in candidate.findings],
+            "saved": None,
+        }
+    saved = save_fn(
+        vault_root, proposal, expected_hash=expected_hash, why=why.strip(), operation=save_operation
+    )
+    return {
+        "subject": subject,
+        "valid": True,
+        "findings": [],
+        "why": why.strip(),
+        "saved": saved,
+    }
 
 
 def op_reclassify_source(
@@ -9491,6 +12020,7 @@ def op_record_memory(
         "update",
         "revise",
         "rebaseline",
+        "discard",
     ],
     collection: str | None = None,
     manifest_path: str | None = None,
@@ -9522,6 +12052,8 @@ def op_record_memory(
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
     refresh_presentation: bool | None = None,
+    held: str | None = None,
+    hold: bool | None = None,
 ) -> dict[str, Any]:
     """Capture, inspect, and govern durable observed state in one Records command.
 
@@ -9531,8 +12063,8 @@ def op_record_memory(
     if none fits, describe and propose a concise collection before explicit create.
 
     Args:
-        action: Exactly one of describe, validate, inspect, query, create, append, update, revise, or rebaseline.
-        collection: Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, and rebaseline.
+        action: Exactly one of describe, validate, inspect, query, create, append, update, revise, rebaseline, or discard.
+        collection: Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, rebaseline, and discard.
         manifest_path: Proposed manifest path for create-mode validate or create.
         manifest_text: Complete proposed manifest text for validate, create, or revise.
         why: Audit reason for create, append, update, revise, or rebaseline.
@@ -9552,8 +12084,9 @@ def op_record_memory(
         continuation: Snapshot-bound query continuation.
         include_agent_history: Include bounded agent mutation history.
         output_format: json, markdown, or csv query output.
-        item: Values for append.
-        item_key: Stable item ID for append or update.
+        item: Values for append; shallow overrides when resuming a held candidate.
+        item_key: The item's internal UUID identity, required for update. Omit it on
+            append and identity derives from the collection's declared natural key.
         expected_container_hash: Exact current container hash for append, update, revise, or rebaseline.
         expected_manifest_hash: Exact current manifest hash for revise or rebaseline.
         acknowledged_gap_codes: Exact inspect-reported gap codes for rebaseline.
@@ -9564,6 +12097,12 @@ def op_record_memory(
         changes: Targeted values for update.
         expected_item_version: Exact current item version for update.
         refresh_presentation: Guardedly rebuild the managed Markdown presentation during update.
+        held: Reference to a held candidate: resumes it on append or update, with
+            item or changes supplying overrides and a null value removing a field;
+            names the candidate to remove on discard.
+        hold: Set false to refuse an invalid candidate without holding it. A refused
+            append or update otherwise preserves the complete candidate as a held
+            file under the collection and returns its reference beside the refusal.
     """
     return record_memory_module.record_memory(
         vault_root,
@@ -9598,6 +12137,8 @@ def op_record_memory(
         changes=changes,
         expected_item_version=expected_item_version,
         refresh_presentation=refresh_presentation,
+        held=held,
+        hold=hold,
     )
 
 
@@ -9936,7 +12477,11 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "args": {"detail": "compact", "rerank": False, "deep": True},
         },
         "safety": "read-only; deep mode assembles context and graph enrichment stays explicit",
-        "advanced": ["read_memory", "query_dataset", "read_media"],
+        # `activate_context` leads because it is the call for a turn that does
+        # not yet have a query: it resolves what the turn is about and returns a
+        # bounded packet, or abstains. The rest of the family assumes the agent
+        # already knows what it is looking for.
+        "advanced": ["activate_context", "read_memory", "query_dataset", "read_media"],
     },
     "remember": {
         "intent": "Save a durable conclusion as compiled governed knowledge.",
@@ -9960,6 +12505,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "compile_source",
             "preserve_artifacts",
             "process_media",
+            "episode_memory",
         ],
     },
     "review": {
@@ -9998,6 +12544,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "safety": "read-only by default; write-capable fixes require explicit flags",
         "advanced": [
             "doctor",
+            "configure_memory",
             "govern_memory",
             "schema_memory",
             "manage_memory_file",
@@ -10068,6 +12615,8 @@ _PRODUCT_METADATA: dict[str, dict] = {
         "actions": ("ask", "review", "save", "update"),
         "first_run_safe": False,
     },
+    "activate_context": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    "episode_memory": {"surface": "primary", "actions": ("save",), "first_run_safe": False},
 }
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
@@ -10075,6 +12624,7 @@ _RC = frozenset({"rest", "cli"})
 # meaningless through the REST/CLI JSON envelopes, so it is mcp-only.
 _M = frozenset({"mcp"})
 _SPEC: tuple[tuple, ...] = (
+    ("configure_memory", op_configure_memory, 1, True, False, None, _MCRC),
     ("coordination_status", op_coordination_status, 1, False, False, None, _MCRC),
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
     ("search", op_search, 1, False, False, "query", _MCRC),
@@ -10116,6 +12666,8 @@ _SPEC: tuple[tuple, ...] = (
     ("record_memory", op_record_memory, 1, True, False, None, _MCRC),
     ("plan_memory", plan_memory_module.plan_memory, 1, True, False, None, _MCRC),
     ("get_video_frames", op_get_video_frames, 2, False, False, None, _M),
+    ("activate_context", op_activate_context, 1, False, False, "turn", _MCRC),
+    ("episode_memory", op_episode_memory, 1, True, True, None, _MCRC),
 )
 
 
@@ -10163,6 +12715,11 @@ egress_module.assert_outcomes_registered({command.name: command for command in C
 
 _PRODUCT_SPEC: tuple[tuple, ...] = (
     (
+        "configure_memory", op_configure_memory, 1, True, False, None, _MCRC,
+        ("configure_memory",),
+        {"surface": "primary", "actions": (), "first_run_safe": False},
+    ),
+    (
         "coordination_status",
         op_coordination_status,
         1,
@@ -10193,6 +12750,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "query",
         _MCRC,
         ("search", "find"),
+        {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    ),
+    (
+        "activate_context",
+        op_activate_context,
+        1,
+        False,
+        False,
+        "turn",
+        _MCRC,
+        ("activate_context",),
         {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     ),
     (
@@ -10270,6 +12838,22 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("add", "propose_compilation"),
+        {
+            "surface": "primary",
+            "actions": ("save",),
+            "first_run_safe": False,
+            "mcp_meta": {"openai/fileParams": ("files",)},
+        },
+    ),
+    (
+        "episode_memory",
+        op_episode_memory,
+        1,
+        True,
+        True,
+        None,
+        _MCRC,
+        ("episode_memory",),
         {"surface": "primary", "actions": ("save",), "first_run_safe": False},
     ),
     (
@@ -10534,7 +13118,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                     schema_default=param.schema_default,
                 )
                 for param in params
-                if param.name in {"path", "why", "operation", "validate_only"}
+                if param.name in {"path", "why", "operation", "validate_only", "identity_decision"}
             )
         if response_detail is not None:
             response_detail_help = (
@@ -10670,6 +13254,48 @@ HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
         exclusion.command: exclusion
         for exclusion in (
             HostedSurfaceExclusion(
+                command="configure_memory",
+                reason=(
+                    "The existing hosted profiles pin their ordered command membership; "
+                    "v5 explicitly retains v4's membership. Adding this command would "
+                    "change the hosted command-surface digest under the same profile ID."
+                ),
+                lifted_when=(
+                    "a new hosted profile admits identity-scoped preference mutations, "
+                    "verifies principal and cell isolation, and carries its own candidate digest"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="activate_context",
+                reason=(
+                    "The hosted profiles pin their ordered command membership, and v5 "
+                    "retains v4's. Publishing this tool on hosted would move both "
+                    "profiles' command_surface_sha256 under an unchanged profile ID, "
+                    "invalidating the promotion records taken off those bytes. The "
+                    "capability is complete and reachable on the self-hosted MCP, CLI "
+                    "and REST surfaces; hosted adoption is a profile decision, not a "
+                    "side effect of adding a tool."
+                ),
+                lifted_when=(
+                    "a new hosted profile admits the context compiler and carries its "
+                    "own command-surface digest and candidate definition"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="episode_memory",
+                reason=(
+                    "The hosted profiles pin their ordered command membership, and v5 "
+                    "retains v4's. Publishing this tool on hosted would move both "
+                    "profiles' command_surface_sha256 under an unchanged profile ID. Its "
+                    "reader, activate_context, is itself excluded from hosted, so a "
+                    "hosted recap would be written where no hosted client reads it back."
+                ),
+                lifted_when=(
+                    "a new hosted profile admits the context compiler together with "
+                    "episode recording and carries its own command-surface digest"
+                ),
+            ),
+            HostedSurfaceExclusion(
                 command="transfer_artifact",
                 reason=(
                     "The hosted runtime intercepts this leaf with "
@@ -10715,6 +13341,61 @@ HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
                 lifted_when=(
                     "a media-capable hosted image ships and the cell carries the `media` "
                     "feature grant"
+                ),
+            ),
+        )
+    }
+)
+
+
+CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
+    {
+        exclusion.command: exclusion
+        for exclusion in (
+            HostedSurfaceExclusion(
+                command="transfer_artifact",
+                reason=(
+                    "An Exomem Cloud cell has no browser transfer or "
+                    "gateway-mediated upload flow to bridge this leaf into; "
+                    "direct browser transfers are out of scope for Exomem Cloud "
+                    "(design Non-Goals)."
+                ),
+                lifted_when=(
+                    "a browser transfer or artifact-upload path is added to "
+                    "Exomem Cloud"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="adopt_vault",
+                reason=(
+                    "There is no upload-then-adopt staging flow for Exomem "
+                    "Cloud cells; a self-serve export/import UI is out of scope "
+                    "for Exomem Cloud (design Non-Goals)."
+                ),
+                lifted_when="an upload/import path is added to Exomem Cloud",
+            ),
+            HostedSurfaceExclusion(
+                command="process_media",
+                reason=(
+                    "The `cloud` image is built from the `hosted` runtime "
+                    "stage, which installs only the `embeddings-onnx` extra "
+                    "and gates the build on torch being absent, so media "
+                    "extraction has no dependencies in the image."
+                ),
+                lifted_when=(
+                    "a media-capable cloud image ships with the required "
+                    "decoding dependencies"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="read_media",
+                reason=(
+                    "Sampling video frames needs the same decoding "
+                    "dependencies the cloud image omits."
+                ),
+                lifted_when=(
+                    "a media-capable cloud image ships with the required "
+                    "decoding dependencies"
                 ),
             ),
         )

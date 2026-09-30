@@ -246,6 +246,34 @@ def test_upsert_report_marks_synchronous_legacy_callbacks_completed(
     assert all(item.code != "accepted_unverified" for item in report.components)
 
 
+def test_the_fan_out_attributes_its_time_to_each_component(tmp_path: Path) -> None:
+    """One total with nothing inside it cannot locate a slow write.
+
+    The 0.83.1 deploy recorded `index.upsert_after_write` at 14.3 s as the only
+    span covering ~32 s of a governed write; the components underneath it were
+    invisible, so the residual could not be attributed at all.
+    """
+    from exomem import call_spans
+
+    target = tmp_path / "Knowledge Base" / "Notes" / "item.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Item\n", encoding="utf-8")
+
+    call_spans.reset()
+    handle = call_spans.MCP_CALL_TOKEN.set("span-attribution-token")
+    try:
+        index_sync.upsert_after_write(tmp_path, [target])
+        recorded = {row["name"] for row in call_spans.pop_call_spans("span-attribution-token")}
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+        call_spans.reset()
+
+    assert "index.upsert_after_write" in recorded
+    assert {"index.memory_refs", "index.resolver", "index.lexstore"} <= recorded, (
+        f"the fan-out did not attribute its components: {sorted(recorded)}"
+    )
+
+
 def test_watcher_upsert_routes_full_vault_generation_only_to_lexstore(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -787,6 +815,44 @@ def test_warm_covered_deferral_is_batch_success_and_mints_no_full_receipt(
         # the already-queued semantic replay stays the sole durable demand.
         assert deferred_index.snapshot_full(tmp_path) == []
         assert deferred_index.status(tmp_path)["paths"] == [rel]
+    finally:
+        _clean_warm_deferred_note(tmp_path)
+
+
+@pytest.mark.parametrize("mode_name", ["normal", "quiet"])
+def test_covered_deferral_ignores_the_auxiliaries_embeddings_never_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode_name: str
+) -> None:
+    """A governed write replaces its page AND `log.md` (and often `index.md`).
+
+    Embeddings skip both auxiliaries by name, so no semantic receipt can ever
+    name them. Measured on the personal service 2026-09-28: every governed
+    write in quiet mode (85 of 85 over 14 hours) failed the coverage check on
+    `log.md` alone and minted a durable full-index receipt, and every replay of
+    that receipt failed the same check again.
+    """
+    target = _warm_deferred_note(tmp_path, monkeypatch)
+    monkeypatch.setenv("EXOMEM_MODE", mode_name)
+    log = tmp_path / "Knowledge Base" / "log.md"
+    log.write_text("# Log\n\n- wrote warm-accounting\n", encoding="utf-8")
+    index = tmp_path / "Knowledge Base" / "index.md"
+    index.write_text("# Index\n\n- [[warm-accounting]]\n", encoding="utf-8")
+    rel = "Knowledge Base/Notes/warm-accounting.md"
+    batch = [target, log, index]
+    try:
+        report = index_sync.upsert_after_write(tmp_path, batch)
+        outcome = _outcome(report, "embeddings")
+        assert outcome.outcome == "deferred"
+        # Only the page is embeddable, and only the page is queued.
+        assert deferred_index.status(tmp_path)["paths"] == [rel]
+        assert index_sync.full_upsert_succeeded(tmp_path, batch, report) is True
+        # The auxiliaries alone never bless a deferral: nothing embeddable was
+        # replaced, so there is nothing a receipt could cover.
+        assert index_sync.full_upsert_succeeded(tmp_path, [log, index], report) is False
+
+        completed = vault_module.post_commit_batch_fanout(tmp_path, batch, None, None)
+        assert completed is True
+        assert deferred_index.snapshot_full(tmp_path) == []
     finally:
         _clean_warm_deferred_note(tmp_path)
 

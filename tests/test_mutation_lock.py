@@ -67,7 +67,7 @@ def test_contention_view_snapshots_busy_refusals_while_recording_a_refusal() -> 
     def view() -> None:
         try:
             mutation_lock_module._contention_view(state)
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - report any worker-thread failure
             failures.append(error)
 
     reader = threading.Thread(target=view)
@@ -865,7 +865,7 @@ def test_metadata_free_hold_is_reserved_for_internal_identity_coordination(
 
 
 def test_status_waits_out_acquire_to_publish_generation_transition(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     context = multiprocessing.get_context("spawn")
     state_root = tmp_path / "state"
@@ -887,6 +887,21 @@ def test_status_waits_out_acquire_to_publish_generation_transition(
         ),
     )
     holder.start()
+    metadata_contention_seen = threading.Event()
+    original_try_os_lock = mutation_lock_module._try_os_lock
+
+    def publish_after_contended_probe(handle) -> bool:  # noqa: ANN001
+        locked = original_try_os_lock(handle)
+        if not locked and not metadata_contention_seen.is_set():
+            metadata_contention_seen.set()
+            publish.set()
+        return locked
+
+    # Trigger publication from the observer that actually sees the metadata
+    # mutex contended. The old parent-side sleep/publish sequence could be
+    # descheduled beyond the product's intentional 250 ms status deadline,
+    # turning a scheduling delay into an unverified-holder result.
+    monkeypatch.setattr(mutation_lock_module, "_try_os_lock", publish_after_contended_probe)
     result: list[dict[str, object]] = []
     status_thread = threading.Thread(
         target=lambda: result.append(
@@ -896,9 +911,11 @@ def test_status_waits_out_acquire_to_publish_generation_transition(
     try:
         assert acquired.wait(_OBSERVE_SECONDS)
         status_thread.start()
-        time.sleep(0.05)
-        assert not result
-        publish.set()
+        assert metadata_contention_seen.wait(_OBSERVE_SECONDS)
+        # A delayed parent no longer controls when the child publishes. This
+        # exceeds the production status deadline and deterministically covers
+        # the former CI scheduling failure without relaxing that deadline.
+        time.sleep(mutation_lock_module._STATUS_TIMEOUT_SECONDS + 0.10)
         assert entered.wait(_OBSERVE_SECONDS)
         status_thread.join(timeout=_HOLD_SECONDS)
         assert result
@@ -1749,7 +1766,7 @@ def _reserved_state_hold(coordinator: VaultMutationCoordinator, **kwargs):
 
 
 def test_routine_reserved_state_holds_are_not_info_rows(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A burst of short, uncontended reserved-state holds must add no INFO rows.
 
@@ -1760,6 +1777,14 @@ def test_routine_reserved_state_holds_are_not_info_rows(
     vault = tmp_path / "vault"
     vault.mkdir()
     coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    # This checks the short-hold log level, not runner scheduling latency.
+    # Freeze only this module's clock: a preempted real hold may legitimately
+    # cross the slow-hold threshold and must remain visible at INFO.
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: 1.0, time=time.time, sleep=time.sleep),
+    )
 
     with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
         for _ in range(25):
@@ -2064,7 +2089,7 @@ def test_refusal_payload_keeps_every_field_the_incident_diagnosis_used(
 
 
 def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The long-holder warning is the loudest boundary signal and stays loud.
 
@@ -2073,9 +2098,13 @@ def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
     """
     vault = tmp_path / "vault"
     vault.mkdir()
-    # Both numbers are under `_QUIET_HOLD_MS`, deliberately: a 50ms hold trips
-    # the slow-hold arm of `_boundary_event_level` on its own, so the release
-    # row reached INFO whether or not the overdue escalation existed at all.
+    # The slow-hold arm of `_boundary_event_level` reaches INFO on its own, so
+    # a hold that outruns the quiet band passes this test with the overdue
+    # escalation deleted.  A 2ms hold sat under the 5ms band on an idle box and
+    # over it on a loaded runner (measured 5.13ms and 10.59ms), which made the
+    # discriminator a wall clock.  Lifting the band out of reach removes the
+    # clock: the escalation is then the only arm that can raise this row.
+    monkeypatch.setattr(mutation_lock_module, "_QUIET_HOLD_MS", 60_000.0)
     coordinator = VaultMutationCoordinator(
         tmp_path / "state", vault, long_holder_seconds=0.001
     )
@@ -2095,10 +2124,8 @@ def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
     # demoted, whatever the holder kind.
     [released] = _events(caplog, "mutation_lock_released")
     # The hold has to stay inside the band for the escalation to be the thing
-    # under test: past `_QUIET_HOLD_MS` the slow-hold arm reaches INFO on its
-    # own and this assertion would pass with the escalation deleted.  The row
-    # already carries its own measurement, so an overshoot on a loaded box is
-    # a visible red here rather than a silent loss of power.
+    # under test.  The row carries its own measurement, so this still fails
+    # loudly if the lifted band is ever removed or undercut.
     assert released.fields["hold_ms"] < mutation_lock_module._QUIET_HOLD_MS, (
         "the hold outran the quiet band; the release row reached INFO through "
         "the slow-hold arm, not through the overdue escalation"
@@ -2194,22 +2221,30 @@ def test_the_shipped_hold_threshold_is_small_enough_to_matter(
 
 
 def test_a_genuinely_routine_hold_is_still_demoted(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other side of the same bar: no sleep at all stays at DEBUG.
+    """A measured sub-millisecond hold stays DEBUG under the shipped threshold.
 
-    This is the population the flood came from -- 5,000 sampled uncontended
-    reserved-state holds, none of which exceeded 5ms.
+    An empty body can exceed that threshold when the runner is descheduled.
+    Control only this module's measurement clock, while still acquiring and
+    releasing the real boundary and exercising its logging path.
     """
+    clock = [100.0]
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=time.sleep),
+    )
     vault = tmp_path / "vault"
     vault.mkdir()
     coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
 
     with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
         with _reserved_state_hold(coordinator):
-            pass
+            clock[0] += 0.0005
 
     [released] = _events(caplog, "mutation_lock_released")
+    assert released.fields["hold_ms"] == 0.5
     assert released.levelno == logging.DEBUG
 
 
@@ -2265,3 +2300,248 @@ def test_the_default_acquire_threshold_keeps_the_tens_of_milliseconds_band(
         )
         == logging.INFO
     )
+
+
+# --- Background holders are distinguishable from one another -----------------
+#
+# Every background acquisition used to publish the literal `untracked`, so two
+# concurrent background holders, and a long-holder warning naming one of them,
+# were indistinguishable in exactly the incident where telling them apart is
+# the whole point.
+
+
+def test_background_acquisitions_publish_distinct_opaque_identifiers(
+    tmp_path: Path,
+) -> None:
+    from exomem.mutation_lock import _SAFE_LABEL
+
+    first_vault = tmp_path / "vault-a"
+    second_vault = tmp_path / "vault-b"
+    first_vault.mkdir()
+    second_vault.mkdir()
+    first = VaultMutationCoordinator(tmp_path / "state", first_vault)
+    second = VaultMutationCoordinator(tmp_path / "state", second_vault)
+
+    # Two background holders, concurrently, each on its own vault boundary --
+    # the shape a media worker and a file watcher reconciliation actually take.
+    with first.hold(
+        operation="background_media_extraction_commit", holder_kind="background"
+    ):
+        with second.hold(
+            operation="watcher_reconcile_freshness", holder_kind="background"
+        ):
+            first_holder = first.snapshot()
+            second_holder = second.snapshot()
+
+    for holder in (first_holder, second_holder):
+        assert holder["state"] == "held"
+        assert holder["holder_kind"] == "background"
+        assert holder["request_id"] != "untracked"
+        assert _SAFE_LABEL.fullmatch(holder["request_id"])
+    assert first_holder["request_id"] != second_holder["request_id"]
+
+    # And two SEQUENTIAL acquisitions by the same holder are distinguishable too.
+    with first.hold(
+        operation="background_media_extraction_commit", holder_kind="background"
+    ):
+        again = first.snapshot()["request_id"]
+    assert again != first_holder["request_id"]
+
+
+def test_background_long_holder_warning_names_its_own_acquisition(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(
+        tmp_path / "state", vault, long_holder_seconds=0.01
+    )
+
+    with caplog.at_level(logging.WARNING, logger="exomem.mutation_lock"):
+        with coordinator.hold(
+            operation="background_media_clip_commit", holder_kind="background"
+        ):
+            acquisition = coordinator.snapshot()["request_id"]
+            time.sleep(0.02)
+
+    human = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("vault mutation boundary held too long")
+    ]
+    assert len(human) == 1
+    assert acquisition in human[0]
+    assert "request_id=untracked" not in human[0]
+
+
+def test_readiness_still_withholds_pid_from_a_background_holder(
+    tmp_path: Path,
+) -> None:
+    from exomem.runtime_readiness import build_runtime_readiness
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    with coordinator.hold(
+        operation="background_media_failure_commit", holder_kind="background"
+    ):
+        boundary = coordinator.snapshot()
+    # A released hold leaves the last-known holder behind, pid included.
+    released = coordinator.snapshot()
+    assert released["contention"]["last_holder"]["pid"] == os.getpid()
+
+    snapshot = build_runtime_readiness(
+        coordination={
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+            "mutation_boundary": boundary,
+        },
+        release="1.2.3",
+        mcp_tool_surface_sha256="a" * 64,
+    )
+
+    public = snapshot["coordination"]["mutation_boundary"]
+    assert public["request_id"] == boundary["request_id"] != "untracked"
+    assert "pid" not in public
+    assert "pid" not in json.dumps(public)
+
+
+# --- Background boundaries: one summary row, not a pair per hold ---
+#
+# Graph drains, derived-receipt proofs, watcher freshness and media commits
+# publish a holder sidecar, so they kept both boundary rows at INFO whatever
+# they cost. They run at machine frequency beside ordinary traffic, and their
+# pairs rotated the service log about every fifteen minutes. A routine
+# background hold now logs at DEBUG and is folded into a periodic INFO hold
+# summary; a slow or contended one still reports itself.
+
+
+def _background_hold(coordinator: VaultMutationCoordinator, **kwargs):
+    return coordinator.hold(
+        operation="epistemic_graph_drain_paths", holder_kind="graph", **kwargs
+    )
+
+
+def test_routine_background_holds_fold_into_one_info_summary(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 3600.0)
+    mutation_lock_module._reset_hold_summary()
+
+    with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
+        for _ in range(30):
+            with _background_hold(coordinator):
+                pass
+        for _ in range(5):
+            with _reserved_state_hold(coordinator):
+                pass
+
+    loud = [
+        (r.levelname, getattr(r, "event", None))
+        for r in caplog.records
+        if r.levelno >= logging.INFO
+    ]
+    assert loud == [], f"routine background holds still log at INFO: {loud[:4]}"
+    # Demoted, not deleted.
+    assert len(_events(caplog, "mutation_lock_released")) == 35
+
+    caplog.clear()
+    monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 0.0)
+    with caplog.at_level(logging.INFO, logger="exomem.mutation_lock"):
+        with _background_hold(coordinator):
+            pass
+
+    [summary] = _events(caplog, "mutation_lock_hold_summary")
+    assert summary.levelno == logging.INFO
+    assert summary.fields["holds"] == 36
+    operations = summary.fields["operations"]
+    drain = operations["epistemic_graph_drain_paths"]
+    assert drain["count"] == 31
+    assert drain["holder_kind"] == "graph"
+    assert drain["hold_ms_max"] >= 0.0 and drain["hold_ms_total"] >= drain["hold_ms_max"]
+    assert isinstance(drain["wait_ms_max"], float)
+    assert operations["reserved_identity:media-jobs-store"]["count"] == 5
+    # The window restarts after a summary.
+    caplog.clear()
+    monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 3600.0)
+    with caplog.at_level(logging.INFO, logger="exomem.mutation_lock"):
+        with _background_hold(coordinator):
+            pass
+    assert _events(caplog, "mutation_lock_hold_summary") == []
+
+
+def test_a_slow_background_hold_still_reports_itself(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    monkeypatch.setattr(mutation_lock_module, "_BACKGROUND_QUIET_HOLD_MS", 20.0)
+
+    with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
+        with _background_hold(coordinator):
+            time.sleep(0.05)
+
+    [acquired] = _events(caplog, "mutation_lock_acquired")
+    [released] = _events(caplog, "mutation_lock_released")
+    assert acquired.levelno == logging.DEBUG
+    assert released.levelno == logging.INFO
+    assert released.fields["hold_ms"] >= 20.0
+    assert isinstance(released.fields["wait_ms"], float)
+
+
+def test_unknown_and_control_holder_kinds_keep_their_audit_rows(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only the named machine-frequency kinds are folded; anything else keeps
+    the audit pair, so a new holder kind is loud until someone decides."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+
+    with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
+        for kind in ("vocabulary-authority-control", "some-future-kind"):
+            with coordinator.hold(operation="op", holder_kind=kind):
+                pass
+
+    assert [r.levelno for r in _events(caplog, "mutation_lock_released")] == [
+        logging.INFO,
+        logging.INFO,
+    ]
+
+
+def test_the_metrics_snapshotter_flushes_a_due_hold_summary(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review L4: a window was emitted only by the next quiet hold, so the last
+    window before holds stopped was never logged. The snapshotter's tick flushes
+    a window that is due."""
+    from exomem import metrics
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 3600.0)
+    mutation_lock_module._reset_hold_summary()
+    with caplog.at_level(logging.INFO, logger="exomem.mutation_lock"):
+        for _ in range(3):
+            with _background_hold(coordinator):
+                pass
+        assert _events(caplog, "mutation_lock_hold_summary") == []
+        # The window is now due, and no further hold will arrive.
+        monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 0.0)
+        metrics.stop_snapshotter()
+        metrics.start_snapshotter(tmp_path / "metrics", 0.05)
+        try:
+            deadline = time.monotonic() + 3.0
+            while not _events(caplog, "mutation_lock_hold_summary") and time.monotonic() < deadline:
+                time.sleep(0.02)
+        finally:
+            metrics.stop_snapshotter()
+    [summary] = _events(caplog, "mutation_lock_hold_summary")[:1]
+    assert summary.fields["holds"] == 3

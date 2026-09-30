@@ -200,3 +200,207 @@ def test_malformed_span_entries_are_dropped_not_fatal() -> None:
     )
 
     assert shaped == [{"name": "kept", "count": 1, "ms": 4.0}]
+
+
+def test_a_mark_closes_a_span_between_two_distant_sites(token) -> None:
+    """Some intervals have no single frame holding both ends."""
+    call_spans.mark("canonical_files_committed")
+    time.sleep(0.02)
+    call_spans.record_span_since("derived.canonical_to_committed", "canonical_files_committed")
+    spans = {row["name"]: row for row in call_spans.pop_call_spans(token)}
+    assert "derived.canonical_to_committed" in spans
+    assert spans["derived.canonical_to_committed"]["ms"] >= 15
+
+
+def test_a_span_since_a_mark_that_was_never_stamped_records_nothing(token) -> None:
+    """A missing mark means that path did not run, not that this one should guess."""
+    call_spans.record_span_since("derived.canonical_to_committed", "never_stamped")
+    assert call_spans.pop_call_spans(token) == []
+
+
+def test_a_mark_outside_an_mcp_call_is_a_no_op() -> None:
+    call_spans.mark("canonical_files_committed")
+    call_spans.record_span_since("derived.canonical_to_committed", "canonical_files_committed")
+    assert call_spans.pop_call_spans(None) == []
+
+
+def test_marks_cannot_grow_without_bound(token) -> None:
+    for i in range(call_spans.MAX_NAMES_PER_CALL + 10):
+        call_spans.mark(f"mark-{i}")
+    call_spans.record_span_since("late", f"mark-{call_spans.MAX_NAMES_PER_CALL + 5}")
+    assert call_spans.pop_call_spans(token) == []
+
+
+#: Every span name the write and retrieval paths record, and the documentation
+#: that has to name them. A span whose name drifts is a diagnosis that silently
+#: stops finding its number, which is exactly the failure `spans` exists to
+#: prevent -- so the source and `docs/observability.md` are pinned to each other
+#: rather than to a hand list that can rot.
+_DOCUMENTED_SPAN_NAMES = frozenset(
+    {
+        "corpus_context.build",
+        "derived.canonical_commit",
+        "derived.canonical_to_committed",
+        "derived.receipt_prepare",
+        "derived.receipt_proof",
+        "derived.acknowledgement",
+        "derived.pending_visibility",
+        "derived.advisory_execute",
+        "derived.component_dispatch",
+        "derived.component_completion",
+        "index.upsert_after_write",
+        "index.memory_refs",
+        "index.resolver",
+        "index.lexstore",
+        "index.epistemic_graph",
+        "index.embeddings",
+        "graph.refresh_paths",
+        "lexical.rebuild_atomic",
+        "embeddings.model_load",
+        "embeddings.encode",
+        "embeddings.matrix_load",
+        "embeddings.matrix_catch_up",
+        "delivery.vocabulary_after_commit",
+        "derived.fanout",
+        "derived.terminal_persist",
+        "derived.deferred_index_store",
+        "index.path_partition",
+        "index.semantic_states",
+        "index.policy_revalidate",
+        "index.corpus_publish",
+        "index.semantic_purge",
+        "index.path_custody",
+        "index.self_write_registration",
+        "index.graph_epoch_handoff",
+        "index.completion_check",
+        "index.full_refresh_store",
+        "advisory.best_cosine",
+        "advisory.overlap_groups",
+        # The write-stage collector's own names, emitted into the ledger
+        # unconditionally by `MutationTimings.emit_call_spans`. Recorded
+        # through a variable at that seam, so the source pin below finds
+        # them at the `mutation_timing_span` call sites that name each one.
+        "commit.boundary_acquire",
+        "commit.creation_lock",
+        "commit.embedding_prewarm",
+        "commit.locked_commit",
+        "commit.manifest",
+        "commit.resolver_prime",
+        "commit.revalidate",
+        "commit.stamp_check",
+        "preflight.contract_eval",
+        "preflight.corpus_context",
+        "preflight.page_states",
+        "preflight.read_guarded",
+        "preflight.registries",
+        "preflight.relation_review",
+        "preflight.validity_token",
+    }
+)
+
+
+def test_every_declared_span_name_is_documented() -> None:
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "observability.md").read_text(
+        encoding="utf-8"
+    )
+    missing = sorted(name for name in _DOCUMENTED_SPAN_NAMES if f"`{name}`" not in doc)
+    assert not missing, (
+        "a span name the write path records is absent from docs/observability.md: "
+        f"{missing}"
+    )
+
+
+def test_every_declared_span_name_is_recorded_somewhere_in_the_source() -> None:
+    """A documented name nothing emits is a diagnosis that will never find it."""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src" / "exomem"
+    body = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(src.rglob("*.py"))
+    )
+    missing = sorted(
+        name
+        for name in _DOCUMENTED_SPAN_NAMES
+        if f'"{name}"' not in body
+        # `index.<component>` is recorded from one f-string seam with the
+        # component name supplied by the caller, so pin the component instead.
+        and f'"{name.removeprefix("index.")}"' not in body
+    )
+    assert not missing, f"documented span names nothing records: {missing}"
+
+
+def test_eviction_warns_once_per_window_rather_than_per_drop(caplog) -> None:
+    """Losing a live call's measurements is a warning; saying so 200 times is noise."""
+    caplog.set_level("WARNING", logger="exomem.call_spans")
+    for index in range(call_spans.MAX_CALLS + 30):
+        handle = call_spans.MCP_CALL_TOKEN.set(f"evict-{index}")
+        try:
+            call_spans.record_span("phase", 1.0)
+        finally:
+            call_spans.MCP_CALL_TOKEN.reset(handle)
+
+    lines = [
+        record for record in caplog.records if "call span eviction dropped" in record.getMessage()
+    ]
+    assert lines, "an eviction that reports nothing is indistinguishable from no instrumentation"
+    assert len(lines) == 1, f"one line per window, not per drop: {len(lines)}"
+    assert lines[0].levelname == "WARNING"
+
+
+def test_a_path_shaped_field_key_never_reaches_a_row(token, caplog) -> None:
+    """Field keys are measurement names, so a key cannot smuggle content.
+
+    The values were bounded from the start -- coerced to int, so a string
+    cannot land -- but the KEYS were only clipped to 64 characters, which a
+    vault path fits inside comfortably. A ledger row is hash-chained and
+    operator-readable outside the vault, so a key like
+    `Knowledge Base/Notes/<title>` would put a note's identity in it.
+    """
+    caplog.set_level("WARNING", logger="exomem.call_spans")
+
+    call_spans.record_span(
+        "index.memory_refs",
+        1.0,
+        {
+            "paths": 3,
+            "Knowledge Base/Notes/Insights/secret-title.md": 1,
+            "Title With Spaces": 1,
+            "camelCase": 1,
+            "has.dot": 1,
+            "has-dash": 1,
+            "digits9": 1,
+        },
+    )
+
+    spans = {span["name"]: span for span in call_spans.pop_call_spans(token)}
+    fields = spans["index.memory_refs"].get("fields") or {}
+    assert fields == {"paths": 3}, (
+        f"a key that is not a bare measurement name reached the row: {fields}"
+    )
+    assert "secret-title" not in caplog.text, (
+        "the warning must report the rejected key's shape, never its text"
+    )
+    assert "span field key rejected" in caplog.text
+
+
+def test_the_ledger_refuses_a_path_shaped_field_key_too(token) -> None:
+    """The last seam before the hash chain enforces it independently."""
+    shaped = call_ledger._clip_spans(
+        [
+            {
+                "name": "index.memory_refs",
+                "count": 1,
+                "ms": 1.0,
+                "fields": {
+                    "paths": 2,
+                    "Knowledge Base/Notes/Insights/secret-title.md": 1,
+                },
+            }
+        ]
+    )
+
+    assert shaped == [
+        {"name": "index.memory_refs", "count": 1, "ms": 1.0, "fields": {"paths": 2}}
+    ], shaped

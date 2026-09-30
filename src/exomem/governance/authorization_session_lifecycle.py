@@ -507,7 +507,7 @@ def mint_hosted_replica_readiness_attestation(
         )
         if expires_at <= current:
             raise AuthorizationSessionUnavailable
-        actual_schema_version = store.authorization_session_schema_version(Path(vault_root))
+        actual_schema_version = store.authorization_session_schema_version_if_readable(Path(vault_root))
         if type(actual_schema_version) is not int or actual_schema_version not in {
             store.SCHEMA_USER_VERSION,
             schema_v4.SCHEMA_USER_VERSION,

@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import move_file as move_file_module
-from . import source_taxonomy
+from . import source_taxonomy, vocabulary_resolution
 from .kbdir import kb_dirname
 from .vault import (
     VaultPathError,
@@ -142,7 +142,10 @@ def _require_source(vault_root: Path, path: str) -> tuple[str, Path]:
         raise ReclassifyError("INVALID_PATH", error.reason) from error
     except Exception as error:  # noqa: BLE001 - reported as a refusal, not a crash
         raise ReclassifyError("INVALID_PATH", str(error)) from error
-    if not absolute.is_file():
+    from .governance import egress
+
+    # A source the caller may not see is answered exactly as a missing one.
+    if not absolute.is_file() or egress.write_target_withheld(vault_root, rel):
         raise ReclassifyError("NOT_FOUND", f"no source page at {rel}.")
     return rel, absolute
 
@@ -252,6 +255,63 @@ def _destination(vault_root: Path, rel: str, kind, domain) -> str:
     return "/".join((kb_dirname(), *segments, rel.rsplit("/", 1)[-1]))
 
 
+def _projection(
+    vault_root: Path,
+    rel: str,
+    taxonomy: source_taxonomy.SourceTaxonomy,
+    kind: str,
+    domain: str | None,
+    *,
+    supplied: bool = True,
+):  # noqa: ANN202 - (kind, domain, destination)
+    """Resolve a correction through the capture's own domain seam.
+
+    A domain projects through the strict snapshot and reuses the one existing
+    equivalent folder, so restating a source's domain never moves it into a
+    case-only sibling of the folder it already lives in.
+
+    A malformed registry refuses only a domain the caller supplied. A kind-only
+    correction carries the source's existing domain, so it falls back to the
+    lenient registry, as it did before the strict seam.
+    """
+    if not domain:
+        kind_resolution = taxonomy.resolve_kind(kind)
+        return kind_resolution, None, _destination(vault_root, rel, kind_resolution, None)
+    try:
+        binding = vocabulary_resolution.resolve_source_domain(
+            vault_root, kind=kind, domain=domain
+        )
+    except vocabulary_resolution.VocabularyResolutionError as error:
+        if supplied or error.code != "INVALID_DOMAIN_TAXONOMY":
+            raise
+        kind_resolution = taxonomy.resolve_kind(kind)
+        domain_resolution = taxonomy.resolve_domain(domain)
+        return (
+            kind_resolution,
+            domain_resolution,
+            _destination(vault_root, rel, kind_resolution, domain_resolution),
+        )
+    destination = "/".join((kb_dirname(), *binding.segments, rel.rsplit("/", 1)[-1]))
+    return binding.kind, binding.domain, destination
+
+
+def _refuse_episode_kind(current_kind: str, target_kind: str | None) -> None:
+    """A recap is only what `episode_memory` recorded and bound, in one folder.
+
+    Nothing is reclassified into the kind, and a recap is not reclassified out
+    of it or into a domain subfolder: its revisions are found by one listing
+    of `Sources/Episodes/`, so a moved recap is one that listing no longer
+    sees, and the next record would leave two live revisions.
+    """
+    if source_taxonomy.EPISODE_KIND in (current_kind, target_kind):
+        raise ReclassifyError(
+            "EPISODE_KIND_RESERVED",
+            f"the {source_taxonomy.EPISODE_KIND!r} kind is reserved for conversation "
+            "recaps recorded with episode_memory: a recap cannot be reclassified, "
+            "and nothing else can become one",
+        )
+
+
 def _introduction_warnings(plan: source_taxonomy.TaxonomyPlan) -> tuple[str, ...]:
     """Say so when a correction introduces vocabulary the vault had not seen.
 
@@ -342,18 +402,23 @@ def propose(
             "this artifact is, which is a judgement the caller has to make"
         )
 
+    if source_kind is not None or domain is not None:
+        _refuse_episode_kind(current_kind, proposed_kind)
     effective_domain = proposed_domain or current_domain
     destination: str | None = None
     relocation_required = False
     if proposed_kind is not None or proposed_domain is not None:
         try:
-            kind_resolution = taxonomy.resolve_kind(proposed_kind or current_kind)
-            domain_resolution = (
-                taxonomy.resolve_domain(effective_domain) if effective_domain else None
+            _, _, destination = _projection(
+                vault_root,
+                rel,
+                taxonomy,
+                proposed_kind or current_kind,
+                effective_domain,
+                supplied=domain is not None,
             )
-            destination = _destination(vault_root, rel, kind_resolution, domain_resolution)
             relocation_required = destination != rel
-        except source_taxonomy.TaxonomyError:
+        except (source_taxonomy.TaxonomyError, vocabulary_resolution.VocabularyResolutionError):
             destination = None
 
     return ReclassifyProposal(
@@ -366,7 +431,20 @@ def propose(
         domain_evidence=tuple(domain_evidence),
         destination=destination,
         relocation_required=relocation_required,
-        references=len(find_inbound_wikilinks(vault_root, rel)),
+        references=_visible_references(vault_root, rel),
+    )
+
+
+def _visible_references(vault_root: Path, rel: str) -> int:
+    """Count inbound links the writer may see. Under a governed policy a writer
+    other than the owner never learns of a link from a page withheld from it."""
+    from .governance import egress
+
+    visible = egress.governed_release_filter(vault_root)
+    return sum(
+        1
+        for match in find_inbound_wikilinks(vault_root, rel)
+        if visible is None or visible(match.path)
     )
 
 
@@ -398,18 +476,26 @@ def reclassify(
 
     taxonomy = source_taxonomy.load_taxonomy(vault_root)
     try:
-        kind_resolution = taxonomy.resolve_kind(source_kind or current_kind)
         effective_domain = domain if domain is not None else current_domain
-        domain_resolution = (
-            taxonomy.resolve_domain(effective_domain) if effective_domain else None
+        kind_resolution, domain_resolution, destination = _projection(
+            vault_root,
+            rel,
+            taxonomy,
+            source_kind or current_kind,
+            effective_domain,
+            supplied=domain is not None,
         )
     except source_taxonomy.TaxonomyError as error:
         raise ReclassifyError("INVALID_CLASSIFICATION", str(error)) from error
+    except vocabulary_resolution.VocabularyResolutionError as error:
+        raise ReclassifyError(
+            error.code, vocabulary_resolution.registry_refusal_reason(vault_root, error)
+        ) from error
+    _refuse_episode_kind(current_kind, kind_resolution.key)
 
     plan = source_taxonomy.plan_registrations(
         vault_root, kind=kind_resolution, domain=domain_resolution
     )
-    destination = _destination(vault_root, rel, kind_resolution, domain_resolution)
     relocating = destination != rel
 
     def transform(current: str) -> str:

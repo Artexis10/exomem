@@ -1,0 +1,58 @@
+---
+base_admin_ssh_cidrs:
+  - 192.0.2.1/32
+base_administrator_authorized_keys:
+  - ssh-ed25519 replace-with-operator-public-key
+
+postgres_database_hostname: db.example.com
+postgres_public_port: 6432
+
+# The four Substrate role passwords are secrets. Each is its own plain
+# string variable, never set here, even in the real control_nodes.yml
+# (gitignored): infra/scripts/secret_handoff.py's sops_ansible_vars
+# destination can only ever write one string per variable (OM-3), so there
+# is one secret-matrix entry and one SOPS file per password, not a single
+# dict-shaped one. They flow in at playbook-run time via
+# infra/scripts/ansible_with_sops.sh --vars, decrypted from:
+#   postgres_substrate_owner_password  <- control-db-substrate-owner-password.{version}.sops.json  (control_db_substrate_owner_password)
+#   postgres_substrate_app_password    <- control-db-substrate-app-password.{version}.sops.json     (control_db_substrate_app_password)
+#   postgres_exomem_gateway_password   <- control-db-exomem-gateway-password.{version}.sops.json    (control_db_exomem_gateway_password)
+#   postgres_exomem_cellctl_password   <- control-db-exomem-cellctl-password.{version}.sops.json    (control_db_exomem_cellctl_password)
+# all under infra/secrets/ansible/, registered in
+# infra/contracts/secret-destinations-v1.json under the names in
+# parentheses. The role's own defaults/main.yml reassembles them into the
+# postgres_role_passwords dict its tasks actually use.
+
+postgres_acme_enabled: true
+postgres_acme_email: ops@example.com
+# postgres_cloudflare_dns_token is a secret. Same SOPS path as above:
+# infra/secrets/ansible/control-db-cloudflare-dns-token.{version}.sops.json,
+# registered as control_db_cloudflare_dns_token.
+
+# Sourced from infra/terraform/durability's control_db_pgbackrest_* outputs
+# (a dedicated bucket, separate from database_backup, which serves only the
+# older provisioner's pg_dump-based backup). The endpoint/region are the
+# fixed B2 constants for this account, not per-bucket Terraform outputs --
+# same as k3s_etcd_s3_endpoint above. The bucket name is an infrastructure
+# identifier, not a credential, so it stays a real value here; the key id
+# and secret are credentials and are never set here (see below).
+postgres_pgbackrest_s3_endpoint: s3.eu-central-003.backblazeb2.com
+postgres_pgbackrest_s3_region: eu-central-003
+postgres_pgbackrest_s3_bucket: replace-with-control_db_pgbackrest_bucket_name-output
+
+# postgres_pgbackrest_s3_key and postgres_pgbackrest_s3_key_secret are
+# secrets (the Terraform control_db_pgbackrest_application_key_id/
+# _application_key outputs). SOPS paths:
+# infra/secrets/ansible/control-db-pgbackrest-s3-key.{version}.sops.json
+# (control_db_pgbackrest_s3_key) and
+# infra/secrets/ansible/control-db-pgbackrest-s3-key-secret.{version}.sops.json
+# (control_db_pgbackrest_s3_key_secret).
+
+# postgres_pgbackrest_repo_cipher_pass is a secret (client-side pgBackRest
+# repository encryption passphrase, repo1-cipher-type=aes-256-cbc -- see the
+# role's defaults/main.yml for why losing it loses every backup). Not a
+# Terraform output: generate it independently (e.g. `openssl rand -base64
+# 48`) and register only its SOPS-encrypted copy at
+# infra/secrets/ansible/control-db-pgbackrest-repo-cipher-pass.{version}.sops.json
+# (control_db_pgbackrest_repo_cipher_pass). It must exist before the first
+# `stanza-create`.

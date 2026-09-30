@@ -1,0 +1,292 @@
+{
+  "artifact_type": "utility-smoke-diagnostic-summary.v1",
+  "interpretation": "Instrument diagnostic only; no demonstrated memory utility or lifecycle benefit. self_contained scores are confounded by ambiguous constraint wording.",
+  "run_product_revision": "3677c2e7cd6bf863f0a0149b21bc339adb35ad50",
+  "scenario_generator": "utility_action_episode.v1",
+  "seed": 11,
+  "actor": {
+    "client": "membench native API actor; not a Claude Code or Codex workflow",
+    "effort": "high",
+    "fallback": false,
+    "judge": null,
+    "model": "z-ai/glm-5.3-flash",
+    "parameters": {
+      "max_input_tokens": 48000,
+      "max_output_tokens": 2000,
+      "samples": 1,
+      "sampling": "provider default"
+    },
+    "pricing": {
+      "cache_write_per_million_usd": 0.15,
+      "cached_input_per_million_usd": 0.03,
+      "ceiling_per_million_usd": {
+        "input": 0.15,
+        "output": 0.5
+      },
+      "input_per_million_usd": 0.15,
+      "output_per_million_usd": 0.5,
+      "source": "https://openrouter.ai/z-ai/glm-5.3-flash",
+      "verified_on": "2026-09-08"
+    },
+    "provider": "Z.AI",
+    "provider_slug": "z-ai/fp8",
+    "tokenizer": {
+      "name": "huggingface-json",
+      "sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+      "source": "https://huggingface.co/zai-org/GLM-5.3-Flash/resolve/eb9eb208eb0d988989d07a6a12d0fdeb5f52574a/tokenizer.json"
+    },
+    "tool_renderer": "MCP JSON envelope; exact duplicate text removed; raw envelope retained in trace",
+    "wire_model": "z-ai/glm-5.3-flash-20260826"
+  },
+  "arms": [
+    {
+      "variant": "helpful_history",
+      "arm": "control",
+      "totals": {
+        "input_tokens": 5429,
+        "output_tokens": 831,
+        "cache_read_tokens": 3008,
+        "reasoning_tokens": 265,
+        "cost_usd": 0.00086889,
+        "elapsed_seconds": 41.45010795001872,
+        "model_calls": 8,
+        "model_seconds": 41.258022303984035,
+        "tool_seconds": 0.00012423202861100435,
+        "tool_calls": 5
+      }
+    },
+    {
+      "variant": "helpful_history",
+      "arm": "memory",
+      "totals": {
+        "input_tokens": 76589,
+        "output_tokens": 1182,
+        "cache_read_tokens": 65792,
+        "reasoning_tokens": 600,
+        "cost_usd": 0.00418431,
+        "elapsed_seconds": 55.85500510898419,
+        "model_calls": 8,
+        "model_seconds": 55.56119214784121,
+        "tool_seconds": 0.00021696992916986346,
+        "tool_calls": 6
+      },
+      "memory_snapshot_changed": false
+    },
+    {
+      "variant": "self_contained",
+      "arm": "control",
+      "totals": {
+        "input_tokens": 10272,
+        "output_tokens": 1818,
+        "cache_read_tokens": 7872,
+        "reasoning_tokens": 674,
+        "cost_usd": 0.0015051599999999997,
+        "elapsed_seconds": 75.06415762502002,
+        "model_calls": 12,
+        "model_seconds": 74.83445265889168,
+        "tool_seconds": 0.0002698287717066705,
+        "tool_calls": 14
+      }
+    },
+    {
+      "variant": "self_contained",
+      "arm": "memory",
+      "totals": {
+        "input_tokens": 51514,
+        "output_tokens": 1149,
+        "cache_read_tokens": 46720,
+        "reasoning_tokens": 491,
+        "cost_usd": 0.0026952,
+        "elapsed_seconds": 40.3858895439771,
+        "model_calls": 5,
+        "model_seconds": 39.95914911304135,
+        "tool_seconds": 0.09315520897507668,
+        "tool_calls": 2
+      },
+      "memory_snapshot_changed": false
+    },
+    {
+      "variant": "stale_distractor",
+      "arm": "control",
+      "totals": {
+        "input_tokens": 7229,
+        "output_tokens": 1157,
+        "cache_read_tokens": 5184,
+        "reasoning_tokens": 386,
+        "cost_usd": 0.0010407699999999999,
+        "elapsed_seconds": 49.906636642001104,
+        "model_calls": 10,
+        "model_seconds": 49.69688813202083,
+        "tool_seconds": 0.00017960305558517575,
+        "tool_calls": 8
+      }
+    },
+    {
+      "variant": "stale_distractor",
+      "arm": "memory",
+      "totals": {
+        "input_tokens": 66370,
+        "output_tokens": 797,
+        "cache_read_tokens": 65536,
+        "reasoning_tokens": 407,
+        "cost_usd": 0.0024896799999999998,
+        "elapsed_seconds": 40.4231225620606,
+        "model_calls": 7,
+        "model_seconds": 40.087378457945306,
+        "tool_seconds": 0.00018096191342920065,
+        "tool_calls": 6
+      },
+      "memory_snapshot_changed": false
+    }
+  ],
+  "recorded_scores_not_product_claims": {
+    "helpful_history": {
+      "arms": {
+        "control": {
+          "arm": "control",
+          "attempted": 1,
+          "destructive_effect_counts": {},
+          "invalid": 0,
+          "missing": 0,
+          "valid": 1,
+          "variant": "helpful_history"
+        },
+        "memory": {
+          "arm": "memory",
+          "attempted": 1,
+          "destructive_effect_counts": {},
+          "invalid": 0,
+          "missing": 0,
+          "valid": 1,
+          "variant": "helpful_history"
+        }
+      },
+      "pair": {
+        "attempted": 1,
+        "both_fail": 0,
+        "both_pass": 1,
+        "conditional_harm": 0.0,
+        "harm_denominator": 1,
+        "harm_numerator": 0,
+        "invalid": 0,
+        "losses": 0,
+        "missing": 0,
+        "scheduled": 1,
+        "unconditional_losses": 0.0,
+        "utility_lift": 0.0,
+        "valid": 1,
+        "variant": "helpful_history",
+        "wins": 0
+      }
+    },
+    "self_contained": {
+      "arms": {
+        "control": {
+          "arm": "control",
+          "attempted": 1,
+          "destructive_effect_counts": {},
+          "invalid": 0,
+          "missing": 0,
+          "valid": 1,
+          "variant": "self_contained"
+        },
+        "memory": {
+          "arm": "memory",
+          "attempted": 1,
+          "destructive_effect_counts": {},
+          "invalid": 0,
+          "missing": 0,
+          "valid": 1,
+          "variant": "self_contained"
+        }
+      },
+      "pair": {
+        "attempted": 1,
+        "both_fail": 1,
+        "both_pass": 0,
+        "conditional_harm": null,
+        "harm_denominator": 0,
+        "harm_numerator": 0,
+        "invalid": 0,
+        "losses": 0,
+        "missing": 0,
+        "scheduled": 1,
+        "unconditional_losses": 0.0,
+        "utility_lift": 0.0,
+        "valid": 1,
+        "variant": "self_contained",
+        "wins": 0
+      }
+    },
+    "stale_distractor": {
+      "arms": {
+        "control": {
+          "arm": "control",
+          "attempted": 1,
+          "destructive_effect_counts": {},
+          "invalid": 0,
+          "missing": 0,
+          "valid": 1,
+          "variant": "stale_distractor"
+        },
+        "memory": {
+          "arm": "memory",
+          "attempted": 1,
+          "destructive_effect_counts": {},
+          "invalid": 0,
+          "missing": 0,
+          "valid": 1,
+          "variant": "stale_distractor"
+        }
+      },
+      "pair": {
+        "attempted": 1,
+        "both_fail": 0,
+        "both_pass": 1,
+        "conditional_harm": 0.0,
+        "harm_denominator": 1,
+        "harm_numerator": 0,
+        "invalid": 0,
+        "losses": 0,
+        "missing": 0,
+        "scheduled": 1,
+        "unconditional_losses": 0.0,
+        "utility_lift": 0.0,
+        "valid": 1,
+        "variant": "stale_distractor",
+        "wins": 0
+      }
+    }
+  },
+  "overhead": {
+    "model_seconds": 301.3970828137244,
+    "outside_phase_seconds": 39.88729855994461,
+    "phase_orchestration_seconds": 1.593709813663736,
+    "tool_seconds": 0.09412680467357859,
+    "wall_seconds": 342.97221799200634
+  },
+  "spend": {
+    "cap_usd": 2.0,
+    "committed_usd": 0.012784010000000002,
+    "held_usd": 0.0,
+    "pair_reservation_usd": 0.3936
+  },
+  "memory_calls": {
+    "bootstrap": 1,
+    "capture": 0,
+    "maintenance": 0,
+    "retrieve": 0
+  },
+  "coverage": {
+    "episodes": 6,
+    "sessions": 18,
+    "unknown_usage_calls": 0,
+    "held_usd": 0
+  },
+  "original_artifact_hashes": {
+    "manifest.json": "5b32ca931ef3ddcc57adae8a7658e00724c2bc684ba77bf850b99e9c1758e5d4",
+    "report.json": "4901408ee2d7f15da69f723c04f90e56729bbf87d2fc8d0073c4f5ff83717cb1",
+    "digests.json": "112e61dc3b3d4f0016487736b4f7896c2fd7f4394878a2cd60bde620baf5e43c"
+  },
+  "original_artifact_bytes": 3141558654
+}

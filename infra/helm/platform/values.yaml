@@ -13,6 +13,9 @@ gateway:
   # Refresh these deliberately when the database provider changes its addresses.
   databaseEgressCidrs: []
 
+legacyHosted:
+  paused: false
+
 cloudflared:
   image: docker.io/cloudflare/cloudflared:2026.7.0@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df
   replicas: 1
@@ -37,6 +40,9 @@ provisioner:
   location: fsn1
   internalOrigin: http://{resource}.{namespace}.svc.cluster.local:8765
   pollSeconds: "1"
+  # Ceiling for the routine worker's idle backoff. It must stay above the database's
+  # autosuspend timeout, or an idle fleet keeps a serverless endpoint awake for nothing.
+  idlePollSeconds: "300"
   providerRecoveryPublicKeySecret:
     name: exomem-provider-recovery-verifier
     key: public-key
@@ -53,17 +59,17 @@ admission:
 
 scheduler:
   contractVersion: 1
-  contractSha256: 02c1b9fa8d031ed77df9015f8555cfc95545b266767474aa52a8ccf08f4b40fc
+  contractSha256: 03ec8f7ae6f1a221ef8ac73e390be029b180df08e0b55806812496ea9fca7733
   secretName: exomem-hosted-scheduler
   secretKey: secret
 
 observability:
-  contractSha256: b616e6b07b39226cb16296b86c818e8f613efa85e883f261efb0685fd87ec7dd
+  contractSha256: 30671acff9bfc15fa825fbc72292f6435cf3ce994c0de04f4649ee46ee343f63
   alertDeliverySecretName: exomem-hosted-alert-delivery
   alertDeliverySecretKey: url
 
 capacityCollector:
-  schedule: "* * * * *"
+  schedule: "*/5 * * * *"
   contractSha256: 9339f62fd322c1d82361ec90506d45e840a38d7abd3f7948507d03adcc572e76
   hcloudServerId: 0
   stateConfigMap: exomem-capacity-receipt
@@ -75,7 +81,7 @@ capacityCollector:
     key: token
 
 durability:
-  contractSha256: 3d1445fe13a4be75ea7bed5c9593f8745e5197926710786cd48c2e9463582dc8
+  contractSha256: 8381b6b85f9afa45eb25323a4b4aedba3ecc1234aa632b38a852f86c14fb48c6
   storageContractSha256: 68e26665af9a48c831c975bc96afb03fbf47e229f89a3c13bc852809787de0f5
   b2Endpoint: ""
   b2Region: ""
@@ -121,7 +127,22 @@ hcloud-csi:
         tag: v2.21.1@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f
         pullPolicy: IfNotPresent
 
+# harden-exomem-cloud-operator-access D1 (task 1.6): the edge namespace's
+# NetworkPolicy lets Traefik reach the API server only at these addresses on
+# 6443. Set it to the K3s server's advertise address as /32 (the address
+# `kubectl get endpoints kubernetes` lists). The render fails while it is empty.
+edge:
+  apiServerCidrs: []
+
 traefik:
+  # harden-exomem-cloud-operator-access D1: the internet-facing edge runs in
+  # its own namespace (namespaces.yaml) with namespaced RBAC, so its Role
+  # grants Secrets there alone and the subchart renders no ClusterRole. The
+  # CRD provider below watches that namespace only; the Role list is the
+  # union of this override and every enabled provider's namespaces.
+  namespaceOverride: exomem-edge
+  rbac:
+    namespaced: true
   image:
     registry: docker.io
     repository: traefik
@@ -133,6 +154,18 @@ traefik:
       exomem.io/ingress: traefik
     podLabels:
       exomem.io/ingress: traefik
+  # add-cloud-node-provisioning N7: the public entrypoint stays on the server,
+  # whose stable primary IP the ingress DNS record targets, however many
+  # agents join. K3s labels every server node control-plane=true.
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: "true"
+  # websecure binds hostPort 443 on that one server node, so a surge pod can
+  # never schedule beside the old one: replace the pod instead of surging.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
   service:
     # Traefik 41.x takes the service type at service.spec.type; a bare
     # `service.type` is not a key in this chart and was silently ignored, so the
@@ -156,13 +189,192 @@ traefik:
         trustedIPs:
           - 10.42.0.0/16
     websecure:
+      # D11: the Exomem Cloud MCP hostname is served here, exposed only
+      # through this entrypoint on the node's real port 443 via hostPort.
+      # servicelb stays disabled and no trustedIPs are set, so Traefik
+      # overwrites X-Real-Ip with the peer address hostPort preserves; the
+      # cloud gateway's own NetworkPolicy (cloud-gateway.yaml) is what makes
+      # that header trustworthy, by admitting ingress only from these pods.
+      # Not added to the ClusterIP Service: hostPort is the only way in, and
+      # the tunnel keeps its single `web` port.
       expose:
         default: false
+      exposedPort: 443
+      hostPort: 443
   providers:
     kubernetesCRD:
       enabled: true
+      # D2: the Cloud route reaches the gateway through an ExternalName
+      # Service in the edge namespace (cloud-ingress.yaml), never by a
+      # cross-namespace reference: watching exomem-cloud would grant its
+      # Secrets to the edge.
       allowCrossNamespace: false
+      allowExternalNameServices: true
+      namespaces: [exomem-edge]
     kubernetesIngress:
       enabled: false
   accessLog:
     enabled: false
+
+# --- Exomem Cloud (adopt-exomem-cloud-plain-cells) ---
+#
+# Separate from the `gateway`/`provisioner`/`storage` blocks above, which
+# stay wired to the old hosted platform until phase R retires it. Cloud
+# cellctl and its gateway run in their own namespace (exomem-cloud) with
+# their own StorageClass, so neither block collides with the hosted one.
+
+cloudDatabase:
+  # Keep the certificate hostname in both DSNs while routing it privately.
+  hostname: ""
+  # RFC1918 IPv4 address of the private PostgreSQL listener.
+  privateIp: ""
+
+cellctl:
+  enabled: false
+  # ghcr.io/artexis10/exomem-cellctl@sha256:<digest>, built from
+  # infra/cellctl/Dockerfile and recorded in the release notes on each release
+  # tag (release-please.yml). Always a digest, never a tag.
+  image: ""
+  # <cell repository>@sha256:<digest> the ValidatingAdmissionPolicy pins
+  # cellctl's own writes to (D4). cellctl itself resolves the per-cell image
+  # to run from the database, not from this value.
+  cellImageRepository: ""
+  namespace: exomem-cloud
+  replicas: 1
+  b2BucketName: ""
+  b2BucketId: ""
+  b2AccountId: ""
+  # D8 amendment: restic reaches B2 through its S3-compatible endpoint, not
+  # B2's native API (e.g. https://s3.us-west-002.backblazeb2.com).
+  b2Endpoint: ""
+  # D3 default; not pinned exactly by the design, kept configurable per the
+  # design owner's ruling rather than hardcoded.
+  initDeadlineMinutes: 10
+  databaseDsnSecretName: exomem-cellctl-database-dsn
+  databaseDsnSecretKey: dsn
+  cellTokenKeySecretName: exomem-cloud-cell-token-key
+  backupMasterKeySecretName: exomem-cloud-backup-master-key
+  b2KeyManagementSecretName: exomem-cloud-b2-key-management
+  hetznerReadTokenSecretName: exomem-cloud-hetzner-read-token
+  # D5: cellctl's own egress, scoped to the control database on 5432 --
+  # explicit addresses, refreshed deliberately, matching gateway's own
+  # databaseEgressCidrs pattern.
+  databaseEgressCidrs: []
+  # memoryLimit is 3Gi because the first index build over a large restored vault
+  # peaked above 1.2 GiB and was OOM-killed at 1536Mi. The owner's cell (about
+  # 9,300 files, 3.6 GB) then settled at 1.7 GiB resident at idle after
+  # indexing, so memoryRequest (1Gi) understates a large vault's steady state
+  # and lets several large cells overcommit a node. The request is left as is
+  # here; sizing it is a separate decision.
+  cellResources:
+    cpuRequest: 250m
+    cpuLimit: "2"
+    memoryRequest: 1Gi
+    memoryLimit: 3Gi
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+
+# D9: capacity is observed from the cluster (CSINode allocatable + live
+# VolumeAttachments), never a chart constant or a Hetzner server id. The old
+# cellctl.nodeName/attachmentsLimit values are gone -- nothing reads them.
+capacity:
+  csiDriver: csi.hetzner.cloud
+  headroom: 5
+  # Set only for a cluster whose CSINode publishes no allocatable count for
+  # csiDriver -- how the local rehearsal runs without Hetzner CSI at all.
+  # Null means "publish cell_slots=0 and log why" (D9: nothing is admitted
+  # to a node whose limit is unknown).
+  attachmentsLimitFallback: null
+
+# D5/D8: cell-fleet-wide settings that are not per-row.
+cells:
+  # UTC hour range "start-end" the nightly backup may run inside: start
+  # inclusive, end exclusive. It may cross midnight ("22-3"); an empty
+  # window (start == end) is rejected by the schema.
+  backupWindow: "2-5"
+  backupConcurrency: 1
+  # Ranges excepted from the backup/restore Jobs' otherwise-unrestricted
+  # object-storage egress ipBlock (0.0.0.0/0): the cluster's own pod/service
+  # CIDRs, plus the standard private, carrier-grade NAT and link-local
+  # ranges, so a Job cannot reach anything inside the cluster or its host
+  # network under the guise of "object storage". The local rehearsal
+  # overrides this to reach its in-cluster S3 double.
+  jobEgressExcept:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 169.254.0.0/16
+
+cloudGateway:
+  enabled: false
+  # Supplied by the reviewed Substrate gateway image release; never a mutable tag.
+  image: ""
+  replicas: 1
+  hostname: ""
+  # Substrate's public origin (EXOMEM_PUBLIC_BASE_URL), and the MCP path on
+  # `hostname` the gateway serves (EXOMEM_CLOUD_MCP_URL is https://hostname+path).
+  publicBaseUrl: ""
+  mcpPath: /mcp
+  cellProtocolVersion: "1"
+  databaseSecretName: exomem-cloud-gateway-database
+  databaseSecretKey: url
+  controlPlaneKeySecretName: exomem-cloud-gateway-control-plane-key
+  controlPlaneKeySecretKey: key
+  # D7: holds `current` (64 hex characters) -- the same entry cellctl reads.
+  cellTokenKeySecretName: exomem-cloud-cell-token-key
+  # D11: set by the Cloud ingress on every forwarded request. The value is
+  # not a secret, but must be at least 32 unguessable URL-safe characters.
+  trustedIngressSourceHeader: x-exomem-ingress-source
+  trustedIngressSourceValue: ""
+  # D5: the gateway may egress only to cell pods on 8765 and the control
+  # database on 5432 -- explicit addresses, matching gateway.databaseEgressCidrs.
+  databaseEgressCidrs: []
+
+cloudStorage:
+  className: exomem-cloud-encrypted
+  encryptionSecretName: exomem-cloud-volume-encryption
+  encryptionSecretNamespace: exomem-platform
+
+cloudIngress:
+  enabled: false
+  hostname: ""
+  acmeEmail: ""
+  cloudflareApiTokenSecretName: exomem-cloudflare-dns-token
+  cloudflareApiTokenSecretKey: token
+
+cert-manager:
+  enabled: true
+  # harden-exomem-cloud-operator-access D3: the Cloud ClusterIssuer's DNS-01
+  # token and ACME account key resolve here. It must equal cellctl.namespace
+  # (cloud-ingress.yaml fails the render otherwise), where the signed secret
+  # registry delivers exomem-cloudflare-dns-token; never the edge namespace.
+  clusterResourceNamespace: exomem-cloud
+  crds:
+    # The chart installs cert-manager's own CRDs (ClusterIssuer, Certificate,
+    # ...); installCRDs is set via crds.enabled (the chart's current key),
+    # not the deprecated installCRDs value.
+    enabled: true
+  # cert-manager's controller must be installed and its webhook available
+  # before any Certificate (cloud-ingress.yaml's ClusterIssuer/Certificate)
+  # is applied in the same release, or that apply fails admission. Runs as
+  # its own platform-level release ahead of most clusters' first application
+  # chart in normal practice; bundled here as a chart dependency (like
+  # hcloud-csi and traefik above) because this repo already manages its
+  # cluster-level infra this way.
+  #
+  # v1.19.6, pinned by multi-arch image index digest (the chart renders
+  # <repository>@<digest> when a digest is set), resolved from quay.io on
+  # 2026-09-25. Bump these together with the chart version in Chart.yaml.
+  image:
+    digest: sha256:c6a328f6095a02731e943c95d5e61bdc3b87373cc9fbd915f73d8615cda766f9
+  cainjector:
+    image:
+      digest: sha256:f7ce571e372f28229cab2e07c803e2dc0b37c5642818a097ab42a19af182a329
+  webhook:
+    image:
+      digest: sha256:c4b7103d6c1edb196ee448660835b9a5d0fb3f9064019d881fd56e94859df288
+  startupapicheck:
+    image:
+      digest: sha256:20bc1106514032737873e8d46afacfbcc61d6ffe0e29f47b9d914b28e18ad521

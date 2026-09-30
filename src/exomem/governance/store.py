@@ -39,6 +39,20 @@ class UnsupportedGovernanceSchema(RuntimeError):
     """The authoring core cannot safely interpret this sidecar version."""
 
 
+class GovernanceStoreUnreadable(RuntimeError):
+    """A sidecar exists at the bound path but cannot be read as v3 or v4.
+
+    Reporting an unreadable store as "no schema" is what let a read-only
+    mount look identical to a cell that had never opened its governance
+    store at all.  The message is deliberately fixed: this classification
+    reaches operator-facing terminals, so it carries neither the path nor
+    the underlying exception text.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("governance store is present but unreadable")
+
+
 def _reset_initialized_sidecars_after_fork() -> None:
     global _INITIALIZED_SIDECARS, _INITIALIZED_SIDECARS_LOCK
     _INITIALIZED_SIDECARS = OrderedDict()
@@ -221,19 +235,34 @@ def open_active_governance_read_connection(vault_root: Path) -> sqlite3.Connecti
 
 
 def authorization_session_schema_version(vault_root: Path) -> int | None:
-    """Return exact v3/v4 for an existing protected store, never creating one."""
+    """Return exact v3/v4 for an existing protected store, never creating one.
 
+    ``None`` means one thing only: no sidecar exists at the bound path.  A
+    sidecar that exists but cannot be read as exact v3 or v4 -- a denied open,
+    a lease-scope failure, a directory in its place, a version this release
+    does not know -- raises `GovernanceStoreUnreadable`.  Callers that must
+    keep treating both as "unavailable" use
+    `authorization_session_schema_version_if_readable`.
+    """
+
+    path = sidecar_path(Path(vault_root))
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise GovernanceStoreUnreadable from None
     connection: sqlite3.Connection | None = None
     try:
         connection = open_authorization_session_connection(vault_root)
     except UnsupportedGovernanceSchema:
         legacy = open_readonly_connection(vault_root)
         if legacy is None:
-            return None
+            raise GovernanceStoreUnreadable from None
         legacy.close()
         return SCHEMA_USER_VERSION
-    except (FileNotFoundError, OSError, sqlite3.Error):
-        return None
+    except (OSError, RuntimeError, sqlite3.Error):
+        raise GovernanceStoreUnreadable from None
     else:
         from . import schema_v4
 
@@ -241,6 +270,20 @@ def authorization_session_schema_version(vault_root: Path) -> int | None:
     finally:
         if connection is not None:
             connection.close()
+
+
+def authorization_session_schema_version_if_readable(vault_root: Path) -> int | None:
+    """Read the schema version tolerantly: an unreadable store reads as absent.
+
+    This is the pre-classification reading. Serving and readiness callers stay
+    fail-closed on ``None`` and must not learn a new exception; only the hosted
+    migration runner distinguishes absent from unreadable.
+    """
+
+    try:
+        return authorization_session_schema_version(vault_root)
+    except GovernanceStoreUnreadable:
+        return None
 
 
 def _schema_migration_barrier(point: str) -> None:

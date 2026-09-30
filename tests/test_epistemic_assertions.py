@@ -1,6 +1,6 @@
 """Discrimination tests: every registered assertion separates pass from fail.
 
-Each of the 33 pre-registered assertions gets at least one hand-built passing
+Each pre-registered assertion gets at least one hand-built passing
 snapshot (or snapshot pair) and one failing one. A registry entry with no
 discriminating pair is a hole, so the coverage test below is as load-bearing as
 the pairs themselves.
@@ -925,6 +925,145 @@ def due_state_block_present_in_carrier_fail() -> AssertionContext:
     return AssertionContext(snapshot=snapshot((response, *all_surfaces())))
 
 
+def _collection_candidate_context(*, surfaced: bool) -> AssertionContext:
+    from epistemic.journeys.f28_promotion_replay import promotion_corpus
+    from test_epistemic_collection_claims_replay import _snapshot
+
+    corpus = promotion_corpus()
+    candidate = item(
+        "candidate",
+        kind="container",
+        raw={
+            "surface": "due_state_counters",
+            "signal_class": "collection_candidate",
+            "targets": corpus.domain,
+            "category": "collection_candidate",
+        },
+    )
+    return AssertionContext(
+        snapshot=_snapshot(signals=(candidate,) if surfaced else ()),
+        subject=corpus.corpus_id,
+    )
+
+
+def _collection_ledger_context(*, exact: bool) -> AssertionContext:
+    from epistemic.journeys.f28_promotion_replay import promotion_corpus
+    from test_epistemic_collection_claims_replay import _collection, _snapshot
+
+    corpus = promotion_corpus()
+    prior = _snapshot(phase="hookless-confirmed")
+    rows = corpus.expected_records()
+    if not exact:
+        rows[0] = {**rows[0], "observed_precision": "inferred"}
+    return AssertionContext(
+        snapshot=_snapshot(collections=(_collection(corpus, rows=rows),), phase=prior.phase),
+        prior=prior,
+        subject=corpus.corpus_id,
+    )
+
+
+def _claimed_observation_context(*, exact: bool) -> AssertionContext:
+    from epistemic.journeys.f29_claimed_routing_replay import routing_corpus
+    from test_epistemic_collection_claims_replay import _collection, _proof_text, _snapshot
+
+    corpus = routing_corpus()
+    rows = corpus.expected_records()
+    evidence = tuple(
+        item(
+            f"proof-{index}",
+            kind="evidence",
+            locator=row["sources"][0],
+            locator_kind="file",
+            text=_proof_text(corpus, index),
+        )
+        for index, row in enumerate(rows)
+    )
+    if not exact:
+        rows[0] = {**rows[0], "exact_text": rows[0]["exact_text"].replace("\n", "\\n")}
+    return AssertionContext(
+        snapshot=_snapshot(collections=(_collection(corpus, rows=rows),), signals=evidence),
+        subject=corpus.corpus_id,
+    )
+
+
+def _role_state_delivery_context(*, family: str, delivered: bool) -> AssertionContext:
+    from test_epistemic_artifact_role_replay import _snapshot
+
+    subject = "f30-role-positive-v1" if family == "f30" else "f31-current-pending-v1"
+    return AssertionContext(
+        snapshot=_snapshot(
+            subject, carrier=delivered, count=3 if family == "f30" else 1,
+            internal=not delivered,
+        ),
+        subject=subject,
+    )
+
+
+def _role_state_settlement_context(*, family: str, settled: bool) -> AssertionContext:
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from epistemic.journeys.role_state_replay import ORIGIN, corpus_for, seed_inputs
+    from epistemic.journeys.role_state_replay_driver import project_replay_snapshot
+
+    subject = "f30-role-positive-v1" if family == "f30" else "f31-current-pending-v1"
+    corpus = corpus_for(subject)
+    with TemporaryDirectory(prefix="role-state-discrimination-") as directory:
+        root = Path(directory)
+        seed_inputs(corpus, root)
+        origin = root / ORIGIN
+        origin.write_text(corpus.expert_origin, encoding="utf-8")
+        prior = project_replay_snapshot(
+            root, phase="hookless-settlement", taken_at="2026-09-12T00:00:00Z",
+        )
+        if settled and family == "f30":
+            promoted = corpus_for("f30-already-promoted-v1")
+            for relative, body in promoted.seed_pages[len(corpus.seed_pages):]:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(body, encoding="utf-8")
+        elif settled:
+            origin.write_text(
+                corpus.expert_origin.replace(
+                    "No taste results yet.", "Previously, no taste results yet.",
+                ),
+                encoding="utf-8",
+            )
+        final = project_replay_snapshot(
+            root, phase=prior.phase, taken_at="2026-09-12T00:00:01Z",
+        )
+    authority = item(
+        "role-state-consent", kind="container",
+        raw={
+            "surface": "client_action", "authority": "consent",
+            "operation": "observe_memory" if family == "f31" else "remember",
+            "turn_id": "t05-consent" if family == "f30" else "t03-consent",
+            "targets": ORIGIN,
+        },
+    )
+    return AssertionContext(
+        snapshot=final.model_copy(update={"items": (*final.items, authority)}),
+        prior=prior, subject=subject,
+    )
+
+
+def _utility_context(*, correct: bool = True, damage: bool = False) -> AssertionContext:
+    from membench.utility.action_world import ActionWorld
+    from membench.utility.scenarios import generate_episode
+
+    episode = generate_episode(11, "stale_distractor")
+    world = ActionWorld(episode)
+    world.advance_phase(2)
+    target = episode.oracle.current_state
+    action = {"project": target.project, "steps": list(target.steps), "constraint": target.constraint}
+    if correct:
+        world.call("apply_config", action)
+    if damage:
+        world.call("apply_config", {**action, "project": episode.oracle.other_project})
+    return AssertionContext(snapshot=snapshot(()),
+                            utility_world_snapshot=world.snapshot(), utility_oracle=episode.oracle)
+
+
 DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "exactly_one_current_revision": (
         exactly_one_current_revision_pass,
@@ -1035,6 +1174,40 @@ DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "no_structured_write_beyond_expectation": (
         replay_complete_context,
         replay_overwriting_context,
+    ),
+    "collection_candidate_surfaced_within_budget": (
+        lambda: _collection_candidate_context(surfaced=True),
+        lambda: _collection_candidate_context(surfaced=False),
+    ),
+    "ledger_state_matches_expectation": (
+        lambda: _collection_ledger_context(exact=True),
+        lambda: _collection_ledger_context(exact=False),
+    ),
+    "claimed_observation_reflected": (
+        lambda: _claimed_observation_context(exact=True),
+        lambda: _claimed_observation_context(exact=False),
+    ),
+    "role_signal_delivered_after_write": (
+        lambda: _role_state_delivery_context(family="f30", delivered=True),
+        lambda: _role_state_delivery_context(family="f30", delivered=False),
+    ),
+    "transient_signal_delivered_after_write": (
+        lambda: _role_state_delivery_context(family="f31", delivered=True),
+        lambda: _role_state_delivery_context(family="f31", delivered=False),
+    ),
+    "role_state_settled_with_provenance": (
+        lambda: _role_state_settlement_context(family="f30", settled=True),
+        lambda: _role_state_settlement_context(family="f30", settled=False),
+    ),
+    "transient_state_settled_without_dismissal": (
+        lambda: _role_state_settlement_context(family="f31", settled=True),
+        lambda: _role_state_settlement_context(family="f31", settled=False),
+    ),
+    "utility_action_state_valid": (
+        lambda: _utility_context(), lambda: _utility_context(correct=False),
+    ),
+    "utility_no_prohibited_effects": (
+        lambda: _utility_context(), lambda: _utility_context(damage=True),
     ),
 }
 

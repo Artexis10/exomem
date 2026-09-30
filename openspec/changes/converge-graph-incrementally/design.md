@@ -223,6 +223,58 @@ start surfacing placeholder nodes in `connect_memory` output. That is a user-vis
 contract change, and it should be made on measurement rather than on the way past. It
 belongs with Phase 3, whose whole premise is re-measuring before relaxing anything.
 
+## Recovering a barrier with unpublished external coverage
+
+A persisted read barrier combined with an external-pending epoch is not a
+per-path repair: the mark only identifies observed paths, while a cold process
+cannot prove that they cover the graph's current recall corpus. Barrier recovery
+therefore continues to refuse that state. The drain must convert the unresolved
+coverage into its existing durable full-rebuild marker, then let the guarded
+marker convergence perform the reconciled full pass.
+
+The marker remains the single retry handle. A current publication-refusal memo
+keeps its backoff, an active rebuild owner retains the marker without starting a
+second rebuild, and a newer external mark survives clear-through of the sampled
+epoch. Reconciliation evicts resolver and inbound caches before it retires an
+observed mark, so a newly available graph cannot share stale dependent answers.
+
+## Phase 3 as measured: the constraint was publication, and the full fix was parked
+
+Task 7.1 first closed Phase 3 on a drain-cost measurement. Under writes the binding
+constraint turned out to be the whole-vault pass's vault-global stabilization proof,
+which any recorded write defeats, and the Class C mark that followed: it cooled recall
+for every reader and made the next writes' lineage gaps uncoverable, so they registered
+more whole-vault passes.
+
+The full response -- publish a pass at the checkpoint it sampled, queue its residue, and
+withhold the availability marker while any graph work is queued -- was built and pinned
+(`fix/graph-convergence-contract`, `fbd16eea`) and parked. Paired against the U5 tree at
+3,000 pages it cost availability that no correctness gain justified: a graph unreadable
+for 14-15 s at one writer against U5's 0.5 s, and 21-49 s against 6-9 s at five writers,
+with write latency and CPU worse too. The marker invariant closes a hole of bounded
+staleness in derived relations that the queue drain repairs anyway; main keeps U5's
+behaviour.
+
+What landed from that work stands on its own:
+
+- **Class C needs positive evidence.** A moved pass is classified against the
+  registry's own history. Recorded movement is a publication failure with no mark; an
+  unexplained difference is marked scoped to its paths. Main raised Class C with an
+  unscoped mark under governed writes alone in every probe run; the classifier removes it
+  without changing the #576 re-target budget.
+- **No lock-order inversion with a committing batch.** Graph work that holds the
+  writers' boundary skips a recovery checkpoint write while a batch commits, instead of
+  waiting on the batch lock a writer holds while it waits for that boundary.
+- **The queue keeps converging under a steady writer.** A drain records the topology it
+  derived under, keeps rows it proved when the vault moves elsewhere, a late refresh of
+  an acknowledged generation is a no-op, and a receipt whose page's own bytes keep
+  failing is quarantined after bounded attempts. Quarantine only stops hot retries: the
+  page keeps its rows, and a change to it or a slow timer retries it. A busy boundary or
+  a brief lock never counts, because the cost of quarantining a healthy page -- missing
+  or stale rows nothing repairs -- is far higher than the hot retries it saves.
+- **Residual lag is reported** wherever unavailability is reported, without a vault walk;
+  the read fence stays fail-closed.
+
 ## Alternatives considered
 
 **Tune the join bound.** This was the previous attempt. Rejected: the constant is
@@ -255,3 +307,113 @@ exist.
 Rewriting the graph sync receipt, epoch, and lineage-reset protocol. It is crash-safety
 machinery, it is correct, and it stays. This change reduces how often it is exercised,
 not what it does.
+
+## Addendum: a handoff that a stale snapshot cannot strand (2026-09-27 upgrade)
+
+The 0.93.0 to 0.95.1 managed upgrade on the personal cell fell back to a cold start.
+The serving worker published generation 5576, an agent's `episode_memory` created a page
+50 s later, and the standby's one proof at 22:00:59 declined with
+`indexed_membership_differs`. The proof ran once, so `graph_snapshot` stayed waiting until
+the 300 s warm budget expired, even though the serving worker could have republished in
+that window. It could not in fact republish: a boundary held for 28 s by the same command
+had escalated the queued per-path repair into whole-vault debt (full marker 5577), and a
+whole-vault pass of about four minutes never held still under writes every one to three
+minutes. That is the livelock 7.2 describes, and it stays parked (below).
+
+This addendum removes the handoff's dependence on that republish:
+
+- **Created and removed pages are residue.** The adoption proof already hashes every
+  admitted page. A page created or removed since the snapshot is enumerated by that same
+  proof, so it is a bounded repair exactly like a page whose bytes moved, and the drain
+  already adds rows for an appeared page and deletes rows for a vanished one, widening to
+  the topology-affected sources. A topology difference is accepted only when reverting the
+  residue paths' resolver entries to their stored titles reproduces the stored
+  fingerprint, the same reconstruction the incremental refresh uses. A snapshot row for a
+  page still on disk but no longer admitted remains a membership decline, because nothing
+  in the residue path proves the drain removes it.
+- **A waiting standby re-proves.** A decline is not final while the warm budget runs.
+  The standby re-proves when the durable generation or the published snapshot changed,
+  at most every 30 s. It reseeds its own unwatched recall registry first, and writes
+  nothing the serving worker owns.
+- **Promotion pays the whole-vault debt its proof covered.** The source proof enumerates
+  every divergence between the sidecar and disk as of the proof. A full marker observed
+  before it is therefore covered once the residue is queued, and promotion retires it
+  by compare-and-swap on the value and raise count, as a publication does. Without this
+  the promoted worker inherits the livelock: its drain works only the marker, and the
+  marker needs a pass that cannot stabilize.
+- **Rebuild outcomes name their reason.** A refused rebuild claim and a pass defeated
+  after eight minutes printed the same `outcome=failed` line with no reason, and the
+  callers that run the pass directly logged nothing. The line now carries the error code
+  and says `coalesced` for a refused claim.
+
+Review of the first cut tightened four things. A proof now holds only the snapshot it
+read: if the serving worker publishes during the proof, the attempt proves nothing and
+the moved token earns a re-proof. Promotion retires the marker only while the durable
+generation is still the one the proof sampled, because a full-scope batch raises its
+marker before its bytes land. To keep that guard from stranding the handoff, the standby
+keeps re-proving after a success while the graph moves, and a newer proof replaces the
+held one only when it succeeds. The re-proof interval runs from the end of the last
+attempt, and the once-a-second poll only stats the checkpoint and the sidecar until one
+moves.
+
+The residue tests compare every edge after the drain with a fresh whole-vault rebuild.
+That covers a created page gaining incoming links, a stem made ambiguous, a rename, a
+removal and a retitle, with a negative control that disables the drain's widening.
+
+**A drain records the resolver topology its rows account for, and no other.** A
+per-path drain under a moving vault lands its rows and withholds the marker, lineage and
+acknowledgement. It used to withhold the stored resolver topology fingerprint as well,
+so a page it created had rows the fingerprint did not know, and the next adoption proof
+declined a snapshot that matched the disk. The published branch had the opposite hole:
+it always wrote the fingerprint of the resolver it derived under, including topology
+changes this batch never widened, such as a retitled page outside the indexed corpus.
+That page has no rows and can never be residue, so the next adoption matched, accepted a
+sidecar missing the link it re-targets, and promotion retired the whole-vault marker
+that was the only repair. Both branches now write the fingerprint only when reverting
+the queued pages' resolver entries to the pre-pass rows reproduces the stored
+fingerprint, decided before the pass while those rows are still readable. Pages the pass
+rewrites only as affected do not count: widening follows the queued pages' keys, so an
+affected page's own retitle was never widened (task 8.9 records the related serving-graph
+limit). A change split across drains -- `DRAIN_LIMIT` truncation, or a page landing
+between the queue snapshot and the drain -- would leave no single drain able to explain
+it, so the fingerprint would stick until a whole-vault publication. A drain that may not
+record the topology therefore carries its queued indexed pages' pre-pass resolver
+entries forward in `graph_meta` (`recall_resolver_topology_carry`, first entry per page
+kept, at most `TOPOLOGY_CARRY_LIMIT` = 256 pages). The next drain and the adoption proof
+revert those entries too, and a carried page whose row no longer matches the resolver
+explains nothing. Recording a fingerprint clears the record, and a whole-vault
+publication starts without one. Past the bound the record is dropped and repair takes
+the whole-vault path, as before. Affected pages and pages outside the indexed corpus
+never enter it. A drain records or extends the record only when reverting its batch,
+the record, and every indexed page whose stored row disagrees with the resolver
+reproduces the stored fingerprint. Otherwise its resolver holds a change outside the
+indexed corpus under which it rewrote affected pages; if that change were later
+reverted, a kept record would explain the fingerprint again over those rows. The
+record is dropped instead, and the whole-vault path stays in charge. Otherwise the stored
+fingerprint stays, the proof keeps failing closed, and the whole-vault marker stays the
+repair. Nothing in the publication or availability contract moves.
+
+Steady-state convergence under writes, meaning catch-up publication of a pass whose
+movement was all recorded, is 7.2. It is not reopened here. It was built and measured on
+`fix/graph-convergence-contract` and parked by ruling on availability and latency
+regressions. The incident is new evidence for revisiting that ruling, which is a separate
+decision.
+
+## Addendum: replayed paths outside the recall delta (0.96.0)
+
+On the live 0.96.0 worker, the periodic reconcile replayed deferred full-index receipts
+through the graph's standalone refresh. Each replayed page had changed long before the
+graph's stored checkpoint, so it lay outside the recall delta, and the refresh fell back
+with `caller_path_outside_delta`. For a standalone caller that meant an in-process
+whole-vault rebuild, 59-101 s each, four in five minutes, one per isolated receipt, with
+concurrent requests at 4-5 s p95 under the GIL.
+
+The gate existed because a caller path outside the delta could mean the registry missed
+the change, and the refresh's topology proof only covers the delta. The page itself says
+which case it is. When the registry records the page exactly as the disk has it, the
+registry is not behind for it. Then either the stored row already carries the page's
+current source hash, and the replay is a no-op, or the row is stale while the change is
+recorded. The second case is the ordinary queued-work case, which the drain repairs with
+its own widening. Only a page the registry does not vouch for keeps the whole-vault
+fallback. No schema change: the file rows already store the source hash, and the
+registry already holds each page's stat signature.

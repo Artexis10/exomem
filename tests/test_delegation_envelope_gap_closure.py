@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -170,6 +172,53 @@ def test_the_first_eligible_write_advisory_carries_one_quiet_offer(vault) -> Non
     assert "quiet" not in again.lower()
     assert identity.ref in again
     assert len(again) <= 300
+
+
+def test_competing_deferred_offer_carriers_have_one_owner(vault, monkeypatch) -> None:
+    store = review_state.ReviewStateStore(vault)
+    family = "near-duplicate"
+    for number in range(3):
+        store.apply(
+            f"{'c' * 23}{number}",
+            f"{'d' * 23}{number}",
+            action="dismiss",
+            family=family,
+        )
+    stale = store.load()
+    barrier = threading.Barrier(2)
+    local = threading.local()
+    original_due = review_state._quiet_offer_due
+
+    def overlap_first_checks(payload, checked_family):
+        due = original_due(payload, checked_family)
+        if not getattr(local, "checked", False):
+            local.checked = True
+            barrier.wait(timeout=5)
+        return due
+
+    monkeypatch.setattr(review_state, "_quiet_offer_due", overlap_first_checks)
+    carriers = [
+        (
+            f"exomem://write-advisory-result/{number:032x}",
+            f"exomem://review/write-advisory/{number:024x}",
+            f"{number:024x}",
+        )
+        for number in (1, 2)
+    ]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        offers = list(
+            pool.map(
+                lambda carrier: store.arm_quiet_offer(family, known=stale, carrier=carrier),
+                carriers,
+            )
+        )
+    assert sum(offer is not None for offer in offers) == 1
+    winner = carriers[next(index for index, offer in enumerate(offers) if offer is not None)]
+    assert store.load()["dispositions"][family]["_quiet_offer_carrier"] == {
+        "result_ref": winner[0],
+        "review_ref": winner[1],
+        "fingerprint": winner[2],
+    }
 
 
 def test_an_offer_failure_does_not_resurrect_a_dismissed_write_advisory(

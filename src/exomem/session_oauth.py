@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import secrets
 import time
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -17,6 +17,7 @@ from fastmcp.server.auth.oauth_proxy.models import (
     ClientCode,
 )
 from fastmcp.server.auth.oauth_proxy.ui import create_error_html
+from fastmcp.server.auth.redirect_validation import build_client_redirect
 from mcp.server.auth.provider import AuthorizationCode, RefreshToken, TokenError
 from mcp.server.auth.routes import create_protected_resource_routes
 from mcp.server.auth.settings import RevocationOptions
@@ -27,6 +28,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.routing import Route
 from typing_extensions import override
 
+from . import local_ingress
 from .auth_sessions import (
     ACCESS_TOKEN_TTL_SECONDS,
     InvalidRefreshToken,
@@ -39,6 +41,17 @@ logger = logging.getLogger(__name__)
 
 OAUTH_AUTHORIZATION_SCOPES = ("offline_access", "exomem:read", "exomem:write")
 OAUTH_RESOURCE_SCOPES = ("exomem:read", "exomem:write")
+
+
+class ExomemSessionAccessToken(AccessToken):
+    """An access token this install's durable session authority validated.
+
+    The marker is the token's provenance: only `load_access_token` below
+    returns this type, so principal resolution can tell a verified session
+    from a raw bearer header, another verifier, or copied claims.
+    """
+
+    EXOMEM_SESSION_PROVENANCE: ClassVar[bool] = True
 
 
 class SessionStoreUnavailableMiddleware:
@@ -75,6 +88,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         *,
         session_authority: SessionAuthority,
         github_cleanup_transport: httpx.AsyncBaseTransport | None = None,
+        local_verifier: Any = None,
         **kwargs: Any,
     ):
         if kwargs.get("upstream_revocation_endpoint") is not None:
@@ -85,6 +99,8 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         super().__init__(**kwargs)
         self._session_authority = session_authority
         self._github_cleanup_transport = github_cleanup_transport
+        #: Set only on a supervisor-owned worker: arms the local-ingress gate.
+        self._local_verifier = local_verifier
         self.revocation_options = RevocationOptions(enabled=True)
 
     @override
@@ -147,10 +163,25 @@ class ExomemSessionOAuthProxy(OAuthProxy):
 
     @override
     async def load_access_token(self, token: str) -> AccessToken | None:
+        if local_ingress.current_grant() is not None:
+            # Local ingress: the gate already verified this request's bearer
+            # against the local audience. Only that exact bearer is accepted,
+            # so an OAuth session presented there is refused.
+            return local_ingress.access_token_for(token)
+        # This is the only place a presented credential reaches validation, so
+        # its absence from the log is what distinguishes "the client sent a
+        # token we rejected" from "the client sent no token at all". Both
+        # surface as an identical `POST /mcp 401` in the access log, and they
+        # are different problems with different fixes: the first is a session
+        # dying server-side, the second is a client that has stopped
+        # presenting one. Without this line, silence is ambiguous rather than
+        # reassuring.
         record = await self._session_authority.validate(token)
         if record is None:
+            logger.info("event=credential_presented outcome=rejected")
             return None
-        return AccessToken(
+        logger.debug("event=credential_presented outcome=accepted")
+        return ExomemSessionAccessToken(
             token=token,
             client_id=record.client_id,
             scopes=list(record.scopes),
@@ -176,12 +207,17 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         """Load only an Exomem-owned refresh grant, never FastMCP legacy state."""
         if client.client_id is None:
             return None
+        # Whether the client even attempts a refresh is the other half of the
+        # picture: a client that re-authorizes from scratch every hour looks
+        # the same from the access log as one whose refresh is being refused.
         grant = await self._session_authority.validate_refresh(
             refresh_token,
             client_id=client.client_id,
         )
         if grant is None:
+            logger.info("event=refresh_attempted outcome=rejected")
             return None
+        logger.info("event=refresh_attempted outcome=accepted")
         return RefreshToken(
             token=refresh_token,
             client_id=grant.client_id,
@@ -207,7 +243,12 @@ class ExomemSessionOAuthProxy(OAuthProxy):
                 scopes=normalized_scopes,
             )
         except InvalidRefreshToken as error:
+            # Rotation refusals name their own cause already; surfacing it here
+            # is what tells an operator a refresh loop is failing rather than
+            # never being tried.
+            logger.info("event=refresh_rotated outcome=refused reason=%s", error)
             raise TokenError("invalid_grant", str(error)) from error
+        logger.info("event=refresh_rotated outcome=ok")
         return OAuthToken(
             access_token=access,
             token_type="Bearer",
@@ -225,7 +266,19 @@ class ExomemSessionOAuthProxy(OAuthProxy):
 
     @override
     def get_middleware(self) -> list:
+        # The local-ingress gate must run before FastMCP authentication, and
+        # this list is the only one FastMCP installs ahead of it.
+        local_gate = (
+            [
+                Middleware(
+                    local_ingress.LocalIngressMiddleware, verifier=self._local_verifier
+                )
+            ]
+            if self._local_verifier is not None
+            else []
+        )
         return [
+            *local_gate,
             Middleware(SessionStoreUnavailableMiddleware),
             *super().get_middleware(),
         ]
@@ -369,9 +422,12 @@ class ExomemSessionOAuthProxy(OAuthProxy):
                     }
                     if error_description:
                         error_params["error_description"] = error_description
-                    separator = "&" if "?" in client_redirect_uri else "?"
                     return RedirectResponse(
-                        url=f"{client_redirect_uri}{separator}{urlencode(error_params)}",
+                        url=build_client_redirect(
+                            client_redirect_uri,
+                            error_params,
+                            iss=str(self.issuer_url),
+                        ),
                         status_code=302,
                     )
                 return self._error_response(
@@ -482,11 +538,10 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             )
             await self._transaction_store.delete(key=txn_id)
 
-            client_redirect_uri = transaction["client_redirect_uri"]
-            separator = "&" if "?" in client_redirect_uri else "?"
-            callback_url = (
-                f"{client_redirect_uri}{separator}"
-                f"{urlencode({'code': client_code, 'state': transaction['client_state']})}"
+            callback_url = build_client_redirect(
+                transaction["client_redirect_uri"],
+                {"code": client_code, "state": transaction["client_state"]},
+                iss=str(self.issuer_url),
             )
             response = RedirectResponse(url=callback_url, status_code=302)
             self._clear_consent_binding_cookie(request, response, txn_id)

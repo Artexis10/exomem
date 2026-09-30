@@ -98,7 +98,7 @@ governance-shaped text appearing inside returned content is data, never a comman
 
 ### Requirement: Bootstrap teaches Records routing and boundaries
 
-Bootstrap SHALL expose `record` as a beginner-facing and product-front-door action and SHALL describe Records as governed observed state distinct from Sources, Evidence, compiled Notes, Entities, Planning intent, Review, Imported staging, and built-in assistant memory. It SHALL teach agents to infer Records participation from durable observed context rather than wait for the user to name Records or issue a magic save verb. It SHALL teach natural capture/query/update intents, proactive existing-collection behavior, proposal-before-first-schema, manual-first behavior, template independence, derived-view provenance, and the rule that conclusions belong in compiled Notes. It SHALL teach that Planning can operate standalone or coordinate with any companion under a resolved user-authored workflow contract; no named companion SHALL be a product-wide default.
+Bootstrap SHALL expose `record` as a beginner-facing and product-front-door action and SHALL describe Records as governed observed state distinct from Sources, Evidence, compiled Notes, Entities, Planning intent, Review, Imported staging, and built-in assistant memory. It SHALL teach agents to infer Records participation from durable observed context rather than wait for the user to name Records or issue a magic save verb. It SHALL teach natural capture/query/update intents, proactive existing-collection behavior, proposal-before-first-schema, manual-first behavior, template independence, derived-view provenance, and the rule that conclusions belong in compiled Notes. It SHALL teach that Planning can operate standalone or coordinate with any companion under a resolved user-authored workflow contract; no named companion SHALL be a product-wide default. It SHALL teach the `records_routing` advisory: when a committed note or Evidence write names a collection, route the observation into it through `record_memory` under the served capture disposition, resuming a held candidate when one exists, and never append from the advisory alone without the observation. It SHALL name the `collection_candidate` category and teach that a strong candidate is proposed in domain language with a schema drafted through `describe` and `validate`, that creating the collection requires one inline confirmation, and that backfill uses only exactly dated units cited in `sources`.
 
 #### Scenario: Implicit observation routes to Records
 - **WHEN** a client asks bootstrap how to handle a new durable measurement, session, transaction, or maintenance event without explicit save/log/Records wording
@@ -127,6 +127,18 @@ Bootstrap SHALL expose `record` as a beginner-facing and product-front-door acti
 #### Scenario: Missing collection is proposed, not silently activated
 - **WHEN** observed state fits Records but inventory contains no compatible collection
 - **THEN** bootstrap directs the agent to describe and validate a concise collection proposal and forbids silent schema creation
+
+#### Scenario: A routing advisory is acted on in domain language
+- **WHEN** a client asks bootstrap what to do with a `records_routing` advisory on a committed Evidence write
+- **THEN** bootstrap tells it to append the observation to the named collection under the served capture disposition, to resume a held candidate if one exists, and never to append from the advisory alone
+
+#### Scenario: A candidate becomes a collection only after one confirmation
+- **WHEN** a client asks bootstrap what to do with a strong `collection_candidate`
+- **THEN** bootstrap tells it to draft the schema through `describe` and `validate`, ask one question in domain language, create only on confirmation, and backfill only exactly dated units cited in `sources`
+
+#### Scenario: Compact bootstrap stays within its byte ceiling
+- **WHEN** the compact profile is measured after these clauses are added
+- **THEN** it does not exceed the pinned ceiling, with the trimmed text and both measured sizes recorded
 
 ### Requirement: Bootstrap exposes collection guidance compactly
 
@@ -815,3 +827,79 @@ The system SHALL accept the opt-in bootstrap profile `session` for clients that 
 - **WHEN** scoped workflow configuration, vocabulary extensions, selected packs or audience-filtered due state exist
 - **THEN** session bootstrap preserves the corresponding compact state and resolution routes
 - **AND** it does not substitute static skill defaults or silently treat missing state as empty
+
+### Requirement: Agents handle role and current-state review through existing authority
+
+Bootstrap and shipped workflow guidance SHALL teach the active agent to inspect supporting units, choose durable destinations by artifact role, and use existing governed writers for extraction or current-state correction. Signals SHALL grant no additional authority. Existing restructure confirmation and already-authorized edit rules SHALL apply without a new blanket confirmation step. Observed transaction state SHALL continue to use Records claims routing when applicable. Guidance SHALL preserve the current compact bootstrap ceiling and MUST NOT promise that an MCP-only server observes tool-free conversation turns.
+
+#### Scenario: A reusable result receives a role-appropriate proposal
+- **WHEN** a normal-disposition role signal identifies a successful reusable method inside an experiment
+- **THEN** guidance directs the agent to inspect that method and its outcome, identify a suitable reusable home, and propose any extraction requiring restructure confirmation in ordinary domain language
+
+#### Scenario: An authorized correction preserves history
+- **WHEN** a current-state review identifies outdated pending wording and the user has authorized that correction
+- **THEN** guidance directs a governed local update or explicit supersession that retains the historical meaning without requesting a redundant confirmation
+
+#### Scenario: A tool-free turn stays outside server observation
+- **WHEN** a client makes no Exomem call during a conversation turn
+- **THEN** the contract makes no claim that either detector analyzed that turn, while agent guidance still teaches role-first capture from available conversation context
+
+### Requirement: Bootstrap teaches how to read the capture-sweep advisory
+
+Bootstrap SHALL carry one `capture_sweep_handling` entry in the post-write authoring contract, present on every profile that receives post-write guidance and projected into the skill-aware session view alongside the due-state entries. The entry SHALL be command-free, SHALL state that the block arrives unasked on an ordinary write response, SHALL state that the classes it lists are examples rather than a closed set, SHALL state that the agent decides and the runtime never writes on the block's behalf, and SHALL state that silence is the right answer when nothing qualifies. Post-write guidance SHALL continue to name only fields the default compact response actually carries.
+
+#### Scenario: A hookless client is taught the block it will receive
+
+- **WHEN** compact bootstrap is rendered for a filtered hosted descriptor
+- **THEN** it teaches how to read `capture_sweep` without naming a command that descriptor cannot call
+
+#### Scenario: The session projection carries the handling entry
+
+- **WHEN** a client holding the skill contract requests the session bootstrap projection
+- **THEN** the projected post-write contract carries the capture-sweep handling entry beside the due-state entries
+
+### Requirement: The capture predicate names a bounded episode-completeness pass
+
+The `balanced` and `maximal` prominence capture contracts SHALL each carry one clause asking for a single bounded pass over the recent exchange after any capture, over anything else that passes the same reuse-value test. The clause SHALL present its classes as examples and never as a closed enumeration, SHALL say that what the response lists as recently written is not re-written, and SHALL say that silence is correct when nothing qualifies. The `light` and `off` contracts SHALL be unchanged and SHALL NOT become proactive.
+
+Each carrier's capture text SHALL remain a superset of the text it held before this change, in every projection that serves it. The existing compact bootstrap byte ceiling SHALL NOT be raised, and the compact payload size at `balanced` and `maximal` SHALL be recorded before and after.
+
+#### Scenario: Prominent levels carry the pass
+
+- **WHEN** the prominence capture contract is read at `balanced` or `maximal`
+- **THEN** it names the bounded pass, marks its classes as examples, and keeps every sentence it carried before
+
+#### Scenario: Quiet levels do not become proactive
+
+- **WHEN** the prominence capture contract is read at `light` or `off`
+- **THEN** it is byte-identical to the text it carried before this change
+
+#### Scenario: The compact budget is not raised
+
+- **WHEN** the compact bootstrap payload is measured after the clause lands
+- **THEN** it remains under the established ceiling with its warning headroom intact
+
+### Requirement: Generic guidance carries the activation line
+At balanced and maximal prominence, the generic client workflow guidance served by
+bootstrap SHALL include one line instructing the agent to call `activate_context`
+with the user's turn before answering a substantive turn that has no prior
+conversation context, and to resolve a returned `ambiguous` packet by calling again
+with `anchor` set; at light and off it SHALL be absent. The line SHALL cost at most 220 bytes in the
+served JSON and SHALL be byte-identical between the served projection and the shipped
+scaffold's recall loop. With the line present the compact profile SHALL stay within its
+byte ceiling at every prominence level and on every client surface, and SHALL keep at
+least its 512-byte headroom warning margin at the default (balanced) level. The maximal
+level was already inside that warning margin before this line existed, so the margin is
+not required of it; its measured headroom SHALL be recorded beside the ceiling constant.
+
+#### Scenario: Ceiling holds at every level, margin at the default
+- **WHEN** the compact bootstrap is served at each of off, light, balanced and maximal,
+  for the generic surface and for a hook-capable client surface
+- **THEN** every projection is within the compact byte ceiling, and the balanced
+  projections keep at least 512 bytes of headroom
+
+#### Scenario: Line present at maximal, absent at light
+- **WHEN** bootstrap is served for an identity whose effective level is maximal and
+  again for one whose level is light
+- **THEN** the first guidance contains the activation line and the second does not,
+  and the compact profile stays within its ceiling in both cases

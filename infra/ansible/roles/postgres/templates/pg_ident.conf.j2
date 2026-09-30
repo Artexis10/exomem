@@ -1,0 +1,9 @@
+## Managed by Ansible (role: postgres).
+##
+## Maps the OS user PgBouncer's own shipped systemd unit runs as to the
+## pgbouncer_auth role. Debian's/PGDG's pgbouncer.service hardcodes
+## `User=postgres` (confirmed against a live package install -- there is no
+## separate "pgbouncer" system account), so that is the only OS identity
+## this map admits. pg_hba.conf's `local ... pgbouncer_auth peer
+## map=pgbouncer_auth_map` line is the only place this map is used.
+pgbouncer_auth_map postgres pgbouncer_auth

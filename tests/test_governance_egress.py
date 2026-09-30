@@ -27,6 +27,7 @@ from exomem.governance import (
     authorization_session_lifecycle,
     bridges,
     egress,
+    policy,
     receipts,
 )
 from exomem.governance.decisions import Decision
@@ -2350,21 +2351,62 @@ def _through_dispatcher(vault: Path, name: str, **kwargs):
     return invoke_command(command, vault, **kwargs)
 
 
+def _answer(call) -> str:
+    """The caller-visible answer: the result, or the refusal text."""
+    try:
+        return str(call())
+    except ValueError as error:
+        return f"ValueError: {error}"
+
+
+def _answer_then_absent(vault: Path, call) -> tuple[str, str]:
+    """Answer once over the governed fixture, then once with the withheld
+    folder removed, so the two can be compared."""
+    import shutil
+
+    with request_scope(_external()):
+        governed = _answer(call)
+    shutil.rmtree(vault / "Knowledge Base" / "Notes" / "Patterns")
+    _reset_governance_caches()
+    with request_scope(_external()):
+        absent = _answer(call)
+    return governed, absent
+
+
 def test_browse_memory_does_not_leak_a_withheld_path(vault: Path) -> None:
     """`browse_memory` is not in `commands.COMMANDS` in this build, so it is
     driven through the exact composition the dispatcher applies: leaf, then
-    `postfilter`."""
+    `postfilter`. Every file in the listed folder is withheld, so the folder
+    answers exactly as a folder that is not there."""
     _restricted_vault(vault)
-    with request_scope(_external()):
+
+    def call():
         raw = commands.op_browse_memory(vault, path="Knowledge Base/Notes/Patterns", mode="list")
-        out = egress.postfilter("browse_memory", raw, vault)
-    assert "kill-switch-for-risky-releases" not in str(out)
+        return egress.postfilter("browse_memory", raw, vault)
+
+    governed, absent = _answer_then_absent(vault, call)
+    assert "kill-switch-for-risky-releases" not in governed
+    assert governed == absent
 
 
 def test_list_directory_does_not_leak_a_withheld_path(vault: Path) -> None:
     _restricted_vault(vault)
+    governed, absent = _answer_then_absent(
+        vault,
+        lambda: _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns"),
+    )
+    assert "kill-switch-for-risky-releases" not in governed
+    assert governed == absent
+
+
+def test_list_directory_still_lists_a_folder_with_visible_pages(vault: Path) -> None:
+    """A folder that holds a visible page is listed, without its withheld pages."""
+    _restricted_vault(vault)
     with request_scope(_external()):
-        out = _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+        out = _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes")
+    names = [entry["name"] for entry in out["entries"]]
+    assert "Insights" in names
+    assert "Patterns" not in names
     assert "kill-switch-for-risky-releases" not in str(out)
 
 
@@ -2401,10 +2443,14 @@ def test_dispatcher_backstop_drops_withheld_entries(vault: Path) -> None:
 def test_dispatcher_emits_one_plaintext_free_receipt_after_final_governed_representation(
     vault: Path,
 ) -> None:
-    """The owning dispatcher, not the reusable postfilter, records egress."""
+    """The owning dispatcher, not the reusable postfilter, records egress.
+
+    Every file in the listed folder is withheld, so the listing answers as a
+    missing folder; the decisions behind that answer are still recorded."""
     _restricted_vault(vault)
     with request_scope(_external()):
-        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
 
     records = _receipt_records(vault)
     assert len(records) == 1
@@ -2438,8 +2484,9 @@ def test_ungoverned_dispatcher_recall_writes_no_receipt(vault: Path) -> None:
 def test_external_dispatcher_retries_mint_distinct_boundary_ids(vault: Path) -> None:
     _restricted_vault(vault)
     with request_scope(_external()):
-        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
-        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+        for _attempt in range(2):
+            with pytest.raises(ValueError, match="NOT_FOUND"):
+                _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
     records = _receipt_records(vault)
     assert len(records) == 2
     assert records[0]["event_id"] != records[1]["event_id"]
@@ -2552,6 +2599,45 @@ def test_hit_receipt_describes_only_the_final_limited_representation(vault: Path
         egress.emit_boundary_receipt(collector)
     outcomes = _receipt_records(vault)[0]["outcomes"]
     assert len(outcomes) == 1
+
+
+def test_outcome_for_decision_never_reads_a_path_outside_the_vault(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """`_outcome_for_decision` hashes a candidate's bytes for the receipt when
+    no `content_hash` is already known. That candidate is expected to already
+    be a decided, vault-relative path, but this is the last thing that
+    touches the filesystem before the receipt is written, so it must not read
+    (and record the size of) a path that escapes the vault, even if one
+    reached this far."""
+    outside_dir = tmp_path_factory.mktemp("outside")
+    outside = outside_dir / "server-secret.txt"
+    outside.write_bytes(b"OUTSIDE-SECRET-" * 10)
+    traversal = "../" * 12 + str(outside).lstrip("/")
+
+    opened: list[str] = []
+    real_read_bytes = Path.read_bytes
+
+    def _spy_read_bytes(self: Path) -> bytes:
+        opened.append(str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _spy_read_bytes)
+
+    with egress.disclosure_boundary(vault, "probe") as collector:
+        egress._outcome_for_decision(
+            vault,
+            traversal,
+            decision=None,
+            policy=policy.load(vault),
+            audience="external",
+            outcome="released",
+        )
+    outcome = collector.outcomes[-1].value
+
+    assert opened == []
+    assert "content_hash" not in outcome
+    assert "size" not in outcome
 
 
 def test_large_reduction_receipt_uses_truthful_bounded_aggregates(vault: Path) -> None:
@@ -2755,6 +2841,8 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             # writer path. Which curation actions are read-only is a second
             # selector's decision, pinned by name in the conditional test below.
             "curation": False,
+            # Preview unless `apply=true`, like structured-files.
+            "tag-variants": True,
         },
     }
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}
@@ -2812,11 +2900,19 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "resolve-entity-type": "structure",
         "propose-relation": "structure",
         "save-relations": "mutation",
+        "census": "structure",
+        "save-roles": "mutation",
+        "save-conventions": "mutation",
+        "history": "structure",
+        "restore": "mutation",
     }
     schema = product["schema_memory"]
     assert commands.invocation_is_read_only(schema, {"operation": "infer"})
     assert not commands.invocation_is_read_only(schema, {"operation": "infer", "save": True})
     assert commands.invocation_is_read_only(schema, {"operation": "validate"})
+    assert commands.invocation_is_read_only(
+        schema, {"operation": "census", "subject": "relations"}
+    )
     assert commands.invocation_is_read_only(
         schema, {"operation": "resolve", "subject": "workflow-contracts"}
     )
@@ -3550,6 +3646,60 @@ def test_inbound_links_ungoverned_is_untouched(vault: Path) -> None:
     assert result["count"] >= 1
 
 
+def test_release_permits_link_target_escaping_the_vault_is_never_opened(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """`_release_permits_link_target` joined the raw `target` string with
+    `vault_root` and stat'd (then, for a `.md`-shaped candidate, read) the
+    result with no containment check, so a `../` traversal or an absolute
+    path reached the filesystem outside the vault before any decision was
+    made.
+
+    `op_list_inbound_links` itself already refuses a `../` or absolute
+    `target` earlier, through `_resolve_memory_identifier`'s
+    `reserved_paths.classify_logical` check, before this function ever runs
+    — so this exercises `_release_permits_link_target` directly, the way a
+    future or internal caller could still reach it, exactly as the receipt
+    hash in `_outcome_for_decision` is confined even though its own caller
+    is expected to have already decided the candidate.
+
+    Every escaping form must answer exactly as the function's own contract
+    for a target that resolves to nothing under the vault (`True`, i.e. not
+    the release plane's business), and none may touch a file outside the
+    vault to get there."""
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _reset_caches()
+    outside_dir = tmp_path_factory.mktemp("outside")
+    outside = outside_dir / "server-secret.md"
+    outside.write_text("---\ntype: insight\n---\nOUTSIDE-SECRET\n", encoding="utf-8")
+
+    vault_resolved = str(vault.resolve())
+    opened_outside: list[str] = []
+    real_read_bytes = Path.read_bytes
+
+    def _spy_read_bytes(self: Path) -> bytes:
+        try:
+            inside = str(self.resolve()).startswith(vault_resolved)
+        except OSError:
+            inside = False
+        if not inside:
+            opened_outside.append(str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _spy_read_bytes)
+
+    traversal_md = "../" * 12 + str(outside).lstrip("/")
+    traversal_bare = traversal_md[: -len(".md")]
+    absolute = "/" + str(outside).lstrip("/")
+    forms = [traversal_md, traversal_bare, absolute]
+
+    for target in forms:
+        assert commands._release_permits_link_target(vault, target) is True, target
+
+    assert opened_outside == []
+
+
 def test_adopt_scan_inherits_the_walk_gate(vault: Path) -> None:
     """`adopt`'s scan_summary counts come from `overview()`, so gating the
     walk covers it without a second bespoke edit."""
@@ -3976,10 +4126,12 @@ def test_traversal_that_escapes_the_root_is_still_rejected(vault: Path, value: s
 # --------------------------------------------------------------------------
 
 
-def test_outbound_links_do_not_name_a_withheld_page_by_stem(vault: Path) -> None:
-    """A wikilink field stores BARE stems, and the bare-word asymmetry that is
-    right for prose is wrong here: inside a reference list every entry is
-    definitionally a reference, so the stem must be compared."""
+def test_an_outbound_link_only_a_withheld_page_answers_is_listed_unresolved(
+    vault: Path,
+) -> None:
+    """`links.outbound` lists the stems the body links. A stem only a withheld
+    page answers is listed exactly as it is when no page answers it: the body
+    already shows it, and dropping it would mark the stem as a withheld page."""
     source = vault / "Knowledge Base" / "Notes" / "Insights" / "links-out.md"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(
@@ -3988,17 +4140,22 @@ def test_outbound_links_do_not_name_a_withheld_page_by_stem(vault: Path) -> None
     )
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NONE)
-    _reset_caches()
     from exomem.governance.principal import request_scope
 
-    with request_scope(_external()):
-        page = commands.op_read_memory(
-            vault, path="Knowledge Base/Notes/Insights/links-out.md", links=True
-        )
-    # Scoped to the STRUCTURED links field. The rendered body still quotes the
-    # wikilink, and body-text scanning of a released page is explicitly out of
-    # scope for this change — a released page's prose is its own content.
-    assert "kill-switch-for-risky-releases" not in json.dumps(page.get("links"), default=str)
+    def links() -> object:
+        _reset_caches()
+        with request_scope(_external()):
+            page = commands.op_read_memory(
+                vault, path="Knowledge Base/Notes/Insights/links-out.md", links=True
+            )
+        return page.get("links")
+
+    withheld = links()
+    (vault / "Knowledge Base" / "Notes" / "Patterns" / "kill-switch-for-risky-releases.md").unlink()
+    absent = links()
+
+    assert withheld == absent
+    assert "kill-switch-for-risky-releases" in json.dumps(withheld, default=str)
 
 
 def test_outbound_links_keep_permitted_stems(vault: Path) -> None:
@@ -4021,14 +4178,14 @@ def test_outbound_links_keep_permitted_stems(vault: Path) -> None:
     assert "rrf-fusion-beats-score-normalization" in json.dumps(page, default=str)
 
 
-def test_a_bare_stem_shared_by_two_pages_fails_closed(vault: Path) -> None:
-    """Ambiguity resolves to WITHHELD, deliberately.
+def test_a_bare_stem_shared_with_a_withheld_page_names_the_visible_one(vault: Path) -> None:
+    """A withheld candidate is absent before ambiguity is decided.
 
-    `Notes/.../shared-name.md` is permitted and `Patterns/shared-name.md` is
-    withheld. A bare wikilink `[[shared-name]]` cannot tell us which page the
-    author meant — and inside a reference list the bare-word asymmetry that
-    protects prose does not apply. Failing closed costs one over-blocked
-    reference entry; failing open leaks the existence of a withheld page.
+    `Notes/Insights/shared-name.md` is permitted and `Notes/Patterns/shared-name.md` is
+    withheld. For the restricted reader the bare `[[shared-name]]` names the one page it
+    may see, exactly as it would in a vault without the withheld page; dropping it would
+    tell the reader that another page shares the name. The full twin comparison lives in
+    `tests/test_derived_identifier_egress.py`.
     """
     permitted_twin = vault / "Knowledge Base" / "Notes" / "Insights" / "shared-name.md"
     permitted_twin.parent.mkdir(parents=True, exist_ok=True)
@@ -4048,9 +4205,9 @@ def test_a_bare_stem_shared_by_two_pages_fails_closed(vault: Path) -> None:
         page = commands.op_read_memory(
             vault, path="Knowledge Base/Notes/Insights/cites-twin.md", links=True
         )
-    assert "shared-name" not in json.dumps(page.get("links"), default=str), (
-        "an ambiguous bare stem matching a withheld page must fail closed"
-    )
+    links = json.dumps(page.get("links"), default=str)
+    assert "shared-name" in links
+    assert "Patterns" not in links
 
 
 # --------------------------------------------------------------------------
@@ -4921,3 +5078,37 @@ def test_owner_explain_labels_purpose_branches_before_conservative_meet(
     ]
     assert result["scope_contributions"][0]["option_values"] == {"abstract": "declared abstract"}
     assert result["scope_contributions"][1]["option_values"] == {}
+
+
+def test_a_page_named_in_many_fields_is_decided_once_per_payload(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The entry filter decides each page once, however many fields name it."""
+    from exomem.governance import lifecycle
+
+    page = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _reset_caches()
+    seen: list[str] = []
+    real = lifecycle.is_tombstoned
+
+    def counted(vault_root: Path, rel_path: str) -> bool:
+        seen.append(rel_path)
+        return real(vault_root, rel_path)
+
+    monkeypatch.setattr(lifecycle, "is_tombstoned", counted)
+    payload = {
+        "items": [
+            {"path": page, "to": page, "from": page, "source_path": page, "target_path": page}
+            for _ in range(20)
+        ]
+    }
+
+    with request_scope(_external()):
+        kept = egress.filter_withheld_entries(vault, payload)
+
+    assert len(kept["items"]) == 20
+    # Resolving the reference, deciding it and the decision's own check: a
+    # constant per page, not one per field that names it.
+    assert seen.count(page) <= 3

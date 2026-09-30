@@ -1,0 +1,30 @@
+{
+  "protocol": "exomem.hosted-activation-ack/v1",
+  "challenge_id": "7777777777777777777777777777777777777777777777777777777777777777",
+  "issued_at": 1789905600,
+  "expires_at": 1789905603,
+  "cell_id": "cell-ack-fixture",
+  "logical_vault_id": "vault-ack-fixture",
+  "registry_attachment_id": "hosted-attachment-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "attachment_epoch": 7,
+  "expected_bundle_revision": "8888888888888888888888888888888888888888888888888888888888888888",
+  "publication": {
+    "publication_event_id": "publication-final-commit",
+    "predecessor": {
+      "activation_store_id": "activation-store-fixture",
+      "activation_epoch": 12,
+      "activation_state_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    "successor": {
+      "activation_store_id": "activation-store-fixture",
+      "activation_epoch": 13,
+      "activation_state_digest": "9999999999999999999999999999999999999999999999999999999999999999"
+    }
+  },
+  "publication_evidence": {
+    "component_kind": "hosted-mutation-commit/v1",
+    "component_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "signing_key_id": "key-ack-fixture",
+  "mac": "f21faf04d64b7d4fcd8661a4697c1f5ac06b105cbefb093ce0c20c5adea14fb5"
+}

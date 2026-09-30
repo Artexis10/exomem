@@ -137,7 +137,7 @@ def test_structured_upload_search_and_unchanged_download(vault, monkeypatch, fil
         assert "private-row-value" not in (vault / result["sidecar_path"]).read_text()
     downloaded = client.get(
         "/download", params={"path": result["path"]},
-        headers={"Authorization": f"Bearer {upload_tokens.mint('sekret', scope='download')}"},
+        headers={"Authorization": f"Bearer {upload_tokens.mint_bound('sekret', audience='owner')}"},
     )
     assert downloaded.status_code == 200, downloaded.text
     assert downloaded.content == data
@@ -599,6 +599,26 @@ def test_upload_text_field_writes_searchable_sidecar(vault, monkeypatch: pytest.
     assert any("invoice.png.md" in h.path for h in hits), [h.path for h in hits]
 
 
+def test_upload_of_a_markdown_file_is_preserved_byte_for_byte(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A `.md` artifact is written as bytes; the graph epoch must accept UTF-8
+    # bytes as the Markdown the graph scan will read, not fail the whole upload.
+    payload = "# Packing list\n\n- tent\n- lantern \u2014 spare batteries\n".encode("utf-8")
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    r = client.post(
+        "/upload",
+        files={"file": ("packing-list.md", payload, "text/markdown")},
+        data={"scope": "Yolo", "category": "01 - Check-in"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["path"].endswith("packing-list.md")
+    assert body["hash"] == hashlib.sha256(payload).hexdigest()
+    assert (vault / body["path"]).read_bytes() == payload
+
+
 def test_upload_get_serves_prefilled_form(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     r = client.get("/upload?scope=Yolo&category=01%20-%20Check-in")
@@ -606,3 +626,25 @@ def test_upload_get_serves_prefilled_form(vault, monkeypatch: pytest.MonkeyPatch
     assert "Add evidence" in r.text
     assert 'value="Yolo"' in r.text
     assert "name=text" in r.text  # searchable-text field present
+
+
+def test_cf_access_upload_beside_a_non_ascii_bearer_is_not_a_server_error(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The bearer fails, Cloudflare Access authorizes, and the lane lookup that
+    # re-reads the bearer must not raise on its non-ASCII bytes.
+    monkeypatch.setattr("exomem.cf_access.verify", lambda *a, **k: True)
+    client = _client(
+        vault,
+        monkeypatch,
+        EXOMEM_UPLOAD_TOKEN="sekret",
+        EXOMEM_CF_ACCESS_TEAM_DOMAIN="t.cloudflareaccess.com",
+        EXOMEM_CF_ACCESS_AUD="aud123",
+    )
+    r = client.post(
+        "/upload",
+        files={"file": ("a.bin", b"viacfaccess", "application/octet-stream")},
+        data={"scope": "S", "category": "C"},
+        headers=[(b"cf-access-jwt-assertion", b"fake.jwt.token"), (b"authorization", b"Bearer \xe9abc")],
+    )
+    assert r.status_code == 201, r.text

@@ -249,3 +249,23 @@ def test_schema_fence_rejects_reusing_the_normal_lease_bearer(tmp_path: Path) ->
             bearer_token="shared-secret",
             operator_token="shared-secret",
         )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "path", ["/v1/state/main/list-keys", "/v1/vaults/main/schema-fence/admit"], ids=["lease", "operator"]
+)
+async def test_non_ascii_bearer_is_refused_not_a_server_error(tmp_path: Path, path: str) -> None:
+    app = create_app(
+        database=tmp_path / "coordinator.sqlite",
+        bearer_token="lease-secret",
+        operator_token="operator-secret",
+    )
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://coordinator.example") as client:
+        response = await client.post(
+            path, json={"collection": "auth"}, headers=[(b"authorization", b"Bearer \xe9abc")]
+        )
+
+    assert response.status_code in (401, 403), response.text

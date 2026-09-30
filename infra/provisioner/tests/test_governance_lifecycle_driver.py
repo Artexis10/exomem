@@ -1,0 +1,128 @@
+"""The real lifecycle dispatcher retains migration identity through final delivery."""
+
+from dataclasses import replace
+
+import pytest
+from test_provider_lifecycle import _config, _context, _v2_request
+
+from exomem_provisioner.driver import DriverFinal, DriverPending, DriverTerminal
+from exomem_provisioner.governance_migration_checkpoint import MigrationCheckpoint
+from exomem_provisioner.lifecycle import CellLifecycleDriver, HighFidelityProviderPlane
+from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
+
+
+def config():
+    return replace(
+        _config(),
+        migration_mode="governance-v3-to-v4",
+        compatibility_digest="9" * 64,
+        runtime_target=_v2_request()["runtimeTarget"],
+    )
+
+
+class MigrationPlane(HighFidelityProviderPlane):
+    def __init__(self):
+        super().__init__(location="fsn1")
+        self.migration_calls = []
+        self.result = None
+
+    async def governance_rollforward(self, metadata, request, context):
+        self.migration_calls.append(context)
+        return self.result or DriverPending(context.checkpoint, 30)
+
+    async def governance_provision(self, metadata, request, context):
+        self.migration_calls.append(context)
+        return self.result or DriverPending(context.checkpoint, 30)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase", ["inspect", "prepare", "enroll", "commit", "complete", "confirmed"]
+)
+async def test_dispatch_preserves_governance_checkpoint(phase):
+    checkpoint = MigrationCheckpoint(
+        phase,
+        "a" * 64,
+        "A" * 43,
+        None if phase == "inspect" else "b" * 64,
+        None if phase in {"inspect", "prepare"} else "c" * 64,
+    ).encode()
+    plane = MigrationPlane()
+    driver = CellLifecycleDriver(plane=plane, config=config(), volume_worker=None)
+    context = _context(checkpoint=checkpoint, wire_protocol=WIRE_PROTOCOL_V2)
+    result = await driver.execute("rollforward", _v2_request(compatibilityDigest="9" * 64), context)
+    assert result == DriverPending(checkpoint, 30)
+    assert plane.migration_calls == [context]
+
+
+@pytest.mark.asyncio
+async def test_governance_provision_cannot_enter_legacy_admission():
+    plane = MigrationPlane()
+    driver = CellLifecycleDriver(plane=plane, config=config(), volume_worker=None)
+    context = _context(wire_protocol=WIRE_PROTOCOL_V2)
+    assert await driver.execute("provision", _v2_request(), context) == DriverPending(
+        context.checkpoint, 30
+    )
+    assert plane.migration_calls == [context]
+
+
+@pytest.mark.asyncio
+async def test_governance_final_result_only_follows_plane_completion():
+    plane = MigrationPlane()
+    plane.result = DriverFinal({"code": "rollforward_preserved"})
+    driver = CellLifecycleDriver(plane=plane, config=config(), volume_worker=None)
+    assert (
+        await driver.execute(
+            "rollforward",
+            _v2_request(compatibilityDigest="9" * 64),
+            _context(wire_protocol=WIRE_PROTOCOL_V2),
+        )
+        == plane.result
+    )
+
+
+@pytest.mark.asyncio
+async def test_offline_restore_candidate_does_not_enter_fresh_governance_enrollment():
+    plane = MigrationPlane()
+    driver = CellLifecycleDriver(plane=plane, config=config(), volume_worker=None)
+    context = _context(wire_protocol=WIRE_PROTOCOL_V2)
+    request = _v2_request(provisionMode="restore-candidate")
+    result = await driver.execute("provision", request, context)
+    assert result.checkpoint == "namespace-ready"
+    assert not plane.migration_calls
+    context = replace(context, checkpoint=result.checkpoint)
+    result = await driver.execute("provision", request, context)
+    assert result.checkpoint == "release-applied"
+    assert not plane.migration_calls
+
+
+def test_offline_restore_chart_never_passes_governance_mode_to_storage_init():
+    from exomem_provisioner.lifecycle import _fixed_helm_values, _metadata_from_context
+
+    values = _fixed_helm_values(
+        _metadata_from_context(_context()), _v2_request(provisionMode="restore-candidate"), config()
+    )
+    assert values["workloadMode"] == "restore" and values["migrationMode"] == "none"
+
+
+@pytest.mark.parametrize("mode", ["none", "binding-v1-to-v2", "state-root-v1"])
+@pytest.mark.parametrize("action,checkpoint", [
+    ("provision", "gpi1:initializing:" + "A" * 43),
+    ("provision", MigrationCheckpoint("inspect", "a" * 64, "A" * 43).encode()),
+    ("rollforward", MigrationCheckpoint("inspect", "a" * 64, "A" * 43).encode()),
+])
+async def test_retained_governance_checkpoint_refuses_legacy_mode_before_provider_observation(
+    mode, action, checkpoint,
+):
+    class UnobservedPlane(MigrationPlane):
+        async def observe_operation(self, context, request):
+            pytest.fail("retained migration must not reach legacy provider observation")
+
+    driver = CellLifecycleDriver(
+        plane=UnobservedPlane(), config=replace(config(), migration_mode=mode), volume_worker=None
+    )
+    with pytest.raises(DriverTerminal, match="PROVISIONER_CHECKPOINT_INVALID"):
+        await driver.execute(
+            action, _v2_request(compatibilityDigest="9" * 64),
+            _context(checkpoint=checkpoint, wire_protocol=WIRE_PROTOCOL_V2),
+        )

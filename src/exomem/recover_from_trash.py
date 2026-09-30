@@ -743,7 +743,11 @@ def recover_from_trash(
             required = graph_sync.registered_checkpoint(vault_root)
             if required is not None:
                 try:
-                    graph_sync.wait_for_registered(vault_root)
+                    if not graph_sync.join_registered_within_budget(vault_root):
+                        warnings.append(
+                            "recovery succeeded; derived graph repair is still running "
+                            "in the background"
+                        )
                 except Exception:  # noqa: BLE001 - leave recovery evidence staged
                     warnings.append("recovery succeeded but graph publication failed; run reconcile")
     elif lifecycle_operation is not None:
@@ -775,7 +779,11 @@ def recover_from_trash(
         required = graph_sync.registered_checkpoint(vault_root)
         if required is not None:
             try:
-                graph_sync.wait_for_registered(vault_root)
+                if not graph_sync.join_registered_within_budget(vault_root):
+                    warnings.append(
+                        "recovery log committed; derived graph repair is still running "
+                        "in the background"
+                    )
             except Exception:  # noqa: BLE001 - log publication remains recoverable
                 warnings.append("recovery log graph publication failed; run reconcile")
 

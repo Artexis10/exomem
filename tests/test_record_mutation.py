@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
-from record_fixtures import copy_dataset_fixture, copy_vehicle_maintenance_fixture, copy_x3_fixture
+from record_fixtures import (
+    copy_dataset_fixture,
+    copy_vehicle_maintenance_fixture,
+    copy_x3_fixture,
+    ledger_item,
+    setup_ledger_collection,
+)
 from record_presentation_fixtures import manifest_text as presentation_manifest_text
 from record_presentation_fixtures import setup_collection as setup_presentation_collection
 from record_presentation_fixtures import values as presentation_values
@@ -1251,3 +1258,1310 @@ def test_the_natural_key_refusal_tells_a_legacy_vault_how_to_recover(
     assert "distinct natural key" in remediation
     assert "delete" in remediation and "archive" in remediation
     assert "retry" in remediation
+
+
+# --------------------------------------------------------------------------
+# Field-addressed refusals and strategy-aware representability
+# --------------------------------------------------------------------------
+
+
+def _ledger(tmp_path: Path, *, source: str = "Entries") -> collections.CollectionManifest:
+    """A generic publications-ledger collection with no personal content."""
+    return collections.load_manifest(tmp_path, setup_ledger_collection(tmp_path, source=source))
+
+
+def test_item_refusal_names_every_failing_field_in_one_response(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-08-03",
+                "asset": "[[Assets/Van]]",
+                "odometer": "many",
+                "amount": "lots",
+                "workshop": "north",
+            },
+            expected_container_hash=parsed.snapshot,
+            why="record a maintenance event",
+        )
+
+    error = caught.value
+    assert error.code == "SCHEMA_UNKNOWN_FIELD"
+    assert error.reason == "item uses fields outside the schema"
+    assert error.details["field"] == "workshop"
+    assert [
+        (issue["field"], issue["code"], issue["received"]) for issue in error.details["issues"]
+    ] == [
+        ("workshop", "SCHEMA_UNKNOWN_FIELD", "str"),
+        ("odometer", "SCHEMA_FIELD_TYPE", "str"),
+        ("amount", "SCHEMA_FIELD_TYPE", "str"),
+    ]
+    assert all(issue["reason"] for issue in error.details["issues"])
+
+
+def test_every_undeclared_field_is_named(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-08-03",
+                "asset": "[[Assets/Van]]",
+                "workshop": "north",
+                "invoice": 12,
+            },
+            expected_container_hash=parsed.snapshot,
+            why="record a maintenance event",
+        )
+
+    issues = caught.value.details["issues"]
+    assert [issue["field"] for issue in issues] == ["invoice", "workshop"]
+    assert {issue["code"] for issue in issues} == {"SCHEMA_UNKNOWN_FIELD"}
+    assert [issue["received"] for issue in issues] == ["int", "str"]
+
+
+def test_markdown_log_still_refuses_a_line_break_and_names_the_nested_field(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    source = fixture / "Training Log.md"
+    before = source.read_bytes()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-08-03",
+                "title": "Pull",
+                "status": "completed",
+                "movements": [
+                    {"movement": "Deadlift", "band": "grey", "repetitions": "22"},
+                    {"movement": "Row\nheavy", "band": "black", "repetitions": "18"},
+                ],
+            },
+            expected_container_hash=parsed.source_versions[-1].hash,
+            why="record a completed session",
+        )
+
+    error = caught.value
+    assert error.code == "UNREPRESENTABLE_RECORD_VALUE"
+    assert error.reason == "record value cannot render losslessly"
+    assert error.details["field"] == "movements[1].movement"
+    assert error.details["issues"][0]["received"] == "str"
+    assert source.read_bytes() == before
+
+
+def test_markdown_log_refuses_a_line_break_in_a_heading_field(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={"occurred_on": "2026-08-03", "title": "Pull\nsession", "status": "completed"},
+            expected_container_hash=parsed.source_versions[-1].hash,
+            why="record a completed session",
+        )
+
+    assert caught.value.code == "UNREPRESENTABLE_RECORD_VALUE"
+    assert caught.value.details["field"] == "title"
+
+
+def test_array_element_failure_is_addressed_by_index(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-08-03",
+                "title": "Pull",
+                "status": "completed",
+                "movements": [
+                    {"movement": "Deadlift", "band": "grey", "repetitions": "22"},
+                    {"movement": "Row", "band": "black", "repetitions": "18"},
+                    "not an object",
+                ],
+            },
+            expected_container_hash=parsed.source_versions[-1].hash,
+            why="record a completed session",
+        )
+
+    error = caught.value
+    assert error.code == "SCHEMA_FIELD_TYPE"
+    assert error.details["field"] == "movements[2]"
+    assert error.details["issues"][0]["received"] == "str"
+
+
+def test_nested_object_sub_field_failure_is_addressed_by_path(tmp_path: Path) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=ledger_item(
+                metrics=[
+                    {"name": "views", "value": 12},
+                    {"name": "replies", "value": 3},
+                    {"name": "shares", "value": float("nan")},
+                ]
+            ),
+            expected_container_hash=parsed.snapshot,
+            why="record a published entry",
+        )
+
+    error = caught.value
+    assert error.code == "SCHEMA_FIELD_TYPE"
+    assert error.details["field"] == "metrics[2].value"
+    assert error.details["issues"][0]["received"] == "float"
+
+
+def test_markdown_item_commits_multi_line_text_and_reads_it_back_identically(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    exact_text = "First line.\n\nThird line."
+
+    committed = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=ledger_item(exact_text=exact_text),
+        expected_container_hash=parsed.snapshot,
+        why="record a published entry",
+    )
+
+    assert committed["outcome"] == "committed"
+    stored = record_formats.load_adapter(tmp_path, manifest).read().records
+    assert len(stored) == 1
+    read_back = stored[0].values["exact_text"]
+    assert read_back == exact_text
+    assert (
+        hashlib.sha256(read_back.encode("utf-8")).hexdigest()
+        == hashlib.sha256(exact_text.encode("utf-8")).hexdigest()
+    )
+
+
+def test_typed_markdown_item_fields_survive_the_round_trip(tmp_path: Path) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    item = ledger_item()
+
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=item,
+        expected_container_hash=parsed.snapshot,
+        why="record a published entry",
+    )
+
+    stored = record_formats.load_adapter(tmp_path, manifest).read().records[0]
+    for name in ("published_on", "published_at", "word_count", "details", "metrics", "channels"):
+        assert stored.values[name] == item[name], name
+
+
+def test_round_trip_refuses_when_serialisation_would_lose_a_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import records, vault
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    entries = tmp_path / "Knowledge Base/Records/Publications/Entries"
+    real = vault.serialize_frontmatter
+
+    def corrupt(frontmatter: dict[str, object]) -> str:
+        if "exact_text" in frontmatter:
+            frontmatter = {
+                **frontmatter,
+                "exact_text": f"{frontmatter['exact_text']} (corrupted)",
+            }
+        return real(frontmatter)
+
+    monkeypatch.setattr(vault, "serialize_frontmatter", corrupt)
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=ledger_item(),
+            expected_container_hash=parsed.snapshot,
+            why="record a published entry",
+        )
+
+    assert caught.value.code == "UNREPRESENTABLE_RECORD_VALUE"
+    assert caught.value.details["field"] == "exact_text"
+    assert list(entries.iterdir()) == []
+
+
+# --------------------------------------------------------------------------
+# Item-key remediation
+# --------------------------------------------------------------------------
+
+
+def test_natural_key_value_supplied_as_item_key_refuses_with_remediation(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-08-03",
+                "asset": "[[Assets/Van]]",
+                "provider": "Northside",
+            },
+            item_key="2026-08-03",
+            expected_container_hash=parsed.snapshot,
+            why="record a maintenance event",
+        )
+
+    error = caught.value
+    assert error.code == "INVALID_RECORD_ID"
+    assert error.reason == "record ID must be a UUID"
+    assert error.details["argument"] == "item_key"
+    assert error.details["received"] == "2026-08-03"
+    assert error.details["natural_key"] == ["occurred_on", "asset", "provider"]
+    assert "internal UUID" in error.details["remediation"]
+    assert "omit" in error.details["remediation"]
+
+
+def test_complete_natural_key_with_any_non_uuid_item_key_gets_remediation(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=ledger_item(),
+            item_key="quarterly-note-2026",
+            expected_container_hash=parsed.snapshot,
+            why="record a published entry",
+        )
+
+    assert caught.value.details["natural_key"] == ["published_on", "slug"]
+    assert caught.value.details["received"] == "quarterly-note-2026"
+
+
+def test_other_non_uuid_item_keys_keep_the_plain_refusal(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={"occurred_on": "2026-08-03"},
+            item_key="oops",
+            expected_container_hash=parsed.source_versions[-1].hash,
+            why="record a completed session",
+        )
+
+    error = caught.value
+    assert error.code == "INVALID_RECORD_ID"
+    assert error.reason == "record ID must be a UUID"
+    assert error.details["received"] == "oops"
+    assert "natural_key" not in error.details
+    assert "remediation" not in error.details
+
+
+def test_update_with_a_natural_key_value_as_item_key_gets_remediation(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    record = parsed.records[0]
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.update_record(
+            tmp_path,
+            manifest.path,
+            item_key="2026-08-03",
+            changes={
+                "occurred_on": "2026-08-03",
+                "asset": "[[Assets/Van]]",
+                "provider": "Northside",
+            },
+            expected_container_hash=parsed.snapshot,
+            expected_item_version=record.source.hash,
+            why="correct the maintenance event",
+        )
+
+    error = caught.value
+    assert error.code == "INVALID_RECORD_ID"
+    assert error.details["natural_key"] == ["occurred_on", "asset", "provider"]
+    assert error.details["received"] == "2026-08-03"
+
+
+# --------------------------------------------------------------------------
+# Held records
+# --------------------------------------------------------------------------
+
+
+def _held_directory(tmp_path: Path) -> Path:
+    return tmp_path / "Knowledge Base/Records/Publications/Held"
+
+
+def _held_files(tmp_path: Path) -> list[Path]:
+    directory = _held_directory(tmp_path)
+    return sorted(directory.glob("*.md")) if directory.is_dir() else []
+
+
+def _held_payload(path: Path) -> dict[str, object]:
+    from exomem import vault
+
+    frontmatter, body, _marker = vault.parse_frontmatter(
+        path.read_text(encoding="utf-8"), strict=True
+    )
+    fenced = body.split("```json", 1)[1].rsplit("```", 1)[0]
+    return {"frontmatter": frontmatter, "candidate": json.loads(fenced)}
+
+
+def _refuse_append(tmp_path: Path, manifest, **kwargs: object):
+    from exomem import records
+
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=ledger_item(unlisted_channel="digest"),
+            expected_container_hash=parsed.snapshot,
+            why="record a published entry",
+            **kwargs,
+        )
+    return caught.value
+
+
+def test_a_refused_append_holds_the_complete_candidate(tmp_path: Path) -> None:
+    manifest = _ledger(tmp_path)
+
+    error = _refuse_append(tmp_path, manifest)
+
+    assert error.code == "SCHEMA_UNKNOWN_FIELD"
+    held = error.details["held"]
+    files = _held_files(tmp_path)
+    assert len(files) == 1
+    assert files[0].name == f"{held['held_id']}.md"
+    assert held["path"] == f"Knowledge Base/Records/Publications/Held/{held['held_id']}.md"
+    assert held["diagnostics"] == error.details["issues"]
+    payload = _held_payload(files[0])
+    frontmatter = payload["frontmatter"]
+    assert frontmatter["type"] == "held-record"
+    assert frontmatter["collection_id"] == manifest.collection_id
+    assert frontmatter["held_id"] == held["held_id"]
+    assert frontmatter["attempted_action"] == "append"
+    assert frontmatter["why"] == "record a published entry"
+    assert frontmatter["held_at"].startswith("20")
+    assert len(frontmatter["candidate_sha256"]) == 64
+    assert json.loads(frontmatter["diagnostics"]) == error.details["issues"]
+    assert "target_item_key" not in frontmatter
+    # Every generated frontmatter value stays on one line, so a held file never
+    # depends on the representability rules that refused its candidate.
+    for value in frontmatter.values():
+        assert "\n" not in str(value)
+    candidate = payload["candidate"]
+    assert candidate["action"] == "append"
+    assert candidate["item"] == ledger_item(unlisted_channel="digest")
+    assert candidate["body"] == ""
+
+
+def test_re_holding_the_same_candidate_rewrites_one_file(tmp_path: Path) -> None:
+    manifest = _ledger(tmp_path)
+
+    first = _refuse_append(tmp_path, manifest)
+    second = _refuse_append(tmp_path, manifest)
+
+    assert first.details["held"]["held_id"] == second.details["held"]["held_id"]
+    assert len(_held_files(tmp_path)) == 1
+
+
+def test_hold_refuses_when_the_held_directory_would_fall_under_the_item_source(
+    tmp_path: Path,
+) -> None:
+    manifest = _ledger(tmp_path, source=".")
+
+    error = _refuse_append(tmp_path, manifest)
+
+    assert error.code == "SCHEMA_UNKNOWN_FIELD"
+    assert "held" not in error.details
+    assert error.details["warnings"]
+    assert not _held_directory(tmp_path).exists()
+
+
+def test_declining_the_hold_refuses_plainly(tmp_path: Path) -> None:
+    manifest = _ledger(tmp_path)
+
+    error = _refuse_append(tmp_path, manifest, hold=False)
+
+    assert error.code == "SCHEMA_UNKNOWN_FIELD"
+    assert error.details["issues"]
+    assert "held" not in error.details
+    assert not _held_directory(tmp_path).exists()
+
+
+def test_a_hold_failure_does_not_mask_the_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+
+    def fail(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise OSError("held file could not be written")
+
+    monkeypatch.setattr(records, "hold_candidate", fail)
+
+    error = _refuse_append(tmp_path, manifest)
+
+    assert error.code == "SCHEMA_UNKNOWN_FIELD"
+    assert error.details["field"] == "unlisted_channel"
+    assert "held" not in error.details
+    assert error.details["warnings"]
+    assert not _held_directory(tmp_path).exists()
+
+
+def test_guard_refusals_never_hold(tmp_path: Path) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=ledger_item(),
+            expected_container_hash="0" * 64,
+            why="record a published entry",
+        )
+
+    assert caught.value.code == "STALE_RECORD"
+    assert not _held_directory(tmp_path).exists()
+
+
+def test_natural_key_conflict_never_holds(tmp_path: Path) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    committed = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=ledger_item(),
+        expected_container_hash=parsed.snapshot,
+        why="record a published entry",
+    )
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=ledger_item(word_count=99),
+            item_key="11111111-1111-4111-8111-111111111111",
+            expected_container_hash=committed["after_container_hash"],
+            why="record the same entry twice",
+        )
+
+    assert caught.value.code == "RECORD_NATURAL_KEY_CONFLICT"
+    assert not _held_directory(tmp_path).exists()
+
+
+def test_resuming_a_held_candidate_commits_once_and_removes_the_file(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    error = _refuse_append(tmp_path, manifest)
+    held_id = error.details["held"]["held_id"]
+    before_head = collections.load_manifest(tmp_path, tmp_path / manifest.path).audit_head
+
+    resumed = records.append_record(
+        tmp_path,
+        manifest.path,
+        held=held_id,
+        item={"unlisted_channel": None},
+        why="resume the held publication entry",
+    )
+
+    assert resumed["outcome"] == "committed"
+    after = collections.load_manifest(tmp_path, tmp_path / manifest.path)
+    assert after.audit_head != before_head
+    stored = record_formats.load_adapter(tmp_path, manifest).read().records
+    assert len(stored) == 1
+    assert "unlisted_channel" not in stored[0].values
+    assert stored[0].values["exact_text"] == ledger_item()["exact_text"]
+    assert _held_files(tmp_path) == []
+
+
+def test_a_resumed_candidate_that_refuses_again_reuses_one_held_file(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    error = _refuse_append(tmp_path, manifest)
+    held_id = error.details["held"]["held_id"]
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            held=held_id,
+            item={"word_count": "not a number"},
+            why="resume the held publication entry",
+        )
+
+    assert caught.value.details["held"]["held_id"] == held_id
+    files = _held_files(tmp_path)
+    assert len(files) == 1
+    assert json.loads(_held_payload(files[0])["frontmatter"]["diagnostics"]) == (
+        caught.value.details["issues"]
+    )
+
+
+def test_resuming_an_unknown_reference_names_the_argument(tmp_path: Path) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            held="11111111-1111-4111-8111-111111111111",
+            why="resume a reference that does not exist",
+        )
+
+    assert caught.value.code == "HELD_NOT_FOUND"
+    assert caught.value.details["argument"] == "held"
+
+
+def test_resuming_a_reference_from_another_collection_refuses(tmp_path: Path) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    error = _refuse_append(tmp_path, manifest)
+    held_id = error.details["held"]["held_id"]
+    path = _held_files(tmp_path)[0]
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            manifest.collection_id, "99999999-9999-4999-8999-999999999999"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            held=held_id,
+            why="resume a reference from another collection",
+        )
+
+    assert caught.value.code == "HELD_COLLECTION_MISMATCH"
+    assert caught.value.details["argument"] == "held"
+
+
+def test_a_failed_cleanup_after_commit_warns_and_keeps_the_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    error = _refuse_append(tmp_path, manifest)
+    held_id = error.details["held"]["held_id"]
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError("held file could not be removed")
+
+    monkeypatch.setattr(records, "_remove_held_file", fail)
+
+    resumed = records.append_record(
+        tmp_path,
+        manifest.path,
+        held=held_id,
+        item={"unlisted_channel": None},
+        why="resume the held publication entry",
+    )
+
+    assert resumed["outcome"] == "committed"
+    assert any("HELD_CLEANUP_FAILED" in warning for warning in resumed["warnings"])
+    assert len(record_formats.load_adapter(tmp_path, manifest).read().records) == 1
+
+
+def test_discarding_a_held_candidate_removes_it_without_touching_the_audit_chain(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    error = _refuse_append(tmp_path, manifest)
+    held_id = error.details["held"]["held_id"]
+    before_head = collections.load_manifest(tmp_path, tmp_path / manifest.path).audit_head
+
+    discarded = records.discard_held(
+        tmp_path, manifest.path, held=held_id, why="the observation was a duplicate"
+    )
+
+    assert discarded["operation"] == "discard"
+    assert discarded["held_id"] == held_id
+    assert discarded["outcome"] == "discarded"
+    assert _held_files(tmp_path) == []
+    after = collections.load_manifest(tmp_path, tmp_path / manifest.path)
+    assert after.audit_head == before_head
+
+
+def test_discarding_an_unknown_reference_names_the_argument(tmp_path: Path) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.discard_held(
+            tmp_path,
+            manifest.path,
+            held="11111111-1111-4111-8111-111111111111",
+            why="discard a reference that does not exist",
+        )
+
+    assert caught.value.code == "HELD_NOT_FOUND"
+    assert caught.value.details["argument"] == "held"
+
+
+def test_a_refused_update_holds_the_changes_and_names_the_target(tmp_path: Path) -> None:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    committed = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=ledger_item(),
+        expected_container_hash=parsed.snapshot,
+        why="record a published entry",
+    )
+    current = collections.load_manifest(tmp_path, tmp_path / manifest.path)
+    refreshed = record_formats.load_adapter(tmp_path, current).read()
+    record = refreshed.records[0]
+    guards = records.lifecycle_guards(current, refreshed)
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.update_record(
+            tmp_path,
+            manifest.path,
+            item_key=committed["item_key"],
+            changes={"word_count": "not a number"},
+            expected_container_hash=guards["expected_container_hash"],
+            expected_item_version=record.source.hash,
+            why="correct the published entry",
+        )
+
+    held = caught.value.details["held"]
+    payload = _held_payload(_held_files(tmp_path)[0])
+    assert payload["frontmatter"]["attempted_action"] == "update"
+    assert payload["frontmatter"]["target_item_key"] == committed["item_key"]
+    assert payload["candidate"]["changes"] == {"word_count": "not a number"}
+    assert held["held_id"] == payload["frontmatter"]["held_id"]
+
+
+def _ledger_query(tmp_path: Path) -> dict[str, object]:
+    """The ledger's query payload without its wall-clock stamp."""
+    from exomem.record_memory import record_memory
+
+    rendered = record_memory(
+        tmp_path,
+        action="query",
+        collection="Knowledge Base/Records/Publications/_collection.md",
+    )["rendered"]
+    payload = json.loads(rendered)
+    payload.pop("generated_at", None)
+    return payload
+
+
+def test_a_held_file_is_invisible_to_items_query_audit_census_and_recall(
+    tmp_path: Path,
+) -> None:
+    from exomem import recall_policy, records, vault
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=ledger_item(),
+        expected_container_hash=parsed.snapshot,
+        why="record a published entry",
+    )
+    before_manifest = collections.load_manifest(tmp_path, tmp_path / manifest.path)
+    before_snapshot = record_formats.load_adapter(tmp_path, before_manifest).read()
+    before_query = _ledger_query(tmp_path)
+    before_recall = set(
+        recall_policy.iter_recall_markdown(tmp_path, vault.walk_vault_md(tmp_path))
+    )
+
+    _refuse_append(tmp_path, manifest)
+
+    held_path = _held_files(tmp_path)[0]
+    after_manifest = collections.load_manifest(tmp_path, tmp_path / manifest.path)
+    after_snapshot = record_formats.load_adapter(tmp_path, after_manifest).read()
+    assert len(after_snapshot.records) == len(before_snapshot.records) == 1
+    assert after_snapshot.snapshot == before_snapshot.snapshot
+    assert [version.path for version in after_snapshot.source_versions] == [
+        version.path for version in before_snapshot.source_versions
+    ]
+    assert after_manifest.audit_head == before_manifest.audit_head
+    assert _ledger_query(tmp_path) == before_query
+    assert not recall_policy.is_recall_candidate(tmp_path, held_path)
+    assert (
+        set(recall_policy.iter_recall_markdown(tmp_path, vault.walk_vault_md(tmp_path)))
+        == before_recall
+    )
+    assert held_path not in before_recall
+
+
+def test_the_source_census_pin_bites_when_the_same_file_sits_under_the_item_source(
+    tmp_path: Path,
+) -> None:
+    """The pins above are only worth having if they can fail."""
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=ledger_item(),
+        expected_container_hash=parsed.snapshot,
+        why="record a published entry",
+    )
+    before_manifest = collections.load_manifest(tmp_path, tmp_path / manifest.path)
+    before_snapshot = record_formats.load_adapter(tmp_path, before_manifest).read()
+    _refuse_append(tmp_path, manifest)
+    held_path = _held_files(tmp_path)[0]
+
+    probe = (
+        tmp_path
+        / "Knowledge Base/Records/Publications/Entries"
+        / "22222222-2222-4222-8222-222222222222.md"
+    )
+    probe.write_bytes(held_path.read_bytes())
+
+    after_snapshot = record_formats.load_adapter(tmp_path, before_manifest).read()
+    assert after_snapshot.snapshot != before_snapshot.snapshot
+    assert len(after_snapshot.source_versions) > len(before_snapshot.source_versions)
+
+
+def test_the_recall_pin_bites_for_the_same_bytes_outside_the_records_layer(
+    tmp_path: Path,
+) -> None:
+    from exomem import recall_policy
+
+    manifest = _ledger(tmp_path)
+    _refuse_append(tmp_path, manifest)
+    held_path = _held_files(tmp_path)[0]
+
+    probe = tmp_path / "Knowledge Base" / "Notes" / "held-probe.md"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_bytes(held_path.read_bytes())
+
+    assert recall_policy.is_recall_candidate(tmp_path, probe)
+    assert not recall_policy.is_recall_candidate(tmp_path, held_path)
+
+
+def test_the_whole_journey_runs_through_the_record_memory_surface(tmp_path: Path) -> None:
+    """Create, append, query, refuse-and-hold, resume, all through the product command."""
+    from record_fixtures import LEDGER_COLLECTION_PATH, LEDGER_MANIFEST_TEXT
+
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
+
+    record_memory(
+        tmp_path,
+        action="create",
+        manifest_path=LEDGER_COLLECTION_PATH,
+        manifest_text=LEDGER_MANIFEST_TEXT,
+        why="open a publications ledger",
+    )
+    heads = [collections.load_manifest(tmp_path, tmp_path / LEDGER_COLLECTION_PATH).audit_head]
+
+    exact_text = "First line.\n\nThird line."
+    record_memory(
+        tmp_path,
+        action="append",
+        collection=LEDGER_COLLECTION_PATH,
+        item=ledger_item(exact_text=exact_text),
+        why="record a published entry",
+    )
+    heads.append(collections.load_manifest(tmp_path, tmp_path / LEDGER_COLLECTION_PATH).audit_head)
+
+    queried = json.loads(
+        record_memory(tmp_path, action="query", collection=LEDGER_COLLECTION_PATH)["rendered"]
+    )
+    assert [row["exact_text"] for row in queried["rows"]] == [exact_text]
+    coverage = record_memory(tmp_path, action="inspect", collection=LEDGER_COLLECTION_PATH)[
+        "coverage"
+    ]
+    assert (coverage["committed"], coverage["held"]) == (1, 0)
+
+    with pytest.raises(OpError) as raised:
+        record_memory(
+            tmp_path,
+            action="append",
+            collection=LEDGER_COLLECTION_PATH,
+            item=ledger_item(slug="second-entry", unlisted_channel="digest"),
+            why="record another published entry",
+        )
+    assert raised.value.code == "SCHEMA_UNKNOWN_FIELD"
+    held_id = raised.value.details["held"]["held_id"]
+
+    coverage = record_memory(tmp_path, action="inspect", collection=LEDGER_COLLECTION_PATH)[
+        "coverage"
+    ]
+    assert (coverage["committed"], coverage["held"]) == (1, 1)
+    assert [reference["held_id"] for reference in coverage["held_refs"]] == [held_id]
+
+    record_memory(
+        tmp_path,
+        action="append",
+        collection=LEDGER_COLLECTION_PATH,
+        held=held_id,
+        item={"unlisted_channel": None},
+        why="resume the held publication entry",
+    )
+    heads.append(collections.load_manifest(tmp_path, tmp_path / LEDGER_COLLECTION_PATH).audit_head)
+
+    coverage = record_memory(tmp_path, action="inspect", collection=LEDGER_COLLECTION_PATH)[
+        "coverage"
+    ]
+    assert (coverage["committed"], coverage["held"]) == (2, 0)
+    assert coverage["held_refs"] == []
+    assert len(set(heads)) == 3
+
+
+# --------------------------------------------------------------------------
+# Review corrections (independent review round 1)
+# --------------------------------------------------------------------------
+
+
+_LOG_HELD_DIRECTORY = "Knowledge Base/Records/Health/X3/Held"
+
+
+def _refuse_log_append(tmp_path: Path, **overrides: object):
+    """Refuse one X3 (Markdown-log) append and return the error."""
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    item: dict[str, object] = {
+        "occurred_on": "2026-08-03",
+        "title": "Pull",
+        "status": "completed",
+        "movements": [{"movement": "Row", "band": "black", "repetitions": "18"}],
+    }
+    item.update(overrides)
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=item,
+            expected_container_hash=parsed.source_versions[-1].hash,
+            why="record a training session",
+        )
+    return caught.value
+
+
+def _log_held_files(tmp_path: Path) -> list[Path]:
+    directory = tmp_path / _LOG_HELD_DIRECTORY
+    return sorted(directory.glob("*.md")) if directory.is_dir() else []
+
+
+def test_a_child_row_carrying_the_row_delimiter_is_addressed_and_held(tmp_path: Path) -> None:
+    """A grammar token is a representability failure of that strategy.
+
+    The render layer used to raise it with empty details, outside the mutation
+    boundary, so the caller learned neither the field nor kept the candidate.
+    """
+    error = _refuse_log_append(
+        tmp_path,
+        movements=[
+            {"movement": "Row", "band": "black", "repetitions": "18"},
+            {"movement": "Deadlift|heavy", "band": "white", "repetitions": "12"},
+        ],
+    )
+
+    assert error.code == "UNREPRESENTABLE_RECORD_VALUE"
+    assert error.details["field"] == "movements[1].movement"
+    assert [issue["field"] for issue in error.details["issues"]] == ["movements[1].movement"]
+    assert error.details["issues"][0]["received"] == "str"
+    held = error.details["held"]
+    assert [path.name for path in _log_held_files(tmp_path)] == [f"{held['held_id']}.md"]
+
+
+def test_a_heading_value_carrying_the_heading_separator_is_addressed_and_held(
+    tmp_path: Path,
+) -> None:
+    error = _refuse_log_append(tmp_path, title="Pull · extra")
+
+    assert error.code == "UNREPRESENTABLE_RECORD_VALUE"
+    assert error.details["field"] == "title"
+    assert [issue["field"] for issue in error.details["issues"]] == ["title"]
+    held = error.details["held"]
+    assert [path.name for path in _log_held_files(tmp_path)] == [f"{held['held_id']}.md"]
+
+
+def test_a_note_carrying_its_own_bracket_is_addressed_and_held(tmp_path: Path) -> None:
+    error = _refuse_log_append(tmp_path, note="a (parenthetical)")
+
+    assert error.code == "UNREPRESENTABLE_RECORD_VALUE"
+    assert error.details["field"] == "note"
+    assert [issue["field"] for issue in error.details["issues"]] == ["note"]
+    held = error.details["held"]
+    assert [path.name for path in _log_held_files(tmp_path)] == [f"{held['held_id']}.md"]
+
+
+def test_an_empty_heading_value_is_addressed_and_held(tmp_path: Path) -> None:
+    """Emptiness is a representability failure of the log strategy like a token.
+
+    The render layer refuses an empty heading string; judging it in the
+    validation pass names the field and lets the refusal hold the candidate.
+    """
+    error = _refuse_log_append(tmp_path, title="")
+
+    assert error.code == "UNREPRESENTABLE_RECORD_VALUE"
+    assert error.details["field"] == "title"
+    assert [issue["field"] for issue in error.details["issues"]] == ["title"]
+    held = error.details["held"]
+    assert [path.name for path in _log_held_files(tmp_path)] == [f"{held['held_id']}.md"]
+
+
+def test_a_whitespace_only_note_is_addressed_and_held(tmp_path: Path) -> None:
+    error = _refuse_log_append(tmp_path, note="   ")
+
+    assert error.code == "UNREPRESENTABLE_RECORD_VALUE"
+    assert error.details["field"] == "note"
+    assert [issue["field"] for issue in error.details["issues"]] == ["note"]
+    held = error.details["held"]
+    assert [path.name for path in _log_held_files(tmp_path)] == [f"{held['held_id']}.md"]
+
+
+def test_the_render_grammar_checks_remain_as_the_last_line_of_defence(tmp_path: Path) -> None:
+    """The validator fires first; the render checks still refuse if reached."""
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    unreachable = {
+        "child row cannot render": {
+            "occurred_on": "2026-08-03",
+            "title": "Pull",
+            "status": "completed",
+            "movements": [{"movement": "Deadlift|heavy", "band": "white", "repetitions": "12"}],
+        },
+        "heading value cannot render": {
+            "occurred_on": "2026-08-03",
+            "title": "Pull · extra",
+            "status": "completed",
+            "movements": [],
+        },
+        "note cannot render": {
+            "occurred_on": "2026-08-03",
+            "title": "Pull",
+            "status": "completed",
+            "note": "a (parenthetical)",
+            "movements": [],
+        },
+    }
+    for reason, values in unreachable.items():
+        with pytest.raises(collections.CollectionError) as caught:
+            record_formats.render_markdown_log_item(
+                manifest, values, "00000000-0000-4000-8000-000000000000", "\n"
+            )
+        assert caught.value.code == "UNREPRESENTABLE_RECORD_VALUE"
+        assert caught.value.reason == reason
+
+
+def test_a_whole_candidate_round_trip_failure_reports_the_frontmatter_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No field is at fault when the whole block fails, so none is named."""
+    from exomem import records, vault
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    monkeypatch.setattr(vault, "serialize_frontmatter", lambda frontmatter: "broken: [unclosed")
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=ledger_item(),
+            expected_container_hash=parsed.snapshot,
+            why="record a published entry",
+            hold=False,
+        )
+
+    error = caught.value
+    assert error.code == "UNREPRESENTABLE_RECORD_VALUE"
+    assert "field" not in error.details
+    assert error.details["scope"] == "frontmatter"
+    assert [issue["scope"] for issue in error.details["issues"]] == ["frontmatter"]
+    assert all("field" not in issue for issue in error.details["issues"])
+
+
+def test_a_non_finite_number_is_held_and_resumes(tmp_path: Path) -> None:
+    """`json.dumps` cannot carry NaN, so the held body tags it instead."""
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=ledger_item(metrics=[{"name": "shares", "value": float("nan")}]),
+            expected_container_hash=parsed.snapshot,
+            why="record a published entry",
+        )
+
+    error = caught.value
+    assert error.code == "SCHEMA_FIELD_TYPE"
+    assert error.details["field"] == "metrics[0].value"
+    assert "warnings" not in error.details
+    held_id = error.details["held"]["held_id"]
+    files = _held_files(tmp_path)
+    assert len(files) == 1
+    candidate = _held_payload(files[0])["candidate"]
+    assert candidate["item"]["metrics"][0]["value"] == {"__float__": "NaN"}
+
+    # Resuming without an override restores the very value that refused, so the
+    # candidate is preserved rather than silently repaired.
+    with pytest.raises(collections.CollectionError) as again:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            held=held_id,
+            why="resume the held publication entry",
+        )
+    assert again.value.code == "SCHEMA_FIELD_TYPE"
+    assert again.value.details["field"] == "metrics[0].value"
+    assert again.value.details["held"]["held_id"] == held_id
+
+    committed = records.append_record(
+        tmp_path,
+        manifest.path,
+        held=held_id,
+        item={"metrics": [{"name": "shares", "value": 12}]},
+        why="resume the held publication entry",
+    )
+    assert committed["outcome"] == "committed"
+    assert _held_files(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        {"__float__": "NaN"},
+        {"__escaped__": {"__float__": "Infinity"}},
+        {"__escaped__": 1},
+    ],
+    ids=["float-tag", "escape-tag", "escape-scalar"],
+)
+def test_a_literal_tag_shaped_object_survives_the_held_round_trip(
+    tmp_path: Path, literal: dict[str, object]
+) -> None:
+    """The held body is lossless by construction, so its own tags must be escaped.
+
+    An object field may legitimately carry the exact shape the encoder uses for
+    non-finite floats; without escaping, resume would restore it as a float and
+    blame a field the caller wrote correctly.
+    """
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=ledger_item(details=literal, word_count="bad"),
+            expected_container_hash=parsed.snapshot,
+            why="record a published entry",
+        )
+    error = caught.value
+    assert error.code == "SCHEMA_FIELD_TYPE"
+    assert error.details["field"] == "word_count"
+    held_id = error.details["held"]["held_id"]
+    stored = _held_payload(_held_files(tmp_path)[0])["candidate"]["item"]["details"]
+    assert stored != literal, "a tag-shaped literal must be escaped in the held body"
+
+    committed = records.append_record(
+        tmp_path,
+        manifest.path,
+        held=held_id,
+        item={"word_count": 5},
+        why="resume the held publication entry",
+    )
+    assert committed["outcome"] == "committed"
+    assert _held_files(tmp_path) == []
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    (record,) = [row for row in snapshot.records if row.values.get("word_count") == 5]
+    assert record.values["details"] == literal
+
+
+def test_two_candidates_sharing_a_natural_key_re_hold_onto_one_file(tmp_path: Path) -> None:
+    """Held identity is the item identity, so one blocked item is one file."""
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    def refuse(word_count: int):
+        with pytest.raises(collections.CollectionError) as caught:
+            records.append_record(
+                tmp_path,
+                manifest.path,
+                item=ledger_item(word_count=word_count, unlisted_channel="digest"),
+                expected_container_hash=parsed.snapshot,
+                why="record a published entry",
+            )
+        return caught.value
+
+    first = refuse(42)
+    second = refuse(99)
+
+    assert first.details["held"]["held_id"] == second.details["held"]["held_id"]
+    files = _held_files(tmp_path)
+    assert len(files) == 1
+    assert _held_payload(files[0])["candidate"]["item"]["word_count"] == 99
+
+
+def _discard_receipt(tmp_path: Path) -> dict[str, object]:
+    from exomem import records
+
+    manifest = _ledger(tmp_path)
+    error = _refuse_append(tmp_path, manifest)
+    return records.discard_held(
+        tmp_path,
+        manifest.path,
+        held=error.details["held"]["held_id"],
+        why="the observation was a duplicate",
+    )
+
+
+def test_a_discard_receipt_is_a_valid_record_receipt(tmp_path: Path) -> None:
+    """A receipt no validator accepts is dropped by every consumer downstream."""
+    from exomem import mutation_terminal
+
+    receipt = _discard_receipt(tmp_path)
+
+    assert mutation_terminal.valid_record_receipt(receipt) is True
+    assert mutation_terminal.valid_collection_receipt(receipt) is True
+
+
+def test_the_compact_terminal_projects_a_discard_receipt(tmp_path: Path) -> None:
+    from exomem import mutation_terminal
+
+    receipt = _discard_receipt(tmp_path)
+
+    terminal = mutation_terminal.committed_terminal(
+        receipt,
+        request_id="req-discard",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["operation"] == "discard"
+    assert compact["outcome"] == "discarded"
+    assert compact["affected_paths"] == receipt["affected_paths"]
+    assert compact["paths"] == receipt["affected_paths"]
+
+
+def test_governance_does_not_withhold_a_discard_receipt(tmp_path: Path) -> None:
+    from exomem import record_governance
+
+    receipt = _discard_receipt(tmp_path)
+
+    projected = record_governance.project_mutation_receipt(receipt)
+
+    assert "withheld" not in projected
+    assert projected["operation"] == "discard"
+    assert projected["outcome"] == "discarded"
+    assert projected["affected_paths"] == receipt["affected_paths"]
+
+
+def test_writer_lease_treats_a_discard_receipt_as_a_receipt(tmp_path: Path) -> None:
+    """`with_graph_outcome` must not smear graph state over a real receipt."""
+    from exomem import writer_lease
+
+    receipt = _discard_receipt(tmp_path)
+
+    assert writer_lease.valid_collection_receipt(receipt) is True

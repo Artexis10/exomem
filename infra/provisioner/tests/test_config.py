@@ -127,7 +127,9 @@ def test_selected_deployment_lock_is_strict_and_exposes_admission_inputs(tmp_pat
         load_deployment_lock(path)
 
 
-@pytest.mark.parametrize("migration_mode", ("binding-v1-to-v2", "state-root-v1"))
+@pytest.mark.parametrize(
+    "migration_mode", ("binding-v1-to-v2", "state-root-v1", "governance-v3-to-v4")
+)
 def test_selected_runtime_exposes_only_signed_forward_upgrade_metadata(
     tmp_path: Path, migration_mode: str
 ) -> None:
@@ -150,10 +152,50 @@ def test_selected_runtime_exposes_only_signed_forward_upgrade_metadata(
     assert lock.runtimeUpgrade.substrateConsumerCommit == "8" * 40
     assert lock.runtimeUpgrade.substrateTrustSha256 == "7" * 64
 
-    value["runtimeUpgrade"]["migrationMode"] = "arbitrary-script"  # type: ignore[index]
+    for unknown in ("arbitrary-script", "governance-v4-to-v5"):
+        value["runtimeUpgrade"]["migrationMode"] = unknown  # type: ignore[index]
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_deployment_lock(path)
+
+
+def test_expand_lock_matches_a_cataloged_legacy_v2_identity_except_to_place_an_image(
+    tmp_path: Path,
+) -> None:
+    value = _deployment_lock()
+    composition = value["composition"]
+    assert isinstance(composition, dict)
+    legacy_contract = dict(composition["legacyCatalog"][0]["contract"])
+    path = tmp_path / "selected-lock.json"
     path.write_text(json.dumps(value), encoding="utf-8")
-    with pytest.raises(ValueError):
-        load_deployment_lock(path)
+    lock = load_deployment_lock(path)
+    legacy_target = {
+        field: legacy_contract[field]
+        for field in (
+            "releaseVersion",
+            "protocolVersion",
+            "agentProfile",
+            "gatewayContractDigest",
+            "commandFingerprint",
+            "schemaDigest",
+        )
+    }
+    legacy_request = {"runtimeTarget": {**legacy_target, "compatibilityDigest": "9" * 64}}
+    v2 = "exomem-cell-provisioner.v2"
+
+    assert lock.matches_runtime_request(legacy_request, wire_protocol=v2)
+    assert lock.matches_runtime_request(
+        legacy_request, wire_protocol=v2, action="renew-authorization"
+    )
+    for placing in ("provision", "rollforward", "rollback-rollforward"):
+        assert not lock.matches_runtime_request(legacy_request, wire_protocol=v2, action=placing)
+    assert not lock.matches_runtime_request(
+        {"runtimeTarget": {**legacy_request["runtimeTarget"], "schemaDigest": "1" * 64}},
+        wire_protocol=v2,
+    )
+    assert lock.matches_runtime_request(
+        {"runtimeTarget": dict(value["runtimeTarget"])}, wire_protocol=v2, action="provision"
+    )
 
 
 def test_selected_lock_accepts_an_authoritatively_empty_legacy_catalog(tmp_path: Path) -> None:
@@ -298,6 +340,8 @@ def test_volume_worker_requires_public_capacity_verification_settings() -> None:
     values = {
         "hcloud_token": "h" * 32,
         "provider_recovery_signing_key": "a" * 43,
+        "deployment_lock_path": "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json",
+        "runtime_selection": "active",
         "volume_encryption_secret_name": "volume-encryption",
         "volume_encryption_secret_namespace": "exomem-platform",
         "location": "fsn1",
@@ -318,6 +362,7 @@ def test_volume_worker_requires_public_capacity_verification_settings() -> None:
         "capacity_receipt_namespace",
         "capacity_receipt_config_map",
         "hcloud_server_id",
+        "deployment_lock_path",
     ):
         invalid = dict(values)
         invalid.pop(field)
@@ -325,3 +370,5 @@ def test_volume_worker_requires_public_capacity_verification_settings() -> None:
             VolumeWorkerSettings(**invalid)
     with pytest.raises(ValidationError):
         VolumeWorkerSettings(**{**values, "capacity_contract_path": "relative.json"})
+    with pytest.raises(ValidationError):
+        VolumeWorkerSettings(**{**values, "deployment_lock_path": "relative.json"})

@@ -124,6 +124,8 @@ V5_ONLY_ARGUMENTS: tuple[tuple[str, str], ...] = (
     ("maintain_memory", "curation_action"),
     ("maintain_memory", "review_ref"),
     ("maintain_memory", "hydration_recheck"),
+    ("remember", "vocabulary_decision"),
+    ("replace_memory", "vocabulary_decision"),
 )
 
 
@@ -275,6 +277,11 @@ V5_ONLY_ARGUMENT_VALUES: dict[str, object] = {
     "curation_action": "status",
     "review_ref": "exomem://review/aaaaaaaaaaaaaaaaaaaaaaaa",
     "hydration_recheck": 3,
+    "vocabulary_decision": {
+        "evidence_fingerprint": "0" * 64,
+        "outcome": "defer",
+        "canonical": None,
+    },
 }
 
 

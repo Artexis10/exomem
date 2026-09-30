@@ -32,6 +32,7 @@ import mimetypes
 import os
 import re
 import tempfile
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,12 +45,14 @@ from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
     DeferredGraphCompletion,
+    FrontmatterError,
     PlannedWrite,
     PreparedBinaryContent,
     batch_atomic_write,
     content_hash,
     escape_wikilinks_for_log,
     kb_root,
+    parse_frontmatter,
     yaml_scalar,
 )
 
@@ -199,6 +202,14 @@ class PreserveResult:
             "stored_path": self.path,
             "sidecar_path": self.sidecar_path,
             "ref": self.ref,
+            # The terminal state of this artifact. `stored` is the only one this
+            # write path can produce -- it has just written the bytes -- but the
+            # field is present so a caller reads one vocabulary across the plain
+            # and the batch preservation commands rather than inferring it.
+            "state": "stored",
+            # `outcome` mirrors `state` for one release, on both branches: a
+            # client branching on it must not have to know which one answered.
+            "outcome": "stored",
             "warnings": self.warnings,
             "size": self.size,
             "hash": self.hash,
@@ -209,6 +220,102 @@ class PreserveResult:
         if self.adoption is not None:
             out["adoption"] = self.adoption
         return out
+
+
+@dataclass(frozen=True)
+class DuplicateArtifact:
+    """An artifact already committed under one destination with these bytes."""
+
+    hash: str          # the sha256 both copies share
+    path: str          # vault-relative path of the existing artifact
+    sidecar_path: str  # vault-relative path of its page
+    ref: str           # the page's stable ref, always resolvable
+
+
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def _duplicate_from_sidecar(
+    vault_root: Path, folder: Path, sidecar: Path
+) -> DuplicateArtifact | None:
+    """One sidecar's artifact identity, or None when it cannot stand for one."""
+    try:
+        source = sidecar.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    try:
+        frontmatter, _body, marker = parse_frontmatter(source, strict=True)
+    except FrontmatterError:
+        return None
+    if marker is None:
+        return None
+    companion = frontmatter.get("governance_companion")
+    if not isinstance(companion, Mapping):
+        return None
+    digest = companion.get("artifact_sha256")
+    artifact_path = companion.get("artifact_path")
+    if (
+        not isinstance(digest, str)
+        or not _SHA256_HEX.fullmatch(digest)
+        or not isinstance(artifact_path, str)
+        or not artifact_path
+    ):
+        return None
+    # The page is vault data and its `artifact_path` reaches the client as
+    # `duplicate_of.path`. A page that points outside the destination it lives
+    # in describes some other artifact, so it cannot stand for a duplicate here.
+    resolved = os.path.realpath(vault_root / artifact_path)
+    if os.path.dirname(resolved) != os.path.realpath(folder) or not Path(resolved).is_file():
+        return None
+    # No resolvable ref, no duplicate. The contract says an `already_stored`
+    # outcome names the existing path *and ref*, and a row that cannot is
+    # better answered by storing the bytes than by reporting half an identity.
+    ref = memory_refs.ref_from_markdown(source)
+    if not isinstance(ref, str) or not ref:
+        return None
+    return DuplicateArtifact(
+        hash=digest,
+        path=artifact_path,
+        sidecar_path=sidecar.relative_to(vault_root).as_posix(),
+        ref=ref,
+    )
+
+
+def destination_duplicate_index(
+    vault_root: Path, *, scope: str, category: str
+) -> dict[str, DuplicateArtifact]:
+    """sha256 -> the artifact already under this destination with those bytes.
+
+    Bounded to `Evidence/<scope>/<category>/` deliberately. The same bytes filed
+    in two evidence families are two facts, and a global content address would
+    make the second one disappear without saying so; the failure actually
+    observed is the retry into the *same* family after a lost acknowledgement.
+
+    Built once per call and handed to every file in a batch. Reading the whole
+    directory once per *file* would make an eight-file batch eight full passes
+    over a category that can hold hundreds of sidecars -- and the design's claim
+    that this is cheaper than the staging download only holds for one pass.
+    """
+    index: dict[str, DuplicateArtifact] = {}
+    folder = kb_root(vault_root) / "Evidence" / scope / category
+    try:
+        sidecars = sorted(folder.glob("*.md"))
+    except OSError:
+        return index
+    for sidecar in sidecars:
+        duplicate = _duplicate_from_sidecar(vault_root, folder, sidecar)
+        if duplicate is not None:
+            index.setdefault(duplicate.hash, duplicate)
+    return index
+
+
+def find_duplicate_artifact(
+    vault_root: Path, *, scope: str, category: str, sha256: str
+) -> DuplicateArtifact | None:
+    """The single-file lane's lookup: one destination index, one probe."""
+    if not _SHA256_HEX.fullmatch(sha256 or ""):
+        return None
+    return destination_duplicate_index(vault_root, scope=scope, category=category).get(sha256)
 
 
 @dataclass
@@ -237,19 +344,31 @@ def preserve(
     max_decoded_bytes: int = MAX_DECODED_BYTES,
     max_stream_bytes: int = MAX_UPLOAD_BYTES,
     adoption_seed: Mapping[str, object] | None = None,
+    text_origin: str = "upload",
 ) -> PreserveResult:
-    """Capture an artifact to Evidence/<scope>/<category>/<filename>."""
+    """Capture an artifact to Evidence/<scope>/<category>/<filename>.
+
+    `text_origin` says who supplied `text`: `upload` for an uploader's own
+    extraction, `client` for a transcription an AI client derived from the
+    original, which the page then records against the original's exact bytes.
+    """
+    if text_origin not in ("upload", "client"):
+        raise ValueError("text_origin must be 'upload' or 'client'")
     missing: list[str] = []
     reasons: list[str] = []
 
-    scope_safe = _sanitize_segment(scope)
-    if not scope_safe:
+    # Destination segments are validated, never normalised: what the caller
+    # supplied is what the path uses, or the call is refused naming the field.
+    scope_refusal = destination_segment_refusal(scope, field="scope")
+    scope_safe = "" if scope_refusal else scope
+    if scope_refusal:
         missing.append("scope")
-        reasons.append("scope is empty or only invalid characters")
-    category_safe = _sanitize_segment(category)
-    if not category_safe:
+        reasons.append(scope_refusal)
+    category_refusal = destination_segment_refusal(category, field="category")
+    category_safe = "" if category_refusal else category
+    if category_refusal:
         missing.append("category")
-        reasons.append("category is empty or only invalid characters")
+        reasons.append(category_refusal)
     filename_safe = _sanitize_filename(filename)
     if not filename_safe:
         missing.append("filename")
@@ -417,7 +536,9 @@ def preserve(
             )
         else:
             if text_clean:
-                extracted_by = "upload"   # the uploader/sandbox supplied the text
+                # The uploader/sandbox supplied the text, or an AI client
+                # transcribed the original it was handed.
+                extracted_by = "client-transcription" if text_origin == "client" else "upload"
             elif want_stub:
                 extracted_by = "pending"  # the worker will fill it
             else:
@@ -459,6 +580,15 @@ def preserve(
                 tree="Evidence",
                 adoption_receipt=adoption_receipt,
                 inspection=inspection,
+                transcription_of=(
+                    {
+                        "sha256": artifact_hash,
+                        "size": artifact_size,
+                        "content_type": content_type_effective,
+                    }
+                    if text_clean and text_origin == "client"
+                    else None
+                ),
             )
             sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
             writes.append(
@@ -607,6 +737,7 @@ def preserve_stream(
     today: dt.date | None = None,
     max_bytes: int = MAX_UPLOAD_BYTES,
     adoption_seed: Mapping[str, object] | None = None,
+    text_origin: str = "upload",
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
 
@@ -631,6 +762,7 @@ def preserve_stream(
         today=today,
         max_stream_bytes=max_bytes,
         adoption_seed=adoption_seed,
+        text_origin=text_origin,
     )
 
 
@@ -718,6 +850,67 @@ def _sanitize_segment(s: str | None) -> str:
     return cleaned
 
 
+#: What a destination segment is allowed to be, said once so every refusal
+#: quotes the same sentence back to the caller.
+DESTINATION_ACCEPTED_FORM = "one path segment; nest with category, not with '/'"
+#: The filesystem component limit every target platform shares. Beyond it the
+#: write dies inside the commit with a bare `OSError`, after every handle in
+#: the batch has already been staged -- which is the opposite of refusing
+#: before a byte moves.
+DESTINATION_SEGMENT_MAX_CHARS = 255
+#: Reserved on Windows with or without an extension, and a directory by one of
+#: these names cannot be created there at all.
+_WINDOWS_RESERVED_SEGMENTS = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+
+
+def destination_segment_refusal(value: object, *, field: str) -> str | None:
+    """Why `value` is not one clean destination segment, or None if it is.
+
+    Validation, never normalisation. `_sanitize_segment` deletes the offending
+    character and writes somewhere else: the live vault holds one logical case
+    split across `Evidence/food/caviarhouse-group-order/` and
+    `Evidence/foodcaviarhouse-group-order/` because a separator was silently
+    removed. A refusal costs the caller one corrected call and names the field;
+    a silent fork costs a reader the case.
+    """
+    if not isinstance(value, str) or not value:
+        return f"{field} is required as {DESTINATION_ACCEPTED_FORM}"
+    if value != value.strip():
+        return f"{field} has leading or trailing whitespace; use {DESTINATION_ACCEPTED_FORM}"
+    # Bytes, not characters: the filesystem limit is a byte limit, and a byte
+    # length can only exceed a character length under UTF-8, never fall short.
+    if len(value.encode("utf-8")) > DESTINATION_SEGMENT_MAX_CHARS:
+        return (
+            f"{field} is longer than {DESTINATION_SEGMENT_MAX_CHARS} characters; "
+            f"use {DESTINATION_ACCEPTED_FORM}"
+        )
+    match = _INVALID_PATH_CHARS.search(value)
+    offending = match.group(0) if match is not None else None
+    if offending is None:
+        # Control, format, surrogate, private-use and unassigned code points.
+        # `U+200B` and the bidi overrides are invisible in a path and make two
+        # different destinations look like one to a reader.
+        offending = next(
+            (char for char in value if unicodedata.category(char).startswith("C")), None
+        )
+    if offending is not None:
+        rendered = offending if offending.isprintable() else "a control character"
+        return f"{field} cannot contain {rendered}; use {DESTINATION_ACCEPTED_FORM}"
+    if value.replace(".", "") == "":
+        return f"{field} cannot be '.' or '..'; use {DESTINATION_ACCEPTED_FORM}"
+    if value.endswith("."):
+        return f"{field} cannot end with '.'; use {DESTINATION_ACCEPTED_FORM}"
+    if value.split(".", 1)[0].lower() in _WINDOWS_RESERVED_SEGMENTS:
+        return f"{field} is a reserved device name; use {DESTINATION_ACCEPTED_FORM}"
+    if value != _sanitize_segment(value):
+        return f"{field} is not {DESTINATION_ACCEPTED_FORM}"
+    return None
+
+
 def _sanitize_filename(s: str | None) -> str:
     """Same as _sanitize_segment but allows the trailing extension dot."""
     if not s:
@@ -790,6 +983,7 @@ def _render_sidecar(
     tree: str = "Evidence",
     adoption_receipt: Mapping[str, object] | None = None,
     inspection: Inspection | None = None,
+    transcription_of: Mapping[str, object] | None = None,
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -904,6 +1098,14 @@ def _render_sidecar(
             lines.append(f"binary_size: {binary_size}")
     if adoption_receipt is not None:
         lines.extend(_render_adoption_receipt_lines(adoption_receipt))
+    if transcription_of is not None:
+        # A client transcription is derived from exactly these bytes; the
+        # binding outlives any later re-extraction of the page.
+        lines.append("transcription:")
+        lines.append("  origin: client")
+        lines.append(f"  sha256: {transcription_of['sha256']}")
+        lines.append(f"  size: {transcription_of['size']}")
+        lines.append(f"  content_type: {yaml_scalar(transcription_of['content_type'] or '')}")
     if parent_media:
         lines.append(f"parent_media: {parent_media}")
     if frame_ts is not None:

@@ -66,3 +66,36 @@ def test_unprocessed_source_finding_omits_meta_when_no_date(
     )
     assert "meta" not in f.as_dict()
     assert "paths" not in f.as_dict()
+
+
+def test_an_episode_recap_is_not_an_unprocessed_source(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    """Every conversation writes a recap; an audit finding per conversation
+    would be noise. The recap and its ledger are the coverage record."""
+    add_module.add(
+        vault, source_schema, content="ordinary capture", source_type="other",
+        title="Ordinary Capture", today=dt.date(2026, 1, 1),
+    )
+    add_module.add(
+        vault,
+        source_schema,
+        content="### Worked on\n\n- Compared two lamps",
+        source_type="episode",
+        title="Harbor Lamp purchase",
+        slug="harbor-lamp-purchase-epa1a1a1a1a1a1-20260101t000000000000-dddddddd",
+        today=dt.date(2026, 1, 1),
+        extra_frontmatter={
+            "summary": "Chose the brass lamp.",
+            "episode": "ep-" + "a1" * 16,
+            "episode_digest": "d" * 64,
+        },
+    )
+
+    report = audit_module.audit(
+        vault, categories=["unprocessed_source"], today=dt.date(2026, 5, 29)
+    )
+    paths = [finding.path for finding in report.findings]
+
+    assert any("ordinary-capture" in path for path in paths)
+    assert not any("/Sources/Episodes/" in path for path in paths)

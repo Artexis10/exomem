@@ -158,7 +158,11 @@ def create_file(
     existing_guard: vault_module.PathGuard | None = None
     existing_file = abs_path.exists()
     if existing_file:
-        if not overwrite:
+        # A file the writer may not see is never overwritten: it is refused
+        # exactly as an occupied path is without `overwrite`, before any read.
+        from .governance import egress
+
+        if not overwrite or egress.write_target_withheld(vault_root, rel_path):
             raise CreateFileError(
                 code="FILE_EXISTS",
                 reason=(

@@ -24,6 +24,7 @@ def test_real_verifier_workflow_is_revision_keyed_and_downloads_the_pin_manifest
     assert "--extra nli" in text
     assert "EXOMEM_RUN_REAL_NLI: \"1\"" in text
     assert "tests/test_frozen_verifier_real.py" in text
+    assert "tests/test_sensing_real_pin.py" in text
 
 
 def test_real_verifier_workflow_is_scoped_to_identity_and_behavior_changes() -> None:
@@ -31,6 +32,9 @@ def test_real_verifier_workflow_is_scoped_to_identity_and_behavior_changes() -> 
 
     for path in (
         "src/exomem/claims.py",
+        "src/exomem/sensing.py",
+        "src/exomem/sensing_nli.py",
+        "tests/test_sensing_real_pin.py",
         "tests/test_frozen_verifier_real.py",
         "tests/test_frozen_verifiers.py",
         "pyproject.toml",

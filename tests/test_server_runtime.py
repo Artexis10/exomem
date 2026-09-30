@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,38 @@ def test_initialize_runtime_loads_dotenv_from_service_working_directory(
 
     assert calls == [(tmp_path / ".env", True)]
     assert runtime.vault_root == vault
+
+
+def test_initialize_runtime_disables_usage_boost_and_relevance_check_in_cloud_mode(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design D1.2: usage boost and the relevance check both read the query
+    journals that `query_log` now turns off under content-private logging --
+    without also disabling the features that read them, each would find its
+    journals silently empty forever instead of being told why (hosted parity
+    with `hosted_runtime.HostedProcessSettings.apply_process_environment`,
+    which sets the same two variables for the same reason)."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    initialize_vault_state_offline(vault, source="server runtime cloud fixture")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_USAGE_BOOST", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RELEVANCE_CHECK", raising=False)
+    monkeypatch.setattr(server_runtime, "resolve_vault", lambda: vault)
+    monkeypatch.setattr(
+        server_runtime.schema,
+        "load_source_schema",
+        lambda _vault: SimpleNamespace(source_types=("session",)),
+    )
+    monkeypatch.setattr(server_runtime.project_keys, "keys_hint", lambda _vault: "")
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _vault: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _vault: None)
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _vault: None)
+
+    server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert os.environ["EXOMEM_DISABLE_USAGE_BOOST"] == "1"
+    assert os.environ["EXOMEM_DISABLE_RELEVANCE_CHECK"] == "1"
 
 
 def test_initialize_runtime_does_not_start_workers_before_transport(
@@ -272,6 +305,7 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
     try:
         activation._activate()
     finally:
+        activation._stop_background_workers()
         readiness.reset()
 
     assert observed_timeouts == [server_runtime.RECALL_SEED_WAIT_SECONDS]
@@ -308,6 +342,7 @@ def test_local_runtime_activation_downgrades_when_watcher_is_unavailable(
         assert managed_at_compute == [False]
         assert readiness.runtime_managed() is False
     finally:
+        activation._stop_background_workers()
         readiness.reset()
 
 
@@ -822,3 +857,137 @@ def test_later_drop_is_immediately_blocked_after_runtime_start_failure(
     assert repeated.state == media_jobs.BLOCKED
     assert sidecar_path.read_bytes() == before
     assert sidecar_path.stat().st_mtime_ns == before_mtime
+
+
+def _quiet_starters(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
+    monkeypatch.setattr(
+        server_runtime, "_start_compute_runtime", lambda _root: calls.append("compute")
+    )
+    monkeypatch.setattr(
+        server_runtime, "_start_graph_drain", lambda _root: calls.append("graph")
+    )
+    monkeypatch.setattr(
+        server_runtime, "_start_media_worker", lambda _root: calls.append("media")
+    )
+    monkeypatch.setattr(
+        server_runtime.LocalRuntimeActivation,
+        "_start_vocabulary_recovery",
+        lambda self, _root: calls.append("vocabulary"),
+    )
+
+
+def test_dreamer_starts_last_and_only_when_enabled(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import dreamer
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[str] = []
+    _quiet_starters(monkeypatch, calls)
+    real_start = dreamer.start
+    monkeypatch.setattr(
+        dreamer, "start", lambda root: (calls.append("dreamer"), real_start(root))[1]
+    )
+    try:
+        # Default off: the starter runs last and starts nothing.
+        activation = server_runtime.LocalRuntimeActivation(vault)
+        activation.start()
+        activation._thread.join(5)
+        assert calls == ["compute", "graph", "media", "vocabulary", "dreamer"]
+        assert activation.dreamer is None
+        assert not dreamer.running()
+
+        calls.clear()
+        monkeypatch.setenv("EXOMEM_DREAMER", "on")
+        enabled = server_runtime.LocalRuntimeActivation(vault)
+        enabled.start()
+        enabled._thread.join(5)
+        assert calls[-1] == "dreamer"
+        assert enabled.dreamer is not None and enabled.dreamer.name == "exomem-dreamer"
+        assert dreamer.running()
+    finally:
+        dreamer.reset_for_tests()
+        readiness.reset()
+
+
+def test_standby_defers_the_dreamer_until_release(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import dreamer
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[str] = []
+    _quiet_starters(monkeypatch, calls)
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    try:
+        activation = server_runtime.LocalRuntimeActivation(vault, deferred=True)
+        activation.start()
+        assert activation._thread is None
+        assert not dreamer.running()
+        activation.release()
+        activation._thread.join(5)
+        assert calls[-1:] == ["vocabulary"]
+        assert activation.dreamer is not None
+        assert dreamer.running()
+    finally:
+        dreamer.reset_for_tests()
+        readiness.reset()
+
+
+def test_shutdown_stops_the_dreamer(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import dreamer
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[str] = []
+    _quiet_starters(monkeypatch, calls)
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+
+    async def exercise() -> None:
+        async with activation.lifespan()(SimpleNamespace()):
+            activation.start()
+            await asyncio.to_thread(activation._thread.join, 5)
+            assert dreamer.running()
+        assert not dreamer.running()
+        assert [t for t in threading.enumerate() if t.name == "exomem-dreamer"] == []
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        dreamer.reset_for_tests()
+        readiness.reset()
+
+
+def test_stopping_background_workers_joins_the_vocabulary_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recovery watcher is a background worker like any other: it stops
+    and is joined with the rest, not left running until the process exits."""
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    for starter in (
+        "_start_derived_drain",
+        "_start_file_watcher",
+        "_start_compute_runtime",
+        "_start_graph_drain",
+        "_start_media_worker",
+        "_start_dreamer",
+    ):
+        monkeypatch.setattr(server_runtime, starter, lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(tmp_path)
+    monkeypatch.setattr(activation, "_start_recall_reembed", lambda _root: None)
+
+    activation._activate()
+    watcher = activation.vocabulary_recovery
+    assert watcher is not None and watcher.name == "exomem-vocabulary-recovery"
+    activation._stop_background_workers()
+
+    assert not watcher.is_alive()
+    assert not [
+        thread
+        for thread in threading.enumerate()
+        if thread.name == "exomem-vocabulary-recovery" and thread.is_alive()
+    ]

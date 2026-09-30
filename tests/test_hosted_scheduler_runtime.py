@@ -96,6 +96,75 @@ def test_scheduler_alerts_transition_at_180_seconds_and_two_failures() -> None:
     )
 
 
+def _request_environment(monkeypatch: pytest.MonkeyPatch, *, job: str, cadence: int) -> None:
+    monkeypatch.setenv("JOB_NAME", job)
+    monkeypatch.setenv("TARGET_URL", "https://example.invalid/api/cron/" + job)
+    monkeypatch.setenv("EXOMEM_HOSTED_SCHEDULER_SECRET", "test-secret")
+    monkeypatch.setenv("CADENCE_SECONDS", str(cadence))
+
+
+def test_scheduler_request_adopts_a_changed_cadence_and_keeps_its_counters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The live fleet moved exomem-reconcile from one-minute to five-minute ticks
+    # (revision 54) while its state ConfigMap still said 60; every run refused
+    # "identity does not match" for twenty hours. The cadence is deployment
+    # configuration for the same job, so a run must carry the counters across.
+    module = _load()
+    stale = module.initial_state("exomem-reconcile", 60)
+    stale["attempts_total"] = 28_899
+    stale["failures_total"] = 199
+    stale["last_attempt_unixtime"] = 1_789_077_372
+    stale["last_success_unixtime"] = 1_789_077_372
+    stale["duration_seconds"] = {
+        "buckets": {"1": 115, "5": 28_865, "20": 28_899, "+Inf": 28_899},
+        "count": 28_899,
+        "sum": 51_324.173329,
+    }
+    written: list[dict[str, object]] = []
+    _request_environment(monkeypatch, job="exomem-reconcile", cadence=300)
+    monkeypatch.setattr(
+        module, "_read_state", lambda name: ({"metadata": {"name": name}}, dict(stale))
+    )
+    monkeypatch.setattr(module, "_write_state", lambda resource, state: written.append(state))
+    monkeypatch.setattr(module, "_exact_https_request", lambda *args, **kwargs: True)
+
+    assert module.request_once() == 0
+
+    assert len(written) == 1
+    persisted = written[0]
+    assert persisted["job"] == "exomem-reconcile"
+    assert persisted["cadence_seconds"] == 300
+    assert persisted["attempts_total"] == 28_900
+    assert persisted["failures_total"] == 199
+    assert persisted["consecutive_failures"] == 0
+    assert persisted["duration_seconds"]["count"] == 28_900
+    assert persisted["last_success_unixtime"] > 1_789_077_372
+
+
+def test_scheduler_request_still_refuses_another_jobs_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load()
+    foreign = module.initial_state("exomem-export-gc", 300)
+    written: list[dict[str, object]] = []
+    requested: list[str] = []
+    _request_environment(monkeypatch, job="exomem-reconcile", cadence=300)
+    monkeypatch.setattr(
+        module, "_read_state", lambda name: ({"metadata": {"name": name}}, dict(foreign))
+    )
+    monkeypatch.setattr(module, "_write_state", lambda resource, state: written.append(state))
+    monkeypatch.setattr(
+        module, "_exact_https_request", lambda target, *args, **kwargs: requested.append(target)
+    )
+
+    with pytest.raises(RuntimeError, match="identity does not match"):
+        module.request_once()
+
+    assert written == []
+    assert requested == []
+
+
 def test_scheduler_transport_rejects_redirects_and_non_exact_https(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -179,11 +248,15 @@ def test_alert_evaluator_scrapes_content_free_snapshot_and_requires_delivery(
     opener = Opener()
     monkeypatch.setattr(module.urllib.request, "build_opener", lambda *_args: opener)
     transition = {"job": "exomem-reconcile", "alert": "missed-run", "active": True}
-    first_id = module.transition_identifier(module.initial_alert_state(), transition, 0)
-    assert first_id == module.transition_identifier(module.initial_alert_state(), transition, 0)
+    first_id = module.transition_identifier(
+        module.initial_alert_state(), transition, 0, observed_at=1_000
+    )
+    assert first_id == module.transition_identifier(
+        module.initial_alert_state(), transition, 0, observed_at=1_000
+    )
     later_state = module.initial_alert_state()
     later_state["transitions_total"] = 1
-    assert module.transition_identifier(later_state, transition, 0) != first_id
+    assert module.transition_identifier(later_state, transition, 0, observed_at=1_000) != first_id
     module.deliver_transition(
         transition,
         webhook_url=target,
@@ -196,3 +269,99 @@ def test_alert_evaluator_scrapes_content_free_snapshot_and_requires_delivery(
             webhook_url=target,
             transition_id="transition-0001",
         )
+
+
+def test_alert_transition_id_does_not_repeat_after_a_counter_regression() -> None:
+    # Measured 2026-09-11: the alert-state ConfigMap's transitions_total stood at
+    # 78 while the receiver already held sequence 79 from 2026-09-07, so the
+    # FIRING for a twenty-hour reconcile outage was deduplicated and never mailed.
+    # The receiver keys on this id, so a later evaluation must never reuse one.
+    module = _load()
+    transition = {"job": "exomem-reconcile", "alert": "missed-run", "active": True}
+    earlier = module.initial_alert_state()
+    earlier["transitions_total"] = 78
+    earlier_id = module.transition_identifier(earlier, transition, 0, observed_at=1_788_996_839)
+
+    regressed = module.initial_alert_state()
+    regressed["transitions_total"] = 78
+    later_id = module.transition_identifier(regressed, transition, 0, observed_at=1_789_078_320)
+    assert later_id != earlier_id
+
+    # A retry of the same evaluation keeps the same id, so the receiver can
+    # still deduplicate a resend after a lost acknowledgement.
+    assert (
+        module.transition_identifier(regressed, transition, 0, observed_at=1_789_078_320)
+        == later_id
+    )
+
+    with pytest.raises(RuntimeError, match="transition identity is invalid"):
+        module.transition_identifier(regressed, transition, 0, observed_at=0)
+
+
+def test_alert_evaluation_reads_the_clock_once_so_every_transition_shares_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Retry idempotence rests on one observed_at per pass. Two transitions in one
+    # pass must carry the same timestamp, and a resend of that pass must produce
+    # the same ids, which a clock read inside the delivery loop would break.
+    module = _load()
+    clock = iter(range(5_000, 5_100))
+    monkeypatch.setattr(module.time, "time", lambda: next(clock))
+    stale = module.record_attempt(
+        module.initial_state("exomem-reconcile", 60),
+        success=False,
+        duration_seconds=0.1,
+        observed_at=1_000,
+    )
+    stale = module.record_attempt(stale, success=False, duration_seconds=0.1, observed_at=1_001)
+    alert_state = module.initial_alert_state()
+    alert_state["baselines"] = {"exomem-reconcile": 1_000}
+    monkeypatch.setenv("COLLECTOR_SNAPSHOT_URL", "http://collector.invalid/snapshot")
+    monkeypatch.setenv("MISSED_RUN_SECONDS", "180")
+    monkeypatch.setenv("FAILURE_THRESHOLD", "2")
+    monkeypatch.setenv("ALERT_WEBHOOK_URL", "https://alerts.example.invalid/hooks/opaque")
+    monkeypatch.setattr(module, "_fetch_snapshot", lambda url: [stale])
+    monkeypatch.setattr(
+        module, "_read_state", lambda name: ({"metadata": {"name": name}}, dict(alert_state))
+    )
+    delivered: list[tuple[dict[str, object], str]] = []
+    monkeypatch.setattr(
+        module,
+        "deliver_transition",
+        lambda transition, *, webhook_url, transition_id: delivered.append(
+            (transition, transition_id)
+        ),
+    )
+    written: list[dict[str, object]] = []
+    monkeypatch.setattr(module, "_write_state", lambda resource, state: written.append(state))
+    monkeypatch.setattr(module, "_api_request", lambda *args, **kwargs: {})
+
+    module.evaluate_once()
+
+    assert {item[0]["alert"] for item in delivered} == {"missed-run", "consecutive-failures"}
+    observed_at = written[0]["last_evaluated_unixtime"]
+    assert observed_at == 5_000, "one clock read per evaluation"
+    for index, (transition, transition_id) in enumerate(delivered):
+        assert transition_id == module.transition_identifier(
+            alert_state, transition, index, observed_at=observed_at
+        )
+
+
+def test_chart_seeds_scheduler_state_once_and_never_re_renders_it() -> None:
+    """Pin the seed-once guards at source level.
+
+    Re-rendering the state ConfigMaps from a render-time `lookup` snapshot was a
+    read-modify-write across the whole upgrade: counters, baselines and active
+    alerts rolled back to whatever the render saw. The chart must only seed.
+
+    This is second-best on purpose: `helm template` runs with an empty `lookup`,
+    so no render-level test can reach the omit-when-present branch. The live
+    evidence is the `Skipping delete ... resource-policy: keep` line in the first
+    upgrade's log after this lands.
+    """
+    template = (ROOT / "infra/helm/platform/templates/observability.yaml").read_text()
+    assert "{{- if not $existingState }}" in template
+    assert "{{- if not $existingAlertState }}" in template
+    assert "$persistedState" not in template
+    assert "$persistedAlertState" not in template
+    assert template.count("helm.sh/resource-policy: keep") >= 2

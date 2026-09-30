@@ -83,6 +83,16 @@ Before expand deployment or any cell rollforward, the workflow SHALL reconcile S
 - **AND** it receives no API bearer, provider signer, Kubernetes service-account token, tenant credential, or mutation command
 - **AND** inventory is refused if the Job, its fixed security shape, its output, or its cleanup cannot be proven
 
+#### Scenario: The installed observer has a reproduced history-reading defect
+
+- **WHEN** the installed fleet-observation command fails because of a documented history-reading defect reproduced by regression tests, and the reviewed incoming provisioner candidate contains its verified repair
+- **THEN** the operator MAY explicitly select the same bounded incoming-candidate observation Job with all of the preceding credential, command, security-shape, output, and cleanup restrictions unchanged
+- **AND** a private operator receipt beside, not inside, the closed-schema execution record binds its trusted-phase execution ID and canonical SHA-256 to the installed image and observed failure, repair source commit, candidate file SHA-256, and exact signed image before the Job runs
+- **AND** before every such Job, including a resumed attempt, candidate signature verification and comparison against the receipt must pass for the current execution, installed failure/image, and candidate; changed inputs require a newly reviewed receipt
+- **AND** this is not an automatic fallback for authentication, connectivity, unknown runtime identity, or inconsistent fleet authority
+- **AND** fresh Substrate, provisioner, and Kubernetes observations must still reconcile before deployment; failed output or cleanup blocks the upgrade
+- **AND** after the repaired provisioner is deployed, the ordinary installed-command path must pass without the bootstrap-image option
+
 #### Scenario: Destroyed operation history names an older runtime
 
 - **WHEN** a finalized destroy or discard removes the last desired, unfinished, and cluster dependency on an older reviewed runtime

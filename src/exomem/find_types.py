@@ -13,7 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from . import temporal
+from . import call_spans, temporal
 
 
 @dataclass(frozen=True)
@@ -189,6 +189,13 @@ class ParsedPage:
         from . import bm25
 
         return frozenset(bm25.tokenize(self.title + " " + self.body))
+
+    @cached_property
+    def letter_script(self) -> str | None:
+        """The script most of the page's letters are written in (`find_policy.dominant_script`)."""
+        from . import find_policy
+
+        return find_policy.dominant_script(self.title + " " + self.body)
 
 
 def _format_timestamp(seconds: float) -> str:
@@ -707,6 +714,11 @@ class FindTimings:
             # membership test the attribution bound sums over.
             if parent is not None:
                 entry.setdefault("parent", parent)
+            # Include nested stages: bm25, vector and rerank run inside
+            # semantic.search, and their own costs explain a slow call. The
+            # ledger keeps its existing name bound; spans are inclusive timings.
+            # Off the MCP path record_span is a no-op.
+            call_spans.record_span(f"recall.{name}", elapsed)
             entry.update(fields)
 
     def mark_source(self, name: str, source: str) -> None:

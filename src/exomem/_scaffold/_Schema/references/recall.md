@@ -4,7 +4,8 @@
 
 `ask_memory` is the normal product command for recall. Underneath, `find` runs in
 **hybrid mode** by default: BM25 + local vector embeddings
-(BAAI/bge-base-en-v1.5, 768-dim) fused via reciprocal rank fusion.
+(a multilingual model on a personal server, `BAAI/bge-m3`, 1024-dim) fused via
+reciprocal rank fusion.
 Natural-language queries reach pages that don't contain the literal terms.
 
 Modes:
@@ -60,6 +61,13 @@ to 300. The retrieval profile reports `candidate_limit_requested`,
 `candidate_limit_effective`, `scorer_input_count`, and `unscored_tail_count`.
 The tail keeps fused order. A candidate count bounds scorer work, not wall-clock
 time; model warm-up, hardware, and text length still affect latency.
+
+A `budget` block on the response means the request deadline left no room for the
+stages it names under `skipped` and `truncated`: the result is complete for every
+stage that ran and is not an error, so re-ask with a narrower option set when you
+need what was left out.
+
+A `latency` block on a `bootstrap` response means this client's own recent recalls have been slower than the service's ceiling; its `dominant_spans` name the stage responsible, and it is absent when nothing is slow.
 
 Performance presets:
 - Normal lookup: `ask_memory(detail="compact", rerank=false)`.

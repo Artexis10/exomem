@@ -1554,7 +1554,13 @@ def _compute_tombstoned_paths(vault_root: Path) -> frozenset[str]:
 
 
 def tombstoned_paths(vault_root: Path) -> frozenset[str]:
-    root = Path(vault_root).resolve()
+    # Only the path resolution is memoised for the request. The generation
+    # below stats every tombstone, recovery marker and event file on each call
+    # and must keep doing so: it is the evidence that decides whether the
+    # cached answer is still true.
+    from .. import state_paths
+
+    root = state_paths.resolved_vault_path(vault_root, expanduser=False)
     return _cached_tombstoned_paths(str(root), _tombstone_generation(root))
 
 

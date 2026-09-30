@@ -162,7 +162,10 @@ content. It needs no MCP connection or Exomem credential.
 The read-side hook suppresses obvious control/status prompts like `continue`,
 `merge it`, and `are you done?`, and can optionally upgrade that reminder to real
 retrieved KB content (`EXOMEM_RETRIEVE_INJECT=1`, opt-in; the legacy
-`KB_RETRIEVE_INJECT` name still works). For Codex, run
+`KB_RETRIEVE_INJECT` name still works) — or, with
+`EXOMEM_RETRIEVE_INJECT=working_set`, to a compiled `activate_context` packet
+under a data header, bounded by `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default
+4,000). For Codex, run
 `exomem install-hook --client codex`; for Claude Code, `exomem install-hook` —
 see
 [QUICKSTART.md § 7](QUICKSTART.md#7-recommended-make-the-kb-automatic-both-directions).
@@ -374,6 +377,8 @@ exomem exposes typed MCP tools for common knowledge-base work:
 
 | Tool | Purpose |
 | --- | --- |
+| `activate_context` | Compile durable context for a raw turn, with no query: resolves which anchors the turn is about and returns a bounded working-memory packet, or abstains. |
+| `episode_memory` | Record a bounded recap of what a conversation worked on, decided and left open, so the next session on any client sees it first; inspect an episode's revisions. |
 | `find` | Search notes, sources, entities, and evidence with type/project/tag filters. |
 | `get` | Read a full page or frontmatter. |
 | `add` | Capture a raw source page. |
@@ -476,6 +481,8 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EXOMEM_VAULT_PATH` | Vault root containing the governed folder (default `Knowledge Base/`). |
 | `EXOMEM_KB_DIRNAME` | Name of the governed folder inside the vault (default `Knowledge Base`). |
 | `EXOMEM_DISABLE_EMBEDDINGS` | `1` forces keyword/BM25-only search. |
+| `EXOMEM_RECALL_MODEL` | Names the recall encoder. Default: `BAAI/bge-m3` on a personal server, `BAAI/bge-base-en-v1.5` on a hosted or cloud cell. A vault whose vectors came from another model is re-embedded in the background. |
+| `EXOMEM_RECALL_REEMBED` | `off` keeps an existing sidecar serving with the model that wrote it and builds no new one. |
 | `EXOMEM_DISABLE_TIER2` | `1` hides Tier-2 filesystem tools. |
 | `EXOMEM_REST_API_KEY` | Enables authenticated REST routes. |
 | `EXOMEM_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/Office extraction. |

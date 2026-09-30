@@ -64,6 +64,8 @@ _NAMESPACE_OWNED_MARKERS = (
 
 def _load(relative: str, name: str) -> ModuleType:
     path = ROOT / relative
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -163,6 +165,16 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert blackbox_input["type"] == "boolean"
     static_job = parsed["jobs"]["static"]
     assert static_job["name"] == "Offline static validation (not release proof)"
+    validation_step = next(
+        step
+        for step in static_job["steps"]
+        if step.get("name")
+        == "Terraform, TFLint, Checkov, Ansible, Helm, policy, SOPS, types, tests, and secret scan"
+    )
+    assert "RUN_K3S_ADMISSION_TEST=1" in validation_step["run"]
+    assert "RUN_K3S_STORAGE_BINDING_TEST=1" in validation_step["run"]
+    assert "infra/scripts/validate.sh" in validation_step["run"]
+    assert 'pytest -q "${repo_root}"/tests/test_hosted_*.py' in validator
     cache_step = next(
         step for step in static_job["steps"] if step.get("name") == "Restore exact validator bundle"
     )
@@ -194,7 +206,9 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     )
     assert install_step["if"] == "steps.validator-cache.outputs.cache-hit != 'true'"
     expose_step = next(
-        step for step in static_job["steps"] if step.get("name") == "Expose infrastructure validators"
+        step
+        for step in static_job["steps"]
+        if step.get("name") == "Expose infrastructure validators"
     )
     assert 'echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"' in expose_step["run"]
     assert 'echo "$PWD/.venv-hosted-ci/bin" >> "$GITHUB_PATH"' in expose_step["run"]
@@ -213,6 +227,8 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         "require_python_distribution checkov",
         "collection list community.general",
         "collection list community.library_inventory_filtering_v1",
+        "collection list community.postgresql",
+        "collection list community.docker",
         "require_output_version trivy",
         "require_output_version shellcheck",
         "require_output_version oras",
@@ -244,8 +260,7 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     release_proof_step = next(
         step
         for step in release_job["steps"]
-        if step.get("name")
-        == "Derive and prove both published images from the reviewed phase lock"
+        if step.get("name") == "Derive and prove both published images from the reviewed phase lock"
     )
     for script in (
         "prepare_hosted_release.py",
@@ -521,6 +536,9 @@ print(json.dumps({
 import os
 import pathlib
 import sys
+if len(sys.argv) > 1 and sys.argv[1] == 'get':
+    print('secret')
+    raise SystemExit(0)
 pathlib.Path(os.environ['KUBECTL_INPUT']).write_bytes(sys.stdin.buffer.read())
 """,
     )
@@ -549,7 +567,8 @@ pathlib.Path(os.environ['KUBECTL_INPUT']).write_bytes(sys.stdin.buffer.read())
     assert result.stdout == "Applied exomem-platform/exomem-hosted-scheduler at v2\n"
     assert "must-not-be-printed" not in result.stdout + result.stderr
     applied = json.loads(kubectl_input.read_text(encoding="utf-8"))
-    assert applied["stringData"] == {"secret": "must-not-be-printed"}
+    assert "stringData" not in applied
+    assert applied["data"] == {"secret": base64.b64encode(b"must-not-be-printed").decode()}
 
 
 def test_sops_ciphertext_validator_binds_every_leaf_to_one_destination(
@@ -601,6 +620,274 @@ def test_sops_ciphertext_validator_binds_every_leaf_to_one_destination(
     target.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(RuntimeError, match="stringData shape"):
         module.validate(matrix_path=test_matrix, artifacts=[target], root=repository)
+
+
+@pytest.mark.parametrize(
+    "fields,extra_live_key,expected_success",
+    [
+        ({"current": "hidden-alpha", "currentVersion": "v2"}, "", True),
+        (
+            {
+                "current": "hidden-beta",
+                "currentVersion": "v2",
+                "previous": "hidden-alpha",
+                "previousVersion": "v1",
+            },
+            "",
+            True,
+        ),
+        ({"current": "hidden-beta", "currentVersion": "v3"}, "previous", False),
+    ],
+)
+def test_bundle_apply_uses_data_and_checks_live_field_set(
+    tmp_path: Path, fields: dict[str, str], extra_live_key: str, expected_success: bool
+) -> None:
+    require_posix_executable_scripts()
+    artifact = tmp_path / "bundle.v2.sops.json"
+    artifact.write_text('{"sops": {}}', encoding="utf-8")
+    matrix = tmp_path / "matrix.json"
+    matrix.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "secrets": {
+                    "bundle": {
+                        "value_shape": "json-object",
+                        "destinations": {
+                            "k3s.bundle.active": {
+                                "kind": "sops_k8s_secret",
+                                "slot": "active",
+                                "target": str(artifact),
+                                "namespace": "exomem-platform",
+                                "kubernetes_secret": "bundle",
+                                "key_sets": [
+                                    ["current", "currentVersion"],
+                                    ["current", "currentVersion", "previous", "previousVersion"],
+                                ],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    plaintext = tmp_path / "plaintext.json"
+    plaintext.write_text(
+        json.dumps(
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {
+                    "name": "bundle",
+                    "namespace": "exomem-platform",
+                    "labels": {
+                        "app.kubernetes.io/managed-by": "exomem-secret-handoff",
+                        "exomem.io/secret-version": "v2",
+                    },
+                },
+                "type": "Opaque",
+                "stringData": fields,
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_sops = tmp_path / "sops"
+    _write_executable(
+        fake_sops,
+        "#!/usr/bin/env python3\nimport os, pathlib, sys\nsys.stdout.buffer.write(pathlib.Path(os.environ['PLAINTEXT']).read_bytes())\n",
+    )
+    fake_kubectl = tmp_path / "kubectl"
+    applied_path = tmp_path / "applied.json"
+    _write_executable(
+        fake_kubectl,
+        """#!/usr/bin/env python3
+import json, os, pathlib, sys
+if sys.argv[1] == 'apply':
+    pathlib.Path(os.environ['APPLIED']).write_bytes(sys.stdin.buffer.read())
+else:
+    keys = list(json.loads(pathlib.Path(os.environ['APPLIED']).read_text())['data'])
+    if os.environ['EXTRA_LIVE_KEY']:
+        keys.append(os.environ['EXTRA_LIVE_KEY'])
+    print('\\n'.join(keys))
+""",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(INFRA / "scripts/apply_sops_secret.py"),
+            "--matrix",
+            str(matrix),
+            "--destination",
+            "k3s.bundle.active",
+            "--artifact",
+            str(artifact),
+            "--sops",
+            str(fake_sops),
+            "--kubectl",
+            str(fake_kubectl),
+        ],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PLAINTEXT": str(plaintext),
+            "APPLIED": str(applied_path),
+            "EXTRA_LIVE_KEY": extra_live_key,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) == expected_success
+    assert "stringData" not in json.loads(applied_path.read_text())
+    assert json.loads(applied_path.read_text())["data"] == {
+        key: base64.b64encode(value.encode()).decode() for key, value in fields.items()
+    }
+    assert all(
+        value not in result.stdout + result.stderr
+        for key, value in fields.items()
+        if key in {"current", "previous"}
+    )
+    if not expected_success:
+        assert "verification failed" in result.stderr
+        assert "Applied" not in result.stdout
+
+
+def test_bundle_ciphertext_requires_exact_encrypted_field_set(tmp_path: Path) -> None:
+    module = _load("infra/scripts/validate_sops_ciphertext.py", "bundle_ciphertext_validator")
+    repository = tmp_path / "repository"
+    target = repository / "infra/secrets/platform/bundle.v2.sops.json"
+    target.parent.mkdir(parents=True)
+    matrix = repository / "matrix.json"
+    matrix.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "secrets": {
+                    "bundle": {
+                        "value_shape": "json-object",
+                        "destinations": {
+                            "k3s.bundle.active": {
+                                "kind": "sops_k8s_secret",
+                                "slot": "active",
+                                "target": "infra/secrets/platform/bundle.{version}.sops.json",
+                                "namespace": "exomem-platform",
+                                "kubernetes_secret": "bundle",
+                                "key_sets": [
+                                    ["current", "currentVersion"],
+                                    ["current", "currentVersion", "previous", "previousVersion"],
+                                ],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    fixture = json.loads(
+        (ROOT / "tests/fixtures/hosted-sops/cloudflared-token.v1.sops.json").read_text()
+    )
+    encrypted = fixture["stringData"]["token"]
+    fixture["stringData"] = {"current": encrypted, "currentVersion": encrypted}
+    target.write_text(json.dumps(fixture), encoding="utf-8")
+    assert module.validate(matrix_path=matrix, artifacts=[target], root=repository) == 1
+
+    fixture["stringData"]["previous"] = encrypted
+    target.write_text(json.dumps(fixture), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="stringData shape"):
+        module.validate(matrix_path=matrix, artifacts=[target], root=repository)
+
+    fixture["stringData"]["previousVersion"] = "unsealed-version"
+    target.write_text(json.dumps(fixture), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="plaintext payload leaf"):
+        module.validate(matrix_path=matrix, artifacts=[target], root=repository)
+
+    fixture["stringData"] = {"current": encrypted, "currentVersion": encrypted}
+    duplicate = json.dumps(fixture).replace(
+        f'"current": "{encrypted}"',
+        f'"current": "unsealed-bundle-value", "current": "{encrypted}"',
+        1,
+    )
+    target.write_text(duplicate, encoding="utf-8")
+    with pytest.raises(RuntimeError, match="invalid"):
+        module.validate(matrix_path=matrix, artifacts=[target], root=repository)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "half-previous",
+        "unknown-key",
+        "nested-value",
+        "newline-value",
+        "placeholder",
+        "wrong-name",
+        "duplicate-key",
+    ],
+)
+def test_bundle_apply_rejects_malformed_decrypted_document(change: str) -> None:
+    module = _load("infra/scripts/apply_sops_secret.py", "bundle_apply_shape_test")
+    destination = module.Destination(
+        target="bundle.{version}.sops.json",
+        namespace="exomem-platform",
+        secret_name="bundle",
+        key=None,
+        key_sets=(
+            frozenset({"current", "currentVersion"}),
+            frozenset({"current", "currentVersion", "previous", "previousVersion"}),
+        ),
+    )
+    document = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "bundle",
+            "namespace": "exomem-platform",
+            "labels": {
+                "app.kubernetes.io/managed-by": "exomem-secret-handoff",
+                "exomem.io/secret-version": "v2",
+            },
+        },
+        "type": "Opaque",
+        "stringData": {"current": "hidden-key", "currentVersion": "2"},
+    }
+    if change == "half-previous":
+        document["stringData"]["previous"] = "hidden-previous"
+    elif change == "unknown-key":
+        document["stringData"]["extra"] = "hidden-extra"
+    elif change == "nested-value":
+        document["stringData"]["current"] = {"nested": "hidden-key"}
+    elif change == "newline-value":
+        document["stringData"]["current"] = "hidden\nkey"
+    elif change == "placeholder":
+        document["stringData"]["current"] = "[REDACTED]"
+    elif change == "wrong-name":
+        document["metadata"]["name"] = "other"
+    raw = json.dumps(document, separators=(",", ":")).encode()
+    if change == "duplicate-key":
+        raw = raw.replace(b'"current":"hidden-key"', b'"current":"hidden-key","current":"other"')
+    with pytest.raises(module.SecretApplyError, match="invalid Kubernetes shape") as error:
+        module._validate_plaintext(raw, destination, "v2")
+    assert "hidden" not in str(error.value)
+
+
+def test_scalar_apply_rejects_invalid_unicode_without_exposing_value() -> None:
+    module = _load("infra/scripts/apply_sops_secret.py", "scalar_apply_unicode_test")
+    destination = module.Destination(
+        target="scalar.{version}.sops.json",
+        namespace="exomem-platform",
+        secret_name="scalar",
+        key="secret",
+    )
+    raw = (
+        b'{"apiVersion":"v1","kind":"Secret","metadata":{"name":"scalar",'
+        b'"namespace":"exomem-platform","labels":{"app.kubernetes.io/managed-by":'
+        b'"exomem-secret-handoff","exomem.io/secret-version":"v2"}},'
+        b'"type":"Opaque","stringData":{"secret":"\\ud800"}}'
+    )
+    with pytest.raises(module.SecretApplyError, match="invalid Kubernetes shape"):
+        module._validate_plaintext(raw, destination, "v2")
 
 
 def test_rotation_retirement_gate_covers_every_independent_rotation(
@@ -1359,19 +1646,29 @@ def test_active_secret_selection_is_complete_and_the_signer_publishes_a_verified
         for destination_id, destination in secret["destinations"].items()
         if destination.get("kind") == "sops_k8s_secret" and destination.get("slot") == "active"
     }
-    assert len(expected) == 34
+    assert len(expected) == 43
+    assert {name for name in expected if name.startswith("k3s.cloud.")} == {
+        f"k3s.cloud.{name}.active"
+        for name in (
+            "exomem-cellctl-database-dsn",
+            "exomem-cloud-gateway-database",
+            "exomem-cloud-gateway-control-plane-key",
+            "exomem-cloud-cell-token-key",
+            "exomem-cloud-backup-master-key",
+            "exomem-cloud-b2-key-management",
+            "exomem-cloud-hetzner-read-token",
+            "exomem-cloudflare-dns-token",
+            "exomem-cloud-volume-encryption",
+        )
+    }
     assert selection["schema_version"] == 1
     assert set(selection["destinations"]) == expected
     assert all(
-        re.fullmatch(r"v[1-9][0-9]*", version)
-        for version in selection["destinations"].values()
+        re.fullmatch(r"v[1-9][0-9]*", version) for version in selection["destinations"].values()
     )
     assert all(
         (
-            ROOT
-            / destination["target"].format(
-                version=selection["destinations"][destination_id]
-            )
+            ROOT / destination["target"].format(version=selection["destinations"][destination_id])
         ).is_file()
         for secret in matrix["secrets"].values()
         for destination_id, destination in secret["destinations"].items()
@@ -1430,7 +1727,7 @@ def test_active_secret_selection_is_complete_and_the_signer_publishes_a_verified
                 trust_contract_path=trust_path,
             )
         )
-        == 34
+        == len(expected)
     )
 
 
@@ -2257,6 +2554,7 @@ def test_runbook_index_is_complete_and_executable_by_default() -> None:
         "backup-restore",
         "deletion",
         "node-replacement",
+        "node-pool",
         "break-glass",
     }
     assert set(contract["runbooks"]) == required
@@ -2293,15 +2591,19 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
     # `protocol` names the default wire envelope, not an exhaustive action gate.
     # This map is the served HTTP surface, and the ingress route is generated
     # against it, so an action absent here is unreachable however it is called.
-    # `renew-authorization` is v2-only on the wire -- the frozen v1 corpus in
-    # provisioner-wire-v1.json never gains an action -- but it is still served,
-    # so it belongs in the composition.
+    # `renew-authorization`, `rollforward` and `rollback-rollforward` are v2-only
+    # on the wire -- the frozen v1 corpus in provisioner-wire-v1.json never gains
+    # an action -- but they are still served, so they belong in the composition;
+    # the 0.77.0 rollforward on the alpha was refused at the ingress because the
+    # two rollforward actions were missing here.
     assert set(contract["provisioner"]["actions"]) == {
         "provision",
         "health",
         "rotate-credential",
         "quiesce",
         "renew-authorization",
+        "rollforward",
+        "rollback-rollforward",
         "resume",
         "stop",
         "export",
@@ -2430,10 +2732,14 @@ def test_secret_matrix_materializes_every_hosted_platform_workload_secret() -> N
         (INFRA / "contracts/secret-destinations-v1.json").read_text(encoding="utf-8")
     )
     materialized = {
-        f"{destination['kubernetes_secret']}/{destination['key']}"
+        f"{destination['kubernetes_secret']}/{key}"
         for secret in matrix["secrets"].values()
         for destination in secret["destinations"].values()
         if destination["kind"] == "sops_k8s_secret"
+        for key_set in (
+            [[destination["key"]]] if "key" in destination else destination["key_sets"]
+        )
+        for key in key_set
     }
     required = {
         "exomem-provisioner-auth/credential",
@@ -2454,6 +2760,18 @@ def test_secret_matrix_materializes_every_hosted_platform_workload_secret() -> N
         "exomem-database-backup-upload-key/application-key",
         "exomem-database-backup-pg-service/pg_service.conf",
         "exomem-database-backup-pgpass/pgpass",
+        "exomem-cellctl-database-dsn/dsn",
+        "exomem-cloud-gateway-database/url",
+        "exomem-cloud-gateway-control-plane-key/key",
+        "exomem-cloud-cell-token-key/current",
+        "exomem-cloud-cell-token-key/currentVersion",
+        "exomem-cloud-backup-master-key/keys",
+        "exomem-cloud-backup-master-key/currentVersion",
+        "exomem-cloud-b2-key-management/keyId",
+        "exomem-cloud-b2-key-management/applicationKey",
+        "exomem-cloud-hetzner-read-token/token",
+        "exomem-cloudflare-dns-token/token",
+        "exomem-cloud-volume-encryption/encryption-passphrase",
     }
     assert required <= materialized
     assert "exomem-provider-recovery-volume-signer/private-key" not in materialized

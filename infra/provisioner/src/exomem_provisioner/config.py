@@ -300,14 +300,16 @@ class SelectedDeploymentRuntime(BaseModel):
     recordsReaderVersion: Literal[2] | None = None
     lifecycleActionsEnabled: bool = False
     compatibilityDigest: str | None = Field(default=None, pattern=_SHA256)
-    migrationMode: Literal["none", "binding-v1-to-v2", "state-root-v1"] = "none"
+    migrationMode: Literal["none", "binding-v1-to-v2", "state-root-v1", "governance-v3-to-v4"] = (
+        "none"
+    )
 
 
 class DeploymentRuntimeUpgrade(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     compatibilityDigest: str = Field(pattern=_SHA256)
-    migrationMode: Literal["none", "binding-v1-to-v2", "state-root-v1"]
+    migrationMode: Literal["none", "binding-v1-to-v2", "state-root-v1", "governance-v3-to-v4"]
     substrateConsumerCommit: str = Field(pattern=_COMMIT)
     substrateTrustSha256: str = Field(pattern=_SHA256)
 
@@ -405,6 +407,17 @@ class DeploymentLock(BaseModel):
         )
 
     @property
+    def legacy_targets(self) -> tuple[dict[str, str], ...]:
+        """The six-field runtime identity of every cataloged legacy contract."""
+
+        from .wire_protocol import RUNTIME_IDENTITY_FIELDS
+
+        return tuple(
+            {field: getattr(unit.contract, field) for field in RUNTIME_IDENTITY_FIELDS}
+            for unit in self.composition.legacyCatalog
+        )
+
+    @property
     def authoritative_legacy_release_set_sha256(self) -> str:
         return self.composition.authoritativeLegacyReleaseSetSha256
 
@@ -414,8 +427,14 @@ class DeploymentLock(BaseModel):
         *,
         wire_protocol: str,
         selection: Literal["active", "rollback"] | None = None,
+        action: str | None = None,
     ) -> bool:
-        from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
+        from .wire_protocol import (
+            FORWARD_ONLY_ACTIONS,
+            RUNTIME_IDENTITY_FIELDS,
+            WIRE_PROTOCOL_V2,
+            runtime_identity,
+        )
 
         try:
             target = runtime_identity(request)
@@ -429,7 +448,14 @@ class DeploymentLock(BaseModel):
             expected = selected.runtimeTarget.model_dump(mode="json")
             if selected.compatibilityDigest is not None:
                 expected["compatibilityDigest"] = selected.compatibilityDigest
-            return target == expected
+            if target == expected:
+                return True
+            # A cell still on a cataloged legacy release matches by its exact six-field
+            # contract identity, except for the actions that place a runtime image.
+            if action in FORWARD_ONLY_ACTIONS:
+                return False
+            identity = {field: target.get(field) for field in RUNTIME_IDENTITY_FIELDS}
+            return identity in self.legacy_targets
         return (target["releaseVersion"], target["protocolVersion"]) in self.legacy_catalog
 
 
@@ -585,6 +611,10 @@ class ProviderWorkerSettings(BaseSettings):
     internal_origin: str = Field(min_length=1, max_length=2048)
     worker_id: str = Field(min_length=1, max_length=128)
     poll_seconds: float = Field(default=1.0, ge=0.05, le=30)
+    # Ceiling for the idle backoff in `worker_loop.run_polling_loop`. It has to sit
+    # comfortably above the database's autosuspend timeout or the endpoint never gets
+    # an idle gap long enough to suspend, which is the entire point of backing off.
+    idle_poll_seconds: float = Field(default=300.0, ge=0.05, le=3600)
     provider_recovery_public_key: str = Field(
         min_length=40,
         max_length=128,
@@ -696,6 +726,8 @@ class VolumeWorkerSettings(BaseSettings):
     )
 
     hcloud_token: SecretStr = Field(min_length=32, max_length=4096)
+    deployment_lock_path: str = Field(min_length=1, max_length=4096)
+    runtime_selection: Literal["active", "rollback"] | None = None
     provider_recovery_signing_key: SecretStr = Field(
         min_length=43,
         max_length=43,
@@ -706,6 +738,10 @@ class VolumeWorkerSettings(BaseSettings):
     location: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")
     worker_id: str = Field(min_length=1, max_length=128)
     poll_seconds: float = Field(default=1.0, ge=0.05, le=30)
+    # Ceiling for the idle backoff in `worker_loop.run_polling_loop`. It has to sit
+    # comfortably above the database's autosuspend timeout or the endpoint never gets
+    # an idle gap long enough to suspend, which is the entire point of backing off.
+    idle_poll_seconds: float = Field(default=300.0, ge=0.05, le=3600)
     capacity_receipt_public_key: str = Field(
         min_length=43,
         max_length=43,
@@ -723,6 +759,19 @@ class VolumeWorkerSettings(BaseSettings):
         pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
     )
     hcloud_server_id: int = Field(gt=0)
+
+    @field_validator("deployment_lock_path")
+    @classmethod
+    def validate_deployment_lock_path(cls, value: str) -> str:
+        if not Path(value).is_absolute():
+            raise ValueError("deployment lock path must be absolute")
+        return value
+
+    @property
+    def deployment_lock(self) -> DeploymentLock:
+        lock = load_deployment_lock(self.deployment_lock_path)
+        lock.selected_runtime(self.runtime_selection)
+        return lock
 
     @field_validator("provider_recovery_signing_key")
     @classmethod

@@ -107,6 +107,10 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
                 require_live_projection=event_indexes,
             ):
                 return False
+            # A catalog inherited from the previous process is current but
+            # stamped in that registry's lineage; adopt it into this one so the
+            # first governed write can bless it with an ordinary delta.
+            lexstore.rebase_inherited_catalog_lineage(vault_root)
             # Bind the CAS token to this successful proof, not to the whole
             # warm operation: an earlier stale proof or completed repair may
             # legitimately advance admission before an eager retry succeeds.
@@ -114,6 +118,24 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
                 proof_generation
             ) or readiness.is_ready("retrieval_catalog")
 
+        if _catalogue_handoff_pending(vault_root):
+            # Promotion adopted a catalogue this process built as a standby,
+            # before the serving worker's last writes. One heal re-parses
+            # exactly the pages whose file signature changed since the build
+            # (against the watcher's fresh seed) and stamps this process's
+            # checkpoints, where the repair below would rebuild the whole
+            # catalogue. A heal that fails leaves exactly that repair.
+            started = time.perf_counter()
+            try:
+                healed = lexstore.heal_adopted_catalog(vault_root)
+            except Exception:  # noqa: BLE001 - the proof and repair below still run
+                log.warning("adopted retrieval catalog heal failed", exc_info=True)
+                healed = False
+            log.info(
+                "adopted retrieval catalog healed=%s in %.1f ms",
+                healed,
+                (time.perf_counter() - started) * 1000.0,
+            )
         if _prove_and_admit():
             return True
         # ``catalog_readiness`` above may already have scheduled this repair.
@@ -148,6 +170,121 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
     return True
 
 
+def _catalogue_handoff_pending(vault_root: Path) -> bool:
+    """Whether this warm owes the adopted catalogue its one bounded heal.
+
+    Only a promoted standby that adopted its detached catalogue carries the
+    handoff; a cold start never does, so its warm is unchanged. A whole-catalogue
+    rebuild already in flight replaces what the heal would patch; a targeted
+    retry of deferred upserts does not, so it does not skip the heal.
+    """
+    from . import lexstore, service_standby
+
+    if "catalogue_handoff" not in service_standby.carried_warm_components():
+        return False
+    return not lexstore.full_rebuild_in_flight(vault_root)
+
+
+def _adopt_graph_snapshot(vault_root: Path, durations: dict[str, float]) -> bool:
+    """Prove and adopt an inherited graph snapshot, if there is one to adopt.
+
+    Records `graph_snapshot_residue`: how many paths the adoption took on as
+    queued repair because the outgoing process left them deferred. Zero is a
+    clean handoff; a positive count is an adoption that succeeded *and* owes the
+    drain that many pages, which is what the operator needs to see rather than a
+    bare success.
+    """
+    from . import epistemic_graph, service_standby
+
+    if not epistemic_graph.graph_enabled():
+        return False
+    if service_standby.in_standby():
+        # A standby runs this step itself, after the same seed and resolver, so
+        # that it can report the residue and reason in its cutover readiness.
+        # Adopting twice would pay the source proof twice for one handoff.
+        return False
+    adoption = epistemic_graph.EpistemicGraphIndex(vault_root).adopt_published_snapshot()
+    durations["graph_snapshot_residue"] = float(len(adoption.residue))
+    log.info(
+        "graph snapshot adoption adopted=%s residue=%d reason=%s",
+        adoption.adopted,
+        len(adoption.residue),
+        adoption.reason,
+    )
+    return adoption.adopted
+
+
+def _run_step(durations: dict[str, float], name: str, fn) -> None:
+    """Run one warm-up step and record its duration; warm-up must never raise."""
+    t0 = time.perf_counter()
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 — warm-up must never break startup
+        log.warning("warm-up step %s failed", name, exc_info=True)
+    finally:
+        durations[name] = round((time.perf_counter() - t0) * 1000.0, 1)
+
+
+def prime_recall_resolver(vault_root: Path) -> None:
+    """Build this process's recall resolver snapshot.
+
+    Ordinary recall resolves links through the policy-projected view; the broad
+    writer resolver stays lazy so warm-up never reads raw Records titles.
+
+    Its own function because two unconditional callers need it and neither may
+    have the other's side effects: start-up adopts the inherited snapshot after
+    it, and a standby proves one without adopting anything the serving worker
+    still owns. `recall_resolver_snapshot_at_checkpoint` refuses to build on a
+    miss by design, so a process that never built one leaves every incremental
+    pass bailing on `resolver_snapshot_unavailable`.
+    """
+    from . import find
+
+    find.recall_resolver_snapshot(vault_root)
+
+
+def warm_graph_handoff(vault_root: Path) -> dict[str, float]:
+    """Adopt the inherited graph snapshot and prime the resolver the first write needs.
+
+    Deliberately NOT inside `warm_caches`. Everything in there is a disposable
+    CPU cache that a resource mode is entitled to skip, and skipping one costs
+    only latency on a later request. This is not that. A replacement worker that
+    never adopts its predecessor's published snapshot has no lineage it is
+    allowed to advance, so its first governed write falls back to a whole-vault
+    rebuild -- measured on the 0.83.1 deploy, where `mode=normal` leaves
+    `preload_cpu_caches` False, `warm_caches` returned at its first gate, and
+    the adoption step it used to contain never ran at all.
+
+    The resolver primer belongs on the same unconditional path and for the same
+    reason: `recall_resolver_snapshot_at_checkpoint` refuses to build on a miss
+    by design, so a process that never built one leaves every incremental pass
+    bailing on `resolver_snapshot_unavailable`.
+
+    Ordering is load-bearing and pinned by test: this runs after the watcher's
+    registry seed -- a seed replaces the registry maps wholesale -- and BEFORE
+    the semantic corpus build that admits writers, because a write admitted
+    ahead of adoption has no lineage to advance. Each step soft-fails like
+    every other warm step.
+
+    `EXOMEM_DISABLE_WARMUP` is the one gate still allowed to skip it, and
+    deliberately: unlike `mode=normal` and `catalog_ready`, which are default
+    states this process reaches on its own, it is an explicit operator opt-out
+    from warming at all. It is not set on the personal service.
+    """
+    durations: dict[str, float] = {}
+    if not warmup_enabled():
+        return durations
+    _run_step(durations, "resolver", lambda: prime_recall_resolver(vault_root))
+    # A replacement worker inherits a derived graph it did not publish, and
+    # `recall_delta_since` refuses a foreign origin by construction, so its first
+    # governed write used to rebuild the whole vault purely to obtain a lineage
+    # it could advance. Proving the inherited snapshot here -- against the disk
+    # this registry is already projecting -- makes that checkpoint the delta
+    # origin instead (`seamless-managed-worker-handoff`).
+    _run_step(durations, "graph_snapshot", lambda: _adopt_graph_snapshot(vault_root, durations))
+    return durations
+
+
 def warm_caches(
     vault_root: Path,
     *,
@@ -176,13 +313,7 @@ def warm_caches(
     durations: dict[str, float] = {}
 
     def _step(name: str, fn) -> None:
-        t0 = time.perf_counter()
-        try:
-            fn()
-        except Exception:  # noqa: BLE001 — warm-up must never break startup
-            log.warning("warm-up step %s failed", name, exc_info=True)
-        finally:
-            durations[name] = round((time.perf_counter() - t0) * 1000.0, 1)
+        _run_step(durations, name, fn)
 
     def _warm_pages() -> None:
         kb = vault_root / kb_dirname()
@@ -196,9 +327,9 @@ def warm_caches(
     _step("pages", _warm_pages)
     _step("bm25_kb", lambda: bm25.warm(vault_root, "kb"))
     _step("bm25_vault", lambda: bm25.warm(vault_root, "vault"))
-    # Ordinary recall resolves links through the policy-projected view.  Keep
-    # the broad writer resolver lazy so warm-up never reads raw Records titles.
-    _step("resolver", lambda: find.recall_resolver_snapshot(vault_root))
+    # The resolver primer and the graph-snapshot adoption used to sit here. They
+    # are not caches, so `warm_graph_handoff` now runs them on the unconditional
+    # start-up path instead; this gate is only allowed to skip disposable work.
     if preload_models and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         # One tiny search warms WHICHEVER backend serves vector search: the vec0
         # backend (sync check + first KNN faults in the vec tables; the numpy
@@ -209,14 +340,13 @@ def warm_caches(
         def _warm_matrix() -> None:
             import numpy as np
 
-            from . import embeddings
+            from . import embeddings, recall_space
 
-            q = np.full(
-                embeddings.VECTOR_DIM,
-                1.0 / (embeddings.VECTOR_DIM**0.5),
-                dtype=np.float32,
-            )
-            embeddings.get_embedding_index(vault_root).search(q, k=1)
+            index = embeddings.get_embedding_index(vault_root)
+            # The sidecar's own width; an index adapter without one is the legacy width.
+            dim = int(getattr(index, "dim", recall_space.LEGACY_DIM))
+            q = np.full(dim, 1.0 / (dim**0.5), dtype=np.float32)
+            index.search(q, k=1)
 
         def _warm_clip() -> None:
             import numpy as np
@@ -238,16 +368,31 @@ def warm_caches(
 
 
 def warm_all(vault_root: Path) -> dict[str, float]:
-    """Required catalog/corpus state, then optional caches and model preloads.
+    """Required catalog/graph/corpus state, then optional caches and model preloads.
 
     Order is the product contract (catalog-first): retrieval admission lands
-    first, then semantic write admission, before optional full-corpus caches
-    and models can extend the warm window.
+    first, then the graph handoff, then semantic write admission, before
+    optional full-corpus caches and models can extend the warm window.
+
+    The graph handoff runs *before* the semantic corpus, and that order is
+    load-bearing rather than tidy. Writers are admitted once the corpus is
+    built, and on the personal service that build is 30-36 s on 4209 pages --
+    so with adoption behind it, the first governed write of a replacement
+    worker dispatched with no delta origin, fell back on
+    `recall_delta_incomplete`, and registered the whole-vault rebuild adoption
+    exists to remove. The rebuild was then still in flight when adoption ran
+    and declined its proof against a sidecar being rewritten under it. Adoption
+    is sub-second to a few seconds; it belongs in the first seconds of the warm.
     Each stage soft-fails; a failed model preload leaves its component
     not-ready (never marked), so requests defer for the rest of the warm and
     then return to inline lazy-load semantics. Never raises.
+
+    A worker promoted from a standby subtracts the steps that standby already
+    ran in this same process and promotion re-verified (`carried_from_standby`
+    in the returned durations and the completion line). It is a subtraction, not
+    a second path: a cold start carries nothing and runs every step.
     """
-    from . import mode, readiness
+    from . import mode, readiness, service_standby
 
     mode_name = mode.resolve_mode()
     preload = model_preload_allowed(mode_name)
@@ -255,6 +400,12 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     catalog_ready = False
     catalog_started = time.perf_counter()
     managed_catalog = readiness.runtime_managed()
+    # What the standby already did and promotion re-verified. Empty on a cold
+    # start, which is the only reason this is a subtraction from a full warm
+    # rather than a second warm path: there is exactly one step list, and a
+    # cold start reads an empty set and runs all of it.
+    carried = service_standby.carried_warm_components()
+    durations["carried_from_standby"] = float(len(carried))
     try:
         catalog_ready = warm_retrieval_catalog(vault_root)
         if catalog_ready and not managed_catalog:
@@ -266,11 +417,57 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             (time.perf_counter() - catalog_started) * 1000.0,
             1,
         )
+    try:
+        # Unconditional, and first. Adoption is what lets a replacement worker's
+        # first governed write stay incremental, so nothing that merely makes
+        # this process nicer may run ahead of it, and no gate that exists to
+        # protect a *cache* may skip it:
+        #
+        #   * not the resource mode -- `mode=normal` is the default and leaves
+        #     `preload_cpu_caches` False, which is how the 0.83.1 deploy skipped
+        #     adoption entirely;
+        #   * not the corpus build -- writers are admitted on `semantic_corpus`,
+        #     30-36 s on this vault, which is how 0.84.1 admitted a write into a
+        #     process with no delta origin;
+        #   * not `catalog_ready` -- the repair it defers to republishes the
+        #     *lexical* catalogue, while this step builds a process-local
+        #     resolver (`find.recall_resolver_snapshot`) and proves the graph
+        #     sidecar. Neither is the artifact the detached repair owner is
+        #     rewriting, so the collision that makes `warm_caches` wait does not
+        #     apply here. A proof taken against a moving projection declines and
+        #     says so; a proof never taken costs the next write a whole vault.
+        if "graph_handoff" in carried:
+            # Promotion re-proved this standby's adopted checkpoint against
+            # disk and found it current, so the adoption `warm_graph_handoff`
+            # would take is the one this process already holds. Re-taking it
+            # cost the 0.85.0 cutover 19.5 s of snapshot proof and a second
+            # `graph snapshot adoption` line, while the writes it was supposed
+            # to protect were being refused for want of the components below.
+            log.info("graph handoff carried from standby; adoption not repeated")
+        else:
+            durations.update(warm_graph_handoff(vault_root))
+    finally:
+        # Marked on every exit, including the ones where nothing ran. The
+        # writers' gate waits on this component, and a component that can be
+        # skipped without being marked would hold every write until the whole
+        # warm -- model preloads included -- finished. "Settled" here means the
+        # delta origin is as good as this process will get it, which an
+        # adoption that declined or never ran satisfies as much as one that
+        # succeeded.
+        readiness.mark_ready("graph_handoff")
     semantic_started = time.perf_counter()
     try:
-        from . import semantic_contract
+        if "semantic_corpus" in carried:
+            # Built in this same process while it was a standby. The context is
+            # captioned by a stat census, so pages the outgoing worker changed
+            # under it reparse on first use; what is carried is the cold build,
+            # 9.9 s on a 4271-page vault, which is what the admission gate was
+            # waiting on for ~30 s after a 1.6 s cutover.
+            log.info("semantic corpus carried from standby; build not repeated")
+        else:
+            from . import semantic_contract
 
-        semantic_contract.build_corpus_context(vault_root)
+            semantic_contract.build_corpus_context(vault_root)
         readiness.mark_ready("semantic_corpus")
     except Exception:  # noqa: BLE001 — semantic warm-up remains rebuildable
         log.warning("semantic corpus warm-up failed", exc_info=True)
@@ -279,7 +476,12 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             (time.perf_counter() - semantic_started) * 1000.0,
             1,
         )
-    if catalog_ready:
+    if catalog_ready and "lexical" in carried:
+        # Same process, same caches: `service_standby.warm` calls `warm_caches`
+        # with this process's own mode and preload policy.
+        log.info("lexical caches carried from standby; warm not repeated")
+        readiness.mark_ready("lexical")
+    elif catalog_ready:
         durations.update(
             warm_caches(
                 vault_root,
@@ -293,7 +495,21 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # enabled. Running it beside the detached repair owner makes the two
         # publications invalidate one another, so leave these disposable caches
         # cold until the admitted catalogue can serve their first request.
+        #
+        # A carried `lexical` keeps the mark it was given in
+        # `_carry_forward_standby_readiness`, and that is deliberate rather than
+        # an oversight of this branch. The standby marks `lexical` only after
+        # proving the catalogue current and warming these caches IN THIS
+        # PROCESS, so the caches are real memory that a later repair does not
+        # take away; what this branch declines is building more of them beside
+        # a repair owner, which is a publication concern, not a readiness one.
+        # Re-marking here would be wrong; un-marking would defer requests for
+        # caches this process already holds.
         log.info("optional recall cache warm-up skipped during catalog repair")
+    # Everything below is optional model preloading. Retrieval admission lost
+    # from here on is re-proved at once instead of waiting for it (the 0.96.0
+    # promotion sat `not_ready` 53 s behind a 46.7 s reranker preload).
+    readiness.finish_required_warm()
 
     def _model_step(name: str, fn) -> bool:
         t0 = time.perf_counter()
@@ -335,6 +551,19 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             except Exception:  # noqa: BLE001 — durable receipt survives retry
                 log.warning("deferred embed drain failed", exc_info=True)
 
+    def _preload_recall_serving() -> None:
+        # A sidecar still in another encoder's space (a re-embed not yet cut
+        # over) is served by that encoder. It loads here in every mode, before
+        # writes are admitted, so neither a query nor a write ever loads it: a
+        # write would otherwise fail to encode and leave its row stale until the
+        # cutover. Quiet mode accepts it resident for as long as the re-embed runs.
+        from . import recall_migration
+
+        _model_step(
+            "model_recall_serving",
+            lambda: recall_migration.preload_serving_encoder(vault_root),
+        )
+
     disabled = bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"))
     if disabled or not preload:
         # Skip model preloads: either a lexical-only install (DISABLE_EMBEDDINGS,
@@ -346,7 +575,34 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         log.info("model preloads skipped (%s); models lazy-load on first use", reason)
         readiness.mark_ready("reranker")
         readiness.mark_ready("clip")
-        drained = readiness.mark_ready("embeddings")
+        from . import embedding_backend
+
+        served = None
+        if not disabled:
+            from . import embeddings
+
+            served = embedding_backend.served_artifact(embeddings.MODEL_NAME)
+        if served is not None and mode_name != "quiet":
+            # A served model's first load may download or build its artefact, which
+            # takes minutes; it belongs here, not in whichever request comes first.
+            # Embeddings stay not-ready until it is resident, so requests meanwhile
+            # defer to the lexical lanes instead of waiting on the load.
+            log.info("preloading the served embedding model %s", embeddings.MODEL_NAME)
+            if _preload("model_bge", embeddings.get_model, lambda m: m.encode(["warm"])):
+                _preload_recall_serving()
+                drained = readiness.mark_ready("embeddings")
+            else:
+                drained = readiness.drain_deferred("embeddings")
+        else:
+            if served is not None:
+                # Quiet mode loads no model at boot, but the artefact a later load
+                # needs is still fetched or built now, off the request path.
+                _model_step(
+                    "model_artifact", lambda: embedding_backend.ensure_served_artifact(embeddings.MODEL_NAME)
+                )
+            if not disabled:
+                _preload_recall_serving()
+            drained = readiness.mark_ready("embeddings")
         # Quiet mode: embeddings ARE available (just lazy), so replay any write
         # parked during the brief lexical warm — mirror the real-preload branch so
         # those edits aren't stranded. Under DISABLE_EMBEDDINGS there's nothing to
@@ -368,6 +624,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # rest of the warm), but drain_deferred() still empties the queue so those
         # writes are replayed instead of lost.
         if bge_ok:
+            _preload_recall_serving()
             log.info("embedding model ready")
             drained = readiness.mark_ready("embeddings")
         else:
@@ -375,6 +632,14 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         _replay_deferred_embeddings(drained)
         if drained:
             log.info("drained %d deferred write-embed batch(es)", len(drained))
+
+        if not embeddings.activation_encoder_is_shared():
+            # A separate activation encoder is never loaded by activation itself
+            # (its query encode is resident-only), so warm-up is what makes it
+            # resident; the shared topology is the recall model just preloaded.
+            log.info("preloading activation encoder %s", embeddings.activation_model_name())
+            if _preload("model_activation", embeddings.get_activation_model, lambda m: m.encode(["warm"])):
+                log.info("activation encoder ready")
 
         if embeddings.ranking_enabled():
             log.info("preloading reranker %s", embeddings.RERANKER_NAME)
@@ -393,8 +658,36 @@ def warm_all(vault_root: Path) -> dict[str, float]:
                 log.info("CLIP model ready")
                 readiness.mark_ready("clip")
 
-    log.info("warm complete: %s", durations)
+    if carried:
+        log.info("warm complete: %s carried_from_standby=%s", durations, sorted(carried))
+    else:
+        log.info("warm complete: %s", durations)
     return durations
+
+
+def _carry_forward_standby_readiness() -> frozenset[str]:
+    """Re-mark the components a promoted standby already warmed. Returns them.
+
+    `begin_warm` clears every readiness event, so a promoted worker that did
+    nothing here would spend its second warm refusing the governed writes its
+    predecessor's users are already sending: measured on the 0.85.0 cutover as
+    ~30 s of `MUTATION_WARMING` behind a 1.6 s unavailable window, which moves
+    an outage rather than removing one.
+
+    Marked synchronously, before the warm thread starts and therefore before
+    `start_background` returns, so no request can observe the window between the
+    clear and the re-mark. Empty and a no-op on a cold start.
+    """
+    from . import readiness, service_standby
+
+    carried = service_standby.carried_warm_components()
+    for component in carried:
+        # `catalogue_handoff` is carried work, not a readiness gate.
+        if component in readiness.COMPONENTS:
+            readiness.mark_ready(component)
+    if carried:
+        log.info("carried warm components forward from the standby: %s", sorted(carried))
+    return carried
 
 
 def start_background(vault_root: Path) -> threading.Thread:
@@ -403,11 +696,17 @@ def start_background(vault_root: Path) -> threading.Thread:
     `readiness.begin_warm()` fires BEFORE the thread starts so request paths
     already defer when this returns; `finish_warm()` runs in a finally so a
     crashed warm can never leave the process deferring forever.
+
+    A promoted standby's carried components are re-marked in the same
+    synchronous stretch, between the clear and the thread, because that clear is
+    what made a promoted worker refuse writes for thirty seconds after a 1.6 s
+    cutover.
     """
     global _WARM_THREAD
     from . import readiness
 
     readiness.begin_warm()
+    _carry_forward_standby_readiness()
 
     def _run() -> None:
         try:

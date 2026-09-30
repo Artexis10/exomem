@@ -1,3 +1,5 @@
+> **Superseded (2026-09-23)** by `adopt-exomem-cloud-plain-cells`. Not to be implemented further; removed with its code in that change's retirement phase.
+
 ## Why
 
 A hosted candidate selecting `hosted-alpha-agent-v4` provisions a healthy runtime that serves only v1: the runtime infers its profile from a Records feature flag, and provisioning never passes the selected profile. Its authenticated v4 contract request therefore fails with `HOSTED_SURFACE_PROFILE_UNSUPPORTED`, preventing cell binding.

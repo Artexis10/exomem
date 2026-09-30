@@ -56,7 +56,10 @@ def stem_tokens_present(page: ParsedPage, query_norm: str) -> bool:
 
     Recovers morphological matches that the literal substring gate misses.
     Used only as a fallback in hybrid mode; keyword mode keeps the strict
-    substring gate.
+    substring gate. An ASCII token is stemmed whole, as it always was. A
+    non-ASCII token is present when each of its words is (in any indexed form,
+    so "zolvarn" finds "Zölvarn") and each unspaced run in it has a strict
+    majority of its bigrams present.
     """
     if not query_norm:
         return True
@@ -66,9 +69,26 @@ def stem_tokens_present(page: ParsedPage, query_norm: str) -> bool:
     for tok in query_norm.split():
         if not tok:
             continue
-        if bm25_module.stem_word(tok) not in text_stems:
+        units = [] if tok.isascii() else bm25_module.token_units(tok, query=True)
+        if not units:
+            if bm25_module.stem_word(tok) not in text_stems:
+                return False
+            continue
+        if not all(bm25_module.unit_present(unit, text_stems) for unit in units):
             return False
     return True
+
+
+def _query_stems_for_anchor(query_norm: str) -> set[str]:
+    from . import bm25 as bm25_module
+
+    stems: set[str] = set()
+    for token in query_norm.split():
+        if token.isascii():
+            stems.add(bm25_module.stem_word(token))
+        else:
+            stems.update(bm25_module.tokenize(token, query=True))
+    return stems
 
 
 def stem_anchored_excerpt(page: ParsedPage, query_norm: str) -> str:
@@ -78,17 +98,27 @@ def stem_anchored_excerpt(page: ParsedPage, query_norm: str) -> str:
     body = page.body.strip()
     if not body:
         return ""
-    query_stems = {bm25_module.stem_word(t) for t in query_norm.split() if t}
-    if not query_stems:
-        return collapse(body[:EXCERPT_MAX_LEN])
     anchor_idx = -1
     anchor_len = 0
-    for m in re.finditer(r"[A-Za-z0-9]+", body):
-        word = m.group(0)
-        if bm25_module.stem_word(word.lower()) in query_stems:
-            anchor_idx = m.start()
-            anchor_len = len(word)
-            break
+    if body.isascii() and query_norm.isascii():
+        query_stems = {bm25_module.stem_word(t) for t in query_norm.split() if t}
+        if not query_stems:
+            return collapse(body[:EXCERPT_MAX_LEN])
+        for m in re.finditer(r"[A-Za-z0-9]+", body):
+            word = m.group(0)
+            if bm25_module.stem_word(word.lower()) in query_stems:
+                anchor_idx = m.start()
+                anchor_len = len(word)
+                break
+    else:
+        # Any script: the first body word or unspaced run carrying a query stem
+        # in any indexed form (an accent-folded variant, a bigram of a run).
+        query_stems = _query_stems_for_anchor(query_norm)
+        if not query_stems:
+            return collapse(body[:EXCERPT_MAX_LEN])
+        span = bm25_module.first_stem_span(body, query_stems)
+        if span is not None:
+            anchor_idx, anchor_len = span
     if anchor_idx == -1:
         return collapse(body[:EXCERPT_MAX_LEN])
     start = max(0, anchor_idx - EXCERPT_RADIUS)

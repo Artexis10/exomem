@@ -4,6 +4,9 @@ on:
   push:
     paths:
       - src/exomem/claims.py
+      - src/exomem/sensing.py
+      - src/exomem/sensing_nli.py
+      - tests/test_sensing_real_pin.py
       - tests/test_frozen_verifier_real.py
       - tests/test_frozen_verifiers.py
       - pyproject.toml
@@ -12,6 +15,9 @@ on:
   pull_request:
     paths:
       - src/exomem/claims.py
+      - src/exomem/sensing.py
+      - src/exomem/sensing_nli.py
+      - tests/test_sensing_real_pin.py
       - tests/test_frozen_verifier_real.py
       - tests/test_frozen_verifiers.py
       - pyproject.toml
@@ -36,6 +42,7 @@ jobs:
     env:
       HF_HOME: /tmp/exomem-frozen-verifier-hf
       EXOMEM_DISABLE_EMBEDDINGS: "1"
+      CUDA_VISIBLE_DEVICES: ""
       OMP_NUM_THREADS: "2"
       TOKENIZERS_PARALLELISM: "false"
     steps:
@@ -82,4 +89,4 @@ jobs:
           TRANSFORMERS_OFFLINE: "1"
         run: >-
           uv run --frozen --extra nli python -m pytest
-          tests/test_frozen_verifier_real.py -q -vv
+          tests/test_frozen_verifier_real.py tests/test_sensing_real_pin.py -q -vv -s

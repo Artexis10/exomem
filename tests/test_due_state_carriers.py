@@ -273,7 +273,13 @@ def test_the_mutation_outcome_keys_are_byte_identical_apart_from_the_block(
 
     assert "due_state" in carrying
     assert "due_state" not in clean
-    volatile = {"request_id", "receipt_id", "operation_id", "due_state"}
+    # `capture_sweep` joined this set when the episode carrier shipped. It is a
+    # SECOND independent advisory on the same seam with its own emission rule --
+    # the first write after a quiet interval carries it and the next does not --
+    # so it varies between these two responses for its own reasons. The invariant
+    # under test is unchanged: an advisory is additive or it is a wire change
+    # wearing an advisory's clothes.
+    volatile = {"request_id", "receipt_id", "operation_id", "due_state", "capture_sweep"}
     assert set(carrying) - volatile == set(clean) - volatile
     for key in ("ok", "state", "status", "terminal", "mutated", "warnings_count"):
         assert carrying[key] == clean[key], key

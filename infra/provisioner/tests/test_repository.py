@@ -32,6 +32,7 @@ from exomem_provisioner.repository import (
     StaleFence,
     _claim_statement,
     canonical_request_sha256,
+    legacy_targets_from,
 )
 from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V1, WIRE_PROTOCOL_V2
 
@@ -134,6 +135,129 @@ async def test_fleet_operation_projection_never_returns_request_secrets(
     }
     assert request["serviceCredential"] not in repr(observation)
     assert request["tenantId"] not in repr(observation)
+
+
+async def _fleet_history_row(
+    repository: OperationRepository,
+    action: str,
+    identity: str,
+    *,
+    state: OperationState = OperationState.FINAL,
+    offset: int = 0,
+    **overrides: object,
+) -> str:
+    operation = await repository.submit(
+        action, identity, _request(operationId=identity, **overrides)
+    )
+    async with repository._sessions() as session, session.begin():
+        row = await session.get(Operation, operation.id)
+        assert row is not None
+        row.state = state
+        row.created_at = datetime(2026, 8, 21, tzinfo=UTC) + timedelta(seconds=offset)
+        row.finalized_at = row.created_at if state is OperationState.FINAL else None
+    return operation.id
+
+
+@pytest.mark.parametrize("action,cell_id", [("destroy", None), ("discard", "cell-alpha")])
+@pytest.mark.parametrize("terminal_state", [OperationState.FINAL, OperationState.ERROR])
+async def test_fleet_destroy_supersedes_terminal_history_before_runtime_replay(
+    repository: OperationRepository,
+    action: str,
+    cell_id: str | None,
+    terminal_state: OperationState,
+) -> None:
+    await _fleet_history_row(repository, "provision", "old-provision", state=terminal_state)
+    await _fleet_history_row(repository, "rollback-rollforward", "orphan-rollback", offset=1)
+    await _fleet_history_row(
+        repository,
+        action,
+        "tenant-destroy",
+        cellId=cell_id,
+        fenceGeneration=8,
+        offset=2,
+    )
+
+    assert await repository.list_fleet_operation_observations() == ()
+    async with repository._sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(Operation)) == 3
+
+
+@pytest.mark.parametrize(
+    "destroy_state",
+    [
+        OperationState.PENDING,
+        OperationState.CLAIMED,
+        OperationState.ERROR,
+    ],
+)
+async def test_fleet_unfinished_or_failed_destroy_does_not_erase_desired_history(
+    repository: OperationRepository, destroy_state: OperationState
+) -> None:
+    await _fleet_history_row(repository, "provision", "old-provision")
+    await _fleet_history_row(
+        repository,
+        "destroy",
+        "tenant-destroy",
+        cellId=None,
+        fenceGeneration=8,
+        offset=1,
+        state=destroy_state,
+    )
+
+    observations = await repository.list_fleet_operation_observations()
+    assert [item.external_operation_id for item in observations] == ["old-provision"]
+
+
+@pytest.mark.parametrize("unfinished_state", [OperationState.PENDING, OperationState.CLAIMED])
+async def test_fleet_destroy_never_hides_unfinished_work(
+    repository: OperationRepository, unfinished_state: OperationState
+) -> None:
+    await _fleet_history_row(
+        repository, "provision", "unfinished-provision", state=unfinished_state
+    )
+    await _fleet_history_row(
+        repository,
+        "destroy",
+        "tenant-destroy",
+        cellId=None,
+        fenceGeneration=8,
+        offset=1,
+    )
+
+    [observation] = await repository.list_fleet_operation_observations()
+    assert observation.external_operation_id == "unfinished-provision"
+    assert observation.state is unfinished_state
+
+
+@pytest.mark.parametrize("boundary", ["tenant", "cell", "fence", "time", "null_discard"])
+async def test_fleet_destroy_cannot_supersede_uncovered_history(
+    repository: OperationRepository, boundary: str
+) -> None:
+    await _fleet_history_row(
+        repository,
+        "provision",
+        "retained-provision",
+        offset=2 if boundary == "time" else 0,
+    )
+    await _fleet_history_row(
+        repository,
+        "discard" if boundary in {"cell", "null_discard"} else "destroy",
+        "other-destroy",
+        tenantId="tenant-other" if boundary == "tenant" else "tenant-alpha",
+        cellId="cell-other" if boundary == "cell" else None,
+        fenceGeneration=7,
+        offset=1,
+    )
+    if boundary == "fence":
+        async with repository._sessions() as session, session.begin():
+            row = await session.scalar(
+                select(Operation).where(Operation.external_operation_id == "retained-provision")
+            )
+            assert row is not None
+            row.fence_generation = 8
+
+    observations = await repository.list_fleet_operation_observations()
+    assert any(item.external_operation_id == "retained-provision" for item in observations)
 
 
 @pytest.mark.asyncio
@@ -255,11 +379,130 @@ async def test_submission_admission_is_atomic_and_protocol_bound(
         await repository.submit(
             "provision",
             "wrong-v2-target",
-            {**v2_request, "operationId": "wrong-v2-target", "runtimeTarget": {**forward_target, "schemaDigest": "d" * 64}},
+            {
+                **v2_request,
+                "operationId": "wrong-v2-target",
+                "runtimeTarget": {**forward_target, "schemaDigest": "d" * 64},
+            },
             wire_protocol=WIRE_PROTOCOL_V2,
             admission=expand,
         )
     assert await repository.get("provision", "wrong-v2-target") is None
+
+
+@pytest.mark.asyncio
+async def test_expand_admits_a_cataloged_legacy_v2_target_only_when_its_identity_matches(
+    repository: OperationRepository,
+) -> None:
+    """A live v2 cell keeps renewing on its legacy release during an expand."""
+
+    forward_target = {
+        "releaseVersion": "0.35.1",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+        "compatibilityDigest": "e" * 64,
+    }
+    legacy_identity = {
+        "releaseVersion": "0.34.0",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "1" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+    }
+    expand = AdmissionPolicy(
+        mode="expand",
+        legacy_catalog=frozenset({("0.34.0", "1")}),
+        forward_target=forward_target,
+        legacy_targets=legacy_targets_from([legacy_identity]),
+    )
+    legacy_request = {
+        **_request(operationId="legacy-v2-renew", fenceGeneration=3),
+        "runtimeTarget": {**legacy_identity, "compatibilityDigest": "9" * 64},
+    }
+    legacy_request.pop("releaseVersion")
+    legacy_request.pop("protocolVersion")
+
+    admitted = await repository.submit(
+        "renew-authorization",
+        "legacy-v2-renew",
+        legacy_request,
+        wire_protocol=WIRE_PROTOCOL_V2,
+        admission=expand,
+    )
+    assert admitted.wire_protocol == WIRE_PROTOCOL_V2
+
+    with pytest.raises(AdmissionRejected):
+        await repository.submit(
+            "renew-authorization",
+            "legacy-v2-drift",
+            {
+                **legacy_request,
+                "operationId": "legacy-v2-drift",
+                "runtimeTarget": {**legacy_request["runtimeTarget"], "schemaDigest": "d" * 64},
+            },
+            wire_protocol=WIRE_PROTOCOL_V2,
+            admission=expand,
+        )
+    assert await repository.get("renew-authorization", "legacy-v2-drift") is None
+
+    # Placing a runtime image always names the forward target, even for a cataloged
+    # legacy identity, and an explicit null target is not the absence of one.
+    for action, key, override in (
+        ("provision", "legacy-v2-provision", {}),
+        ("rollforward", "legacy-v2-rollforward", {"compatibilityDigest": "e" * 64}),
+        ("renew-authorization", "legacy-v2-null", {"runtimeTarget": None}),
+    ):
+        with pytest.raises(AdmissionRejected):
+            await repository.submit(
+                action,
+                key,
+                {**legacy_request, "operationId": key, **override},
+                wire_protocol=WIRE_PROTOCOL_V2,
+                admission=expand,
+            )
+        assert await repository.get(action, key) is None
+
+    uncataloged = AdmissionPolicy(
+        mode="expand",
+        legacy_catalog=frozenset(),
+        forward_target=forward_target,
+    )
+    with pytest.raises(AdmissionRejected):
+        await repository.submit(
+            "renew-authorization",
+            "legacy-v2-uncataloged",
+            {**legacy_request, "operationId": "legacy-v2-uncataloged"},
+            wire_protocol=WIRE_PROTOCOL_V2,
+            admission=uncataloged,
+        )
+
+    contract = AdmissionPolicy(
+        mode="contract",
+        legacy_catalog=frozenset({("0.34.0", "1")}),
+        forward_target=forward_target,
+        legacy_targets=legacy_targets_from([legacy_identity]),
+    )
+    with pytest.raises(AdmissionRejected):
+        await repository.submit(
+            "renew-authorization",
+            "legacy-v2-contract",
+            {**legacy_request, "operationId": "legacy-v2-contract"},
+            wire_protocol=WIRE_PROTOCOL_V2,
+            admission=contract,
+        )
+    assert await repository.get("renew-authorization", "legacy-v2-contract") is None
+    replay = await repository.submit(
+        "renew-authorization",
+        "legacy-v2-renew",
+        legacy_request,
+        wire_protocol=WIRE_PROTOCOL_V2,
+        admission=contract,
+    )
+    assert replay.id == admitted.id
 
 
 @pytest.mark.asyncio
@@ -919,3 +1162,116 @@ async def test_encrypted_request_and_refs_survive_restart_without_plaintext_in_d
         operation_columns = {row[1] for row in connection.execute("PRAGMA table_info(operations)")}
     assert "request_json" not in operation_columns
     assert "request_ciphertext" in operation_columns
+
+
+@pytest.mark.asyncio
+async def test_replay_restarts_a_terminal_operation_that_recorded_nothing(
+    repository: OperationRepository,
+) -> None:
+    """A control plane that must retry gets its work restarted, not refused forever."""
+
+    request = _request(operationId="requeue-alpha")
+    submitted = await repository.submit("rollback-rollforward", "requeue-effect-free", request)
+    claim = await repository.claim_next("requeue-worker")
+    assert claim is not None and claim.claim_token is not None
+    await repository.fail(
+        submitted.id,
+        "requeue-worker",
+        claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation,
+        code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+    )
+    failed = await repository.get("rollback-rollforward", "requeue-effect-free")
+    assert failed is not None and failed.state is OperationState.ERROR
+
+    replay = await repository.submit("rollback-rollforward", "requeue-effect-free", request)
+
+    assert replay.id == submitted.id
+    assert replay.state is OperationState.PENDING
+    async with repository.session_factory() as session:
+        row = await session.get(Operation, submitted.id)
+        assert row is not None
+        assert (row.checkpoint, row.error_code, row.finalized_at) == ("queued", None, None)
+        # The restart is recorded, which also spends it.
+        assert list(row.progress) == ["_replay_restart_v1"]
+    reclaimed = await repository.claim_next("requeue-worker-two")
+    assert reclaimed is not None and reclaimed.id == submitted.id
+    assert reclaimed.claim_token is not None
+
+    # A second failure is the caller's answer, not another restart: the refusal has
+    # to reach it so the failure counts against its own budget.
+    await repository.fail(
+        submitted.id,
+        "requeue-worker-two",
+        claim_token=reclaimed.claim_token,
+        claim_generation=reclaimed.claim_generation,
+        code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+    )
+    second = await repository.submit("rollback-rollforward", "requeue-effect-free", request)
+    assert second.state is OperationState.ERROR
+    assert await repository.claim_next("requeue-worker-three") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "effect", ("resource", "counted-retry", "retained-checkpoint", "multi-phase-action")
+)
+async def test_replay_refuses_a_terminal_operation_that_recorded_anything(
+    repository: OperationRepository,
+    effect: str,
+) -> None:
+    """Anything the first attempt may have retained keeps the row terminal.
+
+    `multi-phase-action` is the case a terminal failure cannot describe: it
+    collapses the checkpoint to "failed", so a provision that got most of the way
+    through is durably indistinguishable from one that never began.
+    """
+
+    action = "provision" if effect == "multi-phase-action" else "rollback-rollforward"
+    request = _request(operationId=f"kept-{effect}")
+    submitted = await repository.submit(action, f"kept-{effect}", request)
+    claim = await repository.claim_next("kept-worker")
+    assert claim is not None and claim.claim_token is not None
+    if effect == "resource":
+        await repository.record_resource(
+            operation_id=submitted.id,
+            worker_id="kept-worker",
+            claim_token=claim.claim_token,
+            claim_generation=claim.claim_generation,
+            tenant_id=str(request["tenantId"]),
+            cell_id=str(request["cellId"]),
+            kind=ResourceKind.KUBERNETES_NAMESPACE,
+            recoverable_reference="cell-namespace",
+            provider_operation_id=str(request["operationId"]),
+            provider_fence_generation=int(request["fenceGeneration"]),  # type: ignore[arg-type]
+        )
+    elif effect == "counted-retry":
+        await repository.record_retryable_failure(
+            submitted.id,
+            "kept-worker",
+            claim_token=claim.claim_token,
+            claim_generation=claim.claim_generation,
+            retry_after_seconds=1,
+        )
+        claim = await repository.claim_next(
+            "kept-worker", now=datetime.now(UTC) + timedelta(days=1)
+        )
+        assert claim is not None and claim.claim_token is not None
+    await repository.fail(
+        submitted.id,
+        "kept-worker",
+        claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation,
+        code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+    )
+    if effect == "retained-checkpoint":
+        async with repository.session_factory.begin() as session:
+            row = await session.get(Operation, submitted.id)
+            assert row is not None
+            row.checkpoint = "gm1:complete:" + "A" * 43
+
+    replay = await repository.submit(action, f"kept-{effect}", request)
+
+    assert replay.id == submitted.id
+    assert replay.state is OperationState.ERROR
+    assert await repository.claim_next("kept-worker-two") is None

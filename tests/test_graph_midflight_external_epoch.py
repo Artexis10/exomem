@@ -411,6 +411,23 @@ def test_a_class_c_attempt_followed_by_a_supersession_stays_class_c(
     assert epistemic_graph.may_mark_external_pending(error) is False
     assert freshness.external_pending(vault) is True
 
+def _registry_behind_the_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report the simulated movement as unrecorded: positive Class C evidence.
+
+    The movement these tests simulate (a patched proof, not real bytes) leaves
+    the registry and the disk agreeing, which the classifier rightly calls
+    recorded: no evidence the registry is behind (OpenSpec `live-index-freshness`,
+    "A graph proof cools the event registry only on evidence it is behind the
+    disk"). These tests pin what the pass does once that evidence exists -- the
+    cause it names, how it meets a supersession -- so the classifier is told it
+    exists. The classifier itself is pinned in `test_graph_class_c_evidence.py`.
+    """
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_classify_movement",
+        lambda *_args, **_kwargs: ("unrecorded", None),
+    )
+
 
 def test_a_supersession_that_coincides_with_a_moved_projection_stays_class_c(
     vault: Path, monkeypatch: pytest.MonkeyPatch
@@ -425,6 +442,7 @@ def test_a_supersession_that_coincides_with_a_moved_projection_stays_class_c(
     monkeypatch.setattr(
         EpistemicGraphIndex, "_source_versions_current", lambda *_args, **_kwargs: False
     )
+    _registry_behind_the_disk(monkeypatch)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved) as raised:
         EpistemicGraphIndex(vault)._rebuild_all_locked()
@@ -470,6 +488,7 @@ def test_the_retry_does_not_mask_a_class_c_that_lands_after_it(
         "_source_versions_current",
         lambda *_args, **_kwargs: locked_calls < 2,
     )
+    _registry_behind_the_disk(monkeypatch)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved) as raised:
         EpistemicGraphIndex(vault)._rebuild_all_off_boundary()

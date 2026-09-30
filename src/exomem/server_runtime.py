@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -28,7 +29,9 @@ from . import (
     privacy_log,
     project_keys,
     schema,
+    vocabulary_recovery,
 )
+from .dotenv_guard import working_directory_dotenv
 from .governance import authorization_session_lifecycle, projection_runtime
 from .governance.authorization_serving_membership import unavailable_readiness
 from .hosted_runtime import (
@@ -72,10 +75,29 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     if hosted_mode_enabled():
         return _initialize_hosted_runtime()
 
-    # An installed package lives under site-packages, so python-dotenv's implicit
-    # caller-relative search misses the service working directory. The documented
-    # repo-root .env is explicitly cwd-relative for both checkout and wheel installs.
-    load_dotenv_func(dotenv_path=Path.cwd() / ".env", override=True)
+    from . import cloud_cell
+
+    if cloud_cell.cloud_mode_enabled():
+        # A cloud cell reads no `.env` file: configuration comes only from the
+        # pod environment (design D1.6). Everything else below this branch is
+        # the standalone path, unmodified.
+        privacy_log.install_hosted_log_redaction()
+        # query_log itself fails closed on content-private logging (D1.2), but
+        # usage boost and the relevance check both read those journals -- with
+        # them off, both features would otherwise loop forever finding nothing.
+        # Hosted parity: hosted_runtime.HostedProcessSettings.apply_process_environment
+        # sets the same two variables for the same reason.
+        os.environ["EXOMEM_DISABLE_USAGE_BOOST"] = "1"
+        os.environ["EXOMEM_DISABLE_RELEVANCE_CHECK"] = "1"
+    else:
+        # An installed package lives under site-packages, so python-dotenv's
+        # implicit caller-relative search misses the service working
+        # directory. The documented repo-root .env is explicitly cwd-relative
+        # for both checkout and wheel installs. It is never read from inside a
+        # vault, whose files remote writers can plant.
+        dotenv_path = working_directory_dotenv()
+        if dotenv_path is not None:
+            load_dotenv_func(dotenv_path=dotenv_path, override=True)
     env_compat.promote_legacy()
 
     vault_root = resolve_vault()
@@ -100,10 +122,20 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
 class LocalRuntimeActivation:
     """Start local background workers after transport liveness is observable."""
 
-    def __init__(self, vault_root: Path, *, fallback_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        fallback_seconds: float = 5.0,
+        deferred: bool = False,
+    ) -> None:
         from . import readiness, warmup
 
-        if warmup.warmup_enabled():
+        # A standby owns nothing until promotion, so it neither claims request
+        # admission nor arms the liveness fallback that would start schedulers
+        # beside the worker still serving (`seamless-managed-worker-handoff` D7).
+        self._deferred = deferred
+        if warmup.warmup_enabled() and not deferred:
             readiness.manage_runtime()
         self.vault_root = vault_root
         self.fallback_seconds = fallback_seconds
@@ -115,11 +147,28 @@ class LocalRuntimeActivation:
         self.media_worker: Any | None = None
         self.file_watcher: Any | None = None
         self.derived_drain: Any | None = None
+        self.vocabulary_recovery: Any | None = None
+        # The recovery watcher runs until told to stop, so it has its own stop
+        # event: every path that stops the other workers stops it too.
+        self._vocabulary_stop = threading.Event()
+        self.recall_reembed: Any | None = None
+        self.dreamer: Any | None = None
+
+    def release(self) -> None:
+        """Hand this process the ownership a standby refused, then activate."""
+        from . import readiness, warmup
+
+        with self._lock:
+            was_deferred = self._deferred
+            self._deferred = False
+        if was_deferred and warmup.warmup_enabled():
+            readiness.manage_runtime()
+        self.start()
 
     def start(self) -> None:
         """Launch local workers once; safe from health and timer races."""
         with self._lock:
-            if self._started or self._shutdown.is_set():
+            if self._started or self._shutdown.is_set() or self._deferred:
                 return
             self._started = True
             timer = self._timer
@@ -161,13 +210,34 @@ class LocalRuntimeActivation:
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
+        # The request path, warmed by one internal turn before the startup
+        # drain: a quiet-mode standby skips its cache warm, so without this the
+        # first real turn after a promotion pays the cold resolver, page and
+        # index handles itself.
+        self._start_component("request-path warm", _warm_request_path)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._start_component(
             "file watcher recovery",
             self._finish_file_watcher_startup,
         )
+        # Lazily, once the drain is done and off this thread: nothing below
+        # waits on a matrix load, and the reaper still frees it when idle.
+        threading.Thread(
+            target=_warm_embedding_matrix,
+            args=(self.vault_root,),
+            name="exomem-matrix-warm",
+            daemon=True,
+        ).start()
         starters = (
             ("graph drain", _start_graph_drain),
             ("media", self._start_media_worker),
+            ("vocabulary recovery", self._start_vocabulary_recovery),
+            ("recall re-embed", self._start_recall_reembed),
+            # Last: upkeep is the least important background work and must
+            # never contend with admission, the watcher or graph convergence.
+            ("dreamer", self._start_dreamer),
         )
         for label, starter in starters:
             if self._shutdown.is_set():
@@ -251,6 +321,22 @@ class LocalRuntimeActivation:
                 stop()
             except Exception:  # noqa: BLE001 - shutdown still has to join activation
                 log.warning("%s runtime shutdown failed", label, exc_info=True)
+        if self.dreamer is not None:
+            try:
+                _stop_dreamer()
+            except Exception:  # noqa: BLE001 - shutdown still has to join activation
+                log.warning("dreamer runtime shutdown failed", exc_info=True)
+        self._vocabulary_stop.set()
+        self._join_vocabulary_recovery()
+
+    def _join_vocabulary_recovery(self) -> None:
+        """Join the recovery watcher, bounded; it exits within one poll."""
+        thread = self.vocabulary_recovery
+        if not isinstance(thread, threading.Thread) or thread is threading.current_thread():
+            return
+        thread.join(timeout=VOCABULARY_WATCHER_JOIN_SECONDS)
+        if thread.is_alive():
+            log.warning("vocabulary recovery watcher did not stop before its deadline")
 
     def _start_component(self, label: str, starter: Callable[[Path], Any]) -> None:
         try:
@@ -268,8 +354,31 @@ class LocalRuntimeActivation:
     def _start_derived_drain(self, vault_root: Path) -> None:
         self.derived_drain = _start_derived_drain(vault_root)
 
+    def _start_vocabulary_recovery(self, vault_root: Path) -> None:
+        """Drain queued recovery in the background, not on a client review call."""
+        thread = threading.Thread(
+            target=watch_vocabulary_recovery,
+            args=(vault_root, self._vocabulary_stop),
+            name="exomem-vocabulary-recovery",
+            daemon=True,
+        )
+        self.vocabulary_recovery = thread
+        thread.start()
+
+    def _start_recall_reembed(self, vault_root: Path) -> None:
+        """Bring the recall sidecar into the recall encoder's space, off-request.
+
+        Stops between batches when the process shuts down; a restart resumes.
+        """
+        from . import recall_migration
+
+        self.recall_reembed = recall_migration.start(vault_root, self._shutdown)
+
     def _start_file_watcher(self, vault_root: Path) -> None:
         self.file_watcher = _start_file_watcher(vault_root)
+
+    def _start_dreamer(self, vault_root: Path) -> None:
+        self.dreamer = _start_dreamer(vault_root)
 
     def _finish_file_watcher_startup(self, _vault_root: Path) -> None:
         watcher = self.file_watcher
@@ -286,7 +395,7 @@ class LocalRuntimeActivation:
             timer = threading.Timer(self.fallback_seconds, self.start)
             timer.daemon = True
             with self._lock:
-                if not self._started:
+                if not self._started and not self._deferred:
                     self._timer = timer
                     timer.start()
             try:
@@ -302,6 +411,18 @@ class LocalRuntimeActivation:
                 self._stop_background_workers()
                 if thread is not None and thread is not threading.current_thread():
                     await anyio.to_thread.run_sync(thread.join)
+                # Activation may have started the watcher after the stop above;
+                # it saw the stop event already set, so this join is short.
+                self._vocabulary_stop.set()
+                await anyio.to_thread.run_sync(self._join_vocabulary_recovery)
+                # A discarded standby must not leave the catalogue it built
+                # behind; a no-op for any worker that is not an unpromoted one.
+                # Off the loop: it may wait, bounded, for a build to stop, and
+                # shielded so a cancelled shutdown still finishes the removal.
+                from . import service_standby
+
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(service_standby.discard)
 
         return _lifespan
 
@@ -553,6 +674,227 @@ def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:
     return True, "HOSTED_READY"
 
 
+#: How long the activation sequence waits for the graph projection to become
+#: current before giving up on this pass, and how many bounded recovery passes
+#: it will run (`seamless-managed-worker-handoff` D12).
+VOCABULARY_DRAIN_WAIT_SECONDS = 120.0
+VOCABULARY_DRAIN_PASSES = 256
+#: How long a publication-triggered drain waits for the projection to report
+#: current once the published snapshot is readable.
+VOCABULARY_REDRAIN_READY_SECONDS = 10.0
+#: The signal fires after the commit or swap, but a snapshot can still be slow
+#: to prove readable. Each readiness probe can walk the vault, so one
+#: publication probes at most `VOCABULARY_REDRAIN_MAX_POLLS` times, backing off
+#: from one second, doubling to a one-minute cap: about two minutes, eight
+#: probes. After that only the next publication wakes the watcher.
+VOCABULARY_REDRAIN_MAX_POLLS = 8
+VOCABULARY_REDRAIN_FIRST_BACKOFF_SECONDS = 1.0
+VOCABULARY_REDRAIN_MAX_BACKOFF_SECONDS = 60.0
+#: How long shutdown waits for the watcher. It polls its stop event every
+#: quarter second, so this bounds only a recovery pass already in flight.
+VOCABULARY_WATCHER_JOIN_SECONDS = 5.0
+
+
+def drain_vocabulary_recovery(
+    vault_root: Path,
+    shutdown: threading.Event,
+    *,
+    wait_seconds: float = VOCABULARY_DRAIN_WAIT_SECONDS,
+    max_passes: int = VOCABULARY_DRAIN_PASSES,
+) -> int:
+    """Drain queued vocabulary recovery once the graph projection is current.
+
+    Rows queue while the projection warms, and until now only an explicit client
+    review call emptied them — on the personal service thirty accumulated across
+    one upgrade. Each pass is the existing bounded four-job window; the loop
+    stops as soon as a pass processes nothing, when the projection never becomes
+    current, or when the runtime shuts down. Returns the number of jobs drained.
+    """
+    from . import graph_sync, vocabulary_delivery
+    from .governance.principal import library_scope
+
+    deadline = time.monotonic() + wait_seconds
+    while not shutdown.is_set():
+        try:
+            current = graph_sync.status(vault_root)["state"] == "current"
+        except Exception:  # noqa: BLE001 - a background drain never breaks activation
+            current = False
+        if current:
+            break
+        if time.monotonic() >= deadline:
+            log.info("vocabulary recovery drain skipped; graph projection is not current")
+            return 0
+        shutdown.wait(0.25)
+    drained = 0
+    for _ in range(max_passes):
+        if shutdown.is_set():
+            break
+        try:
+            with library_scope():
+                result = vocabulary_delivery.recover(vault_root)
+        except Exception:  # noqa: BLE001 - recovery retries on the next activation
+            log.warning("vocabulary recovery pass failed", exc_info=True)
+            break
+        processed = result.get("processed")
+        processed = processed if isinstance(processed, int) and processed > 0 else 0
+        drained += processed
+        if not processed:
+            break
+    if drained:
+        log.info("drained %d queued vocabulary recovery job(s)", drained)
+    return drained
+
+
+#: The internal warm turn. Plain words the lexical, semantic and recent
+#: stages all see; it names nothing, so no anchor resolves and no heat is kept.
+_REQUEST_PATH_WARM_TURN = "what changed recently and what is still open"
+
+
+def _warm_request_path(vault_root: Path) -> None:
+    """Run one activation for its caches only: no log, no session, no heat.
+
+    Calls the activation body directly, so the activation log, the upkeep
+    carrier and the continuity carry-through never see it; with no session,
+    anchor or caller it records no heat and no episode nudge. Never raises.
+    """
+    started = time.perf_counter()
+    try:
+        from . import commands, working_set
+
+        commands._op_activate_context_body(  # noqa: SLF001 - deliberately log-free
+            vault_root,
+            _REQUEST_PATH_WARM_TURN,
+            working_set.DEFAULT_BUDGET_CHARS,
+            purpose=None,
+            continuity=None,
+            anchor=None,
+            include_timings=False,
+            client=None,
+            session=None,
+            workspace=None,
+        )
+    except Exception:  # noqa: BLE001 - a warm is never load-bearing
+        log.info("request-path warm skipped", exc_info=True)
+        return
+    log.info("request-path warm done in %.0f ms", (time.perf_counter() - started) * 1000.0)
+
+
+def _warm_embedding_matrix(vault_root: Path) -> None:
+    """One tiny vector search so the first hybrid recall or write skips the load."""
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return
+    started = time.perf_counter()
+    try:
+        import numpy as np
+
+        from . import embeddings, recall_space
+
+        index = embeddings.get_embedding_index(vault_root)
+        dim = int(getattr(index, "dim", recall_space.LEGACY_DIM))
+        index.search(np.full(dim, 1.0 / (dim**0.5), dtype=np.float32), k=1)
+    except Exception:  # noqa: BLE001 - a warm is never load-bearing
+        log.info("embedding matrix warm skipped", exc_info=True)
+        return
+    log.info("embedding matrix warm done in %.0f ms", (time.perf_counter() - started) * 1000.0)
+
+
+def redrain_backoffs(
+    *,
+    first_backoff: float = VOCABULARY_REDRAIN_FIRST_BACKOFF_SECONDS,
+    max_backoff: float = VOCABULARY_REDRAIN_MAX_BACKOFF_SECONDS,
+    max_polls: int = VOCABULARY_REDRAIN_MAX_POLLS,
+) -> tuple[float, ...]:
+    """The waits between one publication's readiness probes."""
+    delays: list[float] = []
+    delay = first_backoff
+    for _ in range(max(0, max_polls - 1)):
+        delays.append(min(delay, max_backoff))
+        delay *= 2
+    return tuple(delays)
+
+
+def redrain_after_publish(
+    vault_root: Path,
+    shutdown: threading.Event,
+    *,
+    ready_seconds: float = VOCABULARY_REDRAIN_READY_SECONDS,
+    wake: threading.Event | None = None,
+    first_backoff: float = VOCABULARY_REDRAIN_FIRST_BACKOFF_SECONDS,
+    max_backoff: float = VOCABULARY_REDRAIN_MAX_BACKOFF_SECONDS,
+    max_polls: int = VOCABULARY_REDRAIN_MAX_POLLS,
+) -> int | None:
+    """Drain once after a graph publication, when there is work and it can land.
+
+    Returns None when nothing is queued. Otherwise probes, with backoff and a
+    bounded count, for the read snapshot the publication made, then runs the
+    same bounded drain activation runs. A later publication (`wake`) ends the
+    current backoff and restarts the schedule, since it is a new snapshot to
+    wait for. Claims are compare-and-set, so this never repeats a job the
+    activation drain or an explicit review already completed.
+    """
+    from . import epistemic_graph
+
+    if not vocabulary_recovery.page(vault_root, limit=1):
+        return None
+    graph = epistemic_graph.EpistemicGraphIndex(vault_root)
+    schedule = redrain_backoffs(
+        first_backoff=first_backoff, max_backoff=max_backoff, max_polls=max_polls
+    )
+    step = 0
+    while not shutdown.is_set():
+        try:
+            readable = graph.available()
+        except Exception:  # noqa: BLE001 - a background drain never breaks the runtime
+            readable = False
+        if readable:
+            return drain_vocabulary_recovery(vault_root, shutdown, wait_seconds=ready_seconds)
+        if step >= len(schedule):
+            return 0
+        if _wait_for_backoff(schedule[step], shutdown, wake):
+            step = 0
+        else:
+            step += 1
+    return 0
+
+
+def _wait_for_backoff(
+    seconds: float, shutdown: threading.Event, wake: threading.Event | None
+) -> bool:
+    """Wait out one backoff; True when a new publication ended it early."""
+    deadline = time.monotonic() + seconds
+    while not shutdown.is_set():
+        if wake is not None and wake.is_set():
+            wake.clear()
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        shutdown.wait(min(0.25, remaining))
+    return False
+
+
+def watch_vocabulary_recovery(vault_root: Path, shutdown: threading.Event) -> None:
+    """Drain at activation, then again after every graph publication.
+
+    Graph churn withdraws the read snapshot a write's guidance needs, which
+    strands its recovery job until something drains the queue. Publications
+    only set an event, so many coalesce into one drain and none waits for it.
+    """
+    published = vocabulary_recovery.publication_signal(vault_root)
+    try:
+        drain_vocabulary_recovery(vault_root, shutdown)
+        while not shutdown.is_set():
+            if not published.wait(timeout=0.5):
+                continue
+            published.clear()
+            try:
+                redrain_after_publish(vault_root, shutdown, wake=published)
+            except Exception:  # noqa: BLE001 - the next publication retries
+                log.warning("vocabulary recovery redrain failed", exc_info=True)
+    finally:
+        vocabulary_recovery.release_publication_signal(vault_root, published)
+
+
 def _start_metrics_persistence() -> None:
     """Restore the metrics registry from its prior snapshot and start the
     background snapshotter against the writer-lease state directory.
@@ -561,6 +903,12 @@ def _start_metrics_persistence() -> None:
     failure here (an unreadable snapshot, a lease-config error) is logged and
     swallowed rather than blocking startup.
     """
+    from . import service_standby
+
+    if service_standby.in_standby():
+        # A standby publishes nothing, not even its own metrics snapshots, while
+        # the worker that owns the state directory is still serving.
+        return
     try:
         from .writer_lease import get_manager
 
@@ -728,6 +1076,30 @@ def _start_graph_drain(vault_root: Path) -> Any | None:
     except Exception as exc:  # noqa: BLE001 - convergence must not break startup
         log.warning("graph drain start failed: %s", exc)
         return None
+
+
+def _start_dreamer(vault_root: Path) -> Any | None:
+    """Start the default-off upkeep worker, or nothing.
+
+    Local service only. A hosted cell never reaches this starter, and a cloud
+    cell declines here: both would need their own worker registration and
+    review before a background proposal worker runs for a tenant.
+    """
+    from . import cloud_cell, dreamer
+
+    if cloud_cell.cloud_mode_enabled():
+        return None
+    try:
+        return dreamer.start(vault_root)
+    except Exception as exc:  # noqa: BLE001 - upkeep must never break startup
+        log.warning("dreamer start failed: %s", exc)
+        return None
+
+
+def _stop_dreamer() -> None:
+    from . import dreamer
+
+    dreamer.stop(timeout=2.0)
 
 
 def _start_derived_drain(vault_root: Path) -> Any | None:

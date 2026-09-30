@@ -28,13 +28,16 @@ user makes the call, so visibility beats silent graph mutation.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import call_spans, recall_space
 from .kbdir import kb_prefix
 from .vault import content_hash
 
@@ -236,12 +239,24 @@ def _render_identified_write_advisory(
 ) -> str:
     suffix = f" [review: {identity.ref}; fingerprint: {identity.fingerprint}]"
     prose = _render_write_advisory(kind, candidate)
-    offer_clause = ""
-    if quiet_offer:
-        offer_clause = (
-            " [quiet offer: ref="
-            f"{quiet_offer['ref']}; action=quiet; reason required]"
-        )
+    return render_write_advisory_quiet_offer(
+        prose + suffix, identity.ref, identity.fingerprint, quiet_offer
+    )
+
+
+def render_write_advisory_quiet_offer(
+    warning: str, review_ref: str, fingerprint: str, quiet_offer: dict | None
+) -> str:
+    """Keep the review suffix intact while fitting an optional quiet offer."""
+    suffix = f" [review: {review_ref}; fingerprint: {fingerprint}]"
+    if not warning.endswith(suffix):
+        return warning
+    prose = warning[: -len(suffix)]
+    offer_clause = (
+        f" [quiet offer: ref={quiet_offer['ref']}; action=quiet; reason required]"
+        if quiet_offer
+        else ""
+    )
     budget = _WRITE_ADVISORY_WARNING_CHARS - len(suffix)
     prose_budget = budget - len(offer_clause)
     if len(prose) > prose_budget:
@@ -523,6 +538,91 @@ def detected_overlap_advisory_groups(
     return [("overlap", list(candidates))]
 
 
+#: The routes whose committed write carries the default duplicate/overlap sweep.
+WRITE_ADVISORY_ROUTES = frozenset({"remember", "edit"})
+
+
+@dataclass(frozen=True)
+class WriteAdvisoryInputs:
+    """Exactly what one route's write-time sweep reads, and nothing else.
+
+    `remember` scores the draft (its title and normalized body) with the page's
+    just-published vectors reused where the chunk text matches, flags
+    near-duplicates of its own type only, and flags overlaps. `edit` scores the
+    new body's bare paragraphs (no title) for overlaps only. The same object
+    drives the inline sweep and the deferred one, so under fast acknowledgement
+    the background result is this function's output for these inputs, not an
+    approximation reconstructed from the page afterwards.
+    """
+
+    route: str
+    target_rel_path: str
+    self_path: str
+    body: str
+    title: str = ""
+    note_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.route not in WRITE_ADVISORY_ROUTES:
+            raise ValueError(f"unknown write advisory route: {self.route}")
+
+
+def write_advisory_for(
+    vault_root: Path,
+    inputs: WriteAdvisoryInputs,
+    *,
+    record_surfacing: bool = True,
+) -> list[EmittedWriteAdvisory]:
+    """Run one route's default duplicate/overlap sweep over its exact inputs."""
+    if inputs.route == "remember":
+        cosines = _best_cosine_per_file(
+            vault_root,
+            title=inputs.title,
+            body=inputs.body,
+            published_path=inputs.target_rel_path,
+        )
+        duplicate_candidates = detect_duplicates(
+            vault_root,
+            title=inputs.title,
+            body=inputs.body,
+            self_path=inputs.self_path,
+            types_filter=[inputs.note_type] if inputs.note_type else None,
+            precomputed=cosines,
+        )
+        overlap_candidates = detect_contradictions(
+            vault_root,
+            title=inputs.title,
+            body=inputs.body,
+            self_path=inputs.self_path,
+            precomputed=cosines,
+        )
+        return emitted_write_advisory_groups(
+            vault_root,
+            self_path=inputs.self_path,
+            groups=[
+                ("near-duplicate", duplicate_candidates),
+                *detected_overlap_advisory_groups(overlap_candidates),
+            ],
+            record_surfacing=record_surfacing,
+        )
+    candidates = detect_contradictions(
+        vault_root,
+        title="",
+        body=inputs.body,
+        self_path=inputs.self_path,
+    )
+    # The grouping and emission half of the advisory: a ref batch and a
+    # review-state read per candidate. Timed separately from the cosine sweep
+    # because they fail for different reasons and are fixed in different places.
+    with call_spans.span("advisory.overlap_groups", {"candidates": len(candidates)}):
+        return emitted_write_advisory_groups(
+            vault_root,
+            self_path=inputs.self_path,
+            groups=detected_overlap_advisory_groups(candidates),
+            record_surfacing=record_surfacing,
+        )
+
+
 def triage_write_advisory(
     vault_root: Path,
     *,
@@ -590,13 +690,16 @@ def _canon(path: str) -> str:
     return p.lower()
 
 
-def _why(hit) -> str:
-    """One-line rationale assembled from the hit's ranking signals."""
+def _why(hit, *, ranks: bool = True) -> str:
+    """One-line rationale assembled from the hit's ranking signals.
+
+    `ranks=False` names the lanes without their whole-corpus rank numbers.
+    """
     bits: list[str] = []
     if hit.vector_rank:
-        bits.append(f"semantic #{hit.vector_rank}")
+        bits.append(f"semantic #{hit.vector_rank}" if ranks else "semantic")
     if hit.bm25_rank:
-        bits.append(f"keyword #{hit.bm25_rank}")
+        bits.append(f"keyword #{hit.bm25_rank}" if ranks else "keyword")
     if hit.graph_in_degree:
         hub = " (hub)" if hit.graph_in_degree >= 3 else ""
         bits.append(f"{hit.graph_in_degree} shared link(s){hub}")
@@ -646,6 +749,7 @@ def suggest_related(
     suggested edge, since you can't act on a read-only/out-of-KB link.
     """
     from . import find as find_module
+    from .governance import egress
 
     lead = " ".join((body or "").split()[:_QUERY_LEAD_WORDS])
     query = f"{title}\n\n{lead}".strip() or (title or "").strip()
@@ -655,19 +759,29 @@ def suggest_related(
     self_canon = _canon(self_path) if self_path else None
     excluded = {_canon(e) for e in (existing_links or set())}
 
+    # A caller other than the owner ranks over the pages it may see: no graph
+    # lane (hops and in-degree follow links over the whole vault), no withheld
+    # hit, and no rank number computed over the whole corpus, as `op_find`.
+    # It makes one fetch of the fixed over-fetch pool `op_find` uses, so the
+    # work does not depend on how many withheld pages match; when withheld
+    # pages fill that pool the caller receives fewer suggestions.
+    keep = egress.restricted_release_filter(vault_root)
+    wanted = limit * RELATED_OVERFETCH
     try:
         hits = find_module.find(
             vault_root,
             query=query,
-            limit=limit * RELATED_OVERFETCH,
+            limit=wanted if keep is None else egress.pool_limit(wanted),
             mode="hybrid",
-            graph=True,
+            graph=keep is None,
             scope=scope,
             prefer_compiled=True,
         )
     except Exception as e:  # noqa: BLE001 — suggestions are best-effort
         log.debug("suggest_related find() failed: %s", e)
         return []
+    if keep is not None:
+        hits = [h for h in hits if keep(h.path)][:wanted]
 
     eligible = []
     for h in hits:
@@ -688,14 +802,23 @@ def suggest_related(
     ranked = sorted(enumerate(eligible), key=_score, reverse=True)
     return [
         RelatedSuggestion(
-            path=h.path, title=h.title, type=h.type, why=_why(h), excerpt=h.excerpt
+            path=h.path,
+            title=h.title,
+            type=h.type,
+            why=_why(h, ranks=keep is None),
+            excerpt=h.excerpt,
         )
         for _, h in ranked[:limit]
     ]
 
 
 def _best_cosine_per_file(
-    vault_root: Path, *, title: str, body: str, k: int = 15
+    vault_root: Path,
+    *,
+    title: str,
+    body: str,
+    k: int = 15,
+    published_path: str | None = None,
 ) -> dict[str, float]:
     """Embed a draft (title+body) as PASSAGES and return the max cosine per
     existing file over the sidecar: ``{file_path: best_score}``.
@@ -707,6 +830,16 @@ def _best_cosine_per_file(
     a query). Returns ``{}`` when embeddings are disabled, unimportable, or the
     sidecar is empty — the no-op contract both callers depend on, so the fast
     test suite and torch-less deploys are unaffected.
+
+    `published_path` names a page whose rows the sidecar may already hold for
+    these very chunk texts — a post-commit sweep passes the page its commit just
+    embedded. A chunk whose exact text has a stored vector takes that vector
+    instead of being encoded again: a vector is a function of its text, the
+    same economy the write's own embedding pass applies. On a CPU-only cell the
+    second encode of a just-written note was most of a 9-13 s sweep. Only the
+    texts the page's rows lack are encoded, so a missing or stale row costs
+    what it always did, and reuse never changes a score while the sidecar's
+    one-model invariant holds.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}
@@ -718,35 +851,183 @@ def _best_cosine_per_file(
     if readiness.should_defer("embeddings"):
         return {}
     try:
-        from . import embeddings, index_paths
+        from . import embeddings
 
-        chunks = embeddings.chunk_text(title, body)
-        if not chunks:
-            return {}
-        vecs = embeddings.embed_texts(chunks, is_query=False)
-        idx = embeddings.get_embedding_index(vault_root)
-        allowed_paths = {
-            rel
-            for rel in (
-                index_paths.rel_to_vault(vault_root, path)
-                for path in index_paths.iter_index_markdown(vault_root)
+        # The advisory sweep runs inline on every governed edit and is where
+        # the encode it pays actually lives, so it is timed here rather than at
+        # the call sites: one definition, and every surface that reaches it --
+        # add, note, edit, pack assembly -- is attributed the same way. The
+        # fields are what the duration alone cannot say: on 0.84.1 an
+        # `embeddings.encode` of 15.6 s with `count=1` sat entirely outside
+        # `index.embeddings`, and this is the caller it belonged to.
+        with (
+            call_spans.span("advisory.best_cosine", {}) as measured,
+            contextlib.ExitStack() as in_space,
+        ):
+            chunks = embeddings.chunk_text(title, body)
+            if not chunks:
+                if measured is not None:
+                    measured["texts"] = 0
+                    measured["chars"] = 0
+                return {}
+            idx = embeddings.get_embedding_index(vault_root)
+            # The draft is encoded for the sidecar it is scored against.
+            in_space.enter_context(recall_space.encoding_for(idx))
+            stored = (
+                embeddings._stored_text_vectors(idx, published_path)[0]
+                if published_path
+                else {}
             )
-            if rel is not None
-        }
-        best_per_file: dict[str, float] = {}
-        for v in vecs:
-            for fp, _cidx, _ctext, score in idx.search(
-                v, k=k, allowed_paths=allowed_paths
-            ):
-                if fp not in best_per_file or score > best_per_file[fp]:
-                    best_per_file[fp] = score
-        return best_per_file
+            # A text no row holds may still have been encoded by a sweep moments
+            # ago -- an edit's previous generation of these same paragraphs. The
+            # stamp is taken before this sweep encodes anything, so a model
+            # reload during the encode leaves nothing filed under the new model.
+            stamp = embeddings.passage_memo_stamp()
+            recalled = embeddings.recall_passage_vectors(
+                (chunk for chunk in dict.fromkeys(chunks) if chunk not in stored),
+                stamp=stamp,
+            )
+            published = stored
+            if recalled:
+                stored = {**stored, **recalled}
+            encoded = [chunk for chunk in chunks if chunk not in stored]
+            # With nothing to reuse the whole draft is encoded as it always was;
+            # otherwise only the unique texts the stored rows lack.
+            full_encode = len(encoded) == len(chunks)
+            to_encode = chunks if full_encode else list(dict.fromkeys(encoded))
+            if measured is not None:
+                # `texts`/`chars` are what the encoder was handed, so on this
+                # surface they still say what the sweep encoded.
+                measured["texts"] = len(to_encode)
+                measured["chars"] = sum(len(chunk) for chunk in to_encode)
+                if published_path:
+                    measured["reused"] = sum(1 for chunk in chunks if chunk in published)
+                if recalled:
+                    measured["recalled"] = sum(1 for chunk in chunks if chunk in recalled)
+            if full_encode:
+                vecs = embeddings.embed_texts(chunks, is_query=False)
+                embeddings.remember_passage_vectors(chunks, vecs, stamp=stamp)
+            else:
+                lookup = {chunk: stored[chunk] for chunk in chunks if chunk in stored}
+                if to_encode:
+                    fresh = embeddings.embed_texts(to_encode, is_query=False)
+                    embeddings.remember_passage_vectors(to_encode, fresh, stamp=stamp)
+                    lookup.update(zip(to_encode, fresh, strict=True))
+                vecs = [lookup[chunk] for chunk in chunks]
+            best_per_file: dict[str, float] = {}
+            # Every chunk in one pass over the matrix, asking eligibility only of
+            # the pages that reach a chunk's top-k: a `search` per chunk re-read
+            # the matrix and hydrated text this discards, and the allowed-path
+            # set was a walk of the whole corpus on every write.
+            admits = _index_admitter(vault_root)
+            for hits in idx.search_many(vecs, k, admits=admits):
+                for fp, _cidx, score in hits:
+                    if fp not in best_per_file or score > best_per_file[fp]:
+                        best_per_file[fp] = score
+            return best_per_file
     except ImportError as e:
         log.debug("_best_cosine_per_file unavailable (%s)", e)
         return {}
     except Exception as e:  # noqa: BLE001 — best-effort
         log.debug("_best_cosine_per_file failed: %s", e)
         return {}
+
+
+def _index_admitter(vault_root: Path):
+    """Which sidecar pages the advisory may score: exactly those the index walk yields.
+
+    Stray rows -- a page moved to `_trash/`, one deleted before its rows were
+    purged, a Records item -- must never reach a warning (observed 2026-07-04:
+    dup warnings flagging trash entries). The KB scope answers per page from
+    that page's own ancestry; the vault scope has no per-page twin and still
+    walks, once per sweep.
+    """
+    from . import index_paths
+
+    admits = index_paths.index_markdown_admitter(vault_root)
+    if admits is not None:
+        return admits
+    allowed = frozenset(
+        rel
+        for rel in (
+            index_paths.rel_to_vault(vault_root, path)
+            for path in index_paths.iter_index_markdown(vault_root)
+        )
+        if rel is not None
+    )
+    return allowed.__contains__
+
+
+def pairwise_best_cosine_from_sidecar(
+    vault_root: Path, pages: Iterable[tuple[str, list[str]]]
+) -> tuple[dict[frozenset[str], float], set[str]]:
+    """Best cosine between each pair of `pages`, from the sidecar's own rows -- no encode.
+
+    The context pack only ever needs proximity AMONG the pages it packed, and
+    every one of those pages was embedded when it was written. Re-encoding
+    their bodies to get the same vectors back was the whole cost of a recall
+    on a large vault (measured 2026-09-14: 32 to 50 s of `embeddings.encode`
+    over 110 to 174 chunks per `ask_memory`, on 4,281 pages). So this reads the
+    rows the embedding pass published and does one small pairwise product.
+
+    `pages` are `(rel_path, chunks)` with the exact chunking the index stores
+    (`embeddings._chunks_for_page`). Exactness is decided on stored chunk TEXT,
+    as `published_generation_vectors` does: a page whose rows do not match its
+    current chunks -- its embedding still deferred, or the page moved since --
+    contributes no pairs and is absent from the returned covered set, and is
+    never encoded here. Returns `({}, set())` when embeddings are disabled or
+    the sidecar is unavailable, the same no-op contract as the encoding sweep.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return {}, set()
+    wanted = {rel: list(chunks) for rel, chunks in pages if chunks}
+    if not wanted:
+        return {}, set()
+    try:
+        import numpy as np
+
+        from . import embeddings
+
+        # Same span as the encoding sweep on purpose (see
+        # `best_cosine_per_file_for_vectors`): `texts=0` is what says it
+        # encoded nothing, and `pages` how many packed pages had exact rows.
+        with call_spans.span("advisory.best_cosine", {}) as measured:
+            idx = embeddings.get_embedding_index(vault_root)
+            metadata, matrix = idx.all_vectors()
+            rows_by_page: dict[str, list[tuple[int, int]]] = {}
+            for row, (file_path, chunk_index) in enumerate(metadata):
+                if file_path in wanted:
+                    rows_by_page.setdefault(file_path, []).append((chunk_index, row))
+            texts = idx._texts_for(
+                [(fp, ci) for fp, rows in rows_by_page.items() for ci, _row in rows]
+            )
+            vectors: dict[str, np.ndarray] = {}
+            for file_path, rows in rows_by_page.items():
+                rows.sort()
+                chunks = wanted[file_path]
+                if [ci for ci, _row in rows] != list(range(len(chunks))):
+                    continue
+                if [texts.get((file_path, ci)) for ci, _row in rows] != chunks:
+                    continue
+                stacked = np.asarray([matrix[row] for _ci, row in rows], dtype=np.float32)
+                norms = np.linalg.norm(stacked, axis=1, keepdims=True)
+                vectors[file_path] = stacked / np.maximum(norms, 1e-12)
+            if measured is not None:
+                measured["texts"] = 0
+                measured["pages"] = len(vectors)
+                measured["vectors"] = sum(len(v) for v in vectors.values())
+            best: dict[frozenset[str], float] = {}
+            names = sorted(vectors)
+            for i, a in enumerate(names):
+                for b in names[i + 1 :]:
+                    best[frozenset((a, b))] = float((vectors[a] @ vectors[b].T).max())
+            return best, set(names)
+    except ImportError as e:
+        log.debug("pairwise_best_cosine_from_sidecar unavailable (%s)", e)
+        return {}, set()
+    except Exception as e:  # noqa: BLE001 -- best-effort, the pack degrades to no tension
+        log.debug("pairwise_best_cosine_from_sidecar failed: %s", e)
+        return {}, set()
 
 
 def best_cosine_per_file_for_vectors(
@@ -769,31 +1050,32 @@ def best_cosine_per_file_for_vectors(
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}
     try:
-        from . import embeddings, index_paths
+        from . import embeddings
 
-        rows = list(vectors)
-        if not rows:
-            return {}
-        idx = embeddings.get_embedding_index(vault_root)
-        allowed_paths = {
-            rel
-            for rel in (
-                index_paths.rel_to_vault(vault_root, path)
-                for path in index_paths.iter_index_markdown(vault_root)
-            )
-            if rel is not None
-        }
-        self_canon = _canon(self_path) if self_path else None
-        best_per_file: dict[str, float] = {}
-        for v in rows:
-            for fp, _cidx, _ctext, score in idx.search(
-                v, k=k, allowed_paths=allowed_paths
-            ):
-                if self_canon and _canon(fp) == self_canon:
-                    continue
-                if fp not in best_per_file or score > best_per_file[fp]:
-                    best_per_file[fp] = score
-        return best_per_file
+        # The same span name as the encoding path, deliberately: both are "the
+        # advisory's cosine sweep", and a diagnosis wants to compare them. What
+        # separates them is the fields -- this one reports `texts=0`, because
+        # it encodes nothing and reuses vectors the embedding pass published.
+        with call_spans.span("advisory.best_cosine", {}) as measured:
+            rows = list(vectors)
+            if measured is not None:
+                measured["texts"] = 0
+                measured["vectors"] = len(rows)
+            if not rows:
+                return {}
+            idx = embeddings.get_embedding_index(vault_root)
+            self_canon = _canon(self_path) if self_path else None
+            best_per_file: dict[str, float] = {}
+            # The same scoring and eligibility as the inline sweep, so a
+            # deferred advisory ranks exactly what the synchronous one would.
+            admits = _index_admitter(vault_root)
+            for hits in idx.search_many(rows, k, admits=admits):
+                for fp, _cidx, score in hits:
+                    if self_canon and _canon(fp) == self_canon:
+                        continue
+                    if fp not in best_per_file or score > best_per_file[fp]:
+                        best_per_file[fp] = score
+            return best_per_file
     except ImportError as e:
         log.debug("best_cosine_per_file_for_vectors unavailable (%s)", e)
         return {}

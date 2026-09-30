@@ -33,7 +33,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from . import call_spans
+from . import call_spans, request_budget
 from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
@@ -46,6 +46,7 @@ from .mutation_lock import (
 from .mutation_lock import _release_os_lock as _release_owner_lock
 from .mutation_lock import _try_os_lock as _try_owner_lock
 from .mutation_terminal import (
+    _DERIVED_COMPONENT_NAMES,
     ResponseDetail,
     committed_terminal,
     needs_review_terminal,
@@ -169,6 +170,21 @@ _IDEMPOTENCY_ABANDONED_RETRY_AFTER_SECONDS = 60.0
 # probe; it is honored under the pre-existing any-pending-blocks-forever
 # rule for this long before it is classified as an unknown outcome.
 _IDEMPOTENCY_LEGACY_OWNER_GRACE_SECONDS = 600.0
+#: How many non-terminal receipt rows one process start may examine.
+#:
+#: `_prune_expired` removes only terminal rows and `_abandon_if_dead` runs only
+#: when the identical identity is retried, so a `pending`/`reserved` row left
+#: by a process that died had no resolver at all. The sweep below is that
+#: resolver, and this is its per-start budget: it runs once at the end of
+#: `IdempotencyStore.__init__` under its own `BEGIN IMMEDIATE`, and each
+#: examined row costs one owner-lock probe (open, try-lock, close) plus at most
+#: one UPDATE while that write transaction is open -- so an unbounded scan
+#: would hold the store's write lock, on the critical path of every process
+#: start, for as long as a pathological store is large. 64 clears the
+#: thirteen-row backlog measured on the personal cell with five times the
+#: headroom; anything past it is drained by the next start and stays visible in
+#: `oldest_pending_age_seconds`, which this never resets.
+_IDEMPOTENCY_START_SWEEP_LIMIT = 64
 _OUTCOME_UNKNOWN_TERMINAL = ("exomem.outcome-unknown", 1)
 _OUTCOME_UNKNOWN_PAYLOAD = pickle.dumps(_OUTCOME_UNKNOWN_TERMINAL)
 _WINDOWS_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
@@ -203,6 +219,42 @@ _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = Conte
 
 _FAST_ACK_DEADLINE_SECONDS = 2.0
 
+#: PROVISIONAL. The single-origin request budget the write-path resilience
+#: contract assumes (60s), and the slice reserved for shaping and delivering
+#: the terminal once the acknowledgement is done. The derived acknowledgement
+#: now runs *after* the terminal is durable, so the only thing it can still
+#: cost the caller is the response: bound it by what is left of the request
+#: rather than letting a slow index or graph fan-out spend the whole budget on
+#: work whose outcome is already recorded as `pending`. One definition, in one
+#: module, so the pair cannot drift apart. Revisited by the latency change.
+_MUTATION_REQUEST_BUDGET_SECONDS = 60.0
+_TERMINAL_DELIVERY_RESERVE_SECONDS = 5.0
+
+
+def acknowledgement_budget_deadline(entry: float | None = None) -> float:
+    """When the derived acknowledgement must stop waiting, on the monotonic clock.
+
+    Two bounds, and the earlier one wins. The entry-based value is the lease's
+    own: measured from the moment this mutation entered, it keeps a mutation
+    that arrived on a long-lived connection from waiting forever. The request
+    budget's is the connector's: the origin has to have delivered a terminal
+    before the client stops listening, so the wait ends a fixed delivery
+    reserve before the request deadline itself.
+
+    This bounds only the *wait*. A canonical commit already under way is never
+    interrupted by either bound; what expiry changes is that the terminal is
+    reported with `derived_sync` still pending, rather than held back until
+    everything derived has been proven.
+    """
+    started = _fast_ack_monotonic() if entry is None else float(entry)
+    deadline = (
+        started + _MUTATION_REQUEST_BUDGET_SECONDS - _TERMINAL_DELIVERY_RESERVE_SECONDS
+    )
+    budget = request_budget.current()
+    if budget is None:
+        return deadline
+    return min(deadline, budget.deadline - request_budget.DELIVERY_RESERVE_SECONDS)
+
 
 def _publish_pending_visibility(vault_root: Path, receipt: Any) -> bool:
     """The production callee behind the frozen pending-visibility seam.
@@ -231,6 +283,9 @@ class _FastAcknowledgementBatch:
     receipt: Any
     canonical_commit_monotonic: float
     advisory_target: str | None = None
+    #: The route's own sweep inputs, when the leaf declared them for this
+    #: batch's advisory target (`declare_write_advisory`).
+    advisory_inputs: Any | None = None
 
 
 @dataclass(slots=True)
@@ -248,12 +303,182 @@ class _FastAcknowledgementSession:
     #: prepared batch that rolls back must leave the claim for its successor.
     advisory_claimed: bool = False
     advisory_prepared_target: str | None = None
+    advisory_prepared_inputs: Any | None = None
     batches: list[_FastAcknowledgementBatch] = field(default_factory=list)
 
 
 _ACTIVE_FAST_ACK_SESSION: ContextVar[_FastAcknowledgementSession | None] = ContextVar(
     "exomem_active_fast_ack_session", default=None
 )
+
+#: Derived work a leaf moved out of its own critical section, to be run once
+#: this mutation's terminal is durable. The queue is a plain list owned by
+#: `invoke` and bound for the leaf through this variable, the same way the
+#: fast-acknowledgement session is: the leaf appends, `invoke` drains at the
+#: position the acknowledgement occupies, and a leaf running outside any
+#: mutation sees no queue at all and keeps doing the work itself.
+_ACTIVE_POST_TERMINAL_FANOUT: ContextVar[list[Any] | None] = ContextVar(
+    "exomem_active_post_terminal_fanout", default=None
+)
+
+
+def defer_until_terminal_persisted(work: Callable[[], list[object]]) -> bool:
+    """Queue `work` to run after this mutation's terminal is persisted.
+
+    Returns False when there is no mutation to defer to — a CLI caller, a
+    watcher, a direct test — so the caller keeps doing the work inline rather
+    than dropping it. Silence is the one answer this must never give.
+    """
+    queue = _ACTIVE_POST_TERMINAL_FANOUT.get()
+    if queue is None:
+        return False
+    queue.append(work)
+    return True
+
+
+def _drain_post_terminal_fanout(queue: list[Any]) -> tuple[list[Any], bool]:
+    """Run every deferred item once, in order, swallowing failures.
+
+    The canonical write is already durable and its terminal already persisted
+    by the time this runs. Derived work that fails here leaves the index behind
+    the vault, which the deferred-refresh record and `derived_sync` exist to
+    report — it must never turn a committed mutation into an error the caller
+    would retry.
+    """
+    reports: list[Any] = []
+    failed = False
+    while queue:
+        work = queue.pop(0)
+        try:
+            outcome = work()
+            if isinstance(outcome, list):
+                reports.extend(outcome)
+        except Exception:  # noqa: BLE001 - the canonical terminal is durable
+            failed = True
+            logger.warning(
+                "post-terminal derived fan-out failed; index refresh is behind",
+                exc_info=True,
+            )
+    return reports, failed
+
+
+#: Housekeeping a leaf moved out of its own critical section, to be run once
+#: this mutation's terminal is durable -- the same deferral `_ACTIVE_
+#: POST_TERMINAL_FANOUT` gives derived-index work, but for a registrant that
+#: reports nothing about derived custody. Kept as a SEPARATE queue on purpose:
+#: `post_terminal_fanout`'s mere non-emptiness is read in several places as
+#: "real derived-index work is outstanding for this write" (whether to mark
+#: the terminal `derived_sync: "pending"`, whether an acknowledgement is
+#: owed). A housekeeping registrant sharing that queue would make every one
+#: of those reads wrong for every write it touches, not just its own
+#: response (review: merge fallout -- heat's commit-seam append did exactly
+#: this by reusing `defer_until_terminal_persisted`).
+_ACTIVE_POST_TERMINAL_HOUSEKEEPING: ContextVar[list[Callable[[], None]] | None] = ContextVar(
+    "exomem_active_post_terminal_housekeeping", default=None
+)
+
+
+def defer_housekeeping_until_terminal_persisted(work: Callable[[], None]) -> bool:
+    """Queue `work` to run after this mutation's terminal is persisted.
+
+    For housekeeping with no derived-custody implications -- nothing here
+    ever marks a terminal `derived_sync: "pending"` or wraps it in derived-
+    acknowledgement diagnostics, unlike `defer_until_terminal_persisted`.
+    Returns False exactly as that function does: no mutation to defer to (a
+    CLI caller, a watcher, a direct test), so the caller does the work inline.
+    """
+    queue = _ACTIVE_POST_TERMINAL_HOUSEKEEPING.get()
+    if queue is None:
+        return False
+    queue.append(work)
+    return True
+
+
+def _drain_post_terminal_housekeeping(queue: list[Callable[[], None]]) -> None:
+    """Run every deferred housekeeping item once, in order, swallowing failures."""
+    while queue:
+        work = queue.pop(0)
+        try:
+            work()
+        except Exception:  # noqa: BLE001 - the canonical terminal is already durable
+            logger.warning("post-terminal housekeeping failed", exc_info=True)
+
+
+def _with_post_terminal_fanout_acknowledgement(
+    result: Any, reports: list[Any], *, drain_failed: bool
+) -> Any:
+    """Project observed non-graph media fan-out into the durable terminal.
+
+    A no-op when nothing was actually drained. `post_terminal_fanout` is a
+    shared queue of deferred CALLABLES, not derived-index reports: a
+    registrant that has nothing to report about derived custody -- heat's own
+    commit-seam append (`working_set_heat.persist_commit`) queues one on
+    every governed write and its callable always returns `[]` -- must never
+    dress an ordinary write up with `derived_sync`/`advisory_sync`/nested
+    `diagnostics` fields that promise custody tracking nothing here actually
+    performed. Only media's real fan-out ever returns a non-empty report list
+    (review: merge fallout -- heat's registrant made this run unconditionally
+    on every write once it started sharing the queue)."""
+    if not isinstance(result, Mapping) or result.get("state") != "committed":
+        return result
+    if not reports and not drain_failed:
+        return result
+
+    from . import index_sync
+
+    component_outcomes: dict[str, tuple[str, str | None]] = {}
+    diagnostics: list[dict[str, str | None]] = []
+    for report in reports:
+        if not isinstance(report, index_sync.IndexSyncReport):
+            drain_failed = True
+            continue
+        for component in report.components:
+            diagnostics.append(
+                {
+                    "component": component.component,
+                    "state": component.outcome,
+                    "code": component.code,
+                }
+            )
+            if component.component not in _DERIVED_COMPONENT_NAMES:
+                continue
+            if component.outcome in {"failed", "degraded"}:
+                outcome = "failed"
+            elif component.outcome in {"registered", "deferred"}:
+                outcome = "pending"
+            elif component.outcome == "accepted" and component.code not in {
+                "embeddings_disabled",
+                "no_eligible_paths",
+            }:
+                outcome = "pending"
+            else:
+                outcome = "completed"
+            previous = component_outcomes.get(component.component)
+            if previous is None or {"completed": 0, "pending": 1, "failed": 2}[
+                outcome
+            ] > {"completed": 0, "pending": 1, "failed": 2}[previous[0]]:
+                component_outcomes[component.component] = (outcome, component.code)
+
+    states = {outcome for outcome, _code in component_outcomes.values()}
+    derived_sync = (
+        "failed"
+        if drain_failed or "failed" in states
+        else "pending"
+        if "pending" in states
+        else "completed"
+    )
+    unfinished = tuple(
+        component
+        for component, (outcome, _code) in component_outcomes.items()
+        if outcome != "completed"
+    )
+    return with_fast_acknowledgement(
+        result,
+        derived_sync=derived_sync,
+        derived_sync_components=unfinished,
+        component_diagnostics=diagnostics,
+        advisory_sync="not_required",
+    )
 
 
 def _fast_ack_enabled() -> bool:
@@ -289,6 +514,54 @@ def active_derived_batch_custody(vault_root: Path) -> bool:
     session = _ACTIVE_FAST_ACK_SESSION.get()
     return session is not None and _fast_ack_root_key(vault_root) == _fast_ack_root_key(
         session.vault_root
+    )
+
+
+#: What the running leaf declared about its default duplicate/overlap sweep:
+#: unset (the leaf declared nothing), ``None`` (the leaf's write has no sweep),
+#: or the route's exact `corpus_aware.WriteAdvisoryInputs`.
+_UNDECLARED: Any = object()
+_DECLARED_WRITE_ADVISORY: ContextVar[Any] = ContextVar(
+    "exomem_declared_write_advisory", default=_UNDECLARED
+)
+
+
+@contextmanager
+def declare_write_advisory(inputs: Any | None) -> Iterator[None]:
+    """Declare, around a leaf's canonical commit, what its default sweep reads.
+
+    A route that sweeps inline passes its exact inputs; under fast
+    acknowledgement the committed batch then hands them to its `write_advisory`
+    component, which runs the same sweep over them, and the leaf skips its own.
+    ``None`` declares that this write has no default sweep, so the batch takes
+    no advisory custody at all. A leaf that declares nothing keeps the
+    component's generic behaviour.
+    """
+    token = _DECLARED_WRITE_ADVISORY.set(inputs)
+    try:
+        yield
+    finally:
+        _DECLARED_WRITE_ADVISORY.reset(token)
+
+
+def write_advisory_deferred(vault_root: Path, inputs: Any) -> bool:
+    """Whether a committed batch of this session carries exactly these inputs.
+
+    True only under fast acknowledgement, for this exact vault, when a batch
+    this mutation committed holds the session's advisory custody together with
+    the very inputs the leaf declared. The leaf then skips its inline sweep:
+    the component runs it and the terminal carries its result reference.
+    Anything else -- no session, a claim released to a later batch, other
+    inputs -- keeps the inline sweep.
+    """
+    session = _ACTIVE_FAST_ACK_SESSION.get()
+    if session is None or not session.advisory_claimed:
+        return False
+    if _fast_ack_root_key(vault_root) != _fast_ack_root_key(session.vault_root):
+        return False
+    return any(
+        batch.advisory_target is not None and batch.advisory_inputs is inputs
+        for batch in session.batches
     )
 
 
@@ -401,6 +674,17 @@ def prepare_active_derived_batch(
         _release_superseded_advisory_claim(session, paths)
     advisory_target: str | None = None
     advisory_fingerprint: str | None = None
+    declared = _DECLARED_WRITE_ADVISORY.get()
+    advisory_inputs = None
+    if declared is None:
+        # The leaf's write has no default sweep: nothing to defer.
+        advisory_target_rel_path = None
+    elif declared is not _UNDECLARED:
+        if getattr(declared, "target_rel_path", None) == advisory_target_rel_path:
+            advisory_inputs = declared
+        else:
+            # The batch is not about the page the leaf's sweep reads.
+            advisory_target_rel_path = None
     if (
         session.advisory_required
         and not session.advisory_claimed
@@ -418,6 +702,9 @@ def prepare_active_derived_batch(
             advisory_target = advisory_target_rel_path
             advisory_fingerprint = after_hash
     session.advisory_prepared_target = advisory_target
+    session.advisory_prepared_inputs = (
+        advisory_inputs if advisory_target is not None else None
+    )
     required_components = set(derived_receipts.DerivedComponent)
     if advisory_target is None:
         required_components.remove(derived_receipts.DerivedComponent.WRITE_ADVISORY)
@@ -452,18 +739,27 @@ def complete_active_derived_batch(
     if session is None:
         raise RuntimeError("derived receipt committed outside its acknowledgement session")
     advisory_target = session.advisory_prepared_target
+    advisory_inputs = session.advisory_prepared_inputs
     session.advisory_prepared_target = None
+    session.advisory_prepared_inputs = None
     if advisory_target is not None:
         # The canonical batch is known committed, so this is the point the
         # session's one advisory job becomes real. A batch that prepared a
         # target and then rolled back never reaches here and leaves the claim
         # available to the next governed batch in the same mutation.
         session.advisory_claimed = True
+        if advisory_inputs is not None:
+            from . import advisory_handoff
+
+            advisory_handoff.register_route_inputs(
+                session.vault_root, receipt.batch_id, advisory_inputs
+            )
     session.batches.append(
         _FastAcknowledgementBatch(
             receipt,
             float(canonical_commit_monotonic),
             advisory_target=advisory_target,
+            advisory_inputs=advisory_inputs if advisory_target is not None else None,
         )
     )
 
@@ -501,18 +797,84 @@ def _fast_ack_outcome(values: Iterable[str], *, not_required: bool = False) -> s
 def _acknowledge_derived_batches(
     result: Any,
     session: _FastAcknowledgementSession,
+    *,
+    budget_deadline: float | None = None,
 ) -> Any:
     """Prove, publish, signal and freeze one post-canonical status snapshot."""
     if not session.batches:
         return result
     with call_spans.span("derived.acknowledgement"):
-        return _acknowledge_derived_batches_timed(result, session)
+        return _acknowledge_derived_batches_timed(
+            result, session, budget_deadline=budget_deadline
+        )
+
+
+_CLOSED_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_CLOSED_TOKEN = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _content_free_cause(error: BaseException, **fields: str | None) -> str:
+    """One log fragment naming a failure without any vault content.
+
+    The exception class and, when it carries one, a closed upper-case code; then
+    each named field, kept only when it is a closed lower-case token. Messages,
+    paths and argument values never appear.
+    """
+    code = getattr(error, "code", None)
+    parts = [f"class={type(error).__name__}"]
+    if isinstance(code, str) and _CLOSED_CODE.fullmatch(code):
+        parts.append(f"code={code}")
+    for name, value in fields.items():
+        if isinstance(value, str) and _CLOSED_TOKEN.fullmatch(value):
+            parts.append(f"{name}={value}")
+    return " ".join(parts)
+
+
+def _acknowledgement_component_names() -> tuple[str, ...]:
+    """The derived components one acknowledgement is answerable for.
+
+    `graph` and `write_advisory` carry their own terminal fields and are not
+    part of `derived_sync_components`; the compact projection validates against
+    the same closed set, so a name outside it would simply be dropped.
+    """
+    from . import derived_receipts
+
+    return tuple(
+        sorted(
+            component.value
+            for component in derived_receipts.DerivedComponent
+            if component.value in _DERIVED_COMPONENT_NAMES
+        )
+    )
 
 
 def _acknowledge_derived_batches_timed(
     result: Any,
     session: _FastAcknowledgementSession,
+    *,
+    budget_deadline: float | None = None,
 ) -> Any:
+    # What this acknowledgement still owes, per batch: a component that batch 1
+    # completed says nothing about batch 2's, so one shared set would under-report
+    # a multi-batch mutation. A failure before any status is read owes the whole
+    # set, which is the honest answer -- nothing about them was proven.
+    owed: dict[str, set[str]] = {}
+    # Where the acknowledgement was when it failed, for a content-free log:
+    # closed stage names, a component name and a proof outcome, never a path.
+    where: dict[str, str | None] = {"stage": "setup", "component": None, "outcome": None}
+
+    def still_owed() -> tuple[str, ...] | None:
+        """What is owed, or None when no batch was examined at all.
+
+        `None` and `()` are different answers and the caller treats them so:
+        nothing examined means nothing is known, and the honest report is the
+        whole applicable set; an examined batch that owes nothing reports
+        exactly that.
+        """
+        if not owed:
+            return None
+        return tuple(sorted(set().union(*owed.values())))
+
     try:
         from . import derived_receipts, index_sync
 
@@ -522,6 +884,8 @@ def _acknowledge_derived_batches_timed(
             min(batch.canonical_commit_monotonic for batch in session.batches)
             + _FAST_ACK_DEADLINE_SECONDS
         )
+        if budget_deadline is not None:
+            deadline = min(deadline, budget_deadline)
         # Prove and publish newest first. An older batch is superseded only once
         # the newer batch covering it holds live pending custody, and when both
         # batches belong to one mutation the newer one is published by this same
@@ -537,12 +901,14 @@ def _acknowledge_derived_batches_timed(
                 _current_canonical_generation(session.vault_root)
                 or receipt.canonical_generation
             )
+            where.update(stage="receipt_proof", component=None, outcome=None)
             with call_spans.span("derived.receipt_proof"):
                 proof = derived_receipts.prove_committed(
                     session.vault_root,
                     receipt,
                     current_generation=observed_generation,
                 )
+            where["outcome"] = proof.outcome
             if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
                 raise RuntimeError("derived receipt proof does not match this batch")
             if proof.outcome == "superseded":
@@ -556,6 +922,7 @@ def _acknowledge_derived_batches_timed(
                 raise RuntimeError(
                     "derived receipt did not prove the committed generation"
                 )
+            where["stage"] = "pending_visibility"
             with call_spans.span("derived.pending_visibility"):
                 published = derived_receipts.publish_pending_visibility(
                     session.vault_root,
@@ -564,13 +931,19 @@ def _acknowledge_derived_batches_timed(
                 )
             if not published:
                 raise RuntimeError("pending visibility publication was not proven")
+            where["stage"] = "signal"
             derived_receipts.signal_components(session.vault_root, receipt)
 
         for batch in session.batches:
             receipt = batch.receipt
             superseded = receipt.batch_id in superseded_batches
+            # A superseded batch owes nothing: the newer batch that covers it
+            # owns its convergence.
+            batch_owed = set() if superseded else set(_acknowledgement_component_names())
+            owed[receipt.batch_id] = batch_owed
             statuses = []
             for component in derived_receipts.DerivedComponent:
+                where.update(stage="component_status", component=component.value)
                 status = derived_receipts.component_status(
                     session.vault_root, receipt, component
                 )
@@ -582,12 +955,15 @@ def _acknowledge_derived_batches_timed(
                     statuses.append(status)
                     continue
                 if status.state == "claimed":
+                    where["stage"] = "component_wait"
                     status = _wait_for_derived_component(
                         session.vault_root,
                         receipt,
                         status,
                         deadline_monotonic=deadline,
                     )
+                if status.state in {"completed", "not_required"}:
+                    batch_owed.discard(str(component.value))
                 statuses.append(status)
             if superseded:
                 # The newer batch that superseded this one owns both the
@@ -654,14 +1030,122 @@ def _acknowledge_derived_batches_timed(
     except _PostCommitOutcomeUncertain:
         raise
     except Exception as error:
-        # Name the class only -- never the message, which can carry a path.
-        # Without it a projection defect is indistinguishable from a storage
-        # failure in the caller's committed-uncertain terminal.
+        # Content-free cause (owner ruling R4): the exception class, a closed
+        # code, the stage, the component and the proof outcome -- never the
+        # message, which can carry a path. The caller's terminal names the
+        # derived components owed.
         logger.warning(
-            "fast acknowledgement failed; returning committed-uncertain (%s)",
-            type(error).__name__,
+            "fast acknowledgement failed; the persisted terminal degrades to "
+            "derived_sync=pending (%s)",
+            _content_free_cause(error, **where),
         )
-        raise _PostCommitOutcomeUncertain() from error
+        uncertain = _PostCommitOutcomeUncertain()
+        uncertain.derived_components = still_owed()
+        uncertain.advisory_result_ref = _claimed_advisory_ref(session)
+        raise uncertain from error
+
+
+def _claimed_advisory_ref(session: _FastAcknowledgementSession) -> str | None:
+    """The stable result ref for an advisory job this session already claimed.
+
+    The claim is taken at the committed handoff and retained, so a failed
+    acknowledgement leaves a real job behind. Reporting the advisory as pending
+    without its ref would leave the caller holding a job it cannot ask about.
+    """
+    if not session.advisory_claimed:
+        return None
+    try:
+        from . import derived_receipts
+
+        for batch in reversed(session.batches):
+            if batch.advisory_target is None:
+                continue
+            ref = derived_receipts.advisory_result_ref(session.vault_root, batch.receipt)
+            if isinstance(ref, str) and ref:
+                return ref
+    except Exception:  # noqa: BLE001 - a committed terminal never depends on this probe
+        return None
+    return None
+
+
+#: The one warning a lost acknowledgement adds to an already-persisted success
+#: terminal. Names the derived components and nothing else: a failure message
+#: can carry a vault path, and this string reaches the client.
+_DERIVED_ACKNOWLEDGEMENT_PENDING_WARNING = (
+    "derived state acknowledgement did not complete ({components}); "
+    "derived state reconciles behind this committed write"
+)
+
+
+def _awaiting_derived_acknowledgement(result: Any) -> Any:
+    """Mark a terminal that is durable but whose acknowledgement has not run.
+
+    No components and no warning: nothing has failed yet, and the only claim
+    being made is that derived state is not proven current at this instant.
+    """
+    if not isinstance(result, Mapping) or result.get("state") != "committed":
+        return result
+    if result.get("derived_sync") is not None:
+        return result
+    return {**result, "derived_sync": "pending"}
+
+
+def _derived_acknowledgement_pending(result: Any, error: BaseException) -> Any:
+    """Project a lost derived acknowledgement into a persisted success terminal.
+
+    The commit is proven and the terminal is durable, so the honest report is a
+    success whose derived custody has not caught up -- not the committed-uncertain
+    error, which the contract reserves for a terminal that could not be persisted
+    at all.
+
+    `derived_sync_components` is how this reaches a compact client: compact
+    carries the envelope fields and deliberately drops free-text warnings for
+    artifact receipts, so the components have to travel in the field, not in
+    the sentence.
+    """
+    if not isinstance(result, Mapping) or result.get("state") != "committed":
+        return result
+    reported = getattr(error, "derived_components", None)
+    # `None` is "nothing known", which owes the whole set; an empty tuple is an
+    # examined acknowledgement that owes nothing, and is left empty.
+    components = _acknowledgement_component_names() if reported is None else tuple(reported)
+    components = tuple(sorted({name for name in components if name in _DERIVED_COMPONENT_NAMES}))
+    warning = _DERIVED_ACKNOWLEDGEMENT_PENDING_WARNING.format(
+        components=", ".join(components) if components else "derived state"
+    )
+    terminal = dict(result)
+    terminal["derived_sync"] = "pending"
+    if components:
+        terminal["derived_sync_components"] = list(components)
+    terminal.pop("derived_sync_code", None)
+    terminal.pop("derived_sync_next_action", None)
+    # The advisory job was claimed with retention before the acknowledgement
+    # ran, so it outlives the failure. Say so, with the ref that can be asked
+    # about; say nothing at all rather than assert `not_required` for a job
+    # whose ref could not be resolved.
+    advisory_ref = getattr(error, "advisory_result_ref", None)
+    if isinstance(advisory_ref, str) and advisory_ref.startswith(
+        "exomem://write-advisory-result/"
+    ):
+        terminal["advisory_sync"] = "pending"
+        terminal["advisory_result_ref"] = advisory_ref
+        terminal.pop("advisory_sync_code", None)
+        terminal.pop("advisory_sync_next_action", None)
+    leaf = terminal.get("leaf_result")
+    if isinstance(leaf, Mapping):
+        existing = leaf.get("warnings")
+        if isinstance(existing, (list, tuple)):
+            warnings = [*existing, warning]
+        elif existing:
+            warnings = [existing, warning]
+        else:
+            warnings = [warning]
+        terminal["leaf_result"] = {**leaf, "warnings": warnings}
+    count = terminal.get("warnings_count")
+    terminal["warnings_count"] = (
+        count if isinstance(count, int) and not isinstance(count, bool) else 0
+    ) + 1
+    return terminal
 
 
 def _direct_mutation_boundary(
@@ -676,6 +1160,14 @@ def _direct_mutation_boundary(
         canonical_mutation_identity(root),
         state_root.expanduser().resolve(strict=False),
     )
+
+
+def _carries_graph_rebuild_handoff(result: Any) -> bool:
+    """Whether this result still holds an unfinalized graph-rebuild handoff."""
+    if not isinstance(result, Mapping):
+        return False
+    leaf = result.get("leaf_result", result)
+    return isinstance(leaf, Mapping) and isinstance(leaf.get("_graph_rebuild_handoff"), Mapping)
 
 
 def _durable_graph_outcome(vault_root: Path) -> Any:
@@ -795,6 +1287,14 @@ class _PostCommitOutcomeUncertain(OpError):
     """Sanitized terminal state for an unexpected exception after canonical commit."""
 
     committed = True
+    #: Derived components this acknowledgement could not prove, when it is the
+    #: acknowledgement that failed. `None` means nothing is known about them --
+    #: a terminal-persistence failure, or a failure before any batch was read --
+    #: while an empty tuple means a batch was read and owes nothing.
+    derived_components: tuple[str, ...] | None = None
+    #: The claimed advisory job that outlives a failed acknowledgement, if one
+    #: was claimed and its stable result ref could be resolved.
+    advisory_result_ref: str | None = None
 
     def __init__(self) -> None:
         super().__init__(
@@ -1855,6 +2355,22 @@ def _probe_owner_liveness(state_dir: Path, owner: str) -> bool:
     return False
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """A connection whose `with` block commits or rolls back, then closes.
+
+    The stock `with conn:` only ends the transaction and leaves the handle to
+    the collector. A leaked handle keeps the WAL sidecars alive until some
+    later GC pass closes it, so the state directory changes at an arbitrary
+    moment after the store was last used.
+    """
+
+    def __exit__(self, exc_type, exc, traceback):  # noqa: ANN001
+        try:
+            return super().__exit__(exc_type, exc, traceback)
+        finally:
+            self.close()
+
+
 class IdempotencyStore:
     """Durable per-replica retry cache, deliberately outside the synced vault."""
 
@@ -1890,6 +2406,15 @@ class IdempotencyStore:
         )
         self._condition = threading.Condition()
         self._attempts: dict[str, _ExecutionAttempt] = {}
+        # Replaced at the end of a successful construction. An inert store --
+        # one whose runtime root failed validation -- never sweeps, and says so.
+        self.start_sweep: dict[str, Any] = {
+            "ran": False,
+            "examined": 0,
+            "resolved": 0,
+            "retained": 0,
+            "limit_reached": False,
+        }
         self.owner_id: str | None = None
         state_dir_existed = path.parent.exists()
         owners_dir = _owner_lock_path(path.parent, "bootstrap").parent
@@ -1965,6 +2490,92 @@ class IdempotencyStore:
                 if item.exists() and item not in preexisting_private_paths:
                     os.chmod(item, 0o600)
         self._ensure_private_runtime_state()
+        self.start_sweep = self._sweep_dead_non_terminal_rows()
+
+    def _sweep_dead_non_terminal_rows(self) -> dict[str, Any]:
+        """Resolve `pending`/`reserved` rows whose owner is provably dead.
+
+        Every other resolver for a non-terminal row needs the identical
+        identity to be retried. A client that never retries therefore leaves
+        its row behind forever, which is how a live cell reached thirteen
+        pending receipts with the oldest fourteen days old.
+
+        `executing` is DELIBERATELY EXCLUDED. Only the retry path can supply
+        `commit_evidence`, and only with it can `_abandon_if_dead` promote a
+        dead-owner `executing` row to `canonically_committed` and replay its
+        terminal. A sweep has no such evidence to offer, so it would resolve
+        exactly those rows to `completed` + `_OUTCOME_UNKNOWN_PAYLOAD` --
+        destroying recoverable proof of a commit whose process died before
+        persisting its terminal, and then telling the caller to resend under a
+        new key, duplicating a write that already landed. The cost of leaving
+        one is a row that waits for its retry, which is what it did before;
+        the cost of reaping one is a duplicated committed mutation.
+
+        What remains cannot carry that evidence. A `reserved` row provably
+        predates any leaf, so `_abandon_if_dead` reclaims it by deletion. A
+        `pending` row is the legacy/ownerless class, whose branch never
+        consults evidence at all. For both states the sweep's outcome is
+        therefore identical to an on-demand abandonment's, evidence or not --
+        it only stops requiring a retry to trigger it.
+
+        The liveness probe stays fail-closed either way: an owner whose lock is
+        held, or whose liveness cannot be determined, counts as ALIVE and its
+        row is left exactly as it was.
+
+        Returns content-free counts for `coordination_status`/`doctor`: how
+        many rows were examined, resolved and retained, and whether the budget
+        was exhausted (so more may remain). Never a key, digest, or result.
+        """
+        examined = 0
+        resolved = 0
+        retained = 0
+        limit_reached = False
+        try:
+            now = self.clock()
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(
+                    "SELECT key, digest, state, result, updated_at, owner, attempt_id, "
+                    "commit_token, commit_secret FROM mutations "
+                    "WHERE state IN ('pending', 'reserved') "
+                    "ORDER BY updated_at ASC LIMIT ?",
+                    (_IDEMPOTENCY_START_SWEEP_LIMIT,),
+                ).fetchall()
+                limit_reached = len(rows) >= _IDEMPOTENCY_START_SWEEP_LIMIT
+                for row in rows:
+                    examined += 1
+                    disposition = self._abandon_if_dead(conn, row[0], row[1:], now)
+                    if disposition is None or disposition[1] not in {
+                        "pending",
+                        "reserved",
+                    }:
+                        resolved += 1
+                    else:
+                        retained += 1
+        except Exception:  # noqa: BLE001 - a store that cannot be swept still opens
+            logger.warning("idempotency start sweep did not complete", exc_info=True)
+            return {
+                "ran": False,
+                "examined": examined,
+                "resolved": resolved,
+                "retained": retained,
+                "limit_reached": limit_reached,
+            }
+        if resolved:
+            _log_mutation_event(
+                "start_sweep",
+                level=logging.WARNING,
+                examined=examined,
+                resolved=resolved,
+                retained=retained,
+            )
+        return {
+            "ran": True,
+            "examined": examined,
+            "resolved": resolved,
+            "retained": retained,
+            "limit_reached": limit_reached,
+        }
 
     def _ensure_private_runtime_state(self) -> None:
         """Secrets require a local owner-only state directory; never repair one."""
@@ -2090,7 +2701,7 @@ class IdempotencyStore:
             self.path.with_name(f"{self.path.name}-shm"),
         )
         existed = {item for item in private_paths if item.exists()}
-        conn = sqlite3.connect(self.path, timeout=10)
+        conn = sqlite3.connect(self.path, timeout=10, factory=_ClosingConnection)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             if os.name == "nt":
@@ -2173,6 +2784,8 @@ class IdempotencyStore:
         commit_observed=None,  # noqa: ANN001
         after_canonical_persisted=None,  # noqa: ANN001
         after_operation_guard=None,  # noqa: ANN001
+        after_terminal_acknowledgement=None,  # noqa: ANN001
+        acknowledgement_expected=None,  # noqa: ANN001
         resume_canonically_committed=None,  # noqa: ANN001
         commit_evidence=None,  # noqa: ANN001
         legacy_graph_pending_proof=None,  # noqa: ANN001
@@ -2180,7 +2793,17 @@ class IdempotencyStore:
         if not key:
             with operation_guard() if operation_guard is not None else nullcontext():
                 result = operation()
-            return after_operation_guard(result) if after_operation_guard is not None else result
+            if after_operation_guard is not None:
+                result = after_operation_guard(result)
+            if after_terminal_acknowledgement is None:
+                return result
+            # No replay identity, so no terminal to persist -- but a committed
+            # write must not be reported as uncertain because derived work
+            # failed, so the same degradation applies.
+            try:
+                return after_terminal_acknowledgement(result)
+            except _PostCommitOutcomeUncertain as acknowledgement_error:
+                return _derived_acknowledgement_pending(result, acknowledgement_error)
 
         while True:
             disposition, stored = self._claim_or_inspect(
@@ -2313,11 +2936,22 @@ class IdempotencyStore:
             # The attempt lock is released only after the canonical handoff;
             # derived graph work is deliberately not owned by it.
             self._release_attempt(key, attempt)
+            # Work whose terminal *is* the derived state -- a graph-rebuild
+            # handoff -- stays here, before persistence: a `completed` row must
+            # never hold unfinished operation-completion work, or a crash in
+            # the window replays a terminal that says the rebuild is cleared
+            # while the graph is still quarantined. The composition site binds
+            # a command's guard to this hook or to the post-persistence one.
             if after_operation_guard is None:
                 terminal_result = result
             else:
                 terminal_result = after_operation_guard(result)
             if committed_handoff:
+                # A committed *failure* has no success terminal to protect, so
+                # its derived work still runs before the failure terminal
+                # replaces the canonical row.
+                if after_terminal_acknowledgement is not None:
+                    after_terminal_acknowledgement(terminal_result)
                 assert committed_failure is not None
                 try:
                     self._persist_committed_failure(key, digest, committed_failure)
@@ -2328,6 +2962,19 @@ class IdempotencyStore:
                 self._after_terminal_persisted()
                 assert committed_error is not None
                 raise committed_error
+            # A terminal persisted before its acknowledgement has not proven
+            # any derived state, and the contract says such a terminal reads
+            # `pending`. Writing that first means the crash window and a failed
+            # `_advance_completed_terminal` both leave a row that says pending
+            # -- honest, and self-correcting through reconcile -- instead of a
+            # row that says nothing about derived state at all.
+            #
+            # Read after the leaf returned, like `commit_observed`: whether any
+            # derived work is owed is only known once the leaf has had its
+            # chance to register a batch. A commit that registers none owes
+            # nothing and must not be stamped pending forever.
+            if acknowledgement_expected is not None and acknowledgement_expected():
+                terminal_result = _awaiting_derived_acknowledgement(terminal_result)
             try:
                 terminal_result = self._persist_completed_from_canonical(
                     key, digest, terminal_result
@@ -2336,7 +2983,22 @@ class IdempotencyStore:
                 raise _PostCommitOutcomeUncertain() from storage_error
             self._notify_waiters()
             self._after_terminal_persisted()
-            return terminal_result
+            if after_terminal_acknowledgement is None:
+                return terminal_result
+            # The canonical terminal is durable BEFORE the derived-state
+            # acknowledgement runs. The ledger's `preserve_artifacts` rows are
+            # the other order: commit proven, acknowledgement lost, no terminal
+            # for the identity, and the client's same-identity retry resolved
+            # to the fail-closed outcome-unknown. Committed-uncertain is now
+            # reached only when persisting the terminal itself fails.
+            try:
+                acknowledged = after_terminal_acknowledgement(terminal_result)
+            except _PostCommitOutcomeUncertain as acknowledgement_error:
+                acknowledged = _derived_acknowledgement_pending(
+                    terminal_result, acknowledgement_error
+                )
+            self._advance_completed_terminal(key, digest, acknowledged)
+            return acknowledged
         except BaseException as error:
             # Ordinary, explicitly uncommitted leaf failures are safe to retry.
             # Abrupt exits and anything after the canonical commit point are
@@ -2819,6 +3481,20 @@ class IdempotencyStore:
     def _persist_canonically_committed(
         self, key: str, digest: str, result: Any, attempt: _ExecutionAttempt
     ) -> None:
+        # Closes the span opened when canonical bytes landed. Everything between
+        # the two is derived fan-out and terminal bookkeeping, and the 0.83.1
+        # deploy could not attribute ~32 s of it per write.
+        call_spans.record_span_since(
+            "derived.canonical_to_committed", "canonical_files_committed"
+        )
+        # The other half of that umbrella. `derived.fanout` is stamped in
+        # `vault` when the derived work returns; what is left is the terminal
+        # bookkeeping between the leaf returning and this row transitioning --
+        # the `after_canonical_persisted` hooks. Both spans close before the
+        # UPDATE below, so neither includes this row's own write. Measured at
+        # 0.4 s per write on 0.84.1, against 46 s inside the umbrella that had
+        # no span at all, so the split is what says which half to look in.
+        call_spans.record_span_since("derived.terminal_persist", "derived_fanout_complete")
         with self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE mutations SET state = 'canonically_committed', result = ?, owner = NULL, "
@@ -2855,6 +3531,23 @@ class IdempotencyStore:
                 return pickle.loads(row[0])  # noqa: S301 - trusted runtime state
         _log_mutation_event("terminal", receipt=_receipt_tag(key))
         return result
+
+    def _advance_completed_terminal(self, key: str, digest: str, result: Any) -> None:
+        """Refresh the persisted terminal with what the acknowledgement learned.
+
+        Best effort by construction. The terminal is already durable and already
+        correct; failing to advance it costs a reader one stale `derived_sync`
+        field, while raising here would put back the exact failure this ordering
+        removes -- a committed write reported as uncertain because a *derived*
+        step did not land.
+        """
+        try:
+            self._replace_completed(key, digest, result)
+        except Exception as error:  # noqa: BLE001 - the terminal is already durable
+            logger.warning(
+                "committed terminal kept its pre-acknowledgement projection (%s)",
+                type(error).__name__,
+            )
 
     def _replace_completed(self, key: str, digest: str, result: Any) -> None:
         """Advance a durably committed canonical terminal with derived progress."""
@@ -2987,9 +3680,17 @@ class IdempotencyStore:
                 "pending": len(pending_updated_at),
                 "abandoned": int(abandoned),
                 "oldest_pending_age_seconds": oldest_pending_age_seconds,
+                # What this process start already reaped, so a stale oldest-age
+                # can be read against it rather than mistaken for stalled work.
+                "start_sweep": dict(self.start_sweep),
             }
         except Exception:  # noqa: BLE001 - status must never break the caller
-            return {"pending": None, "abandoned": None, "oldest_pending_age_seconds": None}
+            return {
+                "pending": None,
+                "abandoned": None,
+                "oldest_pending_age_seconds": None,
+                "start_sweep": dict(self.start_sweep),
+            }
 
     @staticmethod
     def _reconciliation_error(subject: str) -> OpError:
@@ -3478,6 +4179,10 @@ class LeaseManager:
         mutation_request_id: str | None = None,
     ) -> Any:
         t_start = time.perf_counter()
+        # Same instant on the clock the acknowledgement's own deadlines use, so
+        # the two bounds are comparable without converting between them, and
+        # the earlier of the lease's own budget and the connector's.
+        acknowledgement_deadline = acknowledgement_budget_deadline()
         kwargs = _canonicalize_command_kwargs(kwargs)
         configured_response_detail = getattr(command, "response_detail", None)
         response_detail_default: ResponseDetail = (
@@ -3577,6 +4282,13 @@ class LeaseManager:
                 canonical_terminal=vocabulary_replay_terminal,
             )
         commit_state = {"observed": False}
+        # Derived work the leaf hands back rather than running inside its own
+        # guard. Drained by `idempotency.run`'s post-persistence acknowledgement
+        # hook, strictly after the terminal is durable.
+        post_terminal_fanout: list[Any] = []
+        # Housekeeping with no derived-custody implications, drained the same
+        # way but never read as a sign that acknowledgement is owed.
+        post_terminal_housekeeping: list[Callable[[], None]] = []
         fast_ack_session = (
             _FastAcknowledgementSession(
                 vault_root=receipt_vault_root,
@@ -3600,7 +4312,20 @@ class LeaseManager:
         )
         from . import readiness
 
-        if readiness.should_defer("semantic_corpus"):
+        # The graph handoff joins this gate for the reason the corpus is on it:
+        # a write admitted before its delta origin exists does not merely run
+        # slower, it registers a whole-vault rebuild for a lineage it could
+        # have adopted in the first seconds of the warm. Both refusals are the
+        # same retryable shape, and reads are untouched either way.
+        warming = next(
+            (
+                component
+                for component in ("graph_handoff", "semantic_corpus")
+                if readiness.should_defer(component)
+            ),
+            None,
+        )
+        if warming is not None:
             details: dict[str, Any] = {
                 "status": "retryable",
                 "committed": False,
@@ -3618,9 +4343,14 @@ class LeaseManager:
                 receipt=receipt or "none",
                 error="MUTATION_WARMING",
             )
+            details["warming_component"] = warming
             raise OpError(
                 "MUTATION_WARMING",
-                "semantic corpus warm-up is still in progress",
+                (
+                    "graph handoff warm-up is still in progress"
+                    if warming == "graph_handoff"
+                    else "semantic corpus warm-up is still in progress"
+                ),
                 "Retry the same mutation after warm-up completes.",
                 details=details,
             )
@@ -3638,6 +4368,10 @@ class LeaseManager:
                 if fast_ack_session is not None
                 else None
             )
+            post_terminal_token = _ACTIVE_POST_TERMINAL_FANOUT.set(post_terminal_fanout)
+            housekeeping_token = _ACTIVE_POST_TERMINAL_HOUSEKEEPING.set(
+                post_terminal_housekeeping
+            )
             try:
                 with operation_context(
                     receipt_vault_root,
@@ -3647,6 +4381,10 @@ class LeaseManager:
                     principal=effective_principal(),
                 ) as gate_context:
                     leaf_result = command.leaf(*injected, **kwargs)
+                    if vocabulary_binding is not None and not _ACTIVE_MUTATION_COMMITTED.get():
+                        from . import vocabulary_application
+
+                        vocabulary_application.refuse_identity_preparation(leaf_result)
                     if _ACTIVE_MUTATION_COMMITTED.get():
                         return attach_evidence(
                             committed_terminal(
@@ -3695,10 +4433,17 @@ class LeaseManager:
                     _ACTIVE_MUTATION_COMMITTED.get()
                     and getattr(error, "committed", None) is not True
                 ):
+                    logger.warning(
+                        "committed mutation raised after its canonical commit; the "
+                        "terminal is committed-uncertain (%s)",
+                        _content_free_cause(error, stage="post_commit_leaf"),
+                    )
                     raise _PostCommitOutcomeUncertain() from error
                 raise
             finally:
                 commit_state["observed"] = _ACTIVE_MUTATION_COMMITTED.get()
+                _ACTIVE_POST_TERMINAL_FANOUT.reset(post_terminal_token)
+                _ACTIVE_POST_TERMINAL_HOUSEKEEPING.reset(housekeeping_token)
                 if fast_ack_token is not None:
                     _ACTIVE_FAST_ACK_SESSION.reset(fast_ack_token)
                 _ACTIVE_LEASE_MANAGER.reset(manager_token)
@@ -3726,6 +4471,22 @@ class LeaseManager:
                 )
             return graph_sync.committed_graph_failure(checkpoint)
 
+        def joins_unbounded_graph(result: Any) -> bool:
+            """Whether this command's terminal *is* the derived graph state.
+
+            One predicate, two readers that must agree. `wait_for_graph_sync`
+            uses it to decide whether to join the rebuild flight unbounded, and
+            the composition below uses it to decide whether this command's
+            guard runs before or after terminal persistence -- because a
+            command that joins unbounded is exactly the one whose terminal
+            cannot be made durable until that join has finalized its handoff.
+            """
+            return (
+                command.name == "reconcile"
+                or (command.name == "maintain_memory" and kwargs.get("mode") == "reconcile")
+                or _carries_graph_rebuild_handoff(result)
+            )
+
         def wait_for_graph_sync(result: Any) -> Any:
             """Join derived graph work only after the canonical guard released."""
             terminal_result = (
@@ -3733,14 +4494,7 @@ class LeaseManager:
                 if isinstance(result, Mapping)
                 else result
             )
-            reconcile_leaf = (
-                terminal_result.get("leaf_result", terminal_result)
-                if isinstance(terminal_result, Mapping)
-                else None
-            )
-            has_reconcile_handoff = isinstance(reconcile_leaf, Mapping) and isinstance(
-                reconcile_leaf.get("_graph_rebuild_handoff"), Mapping
-            )
+            has_reconcile_handoff = _carries_graph_rebuild_handoff(terminal_result)
 
             def finish_reconcile_graph_status(value: Any, *, current: bool) -> Any:
                 if not isinstance(value, Mapping):
@@ -3786,12 +4540,7 @@ class LeaseManager:
                     # every write paying for it: `reconcile` proves readability
                     # in its own terminal below, and a rebuild handoff has
                     # nothing to hand off until the flight lands.
-                    joins_unbounded = (
-                        has_reconcile_handoff
-                        or command.name == "reconcile"
-                        or (command.name == "maintain_memory" and kwargs.get("mode") == "reconcile")
-                    )
-                    if joins_unbounded:
+                    if joins_unbounded_graph(terminal_result):
                         # graph-join: unbounded by design (reconcile proves the
                         # graph is readable in its own terminal).
                         graph_sync.wait_for_registered(root, state_root=self.config.state_dir)
@@ -3880,7 +4629,11 @@ class LeaseManager:
 
         def finish_fast_ack_and_graph(result: Any) -> Any:
             acknowledged = (
-                _acknowledge_derived_batches(result, fast_ack_session)
+                _acknowledge_derived_batches(
+                    result,
+                    fast_ack_session,
+                    budget_deadline=acknowledgement_deadline,
+                )
                 if fast_ack_session is not None
                 else result
             )
@@ -3922,6 +4675,8 @@ class LeaseManager:
             result: Any, attempt: _ExecutionAttempt, canonical_disposition: str = "success"
         ) -> Any:
             """Persist exact canonical evidence while canonical authority is held."""
+            if post_terminal_fanout:
+                result = _awaiting_derived_acknowledgement(result)
             if not commit_state["observed"]:
                 return result
             try:
@@ -3950,9 +4705,20 @@ class LeaseManager:
                         "operation_id",
                         "warnings_count",
                         "additive_authority",
+                        "derived_sync",
                     )
                     if isinstance(result, Mapping) and name in result
                 }
+                if isinstance(result, Mapping):
+                    resolution = result.get("vocabulary_resolution")
+                    leaf = result.get("leaf_result")
+                    if resolution is None and isinstance(leaf, Mapping):
+                        resolution = leaf.get("vocabulary_resolution")
+                    if resolution is not None:
+                        from .vocabulary_resolution import valid_public_resolution
+
+                        if valid_public_resolution(resolution):
+                            projection["vocabulary_resolution"] = resolution
                 projection["result_sha256"] = _receipt_result_sha256(result)
                 if not projection:
                     projection = {"status": "committed", "mutated": True}
@@ -3977,6 +4743,11 @@ class LeaseManager:
                     }
                 return result
             except Exception as error:
+                logger.warning(
+                    "graph commit evidence could not be persisted; the terminal is "
+                    "committed-uncertain (%s)",
+                    _content_free_cause(error, stage="graph_commit_evidence"),
+                )
                 raise _PostCommitOutcomeUncertain() from error
 
         def exact_commit_evidence(
@@ -4268,16 +5039,65 @@ class LeaseManager:
             and kwargs.get("operation") == "save-relations"
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        # `maintain_memory(mode="tag-variants")` plans over the tag catalogue
+        # and every candidate page before it writes; its leaf takes the
+        # mutation boundary itself around only the batch re-verification and
+        # commit (`tag_variants.apply`). Every other maintenance mode still
+        # relies on this outer boundary.
+        narrow_tag_variant_commit = (
+            command.name == "maintain_memory"
+            and kwargs.get("mode") == "tag-variants"
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         narrow_boundary = (
             narrow_media_commit
             or narrow_tier2_file_commit
             or narrow_source_artifact_commit
             or narrow_relation_registry_commit
+            or narrow_tag_variant_commit
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
             )
         )
+        # One guard, two possible seams. The handoff clause of the predicate is
+        # a property of the *result*, so the choice is made when the guard is
+        # reached rather than when it is bound -- and recorded, so a guard that
+        # already ran before persistence (finalizing and thereby stripping the
+        # handoff it was selected by) is not run a second time after it.
+        guard_ran_before_persistence = False
+
+        def finish_before_terminal_persistence(result: Any) -> Any:
+            nonlocal guard_ran_before_persistence
+            if not joins_unbounded_graph(result):
+                # The guard used to strip the canonical checkpoint binding here;
+                # it now runs after persistence, so strip it at this seam rather
+                # than persisting an internal key into the completed row. The
+                # *canonical* row keeps it, which is what the resume path reads.
+                if isinstance(result, Mapping) and "_graph_sync_checkpoint" in result:
+                    return {
+                        key: value
+                        for key, value in result.items()
+                        if key != "_graph_sync_checkpoint"
+                    }
+                return result
+            guard_ran_before_persistence = True
+            return finish_fast_ack_and_graph(result)
+
+        def finish_after_terminal_persistence(result: Any) -> Any:
+            if post_terminal_housekeeping:
+                _drain_post_terminal_housekeeping(post_terminal_housekeeping)
+            if post_terminal_fanout:
+                reports, drain_failed = _drain_post_terminal_fanout(
+                    post_terminal_fanout
+                )
+                result = _with_post_terminal_fanout_acknowledgement(
+                    result, reports, drain_failed=drain_failed
+                )
+            if guard_ran_before_persistence:
+                return result
+            return finish_fast_ack_and_graph(result)
+
         try:
             result = self.idempotency.run(
                 key,
@@ -4303,7 +5123,19 @@ class LeaseManager:
                 ),
                 commit_observed=lambda: commit_state["observed"],
                 after_canonical_persisted=persist_graph_sync_progress,
-                after_operation_guard=finish_fast_ack_and_graph,
+                after_operation_guard=finish_before_terminal_persistence,
+                after_terminal_acknowledgement=finish_after_terminal_persistence,
+                # Whether derived work is *owed*, not whether a hook is bound
+                # and not whether a session exists: the session is built before
+                # the leaf runs, from a feature flag and a vault root, so it
+                # cannot know whether a batch will be registered. A commit that
+                # registers none owes no component and must not be stamped
+                # pending. Evaluated after the leaf, where the batches are known.
+                acknowledgement_expected=lambda: (
+                    bool(post_terminal_fanout)
+                    or fast_ack_session is not None
+                    and bool(fast_ack_session.batches)
+                ),
                 resume_canonically_committed=resume_graph_sync,
                 commit_evidence=exact_commit_evidence,
                 legacy_graph_pending_proof=legacy_graph_pending_proof,
@@ -4394,6 +5226,22 @@ class LeaseManager:
             scope=implicit_idempotency_scope or idempotency_principal_scope,
             targets=[str(mutation_subject)],
         )
+        if receipt_vault_root is not None and (
+            command.name == "move_file"
+            or (command.name == "manage_memory_file" and kwargs.get("operation") == "move")
+        ):
+            from . import move_file as move_file_module
+
+            result = move_file_module.restricted_mover_terminal(
+                receipt_vault_root,
+                result,
+                committed=lambda leaf: committed_terminal(
+                    leaf,
+                    request_id=request_id,
+                    receipt_id=receipt,
+                    idempotency_key=effective_public_idempotency_key,
+                ),
+            )
         projected = project_terminal(result, response_detail)
         from .governance import scrubber as governance_scrubber
 
@@ -4535,17 +5383,19 @@ class LeaseManager:
 
                 vault_root = Path(vault_or_cell)
                 graph_status = graph_sync.status(vault_root)
-                if (
-                    graph_status["state"] == "current"
-                    and not epistemic_graph.EpistemicGraphIndex(
-                    vault_root,
-                    mutation_coordinator=self._mutation_coordinator_for(vault_root),
-                    ).available()
-                ):
-                    graph_status = {
-                        "state": "unavailable",
-                        "generation": graph_status["generation"],
-                    }
+                if graph_status["state"] == "current":
+                    # A status probe reports; it never pays the O(corpus)
+                    # source-bytes proof. It reads the remembered verdict, or
+                    # says that nothing has proved the sidecar yet (#1454).
+                    availability = epistemic_graph.EpistemicGraphIndex(
+                        vault_root,
+                        mutation_coordinator=self._mutation_coordinator_for(vault_root),
+                    ).availability_state()
+                    if availability != "available":
+                        graph_status = {
+                            "state": availability,
+                            "generation": graph_status["generation"],
+                        }
                 base["graph_sync"] = graph_status
             except Exception:  # noqa: BLE001 - coordination diagnostics stay bounded
                 base["graph_sync"] = {"state": "unavailable", "generation": 0}
@@ -4833,6 +5683,13 @@ def active_mutation_request_id() -> str | None:
     return trace[0] if trace is not None else None
 
 
+def active_mutation_trace() -> tuple[str, str, str] | None:
+    """`(request_id, command, receipt)` of the mutation this code runs inside,
+    or `None` outside one (a CLI helper, the watcher, a direct call). The heat
+    projection reads the command name as the origin of a governed commit."""
+    return _ACTIVE_MUTATION_TRACE.get()
+
+
 def active_mutation_committed() -> bool:
     """Whether this invocation's canonical writer already crossed its commit boundary.
 
@@ -4933,8 +5790,22 @@ def _fixed_projected_command_completion(
     return wrapped
 
 
+def _request_prominence_context(func):
+    @wraps(func)
+    def wrapped(command, *injected, **kwargs):
+        from . import prominence
+
+        if injected and isinstance(injected[0], Path):
+            with prominence.request_scope(injected[0]):
+                return func(command, *injected, **kwargs)
+        return func(command, *injected, **kwargs)
+
+    return wrapped
+
+
 @_foreground_command_activity
 @_fixed_projected_command_completion
+@_request_prominence_context
 def invoke_command(
     command: Any,
     *injected: Any,
@@ -4983,10 +5854,20 @@ def invoke_command(
         selector_error = error
         read_only = False
 
+    if not read_only:
+        from . import cloud_cell
+
+        if cloud_cell.cloud_read_only_enabled():
+            raise OpError(
+                "CLOUD_CELL_READ_ONLY",
+                "this Exomem Cloud cell is serving read-only",
+                "wait for the cell to leave read-only mode, or read instead of write",
+            )
+
     active_surface = capabilities_module.current_active_surface()
     if (
         command.name == "maintain_memory"
-        and kwargs.get("mode") != "structured-files"
+        and kwargs.get("mode") not in {"structured-files", "tag-variants"}
         and not _profile_admits_request_bound_curation(active_surface, kwargs)
         and not read_only
         and selector_error is None

@@ -27,7 +27,7 @@ import gc
 import logging
 import threading
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
@@ -72,9 +72,25 @@ _DEFERRAL_TELEMETRY_LOCK = threading.Lock()
 
 #: Graph deferral codes that CLAIM durable per-path coverage. `graph_repair_queued`
 #: is emitted only on the branch that proved the durable queue holds the affected
-#: paths. The disabled codes record nothing and are deliberately absent, so a
-#: stale queue entry naming the same path can never bless them.
-_GRAPH_COVERAGE_CODES = frozenset({"graph_repair_queued"})
+#: paths, `graph_repair_unreadable_predecessor` only on the branch that
+#: proved the same thing for a fenced-but-intact sidecar, and
+#: `graph_repair_cold_resolver` only on the branch that queued the complete
+#: recall delta because no resident resolver could widen it, and
+#: `graph_repair_external_pending` only on the branch that queued this write's
+#: own paths because a path-scoped unattributed event covered them, and
+#: `graph_repair_covered_gap` only on the branch that proved every generation
+#: the sidecar skipped is itself queued. The disabled codes
+#: record nothing and are deliberately absent, so a stale queue entry naming the
+#: same path can never bless them.
+_GRAPH_COVERAGE_CODES = frozenset(
+    {
+        "graph_repair_queued",
+        "graph_repair_unreadable_predecessor",
+        "graph_repair_cold_resolver",
+        "graph_repair_external_pending",
+        "graph_repair_covered_gap",
+    }
+)
 
 _FAST_ACK_PENDING_STATES = frozenset({"prepared", "ready", "claimed"})
 _FAST_ACK_FAILED_STATES = frozenset(
@@ -534,10 +550,25 @@ def _safe_relative_path(value: str) -> str | None:
     return path.as_posix()
 
 
-def _legacy_component(component: str, callback) -> IndexComponentOutcome:
-    """Observe only what a legacy leaf actually exposes."""
+def _legacy_component(
+    component: str, callback, *, items: int | None = None
+) -> IndexComponentOutcome:
+    """Observe only what a legacy leaf actually exposes.
+
+    One span per component, recorded here rather than at each leaf: the write
+    path's own total was already timed as `index.upsert_after_write`, and on the
+    0.83.1 deploy that single number was 14.3 s with nothing to attribute it to.
+
+    `items` is how many paths the leaf was handed. A component span that says
+    only "1.2 s" cannot separate a slow store from a large batch, and each of
+    these leaves re-enters the mutation boundary per store -- so the size of
+    what it carried is the first thing a latency read wants.
+    """
     try:
-        result = callback()
+        with call_spans.span(
+            f"index.{component}", None if items is None else {"paths": items}
+        ):
+            result = callback()
     except Exception:  # noqa: BLE001 - one derived index must not stop the rest
         log.warning("%s index dispatch failed", component, exc_info=True)
         return IndexComponentOutcome(component, "degraded", "dispatch_failed")
@@ -548,12 +579,15 @@ def _legacy_component(component: str, callback) -> IndexComponentOutcome:
     return IndexComponentOutcome(component, "completed", "dispatch_completed")
 
 
-def _graph_component(callback) -> IndexComponentOutcome:
+def _graph_component(callback, *, items: int | None = None) -> IndexComponentOutcome:
     """Preserve the graph's exact handoff outcome outside legacy best effort."""
     from .epistemic_graph import GraphDispatchResult
 
     try:
-        result = callback()
+        with call_spans.span(
+            "index.epistemic_graph", None if items is None else {"paths": items}
+        ):
+            result = callback()
     except Exception:  # noqa: BLE001 - defensive boundary for external callers
         log.warning("epistemic graph dispatch escaped", exc_info=True)
         return IndexComponentOutcome("epistemic_graph", "failed", "graph_dispatch_failed")
@@ -563,9 +597,12 @@ def _graph_component(callback) -> IndexComponentOutcome:
     return IndexComponentOutcome("epistemic_graph", result.outcome, result.code)
 
 
-def _resolver_component(callback) -> IndexComponentOutcome:
+def _resolver_component(callback, *, items: int | None = None) -> IndexComponentOutcome:
     try:
-        callback()
+        with call_spans.span(
+            "index.resolver", None if items is None else {"paths": items}
+        ):
+            callback()
     except Exception:  # noqa: BLE001 - resolver sync must not stop the rest
         log.warning("resolver index dispatch failed", exc_info=True)
         return IndexComponentOutcome("resolver", "degraded", "dispatch_failed")
@@ -736,7 +773,7 @@ def record_failed_refresh(vault_root: Path, paths: list[Path]) -> int:
 
 def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object) -> bool:
     """Whether a full-upsert report completed or retained exact durable work."""
-    from . import graph_sync
+    from . import graph_sync, index_paths
 
     if (
         not isinstance(report, IndexSyncReport)
@@ -796,9 +833,30 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
                 }
                 if graph_rels:
                     if graph_receipt_rels is None:
+                        # Only receipts queued at or after the generation this
+                        # deferral reports. A row naming the same path from an
+                        # earlier generation is repair that is already owed for
+                        # older bytes; blessing this batch with it would let a
+                        # stale queue entry launder a fresh deferral, and the
+                        # path would sit with nothing scheduled for what just
+                        # changed. An unknown generation cannot clear that bar
+                        # either: a receipt that cannot say what it owes proves
+                        # nothing about this checkpoint.
+                        # With no checkpoint there is no lineage to be stale
+                        # against, and every receipt is equally uninformative;
+                        # the older, weaker claim -- "these paths are queued" --
+                        # is still true and still the honest answer.
+                        required_generation = (
+                            int(checkpoint.generation) if checkpoint is not None else None
+                        )
                         graph_receipt_rels = {
                             receipt.rel_path
                             for receipt in deferred_index.snapshot_graph(vault_root)
+                            if required_generation is None
+                            or (
+                                receipt.graph_generation is not None
+                                and receipt.graph_generation >= required_generation
+                            )
                         }
                     if graph_rels <= graph_receipt_rels:
                         _note_deferral("covered_deferral_accepted")
@@ -814,16 +872,24 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
             # branch, `deferred_warmup` from the warm-up branch); anything
             # else — `deferred_warmup_volatile` included — carries no claim,
             # so a stale queue entry can never bless it.
+            # Coverage is judged over what embeddings index at all, as the
+            # graph clause above judges over graph inputs: `log.md` and
+            # `index.md` ride along with every governed write and no semantic
+            # receipt can ever name them, so requiring them minted a full
+            # receipt on every quiet-mode write and failed every replay of it.
+            embeddable_rels = {
+                rel for rel in replaced_rels if index_paths.is_embeddable_path(root / rel)
+            }
             if (
                 component.code in {"deferred_durable", "deferred_warmup"}
-                and replaced_rels
+                and embeddable_rels
             ):
                 if receipt_rels is None:
                     receipt_rels = {
                         receipt.rel_path
                         for receipt in deferred_index.snapshot(vault_root)
                     }
-                if replaced_rels <= receipt_rels:
+                if embeddable_rels <= receipt_rels:
                     _note_deferral("covered_deferral_accepted")
                     continue
             _note_deferral("uncovered_deferral_escalated")
@@ -852,7 +918,13 @@ def recover_full_receipt_graph_epoch(vault_root: Path, *, build: bool = True) ->
             ):
                 epoch = graph_sync.classify_epoch(root)
                 if epoch.kind in {"pre_floor", "recoverable"}:
-                    graph_sync.recover_checkpoint(root)
+                    # Not while a batch commits: it may be waiting in its
+                    # post-commit fan-out for the boundary held here.
+                    from . import vault as vault_module
+
+                    with vault_module.batch_commit_if_idle() as idle:
+                        if idle:
+                            graph_sync.recover_checkpoint(root)
                 if graph_sync.classify_epoch(root).kind != "coherent":
                     return False
         elif epoch.kind == "legacy":
@@ -989,10 +1061,17 @@ def _drain_graph_work(
     receipts = deferred_index.snapshot_graph(
         vault_root, limit=limit, paths=requested
     )
+    index = epistemic_graph.EpistemicGraphIndex(vault_root)
     if pending_generation is None and not receipts:
+        # An empty queue is where a withdrawn marker gets stranded: the routes
+        # that withdraw pair it with queued repair, and the drain republishes
+        # while repairing, so the LAST withdrawal -- the one that lands after
+        # the final drain -- has nothing left to earn it back. Proved before
+        # publishing, and a no-op on one metadata read whenever the marker is
+        # already there, which is the ordinary case.
+        _republish_graph_availability(index)
         return 0
 
-    index = epistemic_graph.EpistemicGraphIndex(vault_root)
     if pending_generation is not None:
         result = epistemic_graph.converge_full_graph_marker(vault_root)
         if result.outcome != "completed":
@@ -1033,12 +1112,17 @@ def _drain_graph_work(
         processed += deferred_index.clear_graph_receipts(vault_root, done)
     stalled = [receipt for receipt in receipts if receipt.rel_path not in covered]
     if not stalled:
+        if not deferred_index.snapshot_graph(vault_root, limit=1):
+            _republish_graph_availability(index)
         return processed
 
     for receipt in stalled:
+        path = vault_root / receipt.rel_path
         try:
-            single = index.drain_paths([vault_root / receipt.rel_path])
+            single = index.drain_paths([path])
         except Exception:  # noqa: BLE001 - one poison page must not pin the queue
+            # A busy boundary, a locked store, anything raised out of the pass:
+            # a readiness refusal, never the page's fault, so it never counts.
             log.warning(
                 "deferred graph receipt failed; work remains queued", exc_info=True
             )
@@ -1046,13 +1130,118 @@ def _drain_graph_work(
             continue
         if receipt.rel_path in set(single.get("indexed", ())):
             processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
-        else:
+            continue
+        if single.get("moved") or single.get("requires_rebuild") or single.get("disabled"):
+            # A race or a vault not ready: the page is not the problem, and
+            # counting it would quarantine a page for being written to.
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            continue
+        cause = index._underivable_cause(receipt.rel_path)
+        if cause == "no_rows":
+            # Deleted, or no longer recall Markdown: the pass removed its rows,
+            # which is the whole repair, so the receipt retires with them
+            # rather than rotating behind the queue forever.
+            processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
+            continue
+        if cause is None:
+            # The page reads and decodes now: whatever stopped the pass was not
+            # its bytes.
             log.warning("deferred graph receipt incomplete; work remains queued")
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            continue
+        attempts, first_failed_at = deferred_index.note_graph_failure(
+            vault_root, receipt.rel_path
+        )
+        if attempts < epistemic_graph.GRAPH_POISON_ATTEMPTS or (
+            cause == "unreadable"
+            and time.time() - first_failed_at < epistemic_graph.GRAPH_POISON_MIN_AGE_SECONDS
+        ):
+            log.warning("deferred graph receipt %s; work remains queued", cause)
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            continue
+        # Bounded: the page's own bytes have failed every attempt. Its receipt
+        # is set aside so the queue can empty around it; its rows stay, because
+        # the page still exists. A change to it, or the slow retry timer,
+        # queues it again (`requeue_quarantined_graph_paths`).
+        if deferred_index.quarantine_graph_receipt(
+            vault_root, receipt, signature=_graph_stat_token(path)
+        ):
+            log.warning(
+                "deferred graph receipt quarantined after %d failed attempts cause=%s",
+                attempts,
+                cause,
+            )
+            processed += 1
+        else:
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+    if not deferred_index.snapshot_graph(vault_root, limit=1):
+        # This tick cleared the last receipt, so the same stranding applies to
+        # whatever withdrew while it ran.
+        _republish_graph_availability(index)
     return processed
 
 
-def drain_graph_work(vault_root: Path, *, limit: int | None = None) -> int:
+def _graph_stat_token(path: Path) -> str:
+    """The stat signature a quarantined page is retried on a change to."""
+    try:
+        st = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent"
+    except OSError:
+        return "unstatable"
+    return f"{st.st_mtime_ns}:{st.st_ctime_ns}:{st.st_size}"
+
+
+def requeue_quarantined_graph_paths(vault_root: Path) -> int:
+    """Give quarantined pages one more attempt; return how many were queued.
+
+    A page is retried once `GRAPH_QUARANTINE_RETRY_SECONDS` have passed since
+    its last failure, and sooner when its stat signature has changed since it
+    was set aside -- edited, replaced, deleted -- but no sooner than its change
+    backoff. The backoff matters because a release signals the drain and the
+    drain calls this on every wake: without it, a page a sync tool keeps
+    rewriting was retried every couple of seconds. One readonly read when
+    nothing is quarantined.
+    """
+    from . import epistemic_graph
+
+    quarantined = deferred_index.quarantined_graph_paths(vault_root)
+    if not quarantined:
+        return 0
+    now = time.time()
+    due = []
+    for rel, signature, last_failed_at, attempts in quarantined:
+        waited = now - last_failed_at
+        if waited >= epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS or (
+            waited >= _quarantine_change_backoff(attempts)
+            and _graph_stat_token(vault_root / rel) != signature
+        ):
+            due.append(rel)
+    return deferred_index.release_graph_quarantine(vault_root, due)
+
+
+def _quarantine_change_backoff(attempts: int) -> float:
+    """Seconds after its last failure before a changed quarantined page is retried."""
+    from . import epistemic_graph
+
+    excess = max(0, attempts - epistemic_graph.GRAPH_POISON_ATTEMPTS)
+    return min(
+        epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS,
+        epistemic_graph.GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS * 2**excess,
+    )
+
+
+def _republish_graph_availability(index) -> None:
+    """Let the graph become readable again when the queue owes it nothing."""
+    try:
+        index.republish_availability_if_current()
+    except Exception:  # noqa: BLE001 - a read gate must never fail the drain
+        log.warning("graph availability republication failed", exc_info=True)
+
+
+def drain_graph_work(
+    vault_root: Path, *, limit: int | None = None, paths: Iterable[str] | None = None
+) -> int:
     """Drain queued epistemic-graph repair without touching the other queues.
 
     `drain_deferred_work` runs all three queues because its callers -- the
@@ -1060,8 +1249,13 @@ def drain_graph_work(vault_root: Path, *, limit: int | None = None) -> int:
     daemon wants only this one: it fires within a second of the write that
     queued the debt, and replaying embeddings that often is a different cost
     decision from repairing the graph.
+
+    `paths` (vault-relative) narrows it to receipts a caller just queued, so a
+    refresh that proved its own repair incremental drains it under these rules.
     """
-    return _drain_graph_work(vault_root, limit=limit, requested=None)
+    return _drain_graph_work(
+        vault_root, limit=limit, requested=None if paths is None else set(paths)
+    )
 
 
 def drain_deferred_work(
@@ -1118,7 +1312,7 @@ def drain_deferred_work(
         full_batch_completed = False
         if recover_full_receipt_graph_epoch(vault_root):
             try:
-                dispatched = upsert_after_write(vault_root, full_paths)
+                dispatched = upsert_after_write(vault_root, full_paths, replayed=True)
             except Exception:  # noqa: BLE001 - isolate failures below
                 log.warning("deferred full-index batch failed; isolating receipts", exc_info=True)
             else:
@@ -1139,7 +1333,7 @@ def drain_deferred_work(
             for receipt in isolation_receipts:
                 try:
                     dispatched = upsert_after_write(
-                        vault_root, [vault_root / receipt.rel_path]
+                        vault_root, [vault_root / receipt.rel_path], replayed=True
                     )
                 except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
                     log.warning(
@@ -1255,6 +1449,7 @@ def _dispatch_upsert_components(
     watcher_deleted_rels: list[str] | None = None,
     watcher_lexical_paths: list[Path] | None = None,
     watcher_lexical_suppressed_rels: list[str] | None = None,
+    replayed: bool = False,
 ) -> list[IndexComponentOutcome]:
     from . import epistemic_graph, find, lexstore, memory_refs, mode
 
@@ -1262,23 +1457,26 @@ def _dispatch_upsert_components(
         _legacy_component(
             "memory_refs",
             lambda: memory_refs.upsert_after_write(vault_root, identity_paths),
+            items=len(identity_paths),
         ),
     ]
     rels = _rel_md_paths(vault_root, identity_paths)
     components.append(
         _resolver_component(
-            lambda: find.on_resolver_files_changed(vault_root, rels, []) if rels else None
+            lambda: find.on_resolver_files_changed(vault_root, rels, []) if rels else None,
+            items=len(rels),
         )
     )
     # Publish all raw-Record removals before any semantic insertion/defer. The
     # identity fan-out above remains intentionally broad and has no recall body
     # egress; a purge failure is isolated and cannot stop other sidecars.
     watcher_lexical_batch = watcher_deleted_rels is not None
-    purge_succeeded = purge_semantic_only(
-        vault_root,
-        suppressed_rels,
-        include_lexstore=not watcher_lexical_batch,
-    )
+    with call_spans.span("index.semantic_purge", {"paths": len(suppressed_rels)}):
+        purge_succeeded = purge_semantic_only(
+            vault_root,
+            suppressed_rels,
+            include_lexstore=not watcher_lexical_batch,
+        )
     components.append(
         IndexComponentOutcome(
             "semantic_purge",
@@ -1307,29 +1505,41 @@ def _dispatch_upsert_components(
                 lexical_deletes,
             )
 
-    components.append(_legacy_component("lexstore", lexical_dispatch))
+    components.append(
+        _legacy_component("lexstore", lexical_dispatch, items=len(semantic_paths))
+    )
 
     def graph_upsert():
+        replay: dict[str, bool] = {"replayed": True} if replayed else {}
         if created_semantic_paths:
             return epistemic_graph.upsert_after_write(
                 vault_root,
                 semantic_paths,
                 created_paths=created_semantic_paths,
+                **replay,
             )
-        return epistemic_graph.upsert_after_write(vault_root, semantic_paths)
+        return epistemic_graph.upsert_after_write(vault_root, semantic_paths, **replay)
 
     components.append(
-        _graph_component(graph_upsert)
+        _graph_component(graph_upsert, items=len(semantic_paths))
         if semantic_paths
         else IndexComponentOutcome("epistemic_graph", "not_required", "no_graph_input")
     )
     if defer_semantic or mode.defer_expensive_indexes():
         try:
-            semantic_count, added = _record_deferred_semantic_upserts(
-                vault_root,
-                semantic_paths,
-                omit_proven_current=defer_semantic,
-            )
+            # The durable-defer arm had no span at all, so a write that took the
+            # cheap path looked, in the ledger, like a write that did nothing:
+            # `index.embeddings` is recorded only on the direct arm below. This
+            # is a store write that re-enters the mutation boundary, and it is
+            # exactly the kind of step the 0.84.1 read could not see.
+            with call_spans.span(
+                "derived.deferred_index_store", {"paths": len(semantic_paths)}
+            ):
+                semantic_count, added = _record_deferred_semantic_upserts(
+                    vault_root,
+                    semantic_paths,
+                    omit_proven_current=defer_semantic,
+                )
         except Exception:  # noqa: BLE001 - degradation is reported, other lanes landed
             log.warning("durable semantic defer failed", exc_info=True)
             components.append(
@@ -1350,7 +1560,8 @@ def _dispatch_upsert_components(
         from . import embeddings
 
         try:
-            status = embeddings.upsert_after_write_status(vault_root, semantic_paths)
+            with call_spans.span("index.embeddings", {"paths": len(semantic_paths)}):
+                status = embeddings.upsert_after_write_status(vault_root, semantic_paths)
             component = _embedding_component(status)
         except Exception:  # noqa: BLE001 - derived index must not fail a writer
             log.warning("embeddings index dispatch failed", exc_info=True)
@@ -1418,8 +1629,13 @@ def upsert_after_write(
     publish_corpus_change: bool = True,
     created_paths: Iterable[Path] = (),
     watcher_deleted_rel_paths: Iterable[str] | None = None,
+    replayed: bool = False,
 ) -> IndexSyncReport:
     """Fan a writer's markdown change out to every index sidecar.
+
+    ``replayed`` is set only by the deferred full-index receipt replay: its
+    graph dispatch may prove a page outside the recall delta current instead
+    of rebuilding the vault. Every other caller keeps that fallback.
 
     Paths under excluded scan dirs (`_trash/`, `_archive/`, `_Schema/`, ...) are
     dropped first: every index's FULL rebuild skips them, so the incremental
@@ -1487,7 +1703,13 @@ def upsert_after_write(
         )
     from . import recall_policy
 
-    batch = recall_policy.partition_markdown_paths(vault_root, eligible)
+    # Two steps that run before any component does, and had no span: the
+    # policy partition and the corpus publication below. Together they were
+    # most of what `index.upsert_after_write` reported and none of its
+    # components explained -- 92 ms of 143 ms on the attribution fixture, and
+    # the same shape as the 46 s that had no span at all on 0.84.1.
+    with call_spans.span("index.path_partition", {"paths": len(eligible)}):
+        batch = recall_policy.partition_markdown_paths(vault_root, eligible)
     watcher_lexical_paths: list[Path] | None = None
     watcher_lexical_suppressed_rels: list[str] | None = None
     identity_items = list(batch.identity_paths)
@@ -1564,10 +1786,11 @@ def upsert_after_write(
     # disk identity it cannot prove. The wrapper keeps the warm semantic
     # corpus's freshness token in the same publication boundary; a watcher may
     # later publish the identical event harmlessly.
-    publication_current = not publish_corpus_change or publish_corpus_delta(
-        vault_root,
-        changed=identity_paths,
-    )
+    with call_spans.span("index.corpus_publish", {"paths": len(identity_paths)}):
+        publication_current = not publish_corpus_change or publish_corpus_delta(
+            vault_root,
+            changed=identity_paths,
+        )
     if not publication_current:
         _register_publication_failure_graph_handle(vault_root)
         try:
@@ -1582,18 +1805,24 @@ def upsert_after_write(
         )
     admitted_rels = {item.rel_path for item in batch.admitted_paths}
     states = {rel: state for rel, state in (semantic_states or {}).items() if rel in admitted_rels}
-    for path, rel in zip(semantic_paths, semantic_rels, strict=True):
-        if rel in states:
-            continue
-        active = semantic_index.parent_state_for_path(vault_root, path)
-        if active is not None:
-            states[rel] = active
-            continue
-        try:
-            states[rel] = semantic_index.build_parent_index_state(vault_root, path)
-        except (OSError, UnicodeError, ValueError):
-            continue
-    if not batch.revalidate(vault_root):
+    # Resolving or rebuilding one parent index state per admitted path, which
+    # reads and parses the page when the caller did not supply one. Another
+    # step that ran before any component and had no span of its own.
+    with call_spans.span("index.semantic_states", {"paths": len(semantic_paths)}):
+        for path, rel in zip(semantic_paths, semantic_rels, strict=True):
+            if rel in states:
+                continue
+            active = semantic_index.parent_state_for_path(vault_root, path)
+            if active is not None:
+                states[rel] = active
+                continue
+            try:
+                states[rel] = semantic_index.build_parent_index_state(vault_root, path)
+            except (OSError, UnicodeError, ValueError):
+                continue
+    with call_spans.span("index.policy_revalidate"):
+        current = batch.revalidate(vault_root)
+    if not current:
         return stale_report()
     token = semantic_index.set_parent_states(states)
     try:
@@ -1607,22 +1836,28 @@ def upsert_after_write(
             watcher_deleted_rels=watcher_deleted_rels,
             watcher_lexical_paths=watcher_lexical_paths,
             watcher_lexical_suppressed_rels=watcher_lexical_suppressed_rels,
+            replayed=replayed,
         )
     finally:
         semantic_index.reset_parent_states(token)
-    if not batch.revalidate(vault_root):
+    with call_spans.span("index.policy_revalidate"):
+        current = batch.revalidate(vault_root)
+    if not current:
         return stale_report()
-    _apply_exact_path_custody(
-        vault_root,
-        # `batch.identity_paths` rather than `identity_items`: the latter is
-        # narrowed to the knowledge base in watcher mode so the heavier derived
-        # components stay KB-only, and the read-side caches serve both scopes.
-        # This is the batch's whole markdown path set, which is what a receipt
-        # names.
-        changed=[item.rel_path for item in batch.identity_paths],
-        deleted=watcher_deleted_rels or [],
-        reason="governed_write",
-    )
+    with call_spans.span(
+        "index.path_custody", {"paths": len(batch.identity_paths)}
+    ):
+        _apply_exact_path_custody(
+            vault_root,
+            # `batch.identity_paths` rather than `identity_items`: the latter
+            # is narrowed to the knowledge base in watcher mode so the heavier
+            # derived components stay KB-only, and the read-side caches serve
+            # both scopes. This is the batch's whole markdown path set, which
+            # is what a receipt names.
+            changed=[item.rel_path for item in batch.identity_paths],
+            deleted=watcher_deleted_rels or [],
+            reason="governed_write",
+        )
     report = IndexSyncReport(
         "upsert",
         requested_report,
@@ -1828,6 +2063,35 @@ def reset_derived_fanout_memo() -> None:
         _derived_fanout_memo.clear()
 
 
+def converge_paths_from_current_bytes(
+    vault_root: Path,
+    rel_paths: Sequence[str],
+    created_rel_paths: Sequence[str] = (),
+) -> bool:
+    """The writer fan-out over whatever these paths hold now (operator repair).
+
+    A stranded receipt's recorded after-state may be gone, so the repair indexes
+    the current canonical bytes instead -- the same ``upsert_after_write`` the
+    write path and the receipt-owned drain call. Returns whether the fan-out
+    proved itself (no reconcile-required component).
+    """
+    root = Path(vault_root)
+    written = [root.joinpath(*rel.split("/")) for rel in rel_paths]
+    if not written:
+        return True
+    created = [root.joinpath(*rel.split("/")) for rel in created_rel_paths]
+    from . import graph_sync
+
+    with graph_sync.standalone_join_waived():
+        report = upsert_after_write(
+            root,
+            written,
+            created_paths=created,
+            publish_corpus_change=True,
+        )
+    return not report.reconcile_required
+
+
 def converge_derived_component(
     vault_root: Path,
     receipt: Any,
@@ -1871,12 +2135,17 @@ def converge_derived_component(
             # Nothing this fan-out can publish: a tombstone-only batch is
             # converged by the removal path the deleting writer already ran.
             return True
-        report = upsert_after_write(
-            root,
-            written,
-            created_paths=created,
-            publish_corpus_change=True,
-        )
+        from . import graph_sync
+
+        # A registered graph rebuild still starts; this fan-out just does not
+        # wait on it before the embedding step that follows the graph.
+        with graph_sync.standalone_join_waived():
+            report = upsert_after_write(
+                root,
+                written,
+                created_paths=created,
+                publish_corpus_change=True,
+            )
         if report.reconcile_required:
             return False
         _derived_memo_put(memo_key, report)

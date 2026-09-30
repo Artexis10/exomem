@@ -27,7 +27,7 @@ from .driver import (
     EffectContext,
     LostAcknowledgement,
 )
-from .governance_migration_checkpoint import CHECKPOINT_VERSION
+from .governance_migration_checkpoint import CHECKPOINT_VERSION, migration_binding
 from .models import ResourceKind
 from .provider_identity import (
     ProviderIdentityConflict,
@@ -39,7 +39,12 @@ from .provider_identity import (
     decode_hcloud_identity_envelope,
     provider_operation_resource_name,
 )
-from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
+from .wire_protocol import (
+    FORWARD_ONLY_ACTIONS,
+    RUNTIME_IDENTITY_FIELDS,
+    WIRE_PROTOCOL_V2,
+    runtime_identity,
+)
 
 
 class MetadataConflict(RuntimeError):
@@ -258,18 +263,62 @@ class LifecycleConfig:
     records_reader_version: int | None = None
     lifecycle_actions_enabled: bool = False
     compatibility_digest: str | None = None
-    migration_mode: Literal["none", "binding-v1-to-v2", "state-root-v1"] = "none"
+    migration_mode: Literal["none", "binding-v1-to-v2", "state-root-v1", "governance-v3-to-v4"] = (
+        "none"
+    )
 
-    def runtime_target_for(self, request: dict[str, Any], *, v2: bool) -> dict[str, str]:
+    def _forward_target(self) -> dict[str, str]:
+        if self.runtime_target is None:
+            raise MetadataConflict("selected runtime target is unavailable")
+        compatibility_digest = self.compatibility_digest or self.runtime_target.get(
+            "compatibilityDigest"
+        )
+        if compatibility_digest is None:
+            return dict(self.runtime_target)
+        return {**self.runtime_target, "compatibilityDigest": compatibility_digest}
+
+    def _legacy_unit_for(
+        self, request: dict[str, Any], *, action: str | None
+    ) -> dict[str, str] | None:
+        """The cataloged legacy contract a v2 request names by exact identity, if any.
+
+        A legacy match is by all six contract fields, never by release label alone,
+        and is never offered to an action that places a runtime image: those only
+        ever target the selected forward release.
+        """
+
+        if action in FORWARD_ONLY_ACTIONS:
+            return None
+        try:
+            identity = runtime_identity(request)
+        except (KeyError, ValueError):
+            return None
+        if self.runtime_target is not None and identity == self._forward_target():
+            return None
+        unit = (self.legacy_runtime_units or {}).get(
+            (identity.get("releaseVersion"), identity.get("protocolVersion"))
+        )
+        if unit is None or any(
+            unit.get(field) != identity.get(field) for field in RUNTIME_IDENTITY_FIELDS
+        ):
+            return None
+        return unit
+
+    def runtime_target_for(
+        self, request: dict[str, Any], *, v2: bool, action: str | None = None
+    ) -> dict[str, str]:
         if v2:
-            if self.runtime_target is None:
-                raise MetadataConflict("selected runtime target is unavailable")
-            compatibility_digest = self.compatibility_digest or self.runtime_target.get(
-                "compatibilityDigest"
-            )
-            if compatibility_digest is None:
-                return dict(self.runtime_target)
-            return {**self.runtime_target, "compatibilityDigest": compatibility_digest}
+            forward = self._forward_target()
+            legacy = self._legacy_unit_for(request, action=action)
+            if legacy is None:
+                return forward
+            target = {field: legacy[field] for field in RUNTIME_IDENTITY_FIELDS}
+            # The catalog records no compatibility digest: the request's own is the
+            # one Substrate bound this cell to, and the health probe reports it back.
+            compatibility_digest = runtime_identity(request).get("compatibilityDigest")
+            if compatibility_digest is not None:
+                target["compatibilityDigest"] = compatibility_digest
+            return target
         target = runtime_identity(request)
         try:
             return (self.legacy_runtime_units or {})[
@@ -278,15 +327,22 @@ class LifecycleConfig:
         except KeyError as error:
             raise MetadataConflict("legacy runtime unit is not selected") from error
 
-    def matches_runtime_request(self, request: dict[str, Any], *, v2: bool) -> bool:
+    def matches_runtime_request(
+        self, request: dict[str, Any], *, v2: bool, action: str | None = None
+    ) -> bool:
         try:
-            expected = self.runtime_target_for(request, v2=v2)
+            expected = self.runtime_target_for(request, v2=v2, action=action)
         except MetadataConflict:
             return False
         return runtime_identity(request) == expected if v2 else True
 
-    def runtime_image_for(self, request: dict[str, Any], *, v2: bool) -> str:
-        return self.image if v2 else self.runtime_target_for(request, v2=False)["runtimeImage"]
+    def runtime_image_for(
+        self, request: dict[str, Any], *, v2: bool, action: str | None = None
+    ) -> str:
+        if not v2:
+            return self.runtime_target_for(request, v2=False)["runtimeImage"]
+        legacy = self._legacy_unit_for(request, action=action)
+        return self.image if legacy is None else legacy["runtimeImage"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -565,6 +621,7 @@ class VolumeLifecycleWorker:
         metadata: OpaqueProviderMetadata,
         *,
         pvc_recovery_envelope: str = "",
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> RecordedVolume:
         recorded = await self._kubernetes.discover_bound_volume(metadata)
         if recorded is None:
@@ -600,7 +657,11 @@ class VolumeLifecycleWorker:
                 operation_id=metadata.operation_id,
                 fence_generation=metadata.fence_generation,
             )
+            if effect_guard is not None:
+                await effect_guard()
             await self._kubernetes.label_bound_volume(recorded, pv_envelope)
+        if effect_guard is not None:
+            await effect_guard()
         await self._hcloud.label_volume(recorded.volume_handle, metadata, hcloud_envelope or None)
         if not await self._hcloud.verify_volume(
             recorded.volume_handle, metadata, recorded.location
@@ -687,9 +748,13 @@ class VolumeRegistrationDriver:
         worker: VolumeLifecycleWorker,
         *,
         identity_verifier: ProviderRecoveryIdentityVerifier,
+        binding_observer: Any | None = None,
+        runtime_image: str | None = None,
     ) -> None:
         self._worker = worker
         self._identity_verifier = identity_verifier
+        self._binding_observer = binding_observer
+        self._runtime_image = runtime_image
 
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._worker.observed_fence(tenant_id)
@@ -703,7 +768,10 @@ class VolumeRegistrationDriver:
         if (
             action != "provision"
             or context.cell_id is None
-            or context.checkpoint != "volume-registration-required"
+            or not (
+                context.checkpoint == "volume-registration-required"
+                or context.checkpoint.startswith("gpi1:registering:")
+            )
         ):
             raise DriverTerminal("PROVISIONER_VOLUME_WORK_NOT_APPLICABLE")
         metadata = _metadata_from_context(context)
@@ -718,9 +786,27 @@ class VolumeRegistrationDriver:
                 resource_name=metadata.resource_name,
                 operation_resource_name=provider_operation_resource_name(metadata.operation_id),
             )
+            prefixed = context.checkpoint.startswith("gpi1:registering:")
+            if prefixed:
+                if self._binding_observer is None or self._runtime_image is None:
+                    raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+
+                async def bound_authority() -> None:
+                    await context.assert_effect_authority()
+                    uid = await self._binding_observer.authenticated_volume_uid(metadata)
+                    if context.checkpoint != "gpi1:registering:" + migration_binding(
+                        context, pvc_uid=uid, runtime_image=self._runtime_image
+                    ):
+                        raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+                    await context.assert_effect_authority()
+
+                await bound_authority()
+            else:
+                bound_authority = None
             recorded = await self._worker.register_bound_volume(
                 metadata,
                 pvc_recovery_envelope=envelopes["vaultPvc"],
+                **({"effect_guard": bound_authority} if bound_authority is not None else {}),
             )
             reference = recorded.recoverable_reference()
         except (MetadataConflict, ProviderIdentityConflict) as error:
@@ -728,13 +814,25 @@ class VolumeRegistrationDriver:
                 "PROVISIONER_PROVIDER_METADATA_CONFLICT", reason=_conflict_reason(error)
             ) from error
         return DriverPending(
-            "volume-owned",
+            "gpi1:registered:" + context.checkpoint.split(":", 2)[2]
+            if prefixed else "volume-owned",
             1,
             (DriverResource(ResourceKind.VOLUME, reference),),
         )
 
 
 class LifecyclePlane(Protocol):
+    async def governance_rollforward(
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any], context: EffectContext
+    ) -> DriverPending | DriverFinal: ...
+
+    async def governance_provision(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        context: EffectContext,
+    ) -> DriverPending | DriverFinal: ...
+
     """Provider composition required by the cell lifecycle reconciler."""
 
     async def observed_fence(self, tenant_id: str) -> int: ...
@@ -1797,6 +1895,24 @@ def _require_complete_product_policy(request: dict[str, Any]) -> None:
         )
 
 
+def provider_identity_values(metadata: OpaqueProviderMetadata) -> dict[str, Any]:
+    """The identity a chart target carries, derived from the operation alone.
+
+    Recovery authenticates a retained target against this without recomputing
+    the whole target, so the two callers cannot disagree about what identity a
+    record must carry.
+    """
+    return {
+        "tenantId": metadata.tenant_id,
+        "cellId": metadata.subject_id,
+        "operationId": metadata.operation_id,
+        "fence": str(metadata.fence_generation),
+        "operationDigest": metadata.kubernetes_annotations["exomem.io/operation-digest"],
+        "subjectDigest": metadata.kubernetes_annotations["exomem.io/subject-digest"],
+        "tenantDigest": metadata.kubernetes_annotations["exomem.io/tenant-digest"],
+    }
+
+
 def _fixed_helm_values(
     metadata: OpaqueProviderMetadata,
     request: dict[str, Any],
@@ -1832,18 +1948,16 @@ def _fixed_helm_values(
         ),
         "initOperationId": metadata.operation_id,
         "initRequestId": _deterministic_uuid4(metadata.operation_id + ":init"),
-        "migrationMode": config.migration_mode,
+        # The cell chart has no governance behaviour: the v3-to-v4 migration runs in the
+        # coordinator's own Job against a stopped cell. Every chart apply on this path --
+        # restore shell, initializer, and the rollforward's serving values -- must therefore
+        # carry a mode the cell chart still admits, or the apply fails schema validation.
+        "migrationMode": (
+            "none" if config.migration_mode == "governance-v3-to-v4" else config.migration_mode
+        ),
         "pvcSize": "10Gi",
         "provisionMode": request["provisionMode"],
-        "providerIdentity": {
-            "tenantId": metadata.tenant_id,
-            "cellId": metadata.subject_id,
-            "operationId": metadata.operation_id,
-            "fence": str(metadata.fence_generation),
-            "operationDigest": metadata.kubernetes_annotations["exomem.io/operation-digest"],
-            "subjectDigest": metadata.kubernetes_annotations["exomem.io/subject-digest"],
-            "tenantDigest": metadata.kubernetes_annotations["exomem.io/tenant-digest"],
-        },
+        "providerIdentity": provider_identity_values(metadata),
         "resourceName": metadata.resource_name,
         "recordsReaderVersion": 2,
         "lifecycleActionsEnabled": False,
@@ -1906,11 +2020,13 @@ class CellLifecycleDriver:
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._plane.observed_fence(tenant_id)
 
-    def runtime_target_matches(self, request: dict[str, Any], context: EffectContext) -> bool:
+    def runtime_target_matches(
+        self, request: dict[str, Any], context: EffectContext, action: str | None = None
+    ) -> bool:
         if "runtimeTarget" not in request and "releaseVersion" not in request:
             return True
         return self._config.matches_runtime_request(
-            request, v2=context.wire_protocol == WIRE_PROTOCOL_V2
+            request, v2=context.wire_protocol == WIRE_PROTOCOL_V2, action=action
         )
 
     def rollforward_target_matches(self, request: dict[str, Any], context: EffectContext) -> bool:
@@ -1918,7 +2034,7 @@ class CellLifecycleDriver:
             context.wire_protocol == WIRE_PROTOCOL_V2
             and self._config.compatibility_digest is not None
             and request.get("compatibilityDigest") == self._config.compatibility_digest
-            and self.runtime_target_matches(request, context)
+            and self.runtime_target_matches(request, context, "rollforward")
         )
 
     async def _stop_failed_rollforward(self, metadata: OpaqueProviderMetadata) -> None:
@@ -1945,6 +2061,16 @@ class CellLifecycleDriver:
         context: EffectContext,
     ) -> DriverPending | DriverFinal:
         try:
+            if context.checkpoint.startswith(("gpi1:", CHECKPOINT_VERSION + ":")) and (
+                self._config.migration_mode != "governance-v3-to-v4"
+            ):
+                # A queued recovery is not permission to fall back to a legacy
+                # initializer or rollforward after worker configuration drift.
+                raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+            if context.checkpoint.startswith("gpi1:") and (
+                action != "provision" or context.wire_protocol != WIRE_PROTOCOL_V2
+            ):
+                raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
             if context.checkpoint.startswith(CHECKPOINT_VERSION + ":") and (
                 action not in {"provision", "rollforward"}
                 or context.wire_protocol != WIRE_PROTOCOL_V2
@@ -1958,7 +2084,7 @@ class CellLifecycleDriver:
             if action not in {
                 "rollforward",
                 "rollback-rollforward",
-            } and not self.runtime_target_matches(request, context):
+            } and not self.runtime_target_matches(request, context, action):
                 raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
             if await self.observed_fence(context.tenant_id) > context.fence_generation:
                 raise DriverTerminal("PROVISIONER_STALE_FENCE")
@@ -1966,12 +2092,24 @@ class CellLifecycleDriver:
             if isinstance(observation, DriverPending):
                 return observation
             if action == "provision":
+                if self._config.migration_mode == "governance-v3-to-v4":
+                    if request.get("provisionMode") == "restore-candidate":
+                        if context.checkpoint.startswith(("gpi1:", CHECKPOINT_VERSION + ":")):
+                            raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+                        return await self._provision(request, context)
+                    return await self._plane.governance_provision(
+                        _metadata_from_context(context), request, context
+                    )
                 return await self._provision(request, context)
             if action == "health":
                 return DriverFinal(
                     await self._exact_health(_metadata_from_context(context), request, context)
                 )
             if action == "rollforward":
+                if self._config.migration_mode == "governance-v3-to-v4":
+                    return await self._plane.governance_rollforward(
+                        _metadata_from_context(context), request, context
+                    )
                 return await self._rollforward(request, context)
             if action == "rollback-rollforward":
                 await self._plane.rollback_committed_runtime(

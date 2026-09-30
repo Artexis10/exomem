@@ -806,6 +806,27 @@ def _reset_corpus_context_cache():
 #: registered-flight path (`graph_sync.GraphRebuildCoordinator.ensure_started`)
 #: and the warming path (`epistemic_graph.schedule_background_rebuild`).
 _GRAPH_REBUILD_THREAD_NAME = "exomem-graph-rebuild"
+#: Every background owner that walks a whole vault and ends on its own. A
+#: managed activation starts the working-set index build and the
+#: private-identity inventory build the same way a write starts a graph rebuild:
+#: as a daemon thread that outlives the request, and so the test; a managed
+#: recall that declines on a cold reference sidecar starts its rebuild the same
+#: way. Long-lived
+#: service threads (lease renewal, metrics, mode watch) are deliberately absent;
+#: they never finish, and waiting for one would hang every teardown.
+_VAULT_WALKING_THREAD_NAMES = frozenset(
+    {
+        _GRAPH_REBUILD_THREAD_NAME,
+        "exomem-working-set-warm",
+        "exomem-identity-catalogue-warm",
+        "exomem-lexical-repair",
+        "exomem-refs-rebuild",
+        # Not a vault walk by design, but its readiness probe can reach one
+        # (`available()` -> `_disk_vault_freshness`), and it stops only when
+        # its runtime stops it: one still alive here leaked from its test.
+        "exomem-vocabulary-recovery",
+    }
+)
 #: A rebuild over most test vaults is milliseconds, and one that cannot finish
 #: has wedged rather than slowed -- worth failing on rather than leaving for
 #: whichever test inherits it. But most is not every: the planning-governance
@@ -824,8 +845,8 @@ _GRAPH_REBUILD_THREAD_NAME = "exomem-graph-rebuild"
 _GRAPH_QUIESCE_TIMEOUT_SECONDS = 180.0
 
 
-def _drain_graph_rebuild_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS) -> None:
-    """Join every graph rebuild still running, and say so if one will not stop.
+def _drain_background_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS) -> None:
+    """Join every vault-walking background thread, and say so if one will not stop.
 
     The clock is read only once there is something to wait for. This is autouse
     teardown, so it runs after *every* test, and a test is entitled to replace
@@ -839,7 +860,7 @@ def _drain_graph_rebuild_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS
         alive = [
             thread
             for thread in threading.enumerate()
-            if thread.name == _GRAPH_REBUILD_THREAD_NAME and thread.is_alive()
+            if thread.name in _VAULT_WALKING_THREAD_NAMES and thread.is_alive()
         ]
         if not alive:
             return
@@ -848,8 +869,9 @@ def _drain_graph_rebuild_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise RuntimeError(
-                f"{len(alive)} graph rebuild thread(s) did not finish within "
-                f"{timeout:.0f}s; a wedged rebuild must not be inherited by the next test"
+                f"{len(alive)} background thread(s) did not finish within {timeout:.0f}s "
+                f"({', '.join(sorted({thread.name for thread in alive}))}); a wedged "
+                "vault walk must not be inherited by the next test"
             )
         for thread in alive:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
@@ -879,7 +901,7 @@ def _quiesce_graph_rebuilds():
     """
     yield
     try:
-        _drain_graph_rebuild_threads()
+        _drain_background_threads()
     finally:
         with graph_sync_module._COORDINATORS_LOCK:
             graph_sync_module._COORDINATORS.clear()
@@ -907,6 +929,12 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
         "EXOMEM_PRELOAD_MODELS",
         "EXOMEM_RELEASE_GPU_WHEN_IDLE",
         "EXOMEM_MODEL_OFFLINE",
+        # An ambient owner binding would turn remote-principal fixtures into
+        # the owner; tests that exercise it set it themselves.
+        "EXOMEM_OWNER_OAUTH_SUBJECT",
+        # An operator's exported dreamer setting would start a background
+        # worker in every runtime fixture; dreamer tests set it themselves.
+        "EXOMEM_DREAMER",
     ):
         monkeypatch.delenv(_var, raising=False)
     monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")

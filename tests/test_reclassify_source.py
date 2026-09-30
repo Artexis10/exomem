@@ -611,3 +611,65 @@ def test_a_correction_into_known_vocabulary_stays_quiet(
 
     assert result.warnings == ()
     assert "warnings" not in result.as_dict()
+
+
+# ---------------------------------------------------------------------------
+# The episode kind is reserved in both directions
+# ---------------------------------------------------------------------------
+def _recap(vault: Path, source_schema: schema_module.SourceSchema) -> add_module.AddResult:
+    return _capture(
+        vault,
+        source_schema,
+        title="Harbor Lamp purchase",
+        source_type=st.EPISODE_KIND,
+        slug="harbor-lamp-purchase-epa1a1a1a1a1a1-20260818t091233000000-dddddddd",
+        content="### Worked on\n\n- Compared two lamps for Project Alpha",
+        extra_frontmatter={
+            "summary": "Chose the brass lamp.",
+            "episode": "ep-" + "a1" * 16,
+            "episode_digest": "d" * 64,
+        },
+    )
+
+
+def test_a_capture_cannot_be_reclassified_into_the_episode_kind(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    """A recap is only ever what `episode_memory` recorded and bound."""
+    captured = _capture(
+        vault, source_schema, title="Lamp report", source_type="research-report"
+    )
+    before = (vault / captured.path).read_bytes()
+
+    for call in (
+        lambda: rc.propose(vault, captured.path, source_kind=st.EPISODE_KIND),
+        lambda: rc.reclassify(
+            vault, path=captured.path, source_kind="episodes", reason="probe", today=TODAY
+        ),
+    ):
+        with pytest.raises(rc.ReclassifyError) as error:
+            call()
+        assert error.value.code == "EPISODE_KIND_RESERVED"
+
+    assert (vault / captured.path).read_bytes() == before
+    assert not (vault / KB / "Sources" / "Episodes").exists()
+
+
+@pytest.mark.parametrize(
+    "change", [{"source_kind": "research-report"}, {"domain": "travel"}], ids=["kind", "domain"]
+)
+def test_a_recap_cannot_be_reclassified_out_of_the_episode_folder(
+    vault: Path, source_schema: schema_module.SourceSchema, change: dict
+) -> None:
+    """Out of the kind, or into a domain subfolder: either way the recap leaves
+    the one folder its revisions are found in."""
+    recap = _recap(vault, source_schema)
+    before = (vault / recap.path).read_bytes()
+
+    with pytest.raises(rc.ReclassifyError) as proposed:
+        rc.propose(vault, recap.path, **change)
+    with pytest.raises(rc.ReclassifyError) as applied:
+        rc.reclassify(vault, path=recap.path, reason="probe", today=TODAY, **change)
+
+    assert proposed.value.code == applied.value.code == "EPISODE_KIND_RESERVED"
+    assert (vault / recap.path).read_bytes() == before

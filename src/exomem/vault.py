@@ -22,9 +22,9 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import Context, ContextVar, copy_context
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 
 import yaml
@@ -689,6 +689,35 @@ def _lock_key(vault_root: Path, namespace: str) -> tuple[str, str]:
     return root, hashlib.sha256(f"{root}\0{namespace}".encode()).hexdigest()
 
 
+def _require_real_lock_directory(info: os.stat_result) -> None:
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe")
+
+
+def _clear_inherited_setgid(directory: Path, info: os.stat_result) -> os.stat_result:
+    """chmod the lstat'd directory to 0700 through a no-follow descriptor."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError as error:
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory changed")
+        os.fchmod(descriptor, 0o700)
+    except OSError as error:
+        raise VaultLockError(
+            "VAULT_LOCK_DIRECTORY", "lock directory mode could not be made private"
+        ) from error
+    finally:
+        os.close(descriptor)
+    try:
+        return directory.lstat()
+    except OSError as error:
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unreadable") from error
+
+
 def _private_lock_directory() -> Path:
     owner = os.getuid() if hasattr(os, "getuid") else None
     suffix = str(owner) if owner is not None else os.environ.get("USERNAME", "user")
@@ -703,9 +732,14 @@ def _private_lock_directory() -> Path:
         info = directory.lstat()
     except OSError as error:
         raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unreadable") from error
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
-        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe")
+    _require_real_lock_directory(info)
     if owner is not None:
+        # A setgid parent (a pod fsGroup makes the /tmp emptyDir 02777) hands
+        # S_ISGID to the mkdir above, and the emptyDir keeps it across restarts.
+        # Owner-only plus exactly that bit is cleared, never tolerated.
+        if info.st_uid == owner and stat.S_IMODE(info.st_mode) == 0o700 | stat.S_ISGID:
+            info = _clear_inherited_setgid(directory, info)
+            _require_real_lock_directory(info)
         if info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700:
             raise VaultLockError(
                 "VAULT_LOCK_DIRECTORY",
@@ -791,6 +825,7 @@ def vault_creation_lock(
     if not thread_lock.acquire(timeout=remaining):
         raise VaultLockTimeout("VAULT_LOCK_TIMEOUT", "timed out acquiring vault lock")
     _HELD_LOCKS.keys = {key}
+    _HELD_LOCKS.after_release = []
     try:
         lock_path = _private_lock_directory() / f"{digest}.lock"
         with _InterprocessFileLock(lock_path, deadline=deadline):
@@ -798,6 +833,65 @@ def vault_creation_lock(
     finally:
         _HELD_LOCKS.keys = set()
         thread_lock.release()
+        _run_after_release(_HELD_LOCKS.__dict__.pop("after_release", []))
+
+
+def _defer_until_creation_lock_release(work: Callable[[], Any]) -> bool:
+    """Queue `work` for the moment this thread's creation lock is released.
+
+    Returns False, and queues nothing, when the thread holds no creation lock:
+    the caller runs `work` inline as before. The work runs on this same thread
+    in a copy of the current context, so context-carried state (a writer's
+    semantic parent states, the in-flight call's span token) is what it would
+    have seen inline.
+    """
+    pending = getattr(_HELD_LOCKS, "after_release", None)
+    if not getattr(_HELD_LOCKS, "keys", None) or pending is None:
+        return False
+    context = copy_context()
+    pending.append(lambda: _run_in_captured_context(context, work))
+    return True
+
+
+def _run_in_captured_context(context: Context, work: Callable[[], Any]) -> None:
+    """Run `work` in the context captured at commit; keep what it sets.
+
+    Inline, the fan-out's own context writes landed in the writer's context:
+    the graph dispatch registers a rebuild there, and the writer's mutation
+    boundary starts it on exit. Every variable the work changes is copied
+    back into the context the lock is released in, so that is unchanged.
+    """
+    before = dict(context.items())
+    try:
+        context.run(work)
+    finally:
+        for var, value in context.items():
+            if var not in before or before[var] is not value:
+                var.set(value)
+
+
+def _run_after_release(pending: list[Callable[[], Any]]) -> None:
+    """Run released-lock work in order; the first failure propagates after all ran.
+
+    A failure never masks one already propagating out of the locked body: the
+    committed batch is still fanned out, and the body's own error wins.
+    """
+    import sys
+
+    first: BaseException | None = None
+    for work in pending:
+        try:
+            work()
+        except Exception as error:  # noqa: BLE001 - every committed batch still fans out
+            if first is None:
+                first = error
+            else:
+                log.warning("post-release fan-out failed: %s", type(error).__name__)
+    if first is not None:
+        if sys.exc_info()[1] is not None:
+            log.warning("post-release fan-out failed: %s", type(first).__name__)
+            return
+        raise first
 
 
 @dataclass
@@ -1604,6 +1698,19 @@ class _BatchWorkspace:
                 or not _same_identity(workspace_identity, workspace_info)
             ):
                 raise PathGuardError("PATH_GUARD_UNSAFE", "batch workspace is unsafe")
+            if os.name != "nt" and hasattr(os, "fchmod"):
+                # Setgid inheritance from the parent can leave a freshly
+                # created directory at 02700 even though it was created with
+                # mode 0o700 -- the kernel ORs in the parent's setgid bit
+                # regardless of the requested mode. Clear it, then re-derive
+                # the identity from a fresh post-chmod stat so the object is
+                # constructed with its actual, settled mode -- not a
+                # transient pre-chmod one that `refresh_identity()` would
+                # then see as drift and refuse (a real fsGroup-owned
+                # Kubernetes volume hits this on every write).
+                os.fchmod(workspace_descriptor, 0o700)
+                workspace_info = os.fstat(workspace_descriptor)
+                workspace_identity = _identity(name, workspace_info)
             workspace = cls(
                 absolute_parent,
                 name,
@@ -1613,8 +1720,6 @@ class _BatchWorkspace:
                 workspace_identity,
                 {},
             )
-            if os.name != "nt" and hasattr(os, "fchmod"):
-                os.fchmod(workspace_descriptor, 0o700)
             workspace.refresh_identity()
             return workspace
         except BaseException as init_error:
@@ -1711,6 +1816,17 @@ class _BatchWorkspace:
                 raise PathGuardError(
                     "PATH_GUARD_UNSAFE", "held workspace descriptors are unavailable"
                 )
+            if os.name != "nt" and hasattr(os, "fchmod"):
+                # Setgid inheritance from the parent can leave a freshly
+                # created directory at 02700 even though `held_fs` requested
+                # mode 0o700 -- the kernel ORs in the parent's setgid bit
+                # regardless of the requested mode. Clear it BEFORE any
+                # identity is captured below, so the object is constructed
+                # with its actual, settled mode -- not a transient
+                # pre-chmod one that `refresh_identity()` would then see as
+                # drift and refuse (a real fsGroup-owned Kubernetes volume
+                # hits this on every write).
+                os.fchmod(workspace_descriptor, 0o700)
             parent_info = os.fstat(parent_descriptor)
             workspace_info = os.fstat(workspace_descriptor)
             workspace = cls(
@@ -1726,8 +1842,6 @@ class _BatchWorkspace:
                 held_directory,
                 workspace_relative,
             )
-            if os.name != "nt" and hasattr(os, "fchmod"):
-                os.fchmod(workspace_descriptor, 0o700)
             workspace.refresh_identity()
             return workspace
         except BaseException:
@@ -4167,9 +4281,16 @@ def post_commit_batch_fanout(
     try:
         from . import file_watcher
 
-        registered_intents, corpus_published = file_watcher.register_self_write(
-            vault_root, replaced, return_publication_result=True
-        )
+        # The fan-out driver's own two steps, which sat between the mark and
+        # `index.upsert_after_write` with no span: registering this process's
+        # self-writes so the watcher does not re-observe them, and the graph
+        # epoch check below.
+        with call_spans.span(
+            "index.self_write_registration", {"paths": len(replaced)}
+        ):
+            registered_intents, corpus_published = file_watcher.register_self_write(
+                vault_root, replaced, return_publication_result=True
+            )
         if corpus_published:
             file_watcher.finalize_publication_intents(
                 publication_intents, succeeded=registered_intents
@@ -4217,19 +4338,20 @@ def post_commit_batch_fanout(
         if graph is not None and graph.outcome != "not_required":
             from . import graph_sync
 
-            required = graph_sync.read_checkpoint(vault_root)
-            handoff_missing = required is not None and (
-                (
-                    graph.outcome == "completed"
-                    and graph_sync.status(vault_root).get("state") != "current"
-                )
-                or (
-                    graph.outcome in {"registered", "deferred", "failed"}
-                    and not graph_sync.repair_is_provisioned(
-                        vault_root, required, outcome=graph.outcome
+            with call_spans.span("index.graph_epoch_handoff"):
+                required = graph_sync.read_checkpoint(vault_root)
+                handoff_missing = required is not None and (
+                    (
+                        graph.outcome == "completed"
+                        and graph_sync.status(vault_root).get("state") != "current"
+                    )
+                    or (
+                        graph.outcome in {"registered", "deferred", "failed"}
+                        and not graph_sync.repair_is_provisioned(
+                            vault_root, required, outcome=graph.outcome
+                        )
                     )
                 )
-            )
             if handoff_missing:
                 assert required is not None
                 graph_sync.register_failure(
@@ -4245,8 +4367,11 @@ def post_commit_batch_fanout(
                 )
         if index_reports is not None:
             index_reports.append(report)
-        if not index_sync.full_upsert_succeeded(vault_root, replaced, report):
-            index_sync.record_failed_refresh(vault_root, replaced)
+        with call_spans.span("index.completion_check", {"paths": len(replaced)}):
+            complete = index_sync.full_upsert_succeeded(vault_root, replaced, report)
+        if not complete:
+            with call_spans.span("index.full_refresh_store", {"paths": len(replaced)}):
+                index_sync.record_failed_refresh(vault_root, replaced)
             logging.getLogger(__name__).warning(
                 "index upsert incomplete after batch_atomic_write; "
                 "durable full-index refresh recorded"
@@ -4265,7 +4390,8 @@ def post_commit_batch_fanout(
         try:
             from . import index_sync as failed_index_sync
 
-            failed_index_sync.record_failed_refresh(vault_root, replaced)
+            with call_spans.span("index.full_refresh_store", {"paths": len(replaced)}):
+                failed_index_sync.record_failed_refresh(vault_root, replaced)
         except Exception:  # noqa: BLE001 - canonical commit must still survive
             logging.getLogger(__name__).exception(
                 "failed to persist deferred index refresh after dispatch failure"
@@ -4297,6 +4423,23 @@ class ContentHashMismatchError(RuntimeError):
 
 
 _BATCH_COMMIT_LOCK = threading.RLock()
+
+
+@contextmanager
+def batch_commit_if_idle() -> Iterator[bool]:
+    """Take the in-process batch commit lock only if no batch is committing.
+
+    For work that already holds the writers' canonical boundary and must write
+    a batch of its own: a batch that holds this lock may be in its post-commit
+    fan-out waiting for that very boundary, so waiting here would stall every
+    writer behind it. Yields False instead; the caller retries later.
+    """
+    acquired = _BATCH_COMMIT_LOCK.acquire(blocking=False)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            _BATCH_COMMIT_LOCK.release()
 MISSING_CONTENT_HASH = "<missing>"
 
 
@@ -4555,6 +4698,8 @@ def batch_atomic_write(
     publication and once at the rollback-capable completion point, avoiding a
     full content rehash before every destination flip.
     """
+    from . import working_set_heat
+
     with _BATCH_COMMIT_LOCK:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(
@@ -4568,21 +4713,35 @@ def batch_atomic_write(
             vault_root=vault_root,
             planned_write=PlannedWrite,
         )
-        result = _batch_atomic_write_locked(
-            augmented_writes,
-            vault_root=vault_root,
-            required_guards=required_guards,
-            completion_guards=completion_guards,
-            index_reports=index_reports,
-            semantic_states=semantic_states,
-            post_commit_fanout=post_commit_fanout,
-            commit_point=commit_point,
-            defer_graph_completion=defer_graph_completion,
-            _vocabulary_auxiliaries=_vocabulary_auxiliaries,
-            publication_intents_out=publication_intents_out,
+        # The heat projection's seam (close-memory-loop 7.3): the pages are in
+        # flight from before the first flip until their post-write signatures
+        # are known, so the watcher's echo of this commit is never classified
+        # as someone else's edit. Whose work it was is read from the mutation
+        # trace and the request's batch scope, never from timing.
+        heat_commit = working_set_heat.begin_commit(
+            vault_root, (write.path for write in caller_writes)
         )
+        try:
+            result = _batch_atomic_write_locked(
+                augmented_writes,
+                vault_root=vault_root,
+                required_guards=required_guards,
+                completion_guards=completion_guards,
+                index_reports=index_reports,
+                semantic_states=semantic_states,
+                post_commit_fanout=post_commit_fanout,
+                commit_point=commit_point,
+                defer_graph_completion=defer_graph_completion,
+                _vocabulary_auxiliaries=_vocabulary_auxiliaries,
+                publication_intents_out=publication_intents_out,
+            )
+        except BaseException:
+            working_set_heat.abandon_commit(heat_commit)
+            raise
+        observed = working_set_heat.observe_commit(heat_commit)
         curation_witness.mark_consumed(curation_witness_state)
-        return result
+    working_set_heat.persist_commit(observed)
+    return result
 
 
 def _batch_atomic_write_locked(
@@ -5152,6 +5311,11 @@ def _batch_atomic_write_locked(
         if additive_guard is not None:
             additive_guard.commit()
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
+        # Opens the span the writer lease closes when the mutation row reaches
+        # `canonically_committed`. On the 0.83.1 deploy that stretch was the
+        # largest unattributed piece of a governed write: ~32 s with
+        # `index.upsert_after_write` (14.3 s) the only span inside it.
+        call_spans.mark("canonical_files_committed")
         call_spans.record_span(
             "derived.canonical_commit",
             (_fast_ack_monotonic() - canonical_started_monotonic) * 1000.0,
@@ -5289,14 +5453,27 @@ def _batch_atomic_write_locked(
         graph_epoch_paths = {graph_floor_path, graph_checkpoint_path}
         fanout_replaced = [path for path in replaced if path not in graph_epoch_paths]
         created_paths = [path for path in created_paths if path not in graph_epoch_paths]
-        post_commit_batch_fanout(
-            vault_root,
-            fanout_replaced,
-            index_reports,
-            semantic_states,
-            created_paths=created_paths,
-            publication_intents=publication_intents,
-        )
+
+        def fanout() -> None:
+            post_commit_batch_fanout(
+                vault_root,
+                fanout_replaced,
+                index_reports,
+                semantic_states,
+                created_paths=created_paths,
+                publication_intents=publication_intents,
+            )
+            _close_fanout_span()
+
+        # Under a creation lock the lexical upsert may not take its own
+        # publication namespace (`VAULT_LOCK_NESTED`), so it deferred on every
+        # semantic write, the batch was judged incomplete, a full-index receipt
+        # was minted and retrieval admission revoked. The fan-out runs as the
+        # lock is released instead, still inside the caller's mutation boundary.
+        if not _defer_until_creation_lock_release(fanout):
+            fanout()
+    else:
+        _close_fanout_span()
     if cleanup_retained:
         raise BatchWriteError(
             "BATCH_CLEANUP_INCOMPLETE",
@@ -5312,6 +5489,20 @@ def _batch_atomic_write_locked(
             deferred_predecessor,
         )
     return [write.path for write in caller_writes]
+
+
+def _close_fanout_span() -> None:
+    """Close the fan-out half of the umbrella and open the terminal half.
+
+    Stamped whether or not a fan-out ran: when it did not -- the fast-ack
+    route, or a caller that asked for no fan-out -- a near-zero
+    `derived.fanout` is the honest answer and says which route the write took.
+    Stamped after a fan-out deferred to a creation lock's release, too, so the
+    two spans stay a partition of `derived.canonical_to_committed` rather than
+    two intervals that sometimes leave a gap nobody can name.
+    """
+    call_spans.mark("derived_fanout_complete")
+    call_spans.record_span_since("derived.fanout", "canonical_files_committed")
 
 
 def _batch_state_target(vault_root: Path, target: Path) -> bool:
@@ -5632,6 +5823,17 @@ class VaultPathResolution:
     resolved_relative: str
 
 
+def _write_target_withheld(vault_root: Path, resolved: Path, vault_resolved: Path) -> bool:
+    """Whether a write door must treat this resolved file as absent."""
+    from .governance import egress
+
+    try:
+        rel = resolved.relative_to(vault_resolved).as_posix()
+    except ValueError:
+        return False
+    return egress.write_target_withheld(vault_root, rel)
+
+
 def resolve_under_vault(
     vault_root: Path,
     path: str,
@@ -5641,6 +5843,7 @@ def resolve_under_vault(
     must_be_dir: bool = False,
     must_be_under_kb: bool = False,
     return_details: bool = False,
+    refuse_withheld: bool = False,
 ) -> tuple[Path, str] | VaultPathResolution:
     """Resolve a vault-relative path; guard against escape; normalize.
 
@@ -5654,6 +5857,10 @@ def resolve_under_vault(
     `Knowledge Base/` (checked on the resolved path, so `Knowledge Base/../x`
     can't sneak a write to a vault-root sibling of KB). Governed content writers
     (`create`/`append`) set it — exomem only ever authors under `Knowledge Base/`.
+
+    `refuse_withheld` is for write doors: with `must_exist`, an existing file
+    the caller may not see (`egress.write_target_withheld`) raises exactly the
+    NOT_FOUND an absent path raises.
 
     Raises VaultPathError with code in {INVALID_PATH, NOT_FOUND,
     NOT_A_FILE, NOT_A_DIR}.
@@ -5709,7 +5916,10 @@ def resolve_under_vault(
                 ),
             ) from None
 
-    if must_exist and not candidate.exists():
+    if must_exist and (
+        not candidate.exists()
+        or (refuse_withheld and _write_target_withheld(vault_root, resolved, vault_resolved))
+    ):
         raise VaultPathError(
             code="NOT_FOUND",
             reason=f"path does not exist: {rel}",
@@ -6175,6 +6385,8 @@ class _InboundIndexData:
 
 
 _INBOUND_INDEX: dict[str, tuple[tuple, _InboundIndexData]] = {}
+_INBOUND_INDEX_GENERATIONS: dict[str, int] = {}
+_INBOUND_INDEX_LOCK = threading.Lock()
 
 
 def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
@@ -6238,11 +6450,15 @@ def _inbound_index(vault_root: Path) -> _InboundIndexData:
     """The cached index, rebuilt when the vault's freshness key moves."""
     key = _vault_freshness_key(vault_root)
     root = str(vault_root.resolve())
-    cached = _INBOUND_INDEX.get(root)
-    if cached and cached[0] == key:
-        return cached[1]
+    with _INBOUND_INDEX_LOCK:
+        generation = _INBOUND_INDEX_GENERATIONS.setdefault(root, 0)
+        cached = _INBOUND_INDEX.get(root)
+        if cached and cached[0] == key:
+            return cached[1]
     data = _build_inbound_index(vault_root)
-    _INBOUND_INDEX[root] = (key, data)
+    with _INBOUND_INDEX_LOCK:
+        if _INBOUND_INDEX_GENERATIONS.get(root) == generation:
+            _INBOUND_INDEX[root] = (key, data)
     return data
 
 
@@ -6269,31 +6485,50 @@ def on_inbound_files_changed(
     if not freshness.event_indexes_enabled():
         return
     root = str(vault_root.resolve())
-    cached = _INBOUND_INDEX.get(root)
-    if cached is None:
-        return
+    with _INBOUND_INDEX_LOCK:
+        generation = _INBOUND_INDEX_GENERATIONS.setdefault(root, 0)
+        cached = _INBOUND_INDEX.get(root)
+        if cached is None:
+            return
     changed_list = list(changed_rels)
     deleted_list = list(deleted_rels)
     if not (changed_list or deleted_list):
         return
     _, data = cached
     data.on_files_changed(vault_root, changed_list, deleted_list)
-    _INBOUND_INDEX[root] = (_vault_freshness_key(vault_root), data)
+    key = _vault_freshness_key(vault_root)
+    with _INBOUND_INDEX_LOCK:
+        if (
+            _INBOUND_INDEX_GENERATIONS.get(root) == generation
+            and _INBOUND_INDEX.get(root) is cached
+        ):
+            _INBOUND_INDEX[root] = (key, data)
 
 
 def clear_inbound_index() -> None:
     """Test hook: drop every cached inbound-link index (patch state included —
     `known_rels`/`buckets`/`stem_counts` all live inside the cached
     `_InboundIndexData`, so clearing the outer dict resets everything)."""
-    _INBOUND_INDEX.clear()
+    with _INBOUND_INDEX_LOCK:
+        _INBOUND_INDEX.clear()
+        for root in _INBOUND_INDEX_GENERATIONS:
+            _INBOUND_INDEX_GENERATIONS[root] += 1
 
 
 def evict_inbound_index(vault_root: Path) -> bool:
     """Withdraw one vault's rebuildable inbound-link projection."""
-    return _INBOUND_INDEX.pop(str(Path(vault_root).resolve()), None) is not None
+    root = str(Path(vault_root).resolve())
+    with _INBOUND_INDEX_LOCK:
+        _INBOUND_INDEX_GENERATIONS[root] = _INBOUND_INDEX_GENERATIONS.get(root, 0) + 1
+        return _INBOUND_INDEX.pop(root, None) is not None
 
 
-def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[InboundLink]:
+def find_inbound_wikilinks(
+    vault_root: Path,
+    target_rel_path: str,
+    *,
+    visible: Callable[[str], bool] | None = None,
+) -> list[InboundLink]:
     """Return every wikilink in the vault that resolves to `target_rel_path`.
 
     `target_rel_path` is vault-relative POSIX, with or without `.md`. Matches
@@ -6308,6 +6543,10 @@ def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[Inbou
 
     Served from the process-cached inbound-link index (one read pass per
     vault revision) — results identical to scanning every file per call.
+
+    `visible` is a reader's view (see `egress.visible_page_filter`; `None`
+    for the owner): uniqueness is then counted over the pages it admits, as
+    in a vault without the others. Only a basename that is shared is decided.
     """
     target = target_rel_path.replace("\\", "/").removesuffix(".md")
     target_full = target if target.startswith(kb_prefix()) else kb_prefix() + target
@@ -6315,7 +6554,14 @@ def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[Inbou
     target_basename = target.rsplit("/", 1)[-1]
 
     data = _inbound_index(vault_root)
-    basename_unique = data.stem_counts.get(target_basename, 0) == 1
+    stem_count = data.stem_counts.get(target_basename, 0)
+    if visible is not None and stem_count > 1:
+        stem_count = sum(
+            1
+            for rel in data.known_rels
+            if PurePosixPath(rel).stem == target_basename and visible(rel)
+        )
+    basename_unique = stem_count == 1
 
     candidates: list[_InboundEntry] = []
     candidates.extend(data.buckets.get(target_full, ()))
@@ -6632,12 +6878,27 @@ def render_wikilinks_for_vault(text: str, vault_root: Path) -> str:
     return new_text
 
 
+def writer_link_visibility(vault_root: Path) -> Callable[[str], bool] | None:
+    """The pages a writer's own links may resolve to, or `None` for every page.
+
+    `None` for the owner and on an ungoverned vault, so their writes resolve
+    exactly as before. For any other writer under a policy, a link resolves
+    only over the pages that writer may see: a stem, title or path that
+    matches only withheld pages resolves as it would if those pages were
+    absent, and an ambiguity names only visible pages.
+    """
+    from .governance import egress
+
+    return egress.visible_page_filter(vault_root)
+
+
 def normalize_wikilink(
     target: str,
     vault_root: Path,
     *,
     resolver: WikilinkResolver | None = None,
     strict: bool = False,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, str | None]:
     """Canonicalize a wikilink target to full vault-rooted form (no `.md`).
 
@@ -6653,9 +6914,20 @@ def normalize_wikilink(
     - `strict=False`: returns the cleaned input + a warning string. The
       caller can choose to surface the warning and leave the link as a
       forward reference, or to abort.
+
+    `visible` (see `writer_link_visibility`) restricts every match to the
+    pages it admits; `None` matches over every page.
     """
     if resolver is None:
         resolver = WikilinkResolver(vault_root)
+
+    def _seen(no_ext: str) -> bool:
+        return visible is None or visible(f"{no_ext}.md")
+
+    def _matches(values: list[str] | None) -> list[str] | None:
+        if values is None or visible is None:
+            return values
+        return [value for value in values if _seen(value)] or None
 
     cleaned = _strip_wikilink_brackets(target)
     if "|" in cleaned:
@@ -6679,20 +6951,20 @@ def normalize_wikilink(
         return canonical + anchor, None
 
     # 1. Full vault-rooted (with or without explicit Knowledge Base/ prefix).
-    if cleaned in resolver.full_paths:
+    if cleaned in resolver.full_paths and _seen(cleaned):
         return cleaned + anchor, None
     if not cleaned.startswith(kb_prefix()):
         candidate = kb_prefix() + cleaned
-        if candidate in resolver.full_paths:
+        if candidate in resolver.full_paths and _seen(candidate):
             return candidate + anchor, None
 
     # 2. KB-stripped match (target looks like KB-relative).
-    if cleaned in resolver.kb_stripped:
+    if cleaned in resolver.kb_stripped and _seen(kb_prefix() + cleaned):
         return kb_prefix() + cleaned + anchor, None
 
     # 3. Bare name (no `/`): stem match first, then frontmatter title.
     if "/" not in cleaned:
-        stem_matches = resolver.stems.get(cleaned)
+        stem_matches = _matches(resolver.stems.get(cleaned))
         if stem_matches:
             if len(stem_matches) == 1:
                 return stem_matches[0] + anchor, None
@@ -6705,7 +6977,7 @@ def normalize_wikilink(
                 f"bare wikilink {target!r} matches {len(stem_matches)} files "
                 f"by stem; left unchanged. Files: {stem_matches}"
             )
-        title_matches = resolver.titles.get(cleaned.lower())
+        title_matches = _matches(resolver.titles.get(cleaned.lower()))
         if title_matches:
             if len(title_matches) == 1:
                 return title_matches[0] + anchor, None
@@ -6798,10 +7070,12 @@ def normalize_body_wikilinks(
     emitted Markdown is KB-relative when ``Knowledge Base/.obsidian`` marks the
     managed directory as the Obsidian vault root. Returns `(new_body, warnings)`.
     Unresolvable links are left as-is with a warning — forward references are
-    intentional.
+    intentional. The writer's links resolve over the pages it may see
+    (`writer_link_visibility`).
     """
     if resolver is None:
         resolver = WikilinkResolver(vault_root)
+    visible = writer_link_visibility(vault_root)
     warnings: list[str] = []
     matches = find_body_wikilinks(body)
     new_body = body
@@ -6820,7 +7094,7 @@ def normalize_body_wikilinks(
         else:
             target_only = inner.strip()
         canonical, warning = normalize_wikilink(
-            target_only, vault_root, resolver=resolver, strict=False
+            target_only, vault_root, resolver=resolver, strict=False, visible=visible
         )
         if warning:
             warnings.append(warning)

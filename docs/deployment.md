@@ -298,6 +298,10 @@ bash scripts/install-service.sh --release
 
 **Linux (systemd --user):**
 
+Add `--seamless` to a release install to preserve existing client connections
+during later worker upgrades. First enablement requires one reconnect; see
+[managed service upgrades](managed-service-upgrades.md) for setup and recovery.
+
 ```bash
 bash scripts/install-service.sh --release
 # The installer attempts to enable user linger so the service survives logout.
@@ -826,6 +830,74 @@ release pinning, rollout, and rollback. Exomem deliberately has no cross-machine
 auto-updater, and the readiness contract is independent of Syncthing or any other
 replication product.
 
+## Recall model and re-embedding
+
+A personal server and an Exomem Cloud cell encode recall with `BAAI/bge-m3`,
+served from a pinned int8 ONNX artefact on CPU, and activation shares that one
+instance (about 0.65 GB resident). The first load fetches the published
+artefact, or builds it from the pinned export: a 2.2 GB download and a
+quantisation that peaks near 9 GB in a child process. The cloud image carries
+the artefact, since a cell can fetch nothing. A hosted cell (the helm cell
+chart) keeps `BAAI/bge-base-en-v1.5`. `EXOMEM_RECALL_MODEL` names the model
+explicitly.
+
+Every recall sidecar records the model, fingerprint and width of the vectors it
+holds, and nothing reads it with another encoder. When the recall model changes,
+the installed sidecar keeps serving with the model that wrote it while the
+service builds a sidecar for the new model beside it
+(`.embeddings.<16 hex>.sqlite` in the vault's state directory). The build runs
+in the background, one passage at a time, and resumes after a restart. Pages
+written meanwhile are picked up. When it finishes, the service switches
+`.embeddings.active` to the new sidecar in one atomic write and releases the old
+model; the old sidecar is deleted by the next start. Until then both models are
+resident.
+
+- Progress: `exomem doctor` (`embeddings.reembed`, read from disk) and
+  `exomem status` (`recall_reembed`: pages done, seconds per 1,000 chunks, ETA).
+- `EXOMEM_RECALL_REEMBED=off` builds nothing and keeps the old sidecar serving
+  on a personal server.
+- On a personal server both models are resident while the build runs, in every
+  mode, quiet included: warm-up loads the old model before writes are admitted
+  so a write never finds it cold. `EXOMEM_RECALL_REEMBED=off` is the way to
+  keep one model there.
+- Rolling back to `BAAI/bge-base-en-v1.5` after a later start has retired the
+  old sidecar re-embeds the whole vault into the English space, the same way.
+- A cloud cell holds one model. It never loads the old one: the old sidecar is
+  refused, the vector lane reports `vector_space_mismatch` and the lexical
+  lanes answer until the cutover, and doctor warns that dense recall is off.
+  Writes meanwhile are built by the job's catch-up. With
+  `EXOMEM_RECALL_REEMBED=off` a cell's dense recall stays off.
+- `exomem index` maintains whichever sidecar is serving, with its own model.
+- The sidecar for bge-m3 is about a third larger: 1,024 dimensions against 768.
+
+## Reranking and languages
+
+The cross-encoder reranker reorders a query's top candidates. It runs on explicit
+`rerank=True`, or automatically in performance mode on an accelerated device; CPU
+services leave it off by default. `EXOMEM_DISABLE_RANKING` turns it off entirely.
+
+Each reranker declares what it can judge, and recall keeps the fused order outside
+it, explicit `rerank=True` included (`retrieval_profile.rerank.reason` says why).
+Governed projected recall applies the same gate.
+
+| Reranker | Scripts | Across languages | Notes |
+|---|---|---|---|
+| `BAAI/bge-reranker-base` (default) | Latin, Han | no | Trained on English and Chinese. Skipped for a query written mostly in another script (`query_script_not_covered`). Also skipped when the best dense match shares no content word with the query and either the query's words matched pages in another script than that match (`cross_language_not_covered`) or matched nothing while the query itself is in another script than that match (`cross_script_lead_not_covered`). |
+| `BAAI/bge-reranker-v2-m3` (opt-in) | all (assumed) | yes (assumed) | Select it with `EXOMEM_RANKING_MODEL=BAAI/bge-reranker-v2-m3`. Its model card says only that it is multilingual. The all-scripts, cross-language declaration is an assumption that has not been measured here. Its cost is a design estimate, not a measurement: about 1.3-1.8 GB more memory and roughly 45 s per 30-pair rerank on 2 CPU cores. So it is meant for accelerated hosts. |
+
+A reranker without a declaration is not gated: the owner configured it and is
+trusted with it. The declaration is looked up by the exact model name, so a local
+path or a mirror of `BAAI/bge-reranker-base` is undeclared and not gated either.
+
+The gate works by script, not by language, because no language is detected.
+Two consequences follow:
+
+- A German or Estonian query whose answer is an English page is Latin on both
+  sides, so nothing marks it as crossing and the default reranker runs. On the
+  multilingual fixture this reranking can put a same-language look-alike above
+  the English answer. This is an open gap.
+- A Japanese query written mostly in kanji reads as Han and is reranked.
+
 ## GPU notes (CUDA / Blackwell / Apple Silicon MPS)
 
 Blackwell GPUs (RTX 50-series, compute capability 12.0 / `sm_120`) need CUDA
@@ -953,7 +1025,108 @@ Pick the strongest option that fits the situation:
 | Want to stop the service but leave the public URL configured | Stop the service (e.g. elevated `Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','exomem'`). The tunnel stays up but proxies to nothing. |
 | Want a clean uninstall | Stop + remove service, turn off the tunnel/Funnel, delete the connector in claude.ai, delete the GitHub OAuth App. |
 
+### The remote owner binding
+
+`EXOMEM_OWNER_OAUTH_SUBJECT=github:<numeric id>` in the service environment
+makes remote sign-ins by that GitHub account act as the owner, labelled remote
+(`principal_kind: owner-oauth` in the call ledger, with the remote caller hash).
+Unset, the remote sign-in is a separate non-owner principal, as before. The
+value must equal `EXOMEM_GITHUB_USER_ID`: `github:` then ASCII digits, no
+leading zero. Anything else is treated as unset, and
+`exomem doctor --profile remote` reports it as `malformed` or `mismatch`. It is
+read only from the process environment (`service.env`, or the working
+directory's `.env`), never from the vault, and a hosted cell clears it. The
+service refuses to load a `.env` that is in, or resolves into, a vault and logs
+`event=dotenv_refused` naming the file and the remedy: move the `.env` out of the
+vault, or put the settings in `service.env`. If that file held required settings,
+startup then stops on the missing one.
+
+Enable it with one line and a restart. Before enabling, read doctor's
+`governance.remote_owner_former_audience`: policy rules and grants that name the
+remote connector's former `principal:` audience stop applying to it. Nothing is
+migrated; removing the line and restarting restores the former audience and its
+state.
+
+On an HA pair, set the same line on every replica; otherwise the audience flips
+with the replica that answers.
+
+| Situation | Action |
+|---|---|
+| A remote token may be stolen | `exomem auth revoke <session-id>` for one session (`exomem auth sessions` lists them, marking the owner-equivalent ones), or `exomem auth revoke --all`. To drop owner power only, without signing anyone out, remove `EXOMEM_OWNER_OAUTH_SUBJECT` and restart; this works even while an HA coordinator is down. |
+| The GitHub account is taken over, or you move to another account | Set `EXOMEM_GITHUB_USER_ID` and `EXOMEM_GITHUB_USERNAME` to the new account, and set `EXOMEM_OWNER_OAUTH_SUBJECT` to its id (or remove it), restart, and **always** run `exomem auth revoke --all`. Changing the allowed account only suspends the former account's sessions: they would come back, with owner power if the binding names that account again, the moment it is re-allowed. `revoke --all` ends them for good; every client then signs in once more. |
+
+### Same-machine clients: the local listener
+
+On a managed Linux/WSL install, both Cloudflare tunnels deliver public traffic
+to the public listener on `127.0.0.1:8765`, so a loopback address does not mean
+a local caller. Same-machine clients get their own door instead: a second
+listener, on `127.0.0.1` only, that accepts nothing but per-client local tokens.
+
+It is off by default. Turn it on with one line in `service.env` and a restart of
+the service unit (the supervisor itself, not just an upgrade handoff):
+
+```bash
+EXOMEM_LOCAL_PORT=8764
+```
+
+`python -m exomem.service_upgrade --runtime-dir <runtime dir> --status` then
+reports `local_port`. A malformed value, the public
+port, or a port already in use leaves the local listener closed with a logged
+reason; the public listener is never affected. Both listeners share one ingress,
+so an upgrade pauses and drains them together.
+
+The local listener refuses, before anything reaches the worker, any request
+that came through Cloudflare (`cf-ray` or `cf-connecting-ip`), any request with
+an `Origin` header, any `Host` other than literal `127.0.0.1` or `[::1]` (not
+`localhost`), and every path except `/mcp`, `/api/*`, `/upload` and `/health*`.
+It accepts only local tokens: an OAuth session, the REST key and the upload
+token are all refused there, and a local token is refused on the public path.
+
+Issue one token per client, into a new file that only you can read:
+
+```bash
+exomem auth issue-local --client home --output ~/.config/exomem/home.token
+```
+
+The command needs the same environment as `exomem auth sessions`
+(`EXOMEM_JWT_SIGNING_KEY`, `EXOMEM_GITHUB_USER_ID` and `EXOMEM_GITHUB_USERNAME`)
+and prints only the session id. Local tokens do not expire. `exomem auth
+sessions` lists them with `ingress: local`; `exomem auth revoke <session-id>`
+ends one, and `exomem auth revoke --all` ends them with every other session.
+A request with a local token acts as the owner and is recorded as
+`principal_kind: owner-local`; access log lines carry `ingress=local` and the
+client label, never the token. Tokens give attribution and revocation, not
+isolation: any process running as your user that can read the file can use it.
+
+A client then points at `http://127.0.0.1:8764/mcp` with
+`Authorization: Bearer <token file contents>`. Two helpers use the token file:
+
+- The retrieve hook's REST rung tries the local listener first when
+  `EXOMEM_LOCAL_TOKEN_FILE` names the file and `EXOMEM_LOCAL_PORT` is set (in the
+  hook's environment or `service.env`). For one release it still falls back to
+  the key it lifts from `service.env` when the local request fails.
+- `exomem attach <file> --scope <scope> --category <category>` sends a file's
+  bytes to the local `/upload` and prints the handle the service returns. It
+  reads `EXOMEM_LOCAL_TOKEN_FILE` and `EXOMEM_LOCAL_PORT`, or `--token-file` and
+  `--port`. Without `--scope` and `--category` the service holds the bytes
+  outside the vault and prints a `file` handle for `preserve_artifacts` (or,
+  with `--lane source`, `capture_source`). A held handle is redeemable once,
+  within an hour, and only by a request using the same local token, so point
+  the client's MCP connection at the local listener with that token.
+
+The owner REST key and the static upload token keep working on the public path.
+Their use on a Cloudflare-transited request is logged as
+`event=owner_credential_transit`, so a later release can refuse them there once
+no remote client uses them. It is kept out of `/metrics.json`, which is served
+without authentication.
+
 ## Deploying a new version
+
+For an opt-in managed Linux/WSL service, `bash scripts/upgrade.sh` stages a new
+worker environment and replaces the worker while the public endpoint stays up.
+The supervisor's interpreter stays fixed; the private managed status command
+identifies the active worker release. Follow the
+[managed upgrade procedure](managed-service-upgrades.md) for this mode.
 
 **The service interpreter is the source of truth — not the checkout you are standing in.**
 A service can run from a standalone venv while its `AppDirectory` points at a checkout, so

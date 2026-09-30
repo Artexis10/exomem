@@ -22,6 +22,7 @@ and index updates are determined by the operation, not the caller.
 |---|---|---|
 | **bootstrap** | Return a portable, versioned operating contract for generic MCP clients. A skill-aware agent fetches session state when current policy or capabilities are absent, with compact fallback when its exposed schema or server cannot accept the skill contract; use diagnostics profile for timing/performance interpretation | — |
 | **add** | Capture raw input as immutable source | `Sources/<Kind>/[<Domain>/]` |
+| **episode_memory** | Record a bounded recap of a conversation — worked on, decided, left open, at most three verbatim user statements — once at a decision or stopping point (`action="record"`); reuse its `episode` key for later revisions, which retire the previous one. `action="inspect"` reads the key's revision history. Where `candidates` reports `execution: enabled`, `prepare`, `disposition`, `resume` and the final `coverage` pass run its typed candidates ([engagement](engagement.md)) | `Sources/Episodes/` |
 | **note** | Compile a structured note from raw input or thinking | `Notes/<type>/` |
 | **link** | Create or update an entity, wire backlinks | `Entities/<type>/` |
 | **preserve** | Capture a **text** factual artifact for an incident scope. Binaries (PDF / image / any file) go out-of-band via upload (see the media transport guidance below), not this tool | `Evidence/<scope>/` |
@@ -91,6 +92,29 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   extraction; it takes precedence. Upload responses return concrete metadata (`stored_path`, `size`, `hash`, `hash_algorithm`, `media_id`, `content_type`) so agents can report exactly what landed. The write tools take text only and reject
   inline byte blobs (`BINARY_BLOB_REJECTED`). Full workflow:
   `operations.md` § preserve.
+- **A shared file that is evidence: the original first, on every client.** The
+  original bytes are the record and a transcription is derived from them, so
+  preserve the original before (or in the same call as) any transcription, and
+  never save only the transcription. Send bytes, never a path: no tool takes one.
+  - **File handles (ChatGPT attachments):** pass them in `files`, and put your
+    transcription in
+    **`preserve_artifacts(scope="...", category="...", files=[...], transcriptions=[{"file_id": "...", "text": "..."}])`**.
+    It lands on the original's own page, bound to its SHA-256, size and type, and
+    only when that original is stored.
+  - **Local clients (Claude Code, Codex CLI, any client with a local token):**
+    `exomem attach <file>` holds the bytes and prints a `file` handle; pass it in
+    `files` like any other handle. The handle works once, for an hour, and only for
+    the local token that sent it, so the MCP connection must use that same local
+    token. `--lane source` holds it for `capture_source`; `--scope S --category C`
+    preserves straight to Evidence.
+  - **claude.ai (no file handle):** only with the user's opt-in (code execution on,
+    the Exomem host allowed for network access, a fresh conversation), call
+    `transfer_artifact(operation="upload")` and `curl` the attached file from the
+    sandbox to `upload_url` with `scope`, `category` and a `text` transcription.
+    Pasted inline images never reach the sandbox.
+  - **No path for the bytes:** tell the user the original was not preserved and
+    offer the browser upload form. Custody is proven only by a returned
+    `stored_path`, `size` and `hash`, never by a minted token or a saved transcript.
 - **Media processing is automatic and actionable — `process_media`.** Supported
   audio and video preserved through Exomem or copied directly into the governed
   Knowledge Base are reconciled into durable timestamped transcription work.

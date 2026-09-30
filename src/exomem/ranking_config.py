@@ -75,6 +75,28 @@ class RankingConfig:
     # temporal: up-weight the recency lane so newer matches surface first.
     intent_weights_temporal: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.0, 2.0)
 
+    # ---- Activation-index anchor bands (context-activation) ----
+    # The context compiler emits CATEGORICAL evidence only: these thresholds
+    # decide whether an anchor carries `vector_band` or `lexical_overlap` at
+    # all, and the number itself never reaches the packet. They are pinned here
+    # rather than in the compiler for the same reason every other threshold is:
+    # so the eval harness can sweep them without editing retrieval code.
+    #
+    # `vector_band` is corpus-relative (`working_set_resolve.semantic_band`): a
+    # signature bands when its similarity to the turn clears the level the
+    # largest of N unrelated similarities exceeds with probability
+    # `working_set_semantic_alpha`, measured from the catalogue's own median and
+    # MAD. No cosine belongs to one model, language or vault, so none is set
+    # here. Below `working_set_semantic_min_population` signatures there is no
+    # chance level and no band (`uncalibrated`). `vector_band` alone never
+    # resolves an anchor (design D3).
+    working_set_semantic_alpha: float = 0.01
+    working_set_semantic_min_population: int = 50
+    # Shared lexical terms needed before `lexical_overlap` is claimed. Two is
+    # the same coverage floor `collection_claims.MIN_CLAIM_COVERAGE` uses: one
+    # shared word is a coincidence, two is a reference.
+    working_set_lexical_min_terms: int = 2
+
     def intent_weights(self, intent: str) -> tuple[float, ...]:
         """Lane-weight tuple for a classified intent; conceptual (neutral) default."""
         return {

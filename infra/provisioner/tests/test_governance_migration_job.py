@@ -268,9 +268,56 @@ def test_manifest_is_exact_nonroot_custody_read_only_job(phase):
     mounts = {item["mountPath"]: item for item in container["volumeMounts"]}
     assert mounts["/run/exomem/authorization-session"]["readOnly"] is True
     assert mounts["/var/lib/exomem/logs"]["readOnly"] is True
-    assert mounts["/var/lib/exomem/vault"]["readOnly"] is (phase == "inspect")
-    assert mounts["/var/lib/exomem/state"]["readOnly"] is (phase == "inspect")
+    # Every phase writes the data volume: the runner's schema probe opens the
+    # writer-lease store even while inspecting, which writes coordination
+    # state under the state root. Inspect leaves the vault and the governance
+    # store untouched by code rather than by a read-only mount.
+    assert mounts["/var/lib/exomem/vault"]["readOnly"] is False
+    assert mounts["/var/lib/exomem/state"]["readOnly"] is False
+    volumes = {item["name"]: item for item in spec["volumes"]}
+    assert volumes["data"]["persistentVolumeClaim"]["readOnly"] is False
+    assert volumes["authorization-session-source"]["secret"]["defaultMode"] == 0o444
+    custody = spec["initContainers"][0]["volumeMounts"][0]
+    assert custody["name"] == "authorization-session-source"
+    assert custody["readOnly"] is True
     assert "exomem-cell-credentials" not in json.dumps(body)
+
+
+def test_job_proof_tolerates_server_defaults_but_holds_the_rendered_policy():
+    # The sibling proofs each pin this; the migration proof is the one whose
+    # defaults handling changed, and it renders podReplacementPolicy itself, so a
+    # server value other than the rendered one must still refuse.
+    request = _request()
+    body = _module().build_governance_migration_job(request, recovery_envelope="signed-envelope")
+    stored = copy.deepcopy(body)
+    stored["metadata"].update({"uid": "migration-job-uid", "resourceVersion": "2"})
+    stored["spec"].update(
+        {"completionMode": "NonIndexed", "suspend": False, "manualSelector": False}
+    )
+    stored["spec"]["selector"] = {
+        "matchLabels": {"batch.kubernetes.io/controller-uid": "migration-job-uid"}
+    }
+    adapter = _adapter(Cluster(request))
+    assert adapter._job(stored, body, "migration-job-uid") == "migration-job-uid"
+
+    for policy in ("TerminatingOrFailed", "Unknown"):
+        wrong = copy.deepcopy(stored)
+        wrong["spec"]["podReplacementPolicy"] = policy
+        with pytest.raises(MetadataConflict):
+            adapter._job(wrong, body, "migration-job-uid")
+
+    # A wrong value on a field the manifest omits is only reachable through the
+    # defaults check, so this is what pins that branch rather than the exact loop.
+    for field, wrong in (("completionMode", "Indexed"), ("suspend", True)):
+        drifted = copy.deepcopy(stored)
+        drifted["spec"][field] = wrong
+        with pytest.raises(MetadataConflict):
+            adapter._job(drifted, body, "migration-job-uid")
+
+    unexpected = copy.deepcopy(stored)
+    unexpected["spec"]["backoffLimitPerIndex"] = 1
+    with pytest.raises(MetadataConflict):
+        adapter._job(unexpected, body, "migration-job-uid")
 
 
 @pytest.mark.parametrize(
@@ -514,7 +561,18 @@ async def test_adapter_refuses_ambiguous_or_failed_job_without_adopting_replacem
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "kind", ["env", "envFrom", "init-command", "extra-container", "mount", "token", "capability"]
+    "kind",
+    [
+        "env",
+        "envFrom",
+        "init-command",
+        "extra-container",
+        "mount",
+        "stale-inspect-mount",
+        "stale-inspect-claim",
+        "token",
+        "capability",
+    ],
 )
 async def test_adapter_refuses_extra_execution_or_custody_authority(kind):
     request = _request()
@@ -532,6 +590,11 @@ async def test_adapter_refuses_extra_execution_or_custody_authority(kind):
             spec["containers"] *= 2
         elif kind == "mount":
             spec["containers"][0]["volumeMounts"][3]["readOnly"] = False
+        elif kind == "stale-inspect-mount":
+            # The pre-2026-09-09 read-only inspect body is a foreign Job.
+            spec["containers"][0]["volumeMounts"][0]["readOnly"] = True
+        elif kind == "stale-inspect-claim":
+            spec["volumes"][0]["persistentVolumeClaim"]["readOnly"] = True
         elif kind == "token":
             spec["automountServiceAccountToken"] = True
         else:

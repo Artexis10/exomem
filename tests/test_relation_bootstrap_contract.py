@@ -46,7 +46,7 @@ def test_every_bootstrap_profile_exposes_bounded_relation_currency(tmp_path: Pat
         if profile == "compact":
             assert "core_vocabulary" not in relation
         else:
-            assert len(relation["core_vocabulary"]) == 28
+            assert len(relation["core_vocabulary"]) == 33
         assert relation["extension_count"] == 40
         assert relation["extension_hash"] == relation_registry.load_registry(
             vault

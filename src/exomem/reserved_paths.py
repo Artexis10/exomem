@@ -7,6 +7,7 @@ substitute for the held-handle operation that consumes the target.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -15,18 +16,28 @@ from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 
-from . import held_fs
+from . import held_fs, request_budget
+from .cli_ops import OpError
 from .kbdir import kb_dirname
+
+log = logging.getLogger(__name__)
 
 REGISTRY_VERSION = 1
 
 _SQLITE_SUFFIXES = ("", "-wal", "-shm", "-journal")
+#: A recall sidecar named for the vector space it holds (`index_paths.space_sidecar_name`).
+_EMBEDDINGS_SPACE_RE = re.compile(
+    r"^\.embeddings\.[0-9a-f]{16}\.sqlite(?:-(?:wal|shm|journal))?$", re.ASCII
+)
 _REVIEW_TEMP_RE = re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
-_DUE_TEMP_RE = re.compile(r"^\.\.due-state\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
+_DUE_TEMP_RE = re.compile(
+    r"^\.\.due-state(?:-emission)?\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII
+)
 _LEXICAL_REBUILD_RE = re.compile(
     r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$",
     re.ASCII,
@@ -222,9 +233,16 @@ def _active_owner_authority() -> _OwnerAuthority | None:
 
 
 def _vault_identity_key(vault_root: Path) -> str:
-    """Canonical process key shared by short/long spellings of one vault."""
+    """Canonical process key shared by short/long spellings of one vault.
 
-    return os.path.normcase(str(Path(vault_root).expanduser().resolve(strict=False)))
+    Asked several times per request and answering the same thing every time, so
+    the resolution goes through the request-scoped memo; outside a request scope
+    it is the same full resolution it always was.
+    """
+
+    from . import state_paths
+
+    return os.path.normcase(str(state_paths.resolved_vault_path(vault_root)))
 
 
 def _identity_coordination_domains(
@@ -345,7 +363,8 @@ _REGISTRY = (
         "embeddings-store",
         "embedding_index",
         StatePlacement.EXTERNAL_STATE,
-        exact=_sqlite_family(".embeddings.sqlite"),
+        exact=(*_sqlite_family(".embeddings.sqlite"), ".embeddings.active"),
+        patterns=(_EMBEDDINGS_SPACE_RE,),
     ),
     InternalStateDescriptor(
         "clip-store",
@@ -459,7 +478,7 @@ _REGISTRY = (
         "due-state",
         "due_state",
         StatePlacement.EXTERNAL_STATE,
-        exact=(".due-state.json",),
+        exact=(".due-state.json", ".due-state-emission.json"),
         patterns=(_DUE_TEMP_RE,),
     ),
     InternalStateDescriptor(
@@ -952,14 +971,17 @@ def mutation_remediation(descriptor_id: str | None) -> str:
     return "Use the owning subsystem's bounded control operation."
 
 
-def _leaf_spelling(value: object) -> tuple[str, str]:
+def _leaf_spelling(value: object, *, physical: bool = False) -> tuple[str, str]:
     classified = classify_logical(value)
     if classified.disposition is PathDisposition.RESERVED:
         raise ReservedPathLeafError("RESERVED_PATH")
     if classified.disposition is PathDisposition.INVALID:
         raise ReservedPathLeafError("UNSAFE_PATH")
     assert isinstance(value, (str, os.PathLike))
-    relative = unicodedata.normalize("NFKC", os.fspath(value)).replace("\\", "/")
+    spelling = os.fspath(value)
+    if not physical:
+        spelling = unicodedata.normalize("NFKC", spelling)
+    relative = spelling.replace("\\", "/")
     parent, separator, leaf = relative.rpartition("/")
     if not separator:
         parent, leaf = ".", relative
@@ -968,11 +990,131 @@ def _leaf_spelling(value: object) -> tuple[str, str]:
     return parent, leaf
 
 
+def _physical_leaf_candidates(
+    filesystem: held_fs.HeldFilesystem,
+    parent: held_fs.HeldDirectory,
+    leaf: str,
+) -> tuple[str, ...]:
+    """Every physical file name under `parent` whose NFKC form is `leaf`.
+
+    A byte-exact filesystem (Linux ext4) stores a macOS-origin NFD name and its
+    NFKC form as different names, so the exact logical spelling and the actual
+    on-disk spelling can diverge -- and, rarer but real, two differently
+    normalized physical names can both collapse to the same logical spelling.
+    This enumerates the parent's immediate children once, through the same
+    alias-safe primitive an ordinary directory listing already uses, and
+    reports every physical name that collapses to `leaf`, so a caller can
+    require exactly one before trusting it.
+    """
+
+    children = filesystem.children(parent)
+    if not children.ok:
+        code = children.error.code if children.error is not None else "IO_REFUSED"
+        raise ReservedPathLeafError(code)
+    return tuple(
+        record.relative_path
+        for record in children.require()
+        if record.identity.kind == "file"
+        and unicodedata.normalize("NFKC", record.relative_path) == leaf
+    )
+
+
+def resolve_physical_relative(
+    vault_root: Path,
+    value: object,
+    *,
+    identities: IdentityCatalogue | None = None,
+) -> str:
+    """The vault-relative path that actually names `value`'s on-disk file.
+
+    `value` is ordinarily the NFKC spelling a caller supplied. On a byte-exact
+    filesystem that is a different name from a macOS-origin NFD file, so an
+    NFKC-only lookup reports MISSING for a page that demonstrably exists. This
+    looks in `value`'s parent directory for every physical name whose own NFKC
+    form matches `value`'s leaf -- including the leaf itself, when it happens
+    to already be the on-disk spelling -- and requires exactly one: refusing
+    (`AMBIGUOUS_PATH`) rather than guessing when two physical spellings of the
+    same logical name collide, even when one of them is the NFKC-exact name.
+
+    Returns the confirmed physical relative path. Open it downstream with
+    `physical=True` -- re-normalizing it to NFKC would undo this resolution.
+    This reads no bytes and decides no reserved/private-identity status beyond
+    the containing directory; the caller's own generic leaf operation (opened
+    against the string this returns) is what enforces that for the file
+    itself.
+    """
+
+    with _generic_identity_catalogue_scope(
+        vault_root, value, identities=identities
+    ) as current:
+        parent_path, leaf = _leaf_spelling(value)
+        acquired = held_fs.acquire(Path(vault_root))
+        if not acquired.ok:
+            raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
+        with acquired.require() as filesystem:
+            parent_result = filesystem.parent(parent_path)
+            if not parent_result.ok:
+                code = (
+                    parent_result.error.code
+                    if parent_result.error is not None
+                    else "IO_REFUSED"
+                )
+                raise ReservedPathLeafError(code)
+            with parent_result.require() as parent:
+                _refuse_private_identity(parent.identity, current)
+                _require_current_generic_directory(filesystem, parent)
+                matches = _physical_leaf_candidates(filesystem, parent, leaf)
+                if not matches:
+                    raise ReservedPathLeafError("MISSING")
+                if len(matches) > 1:
+                    raise ReservedPathLeafError("AMBIGUOUS_PATH")
+                physical_leaf = matches[0]
+                return (
+                    physical_leaf
+                    if parent_path in ("", ".")
+                    else f"{parent_path}/{physical_leaf}"
+                )
+
+
+def physical_spelling_refusal(vault_root: Path, value: object) -> tuple[str, str] | None:
+    """Why a write door must not act on `value` as named, or ``None``.
+
+    `("AMBIGUOUS_PATH", reason)` when more than one physical name collapses to
+    `value`'s NFKC leaf, even if one of them is the NFKC-exact name, and
+    `("NON_CANONICAL_NAME", reason)` when the one physical name is not its own
+    NFKC form. Renaming it would be a write, and a door resolves its path
+    before validation, authorization and any dry run, so the door refuses and
+    `move_file` onto the same path is the governed way to canonicalize. Any
+    other lookup outcome is ``None``: the door's own resolution reports a
+    missing or refused path exactly as before.
+    """
+
+    try:
+        physical = resolve_physical_relative(vault_root, value)
+    except ReservedPathLeafError as error:
+        if error.code == "AMBIGUOUS_PATH":
+            return (
+                "AMBIGUOUS_PATH",
+                f"{value} matches more than one on-disk spelling; refusing to guess which",
+            )
+        return None
+    if physical == unicodedata.normalize("NFKC", physical):
+        return None
+    return (
+        "NON_CANONICAL_NAME",
+        (
+            f"{value} is stored under a non-canonical Unicode spelling; "
+            "move_file it onto this same path to canonicalize its name, then retry"
+        ),
+    )
+
+
 def read_generic_bytes(
     vault_root: Path,
     value: object,
     *,
     identities: IdentityCatalogue | None = None,
+    physical: bool = False,
 ) -> GenericFileSnapshot:
     """Read one ordinary file through the retained no-follow leaf.
 
@@ -980,12 +1122,20 @@ def read_generic_bytes(
     names may be a private-state name, so generic acquisition refuses it even
     when the caller supplied an ordinary-looking spelling. Named private
     identities published by owners are refused independently of link count.
+
+    `physical=True` opens the spelling exactly as given rather than its NFKC
+    form, for a path a walk of the disk found: on a byte-exact file system a
+    macOS-origin NFD name and its NFKC form are different names, and only the
+    walked one exists. Classification is unchanged -- it still reads the NFKC,
+    case-folded form -- so a reserved name is refused under any spelling.
     """
 
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
-        return _read_generic_bytes_held(vault_root, value, identities=current)
+        return _read_generic_bytes_held(
+            vault_root, value, identities=current, physical=physical
+        )
 
 
 def _read_generic_bytes_held(
@@ -993,9 +1143,10 @@ def _read_generic_bytes_held(
     value: object,
     *,
     identities: IdentityCatalogue,
+    physical: bool = False,
 ) -> GenericFileSnapshot:
 
-    parent_path, leaf = _leaf_spelling(value)
+    parent_path, leaf = _leaf_spelling(value, physical=physical)
     acquired = held_fs.acquire(Path(vault_root))
     if not acquired.ok:
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
@@ -1035,13 +1186,21 @@ def inspect_generic_file(
     value: object,
     *,
     identities: IdentityCatalogue | None = None,
+    physical: bool = False,
 ) -> held_fs.StableIdentity:
-    """Acquire and classify one generic regular file without reading its bytes."""
+    """Acquire and classify one generic regular file without reading its bytes.
+
+    `physical=True` matches `read_generic_bytes`: it opens `value` exactly as
+    given rather than its NFKC form, for a spelling already confirmed physical
+    (typically via `resolve_physical_relative`).
+    """
 
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
-        return _inspect_generic_file_held(vault_root, value, identities=current)
+        return _inspect_generic_file_held(
+            vault_root, value, identities=current, physical=physical
+        )
 
 
 def inspect_generic_path(
@@ -1195,9 +1354,10 @@ def _inspect_generic_file_held(
     value: object,
     *,
     identities: IdentityCatalogue,
+    physical: bool = False,
 ) -> held_fs.StableIdentity:
 
-    parent_path, leaf = _leaf_spelling(value)
+    parent_path, leaf = _leaf_spelling(value, physical=physical)
     acquired = held_fs.acquire(Path(vault_root))
     if not acquired.ok:
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
@@ -1325,8 +1485,16 @@ def move_generic_path(
     *,
     source_kind: str,
     identities: IdentityCatalogue | None = None,
+    physical: bool = False,
 ) -> None:
-    """Move one generic file or directory through retained source/destination handles."""
+    """Move one generic file or directory through retained source/destination handles.
+
+    `physical=True` opens the *source* exactly as given rather than its NFKC
+    form -- for a spelling already confirmed physical, typically via
+    `resolve_physical_relative` -- and never applies to `destination`: a move
+    target is a name being written, not looked up, so it always takes the
+    ordinary NFKC spelling.
+    """
 
     with _generic_identity_catalogue_scope(
         vault_root, source, destination, identities=identities
@@ -1337,6 +1505,7 @@ def move_generic_path(
             destination,
             source_kind=source_kind,
             identities=current,
+            physical=physical,
         )
 
 
@@ -1347,9 +1516,10 @@ def _move_generic_path_held(
     *,
     source_kind: str,
     identities: IdentityCatalogue,
+    physical: bool = False,
 ) -> None:
 
-    source_parent_path, source_leaf = _leaf_spelling(source)
+    source_parent_path, source_leaf = _leaf_spelling(source, physical=physical)
     destination_parent_path, destination_leaf = _leaf_spelling(destination)
     if source_kind not in {"file", "directory"}:
         raise ReservedPathLeafError("UNSAFE_PATH")
@@ -1859,6 +2029,14 @@ class IdentityCatalogue:
         _IdentityKey, tuple[tuple[str, str], ...]
     ] | None = None
     vault_root: Path | None = None
+    generation: str | None = None
+    """The reserved-identity token this inventory was proved against.
+
+    ``None`` means unproved: a raw scan nobody has bound to a generation yet, or
+    a working snapshot merged for one call.  Only a stamped inventory may be
+    carried across a change of this process's role, and only while
+    :func:`revalidate_identity_catalogue_generation` still agrees with it.
+    """
 
     @classmethod
     def from_vault(cls, vault_root: Path) -> IdentityCatalogue:
@@ -1988,14 +2166,312 @@ _PUBLISHED_OWNER_IDENTITIES: dict[
 _BASELINE_IDENTITY_CATALOGUES: dict[str, IdentityCatalogue] = {}
 
 
-def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
-    """Build one coordinated inventory of private identities per vault/process."""
+@dataclass(slots=True)
+class _BaselineFlight:
+    """One cold inventory build, shared by every caller that arrives during it."""
+
+    done: threading.Event
+    catalogue: IdentityCatalogue | None = None
+    error: BaseException | None = None
+
+
+_BASELINE_IDENTITY_FLIGHTS: dict[str, _BaselineFlight] = {}
+
+#: How long a follower may wait on the one build already running.  Deliberately
+#: NOT the mutation-gate budget: a follower waits on an in-process Event, which
+#: holds no gate and blocks no writer, so a short cap prevents nothing and only
+#: buys refusals.  It is sized to the work it absorbs instead -- the cold walk
+#: that motivated this single-flight was measured at ~12 s -- so concurrent cold
+#: readers wait for the one build rather than being refused while it runs.
+#: The request-budget cap below is MCP-only: `request_budget.set_current` has
+#: one production caller, the MCP request context, so REST and CLI callers and
+#: reconcile-class MCP tools have no bound budget and can wait up to this
+#: ceiling.
+_FLIGHT_WAIT_SECONDS = 120.0
+
+
+def _flight_wait_seconds() -> float:
+    """The follower's budget, capped by the caller's own deadline when it has one.
+
+    An interactive caller must still get the typed unavailable outcome inside
+    its own request deadline rather than at this ceiling.  A caller with no
+    bound budget -- a background warm, a CLI -- waits for the build.
+    """
+
+    budget = request_budget.current()
+    if budget is None:
+        return _FLIGHT_WAIT_SECONDS
+    return min(_FLIGHT_WAIT_SECONDS, budget.remaining())
+
+
+def _await_baseline_flight(
+    flight: _BaselineFlight,
+    timeout: float,
+) -> IdentityCatalogue:
+    """Wait a bounded time on the one build already running, then answer typed.
+
+    A follower never starts a duplicate scan.  It receives the leader's
+    inventory, re-raises the leader's failure so nothing weaker than the
+    fail-closed outcome escapes, or gives up inside the same budget the
+    coordination boundary itself uses and reports the boundary unavailable.
+    """
+
+    if not flight.done.wait(timeout):
+        raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
+    if flight.error is not None:
+        raise flight.error
+    if flight.catalogue is None:
+        raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
+    return flight.catalogue
+
+
+def _warm_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue | None:
+    """Return the inventory this process already holds, or nothing at all.
+
+    Reads no directory and takes no coordination, so an interactive caller can
+    ask whether a snapshot exists without becoming the one that builds it.
+    """
+
+    with _PUBLISHED_IDENTITY_LOCK:
+        return _BASELINE_IDENTITY_CATALOGUES.get(_vault_identity_key(vault_root))
+
+
+def identity_catalogue_ready(vault_root: Path) -> bool:
+    """Whether a private-identity inventory is available without building one."""
+
+    return _warm_baseline_identity_catalogue(vault_root) is not None
+
+
+def revalidate_identity_catalogue_generation(vault_root: Path) -> bool:
+    """Prove a carried inventory against the vault's current identity generation.
+
+    A process that built its inventory in one role and serves in another -- a
+    standby that warmed caches and was then promoted -- carries a snapshot the
+    outgoing worker may have invalidated.  Publications made in another process
+    are invisible here, so the shared generation is the only evidence that the
+    carried inventory still covers the vault.  A mismatch, or an inventory that
+    was never bound to a generation at all, drops it: the next caller rebuilds
+    rather than reusing a snapshot proved under an older token.
+
+    This is deliberately a *promotion-time* check, not a per-reuse one, and that
+    scoping is unreviewed judgment rather than a derived requirement.  The
+    argument: every exact owner bumps the token on an ordinary publish, so
+    proving it on each warm reuse would invalidate the inventory constantly and
+    charge the next generic read a whole-vault walk -- reintroducing the stall
+    this single-flight exists to remove, on a far more frequent trigger.  Within
+    one process's role the live publication layer already covers cooperative
+    churn; what it cannot see is another process's publications, which is
+    exactly what changes hands at promotion.  If that reasoning is wrong, the
+    fix is to call this from every reuse site and fund the rebuild cost, not to
+    weaken what it refuses.
+
+    One window this does not close: between the moment a standby builds its
+    inventory and the moment it is promoted, the standby's own warm-time reads
+    use that inventory while the outgoing worker's publications are invisible to
+    it.  That is pre-existing and identical on base, and promotion is where it
+    ends, not where it never happened.
+    """
+
+    return identity_catalogue_refusal(vault_root) is None
+
+
+def identity_catalogue_refusal(vault_root: Path) -> str | None:
+    """Why the carried inventory was refused, or ``None`` when it still holds.
+
+    Same check and same effect as :func:`revalidate_identity_catalogue_generation`
+    -- this is the one that does the work -- but it names the cause so a
+    promotion record can distinguish a vault that moved from a gate that was
+    merely busy.  Both refuse identically; only the record differs.
+
+    ``absent``            nothing was carried, so there is nothing to prove.
+    ``token-unreadable``  the shared token could not be read or parsed.
+    ``gate-busy``         the coordination boundary refused admission.
+    ``unproved``          the inventory was never bound to a generation.
+    ``generation-moved``  the vault's token advanced under the inventory.
+    """
 
     vault_key = _vault_identity_key(vault_root)
     with _PUBLISHED_IDENTITY_LOCK:
         cached = _BASELINE_IDENTITY_CATALOGUES.get(vault_key)
+    if cached is None:
+        return "absent"
+
+    cause: str | None = None
+    current: str | None = None
+    try:
+        # Read the token under the exclusive, non-advancing boundary so the
+        # comparison cannot race a bump.  One gate round trip, held across the
+        # read and nothing else, and only at promotion.
+        with _identity_coordination_scope(
+            vault_root, identity_may_change=False
+        ) as token:
+            current = token
+    except (RuntimeError, OSError):
+        # A token that cannot be read is not evidence of currency; it is a
+        # mismatch.  Raising here would escape into promotion after the writer
+        # lease was already taken, stranding a lease-holding process that never
+        # finished promoting, and every retry would repeat it.
+        cause = "token-unreadable"
+    except OpError:
+        # A gate we cannot enter is not evidence of currency either.  The named
+        # classes keep a programming error in this block surfacing instead of
+        # being swallowed as a refusal.
+        cause = "gate-busy"
+
+    if cause is None:
+        if cached.generation is None:
+            cause = "unproved"
+        elif current is None or cached.generation != current:
+            cause = "generation-moved"
+        else:
+            return None
+
+    with _PUBLISHED_IDENTITY_LOCK:
+        if _BASELINE_IDENTITY_CATALOGUES.get(vault_key) is cached:
+            del _BASELINE_IDENTITY_CATALOGUES[vault_key]
+    return cause
+
+
+def schedule_identity_catalogue_warm(vault_root: Path) -> None:
+    """Single-flight a cold inventory build away from the request thread.
+
+    Promotion usually refuses the carried inventory, because a busy vault bumps
+    the shared token on every owner publish.  Without this the first interactive
+    caller after promotion pays the whole-vault walk, which is the stall this
+    lane exists to remove.  Starts nothing when an inventory is already warm or
+    a build is already running, and a caller that loses the race to either one
+    still cannot start a second walk: the flight registry, not this check, is
+    what makes construction single-flighted.
+    """
+
+    vault_key = _vault_identity_key(vault_root)
+    with _PUBLISHED_IDENTITY_LOCK:
+        if (
+            vault_key in _BASELINE_IDENTITY_CATALOGUES
+            or vault_key in _BASELINE_IDENTITY_FLIGHTS
+        ):
+            return
+
+    def _warm() -> None:
+        try:
+            _baseline_identity_catalogue(vault_root)
+        except BaseException as error:  # noqa: BLE001 - a background warm never raises
+            # Class only: a failure message can name a private reserved path,
+            # and this log is not inside the leaf boundary that hides them.
+            log.warning(
+                "identity catalogue background warm failed: %s",
+                type(error).__name__,
+            )
+
+    thread = threading.Thread(
+        target=_warm,
+        name="exomem-identity-catalogue-warm",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception:  # noqa: BLE001 - a thread-start failure cannot fail a caller
+        log.warning("identity catalogue background warm could not start")
+
+
+def _install_baseline_identity_catalogue(
+    vault_key: str,
+    candidate: IdentityCatalogue,
+) -> IdentityCatalogue:
+    """Publish one built inventory, keeping whatever a racing build installed."""
+
+    with _PUBLISHED_IDENTITY_LOCK:
+        existing = _BASELINE_IDENTITY_CATALOGUES.get(vault_key)
+        if existing is not None:
+            return existing
+        _BASELINE_IDENTITY_CATALOGUES[vault_key] = candidate
+        return candidate
+
+
+def _stamp_identity_generation(
+    candidate: IdentityCatalogue,
+    generation: str | None,
+) -> IdentityCatalogue:
+    """Bind an inventory to the reserved-identity generation that proved it.
+
+    Only the token the coordinating scope itself yielded counts as proof.  A
+    build nested inside a boundary its caller already holds, or one coordinated
+    by a manager that publishes no token, leaves the inventory unproved rather
+    than reading a value it did not coordinate; an unproved inventory is one
+    :func:`revalidate_identity_catalogue_generation` refuses to carry.
+    """
+
+    return dataclass_replace(candidate, generation=generation)
+
+
+def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
+    """Return one coordinated inventory of private identities per vault/process.
+
+    Cold construction is single-flighted.  Concurrent startup readers used to
+    each walk the whole vault; the generation churn that crossed those walks
+    invalidated every optimistic scan and pushed one reader into the locked
+    all-domain fail-safe, which then stalled activation behind it.  Exactly one
+    caller builds, and the rest wait inside the coordination budget instead of
+    starting a scan of their own.
+    """
+
+    cached = _warm_baseline_identity_catalogue(vault_root)
     if cached is not None:
         return cached
+
+    vault_key = _vault_identity_key(vault_root)
+    if _identity_coordination_active(vault_root):
+        # This task already holds identity coordination, so it cannot wait on
+        # another task's build: the leader needs the same boundary to prove its
+        # snapshot.  Build inline under the boundary already held instead.
+        return _install_baseline_identity_catalogue(
+            vault_key, _build_baseline_identity_catalogue(vault_root)
+        )
+
+    # Registration happens inside the `try`, and `leading` is set before the
+    # entry is published, so every exit -- including an interruption landing
+    # between the two -- reaches the `finally` that releases the flight.  An
+    # orphaned entry would refuse every later caller in this process forever.
+    flight = _BaselineFlight(threading.Event())
+    leading = False
+    try:
+        with _PUBLISHED_IDENTITY_LOCK:
+            cached = _BASELINE_IDENTITY_CATALOGUES.get(vault_key)
+            if cached is not None:
+                return cached
+            running = _BASELINE_IDENTITY_FLIGHTS.get(vault_key)
+            if running is None:
+                leading = True
+                _BASELINE_IDENTITY_FLIGHTS[vault_key] = flight
+            else:
+                flight = running
+
+        if not leading:
+            return _await_baseline_flight(flight, _flight_wait_seconds())
+
+        flight.catalogue = _install_baseline_identity_catalogue(
+            vault_key, _build_baseline_identity_catalogue(vault_root)
+        )
+    except BaseException as error:
+        if leading:
+            flight.error = error
+        raise
+    finally:
+        if leading:
+            # Released before the waiters are woken, so a build that raised
+            # leaves the next caller free to retry rather than a flight nobody
+            # can finish.
+            with _PUBLISHED_IDENTITY_LOCK:
+                if _BASELINE_IDENTITY_FLIGHTS.get(vault_key) is flight:
+                    del _BASELINE_IDENTITY_FLIGHTS[vault_key]
+            flight.done.set()
+    return flight.catalogue
+
+
+def _build_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
+    """Walk one vault's private identities and stamp the generation that proved it."""
+
+    vault_key = _vault_identity_key(vault_root)
 
     # Walking the whole KB can take tens of seconds on a mature vault. Take two
     # short all-domain snapshots around the unlocked walk instead of holding
@@ -2014,19 +2490,15 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
             if cached is not None:
                 return cached
             if before == after:
-                with _PUBLISHED_IDENTITY_LOCK:
-                    _BASELINE_IDENTITY_CATALOGUES[vault_key] = candidate
-                return candidate
+                return _stamp_identity_generation(candidate, after)
 
-    with _identity_coordination_scope(vault_root):
+    with _identity_coordination_scope(vault_root) as generation:
         with _PUBLISHED_IDENTITY_LOCK:
             cached = _BASELINE_IDENTITY_CATALOGUES.get(vault_key)
         if cached is not None:
             return cached
         candidate = IdentityCatalogue.from_vault(vault_root)
-        with _PUBLISHED_IDENTITY_LOCK:
-            _BASELINE_IDENTITY_CATALOGUES[vault_key] = candidate
-        return candidate
+        return _stamp_identity_generation(candidate, generation)
 
 
 def _publish_owner_identities(
@@ -2199,7 +2671,11 @@ def _generic_identity_catalogue_scope(
     *values: object,
     identities: IdentityCatalogue | None = None,
 ) -> Iterator[IdentityCatalogue]:
-    """Pin the cooperative boundary and one private-identity snapshot."""
+    """Pin the cooperative boundary and one private-identity snapshot.
+
+    A caller that must not stall on a cold inventory asks
+    :func:`identity_catalogue_ready` first; this scope always supplies one.
+    """
 
     needs_fresh = _needs_fresh_physical_catalogue(values)
     if identities is None and not needs_fresh:

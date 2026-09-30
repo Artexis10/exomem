@@ -12,10 +12,11 @@ import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import cached_property
 from numbers import Real
 from pathlib import Path, PurePosixPath
 
-from .. import bm25, find_policy, fusion, ranking_config
+from .. import bm25, find_corpus, find_policy, fusion, ranking_config
 from ..find_types import GraphProvenance, Hit
 from ..kbdir import kb_dirname
 from . import (
@@ -1273,6 +1274,79 @@ def _retain_projected_bm25_hits(
     return tuple(retained)
 
 
+def _projected_text(search_fields: Mapping[str, str]) -> str:
+    return " ".join(
+        search_fields[key]
+        for key in sorted(search_fields, key=lambda value: value.encode("utf-16-be"))
+    )
+
+
+class _ProjectedTextView:
+    """A projection's search fields as the dense-lead guard reads a page."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    @cached_property
+    def stem_set(self) -> frozenset[str]:
+        return frozenset(bm25.tokenize(self._text))
+
+    @cached_property
+    def letter_script(self) -> str | None:
+        return find_policy.dominant_script(self._text)
+
+
+def _guard_projected_lexical_votes(
+    lane_hits: dict[str, tuple[projected_retrieval.ProjectedLexicalHit, ...]],
+    *,
+    query: str,
+    rank_config: ranking_config.RankingConfig,
+    window: int,
+) -> str | None:
+    """Apply `find`'s dense-lead guard to the projected lexical lanes, in place.
+
+    Withholds the BM25 and keyword votes `find_policy.lexical_visibility` names,
+    reading only public search fields, and returns why the request crosses
+    scripts (None when it does not) for the rerank coverage gate.
+    """
+    vector = [hit.item_identity for hit in lane_hits.get("vector", ())]
+    if not vector:
+        return None
+    fields: dict[str, Mapping[str, str]] = {}
+    for lane in ("vector", "bm25", "keyword"):
+        for hit in lane_hits.get(lane, ()):
+            fields.setdefault(hit.item_identity, hit.search_fields)
+    views: dict[str, _ProjectedTextView] = {}
+
+    def view_of(identity: str) -> _ProjectedTextView | None:
+        if identity not in fields:
+            return None
+        if identity not in views:
+            views[identity] = _ProjectedTextView(_projected_text(fields[identity]))
+        return views[identity]
+
+    weights = rank_config.intent_weights(find_policy.classify_intent(query))
+    visibility = find_policy.lexical_visibility(
+        query=query,
+        vector_ranking=vector,
+        lexical_rankings=(
+            [hit.item_identity for hit in lane_hits.get("bm25", ())],
+            [hit.item_identity for hit in lane_hits.get("keyword", ())],
+        ),
+        lane_weights=tuple(weights[:3]),
+        rrf_k=rank_config.rrf_k,
+        window=window,
+        view_of=view_of,
+    )
+    if visibility.withheld:
+        for lane in ("bm25", "keyword"):
+            if lane in lane_hits:
+                lane_hits[lane] = tuple(
+                    hit for hit in lane_hits[lane] if hit.item_identity not in visibility.withheld
+                )
+    return visibility.crossing
+
+
 def _should_auto_rerank(
     lane_hits: Mapping[
         str,
@@ -1290,6 +1364,30 @@ def _should_auto_rerank(
         return False
     overlap = len(set(vector) & set(lexical))
     return 1.0 - overlap / max(len(vector), len(lexical)) > 0.5
+
+
+def _without_navigation_candidates(
+    authorization: projected_retrieval.AuthorizationProjectionMap,
+) -> projected_retrieval.AuthorizationProjectionMap:
+    """Exclude navigation from retrieval without changing canonical membership."""
+
+    navigation = frozenset(
+        selection.item_identity
+        for selection in authorization.selections
+        if PurePosixPath(selection.item_identity).name.casefold()
+        in find_corpus.NAVIGATION_BASENAMES
+    )
+    if not navigation:
+        return authorization
+    return projected_retrieval.AuthorizationProjectionMap(
+        namespace_key=authorization.namespace_key,
+        selections=tuple(
+            selection
+            for selection in authorization.selections
+            if selection.item_identity not in navigation
+        ),
+        withheld_identities=authorization.withheld_identities.union(navigation),
+    )
 
 
 def _find_projected_hits_pinned(
@@ -1442,15 +1540,18 @@ def _find_projected_hits_pinned(
         if not inline_withheld
         else authorization.withheld_identities.union(inline_withheld)
     )
+    # Keep policy decisions and continuation binding intact; every candidate lane
+    # shares the narrower selector so navigation cannot enter scoring or traversal.
+    retrieval_authorization = _without_navigation_candidates(authorization)
     by_identity = {
         selection.item_identity: selection
-        for selection in authorization.selections
+        for selection in retrieval_authorization.selections
         if selection.projection_variant_id is not None
     }
     selected_count = len(by_identity)
     selected_variants = {
         variant.item_identity: variant
-        for variant in runtime.catalog.select(authorization)
+        for variant in runtime.catalog.select(retrieval_authorization)
     }
     has_selected_l6 = any(
         variant.decision_level == 6 for variant in selected_variants.values()
@@ -1486,18 +1587,18 @@ def _find_projected_hits_pinned(
 
     if mode == "keyword":
         lane_hits["keyword"] = runtime.lexical_index.search_keyword(
-            authorization,
+            retrieval_authorization,
             query,
             k=lane_depth,
         )
     elif mode == "hybrid":
         lane_hits["bm25"] = runtime.lexical_index.search_bm25(
-            authorization,
+            retrieval_authorization,
             query,
             k=lane_depth,
         )
         lane_hits["keyword"] = runtime.lexical_index.search_keyword(
-            authorization,
+            retrieval_authorization,
             query,
             k=lane_depth,
         )
@@ -1531,7 +1632,7 @@ def _find_projected_hits_pinned(
                 else:
                     try:
                         lane_hits["vector"] = vector_index.search_vector(
-                            authorization,
+                            retrieval_authorization,
                             query_vector,
                             k=lane_depth,
                         )
@@ -1570,7 +1671,7 @@ def _find_projected_hits_pinned(
                 else:
                     try:
                         lane_hits["clip"] = clip_index.search_clip(
-                            authorization,
+                            retrieval_authorization,
                             clip_query,
                             k=lane_depth,
                         )
@@ -1582,8 +1683,15 @@ def _find_projected_hits_pinned(
                         ) from error
 
     raw_bm25_hits = lane_hits.get("bm25", ())
+    lexical_crossing: str | None = None
     if mode == "hybrid":
         lane_hits["bm25"] = _retain_projected_bm25_hits(lane_hits, query)
+        lexical_crossing = _guard_projected_lexical_votes(
+            lane_hits,
+            query=query,
+            rank_config=rank_config,
+            window=candidate_depth,
+        )
 
     graph_degrees: dict[str, int] = {}
     graph_hops: set[str] = set()
@@ -1595,7 +1703,7 @@ def _find_projected_hits_pinned(
             warming.add("graph")
         else:
             try:
-                admitted = runtime.graph_index.authorize(authorization)
+                admitted = runtime.graph_index.authorize(retrieval_authorization)
                 seeds: list[str] = []
                 seen_seeds: set[str] = set()
                 graph_seed_cap = min(
@@ -1738,6 +1846,15 @@ def _find_projected_hits_pinned(
         from .. import embeddings as embeddings_module
     if do_rerank and not embeddings_module.ranking_enabled():
         do_rerank = False
+    if do_rerank:
+        # The coverage gate `find` applies: a reranker judges only the script
+        # most of the query is written in, and a request fusion saw cross
+        # scripts only if it is cross-lingual.
+        coverage = find_policy.reranker_coverage(embeddings_module.RERANKER_NAME)
+        if not find_policy.reranker_reads_query(coverage, query) or (
+            lexical_crossing is not None and not coverage.cross_lingual
+        ):
+            do_rerank = False
     if do_rerank and readiness.should_defer("reranker"):
         warming.add("rerank")
         do_rerank = False
@@ -1780,7 +1897,7 @@ def _find_projected_hits_pinned(
 
         try:
             reranked = runtime.reranker.rerank_batch(
-                authorization,
+                retrieval_authorization,
                 query,
                 ordered_identities,
                 scorer=score_projected_passages,

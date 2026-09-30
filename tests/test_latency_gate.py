@@ -103,6 +103,28 @@ GRAPH_RATIO_SLACK_MS = 25.0  # noise floor for ms-scale medians on shared CI
 CEIL_REFERENTS_RATIO = 1.5
 REFERENTS_RATIO_SLACK_MS = 25.0
 
+# --- Context-compiler ceilings (add-context-activation, design D9).
+# The metric includes the entire activation request. Excluding its retrieval
+# stage previously allowed a fast compiler behind a many-second corpus search
+# to pass. Stage timings diagnose regressions; total latency admits the request.
+#
+# The compiler's stages are index-backed and seed-capped, so they must be FLAT in
+# corpus size: resolution reads a bounded candidate window out of the anchor
+# catalogue, and each lane is capped before the budget pass. A linear-in-N cost
+# reappearing here means a lane started walking the corpus, which is the
+# regression class this gate names. The absolute ceiling is a
+# catastrophic-blowup backstop sized like CEIL_REFERENTS_MS, not a tuned bound;
+# re-measure rather than hand-tuning it.
+CEIL_WORKING_SET_MS = 1000.0
+CEIL_WORKING_SET_RATIO = 1.5
+WORKING_SET_RATIO_SLACK_MS = 50.0
+#: A unique authored alias isolates scale measurement from the deliberately
+#: repetitive synthetic names. Resolver quality has separate acceptance cases;
+#: this gate must run useful role lanes, never time an empty abstention.
+WORKING_SET_TURN = (
+    "I'm planning to meet Activation Scale Contact — what are the constraints?"
+)
+
 
 def _seed_freshness_live(vault: Path) -> None:
     """Seed the event-maintained freshness registry the way the watcher does, so
@@ -599,3 +621,426 @@ def test_entity_type_registry_load_is_bounded_at_scale(
         rerank=False,
     )
     assert len(parse_ms) == 1, "warm registry load reparsed instead of costing 0 ms"
+
+
+# --------------------------------------------------------------------------- #
+# Context compiler (add-context-activation task 5.4)
+# --------------------------------------------------------------------------- #
+
+
+def _compiler_ms(timings: dict) -> float:
+    """Measure the whole operation, including work outside compiler spans."""
+    return float(timings["total_ms"])
+
+
+def _measure_working_set(vault: Path) -> tuple[float, dict]:
+    """Return (warm median compiler ms, one packet) over repeated activations.
+
+    The index is built explicitly first, for the same reason `lexstore.ensure_fresh`
+    is: startup owns a potentially unbounded derived build, and an interactive call
+    must never become that build.
+    """
+    from exomem import commands, working_set_index, working_set_runtime
+
+    # The generated entities otherwise all share the words "Synthetic Person",
+    # which can trigger disambiguation before any role work runs.
+    person = next((vault / "Knowledge Base/Entities/People").glob("synthetic-person-00007-*.md"))
+    person.write_text(
+        person.read_text(encoding="utf-8").replace(
+            "entity_type: person\n",
+            "entity_type: person\naliases: [Activation Scale Contact]\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+    def call() -> dict:
+        # The packet cache is keyed on the turn, so vary it to measure the
+        # compiler rather than a cache hit.
+        working_set_runtime.reset_caches_for_tests()
+        return commands.op_activate_context(
+            vault, turn=WORKING_SET_TURN, include_timings=True
+        )
+
+    packet = call()
+    samples = [_compiler_ms(call()["timings"]) for _ in range(3)]
+    return statistics.median(samples), packet
+
+
+@pytest.mark.timeout(300)
+def test_working_set_compiler_stays_bounded_at_scale(tmp_path: Path, model_free) -> None:
+    from synth_vault import gen_entity_overlay
+
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+    compiler_ms, packet = _measure_working_set(vault)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert compiler_ms < CEIL_WORKING_SET_MS, (
+        f"context compiler took {compiler_ms:.1f}ms @ {N_NOTES} notes "
+        f"(ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    )
+    # The packet is bounded by construction; assert it, so a budget regression
+    # shows up as a gate failure rather than as a context-window surprise.
+    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+    assert len(json.dumps(packet)) < 24_000
+
+
+@pytest.mark.timeout(300)
+def test_working_set_compiler_with_an_upkeep_item_stays_bounded(
+    tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D1-T11: a session start that carries an upkeep item pays the same
+    ceiling. Every measured call is a session start, so every one reads the
+    sidecar, checks signatures, builds the release filter and attaches.
+
+    Timed end to end around `op_activate_context`: the carrier attaches after
+    the compiler stamps `timings["total_ms"]`, so that number cannot see it."""
+    import dreamer_fixture
+    from synth_vault import gen_entity_overlay
+
+    from exomem import commands, dreamer, dreamer_store, upkeep, working_set_runtime
+
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+    _measure_working_set(vault)  # builds the index and warms the lanes
+    pages = sorted(
+        path.relative_to(vault).as_posix()
+        for path in (vault / "Knowledge Base").rglob("*.md")
+    )[:3]
+    dreamer_fixture.plant_deliverable(vault, pages[0], pages[1:], now=time.time())
+    monkeypatch.setattr(dreamer, "delivering", lambda: True)
+
+    def call() -> tuple[float, dict]:
+        working_set_runtime.reset_caches_for_tests()
+        upkeep.reset_delivery_state()
+        dreamer_store.clear_reader_memo()
+        started = time.perf_counter()
+        packet = commands.op_activate_context(vault, turn=WORKING_SET_TURN, include_timings=True)
+        return (time.perf_counter() - started) * 1000.0, packet
+
+    _wall_ms, packet = call()
+    assert packet["upkeep"]["items"], packet.get("upkeep")
+    samples = []
+    for _ in range(3):
+        wall_ms, measured = call()
+        assert measured["upkeep"]["items"], "a sample did not time the carrier"
+        samples.append(wall_ms)
+    request_ms = statistics.median(samples)
+    assert request_ms < CEIL_WORKING_SET_MS, (
+        f"activation with an upkeep item took {request_ms:.1f}ms end to end @ {N_NOTES} "
+        f"notes (ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    )
+    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+
+
+@pytest.mark.timeout(600)
+def test_working_set_compiler_does_not_scale_linearly(tmp_path: Path, model_free) -> None:
+    from synth_vault import gen_entity_overlay
+
+    small = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(small, 125, seed=23)
+    _seed_freshness_live(small)
+    lexstore.ensure_fresh(small)
+    small_ms, _ = _measure_working_set(small)
+
+    large = _build_dense_vault(tmp_path, N_NOTES_LARGE)
+    gen_entity_overlay(large, 500, seed=23)
+    _seed_freshness_live(large)
+    lexstore.ensure_fresh(large)
+    large_ms, _ = _measure_working_set(large)
+
+    bound = max(
+        small_ms * CEIL_WORKING_SET_RATIO,
+        small_ms + WORKING_SET_RATIO_SLACK_MS,
+    )
+    assert large_ms < bound, (
+        f"context compiler scaled {small_ms:.1f}ms @ {N_NOTES} to "
+        f"{large_ms:.1f}ms @ {N_NOTES_LARGE} (bound {bound:.1f}ms)"
+    )
+
+
+#: Distinct pages the full ring's events fall on, the same at every corpus
+#: size, so the ratio measures the corpus and not a differently shaped ring.
+RING_PAGES = 512
+
+
+def _measure_referential_working_set(vault: Path) -> tuple[float, dict]:
+    """Return (warm median ms, one packet) for "continue" against a heat ring
+    at `RING_MAX` events over `RING_PAGES` pages, the scaled contact's page
+    the newest work.
+
+    One read lands before every measured call, so each one rebuilds the
+    profile from the full ring rather than serving a cached aggregation: the
+    steady state of a session that reads between turns.
+    """
+    from exomem import commands, working_set_heat, working_set_index, working_set_runtime
+
+    person = next((vault / "Knowledge Base/Entities/People").glob("synthetic-person-00007-*.md"))
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_heat.reset_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    # Seeds the projection: the registry is copied once per sidecar.
+    commands.op_activate_context(vault, turn=WORKING_SET_TURN)
+
+    pages = sorted(
+        path.relative_to(vault).as_posix()
+        for path in (vault / "Knowledge Base" / "Notes").rglob("*.md")
+    )[:RING_PAGES]
+    assert len(pages) == RING_PAGES
+    now_ns = time.time_ns()
+    ring = [
+        working_set_heat.HeatEvent(
+            now_ns - 3_600 * 10**9 + index * 10**6,
+            pages[index % len(pages)],
+            "read" if index % 3 else "work",
+            origin="ring",
+        )
+        for index in range(working_set_heat.RING_MAX)
+    ]
+    working_set_heat.append(vault, ring)
+    target = person.relative_to(vault).as_posix()
+    working_set_heat.append(
+        vault, [working_set_heat.HeatEvent(now_ns - 60 * 10**9, target, "work", origin="edit_memory")]
+    )
+
+    def call(index: int) -> dict:
+        working_set_heat.append(
+            vault,
+            [
+                working_set_heat.HeatEvent(
+                    now_ns - 1_800 * 10**9 + index, pages[index % len(pages)], "read", origin="read"
+                )
+            ],
+        )
+        working_set_runtime.reset_caches_for_tests()
+        # A fresh keyed conversation each call, as a hook sends it: the worst
+        # case, ranked over the whole ring. A keyless caller never ranks the
+        # vault for its referent, and a session's own served thread would
+        # lead without ranking it.
+        return commands.op_activate_context(
+            vault, turn="continue", include_timings=True, session=f"latency-gate-{index}"
+        )
+
+    packet = call(0)
+    samples = [_compiler_ms(call(index)["timings"]) for index in range(1, 4)]
+    return statistics.median(samples), packet
+
+
+@pytest.mark.timeout(900)
+def test_referential_working_set_stays_under_ceiling_with_a_full_ring(
+    tmp_path: Path, model_free
+) -> None:
+    """Step 5's projection at its bound: a full ring is aggregated and ranked
+    on every referential turn, so "continue" must stay under the compiler
+    ceiling at 2k and 8k notes and must not scale with the corpus."""
+    from synth_vault import gen_entity_overlay
+
+    measured: dict[int, tuple[float, dict]] = {}
+    for notes, overlay in ((N_NOTES, 125), (N_NOTES_LARGE, 500)):
+        vault = _build_dense_vault(tmp_path, notes)
+        gen_entity_overlay(vault, overlay, seed=29)
+        measured[notes] = _measure_referential_working_set(vault)
+
+    for notes, (compiler_ms, packet) in measured.items():
+        assert packet["abstained"] is False, (notes, packet.get("abstention"))
+        assert any("recency" in item["evidence"] for item in packet["anchors"]), notes
+        assert compiler_ms < CEIL_WORKING_SET_MS, (
+            f"referential activation took {compiler_ms:.1f}ms @ {notes} notes with a full "
+            f"ring (ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+        )
+    small_ms, large_ms = measured[N_NOTES][0], measured[N_NOTES_LARGE][0]
+    bound = max(small_ms * CEIL_WORKING_SET_RATIO, small_ms + WORKING_SET_RATIO_SLACK_MS)
+    assert large_ms < bound, (
+        f"referential activation scaled {small_ms:.1f}ms @ {N_NOTES} to "
+        f"{large_ms:.1f}ms @ {N_NOTES_LARGE} with a full ring (bound {bound:.1f}ms)"
+    )
+    sys.stderr.write(
+        f"\nreferential working set, full ring: {small_ms:.1f}ms @ {N_NOTES}, "
+        f"{large_ms:.1f}ms @ {N_NOTES_LARGE} (bound {bound:.1f}ms)\n"
+    )
+
+
+
+# --- Task 5.3 (make-activation-conventions-vault-owned): the same ceiling
+# holds with a vault-owned registry in effect. `test_working_set_compiler_
+# does_not_scale_linearly` above already measures 8k notes but only asserts
+# the SCALING ratio against the 2k measurement; this pins the absolute
+# ceiling at 8k too, the way the 2k test above already pins it.
+
+
+def _conventions_override_at_caps() -> dict:
+    """An override sized to exactly every cap `activation_conventions` names,
+    with rules that match no real page -- the caps exist to bound per-request
+    evaluation cost, not the number of pages one rule admits (design.md
+    decision 3's own point), so this measures the cost of the RULE COUNT.
+    """
+    from exomem import activation_conventions as ac_module
+
+    return {
+        "schema_version": 1,
+        "anchors": {
+            "resource": {
+                "add_folders": [f"CustomResource{i}" for i in range(ac_module.MAX_FOLDERS_PER_KIND)],
+                "add_tags": [f"resource-tag-{i}" for i in range(ac_module.MAX_TAGS_PER_KIND)],
+                "add_types": [f"resource-type-{i}" for i in range(ac_module.MAX_TYPES_PER_KIND)],
+            },
+            "hub": {
+                "add_folders": [f"CustomHub{i}" for i in range(ac_module.MAX_FOLDERS_PER_KIND)],
+                "add_tags": [f"hub-tag-{i}" for i in range(ac_module.MAX_TAGS_PER_KIND)],
+                "add_types": [f"hub-type-{i}" for i in range(ac_module.MAX_TYPES_PER_KIND)],
+            },
+            "add_skip_folders": [f"CustomSkip{i}" for i in range(ac_module.MAX_SKIP_FOLDERS)],
+        },
+        "state": {
+            "prefer_state_fields": [f"custom_state_field_{i}" for i in range(ac_module.MAX_STATE_FIELDS)]
+        },
+        "stopwords": {"add": [f"customstopword{i}" for i in range(ac_module.MAX_STOPWORDS)]},
+        "resolution": {"rare_term_max_anchors": 1},
+    }
+
+
+def _roles_override_at_caps() -> dict:
+    """An override sized to exactly every cap `context_roles` names: the
+    roles-per-override, cues-per-role and evidence-categories-per-role caps.
+    """
+    from exomem import context_roles as roles_module
+
+    categories = [
+        "decision", "fact", "finding", "insight",
+        "constraint", "requirement", "assumption", "risk",
+    ]
+    assert len(categories) == roles_module.MAX_EVIDENCE_CATEGORIES_PER_ROLE
+    cues = [f"custom cue number {i}" for i in range(roles_module.MAX_CUES_PER_ROLE)]
+    return {
+        "schema_version": 1,
+        "roles": {
+            f"custom_latency_role_{i}": {
+                "lane": "evidence",
+                "description": "synthetic role for the latency gate",
+                "cues": cues,
+                "evidence_cues": cues,
+                "evidence_categories": categories,
+            }
+            for i in range(roles_module.MAX_ROLES_PER_OVERRIDE)
+        },
+    }
+
+
+def _write_overrides_at_caps(vault: Path) -> None:
+    import yaml
+
+    from exomem import activation_conventions as ac_module
+    from exomem import context_roles as roles_module
+
+    roles_module.override_path(vault).parent.mkdir(parents=True, exist_ok=True)
+    roles_module.override_path(vault).write_text(
+        yaml.safe_dump(_roles_override_at_caps(), sort_keys=True), encoding="utf-8"
+    )
+    ac_module.override_path(vault).write_text(
+        yaml.safe_dump(_conventions_override_at_caps(), sort_keys=True), encoding="utf-8"
+    )
+    roles_module.clear_cache()
+    ac_module.clear_cache()
+
+
+@pytest.mark.timeout(600)
+def test_working_set_compiler_stays_bounded_at_8k_notes_with_the_shipped_registry(
+    tmp_path: Path, model_free
+) -> None:
+    from synth_vault import gen_entity_overlay
+
+    vault = _build_dense_vault(tmp_path, N_NOTES_LARGE)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+    compiler_ms, packet = _measure_working_set(vault)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert compiler_ms < CEIL_WORKING_SET_MS, (
+        f"context compiler took {compiler_ms:.1f}ms @ {N_NOTES_LARGE} notes "
+        f"(ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    )
+
+
+@pytest.mark.timeout(300)
+def test_working_set_compiler_stays_bounded_with_an_override_at_the_caps(
+    tmp_path: Path, model_free
+) -> None:
+    from synth_vault import gen_entity_overlay
+
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+    _write_overrides_at_caps(vault)
+
+    compiler_ms, packet = _measure_working_set(vault)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["generation"]["roles_source"] == "vault"
+    assert packet["generation"]["conventions_source"] == "vault"
+    assert compiler_ms < CEIL_WORKING_SET_MS, (
+        f"context compiler took {compiler_ms:.1f}ms @ {N_NOTES} notes with an "
+        f"override at every cap (ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    )
+
+
+@pytest.mark.timeout(300)
+def test_a_rule_admitting_a_large_folder_is_reported_not_gated(
+    tmp_path: Path, model_free
+) -> None:
+    """design.md's Risks section: 'An owner admits everything ... The first is
+    slow; the latency gate reports it.' `Notes/` holds three of
+    `gen_dense_vault`'s seven folders, so naming it as a resource rule makes
+    most of the corpus an anchor candidate -- legitimately slow, not unsound
+    (more anchors only tightens `rare_term`), so this measures and reports
+    the cost instead of gating it against `CEIL_WORKING_SET_MS`. The
+    `pytest.mark.timeout` above is the actual backstop, against a hang rather
+    than against a slow-but-correct compile.
+    """
+    import yaml
+
+    from exomem import activation_conventions as ac_module
+    from synth_vault import gen_entity_overlay
+
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+    override_path = ac_module.override_path(vault)
+    override_path.parent.mkdir(parents=True, exist_ok=True)
+    override_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "anchors": {"resource": {"add_folders": ["Notes"]}},
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    ac_module.clear_cache()
+
+    compiler_ms, packet = _measure_working_set(vault)
+
+    print(
+        f"\n[reported, not gated] compiler took {compiler_ms:.1f}ms @ {N_NOTES} notes "
+        f"with 'Notes/' admitted whole as a resource rule "
+        f"(ordinary ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    )
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["generation"]["conventions_source"] == "vault"

@@ -340,3 +340,67 @@ def test_plan_memory_query_view_names_the_excluded_shaping_field(tmp_path: Path)
     assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
     assert "view excludes shaping fields: columns" in raised.value.message
     assert "inbox" not in raised.value.message
+
+
+def test_plan_memory_add_commits_a_multi_line_string_field(tmp_path: Path) -> None:
+    """Representability follows the storage strategy, so Planning gains it too.
+
+    The rule lives in the validator both profiles share, so a Markdown-item
+    Planning collection accepts a line break with no Planning argument change.
+    """
+    from exomem import planning, record_formats
+    from exomem import structured_collections as collections
+    from exomem.plan_memory import plan_memory
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    manifest_text = _manifest().replace(
+        "    parent:\n      type: string\n",
+        "    parent:\n      type: string\n    note:\n      type: string\n",
+    )
+    planning.create_collection(tmp_path, collection, manifest_text, why="create planning collection")
+    note = "First line.\n\nThird line."
+
+    added = plan_memory(
+        tmp_path,
+        "add",
+        collection=collection,
+        item={"title": "Multi-line intent", "note": note},
+        why="capture intended work",
+    )
+
+    assert added["outcome"] == "committed"
+    manifest = collections.load_manifest(tmp_path, tmp_path / collection)
+    stored = record_formats.load_adapter(tmp_path, manifest).read().records
+    assert [item.values["note"] for item in stored] == [note]
+
+
+def test_a_refused_planning_add_writes_no_held_file(tmp_path: Path) -> None:
+    """Holding is a Records-profile mechanism, so Planning must never write one.
+
+    `plan_memory` has no `held`, `hold` or `discard` argument, strips `details`
+    from its refusals and reports no coverage, so a held file it could neither
+    disclose, list nor remove would be an undisclosed vault write.
+    """
+    from exomem import planning
+    from exomem import structured_collections as collections
+    from exomem.plan_memory import plan_memory
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    planning.create_collection(tmp_path, collection, _manifest(), why="create planning collection")
+
+    with pytest.raises((OpError, collections.CollectionError)) as caught:
+        plan_memory(
+            tmp_path,
+            "add",
+            collection=collection,
+            item={"title": "Undeclared intent", "unlisted_field": "digest"},
+            why="capture intended work",
+        )
+
+    assert caught.value.code == "SCHEMA_UNKNOWN_FIELD"
+    assert not (tmp_path / "Knowledge Base/Planning/Work/Held").exists()
+    assert plan_memory(tmp_path, "inspect", collection=collection).get("coverage") is None

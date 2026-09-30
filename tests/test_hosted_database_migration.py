@@ -27,6 +27,8 @@ def _render(*, upgrade: bool) -> list[dict]:
         "exomem-platform",
         "--values",
         str(VALUES),
+        "--set",
+        "cellctl.enabled=false,cloudGateway.enabled=false",
     ]
     if upgrade:
         command.append("--is-upgrade")

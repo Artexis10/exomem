@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from . import env_compat
 from . import init as init_module
 from .governance.authorization_serving_membership import (
     ServingMembershipReadiness,
@@ -44,13 +45,17 @@ _CREDENTIAL_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"", "0", "false", "no", "off"})
 _KNOWN_FEATURES = frozenset({"diarization", "embeddings", "file-watcher", "media", "vision"})
-_HOSTED_CLEARED_ENV = (
+_HOSTED_CLEARED_SETTINGS = (
+    # A cell is sized for the one recall encoder; an inherited activation model
+    # would load a second, larger one beside it.
+    "EXOMEM_ACTIVATION_MODEL",
     "EXOMEM_BASE_URL",
     "EXOMEM_CF_ACCESS_AUD",
     "EXOMEM_CF_ACCESS_TEAM_DOMAIN",
     "EXOMEM_GITHUB_USERNAME",
     "EXOMEM_HOSTED_SERVICE_CREDENTIAL",
     "EXOMEM_LARGE_UPLOAD_BASE_URL",
+    "EXOMEM_OWNER_OAUTH_SUBJECT",
     "EXOMEM_REST_API_KEY",
     "EXOMEM_UPLOAD_TOKEN",
     "EXOMEM_WRITER_LEASE_PREFERRED",
@@ -63,6 +68,16 @@ _HOSTED_CLEARED_ENV = (
     "GITHUB_CLIENT_ID",
     "GITHUB_CLIENT_SECRET",
 )
+
+
+def _legacy_alias(setting: str) -> str | None:
+    """Return the `KB_MCP_*` spelling that `env_compat.promote_legacy()` would
+    promote into `setting`, or ``None`` when `setting` is not a canonical
+    `EXOMEM_*` name (and so has no legacy spelling to promote from)."""
+    if not setting.startswith(env_compat.CANONICAL_PREFIX):
+        return None
+    return env_compat.LEGACY_PREFIX + setting[len(env_compat.CANONICAL_PREFIX):]
+
 
 _DEFAULT_STORAGE_LIMIT_BYTES = 5 * 1024 * 1024 * 1024
 _DEFAULT_UPLOAD_LIMIT_BYTES = 90 * 1024 * 1024
@@ -465,18 +480,18 @@ class HostedCellConfig:
         startup.  Callers may pass a private mapping for planning/tests.
         """
         target = os.environ if env is None else env
-        target["EXOMEM_VAULT_PATH"] = str(self.vault_root)
-        target["EXOMEM_HOSTED_STATE_ROOT"] = str(self.state_root)
-        target["EXOMEM_STATE_ROOT"] = str(self.state_root / "vault-state")
-        target["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(self.state_root)
-        target["EXOMEM_LOG_DIR"] = str(self.log_root)
-        target["EXOMEM_UPLOAD_MAX_BYTES"] = str(self.resource_limits.upload_bytes)
-        target["TMPDIR"] = str(self.state_root / "tmp" / "runtime")
-        target["EXOMEM_DISABLE_QUERY_LOG"] = "1"
-        target["EXOMEM_DISABLE_USAGE_BOOST"] = "1"
-        target["EXOMEM_DISABLE_RELEVANCE_CHECK"] = "1"
-        for inherited_setting in _HOSTED_CLEARED_ENV:
-            target.pop(inherited_setting, None)
+        _set_setting(target, "EXOMEM_VAULT_PATH", str(self.vault_root))
+        _set_setting(target, "EXOMEM_HOSTED_STATE_ROOT", str(self.state_root))
+        _set_setting(target, "EXOMEM_STATE_ROOT", str(self.state_root / "vault-state"))
+        _set_setting(target, "EXOMEM_WRITER_LEASE_STATE_DIR", str(self.state_root))
+        _set_setting(target, "EXOMEM_LOG_DIR", str(self.log_root))
+        _set_setting(target, "EXOMEM_UPLOAD_MAX_BYTES", str(self.resource_limits.upload_bytes))
+        _set_setting(target, "TMPDIR", str(self.state_root / "tmp" / "runtime"))
+        _set_setting(target, "EXOMEM_DISABLE_QUERY_LOG", "1")
+        _set_setting(target, "EXOMEM_DISABLE_USAGE_BOOST", "1")
+        _set_setting(target, "EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
+        for inherited_setting in _HOSTED_CLEARED_SETTINGS:
+            _clear_setting(target, inherited_setting)
 
         workers_enabled = self.resource_limits.worker_count > 0
         _apply_disable_gate(
@@ -1425,18 +1440,39 @@ def _normalize_feature(feature: str) -> str:
     return str(feature).strip().lower().replace("_", "-")
 
 
+def _set_setting(target: MutableMapping[str, str], variable: str, value: str) -> None:
+    target[variable] = value
+    _drop_legacy_alias(target, variable)
+
+
+def _clear_setting(target: MutableMapping[str, str], variable: str) -> None:
+    target.pop(variable, None)
+    _drop_legacy_alias(target, variable)
+
+
+def _drop_legacy_alias(target: MutableMapping[str, str], variable: str) -> None:
+    # A child process inherits this environment and its own `import exomem`
+    # runs `env_compat.promote_legacy()` again, which would copy a surviving
+    # `KB_MCP_*` value back onto a name hosted mode just cleared. Every name
+    # this boundary sets or clears therefore drops its legacy spelling too,
+    # so the outcome never depends on whether the canonical name is present.
+    alias = _legacy_alias(variable)
+    if alias is not None:
+        target.pop(alias, None)
+
+
 def _apply_disable_gate(target: MutableMapping[str, str], enabled: bool, variable: str) -> None:
     if enabled:
-        target.pop(variable, None)
+        _clear_setting(target, variable)
     else:
-        target[variable] = "1"
+        _set_setting(target, variable, "1")
 
 
 def _apply_truthy_gate(target: MutableMapping[str, str], enabled: bool, variable: str) -> None:
     if enabled:
-        target[variable] = "1"
+        _set_setting(target, variable, "1")
     else:
-        target.pop(variable, None)
+        _clear_setting(target, variable)
 
 
 def _staging_root(config: HostedCellConfig) -> Path:
@@ -2395,10 +2431,32 @@ def initialize_hosted_cell_v2(
     )
 
 
+def _ensure_genesis_governance_store(binding: HostedBindingV2) -> None:
+    """Create the never-served schema-3 governance sidecar of a fresh cell.
+
+    A cell whose governance store has never been opened carries no schema
+    proof at all, which the hosted migration coordinator cannot tell apart
+    from a store it failed to read. Initialization is the only lifecycle
+    point allowed to create one, and it never opens a sidecar that already
+    exists: the coordinator owns the v3-to-v4 transition, and a store this
+    step cannot classify is left exactly as found for the runner to report.
+    """
+
+    from .governance import store as governance_store
+
+    try:
+        if governance_store.authorization_session_schema_version(binding.vault_root) is not None:
+            return
+    except governance_store.GovernanceStoreUnreadable:
+        return
+    governance_store.open_connection(binding.vault_root).close()
+
+
 def _migrate_hosted_machine_state_under_lifetime_lock(
     binding: HostedBindingV2,
     *,
     authority_source: str,
+    after_migration: Callable[[HostedBindingV2], None] | None = None,
 ):
     """Run the state migrator while the caller holds the hosted lifetime lock."""
 
@@ -2413,6 +2471,10 @@ def _migrate_hosted_machine_state_under_lifetime_lock(
         "EXOMEM_VAULT_PATH": str(binding.vault_root),
         "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
         "EXOMEM_STATE_ROOT": str(binding.state_root / "vault-state"),
+        # Every other hosted boundary binds the lease state to the cell's own
+        # state root. Without it a Job with a read-only root filesystem falls
+        # back to `$HOME/.cache/exomem` and cannot open any owned sidecar.
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(binding.state_root),
         "EXOMEM_LOG_DIR": str(binding.log_root),
     }
     previous = {name: os.environ.get(name) for name in overrides}
@@ -2425,6 +2487,10 @@ def _migrate_hosted_machine_state_under_lifetime_lock(
             binding.vault_root,
             authority=authority,
         )
+        if after_migration is not None:
+            # Runs inside the bound environment and before ownership converges,
+            # so anything it creates is handed to the runtime uid/gid below.
+            after_migration(binding)
         # The initialization/restore Job is privileged so it can converge
         # legacy v1 ownership. State copied by that process must be handed back
         # to the immutable runtime uid/gid before the tenant pod can start.
@@ -2452,6 +2518,7 @@ def _migrate_hosted_machine_state_offline(binding: HostedBindingV2) -> None:
         _migrate_hosted_machine_state_under_lifetime_lock(
             binding,
             authority_source="hosted target-image initialization job",
+            after_migration=_ensure_genesis_governance_store,
         )
 
 

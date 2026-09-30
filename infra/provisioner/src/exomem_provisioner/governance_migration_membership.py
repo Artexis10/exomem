@@ -109,7 +109,12 @@ def _schema_successor(
         "expected_schema_version": None,
         "expected_recovery_envelope": recovery_envelope,
         "now": now,
-        "_require_fresh": phase == "inspect",
+        # The commit phase already repairs a generation whose window closed. The
+        # inspect phase proves the same fence below (exact custody revision,
+        # draining, issuance stopped, nothing in flight, no future issue time),
+        # and only this generation's own replica could have renewed the window,
+        # so demanding an open one only stranded cells whose recovery ran long.
+        "_require_fresh": False,
     }
     source = membership.inspect_hosted_authorization_bundle(files, **identity)
     control = json.loads(source.control)

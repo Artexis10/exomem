@@ -28,7 +28,7 @@ def test_durability_workload_commands_and_privileges_are_disjoint() -> None:
     assert workloads["deletion"]["kind"] == "JobTemplate"
     assert "schedule" not in workloads["deletion"]
     assert workloads["deletionDispatcher"]["kind"] == "CronJob"
-    assert workloads["deletionDispatcher"]["schedule"] == "* * * * *"
+    assert workloads["deletionDispatcher"]["schedule"] == "*/5 * * * *"
     assert workloads["deletionDispatcher"]["concurrencyPolicy"] == "Forbid"
     assert workloads["deletion"]["maxOperations"] == 1
     assert workloads["deliveryGc"]["automountServiceAccountToken"] is False
@@ -66,10 +66,14 @@ def test_every_workload_secret_binding_exists_in_the_handoff_matrix() -> None:
     contract = _document("durability-workloads-v1.json")
     matrix = _document("secret-destinations-v1.json")
     destinations = {
-        f"{destination['kubernetes_secret']}/{destination['key']}"
+        f"{destination['kubernetes_secret']}/{key}"
         for secret in matrix["secrets"].values()
         for destination in secret["destinations"].values()
         if destination["kind"] == "sops_k8s_secret"
+        for key_set in (
+            [[destination["key"]]] if "key" in destination else destination["key_sets"]
+        )
+        for key in key_set
     }
 
     assert set(contract["secretBindings"].values()) <= destinations
@@ -103,7 +107,7 @@ def test_recurring_deletion_dispatcher_has_no_privileged_provider_or_key_materia
         "kind": "CronJob",
         "command": ["exomem-deletion-dispatcher"],
         "serviceAccount": "exomem-deletion-dispatcher",
-        "schedule": "* * * * *",
+        "schedule": "*/5 * * * *",
         "concurrencyPolicy": "Forbid",
         "startingDeadlineSeconds": 45,
         "activeDeadlineSeconds": 30,

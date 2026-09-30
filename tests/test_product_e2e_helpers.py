@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import json
 import socket
@@ -12,6 +13,93 @@ SPEC = importlib.util.spec_from_file_location("e2e_product_loop_under_test", SCR
 assert SPEC is not None and SPEC.loader is not None
 e2e_product_loop = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(e2e_product_loop)
+
+
+@pytest.mark.parametrize("interrupted_profile", ["epistemic", "provenance", "causal"])
+def test_relation_contexts_wait_for_each_profile_snapshot(monkeypatch, interrupted_profile):
+    calls = []
+    unavailable_sent = False
+    expected = {
+        "epistemic": ("science.replicates", "supports"),
+        "provenance": ("records.traces_to", "derived_from"),
+        "causal": ("systems.triggers", "causes"),
+    }
+
+    async def call(_client, _tool, arguments, _timeout):
+        nonlocal unavailable_sent
+        profile = arguments["traversal_profile"]
+        calls.append(profile)
+        # The first graph can be ready before a later drain starts.
+        if profile == interrupted_profile and not unavailable_sent:
+            unavailable_sent = True
+            return {"graph": {"available": False, "reason": "graph sidecar unavailable"}}
+        canonical, parent = expected[profile]
+        return {
+            "graph": {
+                "available": True,
+                "profile": {"name": profile},
+                "edges": [
+                    {
+                        "relation_type": canonical,
+                        "parent_relation": parent,
+                        "registry_status": "extension",
+                        "raw_relation": canonical,
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(e2e_product_loop, "_call", call)
+    monkeypatch.setattr(e2e_product_loop, "_GRAPH_POLL_SECONDS", 0)
+    asyncio.run(
+        e2e_product_loop._assert_relation_contexts(
+            object(),
+            relation_ref="example",
+            timeout=1,
+        )
+    )
+    assert calls.count(interrupted_profile) >= 2
+    assert set(calls) == set(expected)
+
+
+def test_relation_contexts_still_fail_when_a_profile_never_recovers(monkeypatch):
+    async def call(_client, _tool, arguments, _timeout):
+        return {"graph": {"available": False, "reason": "graph sidecar unavailable"}}
+
+    monkeypatch.setattr(e2e_product_loop, "_call", call)
+    monkeypatch.setattr(e2e_product_loop, "_GRAPH_CONVERGENCE_SECONDS", 0)
+    monkeypatch.setattr(e2e_product_loop, "_server_side_graph_state", lambda: "isolated fixture")
+    with pytest.raises(RuntimeError, match="graph did not converge"):
+        asyncio.run(
+            e2e_product_loop._assert_relation_contexts(
+                object(),
+                relation_ref="example",
+                timeout=1,
+            )
+        )
+
+
+def test_relation_contexts_do_not_retry_an_available_graph_with_wrong_edges(monkeypatch):
+    async def call(_client, _tool, arguments, _timeout):
+        return {
+            "graph": {
+                "available": True,
+                "profile": {
+                    "name": arguments["traversal_profile"],
+                },
+                "edges": [],
+            }
+        }
+
+    monkeypatch.setattr(e2e_product_loop, "_call", call)
+    with pytest.raises(RuntimeError, match="omitted science.replicates"):
+        asyncio.run(
+            e2e_product_loop._assert_relation_contexts(
+                object(),
+                relation_ref="example",
+                timeout=1,
+            )
+        )
 
 
 class _Hit(RootModel[dict[str, object]]):

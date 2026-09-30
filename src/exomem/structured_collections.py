@@ -62,6 +62,12 @@ _MAX_RECORD_PRESENTATION_TABLES = 8
 _MAX_RECORD_PRESENTATION_COLUMNS = 16
 _MAX_ITEM_FILENAME_FIELDS = 8
 _MAX_ITEM_PRESENTATION_FIELDS = 16
+_MAX_CLAIMS_PER_LIST = 24
+_CLAIM_LISTS = ("tags", "terms", "entity_types", "evidence_kinds")
+#: Page frontmatter a `claims.match` predicate may test. Closed: a predicate over
+#: an arbitrary key would make membership depend on fields no router reads.
+_CLAIM_MATCH_KEYS = ("type", "category", "project", "tags")
+_MAX_CLAIM_MATCH_VALUES = 24
 _MUTABLE_FILENAME_FIELDS = frozenset(
     {
         "status",
@@ -240,6 +246,7 @@ def manifest_authoring_contract() -> dict[str, Any]:
             "record_presentation": _record_presentation_json_schema(),
             "item_filename": _item_filename_json_schema(),
             "item_presentation": _item_presentation_json_schema(),
+            "claims": _claims_json_schema(),
         },
         "additionalProperties": True,
         "$defs": {"field": field_schema},
@@ -301,11 +308,68 @@ def manifest_authoring_contract() -> dict[str, Any]:
             "query": "use expand_child for one declared table; expand_children works only when unambiguous",
             "repair": "direct frontmatter edits are canonical; use guarded update refresh_presentation=true after rebaseline",
         },
+        "claims": {
+            "lists": list(_CLAIM_LISTS),
+            "maximum_items_per_list": _MAX_CLAIMS_PER_LIST,
+            "purpose": "declared domain vocabulary used for deterministic Records routing",
+            "match_keys": list(_CLAIM_MATCH_KEYS),
+            "match": (
+                "optional frontmatter predicates, e.g. match: {type: [failure], project: [key]}; "
+                "every listed key must hold on the page and any listed value may match. A page "
+                "satisfying every predicate routes here as strong regardless of word overlap; "
+                "predicates only widen routing and two collections declaring the same membership "
+                "stay silent"
+            ),
+        },
         "item_representation": {
             "available_when": "storage.strategy=markdown-items",
             "filename_version": 1,
             "presentation_version": 1,
             "identity": "collection_id plus record_id or plan_id; filename and body are projections",
+        },
+        "held_records": {
+            "why": (
+                "a Records append or update refused for its own content preserves the "
+                "complete candidate instead of discarding it, and returns the reference "
+                "beside the unchanged refusal"
+            ),
+            "location": "<collection directory>/Held/<held_id>.md",
+            "frontmatter": [
+                "type",
+                "collection_id",
+                "held_id",
+                "attempted_action",
+                "target_item_key",
+                "held_at",
+                "why",
+                "candidate_sha256",
+                "diagnostics",
+            ],
+            "body": "one fenced json block carrying the exact candidate",
+            "refusal_details": "code, reason, field, issues, held",
+            "resume": (
+                "append or update with held=<held_id>; item or changes supply shallow "
+                "overrides and a null value removes a field"
+            ),
+            "discard": "discard with collection, held and why removes the candidate",
+            "decline": "hold=false refuses without writing a held file",
+            "visibility": (
+                "held candidates are not items: they are not counted, queried, recalled "
+                "or hashed into the audit chain, and holding never advances the audit head"
+            ),
+            "coverage": "inspect reports coverage.committed, coverage.held and coverage.held_refs",
+        },
+        "item_identity": {
+            "item_key": "the internal UUID identity of an item, not its natural key",
+            "omitted": (
+                "omit item_key and identity derives from the declared natural key, so a "
+                "restated observation replays instead of arriving as a second item"
+            ),
+            "refusal": (
+                "a non-UUID item_key refuses with INVALID_RECORD_ID; when the value is a "
+                "natural-key value, or the candidate's natural key is complete, the details "
+                "name the declared natural key and say to omit item_key"
+            ),
         },
         "plan_links": {
             "reference": "opaque Planning reference stored under links.plans[].reference",
@@ -456,6 +520,44 @@ record_presentation:
 
 The frontmatter is canonical; the managed Markdown block is a readable projection.
 """
+    state_ledger_text = """---
+type: collection
+exomem_id: a865a192-7c7a-4b7f-9b5d-03c807b205e2
+title: Observed state ledger
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: States
+  format_version: 1
+item_schema:
+  natural_key: [identity, effective_on]
+  fields:
+    identity:
+      type: string
+      required: true
+    effective_on:
+      type: date
+      required: true
+    status:
+      type: enum
+      required: true
+      enum: [active, paused, ended]
+    observed_precision:
+      type: enum
+      required: true
+      enum: [exact, approximate, inferred]
+    sources:
+      type: array
+      required: true
+      items:
+        type: link
+---
+
+One item records the state observed for one identity on one effective date.
+"""
     return {
         "minimal": {
             "manifest_path": f"{vault.kb_dirname()}/Records/Examples/Events/_collection.md",
@@ -530,6 +632,48 @@ The frontmatter is canonical; the managed Markdown block is a readable projectio
                 "provenance": "Imported from the cited source.",
             },
         },
+        "state_ledger": {
+            "manifest_path": f"{vault.kb_dirname()}/Records/Examples/States/_collection.md",
+            "manifest_text": state_ledger_text,
+            "append_item": {
+                "identity": "example-subject",
+                "effective_on": "2026-01-01",
+                "status": "active",
+                "observed_precision": "exact",
+                "sources": ["exomem://memory/00000000-0000-4000-8000-000000000001"],
+            },
+            "backfill_rule": (
+                "Approximate or inferred values are never recorded as exact; backfilled "
+                "items cite the unit or artifact they were taken from in sources."
+            ),
+        },
+    }
+
+
+def _claims_json_schema() -> dict[str, Any]:
+    claim_list = {
+        "type": "array",
+        "maxItems": _MAX_CLAIMS_PER_LIST,
+        "items": {"type": "string"},
+    }
+    match_values = {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": _MAX_CLAIM_MATCH_VALUES,
+        "items": {"type": "string", "minLength": 1},
+    }
+    return {
+        "type": "object",
+        "properties": {
+            **{name: dict(claim_list) for name in _CLAIM_LISTS},
+            "match": {
+                "type": "object",
+                "minProperties": 1,
+                "properties": {key: dict(match_values) for key in _CLAIM_MATCH_KEYS},
+                "additionalProperties": False,
+            },
+        },
+        "additionalProperties": False,
     }
 
 
@@ -789,6 +933,9 @@ class CollectionManifest:
     record_presentation: RecordPresentation | None = None
     item_filename: ItemFilename | None = None
     item_presentation: ItemPresentation | None = None
+    claims: Mapping[str, tuple[str, ...]] | None = None
+    #: `claims.match`: frontmatter predicates that declare membership outright.
+    claim_match: Mapping[str, tuple[str, ...]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -872,6 +1019,17 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         raise CollectionError(
             "INVALID_COLLECTION_MANIFEST", "collection manifest is not UTF-8"
         ) from error
+    digest = hashlib.sha256(data).hexdigest()
+    # The parse is a pure function of (vault, path, bytes) and the manifest it
+    # returns is immutable, so the same bytes parse once per process. The
+    # guarded read above still runs every time: it is the placement and size
+    # check, and it is what proves the bytes are current. Measured on the
+    # personal vault, re-parsing fifteen manifests' YAML on every due-state
+    # serve was 0.6 s of every recall.
+    key = (str(root), rel, digest)
+    cached = _MANIFEST_PARSE_CACHE.get(key)
+    if cached is not None:
+        return cached
     audit_name = _profile_owned_audit_name(text)
     if audit_name is not None:
         _validate_audit_source(text, audit_name)
@@ -881,13 +1039,23 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         raise CollectionError(error.code, error.reason) from error
     if marker is None:
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires YAML frontmatter")
-    return _manifest_from_frontmatter(
+    manifest = _manifest_from_frontmatter(
         root,
         rel,
         frontmatter,
-        SourceVersion(path=rel, hash=hashlib.sha256(data).hexdigest()),
+        SourceVersion(path=rel, hash=digest),
         manifest_stable_hash=_manifest_stable_hash(text),
     )
+    if len(_MANIFEST_PARSE_CACHE) >= _MANIFEST_PARSE_CACHE_CAP:
+        _MANIFEST_PARSE_CACHE.pop(next(iter(_MANIFEST_PARSE_CACHE)), None)
+    _MANIFEST_PARSE_CACHE[key] = manifest
+    return manifest
+
+
+#: Parsed manifests by (vault, path, content digest); bounded, never invalidated
+#: by anything but the bytes changing, because the key IS the bytes.
+_MANIFEST_PARSE_CACHE: dict[tuple[str, str, str], CollectionManifest] = {}
+_MANIFEST_PARSE_CACHE_CAP = 256
 
 
 def parse_manifest_bytes(
@@ -1481,6 +1649,8 @@ def _manifest_from_frontmatter(
         frontmatter.get("views", {}), schema, storage, profile, presentation
     )
     links = _parse_links(frontmatter.get("links", {}), schema)
+    claims = _parse_claims(frontmatter.get("claims"))
+    claim_match = _parse_claim_match(frontmatter.get("claims"))
     return CollectionManifest(
         collection_id=collection_id,
         title=title,
@@ -1502,6 +1672,8 @@ def _manifest_from_frontmatter(
         record_presentation=presentation,
         item_filename=item_filename,
         item_presentation=item_presentation,
+        claims=claims,
+        claim_match=claim_match,
     )
 
 
@@ -2457,6 +2629,75 @@ def _parse_field_spec(value: object, depth: int = 0) -> FieldSpec:
     return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind)
 
 
+def _parse_claims(value: object) -> Mapping[str, tuple[str, ...]] | None:
+    if value is None:
+        return None
+    raw = _mapping(value, "claims")
+    unknown = sorted(set(raw) - set(_CLAIM_LISTS) - {"match"})
+    if unknown:
+        raise CollectionError(
+            "INVALID_COLLECTION_CLAIMS", f"claims has unknown list: {unknown[0]}"
+        )
+    claims: dict[str, tuple[str, ...]] = {}
+    for name in _CLAIM_LISTS:
+        if name not in raw:
+            continue
+        entries = raw[name]
+        if not isinstance(entries, list):
+            raise CollectionError(
+                "INVALID_COLLECTION_CLAIMS", f"claims.{name} must be a list; offending entry: {entries!r}"
+            )
+        if len(entries) > _MAX_CLAIMS_PER_LIST:
+            raise CollectionError(
+                "INVALID_COLLECTION_CLAIMS",
+                f"claims.{name} exceeds {_MAX_CLAIMS_PER_LIST} entries; offending entry: {entries[_MAX_CLAIMS_PER_LIST]!r}",
+            )
+        for entry in entries:
+            if type(entry) is not str:
+                raise CollectionError(
+                    "INVALID_COLLECTION_CLAIMS",
+                    f"claims.{name} requires strings; offending entry: {entry!r}",
+                )
+        claims[name] = tuple(entries)
+    return MappingProxyType(claims)
+
+
+def _parse_claim_match(value: object) -> Mapping[str, tuple[str, ...]] | None:
+    """Parse `claims.match`: every key must hold, any listed value may match."""
+    if not isinstance(value, Mapping) or "match" not in value:
+        return None
+    raw = value["match"]
+    if not isinstance(raw, Mapping) or not raw:
+        raise CollectionError(
+            "INVALID_COLLECTION_CLAIMS",
+            f"claims.match must be a mapping of {', '.join(_CLAIM_MATCH_KEYS)}; offending entry: {raw!r}",
+        )
+    unknown = sorted(str(key) for key in raw if key not in _CLAIM_MATCH_KEYS)
+    if unknown:
+        raise CollectionError(
+            "INVALID_COLLECTION_CLAIMS", f"claims.match has unknown key: {unknown[0]}"
+        )
+    match: dict[str, tuple[str, ...]] = {}
+    for key in _CLAIM_MATCH_KEYS:
+        if key not in raw:
+            continue
+        entries = raw[key]
+        if not isinstance(entries, list) or not entries or len(entries) > _MAX_CLAIM_MATCH_VALUES:
+            raise CollectionError(
+                "INVALID_COLLECTION_CLAIMS",
+                f"claims.match.{key} must be a list of 1 to {_MAX_CLAIM_MATCH_VALUES} strings; "
+                f"offending entry: {entries!r}",
+            )
+        for entry in entries:
+            if type(entry) is not str or not entry.strip():
+                raise CollectionError(
+                    "INVALID_COLLECTION_CLAIMS",
+                    f"claims.match.{key} requires strings; offending entry: {entry!r}",
+                )
+        match[key] = tuple(entries)
+    return MappingProxyType(match)
+
+
 def _parse_templates(root: Path, manifest_rel: str, value: object) -> tuple[TemplateSpec, ...]:
     if value is None:
         return ()
@@ -2566,6 +2807,49 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
         type(value) is type(option) and value == option for option in spec.enum
     ):
         raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}")
+
+
+def validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
+    """Validate one declared field, raising the same refusal `validate` raises.
+
+    Exposed so an aggregating validator can run the shipped per-field rules
+    field by field, and address each failure by path, without a second copy of
+    those rules drifting away from this one.
+    """
+    _validate_field_value(name, value, spec)
+
+
+def normalize_item_values(schema: ItemSchema, values: Mapping[str, Any]) -> dict[str, Any]:
+    """Project validated item values into their canonical comparison form.
+
+    Dates and datetimes go through the schema's own normalization so a candidate
+    and its parsed round-trip compare on meaning rather than on which Python type
+    the YAML reader happened to produce.
+    """
+    return {
+        name: _normalize_item_value(value, schema.fields.get(name))
+        for name, value in values.items()
+    }
+
+
+def _normalize_item_value(value: Any, spec: FieldSpec | None) -> Any:
+    if value is None:
+        return None
+    if spec is not None and spec.type == "date":
+        return _normalize_date(value)
+    if spec is not None and spec.type == "datetime":
+        return _normalize_datetime(value)
+    if spec is not None and spec.type == "array" and isinstance(value, list | tuple):
+        return [_normalize_item_value(item, spec.items) for item in value]
+    if type(value) is dt.datetime:
+        return value.isoformat()
+    if type(value) is dt.date:
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): _normalize_item_value(item, None) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_normalize_item_value(item, None) for item in value]
+    return value
 
 
 def _natural_key_value(value: Any, field_type: str | None) -> Any:

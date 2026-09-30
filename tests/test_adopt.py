@@ -377,6 +377,14 @@ def test_adopt_semantic_census_exact_entry_budget_uses_bounded_sentinel_probe(
 
     class ProbedScandir:
         def __init__(self, target: object) -> None:
+            # Count only the enumeration of the directory whose budget is under
+            # test. This patches the global os.scandir, so counting every call
+            # also counted the registry loads scan() performs before walking,
+            # whose filesystem work depends on whether an earlier test in the
+            # same process warmed their cache. That made the assertion depend on
+            # which other tests shared the process, which is how it passed in
+            # isolation and failed in a CI shard.
+            self._counted = Path(os.fspath(target)) == focus
             self._inner = real_scandir(target)
 
         def __enter__(self) -> ProbedScandir:
@@ -391,7 +399,8 @@ def test_adopt_semantic_census_exact_entry_budget_uses_bounded_sentinel_probe(
 
         def __next__(self) -> os.DirEntry[str]:
             nonlocal probes
-            probes += 1
+            if self._counted:
+                probes += 1
             return next(self._inner)
 
     monkeypatch.setattr(semantic_census.os, "scandir", ProbedScandir)

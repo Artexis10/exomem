@@ -35,7 +35,7 @@ def _activity_log(vault: Path) -> None:
     log.write_text("# Activity\n", encoding="utf-8")
 
 
-def test_record_memory_exposes_the_nine_declared_actions() -> None:
+def test_record_memory_exposes_the_ten_declared_actions() -> None:
     from exomem import record_memory
 
     assert record_memory.ACTIONS == frozenset(
@@ -49,6 +49,7 @@ def test_record_memory_exposes_the_nine_declared_actions() -> None:
             "update",
             "revise",
             "rebaseline",
+            "discard",
         }
     )
 
@@ -230,6 +231,8 @@ def test_record_memory_preserves_explicit_false_and_routes_append(
         "expected_container_hash": "hash",
         "body": "",
         "why": "test",
+        "held": None,
+        "hold": True,
     }
 
 
@@ -449,3 +452,131 @@ def test_record_query_translates_query_data_errors_to_the_public_envelope(
         subject.record_memory(tmp_path, action="query", collection="Records/Test/_collection.md")
 
     assert error_dict(excinfo.value)["code"] == "BAD_OP"
+
+
+def test_describe_states_that_item_key_is_the_internal_uuid(tmp_path: Path) -> None:
+    from exomem.record_memory import record_memory
+
+    identity = record_memory(tmp_path, action="describe")["item_identity"]
+
+    assert "internal UUID" in identity["item_key"]
+    assert "natural key" in identity["omitted"]
+
+
+def test_record_memory_docstring_names_item_key_as_the_internal_uuid() -> None:
+    from exomem.record_memory import record_memory
+
+    assert "internal UUID" in (record_memory.__doc__ or "")
+
+
+def test_hold_and_held_are_accepted_only_on_the_mutations_that_use_them() -> None:
+    from exomem.record_memory import _ACTION_FIELDS, _REQUIRED_FIELDS
+
+    for action in ("append", "update"):
+        assert {"held", "hold"} <= _ACTION_FIELDS[action]
+    for action in ("describe", "validate", "inspect", "create", "query", "revise", "rebaseline"):
+        assert not {"held", "hold"} & _ACTION_FIELDS[action]
+    assert _ACTION_FIELDS["discard"] == frozenset({"collection", "held", "why"})
+    assert _REQUIRED_FIELDS["discard"] == frozenset({"collection", "held", "why"})
+
+
+@pytest.mark.parametrize("argument", ["held", "hold"])
+def test_hold_arguments_are_refused_by_name_on_other_actions(
+    tmp_path: Path, argument: str
+) -> None:
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
+
+    value: object = True if argument == "hold" else "11111111-1111-4111-8111-111111111111"
+
+    with pytest.raises(OpError) as raised:
+        record_memory(
+            tmp_path,
+            action="query",
+            collection="Knowledge Base/Records/Test/_collection.md",
+            **{argument: value},
+        )
+
+    assert raised.value.code == "INVALID_RECORD_ARGUMENTS"
+    assert f"unexpected for query: {argument}" in raised.value.message
+
+
+def test_discard_requires_its_complete_set(tmp_path: Path) -> None:
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
+
+    with pytest.raises(OpError) as raised:
+        record_memory(
+            tmp_path,
+            action="discard",
+            collection="Knowledge Base/Records/Test/_collection.md",
+        )
+
+    assert raised.value.code == "INVALID_RECORD_ARGUMENTS"
+    assert "missing for discard: held, why" in raised.value.message
+
+
+def test_append_accepts_a_held_reference_instead_of_an_item(tmp_path: Path) -> None:
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
+
+    with pytest.raises(OpError) as raised:
+        record_memory(
+            tmp_path,
+            action="append",
+            collection="Knowledge Base/Records/Test/_collection.md",
+            why="resume a held candidate",
+        )
+
+    assert "append requires item or held" in raised.value.message
+
+
+@pytest.mark.parametrize("action", ["append", "update"])
+def test_declining_the_hold_while_resuming_is_refused_by_name(
+    tmp_path: Path, action: str
+) -> None:
+    """A resume always re-holds on a repeated refusal, so the two disagree.
+
+    Accepting both left the held file behind with the diagnostics of the
+    previous attempt, which is a stale answer to a question the caller just
+    asked again.
+    """
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
+
+    extra: dict[str, object] = (
+        {}
+        if action == "append"
+        else {
+            "item_key": "11111111-1111-4111-8111-111111111112",
+            "expected_container_hash": "a" * 64,
+            "expected_item_version": "b" * 64,
+        }
+    )
+
+    with pytest.raises(OpError) as raised:
+        record_memory(
+            tmp_path,
+            action=action,
+            collection="Knowledge Base/Records/Test/_collection.md",
+            held="11111111-1111-4111-8111-111111111111",
+            hold=False,
+            why="resume a held candidate",
+            **extra,
+        )
+
+    assert raised.value.code == "INVALID_RECORD_ARGUMENTS"
+    assert "hold=false cannot be combined with held" in raised.value.message
+
+
+def test_describe_documents_held_records(tmp_path: Path) -> None:
+    from exomem.record_memory import record_memory
+
+    held = record_memory(tmp_path, action="describe")["held_records"]
+
+    assert held["location"] == "<collection directory>/Held/<held_id>.md"
+    assert "hold=false" in held["decline"]
+    assert "held" in held["resume"]
+    assert "discard" in held["discard"]
+    assert "json" in held["body"]
+    assert "not items" in held["visibility"]

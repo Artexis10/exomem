@@ -1,0 +1,28 @@
+## Managed by Ansible (role: postgres). Manual edits are overwritten.
+##
+## Postgres itself never accepts a public connection (see postgresql.conf's
+## listen_addresses). Every non-local line below is reachable only from the
+## private network.
+##
+## substrate_owner and substrate_app are reachable only via loopback (127.0.0.1),
+## because only PgBouncer -- running on this host -- forwards them; the public
+## listener is PgBouncer's, not Postgres's. exomem_gateway and exomem_cellctl
+## (including cellctl's direct LISTEN connection) go straight to Postgres on
+## the private network CIDR instead: PgBouncer no longer proxies either role
+## at all (D12 NEW-1), so there is no loopback line for them here.
+##
+## pgbouncer_auth authenticates over the unix socket only, via `peer`
+## mapped through pg_ident.conf: only a process already running as the OS
+## user PgBouncer's own systemd unit runs as (postgres) can become this
+## role, so it can no longer be reached by any other local OS user, and
+## there is no `hostssl ... trust` fallback for it at all -- a prior
+## `trust` on both lines let any local process read every role's SCRAM
+## verifier through pgbouncer.get_auth() with no credential at all.
+local   all             postgres                                        peer
+local   {{ postgres_database_name }}  pgbouncer_auth       peer map=pgbouncer_auth_map
+hostssl {{ postgres_database_name }}  substrate_owner      127.0.0.1/32 scram-sha-256
+hostssl {{ postgres_database_name }}  substrate_app        127.0.0.1/32 scram-sha-256
+hostssl {{ postgres_database_name }}  exomem_gateway       {{ postgres_private_network_cidr }} scram-sha-256
+hostssl {{ postgres_database_name }}  exomem_cellctl       {{ postgres_private_network_cidr }} scram-sha-256
+host    all             all             0.0.0.0/0                       reject
+host    all             all             ::/0                            reject

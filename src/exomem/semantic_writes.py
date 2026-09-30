@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 # rejected: a token minted before the bump carries no knowledge-time stamp,
 # and inferring one at commit is exactly the non-determinism the freeze exists
 # to prevent. Clients mid validate->commit re-validate once at the boundary.
-_TOKEN_VERSION = 2
+_TOKEN_VERSION = 3
 _MAX_TOKEN_BYTES = 12 * 1024
 _COMPILED_TYPES = frozenset(
     {
@@ -761,6 +761,8 @@ class DraftToken:
     # Declared last so existing positional construction keeps binding
     # `registrations` where callers expect it; always pass this by keyword.
     render_stamp: str = ""
+    vocabulary_binding: dict[str, str] | None = None
+    version: int = _TOKEN_VERSION
 
     def stamp(self) -> str:
         """The frozen instant, falling back to the frozen day."""
@@ -768,7 +770,7 @@ class DraftToken:
 
     def encode(self) -> str:
         value = {
-            "version": _TOKEN_VERSION,
+            "version": self.version,
             "writer": self.writer,
             "operation": self.operation,
             "destination": self.destination,
@@ -776,6 +778,8 @@ class DraftToken:
             "render_stamp": self.render_stamp or self.render_date,
             "registrations": [item.as_dict() for item in self.registrations],
         }
+        if self.version == _TOKEN_VERSION:
+            value["vocabulary_binding"] = self.vocabulary_binding
         raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
@@ -807,17 +811,15 @@ class DraftToken:
             json.JSONDecodeError,
         ) as error:
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token is invalid") from error
-        if type(value) is not dict or set(value) != {
-            "version",
-            "writer",
-            "operation",
-            "destination",
-            "render_date",
-            "render_stamp",
-            "registrations",
-        }:
+        expected = {
+            "version", "writer", "operation", "destination", "render_date", "render_stamp", "registrations"
+        }
+        version = value.get("version") if type(value) is dict else None
+        if version == _TOKEN_VERSION:
+            expected.add("vocabulary_binding")
+        if type(value) is not dict or set(value) != expected:
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token has invalid fields")
-        if value["version"] != _TOKEN_VERSION or any(
+        if version not in {2, _TOKEN_VERSION} or any(
             type(value[key]) is not str
             for key in ("writer", "operation", "destination", "render_date", "render_stamp")
         ):
@@ -874,6 +876,8 @@ class DraftToken:
             value["render_date"],
             tuple(registrations),
             render_stamp=value["render_stamp"],
+            vocabulary_binding=value.get("vocabulary_binding"),
+            version=version,
         )
         if decoded.encode() != token:
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token is not canonical")
@@ -898,6 +902,8 @@ class CreationPreflight:
     #: a page is never its own destination.
     corpus: semantic_contract.SemanticCorpusContext | None = None
     source_closure_plan: source_closure.SourceClosurePlan | None = None
+    vocabulary_binding: Any | None = None
+    vocabulary_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
 
     @property
     def draft_hash(self) -> str | None:
@@ -927,6 +933,8 @@ class CreationPreflight:
             value.update(self.creation_validation.as_dict())
             value["draft_token"] = self.draft_token
             value["applicability"] = self.applicability
+        if self.vocabulary_binding is not None:
+            value["vocabulary_resolution"] = self.vocabulary_binding.as_dict()
         return value
 
 
@@ -940,15 +948,27 @@ class CreationCommit:
     # Advisory only. Absent unless the written page shows recurring durable
     # material outside its own declared scope; never affects the commit.
     structure_suggestion: dict[str, Any] | None = None
+    records_routing: dict[str, Any] | None = None
     # Advisory only, and a DIFFERENT kind of advisory: `structure_suggestion` is
     # evidence about the page just written, while this is a bounded count of what
     # the whole vault currently owes. It rides the same post-commit seam because
     # a second one would be a second thing to keep fail-open; it does not share
     # the seam's licence to skip a disclosure decision, and does not get one.
     due_state: dict[str, Any] | None = None
+    # Advisory only, and a THIRD kind again: the two above describe the page and
+    # the vault, while this one describes the EPISODE this write sits in -- it
+    # asks the agent for one bounded pass over the recent exchange after a quiet
+    # interval. Same seam, same fail-open guard, its own governance.
+    capture_sweep: dict[str, Any] | None = None
+    # Advisory only, and a FOURTH kind: this one names an unresolved identity
+    # THIS write's own link just brought to the two-page gate
+    # (`write-time-identity-candidates`), not a fact about the page's scope, the
+    # vault's backlog, or the episode.
+    entity_candidate: dict[str, Any] | None = None
     # Server-internal point-lookup context. The mutation terminal consumes and
     # strips it; no response detail exposes a local vault path.
     relation_advisory_context: dict[str, str] | None = None
+    vocabulary_resolution: dict[str, str] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -964,10 +984,18 @@ class CreationCommit:
         }
         if self.structure_suggestion is not None:
             value["structure_suggestion"] = self.structure_suggestion
+        if self.records_routing is not None:
+            value["records_routing"] = self.records_routing
         if self.due_state is not None:
             value["due_state"] = self.due_state
+        if self.capture_sweep is not None:
+            value["capture_sweep"] = self.capture_sweep
+        if self.entity_candidate is not None:
+            value["entity_candidate"] = self.entity_candidate
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
+        if self.vocabulary_resolution is not None:
+            value["vocabulary_resolution"] = self.vocabulary_resolution
         return value
 
 
@@ -1036,12 +1064,20 @@ class ExistingCommit:
     # Advisory only. Absent unless the written page shows recurring durable
     # material outside its own declared scope; never affects the commit.
     structure_suggestion: dict[str, Any] | None = None
+    records_routing: dict[str, Any] | None = None
     # Advisory only, and a DIFFERENT kind of advisory: `structure_suggestion` is
     # evidence about the page just written, while this is a bounded count of what
     # the whole vault currently owes. It rides the same post-commit seam because
     # a second one would be a second thing to keep fail-open; it does not share
     # the seam's licence to skip a disclosure decision, and does not get one.
     due_state: dict[str, Any] | None = None
+    # Advisory only, and a THIRD kind again: the two above describe the page and
+    # the vault, while this one describes the EPISODE this write sits in.
+    capture_sweep: dict[str, Any] | None = None
+    # Advisory only, and a FOURTH kind: this one names an unresolved identity
+    # THIS write's own link just brought to the two-page gate
+    # (`write-time-identity-candidates`).
+    entity_candidate: dict[str, Any] | None = None
     relation_advisory_context: dict[str, str] | None = None
     # Exact canonical write bytes, not the normalized semantic source hash.
     # Absent on legacy/replay results without an exact byte proof.
@@ -1062,8 +1098,14 @@ class ExistingCommit:
             value["index"] = self.index_report.as_dict()
         if self.structure_suggestion is not None:
             value["structure_suggestion"] = self.structure_suggestion
+        if self.records_routing is not None:
+            value["records_routing"] = self.records_routing
         if self.due_state is not None:
             value["due_state"] = self.due_state
+        if self.capture_sweep is not None:
+            value["capture_sweep"] = self.capture_sweep
+        if self.entity_candidate is not None:
+            value["entity_candidate"] = self.entity_candidate
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
         if self.after_hash is not None:
@@ -1106,10 +1148,20 @@ class MovePreflight:
     source_guard: vault.PathGuard
     destination_guard: vault.PathGuard
     mutated: Literal[False] = False
+    #: Pages judged for the closure and publication but not asserted against
+    #: this move (see `move_file`: a page withheld from a mover other than the
+    #: owner whose bytes the move does not rewrite).
+    waived_blockers: frozenset[str] = frozenset()
+
+    @property
+    def blocking_evaluations(self) -> tuple[MovePageEvaluation, ...]:
+        return tuple(
+            item for item in self.evaluations if item.after.path not in self.waived_blockers
+        )
 
     @property
     def should_block(self) -> bool:
-        return any(item.contract_result.should_block for item in self.evaluations)
+        return any(item.contract_result.should_block for item in self.blocking_evaluations)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -2026,8 +2078,13 @@ def _commit_existing_locked(
     auxiliaries: tuple[vault.PlannedWrite, ...],
     derived_auxiliaries: tuple[tuple[str, vault.PlannedWrite], ...],
     result: semantic_contract.SemanticContractResult,
+    index_reports: list[Any] | None = None,
 ) -> ExistingCommit:
-    """Plan lifecycle state and commit while the semantic namespace is held."""
+    """Plan lifecycle state and commit while the semantic namespace is held.
+
+    The batch's index fan-out runs as the namespace is released, so its report
+    lands in `index_reports` after this returns; the caller attaches it.
+    """
     if preflight.committed_replay:
         if preflight.applicability != "full":
             return ExistingCommit(
@@ -2176,7 +2233,7 @@ def _commit_existing_locked(
             "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
             str(error),
         ) from error
-    reports: list[Any] = []
+    reports: list[Any] = [] if index_reports is None else index_reports
     from . import vocabulary_auxiliaries
 
     manifest = vocabulary_auxiliaries.seal(
@@ -2290,6 +2347,156 @@ def _structure_suggestion(
         return None
 
 
+def _records_routing_from_terms(
+    vault_root: Path,
+    terms: Sequence[str],
+    facets: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, Any] | None:
+    """Route authored terms through visible projected claims. Advisory; fail open."""
+    try:
+        from . import collection_claims, due_state
+
+        return collection_claims.route(
+            terms, due_state.routing_targets(vault_root), facets=facets
+        )
+    except Exception:  # noqa: BLE001 -- routing advice never breaks a commit
+        log.debug("collection claims routing failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _records_routing(vault_root: Path, state: Any) -> dict[str, Any] | None:
+    """Collect only the written compiled page's declared routing vocabulary."""
+    return _records_routing_from_terms(
+        vault_root, _records_routing_terms(state), _records_routing_facets(state)
+    )
+
+
+def _records_routing_for_delivery(
+    vault_root: Path,
+    routing: Mapping[str, Any] | None,
+    *,
+    state: Any = None,
+    created: bool = True,
+) -> dict[str, Any] | None:
+    """Suppress a routed advisory when its review family is quiet or off.
+
+    Given the written `state`, a strong route of a failure-shaped observation
+    also carries the prominence-driven `disposition` (see `records_disposition`).
+    An edit (`created=False`) carries one only while the page is still unfiled.
+    """
+    if routing is None:
+        return None
+    try:
+        from . import review_state
+
+        payload = review_state.ReviewStateStore(vault_root).load()
+        if (
+            review_state.disposition_for(
+                "unreflected_observations", payload=payload
+            )
+            != "normal"
+        ):
+            return None
+    except Exception:  # noqa: BLE001 -- disposition failure costs only advice
+        log.debug("collection routing disposition read failed (non-fatal)", exc_info=True)
+        return None
+    delivered = dict(routing)
+    if state is not None:
+        try:
+            from . import prominence, records_disposition
+
+            extra = records_disposition.disposition(
+                vault_root,
+                routing,
+                state,
+                level=prominence.effective_capture_level(),
+                created=created,
+            )
+        except Exception:  # noqa: BLE001 -- a disposition failure costs only the disposition
+            log.debug("records routing disposition failed (non-fatal)", exc_info=True)
+            extra = None
+        if extra:
+            delivered.update(extra)
+    return delivered
+
+
+def _frontmatter_strings(frontmatter: Any, *names: str) -> list[str]:
+    values: list[str] = []
+    if not isinstance(frontmatter, Mapping):
+        return values
+    for name in names:
+        raw = frontmatter.get(name)
+        items = [raw] if isinstance(raw, str) else raw if isinstance(raw, (list, tuple)) else ()
+        values.extend(str(item) for item in items if type(item) in {str, int, float, bool})
+    return [value for value in values if value.strip()]
+
+
+def _records_routing_facets(state: Any) -> dict[str, list[str]]:
+    """The page facets `claims.match` predicates test: type, category, project, tags.
+
+    `category` is the page's own `category` plus the categories of its units,
+    so a note that records a `[failure]` unit is failure-shaped even when its
+    `type` says otherwise. `project` reads both `project` and `projects`.
+    """
+    frontmatter = getattr(state, "frontmatter", None) or {}
+    document = getattr(state, "document", None)
+    unit_categories = [
+        str(category)
+        for unit in (getattr(document, "units", None) or ())
+        if (category := getattr(unit, "category", None))
+    ]
+    facets = {
+        "type": _frontmatter_strings(frontmatter, "type"),
+        "category": [*_frontmatter_strings(frontmatter, "category"), *unit_categories],
+        "project": _frontmatter_strings(frontmatter, "project", "projects"),
+        "tags": _frontmatter_strings(frontmatter, "tags"),
+    }
+    return {key: list(dict.fromkeys(values)) for key, values in facets.items() if values}
+
+
+def _records_routing_terms(state: Any) -> list[str]:
+    """Authored title, page tags and unit tags.
+
+    Type, category and project are predicates (`_records_routing_facets`), not
+    words: counted as coverage terms they let a note about one product reach a
+    collection for another through a shared `type`.
+    """
+    frontmatter = getattr(state, "frontmatter", None) or {}
+    page_tags = _frontmatter_strings(frontmatter, "tags")
+    document = getattr(state, "document", None)
+    unit_tags = [
+        str(tag)
+        for unit in (getattr(document, "units", None) or ())
+        for tag in (getattr(unit, "tags", None) or ())
+    ]
+    return [str(getattr(state, "title", "") or ""), *page_tags, *unit_tags]
+
+
+def _observation_delta(
+    vault_root: Path,
+    state: Any,
+    routing: Mapping[str, Any] | None,
+) -> None:
+    """Maintain claimed-observation state after a compiled write; fail open."""
+    if not getattr(state, "eligible_compiled", True):
+        return
+    try:
+        from . import due_state, memory_refs
+
+        identity = str(getattr(state, "identity", "") or "")
+        due_state.apply_observation_write_delta(
+            vault_root,
+            path=str(getattr(state, "path", "") or ""),
+            observation_ref=memory_refs.memory_ref(identity) if identity else "",
+            terms=_records_routing_terms(state),
+            routing=routing,
+            observation_aliases=(str(getattr(state, "path", "") or ""),),
+            facets=_records_routing_facets(state),
+        )
+    except Exception:  # noqa: BLE001 -- observation advice never breaks a commit
+        log.debug("observation due-state delta failed (non-fatal)", exc_info=True)
+
+
 def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
     """Update the due-state projection for one written page and return its block.
 
@@ -2329,6 +2536,93 @@ def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
         return None
 
 
+def _capture_sweep_block(
+    vault_root: Path,
+    state: Any,
+    corpus: semantic_contract.SemanticCorpusContext | None,
+) -> dict[str, Any] | None:
+    """The episode-completeness advisory this write may carry.
+
+    Shares `_structure_suggestion`'s placement and its fail-open guard. Unlike
+    `_due_state_block` it costs one digest-cached file read and nothing else: the
+    wikilinks come from the page state the preflight already built and their
+    resolution runs against the corpus context that same preflight already holds,
+    and the one file is the entity-type extension registry the hint's registry
+    filter needs. No writer lease is taken and no vault-wide read happens here.
+
+    It also records the write in the carrier's own ledger, which is why it is
+    called even when it returns None: the quiet interval is measured from the
+    latest WRITE, not from the latest advisory.
+
+    A fault here costs the caller an advisory, never the write.
+    """
+    try:
+        from . import capture_sweep
+
+        return capture_sweep.block(
+            vault_root,
+            page_state=state,
+            corpus=corpus,
+            ref=_page_reference(state),
+        )
+    except Exception:  # noqa: BLE001 — an episode advisory never breaks a commit
+        log.debug("capture-sweep advisory failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _entity_candidate_block(
+    vault_root: Path,
+    state: Any,
+    corpus: semantic_contract.SemanticCorpusContext | None,
+    *,
+    previous_state: Any = None,
+) -> dict[str, Any] | None:
+    """The write-time `entity_candidate` advisory this write may carry.
+
+    Shares `_capture_sweep_block`'s placement, cost profile and fail-open
+    guard: the wikilinks and their resolution come from the page state and
+    corpus the preflight already built, and the one extra read this adds is a
+    single keyed lookup against the already-maintained graph dependency index
+    (`write-time-identity-candidates` design D5), never a vault walk.
+
+    `previous_state` is the page's pre-write `SemanticPageState` for an edit
+    (`ExistingPreflight.before`) or `None` for a creation, where every link is
+    new by construction. It is what tells a genuinely new link from a no-op
+    re-edit of an already-linking page, because the graph's own dependency row
+    for this page can already reflect this exact commit by the time this runs.
+
+    A fault here costs the caller a candidate, never the write.
+    """
+    try:
+        from . import capture_sweep
+
+        return capture_sweep.entity_candidate(
+            vault_root,
+            page_state=state,
+            corpus=corpus,
+            previous_page_state=previous_state,
+        )
+    except Exception:  # noqa: BLE001 — a candidate advisory never breaks a commit
+        log.debug("entity-candidate advisory failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _page_reference(state: Any) -> str | None:
+    """The canonical `exomem://memory/<id>` reference for a committed page state.
+
+    None when the page carries no stable identity: the dedupe list is a
+    convenience for the agent, and a path is not a reference.
+    """
+    try:
+        if getattr(state, "identity_kind", None) != "exomem_id":
+            return None
+        from . import memory_refs
+
+        return memory_refs.memory_ref(state.identity)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def commit_existing(
     vault_root: Path,
     *,
@@ -2352,7 +2646,19 @@ def commit_existing(
             timings=timings,
         )
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
+    routing = _records_routing(vault_root, preflight.after)
+    _observation_delta(vault_root, preflight.after, routing)
+    delivered_routing = _records_routing_for_delivery(
+        vault_root, routing, state=preflight.after, created=False
+    )
     due = _due_state_block(vault_root, preflight.path)
+    sweep = _capture_sweep_block(vault_root, preflight.after, preflight.after_corpus)
+    candidate = _entity_candidate_block(
+        vault_root,
+        preflight.after,
+        preflight.after_corpus,
+        previous_state=preflight.before,
+    )
     context = {
         "vault": str(Path(vault_root)),
         "registry_hash": preflight.after.relation_registry_hash,
@@ -2360,7 +2666,10 @@ def commit_existing(
     return replace(
         committed,
         structure_suggestion=suggestion,
+        records_routing=delivered_routing,
         due_state=due,
+        capture_sweep=sweep,
+        entity_candidate=candidate,
         relation_advisory_context=context,
     )
 
@@ -2472,7 +2781,7 @@ def _commit_existing(
         if preflight.manifest_install_required:
             with mutation_timing_span(timings, "commit.manifest"):
                 winner = activation_manifest.ensure_manifest(
-                    root, census=preflight.activation_census
+                    root, census=preflight.activation_census, commit_point=False
                 )
                 result, _ = _reevaluate_existing(preflight, manifest=winner)
                 if result.should_block:
@@ -2496,6 +2805,7 @@ def _commit_existing(
                 except Exception:  # noqa: BLE001 — rebuildable graph cache never blocks commit
                     pass
 
+        index_reports: list[Any] = []
         try:
             with _timed_acquire(
                 timings,
@@ -2504,13 +2814,18 @@ def _commit_existing(
             ):
                 log_active_mutation_phase("semantic_locked_commit_start")
                 with mutation_timing_span(timings, "commit.locked_commit"):
-                    return _commit_existing_locked(
+                    committed = _commit_existing_locked(
                         root,
                         preflight=preflight,
                         auxiliaries=auxiliaries,
                         derived_auxiliaries=derived_auxiliaries,
                         result=result,
+                        index_reports=index_reports,
                     )
+            # The fan-out ran as the creation lock was released.
+            if committed.index_report is None and index_reports:
+                committed = replace(committed, index_report=index_reports[0])
+            return committed
         except vault.PathGuardError as error:
             # A caller-captured auxiliary guard (log/index) lost a race the
             # wide boundary used to prevent. The batch aborted atomically —
@@ -2597,8 +2912,21 @@ def _move_state_map(
 def _move_dependency_signature(
     corpus: semantic_contract.SemanticCorpusContext,
     path: str,
+    *,
+    visible: Callable[[str], bool] | None = None,
+    resolver: vault.WikilinkResolver | None = None,
 ) -> tuple[Any, ...]:
+    """What a page's standing in a move depends on.
+
+    For a mover other than the owner (`visible` is its view), the facts it may
+    judge (see `writer_view_relations`): a page whose standing changes only
+    through a relation a withheld page authors does not enter the move's
+    closure, so it is neither judged nor reported for that mover.
+    """
     state = corpus.pages[path]
+    outbound, inbound, _visible = semantic_contract.writer_view_relations(
+        state, corpus, visible=visible, resolver=resolver
+    )
 
     def fact_signature(fact: semantic_contract.RelationFact) -> tuple[Any, ...]:
         qualification = semantic_contract.qualify_relation(
@@ -2623,8 +2951,8 @@ def _move_dependency_signature(
         state.status,
         state.page_type,
         state.projects,
-        tuple(fact_signature(fact) for fact in corpus.outbound.get(path, ())),
-        tuple(fact_signature(fact) for fact in corpus.inbound.get(path, ())),
+        tuple(fact_signature(fact) for fact in outbound),
+        tuple(fact_signature(fact) for fact in inbound),
     )
 
 
@@ -2633,6 +2961,10 @@ def _review_carry_signature(
     path: str,
 ) -> tuple[Any, ...]:
     state = corpus.pages[path]
+    # For a writer other than the owner, the facts it may judge (see
+    # `writer_view_relations`): a relation a withheld page authors does not
+    # decide whether a review carries.
+    outbound, inbound, _visible = semantic_contract.writer_view_relations(state, corpus)
 
     def target_identity(fact: semantic_contract.RelationFact) -> tuple[str, str] | None:
         resolved = (fact.resolved_target_path or "").split("#", 1)[0]
@@ -2642,11 +2974,7 @@ def _review_carry_signature(
         return target.identity_kind, target.identity
 
     def facts(direction: str) -> tuple[tuple[Any, ...], ...]:
-        values = (
-            corpus.outbound.get(path, ())
-            if direction == "outbound"
-            else corpus.inbound.get(path, ())
-        )
+        values = outbound if direction == "outbound" else inbound
         result: list[tuple[Any, ...]] = []
         for fact in values:
             qualification = semantic_contract.qualify_relation(
@@ -2702,13 +3030,27 @@ def _move_evaluation_pairs(
     # inbound/outbound qualifying sets, and registry disposition inputs. Iterate
     # to a fixed point so later dependency dimensions can extend this without a
     # one-hop assumption; the hard bound is the finite final corpus.
+    # A mover other than the owner is judged over its view, decided once.
+    visible = vault.writer_link_visibility(after_corpus.vault_root)
+    resolvers: dict[str, vault.WikilinkResolver | None] = {"before": None, "after": None}
+    if visible is not None:
+        resolvers = {
+            "before": vault.WikilinkResolver.from_entries(
+                before_corpus.vault_root, before_corpus.resolver_entries
+            ),
+            "after": vault.WikilinkResolver.from_entries(
+                after_corpus.vault_root, after_corpus.resolver_entries
+            ),
+        }
     for _ in range(len(after_corpus.pages) + 1):
         added = False
         for path in sorted(after_corpus.eligible_compiled_paths):
             if path in pairs or path not in before_corpus.pages:
                 continue
-            if _move_dependency_signature(before_corpus, path) != _move_dependency_signature(
-                after_corpus, path
+            if _move_dependency_signature(
+                before_corpus, path, visible=visible, resolver=resolvers["before"]
+            ) != _move_dependency_signature(
+                after_corpus, path, visible=visible, resolver=resolvers["after"]
             ):
                 pairs[path] = path
                 added = True
@@ -3047,15 +3389,17 @@ def commit_move(
     if preflight.should_block:
         raise SemanticWriteError(
             "SEMANTIC_CONTRACT_BLOCKED",
-            _blocking_reason_for_evaluations(preflight.evaluations),
+            _blocking_reason_for_evaluations(preflight.blocking_evaluations),
             tuple(
                 finding
-                for item in preflight.evaluations
+                for item in preflight.blocking_evaluations
                 for finding in item.contract_result.blocking_findings
             ),
         )
     if preflight.manifest_install_required:
-        winner = activation_manifest.ensure_manifest(root, census=preflight.activation_census)
+        winner = activation_manifest.ensure_manifest(
+            root, census=preflight.activation_census, commit_point=False
+        )
         if winner != preflight.prospective_manifest:
             raise SemanticWriteError(
                 "SEMANTIC_CONTRACT_BLOCKED",
@@ -3658,6 +4002,7 @@ def preflight_creation(
     relation_disposition: str | None = None,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    vocabulary_binding: Any | None = None,
 ) -> CreationPreflight:
     root = Path(vault_root)
     relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
@@ -3721,6 +4066,11 @@ def preflight_creation(
             census_token,
             before_corpus,
             closure_plan,
+            vocabulary_binding,
+            (
+                vocabulary_binding.registry_guard,
+                vocabulary_binding.parent_guard,
+            ) if vocabulary_binding is not None else (),
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -3741,6 +4091,11 @@ def preflight_creation(
         census_token,
         before_corpus,
         closure_plan,
+        vocabulary_binding,
+        (
+            vocabulary_binding.registry_guard,
+            vocabulary_binding.parent_guard,
+        ) if vocabulary_binding is not None else (),
     )
 
 
@@ -3841,7 +4196,14 @@ def commit_creation(
         predecessor_content_hash=predecessor_content_hash,
     )
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
+    routing = _records_routing(vault_root, preflight.semantic_state)
+    _observation_delta(vault_root, preflight.semantic_state, routing)
+    delivered_routing = _records_routing_for_delivery(
+        vault_root, routing, state=preflight.semantic_state
+    )
     due = _due_state_block(vault_root, preflight.destination)
+    sweep = _capture_sweep_block(vault_root, preflight.semantic_state, preflight.corpus)
+    candidate = _entity_candidate_block(vault_root, preflight.semantic_state, preflight.corpus)
     context = {
         "vault": str(Path(vault_root)),
         "registry_hash": preflight.semantic_state.relation_registry_hash,
@@ -3849,8 +4211,16 @@ def commit_creation(
     return replace(
         committed,
         structure_suggestion=suggestion,
+        records_routing=delivered_routing,
         due_state=due,
+        capture_sweep=sweep,
+        entity_candidate=candidate,
         relation_advisory_context=context,
+        vocabulary_resolution=(
+            preflight.vocabulary_binding.as_dict()
+            if preflight.vocabulary_binding is not None
+            else None
+        ),
     )
 
 
@@ -3979,6 +4349,25 @@ def _commit_creation(
         operation=f"semantic_creation_{operation}_commit",
         holder_kind="command",
     ):
+        if preflight.vocabulary_binding is not None:
+            from . import vocabulary_resolution
+
+            try:
+                current_binding = vocabulary_resolution.binding_from_dict(
+                    root, preflight.vocabulary_binding.as_dict()
+                )
+            except vocabulary_resolution.VocabularyResolutionError as error:
+                raise SemanticWriteError(error.code, error.reason, details=error.details) from error
+            if current_binding.as_dict() != preflight.vocabulary_binding.as_dict():
+                raise SemanticWriteError(
+                    "STALE_VOCABULARY_BINDING", "domain vocabulary changed; validate a fresh draft"
+                )
+            vocabulary_guards = (
+                current_binding.registry_guard,
+                current_binding.parent_guard,
+            )
+        else:
+            vocabulary_guards = ()
         try:
             source_closure.enforce_source_closure(
                 root,
@@ -4027,6 +4416,7 @@ def _commit_creation(
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
                 semantic_state=semantic_index.from_semantic_page_state(preflight.semantic_state),
+                extra_required_guards=vocabulary_guards,
             )
             try:
                 catalog_publication.publish_markdown_batch(catalog_target)
@@ -4105,9 +4495,17 @@ def _commit_creation(
                 root, primary=primary_write, derived=derived_auxiliaries
             )
             written = vault.batch_atomic_write(
-                writes, vault_root=root, _vocabulary_auxiliaries=manifest
+                writes,
+                vault_root=root,
+                required_guards=vocabulary_guards,
+                _vocabulary_auxiliaries=manifest,
             )
         except vault.PathGuardError as error:
+            if vocabulary_guards:
+                raise SemanticWriteError(
+                    "STALE_VOCABULARY_BINDING",
+                    "domain vocabulary changed during commit; validate a fresh draft",
+                ) from error
             raise SemanticWriteError(
                 "STALE_SEMANTIC_WRITE",
                 "a concurrent write updated a shared auxiliary during commit; retry the operation",

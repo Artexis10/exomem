@@ -17,6 +17,9 @@ Subcommands:
 - `doctor` — read-only local install/setup preflight
 - `auth sessions|revoke` — operator-only durable MCP session administration
 - `governance-schema status|plan-migration|stage-migration|commit-migration|restore-migration-backup|downmigrate` — offline schema control
+- `cell-init` — idempotent Exomem Cloud cell init-container entrypoint: vault
+  init when absent, then offline state migration; no governance schema
+  migration, no custody environment
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -35,6 +38,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import replace
@@ -99,9 +103,11 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "doctor",
         "install-info",
         "auth",
+        "attach",
         "status",
         "warm",
         "mode",
+        "dreamer",
         "prominence",
         "backfill-media",
         "index",
@@ -112,6 +118,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "logs",
         "lease",
         "governance-schema",
+        "relations",
     }
 )
 
@@ -249,12 +256,16 @@ def _dispatch_main(raw: list[str]) -> int:
         return _install_info_main(raw[1:])
     if raw and raw[0] == "auth":
         return _auth_main(raw[1:])
+    if raw and raw[0] == "attach":
+        return _attach_main(raw[1:])
     if raw and raw[0] == "status":
         return _status_main(raw[1:])
     if raw and raw[0] == "warm":
         return _warm_main(raw[1:])
     if raw and raw[0] == "mode":
         return _mode_main(raw[1:])
+    if raw and raw[0] == "dreamer":
+        return _dreamer_main(raw[1:])
     if raw and raw[0] == "prominence":
         return _prominence_main(raw[1:])
     if raw and raw[0] == "backfill-media":
@@ -275,6 +286,15 @@ def _dispatch_main(raw: list[str]) -> int:
         return _lease_main(raw[1:])
     if raw and raw[0] == "governance-schema":
         return _governance_schema_main(raw[1:])
+    if raw and raw[0] == "relations":
+        return _relations_main(raw[1:])
+    if raw and raw[0] == "cell-init":
+        return _cell_init_main(raw[1:])
+    # `exomem activate "<turn>"` — the spelled-out contract for the context
+    # compiler. A thin alias over the registry command so there is exactly one
+    # leaf; the long form `exomem activate_context` keeps working.
+    if raw and raw[0] == "activate":
+        return _activate_main(raw[1:])
     # Registry-driven product operations (reads + writes): `exomem ask_memory "..."`,
     # `exomem remember ...`, etc. Product commands take precedence over old
     # short aliases when a name overlaps.
@@ -298,6 +318,30 @@ def _dispatch_main(raw: list[str]) -> int:
     return _serve_main(raw)
 
 
+def _load_cwd_dotenv() -> None:
+    """Load the operator's cwd `.env`, as the local CLI always has.
+
+    Never in a cloud cell: its environment is the pod spec, and "no `.env`
+    file is loaded" (design D1.6) covers every loader, the CLI's included.
+    Never from inside a vault: a `.env` a remote writer planted there (for
+    example to set `EXOMEM_OAUTH_STORAGE_URL`) must not become CLI
+    configuration just because an operator ran a command from inside it --
+    the same guard `server_runtime` applies to the service's own load.
+    """
+    from . import cloud_cell
+
+    if cloud_cell.cloud_mode_enabled():
+        return
+    from .dotenv_guard import working_directory_dotenv
+
+    dotenv_path = working_directory_dotenv()
+    if dotenv_path is None:
+        return
+    from dotenv import load_dotenv
+
+    load_dotenv(dotenv_path=dotenv_path, override=True)
+
+
 def _build_auth_session_authority():
     """Load operator configuration and reuse the HTTP auth authority factory.
 
@@ -305,9 +349,7 @@ def _build_auth_session_authority():
     issuer, audience, storage namespace, and local-vs-HA selection without
     importing server auth during unrelated CLI startup.
     """
-    from dotenv import load_dotenv
-
-    load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
+    _load_cwd_dotenv()
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -319,10 +361,23 @@ def _build_auth_session_authority():
     return build_session_authority(base_url=base_url)
 
 
-def _session_metadata(record, *, current_generation: str) -> dict[str, object]:
+def _session_metadata(
+    record, *, current_generation: str, binding: object | None = None
+) -> dict[str, object]:
     effective_status = record.status
     if effective_status == "active" and record.generation != current_generation:
         effective_status = "generation_revoked"
+    # Whether this session's identity is the one the host bound as the owner
+    # (EXOMEM_OWNER_OAUTH_SUBJECT): its requests then act as the owner.
+    owner_equivalent = (
+        binding is not None
+        and record.github_user_id == getattr(binding, "user_id", None)
+        and record.issuer == getattr(binding, "issuer", None)
+    )
+    from .local_ingress import LOCAL_AUDIENCE
+
+    # A local-ingress session always acts as the owner (`owner-local`).
+    local = record.audience == LOCAL_AUDIENCE
     return {
         "session_id": record.session_id,
         "client_id": record.client_id,
@@ -331,7 +386,118 @@ def _session_metadata(record, *, current_generation: str) -> dict[str, object]:
         "github_user_id": record.github_user_id,
         "issued_at": record.issued_at,
         "status": effective_status,
+        "owner_equivalent": owner_equivalent or local,
+        "ingress": "local" if local else "public",
     }
+
+
+#: A local client's label: it lands in access logs, so it is kept to a short,
+#: plain identifier the operator chose.
+_LOCAL_CLIENT_LABEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}", re.ASCII)
+
+
+def _local_owner_identity():
+    """The owner identity a local session is issued for.
+
+    The configured sign-in account, so the allowed-account recheck applies to
+    local sessions exactly as it does to remote ones.
+    """
+    from .auth_sessions import SessionIdentity
+
+    raw_id = os.environ.get("EXOMEM_GITHUB_USER_ID", "").strip()
+    login = os.environ.get("EXOMEM_GITHUB_USERNAME", "").strip()
+    if not raw_id.isascii() or not raw_id.isdigit() or not login:
+        raise ValueError(
+            "issue-local needs EXOMEM_GITHUB_USER_ID and EXOMEM_GITHUB_USERNAME "
+            "(the owner identity)"
+        )
+    return SessionIdentity(github_user_id=int(raw_id), github_login=login)
+
+
+def _write_private_token(path: Path, bearer: str) -> None:
+    """Create `path` exclusively, owner-only, and write the bearer to it."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        os.write(descriptor, f"{bearer}\n".encode("ascii"))
+    finally:
+        os.close(descriptor)
+
+
+def _issue_local_main(args: argparse.Namespace) -> int:
+    """`exomem auth issue-local`: mint a local client session into a 0600 file.
+
+    The token is never printed or logged. A file that cannot be written leaves
+    no usable session behind: the new session is revoked before returning.
+    """
+    from .auth_sessions import SessionStoreUnavailable
+    from .local_ingress import LOCAL_SCOPES
+
+    output = Path(args.output).expanduser()
+    if output.exists() or output.is_symlink():
+        print(f"issue-local: {output} already exists; choose a new path", file=sys.stderr)
+        return 2
+    _load_cwd_dotenv()
+    from . import env_compat
+
+    env_compat.promote_legacy()
+    try:
+        from .server_auth import build_local_session_authority
+
+        identity = _local_owner_identity()
+        authority = build_local_session_authority()
+    except (SessionStoreUnavailable, OSError):
+        print(
+            "session authority unavailable; check storage configuration and connectivity",
+            file=sys.stderr,
+        )
+        return 1
+    except (ValueError, RuntimeError) as error:
+        print(f"auth configuration error: {error}", file=sys.stderr)
+        return 2
+
+    async def run():
+        bearer, record = await authority.issue(
+            client_id=args.client, scopes=LOCAL_SCOPES, identity=identity
+        )
+        try:
+            _write_private_token(output, bearer)
+        except OSError:
+            await authority.tombstone(record.session_id, reason="issue-local-write-failed")
+            raise
+        return record
+
+    try:
+        record = asyncio.run(run())
+    except SessionStoreUnavailable:
+        print(
+            "session authority unavailable; check storage configuration and connectivity",
+            file=sys.stderr,
+        )
+        return 1
+    except OSError as error:
+        print(
+            f"issue-local: could not write {output}: {error.strerror or error}; "
+            "the new session was revoked",
+            file=sys.stderr,
+        )
+        return 1
+    result = {
+        "session_id": record.session_id,
+        "client_id": record.client_id,
+        "ingress": "local",
+        "output": str(output),
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(
+            f"Issued local session {record.session_id} for client {record.client_id}; "
+            f"token written to {output}."
+        )
+    return 0
 
 
 def _auth_main(argv: list[str]) -> int:
@@ -348,7 +514,24 @@ def _auth_main(argv: list[str]) -> int:
     revoke.add_argument("--all", action="store_true", dest="revoke_all")
     revoke.add_argument("--reason", default=None, help="operator audit reason")
     revoke.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    issue_local = subcommands.add_parser(
+        "issue-local",
+        help="mint a revocable token for a same-machine client of the local listener",
+    )
+    issue_local.add_argument(
+        "--client", required=True, help="short label naming the client, such as home"
+    )
+    issue_local.add_argument(
+        "--output", required=True, help="new file to hold the token, created with mode 0600"
+    )
+    issue_local.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
+
+    if args.command == "issue-local":
+        if _LOCAL_CLIENT_LABEL.fullmatch(args.client) is None:
+            parser.error("--client must be 1-64 of a-z, 0-9, '.', '_' or '-', starting alphanumeric")
+        return _issue_local_main(args)
 
     if args.command == "revoke":
         if bool(args.session_id) == bool(args.revoke_all):
@@ -372,11 +555,18 @@ def _auth_main(argv: list[str]) -> int:
 
     async def run() -> dict[str, object]:
         if args.command == "sessions":
+            from .governance.principal import remote_owner_binding
+
             records = await authority.list_sessions()
             current_generation = await authority.current_generation()
+            binding = remote_owner_binding()
             return {
                 "sessions": [
-                    _session_metadata(record, current_generation=current_generation)
+                    _session_metadata(
+                        record,
+                        current_generation=current_generation,
+                        binding=binding,
+                    )
                     for record in records
                 ]
             }
@@ -406,8 +596,15 @@ def _auth_main(argv: list[str]) -> int:
             print("No durable MCP sessions.")
         else:
             for row in rows:
+                owner = (
+                    "owner-local"
+                    if row["ingress"] == "local"
+                    else "owner"
+                    if row["owner_equivalent"]
+                    else "-"
+                )
                 print(
-                    f"{row['session_id']}  {row['status']}  {row['client_id']}  "
+                    f"{row['session_id']}  {row['status']}  {owner}  {row['client_id']}  "
                     f"{row['github_login']}  {row['issued_at']}"
                 )
     elif result.get("revoked_all"):
@@ -416,6 +613,120 @@ def _auth_main(argv: list[str]) -> int:
         print(f"Revoked session {result['session_id']}.")
     else:
         print(f"Session {result['session_id']} was not found.")
+    return 0
+
+
+def _attach_main(argv: list[str], *, transport=None) -> int:
+    """`exomem attach <file>`: send a file's bytes to the local `/upload`.
+
+    Bytes, never a path: the service never reads the caller's filesystem.
+    The request goes only to literal loopback, with a local client token, and
+    the command prints the handle the service returns. With `--scope` and
+    `--category` the bytes are preserved as Evidence at once; without them the
+    service holds them and the printed `file` handle is what `preserve_artifacts`
+    (or, with `--lane source`, `capture_source`) takes in `files`.
+    """
+    import mimetypes
+
+    parser = argparse.ArgumentParser(
+        prog="exomem attach",
+        description=(
+            "Upload a file to the managed service's local listener with a local "
+            "client token and print the returned handle."
+        ),
+    )
+    parser.add_argument("file", help="file whose bytes to send")
+    parser.add_argument("--scope", default="", help="evidence scope, e.g. a project")
+    parser.add_argument("--category", default="", help="evidence category within the scope")
+    parser.add_argument("--description", default="", help="optional description")
+    parser.add_argument("--filename", default="", help="name to store it under")
+    parser.add_argument(
+        "--lane",
+        choices=("evidence", "source"),
+        default="evidence",
+        help="without --scope/--category: the lane the held file is for "
+        "(evidence -> preserve_artifacts, source -> capture_source)",
+    )
+    parser.add_argument(
+        "--token-file", default="", help="local client token file (default $EXOMEM_LOCAL_TOKEN_FILE)"
+    )
+    parser.add_argument(
+        "--port", default="", help="local listener port (default $EXOMEM_LOCAL_PORT)"
+    )
+    args = parser.parse_args(argv)
+
+    token_file = args.token_file or os.environ.get("EXOMEM_LOCAL_TOKEN_FILE", "").strip()
+    raw_port = str(args.port or os.environ.get("EXOMEM_LOCAL_PORT", "")).strip()
+    if not token_file:
+        parser.error("a local client token file is required (--token-file or EXOMEM_LOCAL_TOKEN_FILE)")
+    if not raw_port.isascii() or not raw_port.isdigit() or not 0 < int(raw_port) < 65536:
+        parser.error("a valid local port is required (--port or EXOMEM_LOCAL_PORT)")
+    try:
+        token = Path(token_file).expanduser().read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        print("attach: the local client token file could not be read", file=sys.stderr)
+        return 2
+    if not token:
+        print("attach: the local client token file is empty", file=sys.stderr)
+        return 2
+    source = Path(args.file).expanduser()
+    if not source.is_file():
+        print(f"attach: {source} is not a file", file=sys.stderr)
+        return 2
+    name = args.filename or source.name
+    hold = not args.scope and not args.category
+    if not hold and args.lane != "evidence":
+        parser.error("--lane applies only without --scope/--category; a direct preserve is Evidence")
+    fields = {
+        key: value
+        for key, value in {
+            "scope": args.scope,
+            "category": args.category,
+            "description": args.description,
+            "filename": args.filename,
+            "hold": "1" if hold else "",
+            "lane": args.lane if hold else "",
+        }.items()
+        if value
+    }
+
+    import httpx
+
+    url = f"http://127.0.0.1:{int(raw_port)}/upload"
+    try:
+        with httpx.Client(
+            transport=transport,
+            trust_env=False,
+            follow_redirects=False,
+            timeout=httpx.Timeout(30.0, read=300.0, write=300.0),
+        ) as client, source.open("rb") as handle:
+            response = client.post(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                files={
+                    "file": (
+                        name,
+                        handle,
+                        mimetypes.guess_type(name)[0] or "application/octet-stream",
+                    )
+                },
+                data=fields,
+            )
+    except httpx.HTTPError:
+        print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
+        return 1
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if response.status_code != 201 or not isinstance(payload, dict):
+        code = payload.get("code") or payload.get("error") if isinstance(payload, dict) else None
+        print(
+            f"attach: upload refused (HTTP {response.status_code}{f', {code}' if code else ''})",
+            file=sys.stderr,
+        )
+        return 1
+    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 
@@ -899,6 +1210,71 @@ def _mode_main(argv: list[str]) -> int:
     return 0
 
 
+def _dreamer_main(argv: list[str]) -> int:
+    """Show or set the dreamer (background upkeep) operator setting.
+
+    There is deliberately no run-once subcommand: a second process driving the
+    pass against a live service is exactly what the live-cell rules forbid.
+    """
+    from . import dreamer
+
+    parser = argparse.ArgumentParser(
+        prog="exomem dreamer",
+        description="Show or set the dreamer, the default-off background worker that "
+        "proposes bounded upkeep. on | off | pause | resume write the `dreamer` key in "
+        "the per-machine config file, which a running server's worker re-reads within one "
+        "poll; a server started with the dreamer off has no worker, so `on` takes effect "
+        "at its next restart. EXOMEM_DREAMER in the service environment overrides it.",
+    )
+    parser.add_argument("action", choices=("status", "on", "off", "pause", "resume"))
+    parser.add_argument(
+        "--vault",
+        default=None,
+        help="vault root whose recorded dreamer health to include (status only)",
+    )
+    parser.add_argument("--json", action="store_true", help="emit stable JSON (status only)")
+    args = parser.parse_args(argv)
+
+    if args.action == "status":
+        vault_root = Path(args.vault).expanduser() if args.vault else None
+        status = dreamer.status(vault_root)
+        if args.json:
+            print(json.dumps(status))
+        else:
+            print(f"dreamer: {status['setting']}  (state: {status['state']})")
+            if status.get("waiting_reason"):
+                print(f"  waiting: {status['waiting_reason']}")
+            if status.get("sidecar") is not None:
+                print(f"  recorded health: {json.dumps(status['sidecar'])}")
+        return 0
+    value = {"on": "on", "off": "off", "pause": "paused", "resume": "on"}[args.action]
+    try:
+        path = dreamer.write_setting(value)
+    except OSError:
+        from . import mode as mode_mod
+
+        print(
+            f"dreamer: could not persist {mode_mod.config_path()}; grant Modify permission "
+            "to the invoking account or change EXOMEM_CONFIG_PATH",
+            file=sys.stderr,
+        )
+        return 1
+    effective = dreamer.setting()
+    print(f"Dreamer set to '{value}'  ({path})")
+    if effective != value:
+        print(f"EXOMEM_DREAMER in this environment overrides it: effective '{effective}'.")
+    if value == "on":
+        # The worker thread is what re-reads the setting, and a server started
+        # with the dreamer off never created one.
+        print(
+            "A running exomem server whose worker is running applies it within one poll "
+            "(about 30s); a server started with the dreamer off starts it at its next restart."
+        )
+    else:
+        print("A running exomem server applies it within one poll (about 30s).")
+    return 0
+
+
 def _status_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem status",
@@ -1007,9 +1383,7 @@ def _doctor_main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    from dotenv import load_dotenv
-
-    load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
+    _load_cwd_dotenv()
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -1042,6 +1416,149 @@ def _doctor_main(argv: list[str]) -> int:
             "inspect with exomem status --resources --json."
         )
     return 0 if report.success else 1
+
+
+def _relations_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem relations",
+        description="Relation-quality tools over the published graph snapshot.",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    census_parser = sub.add_parser(
+        "census",
+        help="counts-only relation-quality census",
+        description=(
+            "Counts-only relation-quality census. Asks the running managed service "
+            "first, so it reads the live published snapshot; otherwise opens the "
+            "local graph sidecar read-only. Reports unavailable, never zero."
+        ),
+    )
+    census_parser.add_argument(
+        "--vault",
+        default=None,
+        help=(
+            f"vault root containing '{kb_prefix()}'; reads its snapshot locally "
+            "instead of asking the service (default: the service, else $EXOMEM_VAULT_PATH)"
+        ),
+    )
+    census_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    census_parser.add_argument(
+        "--keys",
+        action="store_true",
+        help="also name predicate keys, including vault extension keys",
+    )
+    census_parser.add_argument(
+        "--sample",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "also write a seeded sample of N specific edges, stratified by family, as "
+            "refs only, for an agent to judge (reads the local snapshot)"
+        ),
+    )
+    census_parser.add_argument(
+        "--sample-out",
+        default=None,
+        metavar="FILE",
+        help=(
+            "where --sample writes its refs (default: relation-census/sample.json in "
+            "the vault's machine-local state directory, never the current directory)"
+        ),
+    )
+    census_parser.add_argument(
+        "--seed", type=int, default=0, help="sample seed (default: 0)"
+    )
+    census_parser.add_argument(
+        "--judged",
+        default=None,
+        metavar="FILE",
+        help="fold an agent-judged sample into false_precision_judged",
+    )
+    args = parser.parse_args(argv)
+
+    from . import relation_census
+    from .governance.principal import library_scope
+
+    try:
+        judged = None
+        if args.judged is not None:
+            judged = relation_census.fold_judgments(
+                json.loads(Path(args.judged).expanduser().read_text(encoding="utf-8"))
+            )
+        detail = "keys" if args.keys else "counts"
+        # The sample names refs, which only a local read can hand back.
+        local_only = args.vault is not None or args.sample is not None
+        result = None
+        if not local_only:
+            try:
+                result = relation_census.service_census(detail)
+            except relation_census.ServiceKeyRefused as refused:
+                print(
+                    f"note: {refused}; reading the local snapshot instead",
+                    file=sys.stderr,
+                )
+        served_by = "service"
+        sample = None
+        sample_out: Path | None = None
+        if result is None:
+            vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
+            if not vault:
+                raise ValueError(
+                    "VAULT_REQUIRED: no managed service answered; pass --vault or set "
+                    "EXOMEM_VAULT_PATH"
+                )
+            vault_root = Path(vault).expanduser()
+            served_by = "local-snapshot"
+            # A terminal on the owner's machine reading its own sidecar is the
+            # owner-local caller, the one audience a governed vault serves.
+            with library_scope():
+                result = relation_census.census(vault_root, detail=detail)
+                if args.sample is not None and result.get("available"):
+                    sample = relation_census.sample(
+                        vault_root, size=args.sample, seed=args.seed
+                    )
+            if sample is not None:
+                if args.sample_out is not None:
+                    sample_out = Path(args.sample_out).expanduser()
+                else:
+                    from . import state_paths
+
+                    sample_out = (
+                        state_paths.ensure_vault_state_dir(vault_root)
+                        / "relation-census"
+                        / "sample.json"
+                    )
+                    sample_out.parent.mkdir(mode=0o700, exist_ok=True)
+                sample_out.write_text(
+                    json.dumps(sample, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
+    except (OSError, ValueError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 2
+    result = {**result, "served_by": served_by}
+    if result.get("available"):
+        metrics = dict(result["metrics"])
+        if judged is not None:
+            metrics["false_precision_judged"] = judged
+        result["metrics"] = metrics
+        if sample is not None and sample.get("kind") == "relation_census_sample":
+            result["sample"] = {
+                "requested": sample["requested"],
+                "drawn": sample["drawn"],
+                "strata": sample["strata"],
+            }
+    if sample_out is not None and result.get("sample"):
+        print(
+            f"sample: {result['sample']['drawn']} refs written to {sample_out}",
+            file=sys.stderr,
+        )
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(relation_census.summary_line(result))
+        print(f"  served by: {served_by}")
+    return 0
 
 
 def _warm_main(argv: list[str]) -> int:
@@ -1587,7 +2104,7 @@ def _governance_schema_status(vault: Path, *, now: int) -> dict[str, object]:
         for item in membership.replicas
     ]
     return {
-        "schema_version": store.authorization_session_schema_version(vault),
+        "schema_version": store.authorization_session_schema_version_if_readable(vault),
         "governance_enrolled": control.governance_enrolled,
         "logical_vault_id": control.logical_vault_id,
         "activation_store_id": control.activation_store_id,
@@ -2069,6 +2586,67 @@ def _reclaim_schema_main(argv: list[str]) -> int:
     return 0
 
 
+def _cell_init_failure_line(error_code: str, step: str) -> None:
+    """Exactly one JSON line: `{"ok": false, "step": ..., "error_code": ...}`
+    (design D3 "Output"). No traceback and no absolute paths: `step` and
+    `error_code` are both fixed vocabulary, never a path or an exception's own
+    message.
+    """
+    print(json.dumps({"ok": False, "step": step, "error_code": error_code}))
+
+
+def _cell_init_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem cell-init",
+        description=(
+            "Idempotent Exomem Cloud cell init-container entrypoint: vault init "
+            "when absent, then offline state migration. No governance schema "
+            "migration and no custody environment -- a cell runs standalone "
+            "governance defaults, like a fresh desktop install."
+        ),
+    )
+    parser.add_argument("--vault", required=True, help="explicit absolute vault root")
+    parser.add_argument("--json", action="store_true", help="emit stable JSON on success")
+    args = parser.parse_args(argv)
+    as_json = bool(args.json)
+
+    vault = Path(args.vault).expanduser()
+    if not vault.is_absolute():
+        _cell_init_failure_line("CELL_INIT_VAULT_INVALID", "vault_path")
+        return 1
+
+    from . import cell_init, cloud_cell, privacy_log
+
+    # The same content redaction the server installs (design D3 "Output"): a
+    # failure below must never let a query- or path-shaped detail escape
+    # through a log line this process emits before it exits.
+    privacy_log.install_hosted_log_redaction()
+
+    try:
+        # `/data/host` (design D3.1) is enforced only inside a real cloud
+        # cell, where the image's `usermod --home /data/host` makes the passwd
+        # home resolve there -- never for a bare local/dev invocation, which
+        # would otherwise chmod a developer's actual home directory to 0700.
+        host_root = cell_init.account_home() if cloud_cell.cloud_mode_enabled() else None
+        result = cell_init.run_cell_init(vault, host_root=host_root)
+    except cell_init.CellInitError as error:
+        _cell_init_failure_line(error.code, error.step)
+        return 1
+    except Exception:  # noqa: BLE001 - fail closed: no traceback, no absolute paths
+        _cell_init_failure_line("CELL_INIT_FAILED", "unknown")
+        return 1
+
+    report = {
+        "vault_created": result.vault_created,
+    }
+    if as_json:
+        print(json.dumps(report))
+    else:
+        for key, value in report.items():
+            print(f"{key}: {value}")
+    return 0
+
+
 def _init_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem init",
@@ -2403,6 +2981,65 @@ def _install_hook_main(argv: list[str]) -> int:
 # --------------------------------------------------------------------------- #
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
+def _activate_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem activate",
+        description=(
+            "Compile durable context for a raw turn. Thin alias over "
+            "activate_context; pass the user's words verbatim, not a query."
+        ),
+    )
+    parser.add_argument("turn", help="the user's turn, verbatim")
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=None,
+        help="character ceiling for the packet (default 4000, clamped to 500..8000)",
+    )
+    parser.add_argument("--purpose", default=None, help="declared purpose for this request")
+    parser.add_argument(
+        "--continuity",
+        default=None,
+        help="the opaque continuity token a previous packet of this conversation returned",
+    )
+    parser.add_argument(
+        "--anchor",
+        default=None,
+        help="one canonical ref from a previous ambiguity block, naming the sense you mean",
+    )
+    parser.add_argument(
+        "--timings", action="store_true", help="include per-stage timings"
+    )
+    parser.add_argument("--client", default=None, help="calling client label, recorded only")
+    parser.add_argument(
+        "--session", default=None, help="opaque conversation id, recorded only as a hash"
+    )
+    parser.add_argument(
+        "--workspace", default=None, help="opaque project key, recorded only as a hash"
+    )
+    parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
+    args = parser.parse_args(argv)
+
+    core = ["activate_context", args.turn]
+    if args.max_chars is not None:
+        core += ["--max-chars", str(args.max_chars)]
+    if args.purpose:
+        core += ["--purpose", args.purpose]
+    if args.continuity:
+        core += ["--continuity", args.continuity]
+    if args.anchor:
+        core += ["--anchor", args.anchor]
+    if args.timings:
+        core.append("--include-timings")
+    if args.client:
+        core += ["--client", args.client]
+    if args.session:
+        core += ["--session", args.session]
+    if args.workspace:
+        core += ["--workspace", args.workspace]
+    return _core_op_main(_with_json(core, args.json))
+
+
 def _simple_cli_action_names() -> frozenset[str]:
     from . import commands as commands_module
 

@@ -1,0 +1,14 @@
+{
+  "public_test_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "mac_domain_hex": "65786f6d656d2e686f737465642d61637469766174696f6e2d70726f6f662f763100",
+  "fixtures": {
+    "intermediate-child-proof.json": {
+      "signed_body_sha256": "f09b14f087ad3d86aff003d4fb4ebea51a7fcbf89a8fa84e65bb873321c81f73",
+      "expected_mac": "6a8b4041007c9faa4581df889d16c3da720d054a49e9daee12c961a705fe1561"
+    },
+    "final-commit-proof.json": {
+      "signed_body_sha256": "ee1bf3ac08f8b6cc14a480cef840e85472866824ff58cc6760f17c1ef63cb7f5",
+      "expected_mac": "f21faf04d64b7d4fcd8661a4697c1f5ac06b105cbefb093ce0c20c5adea14fb5"
+    }
+  }
+}

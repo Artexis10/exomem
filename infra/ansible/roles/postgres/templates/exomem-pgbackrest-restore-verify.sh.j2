@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+## Managed by Ansible (role: postgres).
+##
+## Weekly restore verification (D12 / spec "have its backup restore verified
+## weekly"): restores the latest pgBackRest backup into a scratch directory,
+## brings up a throwaway PostgreSQL instance against it with no network
+## listener at all (OM-4) -- only a private 0700 socket directory under
+## /var/lib/postgresql, never the shared /var/run/postgresql one -- proves
+## it accepts a query over that socket, then tears the scratch instance
+## down. Never touches the live data directory.
+set -euo pipefail
+
+## Debian/Ubuntu never put versioned PostgreSQL binaries on PATH (that's what
+## pg_ctlcluster is for); a bare `pg_ctl`/`psql` under `runuser -u postgres`
+## resolves against the login PATH, which doesn't include this, so every
+## call below uses the fully qualified path.
+PG_BINDIR="/usr/lib/postgresql/{{ postgres_major_version }}/bin"
+STANZA="{{ postgres_pgbackrest_stanza }}"
+SCRATCH="$(mktemp -d /var/lib/postgresql/{{ postgres_major_version }}/restore-verify.XXXXXX)"
+## mktemp -d already creates with 0700, but OM-4 asks for it explicitly
+## rather than relying on the default umask behaviour.
+chmod 0700 "${SCRATCH}"
+PORT=55432
+
+cleanup() {
+    runuser -u postgres -- "${PG_BINDIR}/pg_ctl" -D "${SCRATCH}" -m immediate -w stop >/dev/null 2>&1 || true
+    rm -rf "${SCRATCH}"
+}
+trap cleanup EXIT
+
+pgbackrest --stanza="${STANZA}" --pg1-path="${SCRATCH}" restore --delta
+
+## Debian/Ubuntu keeps postgresql.conf under {{ postgres_config_dir }}, not
+## inside $PGDATA, so pgBackRest's restore -- which only ever contains what
+## was actually inside pg1-path -- leaves $SCRATCH with no config file at
+## all. A fresh, minimal one is written here rather than copying the live
+## cluster's: that file's `data_directory` (if any survived a copy) would
+## silently redirect this throwaway instance back onto the live data
+## directory this script promises never to touch, and its
+## archive_command would re-archive WAL from the verification instance into
+## the real repo. Recovery settings from the restore itself
+## (postgresql.auto.conf) are untouched and still apply.
+## listen_addresses = '' (OM-4): this instance never listens on any network
+## interface at all, not even loopback -- only the private unix socket
+## directory below. It also never touches the shared /var/run/postgresql
+## socket directory the live cluster and PgBouncer use, so a client that
+## resolves the default socket path can never reach this scratch instance
+## by accident.
+cat > "${SCRATCH}/postgresql.conf" <<CONF
+listen_addresses = ''
+port = ${PORT}
+unix_socket_directories = '${SCRATCH}'
+CONF
+
+## pg_hba.conf lives outside $PGDATA too. With no network listener at all,
+## only the unix-socket `local` line can ever match; this instance is
+## throwaway and torn down at the end of this script, so a permissive local
+## rule carries no standing risk.
+cat > "${SCRATCH}/pg_hba.conf" <<CONF
+local   all             all                                     trust
+CONF
+
+chown -R postgres:postgres "${SCRATCH}"
+runuser -u postgres -- "${PG_BINDIR}/pg_ctl" -D "${SCRATCH}" -l "${SCRATCH}/verify.log" -w start
+runuser -u postgres -- "${PG_BINDIR}/psql" -h "${SCRATCH}" -p "${PORT}" -d postgres -c "SELECT 1" >/dev/null
+runuser -u postgres -- "${PG_BINDIR}/pg_ctl" -D "${SCRATCH}" -m fast -w stop
+
+echo "pgBackRest restore verification succeeded for stanza ${STANZA}"

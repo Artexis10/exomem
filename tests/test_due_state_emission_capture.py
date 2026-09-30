@@ -139,11 +139,11 @@ def test_a_governed_write_increments_the_write_count(vault: Path) -> None:
     overdue_prediction(vault)
     scratch_page(vault)
     commands.op_bootstrap(vault)
-    before = _projection(vault)["emission"]["writes"]
+    before = due_state_module.emission_ledger(vault)["writes"]
 
     _observe(vault, "Reader saturation reproduces on the replica too.")
 
-    assert _projection(vault)["emission"]["writes"] == before + 1
+    assert due_state_module.emission_ledger(vault)["writes"] == before + 1
 
 
 def test_an_emitted_block_increments_the_emission_count(vault: Path) -> None:
@@ -151,12 +151,12 @@ def test_an_emitted_block_increments_the_emission_count(vault: Path) -> None:
     scratch_page(vault)
     commands.op_bootstrap(vault)
     due_state_module.reset_emission_state()
-    before = _projection(vault)["emission"]["emissions"]
+    before = due_state_module.emission_ledger(vault)["emissions"]
 
     result = _observe(vault, "Reader saturation reproduces on the replica too.")
 
     assert "due_state" in result
-    ledger = _projection(vault)["emission"]
+    ledger = due_state_module.emission_ledger(vault)
     assert ledger["emissions"] == before + 1
     assert ledger["last_digest"]
 
@@ -168,12 +168,12 @@ def test_a_block_that_is_not_delivered_does_not_count(vault: Path) -> None:
     commands.op_bootstrap(vault)
     due_state_module.reset_emission_state()
     _observe(vault, "First observation.")
-    after_first = _projection(vault)["emission"]["emissions"]
+    after_first = due_state_module.emission_ledger(vault)["emissions"]
 
     # Identical totals: the governor goes quiet, so nothing is delivered.
     _observe(vault, "Second observation with the same totals.")
 
-    assert _projection(vault)["emission"]["emissions"] == after_first
+    assert due_state_module.emission_ledger(vault)["emissions"] == after_first
 
 
 # ==========================================================================
@@ -195,7 +195,7 @@ def test_a_twelve_write_batch_emits_at_most_once(vault: Path) -> None:
     scratch_page(vault)
     commands.op_bootstrap(vault)
     due_state_module.reset_emission_state()
-    before = _projection(vault)["emission"]
+    before = due_state_module.emission_ledger(vault)
 
     pages = _bulk_pages(vault, 12)
     emitted = 0
@@ -209,7 +209,7 @@ def test_a_twelve_write_batch_emits_at_most_once(vault: Path) -> None:
     # The terminal, once, after the scope.
     assert due_state_module.should_emit(due_state_module.served(vault), vault_root=vault)
 
-    ledger = _projection(vault)["emission"]
+    ledger = due_state_module.emission_ledger(vault)
     assert ledger["writes"] == before["writes"] + 12
     assert ledger["emissions"] == before["emissions"] + 1
     assert ledger["due_total"] >= 12, ledger
@@ -230,7 +230,7 @@ def test_removing_the_batch_scope_emits_once_per_write(vault: Path) -> None:
             emitted += 1
 
     assert emitted == 12
-    assert _projection(vault)["emission"]["emissions"] >= 12
+    assert due_state_module.emission_ledger(vault)["emissions"] >= 12
 
 
 def test_separate_calls_stay_separate_batches(vault: Path) -> None:
@@ -287,12 +287,12 @@ def test_a_multi_write_command_carries_one_block(vault: Path) -> None:
     scratch_page(vault)
     commands.op_bootstrap(vault)
     due_state_module.reset_emission_state()
-    before = _projection(vault)["emission"]
+    before = due_state_module.emission_ledger(vault)
 
     response = _adopt_twelve(vault)
 
     assert "due_state" in response, response
-    ledger = _projection(vault)["emission"]
+    ledger = due_state_module.emission_ledger(vault)
     assert ledger["writes"] - before["writes"] == 12
     assert ledger["emissions"] - before["emissions"] == 1
 
@@ -382,7 +382,7 @@ def test_the_ledger_records_the_size_of_the_block_it_delivered(vault: Path) -> N
     due_state_module.reset_emission_state()
     assert due_state_module.should_emit(block, vault_root=vault)
 
-    ledger = _projection(vault)["emission"]
+    ledger = due_state_module.emission_ledger(vault)
     assert ledger["due_total"] == 2
     assert ledger["emissions"] == 1
 
@@ -400,7 +400,7 @@ def test_a_heal_never_writes_the_denominator(vault: Path) -> None:
     scratch_page(vault)
     due_state_module.reconcile(vault)
 
-    assert _projection(vault)["emission"]["due_total"] == 0
+    assert due_state_module.emission_ledger(vault)["due_total"] == 0
     # ...and the recompute really did find them, so the zero is about the
     # writer and not about an empty vault.
     assert due_state_module.served(vault)["total"] == 2
@@ -420,7 +420,7 @@ def test_a_production_that_is_never_delivered_records_no_denominator(
         assert produced is not None and produced["total"] >= 1
         due_state_module.should_emit(produced, vault_root=vault)
 
-    ledger = _projection(vault)["emission"]
+    ledger = due_state_module.emission_ledger(vault)
     assert ledger["emissions"] == 0
     assert ledger["due_total"] == 0
 
@@ -428,7 +428,7 @@ def test_a_production_that_is_never_delivered_records_no_denominator(
 def test_a_vault_that_owes_nothing_records_a_zero_denominator(vault: Path) -> None:
     scratch_page(vault)
     due_state_module.reconcile(vault)
-    ledger = _projection(vault)["emission"]
+    ledger = due_state_module.emission_ledger(vault)
     assert ledger["due_total"] == 0
     assert ledger["emissions"] == 0
 

@@ -12,6 +12,7 @@ performs. See the module docstring and docs/remote-quickstart.md.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -220,6 +221,109 @@ def test_happy_path_writes_env_and_prints_connector(tmp_path: Path) -> None:
     assert "https://kb.example.com/auth/callback" in out
     # ngrok cap flagged as UNVERIFIED
     assert "UNVERIFIED" in out and "120 req" in out
+
+
+# ============================================================================
+# run_remote_setup — refuses to write secrets into a vault (server-side
+# parity: `exomem.dotenv_guard`, the same guard `server_runtime` applies)
+# ============================================================================
+
+
+def test_refuses_to_write_secrets_at_the_vault_root(vault: Path) -> None:
+    """A vault is synced content remote principals can write; secrets must
+    never land there just because the operator ran the wizard from inside it."""
+    env_path = vault / ".env"
+
+    code, out, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert not env_path.exists()
+    assert doctor_calls == []
+    assert "inside a vault" in out
+    assert str(env_path) in out
+
+
+@pytest.mark.parametrize("interactive", [False, True])
+def test_refuses_secrets_in_a_new_vault_before_initialization(
+    tmp_path: Path, interactive: bool
+) -> None:
+    fresh_vault = tmp_path / "new-vault"
+    fresh_vault.mkdir()
+    env_path = fresh_vault / ".env"
+
+    code, out, doctor_calls = _run(
+        env_path,
+        vault=None if interactive else str(fresh_vault),
+        yes=not interactive,
+        input_fn=lambda _prompt: str(fresh_vault),
+    )
+
+    assert code == 2
+    assert not env_path.exists()
+    assert doctor_calls == []
+    assert "inside a vault" in out
+
+
+def test_refuses_to_write_secrets_in_a_vault_subdirectory(vault: Path) -> None:
+    env_path = vault / "Knowledge Base" / ".env"
+
+    code, out, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert not env_path.exists()
+    assert doctor_calls == []
+    assert "inside a vault" in out
+
+
+def test_refuses_to_write_secrets_when_the_working_directory_is_a_symlinked_vault(
+    vault: Path, tmp_path: Path
+) -> None:
+    linked_root = tmp_path / "symlinked-service-root"
+    linked_root.symlink_to(vault)
+    env_path = linked_root / ".env"
+
+    code, out, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert not env_path.exists()
+    assert doctor_calls == []
+    assert "inside a vault" in out
+
+
+def test_refuses_to_write_secrets_when_the_env_path_is_a_symlink_into_the_vault(
+    vault: Path, tmp_path: Path
+) -> None:
+    """The working directory is outside the vault, but `--env-path` (or the
+    default `<cwd>/.env`) is a symlink whose target lands inside it."""
+    planted_dir = vault / "Knowledge Base"
+    planted_dir.mkdir(exist_ok=True)
+    planted = planted_dir / ".env"
+    service_root = tmp_path / "service-root"
+    service_root.mkdir()
+    env_path = service_root / ".env"
+    env_path.symlink_to(planted)
+
+    code, out, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert not planted.exists()
+    assert doctor_calls == []
+    assert "inside a vault" in out
+
+
+def test_does_not_write_secrets_when_refused_even_if_a_file_already_existed(
+    vault: Path,
+) -> None:
+    """A refusal must not fall back to silently patching whatever is already
+    there -- the wizard writes nothing at all."""
+    env_path = vault / ".env"
+    original = "EXOMEM_BASE_URL=https://pre-existing.example.com\n"
+    env_path.write_text(original, encoding="utf-8")
+
+    code, _, _ = _run(env_path)
+
+    assert code == 2
+    assert env_path.read_text(encoding="utf-8") == original
 
 
 def test_existing_signing_key_is_preserved(tmp_path: Path) -> None:
@@ -548,3 +652,160 @@ def test_setup_remote_yes_without_required_flags_is_usage_error() -> None:
     with pytest.raises(SystemExit) as e:
         main(["setup", "--remote", "--yes", "--vault", "/v"])
     assert e.value.code == 2
+
+
+# ============================================================================
+# the remote owner binding (EXOMEM_OWNER_OAUTH_SUBJECT)
+# ============================================================================
+
+OWNER_KEY = "EXOMEM_OWNER_OAUTH_SUBJECT"
+
+
+def test_patch_env_none_removes_a_key_and_keeps_the_rest() -> None:
+    text = "A=1\n# note\nEXOMEM_OWNER_OAUTH_SUBJECT=github:1234\nB=2\n"
+    assert rsw.patch_env(text, {OWNER_KEY: None}) == "A=1\n# note\nB=2\n"
+    assert rsw.patch_env("A=1\n", {OWNER_KEY: None}) == "A=1\n"
+
+
+def test_yes_without_a_flag_writes_no_binding(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    code, _, _ = _run(env_path)
+    assert code == 0
+    assert OWNER_KEY not in rsw.parse_env(env_path.read_text(encoding="utf-8"))
+
+
+def test_yes_without_a_flag_leaves_an_existing_binding_alone(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"{OWNER_KEY}=github:1234\n", encoding="utf-8")
+    code, _, _ = _run(env_path)
+    assert code == 0
+    assert rsw.parse_env(env_path.read_text(encoding="utf-8"))[OWNER_KEY] == "github:1234"
+
+
+def test_remote_owner_flag_binds_the_resolved_id(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    code, out, _ = _run(env_path, remote_owner=True)
+    assert code == 0
+    assert rsw.parse_env(env_path.read_text(encoding="utf-8"))[OWNER_KEY] == "github:1234"
+    assert "remote_owner" in out
+
+
+def test_no_remote_owner_flag_removes_the_binding(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"KEEP=1\n{OWNER_KEY}=github:1234\n", encoding="utf-8")
+    code, _, _ = _run(env_path, remote_owner=False)
+    assert code == 0
+    written = rsw.parse_env(env_path.read_text(encoding="utf-8"))
+    assert OWNER_KEY not in written
+    assert written["KEEP"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("answer", "bound"), [("", True), ("y", True), ("Yes", True), ("n", False), ("no", False)]
+)
+def test_interactive_setup_asks_whether_the_account_is_the_owner(
+    tmp_path: Path, answer: str, bound: bool
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"GITHUB_CLIENT_SECRET=kept\n{OWNER_KEY}=github:1234\n", encoding="utf-8"
+    )
+    prompts: list[str] = []
+
+    def input_fn(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return answer if "owner" in prompt else ""
+
+    code, _, _ = _run(env_path, yes=False, probe=False, input_fn=input_fn)
+    assert code == 0
+    owner_prompts = [prompt for prompt in prompts if "owner" in prompt]
+    assert len(owner_prompts) == 1
+    assert "octocat" in owner_prompts[0]
+    assert "act as you, the owner" in owner_prompts[0]
+    assert "[Y/n]" in owner_prompts[0]
+    written = rsw.parse_env(env_path.read_text(encoding="utf-8"))
+    assert (written.get(OWNER_KEY) == "github:1234") is bound
+    assert (OWNER_KEY in written) is bound
+
+
+_OWNER_FLAG_BASE = [
+    "setup", "--remote",
+    "--vault", "/v", "--base-url", "https://kb.example.com",
+    "--tunnel", "cloudflare",
+    "--github-client-id", "id", "--github-client-secret", "sec",
+    "--github-username", "octocat", "--yes",
+]
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [([], None), (["--remote-owner"], True), (["--no-remote-owner"], False)],
+)
+def test_setup_remote_dispatches_the_owner_flags(
+    monkeypatch: pytest.MonkeyPatch, extra: list[str], expected: bool | None
+) -> None:
+    called: dict = {}
+    monkeypatch.setattr(rsw, "run_remote_setup", lambda **kw: called.update(kw) or 0)
+    assert main([*_OWNER_FLAG_BASE, *extra]) == 0
+    assert called["remote_owner"] is expected
+
+
+def test_setup_remote_owner_flags_are_exclusive() -> None:
+    with pytest.raises(SystemExit) as e:
+        main([*_OWNER_FLAG_BASE, "--remote-owner", "--no-remote-owner"])
+    assert e.value.code == 2
+
+
+def test_parse_env_reads_export_prefixed_lines_like_dotenv() -> None:
+    parsed = rsw.parse_env("export A=1\n  export   B=2\nexporter=3\n# export C=4\n")
+    assert parsed == {"A": "1", "B": "2", "exporter": "3"}
+
+
+def test_patch_env_replaces_and_removes_export_prefixed_lines() -> None:
+    text = "KEEP=1\nexport EXOMEM_OWNER_OAUTH_SUBJECT=github:1234\nexport OTHER=x\n"
+    assert rsw.patch_env(text, {OWNER_KEY: None}) == "KEEP=1\nexport OTHER=x\n"
+    assert rsw.patch_env(text, {OWNER_KEY: "github:5678"}) == (
+        "KEEP=1\nexport EXOMEM_OWNER_OAUTH_SUBJECT=github:5678\nexport OTHER=x\n"
+    )
+
+
+@pytest.mark.parametrize("separator", [" ", "\t", " \t ", "\t\t"])
+def test_patch_env_removes_an_export_line_with_any_whitespace(separator: str) -> None:
+    text = f"KEEP=1\nexport{separator}{OWNER_KEY}=github:1234\n"
+    assert rsw.parse_env(text) == {"KEEP": "1", OWNER_KEY: "github:1234"}
+    assert rsw.patch_env(text, {OWNER_KEY: None}) == "KEEP=1\n"
+
+
+def test_no_remote_owner_removes_an_export_prefixed_binding(tmp_path: Path) -> None:
+    """Removal must hold for python-dotenv too, which reads `export KEY=`."""
+    from dotenv import dotenv_values
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"KEEP=1\nexport {OWNER_KEY}=github:1234\n", encoding="utf-8")
+    code, _, _ = _run(env_path, remote_owner=False)
+    assert code == 0
+    assert OWNER_KEY not in env_path.read_text(encoding="utf-8")
+    assert OWNER_KEY not in dotenv_values(env_path)
+    assert dotenv_values(env_path)["KEEP"] == "1"
+
+
+def test_the_doctor_gate_does_not_see_a_removed_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binding inherited from the shell or service must not outlive its
+    removal from the file when the wizard's own doctor gate runs."""
+    from exomem.governance.principal import remote_owner_binding_state
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"{OWNER_KEY}=github:1234\n", encoding="utf-8")
+    monkeypatch.setenv(OWNER_KEY, "github:1234")
+    seen: dict[str, str] = {}
+
+    def doctor(**_kwargs):
+        seen["state"] = remote_owner_binding_state()
+        return SimpleNamespace(success=True, profile="remote", checks=[])
+
+    code, _, _ = _run(env_path, remote_owner=False, doctor_fn=doctor, load_env_fn=rsw._load_env)
+    assert code == 0
+    assert seen["state"] == "unset"
+    assert OWNER_KEY not in os.environ

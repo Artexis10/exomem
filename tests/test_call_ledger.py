@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -343,6 +344,42 @@ def test_no_argument_value_ever_reaches_the_ledger(ledger_dir: Path) -> None:
     assert row["target_paths"] == ["Notes/x.md"]
 
 
+def test_content_private_logging_redacts_names_paths_and_hashes(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under content-private logging (design D1.2), a target path and a
+    caller-chosen argument name are both content, and a sha256 of a short
+    guessed value is an offline confirmation oracle for it -- a hosted or
+    cloud row keeps none of the three, only positional names and lengths."""
+    import hashlib
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    sentinel = "blue-port-bookkeeping-record"
+
+    _drive(
+        "remember",
+        {"title": "T", "content": sentinel, "path": "Notes/x.md"},
+        _ok,
+    )
+
+    written = "\n".join(
+        p.read_text(encoding="utf-8") for p in ledger_dir.rglob("*") if p.is_file()
+    )
+    assert sentinel not in written
+
+    row = _rows(ledger_dir)[0]
+    assert row["target_paths"] == []
+    assert sorted(row["arg_names"]) == ["arg0", "arg1", "arg2"]
+    for name in row["arg_names"]:
+        assert "sha256" not in row["args"][name]
+        assert row["args"][name]["len"] > 0
+    # Not merely that the sentinel is absent -- an offline hash of a *guessed*
+    # value would otherwise confirm it, which is exactly what a bare "the
+    # value itself is redacted" check would miss.
+    guessed = hashlib.sha256(call_ledger.canonical_json({"v": sentinel})).hexdigest()
+    assert guessed not in written
+
+
 def test_a_credential_in_an_argument_never_reaches_the_ledger(ledger_dir: Path) -> None:
     """Secrets arrive as ordinary argument values -- a token pasted into a note,
     a connection string in an edit. Hashing every value by construction is what
@@ -600,9 +637,12 @@ def test_derived_phase_vocabulary_is_closed_and_content_free() -> None:
         "derived.component_completion",
         "derived.component_dispatch",
         "derived.pending_visibility",
+        "derived.deferred_index_store",
+        "derived.fanout",
         "derived.post_canonical",
         "derived.receipt_prepare",
         "derived.receipt_proof",
+        "derived.terminal_persist",
     }
     for name in names:
         assert name.startswith("derived.")
@@ -626,6 +666,121 @@ def test_a_derived_phase_is_recorded_on_the_calls_ledger_row(
     assert "derived.acknowledgement" in spans, row["spans"]
     assert spans["derived.acknowledgement"]["count"] == 1
     assert isinstance(spans["derived.acknowledgement"]["ms"], float)
+
+
+def test_a_recall_row_attributes_its_time_by_stage(
+    ledger_dir: Path, vault: Path
+) -> None:
+    """A slow recall row must say which stage was slow, without a second call."""
+    from exomem import commands
+
+    marker = "zzledgerprobetokenzz"
+
+    async def leaf(_context):
+        return commands.op_ask_memory(vault, query=marker, limit=5)
+
+    result = _drive("ask_memory", {"query": marker, "limit": 5}, leaf)
+
+    row = _rows(ledger_dir)[-1]
+    recall = [span for span in row["spans"] if span["name"].startswith("recall.")]
+    assert recall, row["spans"]
+    for span in recall:
+        assert set(span) == {"name", "count", "ms"}
+        assert isinstance(span["ms"], float)
+        # Stage names only: no path, no query, no excerpt can ride in one.
+        assert "/" not in span["name"] and " " not in span["name"]
+    written = json.dumps(row)
+    assert marker not in written
+    assert ".md" not in written.replace('"target_paths": []', "")
+    # Collected, but not returned: response inclusion stays opt-in.
+    assert "timings" not in (result if isinstance(result, dict) else {})
+
+
+def test_a_cli_find_records_no_spans(vault: Path) -> None:
+    """Outside an MCP call the instrumentation reports nothing at all."""
+    from exomem import call_spans, commands
+
+    call_spans.reset()
+    commands.op_find(vault, query="metabolism", limit=5)
+
+    # No token was minted, so nothing may have been keyed under any token.
+    assert call_spans._SPANS == {}
+
+
+def test_nested_recall_stages_reach_the_ledger(
+    ledger_dir: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands, embeddings
+
+    monkeypatch.setattr(
+        embeddings, "rerank_pairs", lambda _query, passages: [0.0] * len(passages)
+    )
+
+    async def leaf(_context):
+        return commands.op_ask_memory(
+            vault, query="metabolism", rerank=True, deep=True, graph_enrich=True, limit=5
+        )
+
+    result = _drive("ask_memory", {"query": "metabolism", "rerank": True}, leaf)
+    spans = {span["name"] for span in _rows(ledger_dir)[-1]["spans"]}
+    assert {
+        "recall.semantic.search", "recall.bm25", "recall.rerank", "recall.graph_enrich"
+    } <= spans
+    assert "timings" not in result
+
+
+def test_a_budgeted_row_records_what_the_budget_did(
+    ledger_dir: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands, request_budget
+
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "0.001")
+    request_budget.reset_resolution_cache()
+
+    async def leaf(_context):
+        return commands.op_ask_memory(vault, query="metabolism", rerank=True, limit=5)
+
+    _drive("ask_memory", {"query": "metabolism", "rerank": True}, leaf)
+
+    row = _rows(ledger_dir)[-1]
+    assert row["budget"] == {
+        "seconds": 0.001,
+        "remaining_ms": 0,
+        "skipped": ["rerank"],
+    }
+
+
+def test_every_budgeted_row_records_the_budget_even_when_nothing_was_skipped(
+    ledger_dir: Path,
+) -> None:
+    """The row is an operator instrument, not a message to a client.
+
+    "50 seconds, 49 left, nothing skipped" is the reading that says a reserve
+    is not yet costing calls — which is exactly what the PROVISIONAL reserves
+    have to be tuned against.
+    """
+    from exomem import request_budget
+
+    async def leaf(_context):
+        return {"ok": True}
+
+    _drive("remember", {"content": "x"}, leaf)
+
+    budget = _rows(ledger_dir)[-1]["budget"]
+    assert budget["seconds"] == request_budget.MCP_REQUEST_BUDGET_SECONDS
+    assert budget["skipped"] == []
+    assert budget["remaining_ms"] > 0
+
+
+def test_a_reconcile_class_row_carries_no_budget_block(ledger_dir: Path) -> None:
+    """No budget applied, so there is nothing for the row to report."""
+
+    async def leaf(_context):
+        return {"ok": True}
+
+    _drive("maintain_memory", {"mode": "reconcile"}, leaf)
+
+    assert _rows(ledger_dir)[-1]["budget"] is None
 
 
 def test_derived_counters_are_closed_named_and_reset_able() -> None:
@@ -692,3 +847,188 @@ def test_derived_diagnostics_report_the_capability_flag_both_ways(
     assert (
         call_ledger.derived_diagnostics(vault_root)["fast_durable_ack"] == "inactive"
     )
+
+
+def test_an_artifact_write_records_what_landed_and_no_handle(
+    ledger_dir: Path, vault: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The ledger has to be able to say what an artifact write put in the vault.
+
+    Its targets come from path-shaped *arguments*, and `preserve_artifacts` has
+    none: the live rows all carried `target_paths: []`. The outcome knows, and
+    handing it over stays within the never-values rule -- a vault-relative path
+    is exactly what a note write already records.
+    """
+    import hashlib
+    import uuid
+
+    from exomem import client_artifacts, commands
+
+    signed_url = "https://files.example/SIGNED-HANDLE-do-not-log?sig=abc123"
+    payload = b"artifact bytes"
+
+    def stage_artifact(file, _budget, **_kwargs):
+        if file["file_id"] == "file-two":
+            raise client_artifacts.SafeFetchError(
+                "SAFE_FETCH_FAILED", "download could not be retrieved"
+            )
+        staged = tmp_path / f"{file['file_id']}-{uuid.uuid4().hex}.bin"
+        staged.write_bytes(payload + file["file_id"].encode())
+        return client_artifacts.StagedArtifact(
+            file_id=file["file_id"],
+            path=staged,
+            size=staged.stat().st_size,
+            sha256=hashlib.sha256(staged.read_bytes()).hexdigest(),
+            content_type="application/octet-stream",
+            filename=f"{file['file_id']}.bin",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage_artifact)
+    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: None)
+    monkeypatch.setattr(
+        client_artifacts,
+        "active_manager",
+        lambda: SimpleNamespace(mutation_guard=lambda *_a, **_k: nullcontext()),
+    )
+
+    arguments = {
+        "scope": "case",
+        "category": "raw",
+        "files": [
+            {"download_url": signed_url, "file_id": "file-one"},
+            {"download_url": signed_url, "file_id": "file-two"},
+            {"download_url": signed_url, "file_id": "file-three"},
+        ],
+    }
+
+    async def call_next(_context):
+        return commands.op_preserve_artifacts(
+            vault,
+            scope=arguments["scope"],
+            category=arguments["category"],
+            files=arguments["files"],
+        )
+
+    result = _drive("preserve_artifacts", arguments, call_next)
+
+    assert result["summary"] == {"stored": 2, "already_stored": 0, "failed": 1}
+    row = _rows(ledger_dir)[0]
+    assert row["target_paths"] == [
+        "Knowledge Base/Evidence/case/raw/file-one.bin",
+        "Knowledge Base/Evidence/case/raw/file-three.bin",
+    ]
+
+    written = "\n".join(
+        p.read_text(encoding="utf-8") for p in ledger_dir.rglob("*") if p.is_file()
+    )
+    assert "SIGNED-HANDLE-do-not-log" not in written
+    assert "sig=abc123" not in written
+    assert "file-one" not in row["args"]
+    for handle_field in ("download_url", "file_id"):
+        assert handle_field not in written
+    assert "artifact bytes" not in written
+
+
+# ------------------------------------------------------------- principal kind
+
+_REMOTE_BASE = "https://memory.example.test"
+_REMOTE_ID = 4242
+
+
+def _remote_session(monkeypatch, *, bound: bool) -> str:
+    """Present a synthetic durable-session token; return its remote scope."""
+    import hashlib
+
+    import fastmcp.server.dependencies as dependencies
+
+    from exomem.session_oauth import ExomemSessionAccessToken
+
+    monkeypatch.setenv("EXOMEM_BASE_URL", _REMOTE_BASE)
+    monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", str(_REMOTE_ID))
+    if bound:
+        monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", f"github:{_REMOTE_ID}")
+    else:
+        monkeypatch.delenv("EXOMEM_OWNER_OAUTH_SUBJECT", raising=False)
+    token = ExomemSessionAccessToken(
+        token="synthetic-session-token",
+        client_id="synthetic-client",
+        scopes=["exomem:read"],
+        claims={
+            "sub": str(_REMOTE_ID),
+            "github_user_id": _REMOTE_ID,
+            "github_login": "example-owner",
+            "iss": _REMOTE_BASE,
+            "aud": f"{_REMOTE_BASE}/mcp",
+        },
+    )
+    monkeypatch.setattr(dependencies, "get_access_token", lambda: token)
+    digest = hashlib.sha256(f"{_REMOTE_BASE}\0{_REMOTE_ID}".encode()).hexdigest()
+    return f"principal:{digest}"
+
+
+def test_a_local_owner_call_is_labelled_owner(ledger_dir: Path) -> None:
+    _drive("browse_memory", {}, _ok)
+    assert _rows(ledger_dir)[0]["principal_kind"] == "owner"
+
+
+def test_a_bound_remote_owner_call_is_labelled_owner_oauth_with_the_remote_hash(
+    ledger_dir: Path, monkeypatch
+) -> None:
+    remote_scope = _remote_session(monkeypatch, bound=True)
+    _drive("browse_memory", {}, _ok)
+    row = _rows(ledger_dir)[0]
+    assert row["principal_kind"] == "owner-oauth"
+    # Labelled remote: the caller hash is the remote identity's, never "owner".
+    assert row["caller_principal_hash"] == remote_scope
+    assert "example-owner" not in (ledger_dir / "ledger.jsonl").read_text(encoding="utf-8")
+
+
+def test_an_unbound_remote_call_is_labelled_principal(ledger_dir: Path, monkeypatch) -> None:
+    remote_scope = _remote_session(monkeypatch, bound=False)
+    _drive("browse_memory", {}, _ok)
+    row = _rows(ledger_dir)[0]
+    assert row["principal_kind"] == "principal"
+    assert row["caller_principal_hash"] == remote_scope
+
+
+def test_an_unresolved_remote_call_is_labelled_unresolved(ledger_dir: Path, monkeypatch) -> None:
+    import fastmcp.server.dependencies as dependencies
+
+    monkeypatch.setattr(dependencies, "get_access_token", lambda: None)
+    monkeypatch.setattr(dependencies, "get_http_headers", lambda **_kw: {"host": "memory"})
+    _drive("browse_memory", {}, _ok)
+    assert _rows(ledger_dir)[0]["principal_kind"] == "unresolved"
+
+
+def test_principal_kind_is_part_of_the_hashed_row(ledger_dir: Path, monkeypatch) -> None:
+    _remote_session(monkeypatch, bound=True)
+    _drive("browse_memory", {}, _ok)
+    assert call_ledger.verify(ledger_dir / "ledger.jsonl") == []
+    row = _rows(ledger_dir)[0]
+    tampered = dict(row, principal_kind="owner")
+    assert call_ledger.row_hash(tampered) != row["row_hash"]
+
+
+def test_a_local_ingress_call_is_labelled_owner_local(ledger_dir: Path, monkeypatch) -> None:
+    import fastmcp.server.dependencies as dependencies
+
+    from exomem import local_ingress
+
+    token = local_ingress.LocalIngressAccessToken(
+        token="synthetic-local-token",
+        client_id="home",
+        scopes=list(local_ingress.LOCAL_SCOPES),
+        claims={"sub": "local:synthetic", "iss": local_ingress.LOCAL_ISSUER},
+    )
+    grant = local_ingress.LocalGrant(
+        bearer="synthetic-local-token", access_token=token, client_id="home", session_id="s"
+    )
+    monkeypatch.setattr(dependencies, "get_access_token", lambda: token)
+    bound = local_ingress._GRANT.set(grant)
+    try:
+        _drive("browse_memory", {}, _ok)
+    finally:
+        local_ingress._GRANT.reset(bound)
+    row = _rows(ledger_dir)[0]
+    assert row["principal_kind"] == "owner-local"
+    assert "synthetic-local-token" not in (ledger_dir / "ledger.jsonl").read_text(encoding="utf-8")

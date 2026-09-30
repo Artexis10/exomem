@@ -236,19 +236,24 @@ def registered_families() -> frozenset[str]:
 
     The triageable attention categories — the default union plus the registered
     opt-in epistemic queues, which is exactly what a due-state count can hand a
-    reference out for — plus the write-advisory kinds the write path emits.
+    reference out for — plus the write-advisory kinds the write path emits and
+    the dreamer's upkeep families (delivery dispositions only).
     Assembled from the owning modules rather than restated, so a queue that is
     added or retired cannot leave a stale name here.
     """
     from . import attention as attention_module
     from . import corpus_aware as corpus_aware_module
+    from . import dreamer_families
+    from . import working_set_learning as working_set_learning_module
     from .vocabulary_notifications import REVIEW_FAMILIES
 
     return frozenset(
         {
             *attention_module._TRIAGEABLE_CATEGORIES,
             *corpus_aware_module._WRITE_ADVISORY_KINDS,
+            *working_set_learning_module._ADVISORY_KINDS,
             *REVIEW_FAMILIES.values(),
+            *dreamer_families.family_names(),
         }
     )
 
@@ -778,10 +783,12 @@ class ReviewStateStore:
             previous = dispositions.get(family)
             if isinstance(previous, dict) and previous.get("quiet_offered_at"):
                 stored["quiet_offered_at"] = previous["quiet_offered_at"]
+                if isinstance(previous.get("_quiet_offer_carrier"), dict):
+                    stored["_quiet_offer_carrier"] = previous["_quiet_offer_carrier"]
             dispositions[family] = stored
             _compact_if_due(payload, now=moment, path=self.path)
             self._write(payload, vocabulary_refs=(), vocabulary_families=vocabulary_families)
-        return dict(stored)
+        return {key: value for key, value in stored.items() if key != "_quiet_offer_carrier"}
 
     def arm_quiet_offer(
         self,
@@ -789,6 +796,7 @@ class ReviewStateStore:
         *,
         now: dt.datetime | None = None,
         known: dict[str, Any] | None = None,
+        carrier: tuple[str, str, str] | None = None,
     ) -> dict[str, Any] | None:
         """Arm exactly one offer to quiet `family`, or answer None.
 
@@ -804,6 +812,9 @@ class ReviewStateStore:
         state is "no offer is due", which must cost no lock and no second read;
         the check is repeated under the lock before writing, because the
         caller's snapshot may predate a decision recorded in between.
+
+        `carrier` is internal ownership for an accepted deferred result: its
+        result ref, review ref, and signal fingerprint. Inline offers omit it.
         """
         family = str(family or "")
         payload = known if known is not None else self.load()
@@ -827,6 +838,12 @@ class ReviewStateStore:
                 "updated_at": timestamp,
             }
             row["quiet_offered_at"] = timestamp
+            if carrier is not None:
+                row["_quiet_offer_carrier"] = {
+                    "result_ref": carrier[0],
+                    "review_ref": carrier[1],
+                    "fingerprint": carrier[2],
+                }
             payload["dispositions"][family] = row
             _compact_if_due(payload, now=moment, path=self.path)
             self._write(payload, vocabulary_refs=(), vocabulary_families=())

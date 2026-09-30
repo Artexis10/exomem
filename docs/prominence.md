@@ -24,6 +24,63 @@ save. Delivery is later and receipt-gated through an existing compatible
 Records collection; reported remote identity never proves remote byte equality.
 Off and light remain explicit-request-only.
 
+## Change the level through your agent
+
+Ask your connected agent to inspect or change your engagement level. It uses
+`configure_memory(action="inspect")`, then passes the returned `revision` as
+`expected_revision` to `configure_memory(action="set", prominence="maximal", ...)`.
+The response includes the saved level and effective contract; the agent should
+apply that contract immediately. Subsequent calls read the setting without a
+service restart.
+
+This preference belongs to the addressed vault and authenticated identity.
+Clients presenting the same identity share it. Local CLI/stdio and the shared REST
+key use the local owner identity; OAuth identities remain distinct. The generated
+`configure_memory` CLI command uses the same operation. A stale revision requires
+a fresh inspect; an operator's conflicting `EXOMEM_PROMINENCE` override is reported
+instead of claiming that the requested change took effect.
+
+## One level while coding, another in chat
+
+You can hold two levels at once. Every request lands in one of two **engagement
+contexts**, and a saved level can belong to a context rather than to you as a
+whole:
+
+- `conversation` — claude.ai, ChatGPT, the hosted service, and every other client
+  that cannot run hooks.
+- `coding` — Codex, Claude Code, and any client the server does not recognise.
+
+Add `context` to a set and the level applies only to clients of that context:
+`configure_memory(action="set", prominence="balanced", expected_revision=..., context="coding")`
+leaves your identity-wide value untouched and quiets coding clients alone.
+`configure_memory(action="clear", context="coding", expected_revision=...)` removes
+it again; clearing a context that holds nothing changes nothing and says so.
+A set without a `context` keeps its original meaning and writes the identity-wide
+value.
+
+A clear still goes through when an operator has pinned `EXOMEM_PROMINENCE`, and the
+response reports that the pin is active and still decides the effective level —
+removing a saved value cannot contradict the pin, and refusing would leave saved
+context values stuck. A *set* that conflicts with the pin is still refused.
+
+The context that applies to a request is **detected from the calling client**, or
+from an operator's explicit `EXOMEM_SURFACE`. No argument selects it, and it is an
+eagerness knob only: it never picks an identity, a vault, a storage path, or an
+authority ceiling. An unrecognised client is treated as `coding`, so it keeps the
+generic default.
+
+`inspect` reports the identity-wide value, every saved context value, the context
+this request resolved under, and the effective level. All of it lives in one record
+under one revision, so a set and a clear cannot interleave behind each other's back:
+whichever lands second is asked to inspect again.
+
+The older `exomem prominence <level>` command remains a machine-wide control.
+Standalone hooks read that legacy configuration and environment; they do not
+inherit another authenticated identity's vault preference.
+
+The versioned hosted agent profiles retain their pinned command lists and do not
+yet expose `configure_memory`. Adding it there requires a new hosted profile.
+
 ## Which level you get by default, and why
 
 **Assistants with hooks — Claude Code, Codex — default to `balanced`.** Those clients
@@ -50,14 +107,42 @@ exomem prominence maximal      # set it
 exomem prominence --hook-env   # print the nudge tunables this level implies
 ```
 
-Precedence is `EXOMEM_PROMINENCE` (env) → the config file → the surface default. The
-level is stored beside `mode` in the same config file, so setting one never clears the
-other. `bootstrap()` reports the active level under `engagement`.
+Precedence is `EXOMEM_PROMINENCE` (env) → the saved value for this request's
+engagement context → the saved identity-wide value → the legacy machine config →
+the known client default. The legacy command stores its level beside `mode`, so
+setting one never clears the other. `bootstrap()` reports the effective level, the
+applied context and the source under `engagement` — `preference:context` when a
+context value won, `preference` when the identity-wide value did.
 
-After changing the level, re-run `exomem install-hook` so the nudge cadence matches.
+Connected web clients save their choice through `configure_memory`, just like
+other agents. The optional custom-instruction blocks below help the assistant
+follow the policy, or provide instructions when that tool is unavailable; they
+do not persist a server preference.
 
-On a web client there is no filesystem, so the level lives in your assistant's custom
-instructions. Paste one of the blocks below.
+### The nudge hooks read your own machine, not the server
+
+A level saved through `configure_memory` is stored on the **server**, per
+identity. The capture and retrieve nudge hooks are standalone copies installed
+into a hook directory on your **client** machine, and they resolve from
+`EXOMEM_PROMINENCE` and that machine's exomem configuration file only. They
+cannot ask the service: they do not import the package, and a client talking to
+a service on another box has no credential to ask with.
+
+So on a client that runs them the two can disagree. Saving `off` through the
+agent makes every response say "never write on your own initiative" while the
+Stop hook on your laptop keeps injecting the capture reminder on its own timer.
+That is why `bootstrap()` and `configure_memory` serve a `hook_cadence` block to
+every client in the **coding** context -- Claude Code, Codex, and any client
+Exomem does not recognise, since an unrecognised client is far more likely to be
+a hooked CLI than a web connector. Conversational clients get nothing, because
+there is genuinely no cadence there to be out of step with.
+
+Run `exomem prominence <level>` **on the machine running the hooks** to change
+the nudge cadence. That command moves the hooks and nothing else: your saved
+preference still decides what the server serves, which is why the block says so
+in as many words. Where the server and the client are the same machine, the one
+command settles both, because the CLI writes the file the hooks read and the
+server resolves that file as its last rung before the client default.
 
 ---
 
@@ -98,7 +183,7 @@ I use Exomem as my durable Knowledge Base. If no skill is loaded, call bootstrap
 
 Exomem prominence: MAXIMAL.
 - Recall: search before every substantive turn; skip only chit-chat/control. Cite useful hits. An empty result is a scoped miss and reason to capture.
-- Capture: save every stepping stone: decision, solved problem, diagnosed failure, reusable pattern, reusable fact about a recurring entity, or a method carried out with a reported useful result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow Entity facet, else concise compiled observation: `proactive_capture`; Records only for a compatible measurement; affiliation relation: `link_acceptance`; Entity creation/structural change: confirmed `restructure_execution`. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. When torn between saving and letting it pass, save. Never save transcripts.
+- Capture: save every stepping stone: decision, solved problem, diagnosed failure, reusable pattern, reusable fact about a recurring entity, or a method carried out with a reported useful result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet, else concise compiled observation; these and a new Entity: `proactive_capture`; Records only for a compatible measurement; affiliation relation: `link_acceptance`; merge/structural change: confirmed `restructure_execution`. Fleeting preferences, one-offs, incidental associations, trivial metrics, and tentative claims stay quiet. When torn between saving and letting it pass, save. Never save transcripts.
 - Entities: once per chat, after primary work and before the final response, review_memory(mode="attention", categories=["entity_recurrence"], limit=3); skip if unavailable.
 - Narration: cite recalls; after a write say "Saved -> <path>".
 - A committed final mutation result is authoritative; never invent a failure code from warnings.
@@ -111,7 +196,7 @@ I use Exomem as my durable Knowledge Base. If no skill is loaded, call bootstrap
 
 Exomem prominence: BALANCED.
 - Recall: search when a turn concerns my projects, domains, named entities, or prior conclusions, attempts, or decisions. Skip chit-chat, control, and answered follow-ups; cite useful hits.
-- Capture: save at a stepping stone: a durable conclusion, reusable fact about a recurring entity, or a method carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow Entity facet, else concise compiled observation: `proactive_capture`; Records only for a compatible measurement; affiliation relation: `link_acceptance`; Entity creation/structural change: confirmed `restructure_execution`. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Not mid-thought exploration, tangents, or open questions. Never save transcripts.
+- Capture: save at a stepping stone: a durable conclusion, reusable fact about a recurring entity, or a method carried out with a reported result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet, else concise compiled observation: `proactive_capture`; Records only for a compatible measurement; affiliation relation: `link_acceptance`; new Entity: `proactive_capture`; merge/structural change: confirmed `restructure_execution`. Fleeting preferences, one-offs, incidental associations, trivial metrics, and tentative claims stay quiet. Not mid-thought exploration, tangents, or open questions. Never save transcripts.
 - Entities: once per chat, after primary work and before the final response, review_memory(mode="attention", categories=["entity_recurrence"], limit=3); skip if unavailable.
 - Narration: stay quiet; cite useful recalls and after a write say "Saved -> <path>".
 - A committed final mutation result is authoritative despite adjacent warnings.
@@ -175,7 +260,7 @@ reports the live envelope under `engagement`, and
 Append this to your custom instructions instead:
 
 ```
-Exomem serves a delegation envelope under `engagement` when you call bootstrap. Follow it: name the action class before you act; treat an intent above that class's ceiling as a proposal rather than an act; honour the class disposition (off — do not start it on your own, though anything I ask for outright is never blocked; advisory — tell me in plain language and stop; silent — go ahead, and narrate as the level says; confirm or confirm-shortcut — get my confirmation first). Record what I decide through triage so it sticks. Restructure application, supersession, entity creation and deletion always need my confirmation, and "always allow that from now on" does not exist yet — say so rather than inventing either a refusal or a permission for it; it is a founder decision, not yours or mine. If I ask you to stop suggesting some KIND of thing, quiet that signal family rather than lowering my level, which silences everything: the registered family names are listed by review_memory(mode="dispositions"), and you pick the one my words mean.
+Exomem serves a delegation envelope under `engagement` when you call bootstrap. Follow it: name the action class before you act; treat an intent above that class's ceiling as a proposal rather than an act; honour the class disposition (off — do not start it on your own, though anything I ask for outright is never blocked; advisory — tell me in plain language and stop; silent — go ahead, and narrate as the level says; confirm or confirm-shortcut — get my confirmation first). Record what I decide through triage so it sticks. Restructure application, supersession, entity merge and deletion always need my confirmation, while a new entity follows proactive capture, and "always allow that from now on" does not exist yet — say so rather than inventing either a refusal or a permission for it; it is a founder decision, not yours or mine. If I ask you to stop suggesting some KIND of thing, quiet that signal family rather than lowering my level, which silences everything: the registered family names are listed by review_memory(mode="dispositions"), and you pick the one my words mean.
 ```
 
 That block is deliberately not a table. The envelope moves when you change level
@@ -187,7 +272,7 @@ To set or reset a served class, use
 `triage_memory(ref="exomem://envelope/<action-class>", action="<disposition>|reset")`.
 
 Two consequences worth knowing as a user. **Confirm-required is not advice.**
-Deletion, restructure application, supersession and entity creation ask you every time,
+Deletion, restructure application, supersession and entity merge ask you every time,
 whatever your level; some of those are enforced by the server and some are the
 assistant honouring the contract, and the served envelope says which is which
 rather than implying a gate that is not there. **Nothing here adapts behind your

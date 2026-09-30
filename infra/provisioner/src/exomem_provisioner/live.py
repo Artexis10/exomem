@@ -5,10 +5,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 import uuid
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from typing import Any, Literal
+
+import httpx
 
 from .adapters import (
     HelmCliAdapter,
@@ -19,6 +23,7 @@ from .adapters import (
     TraefikRoutingAdapter,
     _api_status,
     _require_annotations,
+    _retryable_kubernetes_error,
     mint_maintenance_transfer_grant,
 )
 from .authorization_membership import (
@@ -31,8 +36,24 @@ from .authorization_membership import (
 )
 from .capacity import CapacityError
 from .conflict_reason import ConflictReason
-from .driver import DriverPending, EffectContext
-from .governance_migration_checkpoint import CHECKPOINT_VERSION, MigrationCheckpoint
+from .driver import (
+    DriverFinal,
+    DriverPending,
+    DriverResource,
+    DriverRetryable,
+    DriverTerminal,
+    EffectContext,
+    LostAcknowledgement,
+)
+from .governance_migration_checkpoint import (
+    CHECKPOINT_VERSION,
+    MigrationCheckpoint,
+    migration_binding,
+)
+from .governance_migration_coordinator import HostedGovernanceMigrationCoordinator
+from .governance_provision_membership import drain_fresh_bootstrap_bundle
+from .governance_storage_binding import KubernetesGovernanceStorageBindingAdapter
+from .governance_storage_init import KubernetesGovernanceStorageInitAdapter
 from .lifecycle import (
     HealthObservation,
     LifecycleConfig,
@@ -42,7 +63,7 @@ from .lifecycle import (
     _digest,
     _fixed_helm_values,
 )
-from .models import CapacityReservationClass, ResourceKind
+from .models import CapacityReservationClass, OperationAction, OperationState, ResourceKind
 from .provider_identity import (
     ProviderIdentityConflict,
     ProviderRecoveryIdentityVerifier,
@@ -50,7 +71,7 @@ from .provider_identity import (
     authenticate_cell_provider_recovery_envelopes,
     provider_operation_resource_name,
 )
-from .repository import OperationRepository, canonical_request_sha256
+from .repository import ClaimConflict, OperationRepository, StaleFence, canonical_request_sha256
 from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
 
 
@@ -215,8 +236,17 @@ class KubernetesProviderRegistry:
             json.dumps(values, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
 
-    async def authenticate_recovery_record(self, metadata: OpaqueProviderMetadata) -> str:
-        """Read and authenticate the durable Kubernetes recovery identities once."""
+    async def _authenticate_core_recovery_objects(
+        self, metadata: OpaqueProviderMetadata
+    ) -> tuple[Any, Any, Any]:
+        """Read and authenticate the three objects every provision owns from the start.
+
+        The namespace, the fixed claim and the provider-operation record exist
+        from the first effect onward, so both recoveries can prove ownership
+        from them. Only the init-retry path may additionally demand a deployed
+        release: a provision interrupted before its first successful apply has
+        never written one, and requiring it there would be unsatisfiable.
+        """
         namespace = await asyncio.to_thread(self._core.read_namespace, metadata.resource_name)
         pvc = await asyncio.to_thread(
             self._core.read_namespaced_persistent_volume_claim,
@@ -228,36 +258,6 @@ class KubernetesProviderRegistry:
             provider_operation_resource_name(metadata.operation_id),
             metadata.resource_name,
         )
-        helm_records = tuple(
-            getattr(
-                await asyncio.to_thread(
-                    self._core.list_namespaced_config_map,
-                    metadata.resource_name,
-                    label_selector=(f"owner=helm,name={metadata.resource_name},status=deployed"),
-                ),
-                "items",
-                (),
-            )
-            or ()
-        )
-        if len(helm_records) != 1:
-            raise MetadataConflict(
-                "deployed Helm release record is not exact",
-                reason=ConflictReason.HELM_RELEASE_RECORD_NOT_EXACT,
-            )
-        helm_record = helm_records[0]
-        self._require_not_terminating(helm_record)
-        helm_labels = dict(getattr(helm_record.metadata, "labels", None) or {})
-        if (
-            getattr(helm_record.metadata, "namespace", None) != metadata.resource_name
-            or helm_labels.get("owner") != "helm"
-            or helm_labels.get("name") != metadata.resource_name
-            or helm_labels.get("status") != "deployed"
-        ):
-            raise MetadataConflict(
-                "deployed Helm release record identity differs",
-                reason=ConflictReason.HELM_RELEASE_RECORD_IDENTITY_DIFFERS,
-            )
         for resource in (namespace, pvc, operation_record):
             self._require_not_terminating(resource)
             _require_annotations(getattr(resource.metadata, "annotations", None), metadata)
@@ -297,6 +297,46 @@ class KubernetesProviderRegistry:
                 name=provider_operation_resource_name(metadata.operation_id),
             ),
         )
+        return namespace, pvc, operation_record
+
+    async def authenticate_shell_recovery_record(self, metadata: OpaqueProviderMetadata) -> str:
+        """Authenticate a provision that stopped before it ever deployed a release."""
+        namespace, pvc, operation_record = await self._authenticate_core_recovery_objects(metadata)
+        return self._recovery_digest(namespace, pvc, operation_record)
+
+    async def authenticate_recovery_record(self, metadata: OpaqueProviderMetadata) -> str:
+        """Read and authenticate the durable Kubernetes recovery identities once."""
+        namespace, pvc, operation_record = await self._authenticate_core_recovery_objects(metadata)
+        helm_records = tuple(
+            getattr(
+                await asyncio.to_thread(
+                    self._core.list_namespaced_config_map,
+                    metadata.resource_name,
+                    label_selector=(f"owner=helm,name={metadata.resource_name},status=deployed"),
+                ),
+                "items",
+                (),
+            )
+            or ()
+        )
+        if len(helm_records) != 1:
+            raise MetadataConflict(
+                "deployed Helm release record is not exact",
+                reason=ConflictReason.HELM_RELEASE_RECORD_NOT_EXACT,
+            )
+        helm_record = helm_records[0]
+        self._require_not_terminating(helm_record)
+        helm_labels = dict(getattr(helm_record.metadata, "labels", None) or {})
+        if (
+            getattr(helm_record.metadata, "namespace", None) != metadata.resource_name
+            or helm_labels.get("owner") != "helm"
+            or helm_labels.get("name") != metadata.resource_name
+            or helm_labels.get("status") != "deployed"
+        ):
+            raise MetadataConflict(
+                "deployed Helm release record identity differs",
+                reason=ConflictReason.HELM_RELEASE_RECORD_IDENTITY_DIFFERS,
+            )
         try:
             init_job = await asyncio.to_thread(
                 self._batch.read_namespaced_job,
@@ -327,6 +367,8 @@ class KubernetesProviderRegistry:
         self,
         current: OpaqueProviderMetadata,
         owned: OpaqueProviderMetadata,
+        *,
+        allow_owned_job_cleanup: bool = False,
     ) -> KubernetesProviderSnapshot:
         namespace = None
         try:
@@ -397,18 +439,51 @@ class KubernetesProviderRegistry:
         )
         migration_job = self._governance_job_identity(init_job, current)
         if init_job is not None and migration_job == "absent":
-            self._require_not_terminating(init_job)
+            if allow_owned_job_cleanup:
+                identity = init_job.metadata
+                if (
+                    identity.name != current.resource_name + "-init"
+                    or identity.namespace != current.resource_name
+                    or not isinstance(identity.uid, str)
+                    or not identity.uid
+                    or not isinstance(identity.resource_version, str)
+                    or not identity.resource_version
+                ):
+                    raise MetadataConflict(
+                        "initialization Job identity is invalid",
+                        reason=ConflictReason.GOVERNANCE_MIGRATION_JOB_UNAVAILABLE,
+                    )
+                _require_annotations(identity.annotations, current)
+                self._authenticate_annotations(
+                    identity.annotations,
+                    current,
+                    provider="kubernetes",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="kubernetes",
+                        api_version="batch/v1",
+                        kind="Job",
+                        namespace=current.resource_name,
+                        name=current.resource_name + "-init",
+                    ),
+                )
+            else:
+                self._require_not_terminating(init_job)
         conditions = getattr(getattr(init_job, "status", None), "conditions", ()) or ()
         init_complete = migration_job == "absent" and any(
             getattr(item, "type", None) == "Complete" and getattr(item, "status", None) == "True"
             for item in conditions
         )
-        init_failed = migration_job == "absent" and not init_complete and (
-            any(
-                getattr(item, "type", None) == "Failed" and getattr(item, "status", None) == "True"
-                for item in conditions
+        init_failed = (
+            migration_job == "absent"
+            and not init_complete
+            and (
+                any(
+                    getattr(item, "type", None) == "Failed"
+                    and getattr(item, "status", None) == "True"
+                    for item in conditions
+                )
+                or bool(getattr(getattr(init_job, "status", None), "failed", 0))
             )
-            or bool(getattr(getattr(init_job, "status", None), "failed", 0))
         )
         stateful_set = await exists(
             self._apps.read_namespaced_stateful_set,
@@ -483,6 +558,8 @@ class KubernetesProviderRegistry:
         recovery_envelope: str,
         provision_mode: str,
         helm_values: dict[str, Any],
+        *,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         labels = dict(self._PSS_LABELS)
         labels.update(
@@ -524,6 +601,8 @@ class KubernetesProviderRegistry:
                 "annotations": annotations,
             },
         }
+        if effect_guard is not None:
+            await effect_guard()
         try:
             await asyncio.to_thread(self._core.create_namespace, body)
         except Exception as error:
@@ -543,7 +622,11 @@ class KubernetesProviderRegistry:
                 ) from error
 
     async def record_operation(
-        self, metadata: OpaqueProviderMetadata, recovery_envelope: str
+        self,
+        metadata: OpaqueProviderMetadata,
+        recovery_envelope: str,
+        *,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         name = provider_operation_resource_name(metadata.operation_id)
         annotations = dict(metadata.kubernetes_annotations)
@@ -560,6 +643,8 @@ class KubernetesProviderRegistry:
             "immutable": True,
             "data": {},
         }
+        if effect_guard is not None:
+            await effect_guard()
         try:
             await asyncio.to_thread(
                 self._core.create_namespaced_config_map,
@@ -576,11 +661,26 @@ class KubernetesProviderRegistry:
             )
             _require_annotations(getattr(existing.metadata, "annotations", None), metadata)
 
-    async def mark_runtime_admitted(self, metadata: OpaqueProviderMetadata) -> None:
+    async def mark_runtime_admitted(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        preconditions = {}
+        if effect_guard is not None:
+            namespace = await asyncio.to_thread(self._core.read_namespace, metadata.resource_name)
+            _require_annotations(getattr(namespace.metadata, "annotations", None), metadata)
+            uid = getattr(namespace.metadata, "uid", None)
+            revision = getattr(namespace.metadata, "resource_version", None)
+            if not uid or not revision or getattr(namespace.metadata, "deletion_timestamp", None):
+                raise DriverTerminal("PROVISIONER_GOVERNANCE_ADMISSION_UNAVAILABLE")
+            preconditions = {"uid": uid, "resourceVersion": revision}
+            await effect_guard()
         await asyncio.to_thread(
             self._core.patch_namespace,
             metadata.resource_name,
-            {"metadata": {"annotations": {"exomem.io/runtime-admitted": "true"}}},
+            {"metadata": preconditions | {"annotations": {"exomem.io/runtime-admitted": "true"}}},
         )
 
     async def observed_fence(self, tenant_id: str) -> int:
@@ -654,6 +754,9 @@ class LiveLifecyclePlane:
         identity_verifier: ProviderRecoveryIdentityVerifier,
         config: LifecycleConfig,
         fingerprint: KubernetesVaultFingerprintAdapter | None = None,
+        governance_migration: HostedGovernanceMigrationCoordinator | None = None,
+        storage_init: KubernetesGovernanceStorageInitAdapter | None = None,
+        storage_binding: KubernetesGovernanceStorageBindingAdapter | None = None,
         now: Any = time.time,
     ) -> None:
         self._repository = repository
@@ -667,12 +770,16 @@ class LiveLifecyclePlane:
         self._identity_verifier = identity_verifier
         self._config = config
         self._fingerprint = fingerprint
+        self._governance_migration = governance_migration
+        self._storage_init = storage_init
+        self._storage_binding = storage_binding
         self._now = now
         self._owned: dict[str, OpaqueProviderMetadata] = {}
         self._snapshots: dict[str, KubernetesProviderSnapshot] = {}
         self._recovery_envelopes: dict[str, dict[str, str]] = {}
         self._helm_requests: dict[str, dict[str, Any]] = {}
         self._operation_ids: dict[str, str] = {}
+        self._initializing_recovery: set[str] = set()
 
     @staticmethod
     def _key(metadata: OpaqueProviderMetadata) -> str:
@@ -691,7 +798,15 @@ class LiveLifecyclePlane:
             ) from error
 
     async def _refresh(self, metadata: OpaqueProviderMetadata) -> KubernetesProviderSnapshot:
-        snapshot = await self._registry.inspect(metadata, self._owner(metadata))
+        snapshot = await self._registry.inspect(
+            metadata,
+            self._owner(metadata),
+            **(
+                {"allow_owned_job_cleanup": True}
+                if self._key(metadata) in self._initializing_recovery
+                else {}
+            ),
+        )
         self._snapshots[self._key(metadata)] = snapshot
         return snapshot
 
@@ -701,6 +816,7 @@ class LiveLifecyclePlane:
         request: dict[str, Any],
         *,
         require_fresh: bool = True,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> str:
         """Ensure one authenticated bootstrap generation before Helm can start a pod."""
 
@@ -749,6 +865,11 @@ class LiveLifecyclePlane:
                 # committed since that read is clobbered and its epoch silently
                 # reset to genesis.
                 expected_revision=expected_revision,
+                **(
+                    {"create_only": expected_revision is None, "effect_guard": effect_guard}
+                    if effect_guard is not None
+                    else {}
+                ),
             )
             return minted
 
@@ -796,6 +917,10 @@ class LiveLifecyclePlane:
                     # anything still in date.
                     if bundle.expires_at > current:
                         raise
+                    if effect_guard is not None:
+                        # A governed bootstrap never discards its existing custody.
+                        # Expired pre-enrollment progress needs verified recovery.
+                        raise
                     # Enrollment is irreversible, including while a cell is
                     # stopped and unrouted. Expiry permits renewal, never a new
                     # unenrolled genesis that discards the activation tuple.
@@ -827,6 +952,26 @@ class LiveLifecyclePlane:
                             reason=(ConflictReason.AUTHORIZATION_SESSION_EXPIRED_ON_SERVING_CELL),
                         ) from error
                     bundle = await _mint(expected_revision=bundle.revision)
+        if effect_guard is not None:
+            bundle = inspect_hosted_authorization_bundle(
+                bundle.files,
+                expected_cell_id=owned.subject_id,
+                expected_logical_vault_id=owned.tenant_id,
+                expected_replica_id=replica_id,
+                expected_software_version=target["releaseVersion"],
+                expected_schema_version=AUTHORIZATION_BOOTSTRAP_SCHEMA_VERSION,
+                expected_recovery_envelope=recovery_envelope,
+                now=int(self._now()),
+                _require_fresh=require_fresh,
+            )
+            if (
+                bundle.governance_enrolled
+                or bundle.epoch != 1
+                or bundle.replica_state != "SERVING"
+                or json.loads(bundle.control)["issued_at"] > int(self._now())
+            ):
+                raise DriverTerminal("PROVISIONER_GOVERNANCE_CUSTODY_UNAVAILABLE")
+            await effect_guard()
         return bundle.revision
 
     async def _authorization_helm_values(
@@ -854,6 +999,7 @@ class LiveLifecyclePlane:
         runtime_credential: str | None = None,
         runtime_protocol_version: str | None = None,
         renew: bool = False,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> str:
         """Commit one authenticated successor under the lifecycle maintenance lease."""
 
@@ -903,6 +1049,8 @@ class LiveLifecyclePlane:
                     "runtime attestation authority is unavailable",
                     reason=ConflictReason.RUNTIME_ATTESTATION_AUTHORITY_UNAVAILABLE,
                 )
+            if effect_guard is not None:
+                await effect_guard()
             runtime_attestation = await self._runtime.attest_authorization_session_membership(
                 owned,
                 credential=runtime_credential,
@@ -910,7 +1058,10 @@ class LiveLifecyclePlane:
                 target_epoch=source.epoch + 1,
                 previous_epoch_digest=source.membership_digest,
                 ttl_seconds=DEFAULT_ATTESTATION_TTL_SECONDS,
+                **({"retry_transport": True} if effect_guard is not None else {}),
             )
+        if effect_guard is not None:
+            current = int(self._now())
         successor = transition_hosted_authorization_bundle(
             files,
             expected_cell_id=owned.subject_id,
@@ -927,6 +1078,22 @@ class LiveLifecyclePlane:
             runtime_attestation=runtime_attestation,
         )
         if successor.revision != source.revision:
+
+            async def publication_guard() -> None:
+                assert effect_guard is not None
+                await effect_guard()
+                for bundle in (source, successor):
+                    inspect_hosted_authorization_bundle(
+                        bundle.files,
+                        expected_cell_id=owned.subject_id,
+                        expected_logical_vault_id=owned.tenant_id,
+                        expected_replica_id=owned.resource_name + "-0",
+                        expected_software_version=None,
+                        expected_schema_version=bundle.membership_schema_version,
+                        expected_recovery_envelope=recovery_envelope,
+                        now=int(self._now()),
+                    )
+
             await self._cell.write_authorization_session_bundle(
                 owned,
                 successor.files,
@@ -935,6 +1102,7 @@ class LiveLifecyclePlane:
                 membership_digest=successor.membership_digest,
                 revision=successor.revision,
                 expected_revision=source.revision,
+                **({"effect_guard": publication_guard} if effect_guard is not None else {}),
             )
         return successor.revision
 
@@ -1017,6 +1185,7 @@ class LiveLifecyclePlane:
         )
         owned = current
         helm_request = request
+        owner_operation_id: str | None = None
         for resource in resources:
             if resource.kind is ResourceKind.KUBERNETES_NAMESPACE:
                 owned = OpaqueProviderMetadata(
@@ -1025,10 +1194,80 @@ class LiveLifecyclePlane:
                     operation_id=resource.provider_operation_id,
                     fence_generation=resource.provider_fence_generation,
                 )
+                owner_operation_id = resource.operation_id
                 helm_request = await self._repository.load_request(resource.operation_id)
                 break
         self._owned[self._key(current)] = owned
         self._helm_requests[self._key(current)] = dict(helm_request)
+        self._initializing_recovery.discard(self._key(current))
+        if (
+            self._config.migration_mode == "governance-v3-to-v4"
+            and context.wire_protocol == WIRE_PROTOCOL_V2
+            and context.checkpoint.startswith("gpi1:")
+            and request.get("provisionMode") == "serve"
+            and owned == current
+        ):
+            self._initializing_recovery.add(self._key(current))
+        if owned != current and self._storage_binding is not None and owner_operation_id:
+            original_operation = await self._repository.get_by_id(owner_operation_id)
+            if (
+                original_operation is not None
+                and original_operation.state is OperationState.FINAL
+                and original_operation.action is OperationAction.PROVISION
+            ):
+                if (
+                    original_operation.tenant_id != owned.tenant_id
+                    or original_operation.cell_id != owned.subject_id
+                    or original_operation.external_operation_id != owned.operation_id
+                    or original_operation.fence_generation != owned.fence_generation
+                    or original_operation.wire_protocol != WIRE_PROTOCOL_V2
+                ):
+                    raise MetadataConflict(
+                        "original provision authority is invalid",
+                        reason=ConflictReason.PROVIDER_RECOVERY_ENVELOPE_UNAUTHENTICATED,
+                    )
+                try:
+                    original_envelopes = authenticate_cell_provider_recovery_envelopes(
+                        self._identity_verifier,
+                        helm_request.get("_providerRecoveryEnvelopes"),
+                        tenant_id=owned.tenant_id,
+                        cell_id=owned.subject_id,
+                        operation_id=owned.operation_id,
+                        fence_generation=owned.fence_generation,
+                        resource_name=owned.resource_name,
+                        operation_resource_name=provider_operation_resource_name(
+                            owned.operation_id
+                        ),
+                    )
+                except ProviderIdentityConflict as error:
+                    raise MetadataConflict(
+                        "original provision recovery envelope did not authenticate",
+                        reason=ConflictReason.PROVIDER_RECOVERY_ENVELOPE_UNAUTHENTICATED,
+                    ) from error
+                if await self._storage_binding.wait_for_original(
+                    owned,
+                    recovery_envelope=original_envelopes["initJob"],
+                    effect_guard=context.assert_effect_authority,
+                    replacement_metadata=current,
+                    replacement_envelope=recovery_envelopes["initJob"],
+                ):
+                    return DriverPending(context.checkpoint, 30)
+        if (
+            owned == current
+            and self._storage_binding is not None
+            and self._config.migration_mode == "governance-v3-to-v4"
+            and context.wire_protocol == WIRE_PROTOCOL_V2
+            and context.checkpoint.startswith(CHECKPOINT_VERSION + ":")
+            and request.get("provisionMode") == "serve"
+        ):
+            MigrationCheckpoint.decode(context.checkpoint)
+            if not await self._storage_binding.cleanup_late(
+                owned,
+                pvc_uid=await self._cell.authenticated_volume_uid(owned),
+                recovery_envelope=recovery_envelopes["initJob"],
+                effect_guard=context.assert_effect_authority,
+            ):
+                return DriverPending(context.checkpoint, 30)
         snapshot = await self._refresh(current)
         migration_job = snapshot.governance_migration_job
         if migration_job != "absent":
@@ -1042,7 +1281,13 @@ class LiveLifecyclePlane:
             MigrationCheckpoint.decode(context.checkpoint)
         if snapshot.namespace:
             await self._registry.record_operation(
-                current, recovery_envelopes["providerOperationConfigMap"]
+                current,
+                recovery_envelopes["providerOperationConfigMap"],
+                **(
+                    {"effect_guard": context.assert_effect_authority}
+                    if self._config.migration_mode == "governance-v3-to-v4"
+                    else {}
+                ),
             )
 
     def has_namespace(self, metadata: OpaqueProviderMetadata) -> bool:
@@ -1089,6 +1334,8 @@ class LiveLifecyclePlane:
         self,
         metadata: OpaqueProviderMetadata,
         request: dict[str, Any],
+        *,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         reservation_class = await self._require_capacity_reservation(metadata, request)
         envelopes = self._recovery_envelopes[self._key(metadata)]
@@ -1102,9 +1349,14 @@ class LiveLifecyclePlane:
                 else "restore-candidate"
             ),
             helm_values,
+            **({"effect_guard": effect_guard} if effect_guard is not None else {}),
         )
         self._owned[self._key(metadata)] = metadata
-        await self._registry.record_operation(metadata, envelopes["providerOperationConfigMap"])
+        await self._registry.record_operation(
+            metadata,
+            envelopes["providerOperationConfigMap"],
+            **({"effect_guard": effect_guard} if effect_guard is not None else {}),
+        )
         await self._refresh(metadata)
 
     def has_release(self, metadata: OpaqueProviderMetadata) -> bool:
@@ -1115,10 +1367,21 @@ class LiveLifecyclePlane:
         metadata: OpaqueProviderMetadata,
         request: dict[str, Any],
         values: dict[str, Any],
+        *,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
+        storage_shell: bool = False,
     ) -> None:
         await self._require_capacity_reservation(metadata, request)
         owned = self._owner(metadata)
-        revision = await self._authorization_session_revision(metadata, request)
+        revision = await self._authorization_session_revision(
+            metadata,
+            request,
+            **(
+                {"effect_guard": effect_guard, "require_fresh": False}
+                if effect_guard is not None
+                else {}
+            ),
+        )
         await self._cell.write_credential_bundle(
             owned,
             {"1": str(request["serviceCredential"])},
@@ -1130,10 +1393,25 @@ class LiveLifecyclePlane:
                     "credentialSecret"
                 ],
             },
+            **({"effect_guard": effect_guard} if effect_guard is not None else {}),
         )
         desired = dict(values)
         desired["authorizationSessionRevision"] = revision
-        await self._helm.ensure_release(owned, desired)
+        if storage_shell and (effect_guard is None or desired.get("workloadMode") != "restore"):
+            raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+        await self._helm.ensure_release(
+            owned,
+            desired,
+            **(
+                {
+                    "rollback_on_failure": False,
+                    "effect_guard": effect_guard,
+                    **({"wait_for_ready": False} if storage_shell else {}),
+                }
+                if effect_guard is not None
+                else {}
+            ),
+        )
         await self._refresh(metadata)
 
     async def provision_retarget_required(
@@ -1322,7 +1600,8 @@ class LiveLifecyclePlane:
             expected_worker_policy=dict(request["workerPolicy"]),
             require_runtime_identity=v2,
             expected_contract_digest=target["gatewayContractDigest"],
-            **({"expected_governance": bundle} if governed else {}),
+            **({"expected_target": target} if v2 else {}),
+            **({"expected_governance": bundle, "retry_transport": True} if governed else {}),
         )
         if governed:
             current = await self._governance_health_bundle(metadata, target["releaseVersion"])
@@ -1344,7 +1623,9 @@ class LiveLifecyclePlane:
 
         original = self._helm_requests.get(self._key(metadata))
         envelopes = original.get("_providerRecoveryEnvelopes") if original else None
-        envelope = envelopes.get("authorizationSessionSecret") if isinstance(envelopes, dict) else None
+        envelope = (
+            envelopes.get("authorizationSessionSecret") if isinstance(envelopes, dict) else None
+        )
         if not isinstance(envelope, str) or not envelope:
             raise MetadataConflict(
                 "authorization Secret provider authority is absent",
@@ -1410,7 +1691,11 @@ class LiveLifecyclePlane:
         return self._snapshot(metadata).routes
 
     async def prove_external_rejection(
-        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        *,
+        retry_transport: bool = False,
     ) -> bool:
         credential = str(request["serviceCredential"])
         version = await self._active_version(metadata)
@@ -1422,13 +1707,18 @@ class LiveLifecyclePlane:
             issued_at=int(self._now()),
             jti=str(uuid.uuid4()),
         )
-        return await self._routes.prove_rejected(
-            self._owner(metadata),
-            unused_ticket=ticket,
-            browser_origin=self._config.browser_origin,
-            control_credential=credential,
-            protocol_version=self._config.protocol_version,
-        )
+        try:
+            return await self._routes.prove_rejected(
+                self._owner(metadata),
+                unused_ticket=ticket,
+                browser_origin=self._config.browser_origin,
+                control_credential=credential,
+                protocol_version=self._config.protocol_version,
+            )
+        except httpx.TransportError:
+            if retry_transport:
+                raise DriverRetryable("PROVISIONER_ROUTE_CLOSURE_UNPROVEN") from None
+            raise
 
     async def acquire_maintenance(
         self, metadata: OpaqueProviderMetadata, operation_id: str
@@ -1445,6 +1735,8 @@ class LiveLifecyclePlane:
         metadata: OpaqueProviderMetadata,
         request: dict[str, Any],
         operation_id: str,
+        *,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         runtime_request = request
         if "compatibilityDigest" in request:
@@ -1456,11 +1748,14 @@ class LiveLifecyclePlane:
                     reason=ConflictReason.ORIGINAL_RUNTIME_IDENTITY_UNAVAILABLE,
                 ) from error
         target = runtime_identity(runtime_request)
+        if effect_guard is not None:
+            await effect_guard()
         snapshot = await self._runtime.quiesce(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
             protocol_version=target["protocolVersion"],
             operation_id=operation_id,
+            **({"retry_transport": True} if effect_guard is not None else {}),
         )
         if (
             not isinstance(snapshot, dict)
@@ -1491,6 +1786,7 @@ class LiveLifecyclePlane:
             require_runtime_attestation=True,
             runtime_credential=str(request["serviceCredential"]),
             runtime_protocol_version=str(target["protocolVersion"]),
+            effect_guard=effect_guard,
         )
 
     async def scale(self, metadata: OpaqueProviderMetadata, replicas: int) -> None:
@@ -1510,11 +1806,879 @@ class LiveLifecyclePlane:
         snapshot = await self._refresh(metadata)
         return snapshot.runtime_desired_replicas == 0 and snapshot.runtime_pods == 0
 
+    async def recover_governance_target(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        context: EffectContext,
+    ) -> DriverPending | None:
+        """Bind target recovery to live evidence, without stop/start or route effects.
+
+        The lifecycle must first close routes and stop the workload under its
+        current claim. This read-only guard re-proves that boundary at custody
+        publication, rather than trusting a cached stop or maintenance result.
+        """
+
+        def unavailable() -> MetadataConflict:
+            return MetadataConflict(
+                "governance target recovery is unavailable",
+                reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
+            )
+
+        if (
+            self._config.migration_mode != "governance-v3-to-v4"
+            or context.wire_protocol != WIRE_PROTOCOL_V2
+            or self._governance_migration is None
+            or runtime_identity(request)
+            != self._config.runtime_target_for(request, v2=True, action="rollforward")
+        ):
+            raise unavailable()
+        try:
+            await context.assert_effect_authority()
+            key = self._key(metadata)
+            # These records were authenticated by observe_operation, not supplied
+            # by the caller or inferred from the new operation's annotations.
+            owner = self._owned[key]
+            envelope = self._helm_requests[key]["_providerRecoveryEnvelopes"][
+                "authorizationSessionSecret"
+            ]
+            pvc_uid = await self._cell.authenticated_volume_uid(owner)
+
+            async def stopped_authority() -> None:
+                await context.assert_effect_authority()
+                await self._maintenance.assert_owned(
+                    metadata, context.provider_operation_id, retry_elapsed=True
+                )
+                snapshot = await self._refresh(metadata)
+                if (
+                    not snapshot.namespace
+                    or snapshot.init_job_present
+                    or snapshot.routes != (False, False)
+                    or not await self.prove_external_rejection(
+                        metadata, request, retry_transport=True
+                    )
+                ):
+                    raise unavailable()
+                await self._cell.verify_governance_stopped(owner, pvc_uid=pvc_uid)
+                # Probes and Kubernetes reads can outlast either lease. Recheck
+                # both after those reads and immediately before the guarded CAS.
+                await self._maintenance.assert_owned(
+                    metadata, context.provider_operation_id, retry_elapsed=True
+                )
+                await context.assert_effect_authority()
+
+            return await self._governance_migration.recover_target(
+                context=replace(context, effect_guard=stopped_authority),
+                metadata=metadata,
+                owner=owner,
+                pvc_uid=pvc_uid,
+                runtime_image=self._config.image,
+                custody_recovery_envelope=envelope,
+                software_version=runtime_identity(request)["releaseVersion"],
+            )
+        except (DriverRetryable, LostAcknowledgement):
+            return DriverPending(context.checkpoint, 30)
+        except (ClaimConflict, StaleFence, DriverTerminal, MetadataConflict):
+            raise
+        except Exception as error:  # noqa: BLE001 - no raw provider response in progress
+            if _retryable_kubernetes_error(error):
+                return DriverPending(context.checkpoint, 30)
+            raise unavailable() from None
+
+    async def _governance_authority(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        context: EffectContext,
+        pvc_uid: str,
+        *,
+        maintenance: bool = True,
+        closed: bool = False,
+        stopped: bool = False,
+        wait_for_runtime: bool = False,
+    ) -> None:
+        """Recheck real ownership after asynchronous reads at each effect boundary."""
+        await context.assert_effect_authority()
+        if (
+            self._config.migration_mode != "governance-v3-to-v4"
+            or context.wire_protocol != WIRE_PROTOCOL_V2
+            or (
+                context.tenant_id,
+                context.cell_id,
+                context.provider_operation_id,
+                context.fence_generation,
+            )
+            != (
+                metadata.tenant_id,
+                metadata.subject_id,
+                metadata.operation_id,
+                metadata.fence_generation,
+            )
+            or runtime_identity(request)
+            != self._config.runtime_target_for(request, v2=True, action="provision")
+        ):
+            raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+        owner = self._owned[self._key(metadata)]
+        if await self._cell.authenticated_volume_uid(owner) != pvc_uid:
+            raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+        if context.checkpoint.startswith(CHECKPOINT_VERSION + ":"):
+            checkpoint = MigrationCheckpoint.decode(context.checkpoint)
+            if checkpoint.binding != migration_binding(
+                context, pvc_uid=pvc_uid, runtime_image=self._config.image
+            ):
+                raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+        if maintenance:
+            await self._maintenance.assert_owned(
+                metadata, context.provider_operation_id, retry_elapsed=True
+            )
+        if closed:
+            snapshot = await self._refresh(metadata)
+            if snapshot.routes != (False, False) or not await self.prove_external_rejection(
+                metadata, request, retry_transport=True
+            ):
+                raise DriverTerminal("PROVISIONER_ROUTE_CLOSURE_UNPROVEN")
+        if stopped:
+            snapshot = await self._refresh(metadata)
+            if snapshot.init_job_present:
+                raise DriverRetryable("PROVISIONER_RUNTIME_STOP_UNPROVEN")
+            await self._cell.verify_governance_stopped(
+                owner, pvc_uid=pvc_uid, wait_for_runtime=wait_for_runtime
+            )
+        if maintenance:
+            await self._maintenance.assert_owned(
+                metadata, context.provider_operation_id, retry_elapsed=True
+            )
+        await context.assert_effect_authority()
+
+    async def governance_provision(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        context: EffectContext,
+    ) -> DriverPending | DriverFinal:
+        """Initialize offline, then enter the existing migration and admission path."""
+        try:
+            await context.assert_effect_authority()
+            if (
+                request.get("provisionMode") != "serve"
+                or context.wire_protocol != WIRE_PROTOCOL_V2
+                or self._config.migration_mode != "governance-v3-to-v4"
+                or (
+                    context.tenant_id,
+                    context.cell_id,
+                    context.provider_operation_id,
+                    context.fence_generation,
+                )
+                != (
+                    metadata.tenant_id,
+                    metadata.subject_id,
+                    metadata.operation_id,
+                    metadata.fence_generation,
+                )
+                or runtime_identity(request)
+                != self._config.runtime_target_for(request, v2=True, action="provision")
+            ):
+                raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")
+            if context.checkpoint.startswith(CHECKPOINT_VERSION + ":"):
+                result = await self.governance_rollforward(metadata, request, context)
+                if isinstance(result, DriverFinal):
+                    return DriverFinal(
+                        {
+                            "providerRef": self.provider_reference(metadata),
+                            "privateEndpoint": (
+                                f"https://{self._config.control_hostname}/cells/{metadata.subject_id}"
+                            ),
+                        },
+                        resources=result.resources
+                        + (DriverResource(ResourceKind.ROUTE, metadata.resource_name + "-routes"),),
+                    )
+                return result
+            key = self._key(metadata)
+            owner = self._owned[key]
+            # A fresh provision cannot adopt another operation's initialized cell.
+            if owner != metadata:
+                raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+            if context.checkpoint.startswith("gpi1:"):
+                self._initializing_recovery.add(key)
+            original = self._helm_requests[key]
+            values = _fixed_helm_values(owner, original, self._config)
+            values["workloadMode"] = "initialize"
+            # The initializer only establishes storage. Governance is executed
+            # by the target-image coordinator after this Job is gone.
+            values["migrationMode"] = "none"
+
+            async def unstarted() -> None:
+                await context.assert_effect_authority()
+                snapshot = await self._refresh(metadata)
+                if (
+                    snapshot.serving
+                    or snapshot.runtime_admitted
+                    or snapshot.routes != (False, False)
+                ):
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")
+                await context.assert_effect_authority()
+
+            if context.checkpoint in {
+                "effect-prepared",
+                "namespace-ready",
+                "release-applied",
+                "csi-binding",
+                "volume-registration-required",
+            }:
+                await unstarted()
+                snapshot = self._snapshot(metadata)
+                if not snapshot.namespace:
+                    if context.checkpoint not in {"effect-prepared", "namespace-ready"}:
+                        raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+                    await self.ensure_namespace(metadata, request, effect_guard=unstarted)
+                    return DriverPending(
+                        "namespace-ready",
+                        1,
+                        (
+                            DriverResource(
+                                ResourceKind.KUBERNETES_NAMESPACE, metadata.resource_name
+                            ),
+                        ),
+                    )
+                if context.checkpoint in {"effect-prepared", "namespace-ready"}:
+                    # Reuse the chart's offline storage shell: no Job or runtime
+                    # exists until a bound gpi1 denial marker has committed.
+                    await self.install_release(
+                        metadata,
+                        original,
+                        values | {"workloadMode": "restore"},
+                        effect_guard=unstarted,
+                        storage_shell=True,
+                    )
+                    return DriverPending(
+                        "release-applied",
+                        1,
+                        (
+                            DriverResource(ResourceKind.HELM_RELEASE, metadata.resource_name),
+                            DriverResource(ResourceKind.PVC, metadata.resource_name + "-data"),
+                        ),
+                    )
+                if context.checkpoint == "volume-registration-required":
+                    return DriverPending("volume-registration-required", 1)
+                pvc_uid, _phase = await self._cell.authenticated_volume_state(owner)
+                binding = migration_binding(
+                    context, pvc_uid=pvc_uid, runtime_image=self._config.image
+                )
+                return DriverPending("gpi1:binding:" + binding, 1)
+            if context.checkpoint.startswith("gpi1:binding:"):
+                pvc_uid, _volume_phase = await self._cell.authenticated_volume_state(owner)
+            else:
+                pvc_uid = await self._cell.authenticated_volume_uid(owner)
+            binding = migration_binding(context, pvc_uid=pvc_uid, runtime_image=self._config.image)
+            phase = None
+            if context.checkpoint.startswith("gpi1:"):
+                parts = context.checkpoint.split(":")
+                if (
+                    len(parts) != 3
+                    or parts[1]
+                    not in {
+                        "binding",
+                        "registering",
+                        "registered",
+                        "initializing",
+                        "complete",
+                        "drained",
+                    }
+                    or parts[2] != binding
+                ):
+                    raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+                phase = parts[1]
+            elif context.checkpoint != "volume-owned":
+                raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+
+            if phase == "binding":
+                if self._storage_binding is None:
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")
+
+                async def binding_authority() -> None:
+                    await unstarted()
+                    current_uid, _ = await self._cell.authenticated_volume_state(owner)
+                    if current_uid != pvc_uid:
+                        raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+                    await context.assert_effect_authority()
+
+                ready = await self._storage_binding.reconcile(
+                    owner,
+                    pvc_uid=pvc_uid,
+                    recovery_envelope=self._recovery_envelopes[key]["initJob"],
+                    effect_guard=binding_authority,
+                )
+                return DriverPending(
+                    "gpi1:registering:" + binding if ready else context.checkpoint,
+                    1 if ready else 2,
+                )
+            if phase == "registering":
+                return DriverPending(context.checkpoint, 30)
+
+            if phase in {"registered", "initializing", "complete", "drained"}:
+                if self._storage_binding is None:
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")
+                if not await self._storage_binding.cleanup_late(
+                    owner,
+                    pvc_uid=pvc_uid,
+                    recovery_envelope=self._recovery_envelopes[key]["initJob"],
+                    effect_guard=context.assert_effect_authority,
+                ):
+                    return DriverPending(context.checkpoint, 30)
+
+            async def bound() -> None:
+                await self._governance_authority(
+                    metadata, request, context, pvc_uid, maintenance=False
+                )
+                snapshot = await self._refresh(metadata)
+                if (
+                    snapshot.serving
+                    or snapshot.runtime_admitted
+                    or snapshot.routes != (False, False)
+                ):
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")
+                await context.assert_effect_authority()
+
+            async def closed() -> None:
+                await bound()
+                await self._governance_authority(metadata, request, context, pvc_uid, closed=True)
+
+            async def stopped() -> None:
+                await closed()
+                await self._governance_authority(
+                    metadata, request, context, pvc_uid, closed=True, stopped=True
+                )
+
+            await bound()
+            if not await self._maintenance.acquire(
+                metadata, context.provider_operation_id, effect_guard=bound
+            ):
+                return DriverPending(context.checkpoint, 2)
+            await closed()
+            if phase is None or phase == "registered":
+                return DriverPending("gpi1:initializing:" + binding, 1)
+            if self._storage_init is None:
+                raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")
+            init_arguments = {
+                "pvc_uid": pvc_uid,
+                "recovery_envelope": self._recovery_envelopes[key]["initJob"],
+                "effect_guard": closed,
+                "init_request_recovery_envelope": self._recovery_envelopes[key][
+                    "initRequestConfigMap"
+                ],
+                "init_request": {
+                    "request_id": values["initRequestId"],
+                    "operation_id": values["initOperationId"],
+                    "cell_id": values["cellId"],
+                    "vault_id": values["vaultId"],
+                    "vault_root": "/var/lib/exomem/vault",
+                    "state_root": "/var/lib/exomem/state",
+                    "log_root": "/var/lib/exomem/logs",
+                    "expected_release": values["expectedRelease"],
+                    "expected_protocol": values["expectedProtocol"],
+                    "runtime_uid": values["runtimeUid"],
+                    "runtime_gid": values["runtimeGid"],
+                    "active_credential_version": values["activeCredentialVersion"],
+                },
+            }
+            if phase == "initializing":
+                if await self._storage_init.completed(owner, **init_arguments):
+                    return DriverPending("gpi1:complete:" + binding, 1)
+                if not (await self._refresh(metadata)).init_job_present:
+                    # TTL cleanup can beat worker observation. The runtime
+                    # initializer verifies its durable exact-request replay proof.
+                    await stopped()
+                    values[
+                        "authorizationSessionRevision"
+                    ] = await self._authorization_session_revision(
+                        metadata, original, require_fresh=False, effect_guard=stopped
+                    )
+                    await self._helm.ensure_release(
+                        owner, values, rollback_on_failure=False, effect_guard=stopped
+                    )
+                return DriverPending(context.checkpoint, 30)
+            if phase == "complete":
+                await self._storage_init.cleanup(owner, **init_arguments)
+                await stopped()
+                envelope = self._helm_requests[key]["_providerRecoveryEnvelopes"][
+                    "authorizationSessionSecret"
+                ]
+                files = await self._cell.read_authorization_session_bundle(owner)
+                if files is None:
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_CUSTODY_UNAVAILABLE")
+                identity = {
+                    "expected_cell_id": owner.subject_id,
+                    "expected_logical_vault_id": owner.tenant_id,
+                    "expected_replica_id": owner.resource_name + "-0",
+                    "expected_software_version": runtime_identity(request)["releaseVersion"],
+                    "expected_schema_version": AUTHORIZATION_BOOTSTRAP_SCHEMA_VERSION,
+                    "expected_recovery_envelope": envelope,
+                }
+                source = inspect_hosted_authorization_bundle(
+                    files, **identity, now=int(self._now()), _require_fresh=False
+                )
+                if source.governance_enrolled:
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_CUSTODY_UNAVAILABLE")
+                successor = drain_fresh_bootstrap_bundle(
+                    source.files,
+                    **{
+                        key: value
+                        for key, value in identity.items()
+                        if key != "expected_schema_version"
+                    },
+                    now=int(self._now()),
+                )
+
+                async def publish() -> None:
+                    await stopped()
+                    drain_fresh_bootstrap_bundle(
+                        source.files,
+                        **{
+                            key: value
+                            for key, value in identity.items()
+                            if key != "expected_schema_version"
+                        },
+                        now=int(self._now()),
+                    )
+                    inspect_hosted_authorization_bundle(
+                        successor.files, **identity, now=int(self._now())
+                    )
+
+                if source.revision != successor.revision:
+                    await self._cell.write_authorization_session_bundle(
+                        owner,
+                        successor.files,
+                        recovery_envelope=envelope,
+                        membership_epoch=successor.epoch,
+                        membership_digest=successor.membership_digest,
+                        revision=successor.revision,
+                        expected_revision=source.revision,
+                        effect_guard=publish,
+                    )
+                await stopped()
+                return DriverPending("gpi1:drained:" + binding, 1)
+            if self._fingerprint is None or self._governance_migration is None:
+                raise DriverTerminal("PROVISIONER_GOVERNANCE_MIGRATION_UNAVAILABLE")
+
+            async def fingerprint_authority() -> None:
+                await closed()
+                await self._fingerprint.prove_stopped_before_fingerprint(
+                    metadata,
+                    owner=owner,
+                    pvc_uid=pvc_uid,
+                    operation_id=context.provider_operation_id,
+                    recovery_envelope=self._recovery_envelopes[key]["initJob"],
+                )
+                await closed()
+
+            await fingerprint_authority()
+            before = await self._fingerprint.fingerprint(
+                metadata,
+                operation_id=context.provider_operation_id,
+                phase="before",
+                recovery_envelope=self._recovery_envelopes[key]["initJob"],
+                effect_guard=fingerprint_authority,
+            )
+            await stopped()
+            # Enter gm1 directly so no durable checkpoint loses the PVC binding.
+            return await self._governance_migration.advance(
+                context=replace(
+                    context, checkpoint="vault-fingerprinted-" + before, effect_guard=closed
+                ),
+                metadata=metadata,
+                owner=owner,
+                pvc_uid=pvc_uid,
+                runtime_image=self._config.image,
+                job_recovery_envelope=self._recovery_envelopes[key]["initJob"],
+                custody_recovery_envelope=self._helm_requests[key]["_providerRecoveryEnvelopes"][
+                    "authorizationSessionSecret"
+                ],
+            )
+        except (DriverRetryable, LostAcknowledgement):
+            return DriverPending(context.checkpoint, 30)
+
+    async def governance_rollforward(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        context: EffectContext,
+    ) -> DriverPending | DriverFinal:
+        """Advance the existing rollforward without discarding its migration barrier."""
+        checkpoint = None
+        try:
+            await context.assert_effect_authority()
+            key = self._key(metadata)
+            owner = self._owned[key]
+            pvc_uid = await self._cell.authenticated_volume_uid(owner)
+
+            async def bound() -> None:
+                await self._governance_authority(
+                    metadata, request, context, pvc_uid, maintenance=False
+                )
+
+            async def maintained() -> None:
+                await self._governance_authority(metadata, request, context, pvc_uid)
+
+            async def closed() -> None:
+                await self._governance_authority(metadata, request, context, pvc_uid, closed=True)
+
+            await bound()
+            if not await self._maintenance.acquire(
+                metadata, context.provider_operation_id, effect_guard=bound
+            ):
+                return DriverPending(context.checkpoint, 2)
+            checkpoint = (
+                MigrationCheckpoint.decode(context.checkpoint)
+                if context.checkpoint.startswith(CHECKPOINT_VERSION + ":")
+                else None
+            )
+            if checkpoint is None:
+                if context.checkpoint in {"effect-prepared", "maintenance-wait"}:
+                    return DriverPending("maintenance-acquired", 1)
+                if context.checkpoint == "maintenance-acquired":
+                    await self._routes.disable(owner, effect_guard=maintained)
+                    await closed()
+                    return DriverPending("routes-closed", 1)
+                if context.checkpoint == "routes-closed":
+                    await self.quiesce(
+                        metadata, request, context.provider_operation_id, effect_guard=closed
+                    )
+                    return DriverPending("runtime-drained", 1)
+                if context.checkpoint == "runtime-drained":
+                    await self._cell.scale(owner, 0, effect_guard=closed)
+                    return DriverPending("runtime-stop-wait", 1)
+                if context.checkpoint == "runtime-stop-wait":
+                    await self._governance_authority(
+                        metadata,
+                        request,
+                        context,
+                        pvc_uid,
+                        closed=True,
+                        stopped=True,
+                        wait_for_runtime=True,
+                    )
+                    return DriverPending("runtime-stopped", 1)
+                if context.checkpoint == "runtime-stopped":
+                    await self._governance_authority(
+                        metadata, request, context, pvc_uid, closed=True, stopped=True
+                    )
+                    if self._fingerprint is None:
+                        raise DriverTerminal("PROVISIONER_VAULT_FINGERPRINT_INVALID")
+                    before = await self._fingerprint.fingerprint(
+                        metadata,
+                        operation_id=context.provider_operation_id,
+                        phase="before",
+                        recovery_envelope=self._recovery_envelopes[key]["initJob"],
+                        effect_guard=closed,
+                    )
+                    if not isinstance(before, str) or re.fullmatch(r"[0-9a-f]{64}", before) is None:
+                        raise DriverTerminal("PROVISIONER_VAULT_FINGERPRINT_INVALID")
+                    return DriverPending("vault-fingerprinted-" + before, 1)
+                if re.fullmatch(r"vault-fingerprinted-[0-9a-f]{64}", context.checkpoint) is None:
+                    raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+            if checkpoint is None or checkpoint.phase in {"inspect", "prepare", "enroll", "commit"}:
+                if self._governance_migration is None:
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_MIGRATION_UNAVAILABLE")
+                return await self._governance_migration.advance(
+                    context=replace(context, effect_guard=closed),
+                    metadata=metadata,
+                    owner=owner,
+                    pvc_uid=pvc_uid,
+                    runtime_image=self._config.image,
+                    job_recovery_envelope=self._recovery_envelopes[key]["initJob"],
+                    custody_recovery_envelope=self._helm_requests[key][
+                        "_providerRecoveryEnvelopes"
+                    ]["authorizationSessionSecret"],
+                )
+            envelope = self._helm_requests[key]["_providerRecoveryEnvelopes"][
+                "authorizationSessionSecret"
+            ]
+            files = await self._cell.read_authorization_session_bundle(owner)
+            if files is None:
+                raise DriverTerminal("PROVISIONER_GOVERNANCE_CUSTODY_UNAVAILABLE")
+            source = inspect_hosted_authorization_bundle(
+                files,
+                expected_cell_id=owner.subject_id,
+                expected_logical_vault_id=owner.tenant_id,
+                expected_replica_id=owner.resource_name + "-0",
+                expected_software_version=None,
+                expected_schema_version=4,
+                expected_recovery_envelope=envelope,
+                now=int(self._now()),
+                _require_fresh=False,
+            )
+            if not source.governance_enrolled or json.loads(source.control)["issued_at"] > int(
+                self._now()
+            ):
+                raise DriverTerminal("PROVISIONER_GOVERNANCE_CUSTODY_UNAVAILABLE")
+            if (
+                source.replica_state == "SERVING"
+                and source.software_version != runtime_identity(request)["releaseVersion"]
+            ):
+                raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
+            if checkpoint.phase in {"recover-complete", "recover-confirmed"} or (
+                source.replica_state == "SERVING" and source.expires_at <= int(self._now())
+            ):
+                await self._routes.disable(owner, effect_guard=maintained)
+                await closed()
+                await self._cell.scale(owner, 0, effect_guard=closed)
+                await self._governance_authority(
+                    metadata,
+                    request,
+                    context,
+                    pvc_uid,
+                    closed=True,
+                    stopped=True,
+                    wait_for_runtime=True,
+                )
+                result = await self.recover_governance_target(metadata, request, context)
+                if result is None:
+                    raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+                return result
+
+            async def stopped() -> None:
+                await self._governance_authority(
+                    metadata, request, context, pvc_uid, closed=True, stopped=True
+                )
+
+            publication = source
+            identity = {
+                "expected_cell_id": owner.subject_id,
+                "expected_logical_vault_id": owner.tenant_id,
+                "expected_replica_id": owner.resource_name + "-0",
+                "expected_software_version": runtime_identity(request)["releaseVersion"],
+                "expected_schema_version": 4,
+                "expected_recovery_envelope": envelope,
+            }
+
+            def fresh_publication(*, start: bool = False) -> HostedAuthorizationBundle:
+                current = int(self._now())
+                # Expiry during I/O is resumable at this exact checkpoint; the
+                # next pass will take stopped-cell recovery, never direct renewal.
+                authenticated = inspect_hosted_authorization_bundle(
+                    publication.files,
+                    **identity,
+                    now=current,
+                    _require_fresh=False,
+                )
+                if authenticated.expires_at - current <= (300 if start else 0):
+                    raise DriverRetryable("PROVISIONER_GOVERNANCE_WINDOW_ELAPSED")
+                return inspect_hosted_authorization_bundle(
+                    publication.files, **identity, now=current
+                )
+
+            async def same_serving(*, start: bool = False) -> None:
+                fresh_publication(start=start)
+                observed = await self._cell.read_authorization_session_bundle(owner)
+                current = int(self._now())
+                if observed is None:
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_CUSTODY_UNAVAILABLE")
+                actual = inspect_hosted_authorization_bundle(
+                    observed, **identity, now=current, _require_fresh=False
+                )
+                if actual.revision != publication.revision:
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_CUSTODY_CHANGED")
+                fresh_publication(start=start)
+                if actual.replica_state != "SERVING" or not actual.governance_enrolled:
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_CUSTODY_UNAVAILABLE")
+
+            async def start_authority() -> None:
+                await stopped()
+                await same_serving(start=True)
+                await maintained()
+                fresh_publication(start=True)
+
+            async def ready_authority() -> None:
+                await maintained()
+                await same_serving()
+                try:
+                    health = await self.health(metadata, request, v2=True)
+                except MetadataConflict:
+                    # An otherwise valid selected window may elapse during the
+                    # private round trip. Keep d/t so stopped recovery can run;
+                    # key expiry or genuinely invalid proof still fails closed.
+                    fresh_publication()
+                    raise
+                if health != HealthObservation.ready_for(metadata, request, self._config):
+                    raise DriverTerminal("PROVISIONER_RUNTIME_CONTRACT_MISMATCH")
+                await maintained()
+                await same_serving()
+                await context.assert_effect_authority()
+                fresh_publication()
+
+            values = self._rollforward_helm_values(metadata, request, self._config)
+            values["workloadMode"] = "serve"
+            if checkpoint.phase == "complete":
+                await self._routes.disable(owner, effect_guard=maintained)
+                await self._cell.scale(owner, 0, effect_guard=closed)
+                await self._governance_authority(
+                    metadata,
+                    request,
+                    context,
+                    pvc_uid,
+                    closed=True,
+                    stopped=True,
+                    wait_for_runtime=True,
+                )
+                await stopped()
+                if source.replica_state == "DRAINING":
+                    current = int(self._now())
+                    ttl = min(
+                        DEFAULT_ATTESTATION_TTL_SECONDS,
+                        json.loads(source.keyring)["accepted_keys"][0]["not_after"] - current,
+                    )
+                    if ttl <= 300:
+                        raise DriverTerminal("PROVISIONER_GOVERNANCE_KEY_LIFETIME_INSUFFICIENT")
+                    publication = transition_hosted_authorization_bundle(
+                        source.files,
+                        **(identity | {"expected_software_version": None}),
+                        target_state="SERVING",
+                        target_no_in_flight=False,
+                        target_software_version=identity["expected_software_version"],
+                        now=current,
+                        ttl_seconds=ttl,
+                    )
+
+                    async def publish_authority() -> None:
+                        await stopped()
+                        fresh_publication(start=True)
+
+                    await self._cell.write_authorization_session_bundle(
+                        owner,
+                        publication.files,
+                        recovery_envelope=envelope,
+                        membership_epoch=publication.epoch,
+                        membership_digest=publication.membership_digest,
+                        revision=publication.revision,
+                        expected_revision=source.revision,
+                        effect_guard=publish_authority,
+                    )
+                elif source.replica_state != "SERVING":
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_CUSTODY_UNAVAILABLE")
+                values["authorizationSessionRevision"] = publication.revision
+                values["routes"]["enabled"] = False
+                await self._helm.transition_release(
+                    owner,
+                    values,
+                    operation_id=context.provider_operation_id,
+                    rollback_on_failure=False,
+                    effect_guard=start_authority,
+                )
+                await same_serving()
+                await closed()
+                if self._fingerprint is None:
+                    raise DriverTerminal("PROVISIONER_VAULT_FINGERPRINT_INVALID")
+                after = await self._fingerprint.fingerprint(
+                    metadata,
+                    operation_id=context.provider_operation_id,
+                    phase="after",
+                    recovery_envelope=self._recovery_envelopes[key]["initJob"],
+                    effect_guard=closed,
+                )
+                if after != checkpoint.vault_fingerprint:
+                    raise DriverTerminal("PROVISIONER_VAULT_PRESERVATION_MISMATCH")
+                await closed()
+                await same_serving()
+                await context.assert_effect_authority()
+                fresh_publication()
+                await self.resume(
+                    metadata, request, context.provider_operation_id, retry_transport=True
+                )
+                await ready_authority()
+                return DriverPending(replace(checkpoint, phase="confirmed").encode(), 1)
+            if checkpoint.phase != "confirmed" or source.replica_state != "SERVING":
+                raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+            await self._registry.mark_runtime_admitted(owner, effect_guard=ready_authority)
+            values["authorizationSessionRevision"] = publication.revision
+            values["routes"]["enabled"] = True
+            await self._helm.transition_release(
+                owner,
+                values,
+                operation_id=context.provider_operation_id,
+                rollback_on_failure=False,
+                effect_guard=ready_authority,
+            )
+            if (await self._refresh(metadata)).routes != (True, True):
+                raise DriverRetryable("PROVISIONER_ROUTE_REOPEN_FAILED")
+            await ready_authority()
+            await self.commit_runtime_upgrade(metadata, context.provider_operation_id)
+            await self._maintenance.release(
+                metadata, context.provider_operation_id, effect_guard=ready_authority
+            )
+            await context.assert_effect_authority()
+            fresh_publication()
+            evidence = hashlib.sha256(
+                (
+                    json.dumps(
+                        {
+                            "artifact": "exomem-hosted-rollforward-preservation",
+                            "schemaVersion": 1,
+                            "cellId": metadata.subject_id,
+                            "operationId": context.provider_operation_id,
+                            "runtimeTarget": runtime_identity(request),
+                            "vaultSha256": checkpoint.vault_fingerprint,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode()
+            ).hexdigest()
+            return DriverFinal(
+                {
+                    "code": "rollforward_preserved",
+                    "beforeVaultSha256": checkpoint.vault_fingerprint,
+                    "afterVaultSha256": checkpoint.vault_fingerprint,
+                    "evidenceSha256": evidence,
+                }
+            )
+        except (DriverRetryable, LostAcknowledgement):
+            return DriverPending(context.checkpoint, 30)
+        except (ClaimConflict, StaleFence):
+            raise
+        except (DriverTerminal, MetadataConflict):
+            if checkpoint is not None and checkpoint.phase in {
+                "complete",
+                "confirmed",
+                "recover-complete",
+                "recover-confirmed",
+            }:
+                # Route publication may have succeeded before its acknowledgement
+                # was lost. Bad/expired custody cannot authorize recovery, but it
+                # must not prevent the current fenced owner from closing exposure.
+                try:
+                    await self._routes.disable(owner, effect_guard=maintained)
+                    await self._cell.scale(owner, 0, effect_guard=closed)
+                    await self._governance_authority(
+                        metadata,
+                        request,
+                        context,
+                        pvc_uid,
+                        closed=True,
+                        stopped=True,
+                        wait_for_runtime=True,
+                    )
+                except (DriverRetryable, LostAcknowledgement):
+                    return DriverPending(context.checkpoint, 30)
+                except (ClaimConflict, StaleFence, DriverTerminal, MetadataConflict):
+                    raise
+                except Exception as cleanup_error:  # noqa: BLE001 - bounded provider error
+                    if _retryable_kubernetes_error(cleanup_error):
+                        return DriverPending(context.checkpoint, 30)
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_FENCING_UNAVAILABLE") from None
+            raise
+        except Exception as error:  # noqa: BLE001 - provider details stay private
+            if _retryable_kubernetes_error(error):
+                return DriverPending(context.checkpoint, 30)
+            raise DriverTerminal("PROVISIONER_GOVERNANCE_MIGRATION_UNAVAILABLE") from None
+
     async def resume(
         self,
         metadata: OpaqueProviderMetadata,
         request: dict[str, Any],
         operation_id: str,
+        *,
+        retry_transport: bool = False,
     ) -> None:
         target = runtime_identity(request)
         await self._runtime.resume(
@@ -1522,6 +2686,7 @@ class LiveLifecyclePlane:
             credential=str(request["serviceCredential"]),
             protocol_version=target["protocolVersion"],
             operation_id=operation_id,
+            **({"retry_transport": True} if retry_transport else {}),
         )
 
     def _rollforward_helm_values(

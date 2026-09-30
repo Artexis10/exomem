@@ -1,0 +1,1507 @@
+"""Deterministic, model-free scorer for the context-activation benchmark.
+
+OpenSpec change ``add-context-activation-benchmark``, task 2. Consumes an
+activation packet -- from a hand-written oracle-packet file today, or later
+from ``activate_context``'s own output over MCP/CLI/REST -- and scores it
+against the pre-registered fixture (``epistemic.corpora.context_activation``).
+No model judge, no I/O beyond loading a packet file: every check here is a
+pure function of a packet and a fixture, matching this package's sibling
+``scoring.py`` ("Pure paired scorer over observed action outcomes. No model
+judge, no I/O.").
+
+This module's thresholds quote, rather than restate, ``openspec/changes/
+add-context-activation-benchmark/specs/context-activation-benchmark/
+spec.md`` -- the amended spec is the contract; a docstring that paraphrases
+it is a second copy that can drift. In its own words (Requirement:
+Pre-registered thresholds):
+
+    activation precision at least 0.80, computed over every ref the packet
+    surfaces as a resolved anchor, unit or pointer and excluding superseded
+    ancestors the packet credits as marked [...] `resolved` false activation
+    [...] is a `resolved` anchor, unit, pointer, current-state entry or
+    ambiguity candidate outside the twin's own gold set (a twin designed to
+    resolve on a narrow gold of its own is not a false activation); `partial`
+    activation on twins whose expected status is `unresolved` limited to at
+    most one twin per run [...] (a twin without gold of its own cannot hedge
+    as `ambiguous`, because naming any ambiguity candidate is itself a false
+    activation) [...] a current-state statement of at most 200 characters, a
+    longer one failing the case as a packet-contract violation [...]
+    percentiles taken ceil-rank so that over the eighteen packets of one run
+    the p95 bound is the run's maximum and the hard refusal is reached only
+    by larger runs.
+
+See :func:`score_case` (false activation, hedging, precision, the
+statement-length check) and :func:`_percentile` (ceil-rank) for where each
+clause above is implemented.
+
+The real contract allows a superseded ancestor to be surfaced either omitted
+or marked ``lifecycle: superseded`` with its successor named
+(``provenance.superseded_by``); both paths are credited as non-poison (see
+:func:`_credited_superseded_refs`), which is task 2.3.
+
+``CurrentStateEntry.statement`` mirrors the compiler's own
+``current_state[].statement`` field (``STATEMENT_MAX_CHARS = 200`` in
+``exomem.working_set_state``, the sibling ``add-context-activation``
+change): the authored value text (e.g. ``"status: unavailable"``), never the
+``source`` label (``records``/``profile``/``note``), which names *where* the
+statement came from, not what it says.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import json
+import math
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from epistemic.corpora.context_activation import (
+    BASE_DISTRACTOR_COUNT,
+    DEFAULT_DISTRACTOR_COUNT,
+    FIXTURES,
+    MEASURED_LATENCY_MS,
+    FixtureCase,
+    ReferenceBinding,
+    anchor_kind_for,
+    reference_binding_digests,
+)
+
+
+class PacketError(ValueError):
+    """Raised for a malformed packet file or dict."""
+
+
+class ManifestVoidError(ValueError):
+    """Raised when a run manifest lacks a required digest field."""
+
+
+# --------------------------------------------------------------------------
+# The packet shape (mirrors add-context-activation's activate_context output).
+# --------------------------------------------------------------------------
+
+#: Mirrors ``exomem.working_set_state.STATEMENT_MAX_CHARS`` (the sibling
+#: ``add-context-activation`` change's compiler package is not a dependency
+#: of this benchmark worktree, so the value is pinned here rather than
+#: imported); a packet's ``current_state[].statement`` is authored text, ≤
+#: this many characters, never a server-invented sentence.
+STATEMENT_MAX_CHARS = 200
+
+
+@dataclass(frozen=True)
+class Anchor:
+    ref: str
+    title: str
+    kind: str
+    status: str
+    evidence: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Unit:
+    ref: str
+    role: str
+    text: str
+    lifecycle: str = "active"
+    updated: str | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Pointer:
+    """A "look here yourself" reference the packet surfaces without inlining text."""
+
+    ref: str
+    title: str = ""
+    why: str = ""
+
+
+@dataclass(frozen=True)
+class CurrentStateEntry:
+    anchor: str
+    source: str
+    as_of: str | None = None
+    #: The authored status text itself (task 2, M5); see module docstring.
+    statement: str | None = None
+
+
+@dataclass(frozen=True)
+class ActivationPacket:
+    """The working-memory packet a scorer consumes, oracle-file or product."""
+
+    anchors: tuple[Anchor, ...] = ()
+    roles: tuple[str, ...] = ()
+    units: tuple[Unit, ...] = ()
+    pointers: tuple[Pointer, ...] = ()
+    current_state: tuple[CurrentStateEntry, ...] = ()
+    missing: tuple[str, ...] = ()
+    #: Canonical refs for identity/scoring. Structured producer candidates
+    #: retain their full rendered objects separately in ``ambiguity_text``.
+    ambiguity: tuple[str, ...] = ()
+    ambiguity_text: tuple[str, ...] = ()
+    budget_limit_chars: int | None = None
+    budget_used_chars: int = 0
+    abstained: bool = False
+    abstention_reason: str | None = None
+    #: Wall-clock latency for producing this packet, attached by the caller
+    #: (the harness measures it; the packet contract itself carries no
+    #: latency field). ``None`` for a hand-written oracle packet.
+    latency_ms: float | None = None
+    #: Wall-clock latency for the compiler's own ``working_set.*`` stages
+    #: specifically (spec: p50 ≤ 800 ms / p95 ≤ 2,500 ms on the reference
+    #: corpus), distinct from ``latency_ms``'s end-to-end figure. ``None``
+    #: when a caller has not measured or does not carry this breakdown
+    #: (an oracle packet, or a pre-instrumentation product run).
+    working_set_ms: float | None = None
+    #: The corpus tree (distractor count) this packet was compiled against
+    #: (round-two N1 consequence 1, spec: "Every fixture and every packet
+    #: SHALL record the corpus tree ... it belongs to"). Set by whatever
+    #: compiled the packet -- the harness for a product run, the test/oracle
+    #: author for a hand-written one -- never inferred here.
+    distractor_count: int | None = None
+
+
+#: The documented kill-switch shape (``EXOMEM_DISABLE_WORKING_SET=1``): see
+#: the sibling ``add-context-activation`` spec's "Kill switch abstains
+#: without building" scenario.
+DISABLED_PACKET = ActivationPacket(abstained=True, abstention_reason="disabled")
+
+
+def _tuple_or_empty(data: dict[str, Any], key: str) -> tuple[Any, ...]:
+    value = data.get(key)
+    return tuple(value) if value else ()
+
+
+def _label_items(data: dict[str, Any], key: str) -> tuple[Any, ...]:
+    if key not in data:
+        return ()
+    items = data[key]
+    if not isinstance(items, (list, tuple)):
+        raise PacketError(f"{key} must be an array")
+    return tuple(items)
+
+
+def _mapping_text(item: Mapping[Any, Any], key: str) -> str:
+    try:
+        return json.dumps(
+            dict(item),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise PacketError(f"{key} entry must be a string or object") from exc
+
+
+def _text_labels(data: dict[str, Any], key: str) -> tuple[str, ...]:
+    labels: list[str] = []
+    for item in _label_items(data, key):
+        if isinstance(item, str):
+            labels.append(item)
+            continue
+        if isinstance(item, Mapping):
+            labels.append(_mapping_text(item, key))
+            continue
+        raise PacketError(f"{key} entry must be a string or object")
+    return tuple(labels)
+
+
+def _ambiguity_labels(data: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    refs: list[str] = []
+    labels: list[str] = []
+    structured = False
+    for item in _label_items(data, "ambiguity"):
+        if isinstance(item, str):
+            refs.append(item)
+            labels.append(item)
+            continue
+        if isinstance(item, Mapping):
+            ref = item.get("ref")
+            if not isinstance(ref, str) or not ref.strip():
+                raise PacketError("ambiguity object ref must be a non-empty string")
+            refs.append(ref)
+            labels.append(_mapping_text(item, "ambiguity"))
+            structured = True
+            continue
+        raise PacketError("ambiguity entry must be a string or object")
+    return tuple(refs), tuple(labels) if structured else ()
+
+
+def _pointer_from_item(item: Any) -> Pointer:
+    if isinstance(item, str):
+        return Pointer(ref=item)
+    return Pointer(ref=item["ref"], title=str(item.get("title", "")), why=str(item.get("why", "")))
+
+
+def packet_from_dict(data: dict[str, Any]) -> ActivationPacket:
+    try:
+        anchors = tuple(
+            Anchor(
+                ref=item["ref"],
+                title=str(item.get("title", "")),
+                kind=str(item.get("kind", "unknown")),
+                status=item["status"],
+                evidence=tuple(item.get("evidence", ()) or ()),
+            )
+            for item in data.get("anchors", ()) or ()
+        )
+        units = tuple(
+            Unit(
+                ref=item["ref"],
+                role=str(item.get("role", "")),
+                text=str(item.get("text", "")),
+                lifecycle=str(item.get("lifecycle", "active")),
+                updated=item.get("updated"),
+                provenance=dict(item.get("provenance", {}) or {}),
+            )
+            for item in data.get("units", ()) or ()
+        )
+        pointers = tuple(_pointer_from_item(item) for item in data.get("pointers", ()) or ())
+        current_state = tuple(
+            CurrentStateEntry(
+                anchor=item["anchor"],
+                source=str(item.get("source", "")),
+                as_of=item.get("as_of"),
+                statement=item.get("statement"),
+            )
+            for item in data.get("current_state", ()) or ()
+        )
+    except KeyError as exc:
+        raise PacketError(f"packet entry missing required field {exc}") from exc
+
+    ambiguity, ambiguity_text = _ambiguity_labels(data)
+    budget = data.get("budget", {}) or {}
+    abstention = data.get("abstention", {}) or {}
+    return ActivationPacket(
+        anchors=anchors,
+        roles=_tuple_or_empty(data, "roles"),
+        units=units,
+        pointers=pointers,
+        current_state=current_state,
+        missing=_text_labels(data, "missing"),
+        ambiguity=ambiguity,
+        ambiguity_text=ambiguity_text,
+        budget_limit_chars=budget.get("limit_chars"),
+        budget_used_chars=int(budget.get("used_chars", 0) or 0),
+        abstained=bool(data.get("abstained", False)),
+        abstention_reason=abstention.get("reason"),
+        latency_ms=data.get("latency_ms"),
+        working_set_ms=data.get("working_set_ms"),
+        distractor_count=data.get("distractor_count"),
+    )
+
+
+def load_packet(path: Path) -> ActivationPacket:
+    """Load a packet from a JSON file (an oracle packet, or captured product output)."""
+
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PacketError(f"cannot read packet {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise PacketError(f"packet {path} is not a JSON object")
+    return packet_from_dict(data)
+
+
+def turn_status(packet: ActivationPacket) -> str:
+    """The packet's turn-level status, derived from the anchor/ambiguity/abstention shape.
+
+    The activation contract states per-anchor resolution (``resolved``,
+    ``partial``) and turn-level ``ambiguous``/abstained ``unresolved``
+    separately rather than as one packet field; this folds them into the
+    single vocabulary the benchmark fixtures pin per case.
+    """
+
+    if packet.abstained and packet.abstention_reason != "ambiguous":
+        return "unresolved"
+    if packet.ambiguity:
+        return "ambiguous"
+    if packet.abstained:
+        return "unresolved"
+    statuses = {a.status for a in packet.anchors}
+    if "resolved" in statuses:
+        return "resolved"
+    if "partial" in statuses:
+        return "partial"
+    return "unresolved"
+
+
+def _injected_text_parts(packet: ActivationPacket) -> tuple[str, ...]:
+    """Every text-bearing field a packet would actually inject into context.
+
+    Deliberately broader than "unit text plus current-state source" (the
+    pre-correction-round scope, M4/M5): anchor titles, pointer title/why,
+    ``missing`` and ``ambiguity`` labels, and current-state *statements* (the
+    authored value text, never the ``source`` label) all count, because all
+    of them are characters a real packet would spend budget on.
+    """
+
+    return (
+        *(anchor.title for anchor in packet.anchors),
+        *(unit.text for unit in packet.units),
+        *(f"{p.title} {p.why}".strip() for p in packet.pointers),
+        *packet.missing,
+        *(packet.ambiguity_text or packet.ambiguity),
+        *(entry.statement or "" for entry in packet.current_state),
+    )
+
+
+def _injected_text(packet: ActivationPacket) -> str:
+    return "\n".join(part for part in _injected_text_parts(packet) if part)
+
+
+def injected_char_count(packet: ActivationPacket) -> int:
+    """The packet's actual injected character count (M3), never the packet's
+    own self-reported ``budget.used_chars`` -- a packet author controls that
+    field directly, so it proves nothing about what was actually injected.
+    """
+
+    return len(_injected_text(packet))
+
+
+def packet_token_count(packet: ActivationPacket, *, encoding_name: str = "o200k_base") -> int:
+    """Tokens over exactly the text a packet would inject into context.
+
+    Mirrors ``benchmarks/lme/metered.py``'s frozen-encoding convention
+    (``o200k_base``, ``tiktoken`` imported lazily) rather than introducing a
+    second tokenizer choice.
+    """
+
+    text = _injected_text(packet)
+    if not text:
+        return 0
+    import tiktoken
+
+    return len(tiktoken.get_encoding(encoding_name).encode_ordinary(text))
+
+
+# --------------------------------------------------------------------------
+# Per-case scoring.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AnchorKindTally:
+    """Gold/poison hit counts for one anchor kind. Always a numerator/denominator pair."""
+
+    kind: str
+    gold_total: int
+    gold_hit: int
+    poison_total: int
+    poison_hit: int
+
+
+@dataclass(frozen=True)
+class CaseScore:
+    case_id: str
+    is_twin: bool
+    expected_status: str
+    observed_status: str
+    status_match: bool
+    gold_hit: int
+    gold_total: int
+    poison_hit: int
+    poison_total: int
+    twin_false_activation: bool
+    #: A twin whose expected status is ``unresolved`` observed as
+    #: ``partial``/``ambiguous`` instead (B3): tolerated per-case, but
+    #: bounded to at most :data:`HEDGED_TWINS_CEILING` per run.
+    hedged: bool
+    #: Relevant precision-bearing refs / every distinct precision-bearing
+    #: ref. Bound projections retain their own numerator and denominator
+    #: identities; ``None`` when the packet surfaces none (M1/D9).
+    precision: float | None
+    must_include_missing: tuple[str, ...]
+    must_exclude_present: tuple[str, ...]
+    packet_chars: int
+    packet_tokens: int
+    latency_ms: float | None
+    working_set_ms: float | None
+    #: The corpus tree (distractor count) the scored packet was compiled
+    #: against, propagated from :attr:`ActivationPacket.distractor_count`
+    #: (round-two N1 consequence 1); ``None`` when the packet didn't record it.
+    distractor_count: int | None
+    by_anchor_kind: tuple[AnchorKindTally, ...]
+    #: True when no packet was supplied for this case at all (M2) -- distinct
+    #: from a packet that was supplied and scored ``unresolved``/abstained.
+    blocked: bool
+    passed: bool
+    failure_reasons: tuple[str, ...]
+
+
+#: Per-case gold-recall floor (spec: "activation recall on gold at least 0.90").
+GOLD_RECALL_FLOOR = 0.90
+#: Per-case precision floor over resolved anchors (M1): a packet padding its
+#: gold hits with dozens of irrelevant resolved anchors must still fail, even
+#: though none of those irrelevant anchors happens to be curated poison.
+PRECISION_FLOOR = 0.80
+#: Run-level ceiling on hedged twins (B3 pre-registered hedging ceiling).
+HEDGED_TWINS_CEILING = 1
+#: Packet-size thresholds (spec: "packet size p50 at most 900 tokens and p95
+#: at most 1,500 ... hard refusal above 2,000").
+TOKEN_P50_CEILING = 900
+TOKEN_P95_CEILING = 1500
+TOKEN_HARD_CAP = 2000
+#: The compiler's own working_set.* stage latency thresholds (spec).
+WORKING_SET_P50_MS_CEILING = 800
+WORKING_SET_P95_MS_CEILING = 2500
+#: End-to-end padded-tree precision floor for C9 (N1).
+PADDING_PRECISION_FLOOR = 0.80
+
+#: Scoring amendments (design.md "Amendments"), each opt-in and reported
+#: beside the raw pre-registered score, never in its place. A2: a served unit
+#: whose ref is a fragment of a bound parent page recalls that page, for
+#: recall only. A4: on a twin, a poison anchor served ``partial`` beside a
+#: ``partial`` anchor from the twin's own gold is a hedge, not poison.
+UNIT_PARENT_RECALL = "unit_parent_recall"
+HEDGED_POISON = "hedged_poison"
+#: A7: on a positive (non-twin) case, every ambiguity candidate joins the
+#: precision denominator like a served anchor, so a candidate outside the
+#: case's gold counts against precision. The raw scorer leaves ambiguity out
+#: of precision, so a wrong candidate beside C7's gold still passes raw.
+AMBIGUITY_PRECISION = "ambiguity_precision"
+#: A8: on a positive (non-twin) case, a gold page served ``retrieval_carried``
+#: together with at least one of its own units satisfies the expected
+#: ``resolved`` status, and every unit whose ref is a ``#unit-`` fragment of a
+#: bound gold page is credited to that page in precision as well as recall
+#: (A2 amended recall only). Units of any other page stay distinct.
+CARRIED_GOLD = "carried_gold"
+#: A9: agent-choice scoring (see :data:`AGENT_CHOICE_RULE`).
+AGENT_CHOICE = "agent_choice"
+#: A10: invalid twins (see :data:`INVALID_TWINS`).
+INVALID_TWIN = "invalid_twin"
+AMENDMENTS: frozenset[str] = frozenset(
+    {UNIT_PARENT_RECALL, HEDGED_POISON, AMBIGUITY_PRECISION, CARRIED_GOLD, AGENT_CHOICE, INVALID_TWIN}
+)
+
+#: Amendment A10, as pre-registered: negative twins whose turn a
+#: pre-registered fixture page genuinely answers. The twin's premise (empty
+#: gold, nothing to activate) is a fixture-design defect for these, and
+#: serving that page is correct behaviour, so under A10 the twin is reported
+#: "invalid, excluded" rather than scored. Raw still scores it as-is, and the
+#: fixture page itself is frozen. twin -> (fixture page key, reason).
+INVALID_TWINS: dict[str, tuple[str, str]] = {
+    "T1": (
+        "t1_fitness_goal_note",
+        "the turn is about a step-count goal, and this pre-registered page (C1's poison) records one",
+    ),
+    "T2": (
+        "t2_camera_gear_note",
+        "latent: the turn is about photographing a dish, and this pre-registered page (C2's poison) "
+        "is the photography gear for it; the carry does not reach it today",
+    ),
+    "T9": (
+        "t2_camera_gear_note",
+        "latent: T2's turn on the padded tree, answered by the same page (C9's poison)",
+    ),
+}
+INVALID_TWIN_RULE = (
+    "A10 invalid twins. A negative twin (expected unresolved, empty gold) whose turn a "
+    "pre-registered fixture page genuinely answers is reported 'invalid, excluded' under "
+    "A10, never passed or failed. Raw scores it unchanged. The list is pre-registered with "
+    "the page and the reason; the fixture pages stay frozen."
+)
+
+#: Amendment A9, as pre-registered. Its digest (:func:`agent_choice_digest`)
+#: covers this text and the source of the functions that apply it.
+AGENT_CHOICE_RULE = (
+    "A9 agent-choice scoring. The compiler supplies recall within budget with "
+    "truthful labels; the primary agent chooses. A positive case (not a twin, "
+    "non-empty gold) passes when both hold. (1) Every gold page arrives under an "
+    "honest label: a resolved, partial or retrieval_carried anchor, or an "
+    "ambiguity candidate; and the case's gold facts are present in served "
+    "material. (2) Nothing is mislabelled: no non-gold page is served as a "
+    "resolved anchor or as a current_state entry, and no poison is served as "
+    "resolved. Extra honestly labelled partial or ambiguity siblings do not fail "
+    "the case, within the packet budget (the token hard cap and the packet's own "
+    "character limit). Twins and the no-memory case C6 are scored unchanged."
+)
+
+
+HONEST_ANCHOR_STATUSES: frozenset[str] = frozenset({"resolved", "partial", "retrieval_carried"})
+
+
+def _agent_choice_applies(fixture: FixtureCase) -> bool:
+    """A9 scores positive cases only: not a twin, and a gold of its own."""
+
+    return not fixture.case_id.startswith("T") and bool(fixture.gold)
+
+
+def _agent_choice_failures(
+    packet: ActivationPacket,
+    *,
+    gold_refs: tuple[str, ...],
+    poison_refs: tuple[str, ...],
+    must_include_missing: tuple[str, ...],
+    unit_parents: Mapping[str, str] | None,
+) -> list[str]:
+    """Why a positive case fails under A9 (:data:`AGENT_CHOICE_RULE`)."""
+
+    parents = unit_parents or {}
+
+    def page(ref: str) -> str:
+        return parents.get(ref, ref)
+
+    gold = set(gold_refs)
+    honest = {page(anchor.ref) for anchor in packet.anchors if anchor.status in HONEST_ANCHOR_STATUSES}
+    honest.update(page(ref) for ref in packet.ambiguity)
+    resolved_pages = {page(anchor.ref) for anchor in packet.anchors if anchor.status == "resolved"}
+
+    failures: list[str] = []
+    unlabelled = [ref for ref in gold_refs if ref not in honest]
+    if unlabelled:
+        failures.append(f"A9: {len(unlabelled)} gold page(s) not served under an honest label")
+    if must_include_missing:
+        failures.append(f"A9: gold fact(s) missing from served material: {list(must_include_missing)}")
+    mislabelled = sorted(ref for ref in resolved_pages if ref not in gold)
+    if mislabelled:
+        failures.append(f"A9: {len(mislabelled)} non-gold page(s) served as resolved")
+    stated = sorted({page(entry.anchor) for entry in packet.current_state} - gold)
+    if stated:
+        failures.append(f"A9: {len(stated)} non-gold page(s) served as current_state")
+    poisoned = [ref for ref in poison_refs if ref in resolved_pages]
+    if poisoned:
+        failures.append(f"A9: {len(poisoned)} poison page(s) served as resolved")
+    over_limit = packet.budget_limit_chars is not None and packet.budget_used_chars > packet.budget_limit_chars
+    if packet_token_count(packet) > TOKEN_HARD_CAP or over_limit:
+        failures.append("A9: packet exceeds its budget")
+    return failures
+
+
+def invalid_twins_digest() -> str:
+    """The pre-registered identity of A10: its rule and its list."""
+
+    payload = {"rule": INVALID_TWIN_RULE, "invalid_twins": {k: list(v) for k, v in INVALID_TWINS.items()}}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def invalid_twin_reason(case_id: str) -> str:
+    """The A10 exclusion reason every excluded twin's amended score carries."""
+
+    page, why = INVALID_TWINS[case_id]
+    return f"A10: invalid twin, excluded: {page} answers the turn ({why})"
+
+
+def agent_choice_digest() -> str:
+    """The pre-registered identity of A9: its rule and the code applying it."""
+
+    import inspect
+
+    parts = [
+        AGENT_CHOICE_RULE,
+        ",".join(sorted(HONEST_ANCHOR_STATUSES)),
+        inspect.getsource(_agent_choice_applies),
+        inspect.getsource(_agent_choice_failures),
+    ]
+    blob = "\n".join(part.replace("\r\n", "\n") for part in parts).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def excluded_case_ids(scores: Iterable[CaseScore]) -> tuple[str, ...]:
+    """The cases an A10-amended report excludes from its verdict."""
+
+    return tuple(
+        score.case_id
+        for score in scores
+        if score.failure_reasons and score.failure_reasons[0].startswith("A10: invalid twin, excluded")
+    )
+
+
+def _resolved_refs(packet: ActivationPacket) -> set[str]:
+    return {anchor.ref for anchor in packet.anchors if anchor.status == "resolved"}
+
+
+def _mentioned_refs(packet: ActivationPacket) -> set[str]:
+    """Every ref the packet surfaced anywhere: any anchor, unit, pointer,
+    ambiguity candidate, or current-state entry (B1). Broadened beyond
+    "resolved anchors and ambiguity" to also cover units and pointers --
+    otherwise a false activation injected purely through those channels
+    (never touching ``anchors`` at all) would score as a clean miss.
+    """
+
+    refs = {anchor.ref for anchor in packet.anchors}
+    refs.update(packet.ambiguity)
+    refs.update(entry.anchor for entry in packet.current_state)
+    refs.update(unit.ref for unit in packet.units)
+    refs.update(pointer.ref for pointer in packet.pointers)
+    return refs
+
+
+def _false_activation_candidates(packet: ActivationPacket) -> set[str]:
+    """Refs that are a *confident* false claim if found outside a twin's own gold.
+
+    Resolved-status anchors, plus every unit, pointer, current-state entry
+    and ambiguity candidate -- channels with no "status" concept of their
+    own, where mere presence already injected content. A ``partial``-status
+    anchor is excluded on purpose: see :data:`HEDGED_TWINS_CEILING` and the
+    module docstring.
+    """
+
+    refs = _resolved_refs(packet)
+    refs.update(unit.ref for unit in packet.units)
+    refs.update(pointer.ref for pointer in packet.pointers)
+    refs.update(entry.anchor for entry in packet.current_state)
+    refs.update(packet.ambiguity)
+    return refs
+
+
+def _credited_superseded_refs(packet: ActivationPacket) -> set[str]:
+    """Refs honestly presented as superseded, with a successor named (task 2.3).
+
+    A poison ref that is a superseded ancestor is not a false activation when
+    the packet marks it ``lifecycle: superseded`` and names its successor via
+    ``provenance.superseded_by`` -- that is the compiler contract's marking
+    path (the alternative to omission), never presenting the ancestor as
+    current. A superseded unit with no successor named is not credited: an
+    unnamed supersession is not distinguishable from an ordinary stale hit.
+    """
+
+    return {
+        unit.ref
+        for unit in packet.units
+        if unit.lifecycle == "superseded" and unit.provenance.get("superseded_by")
+    }
+
+
+def _validate_reference_binding(binding: ReferenceBinding) -> dict[str, str]:
+    """Reject any mutation of the frozen map, projection rows, or corpus identities."""
+
+    mapping_digest, digest = reference_binding_digests(
+        corpus_digest=binding.corpus_digest,
+        logical_corpus_digest=binding.logical_corpus_digest,
+        key_to_ref=binding.key_to_ref,
+        projections=binding.projections,
+    )
+    if mapping_digest != binding.mapping_digest:
+        raise ManifestVoidError("run manifest void: reference binding mapping digest mismatch")
+    if digest != binding.digest:
+        raise ManifestVoidError("run manifest void: reference binding digest mismatch")
+    return dict(binding.key_to_ref)
+
+
+def _valid_projection_refs(packet: ActivationPacket, binding: ReferenceBinding) -> dict[str, str]:
+    """Map packet projections that exactly match their pre-activation binding to canonical refs."""
+
+    valid: dict[str, str] = {}
+    for projection in binding.projections:
+        state_matches = any(
+            entry.anchor == projection.anchor_ref
+            and entry.source == projection.source_kind
+            and entry.statement == projection.statement
+            and (entry.as_of or "") == projection.as_of
+            for entry in packet.current_state
+        )
+        if not state_matches:
+            continue
+        unit_matches = any(
+            unit.ref == projection.projection_ref
+            and unit.role == "current_state"
+            and unit.lifecycle == "active"
+            and unit.text == projection.statement
+            and str(unit.updated or "") == projection.as_of
+            and unit.provenance.get("anchor") == projection.anchor_ref
+            and unit.provenance.get("source") == projection.source_kind
+            and str(unit.provenance.get("as_of") or "") == projection.as_of
+            for unit in packet.units
+        )
+        if unit_matches:
+            valid[projection.projection_ref] = projection.anchor_ref
+    return valid
+
+
+def score_case(
+    packet: ActivationPacket,
+    fixture: FixtureCase,
+    *,
+    key_to_ref: dict[str, str] | None = None,
+    reference_binding: ReferenceBinding | None = None,
+    amendments: Iterable[str] = (),
+    unit_parents: Mapping[str, str] | None = None,
+) -> CaseScore:
+    """Score one packet against its pre-registered fixture.
+
+    ``key_to_ref`` maps a fixture's logical gold/poison keys to the packet's
+    own anchor ``ref`` values: the synthetic corpus's ``key_to_path`` for CI,
+    or a locally-authored (never-committed) real-vault mapping for the
+    private instrument. Defaults to the identity mapping, for a hand-written
+    oracle packet that already speaks in the fixture's own logical keys.
+    ``reference_binding`` additionally permits only projections frozen from
+    canonical source bytes before activation; its map supersedes an equivalent
+    ``key_to_ref`` argument.
+
+    ``amendments`` names scoring amendments to apply (:data:`AMENDMENTS`);
+    none by default, which is the raw pre-registered score. ``unit_parents``
+    maps a page's ref spellings to its canonical gold ref, frozen from
+    canonical readback before activation; :data:`UNIT_PARENT_RECALL` needs it.
+    """
+
+    applied = frozenset(amendments)
+    unknown_amendments = sorted(applied - AMENDMENTS)
+    if unknown_amendments:
+        raise ValueError(f"unknown amendment(s) {unknown_amendments}")
+    for needs_parents in (UNIT_PARENT_RECALL, CARRIED_GOLD):
+        if needs_parents in applied and unit_parents is None:
+            raise ValueError(f"{needs_parents} needs a frozen unit_parents map")
+
+    binding_map: dict[str, str] | None = None
+    valid_projections: dict[str, str] = {}
+    all_bound_projections: dict[str, str] = {}
+    if reference_binding is not None:
+        binding_map = _validate_reference_binding(reference_binding)
+        if key_to_ref is not None and any(key_to_ref.get(key) != ref for key, ref in binding_map.items()):
+            raise ManifestVoidError("run manifest void: key_to_ref differs from frozen reference binding")
+        valid_projections = _valid_projection_refs(packet, reference_binding)
+        all_bound_projections = {
+            projection.projection_ref: projection.anchor_ref for projection in reference_binding.projections
+        }
+
+    effective_map = binding_map or key_to_ref
+
+    def ref_for(key: str) -> str:
+        return effective_map.get(key, key) if effective_map else key
+
+    resolved = _resolved_refs(packet)
+    mentioned = _mentioned_refs(packet)
+    false_activation_candidates = _false_activation_candidates(packet)
+    credited = _credited_superseded_refs(packet) - set(all_bound_projections)
+
+    gold_refs = tuple(ref_for(key) for key in fixture.gold)
+    poison_refs = tuple(ref_for(key) for key in fixture.poison)
+    if reference_binding is None:
+        identity_mentions = mentioned
+    else:
+        # A current_state entry is evidence that validates a bound projection;
+        # it does not independently mint the anchor identity it names.
+        identity_mentions = {anchor.ref for anchor in packet.anchors}
+        identity_mentions.update(unit.ref for unit in packet.units)
+        identity_mentions.update(pointer.ref for pointer in packet.pointers)
+        identity_mentions.update(packet.ambiguity)
+        identity_mentions.update(valid_projections.values())
+
+    # A2: recall only. The unit keeps its own ref in every other channel.
+    recall_mentions = set(identity_mentions)
+    if UNIT_PARENT_RECALL in applied and unit_parents is not None:
+        for unit in packet.units:
+            parent, separator, fragment = unit.ref.partition("#")
+            if separator and fragment.startswith("unit-") and parent in unit_parents:
+                recall_mentions.add(unit_parents[parent])
+
+    own_gold = set(gold_refs)
+    # A8: each unit of a bound gold page, credited to that page; and the gold
+    # pages served `retrieval_carried` with at least one of their own units.
+    gold_unit_parent: dict[str, str] = {}
+    carried_gold: set[str] = set()
+    if CARRIED_GOLD in applied and unit_parents is not None and not fixture.case_id.startswith("T"):
+        for unit in packet.units:
+            parent, separator, fragment = unit.ref.partition("#")
+            if separator and fragment.startswith("unit-") and unit_parents.get(parent) in own_gold:
+                gold_unit_parent[unit.ref] = unit_parents[parent]
+        recall_mentions.update(gold_unit_parent.values())
+        carried_gold = {
+            unit_parents.get(anchor.ref, anchor.ref)
+            for anchor in packet.anchors
+            if anchor.status == "retrieval_carried"
+        } & set(gold_unit_parent.values())
+    # A4: a twin's poison served only as a `partial` anchor, beside a
+    # `partial` anchor from the twin's own gold, is a hedge. Served resolved,
+    # through any other channel, or alone, it stays poison.
+    hedged_poison: set[str] = set()
+    if HEDGED_POISON in applied and fixture.case_id.startswith("T"):
+        partial_refs = {anchor.ref for anchor in packet.anchors if anchor.status == "partial"}
+        if partial_refs & own_gold:
+            other_channels = set(false_activation_candidates) | set(all_bound_projections)
+            hedged_poison = {
+                ref
+                for ref in poison_refs
+                if ref in partial_refs
+                and ref not in other_channels
+                and not any(
+                    projection_ref in mentioned and canonical_ref == ref
+                    for projection_ref, canonical_ref in all_bound_projections.items()
+                )
+            }
+
+    def is_poison_hit(ref: str) -> bool:
+        if ref in hedged_poison:
+            return False
+        return (ref in mentioned and ref not in credited) or any(
+            projection_ref in mentioned and canonical_ref == ref
+            for projection_ref, canonical_ref in all_bound_projections.items()
+        )
+
+    gold_hit = sum(1 for ref in gold_refs if ref in recall_mentions)
+    poison_hit = sum(1 for ref in poison_refs if is_poison_hit(ref))
+
+    tallies: dict[str, list[int]] = {}
+    for key, ref in zip(fixture.gold, gold_refs, strict=True):
+        tally = tallies.setdefault(anchor_kind_for(key), [0, 0, 0, 0])
+        tally[0] += 1
+        tally[1] += int(ref in recall_mentions)
+    for key, ref in zip(fixture.poison, poison_refs, strict=True):
+        tally = tallies.setdefault(anchor_kind_for(key), [0, 0, 0, 0])
+        tally[2] += 1
+        tally[3] += int(is_poison_hit(ref))
+    by_anchor_kind = tuple(
+        AnchorKindTally(kind=kind, gold_total=g_t, gold_hit=g_h, poison_total=p_t, poison_hit=p_h)
+        for kind, (g_t, g_h, p_t, p_h) in sorted(tallies.items())
+    )
+
+    observed_status = turn_status(packet)
+    status_match = observed_status == fixture.expected_status or bool(
+        carried_gold and fixture.expected_status == "resolved"
+    )
+
+    # Twin false activation (B1): a ref outside the twin's own gold, found via
+    # a resolved anchor or any unit/pointer/current-state/ambiguity channel.
+    twin_false_activation = bool(
+        fixture.case_id.startswith("T")
+        and any(
+            ref not in own_gold
+            and not (ref in valid_projections and valid_projections[ref] in own_gold)
+            for ref in false_activation_candidates
+        )
+    )
+
+    # Hedging (B3, spec scenario "Hedged twin activation is reported, not
+    # punished as resolution"): a twin expected to resolve nothing may
+    # instead yield only `partial` anchors and *nothing else* -- no units,
+    # pointers, current state or ambiguity candidates -- without being
+    # punished for the status mismatch itself, bounded at the run level by
+    # HEDGED_TWINS_CEILING, not blanket-permitted here. `ambiguous` is not a
+    # hedge shape at all (spec: "a twin without gold of its own cannot hedge
+    # as ambiguous, because naming any ambiguity candidate is itself a false
+    # activation"; a twin with its own narrow gold, e.g. T4, is scored on its
+    # `ambiguous` expectation directly, never credited as "hedging").
+    is_unresolved_expected_twin = fixture.case_id.startswith("T") and fixture.expected_status == "unresolved"
+    hedged = (
+        is_unresolved_expected_twin
+        and observed_status == "partial"
+        and not packet.units
+        and not packet.pointers
+        and not packet.current_state
+        and not packet.ambiguity
+    )
+    # A4 removes the hedged poison hit (`is_poison_hit`) and nothing else: it
+    # never widens B3's `hedged`, so it cannot waive a status mismatch.
+
+    # Precision (M1, spec: "computed over every ref the packet surfaces as a
+    # resolved anchor, unit or pointer and excluding superseded ancestors the
+    # packet credits as marked"): gold hits over the union of resolved
+    # anchors, unit refs and pointer refs -- not resolved anchors alone, or
+    # padding with dozens of junk *units* (never touching an anchor at all)
+    # would be invisible to precision entirely (round-two review: "60 junk
+    # units with 2 gold anchors must fail"). A credited superseded ancestor
+    # (task 2.3) is excluded from the denominator: deliberately,
+    # transparently marking it is correct compiler behaviour, not irrelevant
+    # padding, and must not be penalised as if it were.
+    precision_denominator_refs = (
+        resolved
+        | {gold_unit_parent.get(unit.ref, unit.ref) for unit in packet.units}
+        | {p.ref for p in packet.pointers}
+    )
+    if AMBIGUITY_PRECISION in applied and not fixture.case_id.startswith("T"):
+        precision_denominator_refs |= set(packet.ambiguity)
+    precision_denominator_refs -= credited
+    relevant_precision_refs = set(gold_refs)
+    relevant_precision_refs.update(
+        projection_ref
+        for projection_ref, canonical_ref in valid_projections.items()
+        if canonical_ref in own_gold
+    )
+    gold_hit_for_precision = len(precision_denominator_refs & relevant_precision_refs)
+    total_precision_denominator = len(precision_denominator_refs)
+    precision = (gold_hit_for_precision / total_precision_denominator) if total_precision_denominator else None
+
+    injected_text = _injected_text(packet)
+    # C6's must_include fact ("9.5") is a response-reflection fact for the
+    # reminder-turn test (`score_reminder_turn`, over the agent's answer),
+    # never a packet-content fact: C6's packet is supposed to be empty by
+    # design (the C6-specific check below), so checking must_include against
+    # packet text here would make C6 permanently unpassable.
+    if fixture.case_id == "C6":
+        must_include_missing: tuple[str, ...] = ()
+    else:
+        must_include_missing = tuple(s for s in fixture.must_include if s not in injected_text)
+    must_exclude_present = tuple(s for s in fixture.must_exclude if s in injected_text)
+
+    # STATEMENT_MAX_CHARS (spec: "a current-state statement of at most 200
+    # characters, a longer one failing the case as a packet-contract
+    # violation"). Enforced here, over the packet's own field, never by
+    # truncating it in `packet_from_dict`: a silent truncation would hide
+    # exactly the violation this is meant to catch, and scoring (not
+    # loading) is where "fails the case" -- rather than aborting the whole
+    # run -- makes contractual sense.
+    overlong_statements = tuple(
+        entry.anchor
+        for entry in packet.current_state
+        if entry.statement is not None and len(entry.statement) > STATEMENT_MAX_CHARS
+    )
+
+    failure_reasons: list[str] = []
+    if not status_match and not hedged:
+        failure_reasons.append(f"expected status {fixture.expected_status!r}, observed {observed_status!r}")
+    if poison_hit:
+        failure_reasons.append(f"{poison_hit} poison anchor(s) surfaced")
+    if twin_false_activation:
+        failure_reasons.append("twin surfaced a ref outside its own gold")
+    if fixture.gold:
+        recall = gold_hit / len(fixture.gold)
+        if recall < GOLD_RECALL_FLOOR:
+            failure_reasons.append(f"gold recall {recall:.2f} below the {GOLD_RECALL_FLOOR} floor")
+    if precision is not None and precision < PRECISION_FLOOR:
+        failure_reasons.append(f"precision {precision:.2f} below the {PRECISION_FLOOR} floor")
+    if must_include_missing:
+        failure_reasons.append(f"missing required fact(s): {list(must_include_missing)}")
+    if must_exclude_present:
+        failure_reasons.append(f"forbidden fact(s) present: {list(must_exclude_present)}")
+    if fixture.case_id == "C6" and (mentioned or injected_char_count(packet)):
+        failure_reasons.append("no-memory case injected an anchor, unit, pointer or characters")
+    # B2: an ambiguous turn runs no role lane -- units/pointers must be
+    # empty regardless of case or twin. (General contract property; see the
+    # sibling add-context-activation spec's "no role lane runs" scenario.)
+    if observed_status == "ambiguous" and (packet.units or packet.pointers):
+        failure_reasons.append("ambiguous status packet must carry no units or pointers (no role lane runs)")
+    if overlong_statements:
+        failure_reasons.append(
+            f"packet-contract violation: current_state statement exceeds {STATEMENT_MAX_CHARS} chars "
+            f"for {list(overlong_statements)}"
+        )
+
+    # A10: a listed invalid twin is excluded, never passed or failed. The
+    # reason names it; `excluded_case_ids` reads it back.
+    if INVALID_TWIN in applied and fixture.case_id in INVALID_TWINS:
+        failure_reasons = [invalid_twin_reason(fixture.case_id)]
+
+    # A9 replaces the verdict of a positive case, never its raw metrics.
+    if AGENT_CHOICE in applied and _agent_choice_applies(fixture):
+        failure_reasons = _agent_choice_failures(
+            packet,
+            gold_refs=gold_refs,
+            poison_refs=poison_refs,
+            must_include_missing=must_include_missing,
+            unit_parents=unit_parents,
+        )
+
+    return CaseScore(
+        case_id=fixture.case_id,
+        is_twin=fixture.case_id.startswith("T"),
+        expected_status=fixture.expected_status,
+        observed_status=observed_status,
+        status_match=status_match,
+        gold_hit=gold_hit,
+        gold_total=len(fixture.gold),
+        poison_hit=poison_hit,
+        poison_total=len(fixture.poison),
+        twin_false_activation=twin_false_activation,
+        hedged=hedged,
+        precision=precision,
+        must_include_missing=must_include_missing,
+        must_exclude_present=must_exclude_present,
+        packet_chars=injected_char_count(packet),
+        packet_tokens=packet_token_count(packet),
+        latency_ms=packet.latency_ms,
+        working_set_ms=packet.working_set_ms,
+        distractor_count=packet.distractor_count,
+        by_anchor_kind=by_anchor_kind,
+        blocked=False,
+        passed=not failure_reasons,
+        failure_reasons=tuple(failure_reasons),
+    )
+
+
+def _blocked_score(fixture: FixtureCase) -> CaseScore:
+    """The score for a fixture with no packet supplied at all (M2).
+
+    Distinct from scoring :data:`DISABLED_PACKET` (which a caller may supply
+    *explicitly* to exercise the documented kill-switch shape, and which
+    scores normally through :func:`score_case`): an absent packet means the
+    run never attempted this case, which must void the run's verdict, not
+    merely fail one case.
+    """
+
+    return CaseScore(
+        case_id=fixture.case_id,
+        is_twin=fixture.case_id.startswith("T"),
+        expected_status=fixture.expected_status,
+        observed_status="blocked",
+        status_match=False,
+        gold_hit=0,
+        gold_total=len(fixture.gold),
+        poison_hit=0,
+        poison_total=len(fixture.poison),
+        twin_false_activation=False,
+        hedged=False,
+        precision=None,
+        must_include_missing=fixture.must_include,
+        must_exclude_present=(),
+        packet_chars=0,
+        packet_tokens=0,
+        latency_ms=None,
+        working_set_ms=None,
+        distractor_count=fixture.distractor_count,
+        by_anchor_kind=(),
+        blocked=True,
+        passed=False,
+        failure_reasons=("no packet supplied: run blocked",),
+    )
+
+
+@dataclass(frozen=True)
+class PaddingRobustnessResult:
+    """C9 (padded tree) vs. C2's own score (unpadded tree) consistency check.
+
+    Round-two N1 revision: compares C9 against C2's *own* unpadded-tree
+    score, never T9 (T9 is C2's twin's own turn, restored as an ordinary
+    ninth negative twin -- see the fixtures module docstring). A twin
+    carrying a different turn cannot show what padding did to the grill
+    query's own precision or recall; only the identical query scored on two
+    different corpus states can, and C9-vs-C2 is that comparison. C9 is
+    meant to pass only when padding neither craters precision nor silently
+    drops a gold hit C2 found on the unpadded tree, and only when the two
+    scores actually came from different trees in the first place.
+    """
+
+    padded_case_id: str
+    base_case_id: str
+    precision_padded: float | None
+    recall_padded: float | None
+    recall_base: float | None
+    precision_delta: float | None
+    passed: bool
+    reasons: tuple[str, ...]
+
+
+def _recall(score: CaseScore) -> float | None:
+    return (score.gold_hit / score.gold_total) if score.gold_total else None
+
+
+def score_padding_robustness(padded_score: CaseScore, base_score: CaseScore) -> PaddingRobustnessResult:
+    """Compare C9's padded-tree score against C2's own unpadded-tree score.
+
+    Spec scenario "Padding comparison refuses packets from one tree", and
+    the spec's own "every fixture and every packet SHALL record the corpus
+    tree it belongs to": this refuses (naming what is wrong) whenever the
+    two packets record the same tree -- ``None`` included, since a missing
+    tree is not a third valid state, it is the violation the "every packet"
+    requirement exists to catch -- and whenever either side is not exactly
+    the tree it is supposed to be (the base side ``BASE_DISTRACTOR_COUNT``,
+    the padded side ``DEFAULT_DISTRACTOR_COUNT``). Micro-round finding: a
+    prior ``is not None and ...`` guard let ``None`` vs. ``None`` and ``200``
+    vs. ``None`` both pass vacuously.
+    """
+
+    reasons: list[str] = []
+    if padded_score.distractor_count == base_score.distractor_count:
+        reasons.append(
+            f"padded and base packets record the same corpus tree (distractor_count="
+            f"{padded_score.distractor_count!r}); a padding comparison requires two different trees"
+        )
+    if padded_score.distractor_count != DEFAULT_DISTRACTOR_COUNT:
+        reasons.append(
+            f"padded packet must record distractor_count={DEFAULT_DISTRACTOR_COUNT!r}, "
+            f"got {padded_score.distractor_count!r}"
+        )
+    if base_score.distractor_count != BASE_DISTRACTOR_COUNT:
+        reasons.append(
+            f"base packet must record distractor_count={BASE_DISTRACTOR_COUNT!r}, got {base_score.distractor_count!r}"
+        )
+    if reasons:
+        return PaddingRobustnessResult(
+            padded_case_id=padded_score.case_id,
+            base_case_id=base_score.case_id,
+            precision_padded=padded_score.precision,
+            recall_padded=_recall(padded_score),
+            recall_base=_recall(base_score),
+            precision_delta=None,
+            passed=False,
+            reasons=tuple(reasons),
+        )
+
+    recall_padded = _recall(padded_score)
+    recall_base = _recall(base_score)
+    precision_delta = (
+        padded_score.precision - base_score.precision
+        if padded_score.precision is not None and base_score.precision is not None
+        else None
+    )
+    if padded_score.precision is None or padded_score.precision < PADDING_PRECISION_FLOOR:
+        reasons.append(f"padded-tree precision below the {PADDING_PRECISION_FLOOR} floor")
+    if recall_padded != recall_base:
+        reasons.append("padding changed recall relative to the unpadded tree")
+    return PaddingRobustnessResult(
+        padded_case_id=padded_score.case_id,
+        base_case_id=base_score.case_id,
+        precision_padded=padded_score.precision,
+        recall_padded=recall_padded,
+        recall_base=recall_base,
+        precision_delta=precision_delta,
+        passed=not reasons,
+        reasons=tuple(reasons),
+    )
+
+
+# --------------------------------------------------------------------------
+# Run manifest and report (no aggregate field anywhere; every metric is a
+# per-case or per-case-per-anchor-kind numerator/denominator dual).
+# --------------------------------------------------------------------------
+
+REQUIRED_DIGEST_FIELDS: tuple[str, ...] = (
+    "fixture_set_digest",
+    "corpus_digest",
+    "logical_corpus_digest",
+    "threshold_digest",
+)
+
+# Only these legacy instrument modes are permitted to score fixture-key
+# identities without a canonical reference binding. Every other named
+# mechanism is treated as a product path and therefore fails closed, including
+# historical spellings such as ``product-op-activate-context``.
+IDENTITY_ONLY_MECHANISMS: frozenset[str] = frozenset({"oracle_packet", "unknown"})
+
+
+@dataclass(frozen=True)
+class RunManifest:
+    fixture_set_digest: str
+    corpus_digest: str
+    logical_corpus_digest: str
+    threshold_digest: str
+    reference_binding_digest: str | None = None
+    mechanism: str = "unknown"
+
+
+def validate_manifest(data: dict[str, Any]) -> RunManifest:
+    """Refuse (:class:`ManifestVoidError`) a run manifest missing any required digest."""
+
+    missing = [field_name for field_name in REQUIRED_DIGEST_FIELDS if not data.get(field_name)]
+    if missing:
+        raise ManifestVoidError(f"run manifest void: missing digest field(s) {missing}")
+    return RunManifest(
+        fixture_set_digest=data["fixture_set_digest"],
+        corpus_digest=data["corpus_digest"],
+        logical_corpus_digest=data["logical_corpus_digest"],
+        threshold_digest=data["threshold_digest"],
+        reference_binding_digest=data.get("reference_binding_digest"),
+        mechanism=str(data.get("mechanism") or "unknown").strip() or "unknown",
+    )
+
+
+@dataclass(frozen=True)
+class AuditReport:
+    manifest: RunManifest
+    per_case: tuple[CaseScore, ...]
+    fixtures_run: int
+    fixtures_total: int
+    blocked_count: int
+    verdict: str  # "no_verdict" | "reviewed" -- never a pass/fail aggregate score
+
+
+def build_report(
+    manifest: RunManifest, scores: tuple[CaseScore, ...], *, fixtures_total: int = 18
+) -> AuditReport:
+    blocked_count = sum(1 for score in scores if score.blocked)
+    # "reviewed" requires full coverage *and* zero blocked cases (M2): a run
+    # that covered every fixture id but scored some of them "blocked" has
+    # not actually reviewed anything for those cases.
+    verdict = "reviewed" if (len(scores) >= fixtures_total and blocked_count == 0) else "no_verdict"
+    return AuditReport(
+        manifest=manifest,
+        per_case=scores,
+        fixtures_run=len(scores),
+        fixtures_total=fixtures_total,
+        blocked_count=blocked_count,
+        verdict=verdict,
+    )
+
+
+def run_audit(
+    packets: dict[str, ActivationPacket],
+    *,
+    manifest: RunManifest,
+    key_to_ref: dict[str, str] | None = None,
+    reference_binding: ReferenceBinding | None = None,
+    fixtures: tuple[FixtureCase, ...] = FIXTURES,
+    amendments: Iterable[str] = (),
+    unit_parents: Mapping[str, str] | None = None,
+) -> AuditReport:
+    """Score every fixture against its supplied packet, or mark it blocked.
+
+    A ``case_id`` with no entry in ``packets`` is scored ``blocked`` (M2),
+    never silently substituted with :data:`DISABLED_PACKET`: that
+    substitution made "nobody ran this case" indistinguishable from "the
+    compiler was deliberately disabled for this case", and voided the run's
+    verdict only by accident (via the coverage count), not by design. A
+    caller exercising the documented kill-switch shape passes
+    ``DISABLED_PACKET`` explicitly instead.
+    """
+
+    if reference_binding is None:
+        if manifest.mechanism not in IDENTITY_ONLY_MECHANISMS:
+            raise ManifestVoidError(
+                f"run manifest void: product mechanism {manifest.mechanism!r} requires reference_binding"
+            )
+        if manifest.reference_binding_digest:
+            raise ManifestVoidError("run manifest void: reference_binding is missing")
+    else:
+        _validate_reference_binding(reference_binding)
+        if not manifest.reference_binding_digest:
+            raise ManifestVoidError("run manifest void: reference_binding_digest is missing")
+        if manifest.reference_binding_digest != reference_binding.digest:
+            raise ManifestVoidError("run manifest void: reference_binding_digest mismatch")
+        if manifest.corpus_digest != reference_binding.corpus_digest:
+            raise ManifestVoidError("run manifest void: corpus_digest differs from reference binding")
+        if manifest.logical_corpus_digest != reference_binding.logical_corpus_digest:
+            raise ManifestVoidError(
+                "run manifest void: logical_corpus_digest differs from reference binding"
+            )
+
+    scores = tuple(
+        score_case(
+            packets[fixture.case_id],
+            fixture,
+            key_to_ref=key_to_ref,
+            reference_binding=reference_binding,
+            amendments=amendments,
+            unit_parents=unit_parents,
+        )
+        if fixture.case_id in packets
+        else _blocked_score(fixture)
+        for fixture in fixtures
+    )
+    # `fixtures_total` is always the canonical full registered set (18), not
+    # `len(fixtures)`: a caller scoring a deliberately partial subset (e.g. a
+    # dropped twin) must still see "no_verdict", never "reviewed" just
+    # because it covered everything it decided to attempt.
+    return build_report(manifest, scores, fixtures_total=len(FIXTURES))
+
+
+def _percentile(data: list[float], pct: float) -> float | None:
+    """Ceil-rank percentile (``rank = ceil(pct * n)``, ``index = rank - 1``).
+
+    Spec: "percentiles taken ceil-rank so that over the eighteen packets of
+    one run the p95 bound is the run's maximum and the hard refusal is
+    reached only by larger runs." At the pre-registered run size (eighteen
+    fixtures, one packet each), ``rank = ceil(0.95 * 18) = 18``, i.e. p95
+    *is* ``max(data)`` -- the p95 ceiling and the hard-refusal cap
+    (:data:`TOKEN_HARD_CAP`) are deliberately two separate bounds at n = 18:
+    the p95 bound covers every packet in a normal run, while the hard cap is
+    a backstop that only starts distinguishing outliers once a run has more
+    than eighteen packets (e.g. the n = 5 repeats of task 4). A prior
+    nearest-rank approximation under-reported p95 for this small n (minor
+    fix).
+    """
+
+    if not data:
+        return None
+    rank = max(1, math.ceil(pct * len(data)))
+    index = min(len(data), rank) - 1
+    return data[index]
+
+
+def token_size_distribution(scores: Iterable[CaseScore]) -> dict[str, Any]:
+    """The packet-size distribution across a run's cases.
+
+    A percentile is the benchmark's own pre-registered way of reporting
+    packet-size threshold compliance (spec: "packet size p50 at most 900
+    tokens and p95 at most 1,500 ... hard refusal above 2,000"), not a
+    weighted aggregate score: it is always reported beside the full per-case
+    list it is derived from, never in place of it.
+    """
+
+    sizes = sorted(score.packet_tokens for score in scores)
+    over_cap = [score.case_id for score in scores if score.packet_tokens > TOKEN_HARD_CAP]
+    return {"p50": _percentile(sizes, 0.50), "p95": _percentile(sizes, 0.95), "over_hard_cap": over_cap}
+
+
+def _latency_distribution(values: list[float]) -> dict[str, Any]:
+    values = sorted(values)
+    return {"p50": _percentile(values, 0.50), "p95": _percentile(values, 0.95)}
+
+
+def working_set_latency_distribution(scores: Iterable[CaseScore]) -> dict[str, Any]:
+    """The compiler-stage latency distribution, over only the cases that carry it."""
+
+    return _latency_distribution([score.working_set_ms for score in scores if score.working_set_ms is not None])
+
+
+def end_to_end_latency_distribution(scores: Iterable[CaseScore]) -> dict[str, Any]:
+    """The end-to-end ``activate_context`` latency distribution, over only the
+    cases that carry it -- compared against :data:`MEASURED_LATENCY_MS`'s
+    naive-path baseline, never a placeholder figure (M8).
+    """
+
+    return _latency_distribution([score.latency_ms for score in scores if score.latency_ms is not None])
+
+
+def audit_passed(report: AuditReport) -> bool:
+    """Whether the audit is green: full coverage, every case passed, and every
+    pre-registered run-level bound (token size, hedging ceiling, latency,
+    C9 padding robustness) is met.
+    """
+
+    if report.verdict != "reviewed":
+        return False
+    if not all(score.passed for score in report.per_case):
+        return False
+
+    sizes = token_size_distribution(report.per_case)
+    if sizes["over_hard_cap"]:
+        return False
+    if sizes["p50"] is not None and sizes["p50"] > TOKEN_P50_CEILING:
+        return False
+    if sizes["p95"] is not None and sizes["p95"] > TOKEN_P95_CEILING:
+        return False
+
+    hedged_count = sum(1 for score in report.per_case if score.hedged)
+    if hedged_count > HEDGED_TWINS_CEILING:
+        return False
+
+    working_set = working_set_latency_distribution(report.per_case)
+    if working_set["p50"] is not None and working_set["p50"] > WORKING_SET_P50_MS_CEILING:
+        return False
+    if working_set["p95"] is not None and working_set["p95"] > WORKING_SET_P95_MS_CEILING:
+        return False
+
+    end_to_end = end_to_end_latency_distribution(report.per_case)
+    if end_to_end["p50"] is not None and end_to_end["p50"] > MEASURED_LATENCY_MS["p50_ms"]:
+        return False
+    if end_to_end["p95"] is not None and end_to_end["p95"] > MEASURED_LATENCY_MS["p95_ms"]:
+        return False
+
+    scores_by_id = {score.case_id: score for score in report.per_case}
+    if "C9" in scores_by_id and "C2" in scores_by_id:
+        if not score_padding_robustness(scores_by_id["C9"], scores_by_id["C2"]).passed:
+            return False
+
+    return True
+
+
+def report_to_dict(report: AuditReport) -> dict[str, Any]:
+    scores_by_id = {score.case_id: score for score in report.per_case}
+    padding_robustness = None
+    if "C9" in scores_by_id and "C2" in scores_by_id:
+        result = score_padding_robustness(scores_by_id["C9"], scores_by_id["C2"])
+        padding_robustness = {
+            "padded_case_id": result.padded_case_id,
+            "base_case_id": result.base_case_id,
+            "precision_padded": result.precision_padded,
+            "recall_padded": result.recall_padded,
+            "recall_base": result.recall_base,
+            "precision_delta": result.precision_delta,
+            "passed": result.passed,
+            "reasons": list(result.reasons),
+        }
+    hedged_total = sum(1 for score in report.per_case if score.is_twin and score.expected_status == "unresolved")
+    hedged_count = sum(1 for score in report.per_case if score.hedged)
+    return {
+        "manifest": dataclasses.asdict(report.manifest),
+        "verdict": report.verdict,
+        "fixtures_run": report.fixtures_run,
+        "fixtures_total": report.fixtures_total,
+        "blocked": {"count": report.blocked_count, "total": report.fixtures_total},
+        "hedged_twins": {"count": hedged_count, "total": hedged_total},
+        "packet_size_tokens": token_size_distribution(report.per_case),
+        "working_set_latency_ms": working_set_latency_distribution(report.per_case),
+        "end_to_end_latency_ms": end_to_end_latency_distribution(report.per_case),
+        "c9_padding_robustness": padding_robustness,
+        "per_case": [
+            {
+                "case_id": score.case_id,
+                "is_twin": score.is_twin,
+                "expected_status": score.expected_status,
+                "observed_status": score.observed_status,
+                "status_match": score.status_match,
+                "gold": {"hit": score.gold_hit, "total": score.gold_total},
+                "poison": {"hit": score.poison_hit, "total": score.poison_total},
+                "twin_false_activation": score.twin_false_activation,
+                "hedged": score.hedged,
+                "precision": score.precision,
+                "must_include_missing": list(score.must_include_missing),
+                "must_exclude_present": list(score.must_exclude_present),
+                "packet_chars": score.packet_chars,
+                "packet_tokens": score.packet_tokens,
+                "latency_ms": score.latency_ms,
+                "working_set_ms": score.working_set_ms,
+                "by_anchor_kind": [
+                    {
+                        "kind": tally.kind,
+                        "gold": {"hit": tally.gold_hit, "total": tally.gold_total},
+                        "poison": {"hit": tally.poison_hit, "total": tally.poison_total},
+                    }
+                    for tally in score.by_anchor_kind
+                ],
+                "blocked": score.blocked,
+                "passed": score.passed,
+                "failure_reasons": list(score.failure_reasons),
+            }
+            for score in report.per_case
+        ],
+    }
+
+
+def write_report(report: AuditReport, path: Path) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report_to_dict(report), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+__all__ = [
+    "AMBIGUITY_PRECISION",
+    "AGENT_CHOICE",
+    "AGENT_CHOICE_RULE",
+    "AMENDMENTS",
+    "CARRIED_GOLD",
+    "DISABLED_PACKET",
+    "GOLD_RECALL_FLOOR",
+    "HEDGED_POISON",
+    "HEDGED_TWINS_CEILING",
+    "IDENTITY_ONLY_MECHANISMS",
+    "PADDING_PRECISION_FLOOR",
+    "PRECISION_FLOOR",
+    "REQUIRED_DIGEST_FIELDS",
+    "STATEMENT_MAX_CHARS",
+    "TOKEN_HARD_CAP",
+    "TOKEN_P50_CEILING",
+    "TOKEN_P95_CEILING",
+    "UNIT_PARENT_RECALL",
+    "WORKING_SET_P50_MS_CEILING",
+    "WORKING_SET_P95_MS_CEILING",
+    "ActivationPacket",
+    "Anchor",
+    "AnchorKindTally",
+    "AuditReport",
+    "CaseScore",
+    "CurrentStateEntry",
+    "ManifestVoidError",
+    "PacketError",
+    "PaddingRobustnessResult",
+    "Pointer",
+    "ReferenceBinding",
+    "RunManifest",
+    "Unit",
+    "INVALID_TWIN",
+    "INVALID_TWINS",
+    "INVALID_TWIN_RULE",
+    "agent_choice_digest",
+    "excluded_case_ids",
+    "invalid_twin_reason",
+    "invalid_twins_digest",
+    "audit_passed",
+    "build_report",
+    "end_to_end_latency_distribution",
+    "injected_char_count",
+    "load_packet",
+    "packet_from_dict",
+    "packet_token_count",
+    "report_to_dict",
+    "run_audit",
+    "score_case",
+    "score_padding_robustness",
+    "token_size_distribution",
+    "turn_status",
+    "validate_manifest",
+    "working_set_latency_distribution",
+    "write_report",
+]

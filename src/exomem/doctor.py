@@ -904,6 +904,70 @@ def _check_deferred_index_backlog(vault_root: Path | None) -> DoctorCheck:
     )
 
 
+def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
+    """Fast durable acknowledgement's derived custody, in one content-free line.
+
+    Read-only and out of process: counts and one age from the receipt store,
+    the pending overlay's outcome recomputed without retiring anything, and
+    this process's view of EXOMEM_FAST_DURABLE_ACK (the service's own value is
+    in its environment). A stranded batch fails the check: no drain pass
+    finishes it, and while one of its pending rows cannot prove, every managed
+    recall answers warming.
+    """
+    from . import derived_receipts, pending_recall, writer_lease
+
+    active = "active" if writer_lease.fast_durable_ack_active() else "inactive"
+    details: dict[str, object] = {"fast_ack": active}
+    if vault_root is None:
+        return _check(
+            "fast_ack_custody",
+            "pass",
+            "No vault configured; derived custody was not inspected.",
+            details=details,
+        )
+    try:
+        census = derived_receipts.custody_census(vault_root)
+        visibility, code = pending_recall.readonly_visibility(vault_root)
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+        return _check(
+            "fast_ack_custody",
+            "warn",
+            f"fast ack {active}; derived custody could not be read.",
+            details=details,
+        )
+    details.update(census)
+    details["pending_visibility"] = visibility
+    details["pending_visibility_code"] = code
+    oldest = census["oldest_due_age_seconds"]
+    shown = visibility if code is None else f"{visibility}({code})"
+    message = (
+        f"fast ack {active}; due components {census['due_components']} "
+        f"(oldest {'-' if oldest is None else f'{oldest:.0f}s'}); "
+        f"stranded batches {census['stranded_batches']}; "
+        f"recovering {census['recovering_batches']}; pending visibility {shown}"
+    )
+    if census["stranded_batches"]:
+        return _check(
+            "fast_ack_custody",
+            "fail",
+            message,
+            'Run `exomem maintain --reconcile` (maintain_memory mode="reconcile") to '
+            "re-converge stranded batches from their current bytes. Setting "
+            "EXOMEM_FAST_DURABLE_ACK=0 stops new ones but does not repair these.",
+            details=details,
+        )
+    if visibility != "ready":
+        return _check(
+            "fast_ack_custody",
+            "warn",
+            message,
+            "Managed recall answers warming until pending visibility proves. If it "
+            "persists, run `exomem maintain --reconcile`.",
+            details=details,
+        )
+    return _check("fast_ack_custody", "pass", message, details=details)
+
+
 def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
     """graph_sync epoch health: whether the derived graph is servable.
 
@@ -950,7 +1014,21 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
             f"Run `{_REBUILD_VECTORS_CMD}` to recover the derived graph.",
             details=details,
         )
+    from . import deferred_index
+
+    quarantined = deferred_index.graph_quarantined_count(vault_root)
+    if quarantined:
+        details["quarantined_paths"] = quarantined
     if state == "current":
+        if quarantined:
+            return _check(
+                "graph_sync.state",
+                "warn",
+                f"graph_sync is current at generation {generation}, but {quarantined} "
+                "page(s) could not be read; the graph keeps their last readable version.",
+                "Check the files' permissions or encoding; a change to a page retries it.",
+                details=details,
+            )
         return _check(
             "graph_sync.state",
             "pass",
@@ -958,6 +1036,29 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
             details=details,
         )
     if state == "recovery_required":
+        from . import epistemic_graph
+
+        try:
+            lag = epistemic_graph.graph_lag(vault_root)
+        except Exception:  # noqa: BLE001 - an unreadable lag leaves the failure standing
+            lag = None
+        if (
+            lag is not None
+            and lag["catching_up"]
+            and (lag["oldest_queued_age_seconds"] or 0.0) < RECOVERY_AGE_FAIL_SECONDS
+        ):
+            # Every skipped generation is queued repair the drain is working
+            # through: a catch-up publication or a truncated drain. Readers
+            # refuse meanwhile; that is lag to watch, not a graph to recover.
+            return _check(
+                "graph_sync.state",
+                "warn",
+                f"graph_sync is catching up at generation {generation}: "
+                f"{lag['generations_behind']} generation(s) behind, "
+                f"{lag['queued_paths']} path(s) queued, every gap receipt-covered.",
+                "No action needed while the lag shrinks; the graph drain converges it.",
+                details={**details, "lag": lag},
+            )
         if checkpoint is not None:
             remediation = graph_sync.committed_graph_failure(checkpoint)[
                 "graph_sync_remediation"
@@ -987,6 +1088,50 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
         "cannot be trusted.",
         f"Run `{_REBUILD_VECTORS_CMD}` to recover the derived graph.",
         details=details,
+    )
+
+
+def _check_relation_census(vault_root: Path | None) -> DoctorCheck:
+    """One line of relation quality from the published graph snapshot.
+
+    Informational: edge quality is never a setup failure, so an available
+    census passes and an unavailable one only warns (`graph_sync.state` owns
+    the graph's health). Doctor is a read-only local preflight run by the
+    owner, so it declares the owner-local caller the census serves.
+    """
+    if vault_root is None:
+        return _check(
+            "relations.census",
+            "pass",
+            "No vault configured; the relation census was not read.",
+        )
+    from . import relation_census
+    from .governance.principal import library_scope
+
+    try:
+        with library_scope():
+            result = relation_census.census(vault_root)
+    except Exception as error:  # noqa: BLE001 - diagnostics must not crash doctor
+        return _check(
+            "relations.census",
+            "warn",
+            f"Relation census unavailable: {type(error).__name__}.",
+        )
+    if not result.get("available"):
+        return _check(
+            "relations.census",
+            "warn",
+            relation_census.summary_line(result),
+            "Run `exomem relations census` once the graph is current.",
+        )
+    return _check(
+        "relations.census",
+        "pass",
+        relation_census.summary_line(result),
+        details={
+            "graph_generation": result.get("graph_generation"),
+            "eligible_pages": result["cohort"]["eligible_pages"],
+        },
     )
 
 
@@ -1968,21 +2113,30 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "so it can't be probed.",
             f"Install it with `uv sync --extra {extra}` to enable hybrid search.",
         )
-    from . import embeddings, model_cache
+    from . import embeddings, model_cache, recall_space
 
-    if not _model_cached(_hf_hub_dir(), model_cache.snapshot_dirname(embeddings.MODEL_NAME)):
+    index = embeddings.get_embedding_index(vault_root)
+    # The probe encodes with the encoder that serves this sidecar: the recall
+    # encoder, or the one that wrote it while a re-embed has not cut over.
+    model = recall_space.serving_model(index)
+    if not _model_cached(_hf_hub_dir(), model_cache.snapshot_dirname(model)):
         # doctor must never trigger a download — skip the live probe rather than
         # let embed_texts() fetch the model over the network.
         return _check(
             "embeddings.sidecar",
             "warn",
-            f"Embedding sidecar exists but {embeddings.MODEL_NAME} is not in the local HF "
+            f"Embedding sidecar exists but {model} is not in the local HF "
             "cache, so the live probe was skipped (doctor never downloads).",
             "Run `exomem warm` to fetch the model, then re-run doctor for the live probe.",
         )
     try:
-        index = embeddings.get_embedding_index(vault_root)
-        query_vec = embeddings.embed_texts(["knowledge"], is_query=True)[0]
+        with recall_space.encoding_for(index, load=True):
+            query_vec = embeddings.embed_texts(["knowledge"], is_query=True)[0]
+            # The resident encoder's own fingerprint, which for a served model
+            # names the exact bytes it runs; the probe just loaded it. Read
+            # inside the block so a sidecar still served by its previous
+            # encoder reports that encoder's space.
+            fingerprint = embeddings._vector_space()
         hits = index.search(query_vec, k=1)
     except Exception as e:  # noqa: BLE001 — diagnostic boundary
         return _check(
@@ -2004,9 +2158,6 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     # identifies the vector space. A benchmark contender is disqualified when it
     # cannot show it is serving semantically (docs/benchmark-fairness-contract.md),
     # and until now an ONNX install had no way to show that from doctor.
-    from . import embedding_backend
-
-    fingerprint = embedding_backend.fingerprint(embeddings.MODEL_NAME)
     try:
         metadata, _matrix = index.all_vectors()
         vector_count: int | None = len(metadata)
@@ -2022,7 +2173,8 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "backend": backend,
             "vector_count": vector_count,
             "fingerprint": fingerprint,
-            "model": embeddings.MODEL_NAME,
+            "model": model,
+            "dim": getattr(getattr(index, "identity", None), "dim", None),
         },
     )
 
@@ -2036,6 +2188,74 @@ def _hf_hub_dir() -> Path:
     from . import model_cache
 
     return model_cache.hub_dir()
+
+
+def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
+    """Which vector space serves recall, and how far a re-embed into the recall
+    encoder's space has come. Read from the sidecars on disk; loads no model."""
+    if vault_root is None:
+        return None
+    from . import recall_migration
+
+    try:
+        state = recall_migration.disk_status(vault_root)
+    except Exception as e:  # noqa: BLE001 — diagnostic boundary
+        return _check("embeddings.reembed", "warn", f"Recall sidecars could not be read: {e}")
+    serving = state.get("serving")
+    if serving is None:
+        return None
+    building = state.get("building")
+    from . import recall_space
+
+    recall = recall_space.recall_model()
+    if recall_space.cell_mode() and serving["model"] != recall:
+        # A cell holds one encoder, so the sidecar another model wrote is
+        # refused until the re-embed cuts over, not served.
+        built = (
+            f"{building['paths_done']}/{state['paths_total']} pages built"
+            if building
+            else "not started"
+        )
+        if state.get("reembed") == "off":
+            return _check(
+                "embeddings.reembed",
+                "warn",
+                f"This cell encodes with {recall} and refuses its {serving['model']} sidecar; "
+                "dense recall is off and EXOMEM_RECALL_REEMBED=off keeps it off.",
+                "Unset EXOMEM_RECALL_REEMBED to let the cell re-embed and cut over.",
+                details=state,
+            )
+        return _check(
+            "embeddings.reembed",
+            "warn",
+            f"This cell encodes with {recall} and refuses its {serving['model']} sidecar; "
+            f"dense recall is off until the re-embed cuts over ({built}).",
+            details=state,
+        )
+    if not building:
+        return _check(
+            "embeddings.reembed",
+            "pass",
+            f"Recall serves {serving['model']} vectors ({serving['dim']}-d) from {serving['sidecar']}.",
+            details=state,
+        )
+    if state.get("reembed") == "off":
+        return _check(
+            "embeddings.reembed",
+            "warn",
+            f"Recall serves {serving['model']} vectors while a sidecar for {building['model']} "
+            f"is partly built ({building['paths_done']}/{state['paths_total']} pages); "
+            "EXOMEM_RECALL_REEMBED=off keeps it from finishing.",
+            "Unset EXOMEM_RECALL_REEMBED to let the service finish and cut over.",
+            details=state,
+        )
+    return _check(
+        "embeddings.reembed",
+        "pass",
+        f"Recall serves {serving['model']} vectors while the service re-embeds into "
+        f"{building['model']}: {building['paths_done']}/{state['paths_total']} pages built.",
+        details=state,
+    )
 
 
 def _model_cached(hub: Path, dirname: str) -> bool:
@@ -2210,6 +2430,8 @@ def _check_remote_env() -> list[DoctorCheck]:
             "Set EXOMEM_GITHUB_USER_ID to the positive numeric ID returned by GitHub.",
         ))
 
+    checks.append(_check_remote_owner_binding())
+
     host = os.environ.get("EXOMEM_HOST", "127.0.0.1")
     checks.append(_check("env.EXOMEM_HOST", "pass", f"EXOMEM_HOST resolves to {host}."))
     if os.environ.get("EXOMEM_REST_API_KEY"):
@@ -2231,6 +2453,104 @@ def _check_remote_env() -> list[DoctorCheck]:
             "Run `uv run python scripts/set-upload-token.py` if you want binary upload/download.",
         ))
     return checks
+
+
+_REMOTE_OWNER_LINE = "EXOMEM_OWNER_OAUTH_SUBJECT=github:<the value of EXOMEM_GITHUB_USER_ID>"
+
+
+def _check_remote_owner_binding() -> DoctorCheck:
+    """The owner binding's state. Never prints the bound id or the login."""
+    from .governance.principal import remote_owner_binding_state
+
+    check_id = "env.EXOMEM_OWNER_OAUTH_SUBJECT"
+    state = remote_owner_binding_state()
+    if state == "active":
+        return _check(
+            check_id,
+            "pass",
+            "Remote sign-ins by the allowed GitHub account act as the owner. "
+            "They stay labelled remote (owner-oauth) in ledgers.",
+        )
+    if state == "mismatch":
+        return _check(
+            check_id,
+            "fail",
+            "The owner subject is not the account allowed to sign in, so owner "
+            "equivalence can never apply.",
+            f"Set {_REMOTE_OWNER_LINE}, or remove it, and restart.",
+        )
+    if state == "malformed":
+        return _check(
+            check_id,
+            "fail",
+            "EXOMEM_OWNER_OAUTH_SUBJECT is malformed. Treated as unset. "
+            "Expected `github:<numeric id>`.",
+            f"Set {_REMOTE_OWNER_LINE}, or remove it, and restart.",
+        )
+    return _check(
+        check_id,
+        "pass",
+        "Remote sign-ins act as a separate non-owner principal.",
+        f"To act as the owner remotely, set {_REMOTE_OWNER_LINE} and restart.",
+    )
+
+
+def _check_remote_owner_former_audience(vault_root: Path | None) -> list[DoctorCheck]:
+    """Rules and grants naming the audience remote sign-ins had before binding.
+
+    Binding makes the allowed account's remote sessions the owner, so anything
+    authored against its separate `principal:` audience stops applying to them.
+    Reported while the binding is active, and previewed while it is unset so
+    the owner can read it before enabling. Counts only; never the audience.
+    """
+    if vault_root is None:
+        return []
+    from .governance import policy as policy_module
+    from .governance.principal import (
+        _allowed_github_user_id,
+        normalize_audience,
+        remote_owner_binding_state,
+    )
+
+    state = remote_owner_binding_state()
+    if state not in ("active", "unset"):
+        return []
+    allowed = _allowed_github_user_id(os.environ)
+    issuer = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
+    if allowed is None or not issuer:
+        return []
+    former = normalize_audience(subject=str(allowed), issuer=issuer)
+    try:
+        pol = policy_module.load(vault_root)
+    except Exception:  # noqa: BLE001 - doctor reports, it never breaks
+        return []
+    if pol.empty or pol.blocked:
+        return []
+    rules = sum(1 for rule in pol.rules if rule.audience == former)
+    grants = sum(1 for grant in pol.grants if grant.audience == former) + sum(
+        1 for grant in pol.release_grants if grant.to_audience == former
+    )
+    total = rules + grants
+    if total == 0:
+        return []
+    details = {"rules": rules, "grants": grants}
+    if state == "active":
+        return [_check(
+            "governance.remote_owner_former_audience",
+            "warn",
+            f"{total} rules/grants name your former remote audience and no longer "
+            "apply to your remote sessions.",
+            "Review them; removing EXOMEM_OWNER_OAUTH_SUBJECT and restarting "
+            "applies them again.",
+            details=details,
+        )]
+    return [_check(
+        "governance.remote_owner_former_audience",
+        "pass",
+        f"{total} rules/grants name your remote audience; they would stop applying "
+        "to your remote sessions if EXOMEM_OWNER_OAUTH_SUBJECT were set.",
+        details=details,
+    )]
 
 
 def _check_ha_env() -> list[DoctorCheck]:
@@ -2946,6 +3266,69 @@ def _check_edge_ingress_read_routing(base_url: str, config: LeaseConfig) -> Doct
     )
 
 
+def _check_latency() -> DoctorCheck:
+    """Recall latency per tool and calling client over the trailing window, read
+    from the call ledger on disk so it sees across restarts. Warns above the
+    provisional ceilings and names the stage spans that dominate the slow calls,
+    so the finding is a diagnosis rather than a number. Reads no note content,
+    query text or path. Never touches the network."""
+    from . import call_ledger, latency_watch
+
+    details: dict[str, object] = {
+        "window_seconds": int(latency_watch.WINDOW_SECONDS),
+        "ceilings_ms": {
+            "recall": int(latency_watch.RECALL_P90_CEILING_MS),
+            "deep_recall": int(latency_watch.DEEP_RECALL_P90_CEILING_MS),
+        },
+        "min_samples": latency_watch.MIN_SAMPLES,
+    }
+    try:
+        path = call_ledger.ledger_path()
+        archive = call_ledger.archive_dir()
+    except Exception:  # noqa: BLE001 - doctor must stay structured
+        return _check("latency", "pass", "Call ledger location unavailable; nothing to measure.", details=details)
+    details["ledger"] = str(path)
+    if not path.exists():
+        return _check("latency", "pass", "No call ledger yet; nothing to measure.", details=details)
+    now = time.time()
+    try:
+        samples = latency_watch.samples_from_ledger(path, archive_dir=archive, now=now)
+        rows = latency_watch.summarize(samples, now=now)
+    except Exception as exc:  # noqa: BLE001 - doctor must stay structured
+        details["error"] = type(exc).__name__
+        return _check("latency", "pass", "Call ledger could not be summarised.", details=details)
+    details["rows"] = rows
+    if not rows:
+        return _check("latency", "pass", "No recall calls in the window; nothing to measure yet.", details=details)
+    warnings: list[str] = []
+    for row in rows:
+        if not row["breach"]:
+            continue
+        label = f"{row['tool']}{' deep' if row['deep'] else ''} from {row['client']}"
+        dominant = ", ".join(
+            f"{span['name']} {span['ms']} ms over {span['calls']} call(s)"
+            for span in row["dominant_spans"][:3]
+        )
+        warnings.append(
+            f"{label}: p90 {row['p90_ms']} ms over the {row['ceiling_ms']} ms ceiling "
+            f"({row['samples']} calls); dominant spans: {dominant or 'none recorded'}"
+        )
+    thin = sum(1 for row in rows if row["samples"] < latency_watch.MIN_SAMPLES)
+    if warnings:
+        return _check(
+            "latency",
+            "warn",
+            "; ".join(warnings),
+            "Read the dominant spans first: they name the stage that regressed. "
+            "`exomem logs --file ledger` has the rows; docs/observability.md explains each span.",
+            details=details,
+        )
+    message = "Recall latency is under its ceilings."
+    if thin:
+        message += f" {thin} tool/client pair(s) have fewer than {latency_watch.MIN_SAMPLES} calls in the window."
+    return _check("latency", "pass", message, details=details)
+
+
 def _check_observability() -> DoctorCheck:
     """Log directory writability, active/rotated file sizes, JSONL
     tail-parseability, the NSSM `service.*` rotation pile, and
@@ -3079,6 +3462,64 @@ def _check_idempotency_store() -> DoctorCheck:
     )
 
 
+def _check_managed_hook_refresh() -> DoctorCheck:
+    """Surface the outcome of the last managed-upgrade Claude Code hook refresh.
+
+    Read-only: never runs `install-hook` itself, just reports what a managed
+    upgrade (if any has ever run on this machine) recorded when it last
+    refreshed already-wired profiles.
+    """
+    from . import install_hook
+
+    report = install_hook.read_last_upgrade_refresh()
+    if report is None:
+        return _check(
+            "upgrade.hook_refresh",
+            "pass",
+            "no managed upgrade has refreshed Claude Code hooks yet",
+        )
+    if report.get("skipped"):
+        return _check(
+            "upgrade.hook_refresh",
+            "pass",
+            f"the last managed upgrade skipped the hook refresh ({report.get('reason')})",
+        )
+    profiles = report.get("profiles")
+    failed = (
+        [p for p in profiles if isinstance(p, dict) and not p.get("success")]
+        if isinstance(profiles, list)
+        else []
+    )
+    if failed:
+        names = ", ".join(str(p.get("settings_path")) for p in failed)
+        return _check(
+            "upgrade.hook_refresh",
+            "warn",
+            f"the last managed upgrade could not refresh Claude Code hooks for: {names}",
+            "Re-run `exomem install-hook` for the listed profile(s).",
+            details=report,
+        )
+    if report.get("success") is False:
+        return _check(
+            "upgrade.hook_refresh",
+            "warn",
+            "the last managed upgrade could not complete the Claude Code hook refresh",
+            "Re-run `exomem install-hook` for affected profiles.",
+            details=report,
+        )
+    if profiles:
+        return _check(
+            "upgrade.hook_refresh",
+            "pass",
+            "the last managed upgrade refreshed all wired Claude Code hook profiles",
+        )
+    return _check(
+        "upgrade.hook_refresh",
+        "pass",
+        "the last managed upgrade found no wired Claude Code hook profiles to refresh",
+    )
+
+
 def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     """Doctor's `edge-ingress` section (design.md Decision 3): verifies the public
     apex is fronted by the HA edge worker rather than tunnel-direct. Skipped
@@ -3163,8 +3604,10 @@ def doctor(
         _check_state_placement(vault_root),
         _check_rebuild_temp_orphans(vault_root),
         _check_write_path_env_flags(vault_root),
+        _check_fast_ack_custody(vault_root),
         _check_frozen_verifier(),
         check_graph_recovery_age(vault_root),
+        _check_relation_census(vault_root),
     ]
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:
@@ -3192,6 +3635,9 @@ def doctor(
         sidecar = _check_embedding_sidecar(vault_root)
         if sidecar is not None:
             checks.append(sidecar)
+        reembed = _check_recall_reembed(vault_root)
+        if reembed is not None:
+            checks.append(reembed)
 
     if profile in ("standard", "media"):
         checks.extend([
@@ -3206,6 +3652,7 @@ def doctor(
 
     if profile == "remote":
         checks.extend(_check_remote_env())
+        checks.extend(_check_remote_owner_former_audience(vault_root))
         if _ha_auth_configured():
             checks.extend(_check_ha_env())
         # Opt-in live-endpoint verification (three read-only GETs). The
@@ -3236,7 +3683,9 @@ def doctor(
     # enabled, and the section self-skips when it is not (design.md Decision 3).
     checks.extend(_check_edge_ingress(probe=probe))
     checks.append(_check_observability())
+    checks.append(_check_latency())
     checks.append(_check_idempotency_store())
+    checks.append(_check_managed_hook_refresh())
 
     return DoctorReport(profile=profile, checks=checks)
 

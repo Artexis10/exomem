@@ -1,4 +1,5 @@
 {{- if .Values.gateway.enabled }}
+{{- $legacyPaused := eq (include "exomem.legacyHostedPaused" .) "true" -}}
 {{- $lock := include "exomem.hostedDeploymentLockJson" . | mustFromJson }}
 {{- $runtimeTarget := $lock.runtimeTarget }}
 {{- if eq (include "exomem.hostedRuntimeSelection" .) "rollback" }}
@@ -21,7 +22,7 @@ metadata:
     app.kubernetes.io/name: exomem-gateway
     app.kubernetes.io/part-of: exomem-hosted
 spec:
-  replicas: {{ .Values.gateway.replicas }}
+  replicas: {{ ternary 0 .Values.gateway.replicas $legacyPaused }}
   strategy:
     type: RollingUpdate
     rollingUpdate:

@@ -108,9 +108,7 @@
     (size(variables.migrationSpec.volumes) == 4 &&
       variables.migrationSpec.volumes[0].name == 'data' &&
       variables.migrationSpec.volumes[0].persistentVolumeClaim.claimName == request.namespace + '-data' &&
-      (variables.migrationMeta.annotations['exomem.io/governance-migration-phase'] == 'inspect'
-        ? variables.migrationSpec.volumes[0].persistentVolumeClaim.readOnly == true
-        : (!has(variables.migrationSpec.volumes[0].persistentVolumeClaim.readOnly) || variables.migrationSpec.volumes[0].persistentVolumeClaim.readOnly == false)) &&
+      (!has(variables.migrationSpec.volumes[0].persistentVolumeClaim.readOnly) || variables.migrationSpec.volumes[0].persistentVolumeClaim.readOnly == false) &&
       variables.migrationSpec.volumes[1].name == 'authorization-session-source' &&
       variables.migrationSpec.volumes[1].secret.secretName == 'exomem-authorization-session' &&
       variables.migrationSpec.volumes[1].secret.defaultMode == 292 &&
@@ -135,7 +133,7 @@
       variables.migrationSpec.containers[0].volumeMounts[{{ $i }}].name == 'data' &&
       variables.migrationSpec.containers[0].volumeMounts[{{ $i }}].mountPath == '/var/lib/exomem/{{ $path }}' &&
       variables.migrationSpec.containers[0].volumeMounts[{{ $i }}].subPath == '{{ $path }}' &&
-      (variables.migrationMeta.annotations['exomem.io/governance-migration-phase'] == 'inspect' || '{{ $path }}' == 'logs'
+      ('{{ $path }}' == 'logs'
         ? variables.migrationSpec.containers[0].volumeMounts[{{ $i }}].readOnly == true
         : (!has(variables.migrationSpec.containers[0].volumeMounts[{{ $i }}].readOnly) || variables.migrationSpec.containers[0].volumeMounts[{{ $i }}].readOnly == false)) &&
       {{ end -}}
@@ -147,5 +145,5 @@
       variables.migrationSpec.containers[0].volumeMounts[4].mountPath == '/tmp' &&
       (!has(variables.migrationSpec.containers[0].volumeMounts[4].readOnly) || variables.migrationSpec.containers[0].volumeMounts[4].readOnly == false) &&
       !has(variables.migrationSpec.containers[0].volumeMounts[4].subPath))
-  message: Governance migration mounts only fixed PVC roots and read-only custody; inspection cannot write persisted roots.
+  message: Governance migration mounts only fixed PVC roots read-write and read-only custody and logs.
 {{- end -}}

@@ -4,3 +4,19 @@ collections:
     version: 13.2.0
   - name: community.library_inventory_filtering_v1
     version: 1.1.5
+  - name: community.postgresql
+    version: 3.3.0
+  # Only used by the gated live-role test's inventory
+  # (ansible_connection=community.docker.docker), never by production, which
+  # connects over SSH. Pinned like every other collection here (OM-6/item 6)
+  # rather than resolved implicitly from whatever happened to already be on
+  # the collection search path. Not 3.7.0 (the first version considered):
+  # confirmed live that 3.7.0's docker.py connection plugin and
+  # socket_handler.py both do `from ansible.compat import selectors`, a
+  # shim ansible-core 2.21.2 no longer ships (removed upstream), which
+  # fails every task past "Gathering Facts" with "cannot import name
+  # 'selectors' from 'ansible.compat'". 3.13.10 (the last 3.x release,
+  # still requires_ansible >=2.11.0, same major line) vendors its own
+  # selectors shim instead and was confirmed live to work.
+  - name: community.docker
+    version: 3.13.10

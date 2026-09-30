@@ -1,18 +1,11 @@
 """The frozen assertion registry.
 
-The 35 names below are pre-registered in ``PREREGISTRATION.md`` §2 — eighteen
-committed before any competitor was run by this programme, six added by the
-2026-08 loop-closure amendment, nine added by the 2026-08 no-nudge amendment,
-and two added by the 2026-08 lifecycle-replay amendment, all through the
-governed §7 path. The registry is a closed set on
-purpose: a scenario that names anything else fails to load, which is what stops
-the suite from growing an assertion to fit a result it wanted.
+The assertion and family names below mirror PREREGISTRATION.md through the
+sequence-six downstream action utility amendment. Unknown names fail at
+fixture load; assertions cannot be added after seeing a result.
 
-Registration is not release. The families each amendment introduced stay
-withheld from comparative runs until its receipt is acknowledged; that gate
-lives in :mod:`epistemic.amendments` and fires at the same load-time choke
-point this registry does. Sequence 1 is acknowledged; sequences 2 and 3 are
-not, so f20-f26 and f27 are registered and withheld at once.
+Registration is not release. Each family's amendment receipt controls its
+comparative use through :mod:`epistemic.amendments`.
 
 ``PREREGISTERED_ASSERTIONS`` mirrors §2 in code so the mapping can be checked
 without file I/O at import time; ``tests/test_epistemic_registry.py`` parses the
@@ -82,6 +75,18 @@ PREREGISTERED_ASSERTIONS: tuple[str, ...] = (
     # and reported together.
     "lifecycle_consequence_landed_unprompted",
     "no_structured_write_beyond_expectation",
+    # Sequence 4: collection claims replay, pending founder acknowledgment.
+    "collection_candidate_surfaced_within_budget",
+    "ledger_state_matches_expectation",
+    "claimed_observation_reflected",
+    # Sequence 5: artifact-role and transient-state replay, pending acknowledgment.
+    "role_signal_delivered_after_write",
+    "role_state_settled_with_provenance",
+    "transient_signal_delivered_after_write",
+    "transient_state_settled_without_dismissal",
+    # Sequence 6: downstream action utility.
+    "utility_action_state_valid",
+    "utility_no_prohibited_effects",
 )
 
 #: Quiet assertions: every one composes
@@ -101,6 +106,7 @@ COMPOSES_ABSENCE_META: frozenset[str] = frozenset(
         "signal_absence_checked_across_all_surfaces",
         "dismissal_respected_across_passes",
         "restructure_signal_cleared_by_state_change",
+        "collection_candidate_surfaced_within_budget",
     }
 )
 
@@ -139,6 +145,11 @@ PREREGISTERED_FAMILIES: tuple[tuple[str, str], ...] = (
     ("f26", "hookless_episode_carrier"),
     # Added by the 2026-08 lifecycle-replay amendment (§7), sequence 3.
     ("f27", "lifecycle_routing_replay"),
+    ("f28", "collection_promotion_replay"),
+    ("f29", "claimed_collection_routing_replay"),
+    ("f30", "artifact_role_promotion_replay"),
+    ("f31", "transient_state_hygiene_replay"),
+    ("f32", "utility_action_episode"),
 )
 
 PREREGISTERED_FAMILY_IDS: frozenset[str] = frozenset(
@@ -180,6 +191,11 @@ AMENDMENT_INTRODUCED_FAMILIES: Mapping[str, int] = MappingProxyType(
         # run recorded before acknowledgment remains evidence about the harness
         # and that runtime, never a comparative claim.
         "f27": 3,
+        "f28": 4,
+        "f29": 4,
+        "f30": 5,
+        "f31": 5,
+        "f32": 6,
     }
 )
 
@@ -205,6 +221,13 @@ REQUIRES_ITEM_PAIR: frozenset[str] = frozenset(
 #: and far weaker claim that an empty snapshot would satisfy.
 REQUIRES_SUBJECT: frozenset[str] = frozenset(
     {
+        "collection_candidate_surfaced_within_budget",
+        "ledger_state_matches_expectation",
+        "claimed_observation_reflected",
+        "role_signal_delivered_after_write",
+        "role_state_settled_with_provenance",
+        "transient_signal_delivered_after_write",
+        "transient_state_settled_without_dismissal",
         # f27's pair reads its expectation out of the corpus the subject names.
         # Subject-less both block with the reason, but blocking at evaluation is
         # late: the mistake is visible at load, and a scenario that forgot the
@@ -225,6 +248,9 @@ REQUIRES_SUBJECT: frozenset[str] = frozenset(
 #: take two snapshots at or before the phase that expects them.
 REQUIRES_SNAPSHOT_PAIR: frozenset[str] = frozenset(
     {
+        "ledger_state_matches_expectation",
+        "role_state_settled_with_provenance",
+        "transient_state_settled_without_dismissal",
         # f27's false-write dual diffs pages against the seeded vault, so the
         # trajectory owes a snapshot taken before the first agent turn. Without
         # it a scaffold page the harness itself laid would be scored as a page

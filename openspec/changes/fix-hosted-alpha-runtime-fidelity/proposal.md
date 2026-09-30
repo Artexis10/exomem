@@ -1,3 +1,5 @@
+> **Superseded (2026-09-23)** by `adopt-exomem-cloud-plain-cells`: cloud mode carries over any runtime setting this change proves necessary.
+
 ## Why
 
 Two runtime settings chosen for capacity headroom would ship a hosted product that is

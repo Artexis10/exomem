@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -22,6 +23,10 @@ _SEMANTIC_UPSERTS_GENERATION_KEY = "semantic_upserts_generation"
 _GRAPH_UPSERTS_GENERATION_KEY = "graph_upserts_generation"
 _GRAPH_FULL_REBUILD_KEY = "graph_full_rebuild_generation"
 _GRAPH_FULL_REBUILD_SEQUENCE_KEY = "graph_full_rebuild_sequence"
+#: Counts every raise of whole-vault debt, including a repeat that leaves the
+#: marker's value unchanged, so a retirement can tell "no new debt" from "new
+#: debt at the same value".
+_GRAPH_FULL_REBUILD_MARKS_KEY = "graph_full_rebuild_marks"
 _PENDING_VISIBILITY_GENERATION_KEY = "pending_visibility_generation:v1"
 
 #: The queues this store carries, and the tables behind them.  The graph queue
@@ -45,6 +50,7 @@ _ROTATION_EPSILON_SECONDS = 1e-6
 
 def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
     """Add the exact derived-batch custody tables without touching old queues."""
+    caller_transaction = conn.in_transaction
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS derived_batches (
@@ -64,7 +70,8 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
             updated_at REAL NOT NULL,
             failure_code TEXT CHECK(
                 failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 64
-            )
+            ),
+            proven_at REAL
         )
         """
     )
@@ -78,6 +85,7 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
             stable_memory_ref TEXT CHECK(
                 stable_memory_ref IS NULL OR length(stable_memory_ref) BETWEEN 1 AND 256
             ),
+            batch_seq INTEGER,
             PRIMARY KEY(batch_id, rel_path),
             FOREIGN KEY(batch_id) REFERENCES derived_batches(batch_id)
         )
@@ -204,6 +212,59 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS advisory_result_retention "
         "ON write_advisory_results(retention_deadline, terminal_replay_until)"
     )
+    # Coverage asks "which later batch carries this path?". The batch's store
+    # sequence on each path row lets that seek by path and sequence instead of
+    # walking every later receipt, which are never pruned. A trigger fills it,
+    # so every writer -- an older build after a rollback included -- keeps it.
+    batch_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(derived_batches)")
+    }
+    if "proven_at" not in batch_columns:
+        conn.execute("ALTER TABLE derived_batches ADD COLUMN proven_at REAL")
+    conn.execute("SAVEPOINT derived_paths_sequence_migration")
+    try:
+        path_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(derived_batch_paths)")
+        }
+        if "batch_seq" not in path_columns:
+            conn.execute("ALTER TABLE derived_batch_paths ADD COLUMN batch_seq INTEGER")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS derived_paths_missing_sequence "
+            "ON derived_batch_paths(batch_id) WHERE batch_seq IS NULL"
+        )
+        if conn.execute(
+            "SELECT 1 FROM derived_batch_paths "
+            "INDEXED BY derived_paths_missing_sequence "
+            "WHERE batch_seq IS NULL LIMIT 1"
+        ).fetchone():
+            conn.execute(
+                "UPDATE derived_batch_paths SET batch_seq = (SELECT b.rowid "
+                "FROM derived_batches AS b WHERE b.batch_id = derived_batch_paths.batch_id) "
+                "WHERE batch_seq IS NULL"
+            )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS derived_paths_sequence_fill "
+            "AFTER INSERT ON derived_batch_paths WHEN NEW.batch_seq IS NULL BEGIN "
+            "UPDATE derived_batch_paths SET batch_seq = (SELECT b.rowid "
+            "FROM derived_batches AS b WHERE b.batch_id = NEW.batch_id) "
+            "WHERE batch_id = NEW.batch_id AND rel_path = NEW.rel_path; END"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS derived_paths_sequence "
+            "ON derived_batch_paths(rel_path, batch_seq)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS derived_paths_after_sequence "
+            "ON derived_batch_paths(rel_path, after_hash, batch_seq)"
+        )
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT derived_paths_sequence_migration")
+        conn.execute("RELEASE SAVEPOINT derived_paths_sequence_migration")
+        raise
+    conn.execute("RELEASE SAVEPOINT derived_paths_sequence_migration")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS derived_batches_state ON derived_batches(state)"
+    )
     advisory_columns = {
         str(row[1]) for row in conn.execute("PRAGMA table_info(write_advisory_results)")
     }
@@ -250,10 +311,10 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         )
         conn.execute("UPDATE pending_recall_rows SET component_revision = 1")
         conn.execute("UPDATE write_advisory_results SET component_revision = 1")
-    # DDL itself is durable without a caller transaction, but the additive
-    # generation initialization and any repair DML are not. Commit schema
-    # migration before returning a handle whose caller may begin immediately.
-    conn.commit()
+    # A newly opened handle must be ready for the caller's BEGIN; a caller's
+    # existing transaction still owns its commit or rollback.
+    if not caller_transaction:
+        conn.commit()
 
 
 def _ensure_vocabulary_provenance_schema(conn: sqlite3.Connection) -> None:
@@ -522,6 +583,26 @@ def _connect_created_owned(
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS graph_debt_generations (
+            generation INTEGER PRIMARY KEY,
+            recorded_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS graph_failures (
+            rel_path TEXT PRIMARY KEY,
+            attempts INTEGER NOT NULL,
+            first_failed_at REAL NOT NULL,
+            last_failed_at REAL NOT NULL,
+            quarantined INTEGER NOT NULL DEFAULT 0,
+            signature TEXT
+        )
+        """
+    )
     for event in ("INSERT", "UPDATE", "DELETE"):
         conn.execute(
             f"CREATE TRIGGER IF NOT EXISTS graph_upserts_generation_{event.lower()} "
@@ -543,6 +624,15 @@ def _connect_created_owned(
         conn.execute(
             "ALTER TABLE full_upserts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
         )
+    graph_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(graph_upserts)")
+    }
+    if "graph_generation" not in graph_columns:
+        # Deliberately nullable with no default: an existing row was queued
+        # before anything recorded which generation it owed, and inventing one
+        # would let a pre-upgrade receipt bless a lineage gap it knows nothing
+        # about. NULL reads back as "unknown", which never counts as coverage.
+        conn.execute("ALTER TABLE graph_upserts ADD COLUMN graph_generation INTEGER")
     _ensure_derived_batch_schema(conn)
     _ensure_vocabulary_provenance_schema(conn)
     if publish:
@@ -696,6 +786,11 @@ def claim_mixed_drain_queue(vault_root: Path) -> str:
 class DeferredReceipt:
     rel_path: str
     revision: int
+    #: The graph-sync generation this path was queued for, or None when it is
+    #: not known -- a row written before the column existed, or a caller with no
+    #: checkpoint to name. Unknown is never usable as coverage: a receipt that
+    #: cannot say which generation it owes cannot prove that generation queued.
+    graph_generation: int | None = None
 
 
 class EmbeddingFreshness(StrEnum):
@@ -704,8 +799,15 @@ class EmbeddingFreshness(StrEnum):
     UNVERIFIABLE = "unverifiable"
 
 
-def _safe_markdown_rel_path(value: object) -> str | None:
-    """Normalize one persisted Markdown identity without permitting traversal."""
+def _safe_markdown_rel_path(
+    value: object, *, knowledge_base_only: bool = True
+) -> str | None:
+    """Normalize one persisted Markdown identity without permitting traversal.
+
+    ``knowledge_base_only=False`` keeps every traversal refusal but admits a
+    vault-relative page outside the knowledge base -- what a vault-scope
+    advisory can name as its counterpart.
+    """
     if not isinstance(value, str):
         return None
     if "\\" in value:
@@ -720,7 +822,7 @@ def _safe_markdown_rel_path(value: object) -> str | None:
         or any(part in {"", ".", ".."} for part in path.parts)
         or not normalized.lower().endswith(".md")
         or not path.parts
-        or path.parts[0] != kb_dirname()
+        or (knowledge_base_only and path.parts[0] != kb_dirname())
     ):
         return None
     return path.as_posix()
@@ -821,7 +923,11 @@ def _add_full_receipts(
 
 
 def _add_plain_receipts(
-    vault_root: Path, rel_paths: list[str], *, table: str
+    vault_root: Path,
+    rel_paths: list[str],
+    *,
+    table: str,
+    generation: int | None = None,
 ) -> tuple[list[DeferredReceipt], int]:
     """Queue paths in an admission-free queue and return exact revisions.
 
@@ -843,28 +949,60 @@ def _add_plain_receipts(
     added = 0
     conn = _connect(vault_root, create=True)
     try:
+        columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+        tracks_generation = "graph_generation" in columns
         conn.execute("BEGIN IMMEDIATE")
         try:
             for rel in rels:
+                stored = "graph_generation" if tracks_generation else "NULL"
                 row = conn.execute(
-                    f"SELECT revision FROM {table} WHERE rel_path = ?", (rel,)
+                    f"SELECT revision, {stored} FROM {table} WHERE rel_path = ?", (rel,)
                 ).fetchone()
                 if row is None:
                     revision = 1
                     added += 1
-                    conn.execute(
-                        f"INSERT INTO {table}"
-                        "(rel_path, created_at, updated_at, revision) VALUES (?, ?, ?, ?)",
-                        (rel, now, now, revision),
-                    )
+                    recorded = generation if tracks_generation else None
+                    if tracks_generation:
+                        conn.execute(
+                            f"INSERT INTO {table}"
+                            "(rel_path, created_at, updated_at, revision, graph_generation) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (rel, now, now, revision, generation),
+                        )
+                    else:
+                        conn.execute(
+                            f"INSERT INTO {table}"
+                            "(rel_path, created_at, updated_at, revision) VALUES (?, ?, ?, ?)",
+                            (rel, now, now, revision),
+                        )
                 else:
                     revision = int(row[0]) + 1
-                    conn.execute(
-                        f"UPDATE {table} SET updated_at = ?, revision = ? "
-                        "WHERE rel_path = ?",
-                        (now, revision, rel),
+                    previous = None if row[1] is None else int(row[1])
+                    # The newest KNOWN generation wins, and an unknown enqueue
+                    # never erases one: the row still owes the repair it was
+                    # queued for, and forgetting that would refuse coverage the
+                    # queue genuinely holds. A stale generation can never rise
+                    # this way -- only a re-queue at a later one moves it.
+                    recorded = (
+                        previous
+                        if generation is None
+                        else max(generation, previous if previous is not None else generation)
                     )
-                receipts.append(DeferredReceipt(rel, revision))
+                    if tracks_generation:
+                        conn.execute(
+                            f"UPDATE {table} SET updated_at = ?, revision = ?, "
+                            "graph_generation = ? WHERE rel_path = ?",
+                            (now, revision, recorded, rel),
+                        )
+                    else:
+                        conn.execute(
+                            f"UPDATE {table} SET updated_at = ?, revision = ? "
+                            "WHERE rel_path = ?",
+                            (now, revision, rel),
+                        )
+                receipts.append(DeferredReceipt(rel, revision, recorded))
+            if tracks_generation and generation is not None and rels:
+                _record_graph_debt_generation_locked(conn, int(generation), now)
         except Exception:
             conn.rollback()
             raise
@@ -893,18 +1031,44 @@ def _note_graph_debt() -> None:
         pass
 
 
-def add_graph(vault_root: Path, rel_paths: list[str]) -> int:
+def add_graph(
+    vault_root: Path, rel_paths: list[str], *, generation: int | None = None
+) -> int:
     """Durably queue pages whose epistemic-graph projection needs re-deriving."""
-    _receipts, added = _add_plain_receipts(vault_root, rel_paths, table="graph_upserts")
+    _receipts, added = _add_plain_receipts(
+        vault_root, rel_paths, table="graph_upserts", generation=generation
+    )
     if added:
         _note_graph_debt()
     return added
 
 
-def add_graph_receipts(vault_root: Path, rel_paths: list[str]) -> list[DeferredReceipt]:
-    """Queue graph work and return its exact transaction-local revisions."""
+def add_graph_receipts(
+    vault_root: Path, rel_paths: list[str], *, generation: int | None = None
+) -> list[DeferredReceipt]:
+    """Queue graph work and return its exact transaction-local revisions.
+
+    `generation` is the graph-sync generation this repair is owed for. It is
+    what lets a later predecessor probe prove a lineage gap is covered by
+    durable work rather than guess it from a path name, so a caller that knows
+    it must pass it; one that does not leaves the row unknown, and an unknown
+    row never counts as coverage.
+
+    THE CONVENTION A RECORDED GENERATION ENTERS INTO: recording generation G
+    claims G's COMPLETE path set. `_lineage_gap_is_receipt_covered` reads one
+    present generation as "that whole step is queued" -- it cannot see how many
+    paths G was owed, so half of G recorded under G would bless a gap this
+    queue only half owns, and the write that trusted it would publish over real
+    divergence with no rebuild to catch it. A caller that cannot make that claim
+    passes `generation=None` and is honest about knowing nothing; a caller that
+    records a deliberately partial set must be sure no probe can ask about the
+    generation it records (the adopted residue is the one such site, and it
+    records the *acknowledged* generation for exactly that reason). The sites
+    are enumerated and must each declare their claim --
+    `tests/test_graph_deferred_queue.py::test_every_generation_recording_enqueue_declares_its_path_set`.
+    """
     receipts, _added = _add_plain_receipts(
-        vault_root, rel_paths, table="graph_upserts"
+        vault_root, rel_paths, table="graph_upserts", generation=generation
     )
     if receipts:
         _note_graph_debt()
@@ -927,7 +1091,7 @@ def enqueue_graph_checkpoint(vault_root: Path, checkpoint: Any) -> int:
         return 0
     rels = [rel for rel, _content_hash in checkpoint.paths]
     rels.extend(checkpoint.created_paths)
-    return add_graph(vault_root, rels)
+    return add_graph(vault_root, rels, generation=int(checkpoint.generation))
 
 
 def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
@@ -968,6 +1132,7 @@ def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(max(sequence, recorded))),
             )
+            _count_graph_full_rebuild_mark_locked(conn)
         except Exception:
             conn.rollback()
             raise
@@ -1011,6 +1176,7 @@ def advance_graph_full_rebuild(vault_root: Path, *, after_generation: int = 0) -
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(generation)),
             )
+            _count_graph_full_rebuild_mark_locked(conn)
         except Exception:
             conn.rollback()
             raise
@@ -1019,6 +1185,100 @@ def advance_graph_full_rebuild(vault_root: Path, *, after_generation: int = 0) -
         conn.close()
     _note_graph_debt()
     return generation
+
+
+def _count_graph_full_rebuild_mark_locked(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT INTO maintenance_state(key, value) VALUES (?, '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
+        (_GRAPH_FULL_REBUILD_MARKS_KEY,),
+    )
+
+
+def graph_full_rebuild_observation(vault_root: Path) -> tuple[int, int] | None:
+    """The standing marker and its raise count, read together, or None.
+
+    What a whole-vault pass records before it samples its epoch, so that its
+    publication can retire exactly the debt that existed then and nothing
+    raised after -- see `retire_observed_graph_full_rebuild`.
+    """
+    if not store_path(vault_root).exists():
+        return None
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            rows = dict(
+                conn.execute(
+                    "SELECT key, value FROM maintenance_state WHERE key IN (?, ?)",
+                    (_GRAPH_FULL_REBUILD_KEY, _GRAPH_FULL_REBUILD_MARKS_KEY),
+                ).fetchall()
+            )
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return None
+    if _GRAPH_FULL_REBUILD_KEY not in rows:
+        return None
+    try:
+        return int(rows[_GRAPH_FULL_REBUILD_KEY]), int(rows.get(_GRAPH_FULL_REBUILD_MARKS_KEY, 0))
+    except (TypeError, ValueError):
+        return None
+
+
+def retire_observed_graph_full_rebuild(
+    vault_root: Path, observation: tuple[int, int]
+) -> bool:
+    """Retire the marker only if no debt was raised since `observation`.
+
+    Stricter than `clear_graph_full_rebuild`'s value compare-and-swap: a repeat
+    raise keeps the marker's value but moves its raise count, so debt a batch
+    raised while a pass ran survives even when it did not change the value.
+    That is what lets a publication retire its debt after leaving the canonical
+    boundary rather than under it.
+    """
+    if not store_path(vault_root).exists():
+        return False
+    marker, marks = observation
+    conn = _connect(vault_root, create=True)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = dict(
+                conn.execute(
+                    "SELECT key, value FROM maintenance_state WHERE key IN (?, ?, ?)",
+                    (
+                        _GRAPH_FULL_REBUILD_KEY,
+                        _GRAPH_FULL_REBUILD_SEQUENCE_KEY,
+                        _GRAPH_FULL_REBUILD_MARKS_KEY,
+                    ),
+                ).fetchall()
+            )
+            if (
+                _GRAPH_FULL_REBUILD_KEY not in rows
+                or int(rows[_GRAPH_FULL_REBUILD_KEY]) != marker
+                or int(rows.get(_GRAPH_FULL_REBUILD_MARKS_KEY, 0)) != marks
+            ):
+                conn.commit()
+                return False
+            sequence = int(rows.get(_GRAPH_FULL_REBUILD_SEQUENCE_KEY, 0))
+            # The same persistence `clear_graph_full_rebuild` makes: later debt
+            # must advance past the generation retired here.
+            conn.execute(
+                "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(max(sequence, marker))),
+            )
+            changed = conn.execute(
+                "DELETE FROM maintenance_state WHERE key = ?",
+                (_GRAPH_FULL_REBUILD_KEY,),
+            ).rowcount
+        except Exception:
+            conn.rollback()
+            raise
+        conn.commit()
+        return bool(changed)
+    finally:
+        conn.close()
 
 
 def graph_full_rebuild_pending(vault_root: Path) -> int | None:
@@ -1204,20 +1464,420 @@ def snapshot_graph(
     return _snapshot_plain(vault_root, table="graph_upserts", limit=limit, paths=paths)
 
 
+#: Generations kept in the durable debt record. A gap wider than this is far
+#: outside anything a path-keyed queue could cover, and pruning the oldest can
+#: only make the probe refuse coverage it might have granted -- an extra
+#: rebuild, never a blessed divergence.
+MAX_GRAPH_DEBT_GENERATIONS = 512
+
+
+def _record_graph_debt_generation_locked(conn: Any, generation: int, now: float) -> None:
+    """Record that generation `generation`'s graph debt was queued. Under the
+    caller's open transaction, so it lands with the receipts or not at all.
+
+    WHY THIS IS NOT THE RECEIPTS THEMSELVES. `graph_upserts` is keyed by
+    rel_path with ONE generation column, so a later enqueue of the same path
+    overwrites the generation an earlier one recorded -- `max(new, old)`, by
+    design, because the row does still owe the newer repair. That makes the
+    receipts a fine queue and a terrible ledger: measured under load, six
+    writes over six paths collapsed `{2,3,4,5}` into `{6}` the moment the
+    watcher re-queued those paths at its own checkpoint, and the next write's
+    predecessor probe then read a proven divergence where every generation's
+    repair was in fact queued. It cost a whole-vault rebuild about two writes
+    in six, and only under contention, which is exactly the batch-ingest
+    condition task 1.13 exists for.
+
+    So the proof gets its own append-only row per generation. Nothing
+    overwrites it, the drain does not consume it, and it is written in the same
+    durable step as the receipts and before the write acknowledges -- which is
+    what makes "a committed checkpoint implies its debt was recorded" a
+    property of the storage rather than of the timing.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO graph_debt_generations(generation, recorded_at) "
+        "VALUES (?, ?)",
+        (generation, now),
+    )
+    conn.execute(
+        "DELETE FROM graph_debt_generations WHERE generation <= ("
+        "  SELECT generation FROM graph_debt_generations "
+        "  ORDER BY generation DESC LIMIT 1 OFFSET ?"
+        ")",
+        (MAX_GRAPH_DEBT_GENERATIONS,),
+    )
+
+
+def graph_debt_generations_recorded(
+    vault_root: Path, generations: Iterable[int]
+) -> tuple[frozenset[int], bool]:
+    """Which of `generations` have a durable debt record, and whether one exists.
+
+    The second value distinguishes "this store has the record and these
+    generations are absent from it" from "this store predates the record", so a
+    caller can fall back rather than read an empty table as a proven divergence.
+    """
+    wanted = sorted({int(generation) for generation in generations})
+    if not wanted:
+        return frozenset(), True
+    path = store_path(vault_root)
+    if not path.exists():
+        return frozenset(), False
+    conn = _connect(vault_root, create=False)
+    try:
+        return _graph_debt_generations_locked(conn, wanted)
+    finally:
+        conn.close()
+
+
+def _graph_debt_generations_locked(
+    conn: Any, wanted: list[int]
+) -> tuple[frozenset[int], bool]:
+    """The debt lookup on a connection the caller already has open."""
+    available = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("graph_debt_generations",),
+        ).fetchone()
+    )
+    if not available:
+        return frozenset(), False
+    rows = conn.execute(
+        "SELECT generation FROM graph_debt_generations WHERE generation IN "
+        f"({','.join('?' for _ in wanted)})",
+        tuple(wanted),
+    ).fetchall()
+    return frozenset(int(row[0]) for row in rows), True
+
+
+def graph_gap_coverage(
+    vault_root: Path, generations: Iterable[int]
+) -> tuple[frozenset[int], bool, frozenset[int], bool]:
+    """Everything the predecessor probe needs about a gap, on ONE connection.
+
+    The probe runs on the write path, and every `_connect` here takes a
+    reserved-identity boundary entry -- the per-item re-entry that already
+    dominates the mutation-lock log. Asking two questions of the same store
+    through two connections doubled that for no reading anyone needs
+    separately, so they are asked together.
+
+    Returns the receipt generations in range, whether any queued receipt cannot
+    say what it owes, the generations with a durable debt record, and whether
+    that record exists in this store at all.
+    """
+    wanted = sorted({int(generation) for generation in generations})
+    if not wanted:
+        return frozenset(), False, frozenset(), True
+    path = store_path(vault_root)
+    if not path.exists():
+        return frozenset(), False, frozenset(), False
+    conn = _connect(vault_root, create=False)
+    try:
+        receipts = _snapshot_plain(
+            vault_root, table="graph_upserts", generations=wanted, connection=conn
+        )
+        known = frozenset(
+            receipt.graph_generation
+            for receipt in receipts
+            if receipt.graph_generation is not None
+        )
+        unknown = any(receipt.graph_generation is None for receipt in receipts)
+        recorded, has_record = _graph_debt_generations_locked(conn, wanted)
+    finally:
+        conn.close()
+    return known, unknown, recorded, has_record
+
+
+def clear_graph_debt_generations(vault_root: Path) -> int:
+    """Drop the whole debt record. Pairs with clearing the whole queue."""
+    path = store_path(vault_root)
+    if not path.exists():
+        return 0
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            return int(conn.execute("DELETE FROM graph_debt_generations").rowcount)
+    except sqlite3.OperationalError:
+        return 0
+    finally:
+        conn.close()
+
+
+def graph_receipt_generations(
+    vault_root: Path, *, generations: Iterable[int] | None = None
+) -> tuple[frozenset[int], bool]:
+    """Which generations the queued graph receipts name, and whether any is unknown.
+
+    The durable artifact a predecessor probe reads to decide whether a lineage
+    gap is already owned by the queue. Two values because they are acted on
+    differently: a generation present in the set has its paths queued, and a
+    single unknown row means some queued repair cannot say what it owes -- which
+    is not evidence about any generation, so the probe refuses on it rather than
+    reasoning around it.
+
+    `generations` scopes the read to the gap the caller is actually asking
+    about, plus the unknown rows it must fail closed on. A probe runs on the
+    write path against a queue that holds one row per deferred page, so the
+    unscoped read this used to take grew with the backlog while the question
+    never did -- a six-generation gap needs six generations' rows, not the
+    table. The unscoped form is kept for callers reporting on the whole queue.
+
+    THE CONVENTION THIS RESTS ON, stated because a probe cannot check it: an
+    enqueue that records generation G records G's *complete* path set. A site
+    that recorded a partial set under G would make this answer "covered" for a
+    gap it only half owns. `tests/test_graph_deferred_queue.py` enumerates the
+    recording sites so a new one has to declare itself rather than inherit the
+    claim silently.
+    """
+    receipts = _snapshot_graph_generation_rows(vault_root, generations)
+    known = {
+        receipt.graph_generation
+        for receipt in receipts
+        if receipt.graph_generation is not None
+    }
+    unknown = any(receipt.graph_generation is None for receipt in receipts)
+    return frozenset(known), unknown
+
+
+def _snapshot_graph_generation_rows(
+    vault_root: Path, generations: Iterable[int] | None
+) -> list[DeferredReceipt]:
+    """Graph receipts for `generations`, plus every row that names none.
+
+    Same corrupt-row purge and same safety filter as `snapshot_graph`; it is
+    `_snapshot_plain` with a generation predicate rather than a path one.
+    """
+    if generations is None:
+        return _snapshot_plain(vault_root, table="graph_upserts")
+    wanted = sorted({int(generation) for generation in generations})
+    return _snapshot_plain(
+        vault_root, table="graph_upserts", generations=wanted
+    )
+
+
 def list_graph_paths(vault_root: Path, *, limit: int | None = None) -> list[str]:
     return [receipt.rel_path for receipt in snapshot_graph(vault_root, limit=limit)]
 
 
 def clear_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
-    return _clear_plain_receipts(vault_root, receipts, table="graph_upserts")
+    """CAS-clear graph receipts; a path derived at last forgets its failures."""
+    cleared = _clear_plain_receipts(vault_root, receipts, table="graph_upserts")
+    if receipts:
+        forget_graph_failures(vault_root, {receipt.rel_path for receipt in receipts})
+    return cleared
+
+
+def note_graph_failure(vault_root: Path, rel_path: str) -> tuple[int, float]:
+    """Count one failed isolated attempt to derive `rel_path`.
+
+    Returns the attempts so far and when the first of them failed. Counted per
+    path, not per receipt revision: a page that cannot be read fails the same
+    way whatever revision queued it.
+    """
+    now = time.time()
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, last_failed_at) "
+                "VALUES (?, 1, ?, ?) ON CONFLICT(rel_path) DO UPDATE SET "
+                "attempts = attempts + 1, last_failed_at = excluded.last_failed_at",
+                (rel_path, now, now),
+            )
+            row = conn.execute(
+                "SELECT attempts, first_failed_at FROM graph_failures WHERE rel_path = ?",
+                (rel_path,),
+            ).fetchone()
+        if row is None:
+            return 1, now
+        return int(row[0]), float(row[1])
+    finally:
+        conn.close()
+
+
+def quarantine_graph_receipt(
+    vault_root: Path, receipt: DeferredReceipt, *, signature: str | None
+) -> bool:
+    """Set a receipt no drain can derive aside, by exact revision.
+
+    Its row leaves the queue, so the queue can empty around it, and the path
+    is recorded as quarantined for the lag and the doctor with the stat
+    `signature` it failed at: a change to it earns a retry
+    (`release_graph_quarantine`). A newer revision -- a write that landed
+    since -- stays queued as ordinary work.
+    """
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            removed = conn.execute(
+                "DELETE FROM graph_upserts WHERE rel_path = ? AND revision = ?",
+                (receipt.rel_path, receipt.revision),
+            ).rowcount
+            if removed:
+                now = time.time()
+                conn.execute(
+                    "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, "
+                    "last_failed_at, quarantined, signature) VALUES (?, 1, ?, ?, 1, ?) "
+                    "ON CONFLICT(rel_path) DO UPDATE SET quarantined = 1, "
+                    "last_failed_at = excluded.last_failed_at, signature = excluded.signature",
+                    (receipt.rel_path, now, now, signature),
+                )
+        return bool(removed)
+    finally:
+        conn.close()
+
+
+def quarantined_graph_paths(
+    vault_root: Path,
+) -> list[tuple[str, str | None, float, int]]:
+    """Each quarantined path, the stat signature it failed at, when it last failed,
+    and how many attempts have failed.
+
+    An absent or unreadable store reads as none.
+    """
+    rows = _graph_failure_rows(vault_root, "WHERE quarantined = 1")
+    return [
+        (str(rel), None if sig is None else str(sig), float(at), int(attempts))
+        for rel, sig, at, attempts in rows
+    ]
+
+
+def graph_failure_paths(vault_root: Path) -> list[str]:
+    """Every path with a recorded failure, quarantined or not. Absent store: none."""
+    return [str(row[0]) for row in _graph_failure_rows(vault_root, "")]
+
+
+def _graph_failure_rows(vault_root: Path, where: str) -> list[tuple[Any, ...]]:
+    if not store_path(vault_root).exists():
+        return []
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'graph_failures'"
+            ).fetchone():
+                return []
+            return conn.execute(
+                "SELECT rel_path, signature, last_failed_at, attempts FROM graph_failures "
+                f"{where} ORDER BY rel_path"
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return []
+
+
+def release_graph_quarantine(vault_root: Path, rel_paths: list[str]) -> int:
+    """Queue quarantined paths for one more attempt; return how many were queued.
+
+    Queued first and released second, so a crash between the two leaves a path
+    both queued and quarantined -- retried, and re-quarantined or forgotten by
+    that attempt -- rather than neither. The failure count and its first
+    failure stay: a retry that fails again is set aside on that one attempt.
+    """
+    if not rel_paths:
+        return 0
+    add_graph(vault_root, list(rel_paths))
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            conn.executemany(
+                "UPDATE graph_failures SET quarantined = 0 WHERE rel_path = ?",
+                [(rel,) for rel in sorted(set(rel_paths))],
+            )
+    finally:
+        conn.close()
+    return len(set(rel_paths))
+
+
+def graph_quarantined_count(vault_root: Path) -> int:
+    """How many paths are quarantined as underivable. An unreadable store reads 0."""
+    if not store_path(vault_root).exists():
+        return 0
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'graph_failures'"
+            ).fetchone():
+                return 0
+            row = conn.execute(
+                "SELECT count(*) FROM graph_failures WHERE quarantined = 1"
+            ).fetchone()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return 0
+    return int(row[0] or 0)
+
+
+def forget_graph_failures(vault_root: Path, rel_paths: set[str]) -> None:
+    """Drop the failure record of paths that derived; best effort, one read first."""
+    if not rel_paths or not store_path(vault_root).exists():
+        return
+    try:
+        conn = _connect(vault_root, create=True)
+        try:
+            with conn:
+                if not conn.execute("SELECT 1 FROM graph_failures LIMIT 1").fetchone():
+                    return
+                conn.executemany(
+                    "DELETE FROM graph_failures WHERE rel_path = ?",
+                    [(rel,) for rel in sorted(rel_paths)],
+                )
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        # The record only feeds the quarantine count; a stale one costs a
+        # quarantine a little sooner, never a lost repair.
+        return
 
 
 def clear_graph(vault_root: Path, rel_paths: list[str] | None = None) -> int:
-    return _clear(vault_root, table="graph_upserts", rel_paths=rel_paths)
+    """Drop queued graph work; a whole-queue clear drops the debt record too.
+
+    Clearing named paths leaves the debt record alone -- those generations were
+    still recorded, and their repair either landed or moved to another row.
+    Clearing the WHOLE queue is the caller saying this queue's history no longer
+    describes anything, and a proof that outlived the queue it describes would
+    bless a gap nothing is converging.
+    """
+    cleared = _clear(vault_root, table="graph_upserts", rel_paths=rel_paths)
+    if rel_paths is None:
+        clear_graph_debt_generations(vault_root)
+    return cleared
 
 
 def rotate_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
     return rotate_receipts(vault_root, receipts, queue="graph")
+
+
+def graph_queue_age(vault_root: Path) -> tuple[int, float | None]:
+    """How many graph receipts are queued, and how long ago the oldest was.
+
+    One indexed read on one connection, for lag reporting. The age runs from
+    a row's first enqueue: a requeue keeps it, so repair that keeps losing its
+    compare-and-swap still reads as old. An unreadable store reads as empty.
+    """
+    if not store_path(vault_root).exists():
+        return 0, None
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(graph_upserts)")
+            }
+            if not columns:
+                return 0, None
+            count, oldest = conn.execute(
+                "SELECT count(*), min(created_at) FROM graph_upserts"
+            ).fetchone()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return 0, None
+    if not count or oldest is None:
+        return int(count or 0), None
+    return int(count), max(0.0, time.time() - float(oldest))
 
 
 def graph_status(vault_root: Path | None) -> dict[str, Any]:
@@ -1236,11 +1896,16 @@ def _snapshot_plain(
     table: str,
     limit: int | None = None,
     paths: set[str] | None = None,
+    generations: list[int] | None = None,
+    connection: Any | None = None,
 ) -> list[DeferredReceipt]:
     path = store_path(vault_root)
     if not path.exists():
         return []
-    conn = _connect(vault_root, create=False)
+    # A caller with a connection already open lends it rather than paying a
+    # second reserved-identity boundary entry for the same store.
+    borrowed = connection is not None
+    conn = connection if borrowed else _connect(vault_root, create=False)
     try:
         columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
         if not columns:
@@ -1251,8 +1916,11 @@ def _snapshot_plain(
             # that does not exist yet; the next writable open migrates it.
             return []
         revision = "revision" if "revision" in columns else "1 AS revision"
+        generation = (
+            "graph_generation" if "graph_generation" in columns else "NULL AS graph_generation"
+        )
         sql = (
-            f"SELECT rel_path, {revision} FROM {table} "
+            f"SELECT rel_path, {revision}, {generation} FROM {table} "
         )
         params: list[Any] = []
         if paths is not None:
@@ -1267,18 +1935,36 @@ def _snapshot_plain(
                 return []
             sql += f"WHERE rel_path IN ({','.join('?' for _ in wanted)}) "
             params.extend(wanted)
+        if generations is not None:
+            # The unknown rows come back too, and must: one receipt that cannot
+            # say what it owes disqualifies the whole queue as evidence, so a
+            # read scoped to the asked-about generations would answer "covered"
+            # on a queue it never looked at properly.
+            # The predicate needs the raw column, not the SELECT alias: on a
+            # store that predates the column every row is unknown, and
+            # `NULL IS NULL` is the honest way to say so.
+            column = "graph_generation" if "graph_generation" in columns else "NULL"
+            placeholders = ",".join("?" for _ in generations)
+            clause = f"{column} IS NULL"
+            if generations:
+                clause += f" OR {column} IN ({placeholders})"
+            sql += ("AND " if paths is not None else "WHERE ") + f"({clause}) "
+            params.extend(generations)
         sql += "ORDER BY updated_at, rel_path"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(max(0, limit))
         receipts = [
-            DeferredReceipt(str(row[0]), int(row[1]))
+            DeferredReceipt(
+                str(row[0]), int(row[1]), None if row[2] is None else int(row[2])
+            )
             for row in conn.execute(sql, tuple(params)).fetchall()
         ]
     finally:
-        conn.close()
+        if not borrowed:
+            conn.close()
     valid = [
-        DeferredReceipt(rel, receipt.revision)
+        DeferredReceipt(rel, receipt.revision, receipt.graph_generation)
         for receipt in receipts
         if (rel := _safe_markdown_rel_path(receipt.rel_path)) is not None
     ]

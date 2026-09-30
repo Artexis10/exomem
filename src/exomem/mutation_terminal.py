@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
@@ -22,6 +23,9 @@ _RECORD_RECEIPT_FIELDS = (
     "operation",
     "collection_id",
     "item_key",
+    # Only a discard carries this; it names the candidate the call removed, and
+    # without it the compact response says nothing about what was discarded.
+    "held_id",
     "before_item_hash",
     "after_item_hash",
     "before_manifest_hash",
@@ -42,6 +46,34 @@ _RECORD_RECEIPT_MARKER = "exomem.records-mutation"
 _RECORD_RECEIPT_VERSION = 1
 _LIFECYCLE_RECEIPT_VERSION = 2
 _PLAN_RECEIPT_MARKER = "exomem.planning-mutation"
+_EPISODE_RECEIPT_FIELDS = (
+    "operation",
+    "episode",
+    "revision",
+    "source",
+    "idempotent",
+    "recovery",
+    "ledger",
+    "about_skipped",
+)
+_EPISODE_WORKFLOW_FIELDS = (
+    "operation",
+    "action",
+    "episode",
+    "input_revision",
+    "status",
+    "code",
+    "reason",
+    "candidates",
+    "complete",
+    "execution",
+    "executed",
+    "reconciled",
+    "blocked",
+    "deferred",
+    "publication",
+)
+
 _PLAN_RECEIPT_FIELDS = (
     "operation",
     "collection_id",
@@ -159,6 +191,19 @@ def _without_graph_rebuild_handoff(result: Any) -> Any:
     return result
 
 
+#: The terminal states one preserved file can end in. `outcome` mirrors them
+#: for one release, reporting `already_stored` as `stored`, so a reader that
+#: needs to tell a fresh commit from a duplicate reads `state`.
+_ARTIFACT_STATES = frozenset({"stored", "already_stored", "failed"})
+
+
+def _artifact_state(item: Any) -> Any:
+    """This row's terminal state, falling back to the lane that has no states."""
+    if not isinstance(item, Mapping):
+        return None
+    return item.get("state", item.get("outcome"))
+
+
 def _warning_count(result: Any) -> int:
     if not isinstance(result, Mapping):
         return 0
@@ -228,8 +273,12 @@ def _path_projection(result: Any) -> dict[str, Any]:
         return {"paths": []}
     artifact_receipt = _artifact_receipt_projection(result)
     if artifact_receipt:
+        # Only what this call stored. A duplicate names a path an earlier call
+        # committed; reporting it here would claim this mutation wrote it.
         paths = [
-            item["stored_path"] for item in artifact_receipt["files"] if item["outcome"] == "stored"
+            item["stored_path"]
+            for item in artifact_receipt["files"]
+            if _artifact_state(item) == "stored"
         ]
         if len(paths) == 1:
             return {"path": paths[0]}
@@ -537,9 +586,36 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             return None
         return {field: value[field] for field in fields}
 
+    def duplicate_of(value: Any) -> dict[str, Any] | None:
+        """The bounded identity of the artifact a duplicate resolved to."""
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"path", "ref"}
+            or not string(value.get("path"), limit=2048)
+            or not string(value.get("ref"), limit=2048)
+        ):
+            return None
+        return {"path": value["path"], "ref": value["ref"]}
+
+    def transcription(value: Any) -> dict[str, Any] | None:
+        """Whether a client transcription was recorded with its original."""
+        if not isinstance(value, Mapping):
+            return None
+        if value.get("state") == "recorded" and set(value) == {"state", "page"}:
+            return dict(value) if string(value.get("page"), limit=2048) else None
+        if value.get("state") == "not_recorded" and set(value) == {"state", "reason"}:
+            return dict(value) if string(value.get("reason"), limit=300) else None
+        return None
+
     projected: list[dict[str, Any]] = []
     for index, item in enumerate(files):
         if not isinstance(item, Mapping) or not string(item.get("file_id"), limit=256):
+            projected.append(invalid_row(item, index))
+            continue
+        # `outcome` mirrors `state` for one release, so `already_stored` arrives
+        # as `stored`; the state itself has to survive the projection or a
+        # compact client cannot tell a fresh commit from a duplicate.
+        if "state" in item and item["state"] not in _ARTIFACT_STATES:
             projected.append(invalid_row(item, index))
             continue
         outcome = item.get("outcome")
@@ -562,6 +638,7 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                 for key in (
                     "file_id",
                     "outcome",
+                    "state",
                     "stored_path",
                     "size",
                     "hash",
@@ -575,6 +652,18 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             for key in ("path", "page", "ref"):
                 if key in item and string(item[key], limit=2048):
                     row[key] = item[key]
+            if "duplicate_of" in item:
+                duplicate = duplicate_of(item["duplicate_of"])
+                if duplicate is None:
+                    projected.append(invalid_row(item, index))
+                    continue
+                row["duplicate_of"] = duplicate
+            if "transcription" in item:
+                recorded = transcription(item["transcription"])
+                if recorded is None:
+                    projected.append(invalid_row(item, index))
+                    continue
+                row["transcription"] = recorded
             if "adoption" in item:
                 receipt = adoption_receipt(item["adoption"], item)
                 if receipt is None:
@@ -591,14 +680,21 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             and string(item.get("code"), limit=64)
             and string(item.get("reason"), limit=300)
         ):
-            row = {key: item[key] for key in ("file_id", "outcome", "code", "reason")}
+            row = {
+                key: item[key]
+                for key in ("file_id", "outcome", "state", "code", "reason")
+                if key in item
+            }
         else:
             projected.append(invalid_row(item, index))
             continue
         projected.append(row)
+    # Counted by terminal state, so the projected summary and the projected
+    # rows report the same three numbers. A row with no state is one of the
+    # adoption/source lanes, whose vocabulary is still its outcome.
     counts = {
-        outcome: sum(item["outcome"] == outcome for item in projected)
-        for outcome in ("stored", "replayed", "failed", "unselected")
+        state: sum(_artifact_state(item) == state for item in projected)
+        for state in ("stored", "already_stored", "replayed", "failed", "unselected")
     }
     adoption_result = any(
         isinstance(item, Mapping)
@@ -609,21 +705,31 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
         raw_stored = summary.get("stored")
         raw_failed = summary.get("failed")
         raw_omitted = summary.get("omitted")
+        raw_already_stored = summary.get("already_stored")
         if (
             nonnegative_int(raw_stored)
             and raw_stored >= counts["stored"]
             and nonnegative_int(raw_failed)
             and raw_failed >= counts["failed"]
             and (raw_omitted is None or nonnegative_int(raw_omitted))
+            and (
+                raw_already_stored is None
+                or (
+                    nonnegative_int(raw_already_stored)
+                    and raw_already_stored >= counts["already_stored"]
+                )
+            )
         ):
             projected_summary = {"stored": raw_stored, "failed": raw_failed}
+            if raw_already_stored is not None:
+                projected_summary["already_stored"] = raw_already_stored
             if raw_omitted is not None:
                 projected_summary["omitted"] = raw_omitted
             return {"files": projected, "summary": projected_summary}
-        return {
-            "files": projected,
-            "summary": {"stored": counts["stored"], "failed": counts["failed"]},
-        }
+        recomputed = {"stored": counts["stored"], "failed": counts["failed"]}
+        if counts["already_stored"] or raw_already_stored is not None:
+            recomputed["already_stored"] = counts["already_stored"]
+        return {"files": projected, "summary": recomputed}
     projected_summary: dict[str, int] = {}
     for outcome in ("stored", "replayed", "failed", "unselected"):
         value = summary.get(outcome)
@@ -647,6 +753,29 @@ _STRUCTURE_STRENGTHS = frozenset({"strong", "moderate"})
 _MAX_STRUCTURE_REASONS = 8
 _MAX_STRUCTURE_TERMS = 6
 _MAX_STRUCTURE_TOKEN_CHARS = 64
+_MAX_ROUTING_TITLE_CHARS = 160
+_MAX_ROUTING_COLLECTION_CHARS = 512
+_MAX_ROUTING_KEY_FIELDS = 16
+_ROUTING_STRENGTHS = frozenset({"strong", "moderate"})
+_ROUTING_REQUIRED_KEYS = frozenset(
+    {"collection", "title", "matched_terms", "natural_key", "strength"}
+)
+_ROUTING_OPTIONAL_KEYS = frozenset(
+    {
+        "matched_predicates",
+        "disposition",
+        "signal_version",
+        "instruction",
+        "question",
+        "record_memory",
+        "missing_fields",
+    }
+)
+_ROUTING_DISPOSITIONS = frozenset({"file", "ask", "hold", "append_occurrence"})
+_ROUTING_CALL_ACTIONS = frozenset({"append", "update"})
+_MAX_ROUTING_PROSE_CHARS = 480
+_MAX_ROUTING_CALL_BYTES = 4096
+_MAX_ROUTING_PREDICATES = 4
 #: Advisory kind emitted by the capture path. Its payload names the domain the
 #: fallback captures share, not the off-scope units a compiled write reports.
 _SOURCE_CLASSIFICATION_KIND = "source_classification_debt"
@@ -699,6 +828,237 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
         if not _bounded_tokens(terms, _MAX_STRUCTURE_TERMS):
             continue
         return {**common, "off_scope_units": units, "cluster_terms": list(terms)}
+    return None
+
+
+def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
+    """Lift one bounded, validated Records routing advisory from a write leaf."""
+    if not isinstance(leaf, Mapping):
+        return None
+    for container_key in ("creation", "semantic", "source", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        value = container.get("records_routing")
+        if (
+            not isinstance(value, Mapping)
+            or not _ROUTING_REQUIRED_KEYS <= set(value)
+            or set(value) - _ROUTING_REQUIRED_KEYS - _ROUTING_OPTIONAL_KEYS
+        ):
+            continue
+        collection = value.get("collection")
+        title = value.get("title")
+        matched_terms = value.get("matched_terms")
+        natural_key = value.get("natural_key")
+        strength = value.get("strength")
+        if not (
+            isinstance(collection, str)
+            and 0 < len(collection) <= _MAX_ROUTING_COLLECTION_CHARS
+            and collection.startswith("Knowledge Base/Records/")
+            and collection.endswith("/_collection.md")
+            and ".." not in collection.split("/")
+        ):
+            continue
+        if not isinstance(title, str) or not 0 < len(title) <= _MAX_ROUTING_TITLE_CHARS:
+            continue
+        predicates = value.get("matched_predicates")
+        if predicates is not None and not _bounded_tokens(predicates, _MAX_ROUTING_PREDICATES):
+            continue
+        # A declared-membership route may share no word at all with the claims.
+        if not (
+            _bounded_tokens(matched_terms, _MAX_STRUCTURE_TERMS)
+            or (predicates is not None and matched_terms == [])
+        ):
+            continue
+        if not _bounded_tokens(natural_key, _MAX_ROUTING_KEY_FIELDS):
+            continue
+        if not isinstance(strength, str) or strength not in _ROUTING_STRENGTHS:
+            continue
+        disposition = _routing_disposition_projection(value, collection)
+        if disposition is None:
+            continue
+        return {
+            "collection": collection,
+            "title": title,
+            "matched_terms": list(matched_terms),
+            **({"matched_predicates": list(predicates)} if predicates is not None else {}),
+            "natural_key": list(natural_key),
+            "strength": strength,
+            **disposition,
+        }
+    return None
+
+
+def _routing_disposition_projection(
+    value: Mapping[str, Any], collection: str
+) -> dict[str, Any] | None:
+    """The bounded disposition half of a routing advisory; None when malformed.
+
+    An advisory without a disposition projects as `{}`. One with a malformed
+    disposition is dropped whole, like any other malformed advisory: a partial
+    instruction to act is worse than none.
+    """
+    if "disposition" not in value:
+        return (
+            {}
+            if not set(value) & {"signal_version", "instruction", "question", "record_memory", "missing_fields"}
+            else None
+        )
+    disposition = value.get("disposition")
+    if disposition not in _ROUTING_DISPOSITIONS:
+        return None
+    out: dict[str, Any] = {"disposition": disposition}
+    signal = value.get("signal_version")
+    if signal is not None:
+        if not isinstance(signal, str) or not 0 < len(signal) <= 64:
+            return None
+        out["signal_version"] = signal
+    for key in ("instruction", "question"):
+        text = value.get(key)
+        if text is None:
+            continue
+        if not isinstance(text, str) or not 0 < len(text) <= _MAX_ROUTING_PROSE_CHARS:
+            return None
+        out[key] = text
+    if "question" in out and disposition != "ask":
+        return None
+    call = value.get("record_memory")
+    if call is not None:
+        if (
+            disposition not in {"file", "append_occurrence"}
+            or not isinstance(call, Mapping)
+            or call.get("action") not in _ROUTING_CALL_ACTIONS
+            or call.get("collection") != collection
+        ):
+            return None
+        try:
+            encoded = json.dumps(call, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return None
+        if len(encoded.encode("utf-8")) > _MAX_ROUTING_CALL_BYTES:
+            return None
+        out["record_memory"] = json.loads(encoded)
+    missing = value.get("missing_fields")
+    if missing is not None:
+        if not _bounded_tokens(missing, _MAX_ROUTING_KEY_FIELDS):
+            return None
+        out["missing_fields"] = list(missing)
+    return out
+
+
+#: Wire bounds on the advisory `entity_candidate` block
+#: (`write-time-identity-candidates` spec): at most three identities, each with
+#: at most eight linking pages and at most three registry near matches. This
+#: module's own numbers, for the same reason the structure-suggestion and
+#: due-state bounds above are its own: the terminal re-validates what a leaf
+#: attached instead of trusting it. `_ENTITY_CANDIDATE_ROUTES` is the closed,
+#: ordered pair every identity carries; a leaf naming anything else is dropped.
+_MAX_ENTITY_CANDIDATE_IDENTITIES = 3
+_MAX_ENTITY_CANDIDATE_NAME_CHARS = 64
+_MAX_ENTITY_CANDIDATE_PAGES = 8
+_MAX_ENTITY_CANDIDATE_PAGE_CHARS = 512
+_MAX_ENTITY_CANDIDATE_NEAR_MATCHES = 3
+_MAX_ENTITY_CANDIDATE_MATCH_PATH_CHARS = 512
+_MAX_ENTITY_CANDIDATE_MATCH_TITLE_CHARS = 200
+_MAX_ENTITY_CANDIDATE_SHARED_TOKENS = 8
+_ENTITY_CANDIDATE_ROUTES = ("resolve-entity", "create-entity")
+#: The block's own copy of its one fixed guidance sentence (task 2.4), for the
+#: same reason `_ENTITY_CANDIDATE_ROUTES` is this module's own copy: the
+#: terminal re-validates what a leaf attached rather than trusting it, and
+#: re-emits its own constant rather than whatever bytes the leaf carried.
+_ENTITY_CANDIDATE_GUIDANCE = (
+    "Resolve before you create an Entity, and hydrate an existing Entity "
+    "before you make a second one."
+)
+
+
+def _entity_candidate_near_match(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    path = value.get("path")
+    title = value.get("title")
+    shared = value.get("shared_tokens")
+    if (
+        not isinstance(path, str)
+        or not 0 < len(path) <= _MAX_ENTITY_CANDIDATE_MATCH_PATH_CHARS
+    ):
+        return None
+    if (
+        not isinstance(title, str)
+        or not 0 < len(title) <= _MAX_ENTITY_CANDIDATE_MATCH_TITLE_CHARS
+    ):
+        return None
+    if not _bounded_tokens(shared, _MAX_ENTITY_CANDIDATE_SHARED_TOKENS):
+        return None
+    return {"path": path, "title": title, "shared_tokens": list(shared)}
+
+
+def _entity_candidate_identity(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    name = value.get("name")
+    pages = value.get("pages")
+    near_matches = value.get("near_matches")
+    routes = value.get("routes")
+    if not isinstance(name, str) or not 0 < len(name) <= _MAX_ENTITY_CANDIDATE_NAME_CHARS:
+        return None
+    if not isinstance(pages, (list, tuple)) or not (
+        0 < len(pages) <= _MAX_ENTITY_CANDIDATE_PAGES
+    ):
+        return None
+    if not all(
+        isinstance(page, str) and 0 < len(page) <= _MAX_ENTITY_CANDIDATE_PAGE_CHARS
+        for page in pages
+    ):
+        return None
+    if not isinstance(near_matches, (list, tuple)) or len(near_matches) > (
+        _MAX_ENTITY_CANDIDATE_NEAR_MATCHES
+    ):
+        return None
+    matches: list[dict[str, Any]] = []
+    for match in near_matches:
+        projected = _entity_candidate_near_match(match)
+        if projected is None:
+            return None
+        matches.append(projected)
+    if not isinstance(routes, (list, tuple)) or list(routes) != list(_ENTITY_CANDIDATE_ROUTES):
+        return None
+    return {
+        "name": name,
+        "pages": list(pages),
+        "near_matches": matches,
+        "routes": list(_ENTITY_CANDIDATE_ROUTES),
+    }
+
+
+def _entity_candidate_projection(leaf: Any) -> dict[str, Any] | None:
+    """Lift one advisory `entity_candidate` block out of a write leaf.
+
+    Same posture as `_structure_suggestion_projection`, and carried the same
+    way: kept at compact detail, dropped (as a top-level key; the raw leaf is
+    untouched) at `legacy`. A malformed or oversized advisory is DROPPED
+    rather than allowed to widen the wire contract.
+    """
+    if not isinstance(leaf, Mapping):
+        return None
+    for container_key in ("creation", "semantic", "source", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        value = container.get("entity_candidate")
+        if not isinstance(value, Mapping):
+            continue
+        identities = value.get("identities")
+        if not isinstance(identities, (list, tuple)) or not (
+            0 < len(identities) <= _MAX_ENTITY_CANDIDATE_IDENTITIES
+        ):
+            continue
+        projected = [_entity_candidate_identity(item) for item in identities]
+        if any(item is None for item in projected):
+            continue
+        if value.get("guidance") != _ENTITY_CANDIDATE_GUIDANCE:
+            continue
+        return {"identities": projected, "guidance": _ENTITY_CANDIDATE_GUIDANCE}
     return None
 
 
@@ -789,6 +1149,98 @@ def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
     return None, ""
 
 
+#: Wire bounds on the advisory capture-sweep block. This module's own numbers
+#: rather than an import of the producer's, for the reason stated above the
+#: due-state bounds: the terminal re-validates what a leaf attached instead of
+#: trusting it, and a bound that came from the producer would validate nothing.
+#: The boundary vocabulary IS restated here, unlike the due-state categories,
+#: because it is closed by design and three tokens long -- a drifting copy of it
+#: would be visible, while an unbounded token would let the leaf name anything.
+_CAPTURE_SWEEP_BOUNDARIES = frozenset({"quiet-interval"})
+_MAX_CAPTURE_SWEEP_RULE_CHARS = 400
+_MAX_CAPTURE_SWEEP_CLASSES = 12
+_MAX_CAPTURE_SWEEP_CLASS_CHARS = 64
+_MAX_CAPTURE_SWEEP_REFS = 8
+_MAX_CAPTURE_SWEEP_MENTIONS = 5
+_MAX_CAPTURE_SWEEP_MENTION_CHARS = 64
+
+
+def _capture_sweep_projection(leaf: Any) -> dict[str, Any] | None:
+    """Lift one advisory capture-sweep block out of a write leaf.
+
+    Same posture as the two projections above, and dropped rather than truncated
+    for the same reason: a malformed or oversized advisory is a bug or an
+    untrusted leaf, and silently repairing one would make the wire contract
+    whatever the producer happened to send.
+
+    What it describes is neither of the other two: `structure_suggestion` is
+    evidence about the page just written and `due_state` is a count of what the
+    vault owes, while this is a prompt about the EPISODE the write sits in. It
+    carries no emission decision here -- the producer's quiet-interval ledger
+    already made it -- so unlike `due_state` there is no `_vault` hint to strip.
+    """
+    if not isinstance(leaf, Mapping):
+        return None
+    for container_key in ("creation", "semantic", "source", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        value = container.get("capture_sweep")
+        if not isinstance(value, Mapping):
+            continue
+        boundary = value.get("boundary")
+        rule = value.get("rule")
+        consider = value.get("consider")
+        if boundary not in _CAPTURE_SWEEP_BOUNDARIES:
+            continue
+        if not isinstance(rule, str) or not 0 < len(rule) <= _MAX_CAPTURE_SWEEP_RULE_CHARS:
+            continue
+        if not isinstance(consider, (list, tuple)) or not (
+            0 < len(consider) <= _MAX_CAPTURE_SWEEP_CLASSES
+        ):
+            continue
+        if not all(
+            isinstance(item, str) and 0 < len(item) <= _MAX_CAPTURE_SWEEP_CLASS_CHARS
+            for item in consider
+        ):
+            continue
+        projected: dict[str, Any] = {
+            "boundary": boundary,
+            "rule": rule,
+            "consider": list(consider),
+        }
+        written = value.get("written_recently")
+        if written is not None:
+            if not isinstance(written, (list, tuple)) or len(written) > _MAX_CAPTURE_SWEEP_REFS:
+                continue
+            if not all(
+                isinstance(ref, str)
+                and ref.startswith(_ADVISORY_REF_SCHEME)
+                and len(ref) <= _MAX_DUE_STATE_REF_CHARS
+                for ref in written
+            ):
+                continue
+            if written:
+                projected["written_recently"] = list(written)
+        mentions = value.get("unpaged_mentions")
+        if mentions is not None:
+            if (
+                not isinstance(mentions, (list, tuple))
+                or len(mentions) > _MAX_CAPTURE_SWEEP_MENTIONS
+            ):
+                continue
+            if not all(
+                isinstance(name, str)
+                and 0 < len(name) <= _MAX_CAPTURE_SWEEP_MENTION_CHARS
+                for name in mentions
+            ):
+                continue
+            if mentions:
+                projected["unpaged_mentions"] = list(mentions)
+        return projected
+    return None
+
+
 def _admit_due_state(block: dict[str, Any], vault_hint: str) -> bool:
     """Decide, at the point of DELIVERY, whether this response carries the block.
 
@@ -844,32 +1296,44 @@ def _iso_date(value: Any) -> bool:
     )
 
 
-def _without_advisory_due_state(result: Any) -> Any:
-    """Strip the due-state block from the leaf the legacy detail and diagnostics see.
+def _without_leaf_advisory(result: Any, advisory_key: str) -> Any:
+    """Strip one advisory block from the leaf the legacy detail and diagnostics see.
 
-    The legacy detail returns the leaf verbatim, so leaving the block there would
+    The legacy detail returns the leaf verbatim, so leaving a block there would
     put an advisory on exactly the response shape the spec says omits it. Mirrors
     `_without_graph_rebuild_handoff`: the leaf attaches, the terminal decides who
     sees it.
+
+    Parameterised by key rather than copied per advisory, because "which shapes
+    omit an advisory" is one rule and a second copy of it would drift the day a
+    third carrier lands on this seam.
     """
     if not isinstance(result, Mapping):
         return result
     changed = False
     stripped: dict[str, Any] = {}
     for key, value in result.items():
-        if key == "due_state":
+        if key == advisory_key:
             changed = True
             continue
         if (
             key in ("creation", "semantic", "source")
             and isinstance(value, Mapping)
-            and ("due_state" in value)
+            and (advisory_key in value)
         ):
-            stripped[key] = {inner: value[inner] for inner in value if inner != "due_state"}
+            stripped[key] = {inner: value[inner] for inner in value if inner != advisory_key}
             changed = True
             continue
         stripped[key] = value
     return stripped if changed else result
+
+
+def _without_advisory_due_state(result: Any) -> Any:
+    return _without_leaf_advisory(result, "due_state")
+
+
+def _without_advisory_capture_sweep(result: Any) -> Any:
+    return _without_leaf_advisory(result, "capture_sweep")
 
 
 def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
@@ -1300,13 +1764,16 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         return result
     raw_leaf = result["leaf_result"]
     due_state, due_state_vault = _due_state_projection(raw_leaf)
+    capture_sweep = _capture_sweep_projection(raw_leaf)
     relation_advisory = (
         _relation_advisory_projection(raw_leaf)
         if result.get("state") == "committed"
         else None
     )
     leaf = _without_relation_advisory_context(
-        _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+        _without_advisory_capture_sweep(
+            _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+        )
     )
     if detail == "legacy":
         return leaf
@@ -1358,6 +1825,23 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
+    elif isinstance(leaf, Mapping) and leaf.get("operation") == "episode_workflow":
+        # The agent resumes by leaf id and must see which leaves ran, which
+        # reconciled and which are blocked; every list is bounded by the
+        # episode model's own caps.
+        compact.update({key: leaf[key] for key in _EPISODE_WORKFLOW_FIELDS if key in leaf})
+    elif isinstance(leaf, Mapping) and leaf.get("operation") == "episode_memory":
+        # The recording agent needs the key back to record the next revision,
+        # and every field here is bounded by `episode_capture`'s own caps.
+        compact.update({key: leaf[key] for key in _EPISODE_RECEIPT_FIELDS if key in leaf})
+    elif isinstance(leaf, Mapping) and leaf.get("operation") == "configure_memory":
+        # The configuration contract is metadata-only and bounded by the
+        # canonical prominence vocabulary. Keep the newly effective contract
+        # visible so the current conversation can adopt it immediately.
+        compact.update({key: leaf[key] for key in (
+            "operation", "action", "scope", "stored", "contexts", "context", "revision",
+            "before_hash", "after_hash", "receipt_id", "engagement",
+        ) if key in leaf})
     elif (
         isinstance(leaf, Mapping)
         and isinstance(leaf.get("run_id"), str)
@@ -1441,8 +1925,20 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     structure_suggestion = _structure_suggestion_projection(leaf)
     if structure_suggestion is not None:
         compact["structure_suggestion"] = structure_suggestion
+    records_routing = _records_routing_projection(leaf)
+    if records_routing is not None:
+        compact["records_routing"] = records_routing
+    entity_candidate = _entity_candidate_projection(leaf)
+    if entity_candidate is not None:
+        compact["entity_candidate"] = entity_candidate
     if due_state is not None and _admit_due_state(due_state, due_state_vault):
         compact["due_state"] = due_state
+    if capture_sweep is not None:
+        # No admission step, unlike due-state. This carrier's governor is its own
+        # quiet-interval ledger and it already ran at the seam, where the write it
+        # measures actually happened. See `capture_sweep`'s module docstring on
+        # why this ledger records writes rather than deliveries.
+        compact["capture_sweep"] = capture_sweep
     if relation_advisory is not None:
         compact["relation_advisory"] = relation_advisory
     if "vocabulary_sync" in result or "vocabulary_advisory" in result:
@@ -1454,6 +1950,20 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
 
         if valid_projection(result["additive_authority"]):
             compact["additive_authority"] = result["additive_authority"]
+    if isinstance(leaf, Mapping):
+        resolution = leaf.get("vocabulary_resolution")
+        if resolution is None and isinstance(leaf.get("creation"), Mapping):
+            resolution = leaf["creation"].get("vocabulary_resolution")
+        if resolution is not None:
+            from .vocabulary_resolution import valid_public_resolution
+
+            if valid_public_resolution(resolution):
+                compact["vocabulary_resolution"] = resolution
+    if "vocabulary_resolution" in result:
+        from .vocabulary_resolution import valid_public_resolution
+
+        if valid_public_resolution(result["vocabulary_resolution"]):
+            compact["vocabulary_resolution"] = result["vocabulary_resolution"]
     compact["warnings_count"] = result["warnings_count"]
     # Projected from the leaf, never from the receipt. Receipt recovery replaces
     # `leaf_result` with `{}` on purpose (the portable receipt must not retain
@@ -1528,15 +2038,23 @@ def valid_record_receipt(value: Any) -> bool:
         value.get("_record_receipt") != _RECORD_RECEIPT_MARKER
         or type(value.get("receipt_version")) is not int
         or value.get("receipt_version") != _RECORD_RECEIPT_VERSION
-        or operation not in {"create", "append", "update"}
         or not _normalized_uuid(value.get("collection_id"))
         or not isinstance(value.get("affected_paths"), list)
         or len(value["affected_paths"]) > 16
         or not all(
             isinstance(path, str) and 0 < len(path) <= 1024 for path in value["affected_paths"]
         )
-        or value.get("outcome") not in {"committed", "replayed"}
     ):
+        return False
+    # A discard has its own closed shape and never mixes with the committing
+    # operations: it is admitted here rather than by widening their outcome set,
+    # so `outcome: discarded` stays impossible for an append or an update.
+    if operation == "discard":
+        return _valid_discard_receipt(value)
+    if operation not in {"create", "append", "update"} or value.get("outcome") not in {
+        "committed",
+        "replayed",
+    }:
         return False
     outcome = value.get("outcome")
     correlation = value.get("audit_correlation")
@@ -1602,6 +2120,33 @@ def valid_record_receipt(value: Any) -> bool:
     if operation == "create":
         return True
     return False
+
+
+def _valid_discard_receipt(value: Mapping[str, Any]) -> bool:
+    """Whether *value* is the closed receipt a held-candidate discard returns.
+
+    A discard removes a candidate that never entered the audit chain, so there
+    is no item key, no item or container hash and nothing to correlate; the
+    removed reference and its path are the whole of it. The key set is exact so
+    that admitting this shape cannot admit a malformed committing receipt.
+    """
+    if set(value) != {
+        "_record_receipt",
+        "receipt_version",
+        "operation",
+        "collection_id",
+        "held_id",
+        "affected_paths",
+        "outcome",
+        "audit_correlation",
+    }:
+        return False
+    return (
+        value.get("outcome") == "discarded"
+        and _normalized_uuid(value.get("held_id"))
+        and value.get("audit_correlation") is None
+        and len(value["affected_paths"]) == 1
+    )
 
 
 def _valid_lifecycle_record_receipt(value: Mapping[str, Any]) -> bool:

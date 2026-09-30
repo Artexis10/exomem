@@ -238,6 +238,42 @@ def test_platform_requires_cross_repository_trust_in_runtime_upgrade_metadata(
     assert "runtime upgrade is invalid" in result.stderr
 
 
+def test_platform_admits_the_governance_migration_mode_but_no_other_new_one(
+    tmp_path: Path,
+) -> None:
+    """The coordinator's governance migration is selectable from a real deployment lock."""
+
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+    lock = json.loads(values["provisioner"]["deploymentLockJson"])
+    lock["runtimeUpgrade"] = {
+        "compatibilityDigest": "c" * 64,
+        "migrationMode": "governance-v3-to-v4",
+        "substrateConsumerCommit": "d" * 40,
+        "substrateTrustSha256": "e" * 64,
+    }
+    accepted = _lock_override(tmp_path / "governance", lock)
+    _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--values", str(accepted)),
+    )
+
+    lock["runtimeUpgrade"]["migrationMode"] = "governance-v4-to-v5"
+    rejected = _lock_override(tmp_path / "unknown", lock)
+    result = _render_process(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        release_name="exomem-platform",
+        extra_args=("--values", str(rejected)),
+    )
+    assert result.returncode != 0
+    assert "runtime upgrade is invalid" in result.stderr
+
+
 def test_platform_accepts_an_authoritatively_empty_legacy_catalog(tmp_path: Path) -> None:
     if HELM is None:
         pytest.skip("set HELM_BIN to run pinned Helm rendering")
@@ -930,7 +966,12 @@ def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -
 
 
 def test_platform_rotation_quiescence_surfaces_every_database_consumer() -> None:
-    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--set", "cellctl.enabled=false,cloudGateway.enabled=false"),
+    )
     expected_deployments = {
         "exomem-provisioner-api",
         "exomem-provisioner-worker",
@@ -1010,7 +1051,7 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
     }
 
     collector = _find(documents, "CronJob", "exomem-capacity-receipt-collector")
-    assert collector["spec"]["schedule"] == "* * * * *"
+    assert collector["spec"]["schedule"] == "*/5 * * * *"
     assert collector["spec"]["concurrencyPolicy"] == "Forbid"
     pod = collector["spec"]["jobTemplate"]["spec"]["template"]["spec"]
     assert pod["serviceAccountName"] == "exomem-capacity-receipt-collector"
@@ -1161,7 +1202,7 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
         "exomem-deletion-dispatcher": (
             "CronJob",
             ["exomem-deletion-dispatcher"],
-            "* * * * *",
+            "*/5 * * * *",
             True,
         ),
         "exomem-volume-worker": (
@@ -1281,6 +1322,18 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
         "exomem-capacity-receipt"
     )
     assert volume_env["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"] == "156895713"
+    assert volume_env["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"].startswith(
+        "/etc/exomem/deployment-lock/"
+    )
+    assert volume_env["EXOMEM_PROVISIONER_RUNTIME_SELECTION"] == "active"
+    assert any(
+        mount["name"] == "deployment-lock" and mount["readOnly"] is True
+        for mount in volume_pod["containers"][0]["volumeMounts"]
+    )
+    assert any(
+        volume["name"] == "deployment-lock"
+        for volume in volume_pod["volumes"]
+    )
 
     deletion_job = json.loads(
         _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"]["job-template.json"]
@@ -1665,7 +1718,7 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
         "kind": "CronJob",
         "command": ["exomem-durability-actions"],
         "serviceAccount": "exomem-durability-actions",
-        "schedule": "* * * * *",
+        "schedule": "*/5 * * * *",
         "concurrencyPolicy": "Forbid",
         "startingDeadlineSeconds": 45,
         "activeDeadlineSeconds": 4800,
@@ -1686,7 +1739,7 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
     }
 
     cronjob = _find(documents, "CronJob", "exomem-durability-actions")
-    assert cronjob["spec"]["schedule"] == "* * * * *"
+    assert cronjob["spec"]["schedule"] == "*/5 * * * *"
     assert cronjob["spec"]["concurrencyPolicy"] == "Forbid"
     assert cronjob["spec"]["startingDeadlineSeconds"] == 45
     assert cronjob["spec"]["jobTemplate"]["spec"]["activeDeadlineSeconds"] == 4800
@@ -2008,6 +2061,48 @@ def test_runtime_k3s_gate_pins_the_reviewed_release_unit() -> None:
     }
 
 
+def test_provisioner_api_validates_the_database_once_at_startup_not_every_five_seconds() -> None:
+    """Database validation is a boot-time invariant, not a serving-time one.
+
+    ``/health/ready`` runs four PostgreSQL queries. As a readiness probe it fired
+    every five seconds forever, which is one more consumer keeping a serverless
+    endpoint from ever suspending, and on any database blip it removed the only API
+    pod from the Service, turning a per-request 503 into a whole-service outage.
+    The startup probe keeps the validation; the periodic probes never touch the
+    database.
+    """
+    documents = _render(
+        PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform"
+    )
+    api = _find(documents, "Deployment", "exomem-provisioner-api")
+    (container,) = api["spec"]["template"]["spec"]["containers"]
+    assert container["startupProbe"]["httpGet"]["path"] == "/health/ready"
+    assert container["startupProbe"]["failureThreshold"] >= 12
+    for periodic in ("readinessProbe", "livenessProbe"):
+        assert container[periodic]["httpGet"]["path"] == "/health/live", periodic
+
+
+def test_no_cronjob_schedule_sits_inside_the_database_autosuspend_window() -> None:
+    """Every heartbeat must clear the endpoint's autosuspend window.
+
+    The endpoint stays awake for its most frequent consumer, so a single job added back
+    at one-minute cadence returns the whole platform to a permanently-awake database and
+    silently undoes the saving. This asserts the property rather than each schedule, so a
+    future CronJob has to opt into the cost explicitly rather than inherit it by copying
+    a neighbour.
+    """
+    documents = _render(
+        PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform"
+    )
+    offenders = sorted(
+        document["metadata"]["name"]
+        for document in documents
+        if document.get("kind") == "CronJob"
+        and document["spec"]["schedule"].split()[0] in {"*", "*/1"}
+    )
+    assert offenders == [], offenders
+
+
 def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     storage = _find(documents, "StorageClass", "exomem-hcloud-encrypted-retain")
@@ -2030,6 +2125,9 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     variables = tenant_admission["spec"]["variables"]
     assert [variable["name"] for variable in variables] == [
         "storageInit",
+        "storageBinding",
+        "bindingSpec",
+        "bindingMeta",
         "vaultFingerprint",
         "governanceMigration",
         "lifecycleJob",
@@ -2043,12 +2141,13 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "migrationMeta",
     ]
     assert "exomem-storage-init" in variables[0]["expression"]
-    assert "exomem.io/vault-fingerprint" in variables[1]["expression"]
-    assert "storageInit" in variables[3]["expression"]
-    assert "exomem.io/tenant-cell" in variables[4]["expression"]
+    assert "exomem.io/vault-fingerprint" in variables[4]["expression"]
+    assert "storageInit" in variables[6]["expression"]
+    assert "exomem.io/tenant-cell" in variables[7]["expression"]
     assert all(
         "!variables.inScope" in validation["expression"]
         or "!variables.governanceMigration" in validation["expression"]
+        or "!variables.storageBinding" in validation["expression"]
         for validation in tenant_admission["spec"]["validations"]
     )
     admission_text = json.dumps(tenant_admission)
@@ -2271,7 +2370,11 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         assert env["TARGET_URL"] == contract["origin"] + job["path"]
         assert env["CONNECT_TIMEOUT_SECONDS"] == "5"
         assert env["TOTAL_TIMEOUT_SECONDS"] == "20"
-        assert env["CADENCE_SECONDS"] == ("60" if job["schedule"] == "* * * * *" else "3600")
+        assert env["CADENCE_SECONDS"] == {
+            "* * * * *": "60",
+            "*/5 * * * *": "300",
+            "17 * * * *": "3600",
+        }[job["schedule"]]
         assert container["command"] == [
             "python",
             "/opt/exomem-hosted/scheduler_runtime.py",
@@ -2320,7 +2423,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "durationHistogramMetric": "exomem_hosted_scheduler_duration_seconds",
         "lastSuccessMetric": "exomem_hosted_scheduler_last_success_unixtime",
         "failureCounterMetric": "exomem_hosted_scheduler_failures_total",
-        "missedRunAlertAfterSeconds": 180,
+        "missedRunAlertAfterSeconds": 900,
         "consecutiveFailureAlertThreshold": 2,
     }
 
@@ -2372,7 +2475,7 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
     assert contract == json.loads(
         (ROOT / "infra/contracts/observability-v1.json").read_text(encoding="utf-8")
     )
-    assert contract["alerts"]["scheduler_missed_run_seconds"] == 180
+    assert contract["alerts"]["scheduler_missed_run_seconds"] == 900
     assert contract["alerts"]["scheduler_consecutive_failures"] == 2
     assert contract["poll_interval_seconds"] == 300
     scheduler_check = next(
@@ -2420,7 +2523,7 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
         item["name"]: item.get("value")
         for item in evaluator["spec"]["template"]["spec"]["containers"][0]["env"]
     }
-    assert evaluator_env["MISSED_RUN_SECONDS"] == "180"
+    assert evaluator_env["MISSED_RUN_SECONDS"] == "900"
     assert evaluator_env["FAILURE_THRESHOLD"] == "2"
     evaluator_container = evaluator["spec"]["template"]["spec"]["containers"][0]
     webhook = next(
@@ -2887,6 +2990,27 @@ def test_cell_state_root_migration_mode_enables_only_the_offline_state_migrator(
     assert not any(document.get("kind") == "StatefulSet" for document in documents)
 
 
+def test_cell_chart_refuses_the_governance_migration_mode() -> None:
+    """Governance migration runs in the coordinator's Job, never in an in-cell storage init."""
+
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    result = _render_process(
+        CELL,
+        CELL / "values.initialize.yaml",
+        namespace="cell-alpha-test",
+        extra_args=(
+            "--set",
+            "workloadMode=migrate",
+            "--set",
+            "migrationMode=governance-v3-to-v4",
+        ),
+    )
+
+    assert result.returncode != 0
+    assert "migrationMode" in result.stderr
+
+
 def test_cell_chart_rejects_mismatched_runtime_and_provider_cell_ids(tmp_path: Path) -> None:
     if HELM is None:
         pytest.skip("set HELM_BIN to run pinned Helm rendering")
@@ -3307,3 +3431,15 @@ def test_no_service_requires_an_external_load_balancer() -> None:
         and document.get("spec", {}).get("type") in {"LoadBalancer", "NodePort"}
     ]
     assert not offenders, f"these Services need an external balancer the cluster lacks: {offenders}"
+
+
+def test_cloud_cell_default_memory_envelope_is_3gi_limit_over_a_1gi_request() -> None:
+    """The cloud cell's first index build over a large restored vault was
+    OOM-killed at 1536Mi. The platform default feeds cellctl's
+    CELLCTL_CELL_MEMORY_LIMIT, which must agree with cellctl's own default."""
+    values = yaml.safe_load((PLATFORM / "values.yaml").read_text(encoding="utf-8"))
+    resources = values["cellctl"]["cellResources"]
+    assert resources["memoryLimit"] == "3Gi"
+    assert resources["memoryRequest"] == "1Gi"
+    main_py = (ROOT / "infra/cellctl/src/cellctl/main.py").read_text(encoding="utf-8")
+    assert 'os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", "3Gi")' in main_py

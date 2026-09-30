@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Artexis10/exomem/blob/main/infra/contracts/exomem-prepared-canonical-mutation-v1.schema.json",
+  "title": "Exomem prepared canonical mutation recovery descriptor v1",
+  "$comment": "The schema validates parsed data shape. The private codec separately enforces UTF-8 byte bounds, recipe depth and node bounds, custody-identity byte grammar, ordered acyclic prerequisites, canonical encoding and authenticated preparation. A valid or authenticated descriptor is not committed-effect proof.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "scoped_idempotency_digest",
+    "command_digest",
+    "attempt_id",
+    "commit_token",
+    "command",
+    "selector_digest",
+    "cell_id",
+    "logical_vault_id",
+    "registry_attachment_id",
+    "attachment_epoch",
+    "activation_store_id",
+    "required_children",
+    "result_recipe"
+  ],
+  "properties": {
+    "version": {"const": "exomem.prepared-canonical-mutation/v1"},
+    "scoped_idempotency_digest": {"$ref": "#/$defs/sha256"},
+    "command_digest": {"$ref": "#/$defs/sha256"},
+    "attempt_id": {"$ref": "#/$defs/attemptToken"},
+    "commit_token": {"$ref": "#/$defs/attemptToken"},
+    "command": {"$ref": "#/$defs/custodyIdentifier"},
+    "selector_digest": {"$ref": "#/$defs/sha256"},
+    "cell_id": {"$ref": "#/$defs/custodyIdentifier"},
+    "logical_vault_id": {"$ref": "#/$defs/custodyIdentifier"},
+    "registry_attachment_id": {"$ref": "#/$defs/custodyIdentifier"},
+    "attachment_epoch": {"$ref": "#/$defs/positiveSqliteInteger"},
+    "activation_store_id": {"$ref": "#/$defs/custodyIdentifier"},
+    "required_children": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/requiredChild"}
+    },
+    "result_recipe": {"$ref": "#/$defs/recipeNode"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$(?![\\s\\S])"},
+    "attemptToken": {"type": "string", "pattern": "^[0-9a-f]{24}$(?![\\s\\S])"},
+    "custodyIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f]).+$"
+    },
+    "positiveSqliteInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "requiredChild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "plan_sha256", "requires"],
+      "properties": {
+        "id": {"$ref": "#/$defs/custodyIdentifier"},
+        "kind": {"enum": ["catalog", "policy", "sidecar"]},
+        "plan_sha256": {"$ref": "#/$defs/sha256"},
+        "requires": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/custodyIdentifier"}
+        }
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    },
+    "literalNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "value"],
+      "properties": {
+        "kind": {"const": "literal"},
+        "value": {"$ref": "#/$defs/jsonValue"}
+      }
+    },
+    "objectNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "members"],
+      "properties": {
+        "kind": {"const": "object"},
+        "members": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/recipeNode"}
+        }
+      }
+    },
+    "listNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "items"],
+      "properties": {
+        "kind": {"const": "list"},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/recipeNode"}}
+      }
+    },
+    "childFieldNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "child_id", "field"],
+      "properties": {
+        "kind": {"const": "child-field"},
+        "child_id": {"$ref": "#/$defs/custodyIdentifier"},
+        "field": {"type": "string", "minLength": 1}
+      }
+    },
+    "recipeNode": {
+      "oneOf": [
+        {"$ref": "#/$defs/literalNode"},
+        {"$ref": "#/$defs/objectNode"},
+        {"$ref": "#/$defs/listNode"},
+        {"$ref": "#/$defs/childFieldNode"}
+      ]
+    }
+  }
+}

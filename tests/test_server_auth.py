@@ -200,3 +200,46 @@ async def test_coordinator_state_rejects_unauthenticated_and_accepts_configured_
         await denied.get("current", collection="auth")
     assert error.value.response.status_code == 401
     assert await configured.get("current", collection="auth") is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, "unset"),
+        ("github:123456", "active"),
+        ("github:654321", "mismatch"),
+        ("github:0123456", "malformed"),
+        ("Person", "malformed"),
+    ],
+)
+def test_build_oauth_logs_the_remote_owner_binding_state_without_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    value: str | None,
+    expected: str,
+) -> None:
+    """A malformed or mismatched binding never stops startup; one content-free
+    line says which of the four states the host is in."""
+    _set_oauth_env(monkeypatch)
+    if value is None:
+        monkeypatch.delenv("EXOMEM_OWNER_OAUTH_SUBJECT", raising=False)
+    else:
+        monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", value)
+    from fastmcp import settings
+
+    monkeypatch.setattr(settings, "home", tmp_path)
+    monkeypatch.setattr(server_auth, "ExomemSessionOAuthProxy", lambda **_: object())
+
+    with caplog.at_level("INFO", logger=server_auth.log.name):
+        assert (
+            server_auth.build_oauth(require_auth=True, base_url="https://memory.example")
+            is not None
+        )
+
+    lines = [r.getMessage() for r in caplog.records if "remote_owner_binding" in r.getMessage()]
+    assert lines == [f"event=remote_owner_binding state={expected}"]
+    for record in caplog.records:
+        message = record.getMessage()
+        assert "123456" not in message and "654321" not in message
+        assert "person" not in message.casefold()

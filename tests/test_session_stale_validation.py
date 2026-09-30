@@ -75,13 +75,15 @@ def _stale_authority(
     *,
     now: list[float],
     grace: float = 86_400.0,
+    allowed_github_user_id: int | None = None,
+    store: AtomicStore | None = None,
 ) -> tuple[SessionAuthority, AtomicStore, Any, Any]:
     from exomem.session_validation_cache import (
         SessionStoreTelemetry,
         SessionValidationCache,
     )
 
-    store = AtomicStore()
+    store = store or AtomicStore()
     cache = SessionValidationCache(
         tmp_path / "session-validations.sqlite",
         encryption_key=Fernet.generate_key(),
@@ -96,6 +98,7 @@ def _stale_authority(
         validation_cache=cache,
         stale_grace_seconds=grace,
         session_store_telemetry=telemetry,
+        allowed_github_user_id=allowed_github_user_id,
     )
     return authority, store, cache, telemetry
 
@@ -451,3 +454,36 @@ def test_server_auth_uses_exact_fastmcp_storage_key_and_zero_grace_omits_cache(
     assert disabled._validation_cache is None
     assert disabled._stale_grace_seconds == 0
     assert captured == {}
+
+
+@pytest.mark.anyio
+async def test_stale_grace_never_serves_an_account_no_longer_allowed(tmp_path: Path) -> None:
+    now = [1_800_000_000.0]
+    authority, store, _, _ = _stale_authority(tmp_path, now=now, allowed_github_user_id=123456)
+    bearer, issued = await _issue(authority)
+    assert await authority.validate(bearer) == issued
+
+    # The host rotates the allowed account, and the coordinator is down: the
+    # replica-local cache must not keep the former account signed in.
+    rotated, _, _, _ = _stale_authority(
+        tmp_path, now=now, allowed_github_user_id=654321, store=store
+    )
+    store.fail_get = True
+    with pytest.raises(SessionStoreUnavailable):
+        await rotated.validate(bearer)
+
+
+def test_server_auth_binds_the_allowed_account_into_session_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from fastmcp import settings
+
+    monkeypatch.setattr(settings, "home", tmp_path)
+    monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", "stable-signing-root")
+    monkeypatch.delenv("EXOMEM_OAUTH_STORAGE_URL", raising=False)
+    monkeypatch.delenv("EXOMEM_WRITER_LEASE_URL", raising=False)
+    for raw, expected in (("123456", 123456), (" 123456 ", 123456), ("", None), ("x", None)):
+        monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", raw)
+        authority = server_auth.build_session_authority(base_url="https://memory.example")
+        assert authority.allowed_github_user_id == expected

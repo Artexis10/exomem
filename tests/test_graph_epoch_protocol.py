@@ -389,6 +389,57 @@ def test_v2_receipt_requires_exact_canonical_utf8_json_before_authentication() -
     assert graph_sync.GraphCommitReceipt.parse(json.dumps(legacy, indent=2)) is not None
 
 
+@pytest.mark.parametrize("derived_sync", ["pending", "completed", "failed"])
+def test_receipt_round_trips_optional_derived_sync(derived_sync: str) -> None:
+    receipt = graph_sync.GraphCommitReceipt.create(
+        idempotency_key_digest="a" * 64,
+        command_digest="b" * 64,
+        attempt_id="0123456789abcdef01234567",
+        commit_token="fedcba987654321001234567",
+        canonical_disposition="success",
+        terminal_projection={
+            "status": "committed",
+            "mutated": True,
+            "derived_sync": derived_sync,
+        },
+        commit_secret=b"s" * 32,
+    )
+
+    assert graph_sync.GraphCommitReceipt.parse(receipt.render()) == receipt
+
+
+@pytest.mark.parametrize("derived_sync", [None, True, 1, "unknown", [], {}])
+def test_receipt_rejects_malformed_derived_sync(derived_sync: object) -> None:
+    with pytest.raises(ValueError, match="terminal projection"):
+        graph_sync.GraphCommitReceipt.create(
+            idempotency_key_digest="a" * 64,
+            command_digest="b" * 64,
+            attempt_id="0123456789abcdef01234567",
+            commit_token="fedcba987654321001234567",
+            canonical_disposition="success",
+            terminal_projection={
+                "status": "committed",
+                "mutated": True,
+                "derived_sync": derived_sync,
+            },
+            commit_secret=b"s" * 32,
+        )
+
+
+def test_receipt_without_derived_sync_remains_supported() -> None:
+    receipt = graph_sync.GraphCommitReceipt.create(
+        idempotency_key_digest="a" * 64,
+        command_digest="b" * 64,
+        attempt_id="0123456789abcdef01234567",
+        commit_token="fedcba987654321001234567",
+        canonical_disposition="success",
+        terminal_projection={"status": "committed", "mutated": True},
+        commit_secret=b"s" * 32,
+    )
+
+    assert graph_sync.GraphCommitReceipt.parse(receipt.render()) == receipt
+
+
 def test_v2_receipt_rejects_noncanonical_terminal_projection_scalars_before_auth() -> None:
     secret = b"s" * 32
     projection = {

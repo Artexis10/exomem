@@ -718,4 +718,10 @@ def test_the_file_watcher_switch_does_not_gate_admission(tmp_path, monkeypatch) 
         module._enter_managed_recall(vault_root)
         assert module.readiness.retrieval_admission(vault_root).get("admitted") is True
     finally:
-        module.readiness.unmanage_runtime()
+        # Same residue as the node above: `_enter_managed_recall` drives a real
+        # warm-up to completion, and `unmanage_runtime()` alone left
+        # `_warm_finished` set for whatever the shard ran next. On 2026-09-10 the
+        # duration-based split placed
+        # `test_server_runtime.py::test_disable_warmup_preserves_unverified_lazy_runtime_admission`
+        # right after this node and it read `unavailable` instead of `unverified`.
+        module.readiness.reset()

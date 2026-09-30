@@ -1,0 +1,150 @@
+{{- if .Values.cloudIngress.enabled }}
+{{- if ne .Values.cloudIngress.hostname .Values.cloudGateway.hostname }}
+{{- fail "cloudIngress.hostname must equal cloudGateway.hostname" }}
+{{- end }}
+{{- $edge := required "traefik.namespaceOverride names the edge namespace" .Values.traefik.namespaceOverride }}
+{{- $certManager := index .Values "cert-manager" }}
+{{- if and $certManager.enabled (ne $certManager.clusterResourceNamespace .Values.cellctl.namespace) }}
+{{- fail "cert-manager.clusterResourceNamespace must equal cellctl.namespace, where the ClusterIssuer's DNS-01 token is delivered" }}
+{{- end }}
+# D11: cert-manager obtains the MCP hostname's certificate through an ACME
+# DNS-01 solver using a Cloudflare DNS-edit token, so the certificate lives
+# in a Secret and needs no volume. This assumes cert-manager's controller
+# and CRDs are already installed in the cluster (see the delivery report:
+# no task in this change installs the controller itself; the
+# `cert-manager` chart dependency this repo vendors alongside hcloud-csi
+# and traefik, gated by cert-manager.enabled, covers that if it is not
+# already present some other way).
+# harden-exomem-cloud-operator-access D3: a ClusterIssuer, so the Certificate
+# and its TLS Secret can live in the edge namespace while the DNS-edit token
+# and ACME account key never do. cert-manager resolves a ClusterIssuer's
+# Secret references in its clusterResourceNamespace, pinned above to
+# cellctl.namespace, where the signed registry already delivers the token.
+# Any namespace could name a ClusterIssuer, so exomem-cloud-issuer-scope below
+# admits a Certificate or CertificateRequest naming it only in the edge
+# namespace. The solver stays scoped by selector.dnsNames to the one hostname
+# it is meant to solve for.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: exomem-cloud-dns01
+spec:
+  acme:
+    email: {{ .Values.cloudIngress.acmeEmail | quote }}
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: exomem-cloud-acme-account-key
+    solvers:
+      - selector:
+          dnsNames:
+            - {{ .Values.cloudIngress.hostname | quote }}
+        dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: {{ .Values.cloudIngress.cloudflareApiTokenSecretName }}
+              key: {{ .Values.cloudIngress.cloudflareApiTokenSecretKey }}
+---
+# D3: only the edge namespace may request the MCP hostname's certificate. An
+# omitted issuerRef kind means Issuer and an omitted group means cert-manager,
+# as cert-manager itself reads them. cert-manager creates each
+# CertificateRequest in its Certificate's namespace, so the Cloud route's own
+# issuance is admitted. Masters can remove this; it stops accidents, and the
+# audit log records a removal.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-cloud-issuer-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["certificates", "certificaterequests"]
+  variables:
+    - name: namesCloudIssuer
+      expression: >-
+        object.spec.issuerRef.name == 'exomem-cloud-dns01' &&
+        (has(object.spec.issuerRef.kind) ? object.spec.issuerRef.kind : 'Issuer') == 'ClusterIssuer' &&
+        (!has(object.spec.issuerRef.group) || object.spec.issuerRef.group in ['', 'cert-manager.io'])
+  validations:
+    - expression: "!variables.namesCloudIssuer || request.namespace == '{{ $edge }}'"
+      message: only the edge namespace may request a certificate from the Cloud MCP ClusterIssuer exomem-cloud-dns01.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-cloud-issuer-scope
+spec:
+  policyName: exomem-cloud-issuer-scope
+  validationActions: [Deny]
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: exomem-cloud-gateway
+  namespace: {{ $edge }}
+spec:
+  secretName: exomem-cloud-gateway-tls
+  issuerRef:
+    name: exomem-cloud-dns01
+    kind: ClusterIssuer
+  dnsNames:
+    - {{ .Values.cloudIngress.hostname | quote }}
+---
+# The DNS record for this hostname must be DNS-only (not proxied) in
+# Cloudflare, so the ACME DNS-01 challenge and the direct TLS connection
+# both reach this cluster's own certificate, not a third party's (D11, the
+# "Vault traffic is TLS-terminated only on our own servers" requirement).
+# The gateway applies its per-IP bucket only to requests carrying the
+# trusted-ingress header with the configured value. Traefik overwrites any
+# copy a client sends, and the gateway's NetworkPolicy admits only Traefik
+# pods, so the header proves the request came through this route.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: exomem-cloud-trusted-ingress
+  namespace: {{ $edge }}
+spec:
+  headers:
+    customRequestHeaders:
+      {{ .Values.cloudGateway.trustedIngressSourceHeader }}: {{ .Values.cloudGateway.trustedIngressSourceValue | quote }}
+---
+# D2: Traefik watches only the edge namespace, so the route names the
+# gateway through this ExternalName Service instead of a cross-namespace
+# reference. The gateway's NetworkPolicy (cloud-gateway.yaml) is what admits
+# the connection.
+apiVersion: v1
+kind: Service
+metadata:
+  name: exomem-cloud-gateway
+  namespace: {{ $edge }}
+spec:
+  type: ExternalName
+  externalName: {{ printf "exomem-cloud-gateway.%s.svc.cluster.local" .Values.cellctl.namespace }}
+  ports:
+    - name: http
+      port: 8080
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: exomem-cloud-gateway
+  namespace: {{ $edge }}
+spec:
+  entryPoints: [websecure]
+  tls:
+    secretName: exomem-cloud-gateway-tls
+  routes:
+    # Only the Cloud MCP path and its protected-resource metadata are public.
+    # The gateway also serves the hosted MCP path, which must stay unreachable
+    # through the Cloud hostname.
+    - kind: Rule
+      match: Host(`{{ .Values.cloudIngress.hostname }}`) && (Path(`{{ .Values.cloudGateway.mcpPath }}`) || Path(`/.well-known/oauth-protected-resource{{ .Values.cloudGateway.mcpPath }}`))
+      middlewares:
+        - name: exomem-cloud-trusted-ingress
+      services:
+        - name: exomem-cloud-gateway
+          port: 8080
+{{- end }}

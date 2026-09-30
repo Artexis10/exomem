@@ -47,7 +47,11 @@ from exomem_provisioner.provider_identity import (
     provider_operation_resource_name,
 )
 from exomem_provisioner.repository import OperationRepository
-from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
+from exomem_provisioner.wire_protocol import (
+    SINGLE_PHASE_ACTIONS,
+    WIRE_PROTOCOL_V2,
+    runtime_identity,
+)
 from exomem_provisioner.worker import ProvisionerWorker
 
 
@@ -485,9 +489,7 @@ async def test_rollforward_waits_for_zero_runtime_proof_before_fingerprint_and_m
                 return False
             return await super().runtime_stopped(metadata)
 
-        async def canonical_vault_fingerprint(
-            self, metadata, request, operation_id, *, phase
-        ):
+        async def canonical_vault_fingerprint(self, metadata, request, operation_id, *, phase):
             self.events.append(f"fingerprint:{phase}")
             return await super().canonical_vault_fingerprint(
                 metadata, request, operation_id, phase=phase
@@ -1515,6 +1517,148 @@ async def test_v2_health_preserves_pre_upgrade_runtime_identity_without_compatib
     assert healthy.result["runtimeIdentity"] == target
 
 
+_LEGACY_IMAGE = "registry.invalid/exomem@sha256:" + "a" * 64
+_FORWARD_IMAGE = "registry.invalid/exomem@sha256:" + "f" * 64
+
+
+def _expand_configs() -> tuple[LifecycleConfig, LifecycleConfig]:
+    """The outgoing 0.22.0 worker config and the 0.23.0 expand config that catalogs it."""
+
+    legacy_target = _runtime_target()
+    legacy_unit = {
+        field: legacy_target[field]
+        for field in (
+            "releaseVersion",
+            "protocolVersion",
+            "agentProfile",
+            "gatewayContractDigest",
+            "commandFingerprint",
+            "schemaDigest",
+        )
+    }
+    legacy = replace(_config(), runtime_target=legacy_target)
+    forward = replace(
+        _config(),
+        image=_FORWARD_IMAGE,
+        release_version="0.23.0",
+        contract_digest="f" * 64,
+        runtime_target=_runtime_target(
+            releaseVersion="0.23.0",
+            gatewayContractDigest="f" * 64,
+            compatibilityDigest="8" * 64,
+        ),
+        compatibility_digest="8" * 64,
+        legacy_runtime_units={
+            ("0.22.0", "1"): {
+                **legacy_unit,
+                "runtimeImage": _LEGACY_IMAGE,
+                "sourceCommit": "a" * 40,
+            }
+        },
+    )
+    return legacy, forward
+
+
+class _RenewingPlane(HighFidelityProviderPlane):
+    def __init__(self, *, location: str) -> None:
+        super().__init__(location=location)
+        self.renewals: list[tuple[str, str]] = []
+
+    async def renew_authorization_session(
+        self, metadata: OpaqueProviderMetadata, request: dict[str, object]
+    ) -> str:
+        self.renewals.append((metadata.subject_id, runtime_identity(request)["releaseVersion"]))
+        return f"revision-{len(self.renewals)}"
+
+
+@pytest.mark.asyncio
+async def test_legacy_v2_cell_keeps_renewing_and_checking_under_the_expand_lock() -> None:
+    """The worker gate admits a cataloged legacy identity for the actions that keep a cell alive."""
+
+    plane = _RenewingPlane(location="fsn1")
+    legacy, forward = _expand_configs()
+    request = _v2_request()
+    await plane.seed_ready_cell(_metadata(), request, legacy)
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=forward)
+    context = _context(wire_protocol=WIRE_PROTOCOL_V2)
+
+    renewed = await driver.execute("renew-authorization", request, context)
+    healthy = await driver.execute("health", request, context)
+
+    assert isinstance(renewed, DriverFinal)
+    assert plane.renewals == [("cell-alpha", "0.22.0")]
+    assert isinstance(healthy, DriverFinal)
+    assert healthy.result["runtimeIdentity"] == _runtime_target()
+
+    forward_request = _v2_request(runtimeTarget=forward.runtime_target)
+    with pytest.raises(DriverTerminal, match="PROVISIONER_RUNTIME_CONTRACT_MISMATCH"):
+        await driver.execute("health", forward_request, context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field",
+    (
+        "releaseVersion",
+        "protocolVersion",
+        "agentProfile",
+        "gatewayContractDigest",
+        "commandFingerprint",
+        "schemaDigest",
+    ),
+)
+async def test_legacy_v2_identity_drift_is_terminal_before_any_provider_effect(
+    field: str,
+) -> None:
+    plane = _RenewingPlane(location="fsn1")
+    legacy, forward = _expand_configs()
+    await plane.seed_ready_cell(_metadata(), _v2_request(), legacy)
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=forward)
+    target = _runtime_target()
+    target[field] = "2" if field == "protocolVersion" else "e" * 64
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_RELEASE_UNIT_MISMATCH"):
+        await driver.execute(
+            "renew-authorization",
+            _v2_request(runtimeTarget=target),
+            _context(wire_protocol=WIRE_PROTOCOL_V2),
+        )
+
+    assert plane.renewals == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ("provision", "rollforward"))
+async def test_legacy_v2_identity_never_places_a_runtime_image(action: str) -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    _, forward = _expand_configs()
+    driver = CellLifecycleDriver(
+        plane=plane, volume_worker=VolumeLifecycleWorker(plane, plane), config=forward
+    )
+    request = _v2_request(**({"compatibilityDigest": "8" * 64} if action == "rollforward" else {}))
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_RELEASE_UNIT_MISMATCH"):
+        await driver.execute(action, request, _context(wire_protocol=WIRE_PROTOCOL_V2))
+
+    assert plane._cells == {}
+    assert plane._tenant_fences == {}
+
+
+def test_fixed_helm_values_keep_a_legacy_v2_cell_on_its_cataloged_image() -> None:
+    _, forward = _expand_configs()
+
+    legacy_values = _fixed_helm_values(_metadata(), _v2_request(), forward)
+    forward_values = _fixed_helm_values(
+        _metadata(), _v2_request(runtimeTarget=forward.runtime_target), forward
+    )
+
+    assert legacy_values["image"] == _LEGACY_IMAGE
+    assert legacy_values["expectedRelease"] == "0.22.0"
+    assert legacy_values["agentProfile"] == "hosted-alpha-agent-v1"
+    assert forward_values["image"] == _FORWARD_IMAGE
+    assert forward_values["expectedRelease"] == "0.23.0"
+
+
 @pytest.mark.asyncio
 async def test_v2_restore_candidate_does_not_require_a_live_health_probe() -> None:
     plane = HighFidelityProviderPlane(location="fsn1")
@@ -2137,3 +2281,34 @@ def test_every_provider_conflict_on_the_provision_path_names_its_condition() -> 
                 unlabelled.append(f"{module.__name__}:{node.lineno}")
 
     assert unlabelled == [], f"MetadataConflict raised without a condition label: {unlabelled}"
+
+
+@pytest.mark.asyncio
+async def test_single_phase_actions_settle_without_a_checkpoint_of_their_own() -> None:
+    """The repository's restart rule reads this set as proof of no retained progress.
+
+    A terminal failure collapses any non-governance checkpoint to "failed", so the
+    only actions whose failed row still proves nothing was retained are the ones
+    whose dispatch never parks on a checkpoint of its own. This keeps that
+    declaration true. The shared observation ahead of dispatch can still park a
+    cell carrying a stray migration artifact, but that leaves the operation
+    pending rather than terminally failed, which is not what the rule acts on.
+    """
+
+    plane = _RenewingPlane(location="fsn1")
+    config = replace(_config(), runtime_target=_runtime_target(), compatibility_digest="9" * 64)
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    request = _v2_request()
+    await plane.seed_ready_cell(_metadata(), request, config)
+    context = _context(wire_protocol=WIRE_PROTOCOL_V2)
+
+    assert isinstance(await driver.execute("health", request, context), DriverFinal)
+    assert isinstance(await driver.execute("renew-authorization", request, context), DriverFinal)
+    # No prior rollforward is committed, so this is the failing shape; it must still
+    # settle in one pass rather than parking on a checkpoint.
+    with pytest.raises(DriverTerminal, match="PROVISIONER_PROVIDER_METADATA_CONFLICT"):
+        await driver.execute(
+            "rollback-rollforward", _v2_request(compatibilityDigest="9" * 64), context
+        )
+
+    assert SINGLE_PHASE_ACTIONS == {"health", "renew-authorization", "rollback-rollforward"}

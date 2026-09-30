@@ -13,8 +13,9 @@ It is PURE ASSEMBLY (measurement), mirroring `attention.py`:
   grouped under bounded provenance/lifecycle context. Selected unit hits are packed first.
 - The neighbourhood reuses `find`'s outbound-link resolution + `vault`'s inbound search.
 - Contradictions are recorded supersession edges (frontmatter) plus proximity "tension"
-  pairs whose cosine sits in the existing `[floor, dup)` band (reusing
-  `corpus_aware._best_cosine_per_file`) — proximity, not polarity; the reader decides.
+  pairs whose cosine sits in the existing `[floor, dup)` band, computed from the packed
+  pages' stored sidecar vectors (`corpus_aware.pairwise_best_cosine_from_sidecar`), never
+  by re-encoding them — proximity, not polarity; the reader decides.
 
 Nothing is mutated, no generative/reasoning model runs, and `find` ordering is untouched.
 The tension part soft-fails to empty (`embeddings_available: false`) when the embedding
@@ -25,8 +26,10 @@ that drops content is reported in `truncation` — never a silent truncation.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -43,6 +46,15 @@ from . import (
 from . import find as find_module
 from . import vault as vault_module
 from .find_types import Hit, ParsedPage, SemanticUnitHit
+
+#: The clock the deadline check reads, named so a test can substitute one.
+_monotonic = time.monotonic
+
+#: Appended to a pack's `truncation` when the request deadline ended assembly
+#: early. A named constant rather than a phrase the caller has to match: the
+#: recall path reads it back to decide whether to name `pack` as truncated.
+DEADLINE_TRUNCATION = "pack assembly stopped at the request deadline"
+GRAPH_ENRICH_BUDGET_SKIP = "graph enrichment skipped for the request budget"
 
 # --- bounds (env-overridable at call time so tests can monkeypatch) ---
 _DEFAULT_MAX_HITS = 5
@@ -466,13 +478,22 @@ def _neighborhood(
     vault_root: Path, packed_pages: list[ParsedPage], max_neighbors: int
 ) -> tuple[list[dict], int]:
     """1-hop inbound+outbound wikilink neighbours of the packed notes, packed notes
-    excluded, ranked by co-citation (distinct packed notes linked), capped."""
+    excluded, ranked by co-citation (distinct packed notes linked), capped.
+
+    For a reader other than the owner, links resolve over the pages it may see
+    and a neighbour it may not see is decided before ranking and the cap.
+    """
+    from .governance import egress
+
+    visible = egress.visible_page_filter(vault_root)
     packed_canon = {corpus_aware._canon(p.rel_path) for p in packed_pages}
     # canon -> {"path", "directions": set, "referenced_by": set}
     neigh: dict[str, dict] = {}
 
     def _touch(target_path: str, packed_rel: str, direction: str) -> None:
         if not recall_policy.is_recall_candidate(vault_root, vault_root / target_path):
+            return
+        if visible is not None and not visible(target_path):
             return
         canon = corpus_aware._canon(target_path)
         if canon in packed_canon:
@@ -483,10 +504,12 @@ def _neighborhood(
         entry["directions"].add(direction)
         entry["referenced_by"].add(packed_rel)
 
+    # The owner's calls are made exactly as before.
+    view: dict = {} if visible is None else {"visible": visible}
     for page in packed_pages:
-        for target in find_module._outbound_wikilink_paths(page, vault_root):
+        for target in find_module._outbound_wikilink_paths(page, vault_root, **view):
             _touch(target, page.rel_path, "out")
-        for link in vault_module.find_inbound_wikilinks(vault_root, page.rel_path):
+        for link in vault_module.find_inbound_wikilinks(vault_root, page.rel_path, **view):
             _touch(link.path, page.rel_path, "in")
 
     items = sorted(
@@ -578,17 +601,54 @@ def _asserted_tension(
     return pairs, keys
 
 
+def _published_chunks_if_current(vault_root: Path, page: ParsedPage) -> list[str]:
+    """The chunking the embedding pass published for `page`, if it is this file's.
+
+    For a timed media transcript the chunking IS the semantic segmenter's
+    output, and deriving it again encodes: measured 2026-09-18 on the personal
+    service, 837 to 981 texts and 80 to 110 s of `embeddings.encode` inside
+    `recall.pack` on every deep recall that packed one video page. The pass
+    that published the page's rows cut them from the same bytes and stamped
+    them with the file's mtime, so a row mtime equal to the page's mtime is the
+    same generation, and its stored texts are the page's chunking without an
+    encode. Rows older than the file belong to another generation: the page
+    contributes no proximity pair this time, and the caller reports it.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return []
+    from . import embeddings as embeddings_module
+
+    chunks, stored_mtime = embeddings_module.get_embedding_index(vault_root).stored_chunks_for(
+        page.rel_path
+    )
+    if not chunks or stored_mtime is None:
+        return []
+    # rel_tol=0.0 is load-bearing: `math.isclose`'s default relative tolerance
+    # is 1e-9, and at epoch magnitudes (1.8e9 s) that is ~1.8 s, wide enough to
+    # take a double-save's previous generation as current. The writers stamp
+    # the row from the same `st_mtime` the page carries, bit for bit, so only
+    # float round-trip slack is allowed.
+    if not math.isclose(stored_mtime, float(page.mtime), rel_tol=0.0, abs_tol=1e-6):
+        return []
+    return chunks
+
+
 def _tension_pairs(
     vault_root: Path, packed_pages: list[ParsedPage], max_tension: int
-) -> tuple[list[dict], int, bool]:
+) -> tuple[list[dict], int, bool, int]:
     """Tension pairs AMONG the packed notes: authored `contradicts` edges first, then
-    proximity pairs whose pairwise cosine lands in the contradiction band. Reuses the
-    embedding sidecar for the proximity half only; soft-fails to empty when off.
+    proximity pairs whose pairwise cosine lands in the contradiction band. The proximity
+    half reads the packed pages' stored vectors from the embedding sidecar and encodes
+    nothing; soft-fails to empty when off.
 
-    `embeddings_available` is True iff a cosine pass returned scores AND the band is
-    active; an inverted/disabled band (floor >= ceiling) reports it False — the band is
-    off, so no proximity tension can be measured regardless of the sidecar. Asserted
-    pairs are independent of it and are surfaced either way.
+    `embeddings_available` is True iff at least one packed page had exact stored rows AND
+    the band is active; an inverted/disabled band (floor >= ceiling) reports it False — the
+    band is off, so no proximity tension can be measured regardless of the sidecar.
+    Asserted pairs are independent of it and are surfaced either way.
+
+    The fourth value counts packed pages that had no exact rows while others did (their
+    embedding not yet landed, or the page moved since): they contributed no proximity
+    pair this time, and the caller reports that rather than leaving it silent.
 
     A pair that is both authored and in band appears once, as asserted."""
     floor = corpus_aware._contradiction_floor()
@@ -598,23 +658,41 @@ def _tension_pairs(
     pair_best: dict[frozenset[str], float] = {}
     embeddings_available = False
 
+    uncovered = 0
     if floor < ceiling:
+        # Proximity among the packed pages comes from the vectors the embedding
+        # pass already published for them, never from re-encoding their bodies:
+        # on a large vault that encode was most of a recall's wall time. A page
+        # whose rows are not yet exact (embedding deferred, or moved since) just
+        # contributes no pairs this time, and the caller says so in `truncation`.
+        from . import embeddings as embeddings_module
+
+        chunked: list[tuple[str, list[str]]] = []
         for page in packed_pages:
-            cmap = corpus_aware._best_cosine_per_file(vault_root, title=page.title, body=page.body)
-            if cmap:
-                embeddings_available = True
-            self_canon = corpus_aware._canon(page.rel_path)
-            for fp, score in cmap.items():
-                canon = corpus_aware._canon(fp)
-                if canon == self_canon or canon not in by_canon:
-                    continue
-                if not (floor <= score < ceiling):
-                    continue
-                key = frozenset((self_canon, canon))
-                if key in asserted_keys:
-                    continue  # the authored edge owns this pair
-                if key not in pair_best or score > pair_best[key]:
-                    pair_best[key] = score
+            try:
+                chunks = embeddings_module._chunks_for_page(vault_root, page, allow_encode=False)
+                if chunks is None:
+                    chunks = _published_chunks_if_current(vault_root, page)
+            except Exception:  # noqa: BLE001 -- chunking is best-effort here
+                chunks = []
+            chunked.append((page.rel_path, chunks))
+        scores, covered = corpus_aware.pairwise_best_cosine_from_sidecar(vault_root, chunked)
+        embeddings_available = bool(covered)
+        if covered:
+            uncovered = sum(1 for rel, _chunks in chunked if rel not in covered)
+        for pair, score in scores.items():
+            first, second = tuple(pair)
+            canon_a = corpus_aware._canon(first)
+            canon_b = corpus_aware._canon(second)
+            if canon_a == canon_b or canon_a not in by_canon or canon_b not in by_canon:
+                continue
+            if not (floor <= score < ceiling):
+                continue
+            key = frozenset((canon_a, canon_b))
+            if key in asserted_keys:
+                continue  # the authored edge owns this pair
+            if key not in pair_best or score > pair_best[key]:
+                pair_best[key] = score
 
     proximity: list[dict] = []
     for key, score in pair_best.items():
@@ -632,7 +710,7 @@ def _tension_pairs(
     pairs = asserted + proximity
     shown = pairs[:max_tension] if max_tension > 0 else pairs
     dropped = len(pairs) - len(shown)
-    return shown, dropped, embeddings_available
+    return shown, dropped, embeddings_available, uncovered
 
 
 # ----------------------------- assembly -----------------------------
@@ -650,6 +728,9 @@ def assemble_pack(
     unit_chars: int | None = None,
     max_unit_total_chars: int | None = None,
     graph_enrich: bool = False,
+    deadline: float | None = None,
+    graph_enrich_reserve_seconds: float = 0.0,
+    timings: find_module.FindTimings | None = None,
 ) -> dict:
     """Assemble a reasoning-ready context pack over the top `hits`. Pure measurement.
 
@@ -657,6 +738,11 @@ def assemble_pack(
     contradictions, embeddings_available, truncation}``. Reads note content,
     frontmatter, wikilinks, and precomputed sidecar embeddings only — no mutation,
     no generative model, `find` ordering untouched.
+
+    `deadline` is a `time.monotonic` instant past which no further parent is
+    packed; what was packed stays a prefix of the full pack, in `find` order,
+    and `truncation` names `DEADLINE_TRUNCATION`. Reporting stays the caller's
+    job so this function keeps no side effect of its own.
     """
     max_hits = _resolve_cap(max_hits, "EXOMEM_PACK_MAX_HITS", _DEFAULT_MAX_HITS)
     max_neighbors = _resolve_cap(max_neighbors, "EXOMEM_PACK_MAX_NEIGHBORS", _DEFAULT_MAX_NEIGHBORS)
@@ -719,161 +805,179 @@ def assemble_pack(
     semantic_states: dict[str, semantic_index.SemanticParentIndexState] = {}
     selected_by_path: dict[str, list[tuple[int, int, str]]] = {}
     missing = 0
-    for group in packed_groups:
-        snapshot = _load_parent_snapshot(vault_root, str(group["path"]))
-        if snapshot is None:
-            missing += 1  # a packed hit whose file is gone/unreadable — surface it.
-            continue
-        page, state = snapshot
-        packed_pages.append(page)
-        semantic_states[page.rel_path] = state
-        selected_by_path[page.rel_path] = list(group["selected_refs"])
+    # Each phase below is its own span under `pack`: the 2026-09-18 media
+    # re-segmentation sat inside `recall.pack` for days because the pack was
+    # one opaque number, and a slow pack has to say which of its phases paid.
+    with find_module._span(timings, "pack.parents"):
+        for group in packed_groups:
+            if deadline is not None and _monotonic() >= deadline:
+                truncation.append(DEADLINE_TRUNCATION)
+                break
+            snapshot = _load_parent_snapshot(vault_root, str(group["path"]))
+            if snapshot is None:
+                missing += 1  # a packed hit whose file is gone/unreadable — surface it.
+                continue
+            page, state = snapshot
+            packed_pages.append(page)
+            semantic_states[page.rel_path] = state
+            selected_by_path[page.rel_path] = list(group["selected_refs"])
     if missing:
         truncation.append(f"{missing} packed hit(s) unreadable or missing, not packed")
 
-    claims = {p.rel_path: _extract_claims(p, claim_chars=claim_chars) for p in packed_pages}
-    semantic_unit_map: dict[str, dict[str, Any]] = {}
-    semantic_block_map: dict[str, list[dict]] = {}
-    plans: list[_UnitPackPlan] = []
-    for page in packed_pages:
-        document = semantic_states[page.rel_path].document
-        by_ref = {
-            unit.unit_ref: unit for unit in document.units if unit.unit_ref is not None
-        }
-        selected: list[tuple[int, int, semantic_units.SemanticUnit]] = []
-        unresolved = 0
-        for hit_rank, unit_order, unit_ref in selected_by_path.get(page.rel_path, []):
-            unit = by_ref.get(unit_ref)
-            if unit is None:
-                unresolved += 1
-            elif all(existing[2] is not unit for existing in selected):
-                selected.append((hit_rank, unit_order, unit))
-        if unresolved:
-            truncation.append(
-                f"{page.rel_path}: {unresolved} selected semantic unit(s) stale or missing"
+    units_span = find_module._span(timings, "pack.units")
+    with units_span:
+        claims = {p.rel_path: _extract_claims(p, claim_chars=claim_chars) for p in packed_pages}
+        semantic_unit_map: dict[str, dict[str, Any]] = {}
+        semantic_block_map: dict[str, list[dict]] = {}
+        plans: list[_UnitPackPlan] = []
+        for page in packed_pages:
+            document = semantic_states[page.rel_path].document
+            by_ref = {
+                unit.unit_ref: unit for unit in document.units if unit.unit_ref is not None
+            }
+            selected: list[tuple[int, int, semantic_units.SemanticUnit]] = []
+            unresolved = 0
+            for hit_rank, unit_order, unit_ref in selected_by_path.get(page.rel_path, []):
+                unit = by_ref.get(unit_ref)
+                if unit is None:
+                    unresolved += 1
+                elif all(existing[2] is not unit for existing in selected):
+                    selected.append((hit_rank, unit_order, unit))
+            if unresolved:
+                truncation.append(
+                    f"{page.rel_path}: {unresolved} selected semantic unit(s) stale or missing"
+                )
+
+            selected_ids = {id(item[2]) for item in selected}
+            parent, dropped_provenance = _parent_context(
+                page, semantic_states[page.rel_path].parent_ref
+            )
+            plans.append(
+                _UnitPackPlan(
+                    page=page,
+                    parent=parent,
+                    selected=selected,
+                    fillers=[
+                        unit for unit in document.units if id(unit) not in selected_ids
+                    ],
+                    dropped_provenance=dropped_provenance,
+                )
             )
 
-        selected_ids = {id(item[2]) for item in selected}
-        parent, dropped_provenance = _parent_context(
-            page, semantic_states[page.rel_path].parent_ref
-        )
-        plans.append(
-            _UnitPackPlan(
-                page=page,
-                parent=parent,
-                selected=selected,
-                fillers=[
-                    unit for unit in document.units if id(unit) not in selected_ids
-                ],
-                dropped_provenance=dropped_provenance,
+        packed_unit_count = 0
+
+        def _try_pack(
+            plan: _UnitPackPlan,
+            unit: semantic_units.SemanticUnit,
+        ) -> None:
+            nonlocal packed_unit_count
+            if len(plan.packed_units) >= max_units_per_page:
+                plan.omitted_reasons.add("per-page cap")
+                return
+            if packed_unit_count >= max_units:
+                plan.omitted_reasons.add("pack-wide cap")
+                return
+
+            packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
+            block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
+            candidate_unit_map = {
+                **semantic_unit_map,
+                plan.page.rel_path: {
+                    "parent": plan.parent,
+                    "units": plan.packed_units + [packed],
+                },
+            }
+            candidate_block_map = dict(semantic_block_map)
+            if block is not None:
+                candidate_block_map[plan.page.rel_path] = plan.legacy_blocks + [block]
+            encoded = json.dumps(
+                {
+                    "semantic_units": candidate_unit_map,
+                    "semantic_blocks": candidate_block_map,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
             )
-        )
+            if len(encoded) > max_unit_total_chars:
+                plan.omitted_reasons.add("character cap")
+                return
 
-    packed_unit_count = 0
-
-    def _try_pack(
-        plan: _UnitPackPlan,
-        unit: semantic_units.SemanticUnit,
-    ) -> None:
-        nonlocal packed_unit_count
-        if len(plan.packed_units) >= max_units_per_page:
-            plan.omitted_reasons.add("per-page cap")
-            return
-        if packed_unit_count >= max_units:
-            plan.omitted_reasons.add("pack-wide cap")
-            return
-
-        packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
-        block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
-        candidate_unit_map = {
-            **semantic_unit_map,
-            plan.page.rel_path: {
+            plan.packed_units.append(packed)
+            plan.chosen_units.append((unit, packed))
+            if block is not None:
+                plan.legacy_blocks.append(block)
+            plan.dropped_fields += dropped + dropped_metadata
+            packed_unit_count += 1
+            semantic_unit_map[plan.page.rel_path] = {
                 "parent": plan.parent,
-                "units": plan.packed_units + [packed],
-            },
-        }
-        candidate_block_map = dict(semantic_block_map)
-        if block is not None:
-            candidate_block_map[plan.page.rel_path] = plan.legacy_blocks + [block]
-        encoded = json.dumps(
-            {
-                "semantic_units": candidate_unit_map,
-                "semantic_blocks": candidate_block_map,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
+                "units": plan.packed_units,
+            }
+            if plan.legacy_blocks:
+                semantic_block_map[plan.page.rel_path] = plan.legacy_blocks
+
+        selected_candidates = sorted(
+            (
+                (hit_rank, unit_order, plan_index, plan, unit)
+                for plan_index, plan in enumerate(plans)
+                for hit_rank, unit_order, unit in plan.selected
+            ),
+            key=lambda item: (item[0], item[1], item[2]),
         )
-        if len(encoded) > max_unit_total_chars:
-            plan.omitted_reasons.add("character cap")
-            return
-
-        plan.packed_units.append(packed)
-        plan.chosen_units.append((unit, packed))
-        if block is not None:
-            plan.legacy_blocks.append(block)
-        plan.dropped_fields += dropped + dropped_metadata
-        packed_unit_count += 1
-        semantic_unit_map[plan.page.rel_path] = {
-            "parent": plan.parent,
-            "units": plan.packed_units,
-        }
-        if plan.legacy_blocks:
-            semantic_block_map[plan.page.rel_path] = plan.legacy_blocks
-
-    selected_candidates = sorted(
-        (
-            (hit_rank, unit_order, plan_index, plan, unit)
-            for plan_index, plan in enumerate(plans)
-            for hit_rank, unit_order, unit in plan.selected
-        ),
-        key=lambda item: (item[0], item[1], item[2]),
-    )
-    for _hit_rank, _unit_order, _plan_index, plan, unit in selected_candidates:
-        _try_pack(plan, unit)
-    for plan in plans:
-        for unit in plan.fillers:
+        for _hit_rank, _unit_order, _plan_index, plan, unit in selected_candidates:
             _try_pack(plan, unit)
+        for plan in plans:
+            for unit in plan.fillers:
+                _try_pack(plan, unit)
 
-    for plan in plans:
-        total_units = len(plan.selected) + len(plan.fillers)
-        omitted = total_units - len(plan.packed_units)
-        if omitted:
-            reason = ", ".join(sorted(plan.omitted_reasons)) or "configured bounds"
-            truncation.append(
-                f"{plan.page.rel_path}: {omitted} semantic units omitted by {reason}"
+        for plan in plans:
+            total_units = len(plan.selected) + len(plan.fillers)
+            omitted = total_units - len(plan.packed_units)
+            if omitted:
+                reason = ", ".join(sorted(plan.omitted_reasons)) or "configured bounds"
+                truncation.append(
+                    f"{plan.page.rel_path}: {omitted} semantic units omitted by {reason}"
+                )
+            selected_included = {
+                packed["unit_ref"]
+                for _unit, packed in plan.chosen_units
+                if packed["unit_ref"]
+            }
+            selected_omitted = sum(
+                1
+                for _hit_rank, _unit_order, unit in plan.selected
+                if unit.unit_ref not in selected_included
             )
-        selected_included = {
-            packed["unit_ref"]
-            for _unit, packed in plan.chosen_units
-            if packed["unit_ref"]
-        }
-        selected_omitted = sum(
-            1
-            for _hit_rank, _unit_order, unit in plan.selected
-            if unit.unit_ref not in selected_included
-        )
-        if selected_omitted:
-            truncation.append(
-                f"{plan.page.rel_path}: {selected_omitted} selected semantic unit(s) omitted by bounds"
-            )
-        if plan.dropped_provenance:
-            truncation.append(
-                f"{plan.page.rel_path}: {plan.dropped_provenance} provenance/lifecycle value(s) omitted"
-            )
-        if plan.dropped_fields:
-            truncation.append(
-                f"{plan.page.rel_path}: {plan.dropped_fields} semantic-unit field value(s) omitted by bounds"
-            )
+            if selected_omitted:
+                truncation.append(
+                    f"{plan.page.rel_path}: {selected_omitted} selected semantic unit(s) omitted by bounds"
+                )
+            if plan.dropped_provenance:
+                truncation.append(
+                    f"{plan.page.rel_path}: {plan.dropped_provenance} provenance/lifecycle value(s) omitted"
+                )
+            if plan.dropped_fields:
+                truncation.append(
+                    f"{plan.page.rel_path}: {plan.dropped_fields} semantic-unit field value(s) omitted by bounds"
+                )
 
-    neighborhood, n_dropped = _neighborhood(vault_root, packed_pages, max_neighbors)
+    with find_module._span(timings, "pack.neighborhood"):
+        neighborhood, n_dropped = _neighborhood(vault_root, packed_pages, max_neighbors)
     if n_dropped > 0:
         truncation.append(
             f"neighborhood capped at {max_neighbors} "
             f"({n_dropped} more not shown; raise EXOMEM_PACK_MAX_NEIGHBORS)"
         )
 
-    superseded = _supersession_edges(packed_pages)
-    tension, t_dropped, embeddings_available = _tension_pairs(vault_root, packed_pages, max_tension)
+    with find_module._span(timings, "pack.tension"):
+        superseded = _supersession_edges(packed_pages)
+        tension, t_dropped, embeddings_available, uncovered = _tension_pairs(
+            vault_root, packed_pages, max_tension
+        )
+    if uncovered > 0:
+        truncation.append(
+            f"{uncovered} packed page(s) had no current embedding rows; "
+            "no proximity pair computed for them"
+        )
     if t_dropped > 0:
         truncation.append(
             f"tension pairs capped at {max_tension} "
@@ -891,7 +995,13 @@ def assemble_pack(
         "truncation": truncation,
     }
     if graph_enrich:
-        result["graph"] = _graph_enrichment(vault_root, packed_pages)
+        # Parent loading can consume the reserve checked before assembly.
+        # Decide again at the actual stage entry, keeping earlier packed pages.
+        if deadline is not None and deadline - _monotonic() <= graph_enrich_reserve_seconds:
+            truncation.append(GRAPH_ENRICH_BUDGET_SKIP)
+        else:
+            with find_module._span(timings, "graph_enrich"):
+                result["graph"] = _graph_enrichment(vault_root, packed_pages)
     return result
 
 

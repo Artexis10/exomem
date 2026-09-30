@@ -2,4 +2,4 @@
 
 from __future__ import annotations
 
-__all__ = ["no_nudge"]
+__all__ = ["context_activation", "no_nudge"]

@@ -77,6 +77,18 @@ per-operation rules:
 | `Knowledge Base/<subfolder>/index.md` | any write | Catalog only; no orientation prose (orientation lives in `_Schema/references/`) |
 | `Knowledge Base/_Schema/**` | manual only | Schema is human-edited; the skill does not modify itself |
 
+## A legacy page `observe_memory` refuses
+
+`observe_memory` only mutates a writable compiled page. A page with no compiled
+`type`, or no frontmatter at all, refuses with a remediation and a structured
+`resolution` naming the safe next step instead of leaving you to improvise: if
+the surface has body edits, append in place with `edit_memory`; otherwise
+create the suggested dated child page linked `part_of` the legacy page (its
+directory when the legacy page is under the Knowledge Base, else
+`Notes/Research/<scope>/`) and let it stand beside the original rather than
+rewriting it. Migrate the legacy page into a compiled type only on request
+(`adoption_studio`) — nothing here does that automatically.
+
 ## Read-only paths (rest of the vault)
 
 The skill **reads from** any folders in the vault outside `Knowledge Base/` to

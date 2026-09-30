@@ -43,11 +43,50 @@ spec:
       expression: >-
         request.resource.resource == 'jobs' && request.operation != 'DELETE' &&
         'exomem.io/governance-migration' in variables.labels
+    - name: storageBinding
+      expression: >-
+        request.resource.resource == 'jobs' && request.operation != 'DELETE' &&
+        'exomem.io/storage-binding' in variables.labels &&
+        variables.labels['exomem.io/storage-binding'] == 'true'
+    - name: bindingSpec
+      expression: variables.target.spec.template.spec
+    - name: bindingMeta
+      expression: variables.target.spec.template.metadata
     - name: migrationSpec
       expression: variables.target.spec.template.spec
     - name: migrationMeta
       expression: variables.target.spec.template.metadata
   validations:
+    - expression: >-
+        !variables.storageBinding ||
+        (variables.name == request.namespace + '-init' &&
+          variables.labels['app.kubernetes.io/name'] == 'exomem-cell' &&
+          variables.labels['exomem.io/cell'] == request.namespace &&
+          variables.labels['exomem.io/storage-init'] == 'true' &&
+          variables.labels['app.kubernetes.io/instance'] == request.namespace &&
+          variables.labels['app.kubernetes.io/part-of'] == 'exomem-hosted' &&
+          size(variables.labels) == 6 &&
+          variables.annotations['exomem.io/job-purpose'] == 'storage-binding' &&
+          variables.annotations['exomem.io/recovery-envelope'].size() > 0 &&
+          variables.annotations['exomem.io/recovery-envelope'].size() <= 32768 &&
+          variables.annotations['exomem.io/fence'].matches('^[1-9][0-9]{0,15}$') &&
+          variables.target.spec.backoffLimit == 0 &&
+          variables.target.spec.activeDeadlineSeconds == 90 &&
+          variables.target.spec.ttlSecondsAfterFinished == 60 &&
+          variables.target.spec.parallelism == 1 && variables.target.spec.completions == 1 &&
+          (!has(variables.target.spec.completionMode) ||
+            variables.target.spec.completionMode == 'NonIndexed') &&
+          (!has(variables.target.spec.manualSelector) || variables.target.spec.manualSelector == false) &&
+          (!has(variables.target.spec.suspend) || variables.target.spec.suspend == false) &&
+          !has(variables.target.spec.podFailurePolicy) &&
+          !has(variables.target.spec.successPolicy) &&
+          !has(variables.target.spec.backoffLimitPerIndex) &&
+          !has(variables.target.spec.maxFailedIndexes) &&
+          !has(variables.bindingSpec.nodeName) &&
+          !has(variables.bindingSpec.nodeSelector) &&
+          !has(variables.bindingSpec.affinity))
+      message: Storage binding Jobs must keep the exact fenced fixed-slot deadline and purpose.
+    {{- include "exomem.storageBindingPodAdmission" . | nindent 4 }}
     - expression: >-
         !variables.governanceMigration ||
         (variables.labels['app.kubernetes.io/name'] == 'exomem-governance-migration' &&

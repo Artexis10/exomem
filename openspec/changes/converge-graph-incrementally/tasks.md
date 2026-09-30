@@ -194,6 +194,13 @@ time. Reachable today on every path that already rebuilds off the write path.
   publication hold exists to avoid, arriving from a reader the hold cannot see because it
   was never registered. Found by instrumenting the benchmark that could not delete its own
   sidecar, not by a test.
+- [x] 5.16 Route a persisted graph read barrier with an external-pending epoch through
+  the existing durable full-rebuild marker when ordinary barrier recovery declines. Keep
+  publication-refusal backoff and active-owner coalescing intact; clear only the sampled
+  external epoch after resolver and inbound cache eviction, which revokes publication by
+  any already-running cache builder. Daemon-pass regressions cover
+  complete recovery, cold unqueued recall content, a newer mark across reconciliation,
+  and marker idempotency under backoff or another owner.
 - [x] 5.10 Stop the dispatch layer re-scheduling the whole-vault rebuild that 5.3
   removed. A defer-classified bail-out returns `deferred`, but the layer above reads an
   unregistered, unacknowledged checkpoint as a missing rebuild and registers one — so
@@ -279,13 +286,181 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   7.2–7.4 stay unopened: relaxing an access-safety-grade fence, and retiring the
   classification and refusal-memo machinery, are not changes to make against a
   constraint that measurement says is not binding.
-- [ ] 7.2 If still binding: replace only the content-freshness term with a check against
-  the durable dirty set, readable cross-process so a cold reader can evaluate it. Leave
-  the recall-policy-version and access-fingerprint terms fail-closed and all-or-nothing —
-  those are access safety, not content staleness.
-- [ ] 7.3 Report residual lag as a reported dimension rather than a fail-closed one.
-- [ ] 7.4 Reduce the stabilization, publication, and supersession retry budgets now that
-  whole-vault rebuilds are rare, and retire the classification and refusal-memo machinery
-  that exists only to make repeated doomed rebuilds survivable.
-- [ ] 7.5 Confirm the pinned surface digests did not move: this change alters a response
-  contract, not a tool schema. Confirm rather than assume.
+  **Re-measured 2026-09-23.** Under writes the binding constraint is not the read term
+  but the whole-vault pass's vault-global stabilization proof, which any recorded write
+  defeats, and the Class C mark that followed it: on the personal cell (0.90-0.91, 33 h)
+  62 whole-vault publications, seven Class C exhaustions, every one inside committed
+  governed writes. 7.2 and 7.4 responded to that and are parked (below); 7.3, 7.6 and 7.7
+  landed.
+- [ ] 7.2 **Parked.** Publish a whole-vault pass at the checkpoint it sampled when every
+  movement across it is recorded (catch-up publication), with the availability marker
+  withheld while graph work is queued. Built and pinned on
+  `fix/graph-convergence-contract` (`fbd16eea`), then parked by ruling because the
+  paired bar against the U5 tree (3,000 pages, back to back) regressed availability and
+  write latency: longest unreadable stretch 48.8 s vs 9.0 s and 21.5 s vs 5.9 s at five
+  writers, 15.3 s vs 0.5 s and 14.0 s vs 0.5 s at one writer; write p50 3.13 vs 0.65 s
+  and 2.25 vs 0.51 s at five writers; CPU +52-65% at five writers. The marker invariant
+  (7.6's first half) was ruled not worth it: the hole it closes is bounded staleness of
+  derived relations that the queue drain later repairs, and closing it cost a refusal
+  until the debt is paid, 14-15 s at one writer against 0.5 s. The original 7.2, a
+  dirty-set check in the read snapshot, stays superseded: reads were not the binding
+  constraint.
+- [x] 7.3 Report residual lag as a reported dimension rather than a fail-closed one.
+  `graph_lag` (acknowledged and committed generations, queued paths and oldest age,
+  receipt coverage, full marker, quarantined paths; no vault walk), "graph catching up"
+  with the lag on `graph_context`'s refusal, the doctor's warning on covered lag and on
+  quarantined paths, and the lag on the drain's settled line
+  (`tests/test_graph_lag_reporting.py`). The read fence stays fail-closed.
+- [ ] 7.4 **Parked.** Reduce the stabilization, publication, and supersession retry
+  budgets, and retire the drain's whole-vault quiet window. Both depended on 7.2: without
+  catch-up a recorded write still defeats a pass, so the #576 re-target and the quiet
+  window stay. If revisited, publication attempts stay at four: an attempt that finds
+  recall preparation cold is spent on the reconcile alone, and recovering from one
+  unrecorded race at the publication seam takes three
+  (`test_original_index_publication_seam_rechecks_freshness_before_replace`). Retiring the
+  window exposed a lock-order inversion that main also has once whole-vault work runs
+  inside a burst; its fix landed (7.8).
+- [x] 7.5 Confirm the pinned surface digests did not move: this change alters a response
+  contract, not a tool schema. Confirm rather than assume. Confirmed:
+  `tests/test_mcp_schema_fidelity.py`, `tests/test_tool_surface_contract.py` and
+  `tests/test_tool_surface_fingerprint.py` pass unchanged (27 passed), and
+  `docs/capabilities.md` is current.
+- [x] 7.6 Keep the queue converging under a steady writer. A drain records the resolver
+  topology it derived under (else the next topology-changing write fell back on
+  `stored_topology_fingerprint_mismatch`), keeps the rows it proved when the vault moves
+  elsewhere, a late refresh of an already-acknowledged generation is a no-op while the
+  marker is current (and queues its page when a late registry update left it stale), and a
+  receipt whose page's own bytes fail -- not UTF-8, or an `OSError` older than
+  `GRAPH_POISON_MIN_AGE_SECONDS` -- is quarantined after `GRAPH_POISON_ATTEMPTS` rather
+  than rotated forever, keeping the page's rows and retried on a stat change (after a
+  backoff that doubles per failed attempt) or after `GRAPH_QUARANTINE_RETRY_SECONDS`; a busy boundary, a locked store or a brief lock never
+  counts (`tests/test_graph_deferred_queue.py`). The marker invariant is parked
+  with 7.2.
+- [x] 7.7 Cool the event registry only on evidence it is behind the disk: classify a
+  moved whole-vault pass against the registry's own history; recorded movement is a
+  publication failure with no mark, and a Class C mark names the unexplained paths
+  (`tests/test_graph_class_c_evidence.py`). Probe L (3,000 pages, three governed writers
+  at one write a second, one direct rebuild): main raised Class C with an unscoped mark in
+  3 of 3 runs (8 attempts, 111-132 s, load 5-10); this change raised Class B with no mark
+  in 2 of 2 (8 attempts, 109-118 s, load 8-10).
+- [x] 7.8 Graph work holding the writers' boundary never waits on a committing batch:
+  the full-marker dispatcher's and the full-upsert recovery's checkpoint writes skip while
+  a batch commits (`vault.batch_commit_if_idle`). Measured on the catch-up branch at five
+  writers: `MUTATION_BUSY` refusals every 5 s for 26-42 s, holder
+  `epistemic_graph_dispatch_full_marker`, from the dispatcher waiting on the batch lock
+  held by a writer waiting on the boundary
+  (`tests/test_graph_repair_coalescing.py::test_the_dispatcher_never_waits_on_a_committing_batch_under_the_boundary`).
+
+## 8. Handoff convergence — the 2026-09-27 cold fallback
+
+- [x] 8.1 Red tests: a page created after the last publication does not strand the
+  standby; a standby re-proves after the serving worker republishes; a removed page is
+  adopted as residue and its rows are deleted by the drain; promotion retires a full
+  marker its proof covered and retains one raised after; rebuild outcome lines carry a
+  reason and report a refused claim as coalesced.
+- [x] 8.2 Rebuild outcome logging: `_rebuild_outcome` names the reason and reports
+  `GraphRebuildInProgress` as `coalesced`; start-up validation and the reconcile
+  rebuild log their outcome; the drain's whole-vault request names its branch.
+- [x] 8.3 Adoption residue for created and removed pages, bounded by one drain pass,
+  with topology accepted only when the residue explains it.
+- [x] 8.4 A waiting standby re-proves on a changed generation or snapshot, at most every
+  30 s, and never after promotion or discard has begun.
+- [x] 8.5 Promotion retires the full marker its proof covered, recorded in the handoff
+  record.
+- [x] 8.6 Scoped suites green (`tests/test_standby_*`, `tests/test_graph_*`, index_sync);
+  ruff and the public-artifact gate green; author-independent review.
+  Evidence for 8.1-8.5: `tests/test_graph_handoff_convergence.py` (15 tests) was red
+  on the base (14 failed, 1 guard passed) and is green with the fix. The graph handoff
+  files, `test_standby_promotion.py` and `test_graph_deferred_queue.py` pass (162); the
+  independent review approved the final round after five rounds of probes.
+- [x] 8.7 Review follow-ups: a proof holds only the snapshot it read; promotion retires
+  the marker only at the proof's durable generation, and the standby keeps re-proving
+  after a success, replacing the held proof only with a newer success; the interval
+  runs from the end of the last attempt and the poll stats before it reads; a promotion
+  that raises leaves the standby proving; an unknown drain cause is logged as given;
+  a drain, published or withheld, records its resolver topology only when its queued
+  pages and the carry-forward record account for every change in it; the residue
+  tests compare every edge with a fresh rebuild.
+- [ ] 8.8 **Open, not built.** Evaluate a cheaper route to steady-state convergence than
+  7.2: when a whole-vault pass exhausts its stabilization attempts with every movement
+  recorded, run the adoption proof against the live sidecar (O(vault) hashing, no build
+  or publication) and, when it adopts, queue the residue and retire the full marker
+  observed before it. Measure it on the same paired bar that parked 7.2 (longest
+  unreadable stretch, write p50 and CPU at one and five writers on the 3,000-page tree)
+  before any decision to ship it.
+- [ ] 8.9 **Open, pre-existing, not fixed here.** A drain (published or withheld) that
+  rewrites a page only as affected (its links re-target) also overwrites that page's stored title in
+  `graph_nodes`. When the page's own retitle drains later from its receipt, widening
+  reads the new title as the old one, so pages that still link the old title are
+  missed. The adoption proof fails closed on it (the drain gate counts only queued
+  pages), but the serving graph can carry the stale edge. Keep an affected page's stored
+  title until its own receipt drains, or widen on it when the pass changes it.
+  Since 9.2, a replayed page whose rows such a drain already rewrote proves current and
+  is dropped, so the whole-vault replay no longer heals its old-title dependants by
+  accident.
+- [ ] 8.10 **Open, not fixed here.** The carry's exactness check counts a Knowledge Base
+  page that is on disk with no row (or a differing row) and not queued as explained, so a
+  drain can derive an edge to it. If that page is deleted, or retitled and back, before
+  its own receipt drains, adoption can accept a sidecar with an extra edge. Its receipt
+  repairs it, so this matters only when that receipt is lost. Count such a page as
+  explained only when it has a pending graph receipt.
+
+## 9. Replayed paths outside the recall delta (0.96.0 live latency)
+
+- [x] 9.1 Red tests: a replayed receipt whose bytes match the stored row rebuilds
+  nothing; a replayed stale page is drained incrementally; a replayed page the registry
+  does not vouch for still falls back; every case is compared edge for edge with a fresh
+  rebuild.
+- [x] 9.2 Prove caller paths outside the delta against the stored rows and the live
+  registry before `caller_path_outside_delta`; drop current paths, queue and drain stale
+  ones for a standalone caller, and fall back only when unprovable.
+- [x] 9.3 Scoped suites and gates green.
+  Evidence: `tests/test_graph_replay_currency.py` (5 tests; 4 red on 53ac15a2, the
+  unprovable-case guard green on both). Scoped graph, standby, index_sync and drain
+  suites: 774 passed, 13 skipped, 2 failed, both reproduced on 53ac15a2 on this host
+  (a latency median under load, and the rebuild-lock test that fails in this tmp dir).
+  `tests/test_graph_value_benchmark.py` hit the 60 s thread timeout in the scoped run
+  at load 37 and passes alone (163 passed).
+- [x] 9.4 Review corrections: the replay's repair runs through
+  `index_sync.drain_graph_work(paths=...)`, so a standing full marker, an unsettled
+  epoch and receipt CAS apply to it; the proof judges a path under the vault's own
+  spelling; created paths outside the delta are proved and filtered with the written
+  ones; the replay oracle also compares `graph_nodes` (kind, path, title) and
+  `graph_dependencies`, and its retitle fixture links each title from its own page.
+  Evidence: `tests/test_graph_replay_currency.py` (11 passed; the alias and
+  created-path tests red before the fix). Scoped graph, standby, index_sync, bounded
+  join and drain suites: 936 passed, 13 skipped.
+  Recheck follow-up: a caller that can report pending (a mutation request, a direct
+  mutation guard, a parent handoff) no longer drains the replay's scope while a full
+  marker stands or the epoch refuses per-path repair, since either runs a whole-vault
+  pass on its thread; it returns queued and the drain daemon pays the debt once. A
+  refresh that ran a whole-vault pass dispatches as `graph_rebuild_completed`, and a
+  queued deferral without a checkpoint as `graph_repair_queued_for_drain`, not
+  `incremental_completed`. Evidence: the marker and epoch request tests and the
+  standalone code test, red on 544662fa and green after the fix. Scoped graph, standby,
+  index_sync, bounded join, drain, records-recall, trash-exclusion, media-worker and
+  durable-closure suites: 1154 passed, 13 skipped.
+  Recheck 2: under a durable checkpoint the acknowledgement covers, that request
+  deferral entered the checkpoint-deferred block and was reported as a completed
+  whole-vault rebuild. A deferred and queued report from a caller that can carry
+  pending now dispatches as `deferred`/`graph_repair_queued`, a coverage code,
+  whatever the acknowledgement covers. With no checkpoint the dispatch cannot be
+  `deferred`, so it stays `completed`/`graph_repair_queued_for_drain`, which is not
+  treated as pending coverage. Evidence: the acknowledged-checkpoint request test
+  (marker and epoch), red on 99aae8b6 and green after the fix.
+  Recheck 3: the proof made reconcile's deliberate refresh of unchanged pages a no-op,
+  so unit drift and parser upgrades stopped repairing. The deferred full-index replay
+  now passes an explicit `replayed` flag through `index_sync.upsert_after_write` to the
+  graph refresh, and only it takes the proof; every other caller keeps the
+  `caller_path_outside_delta` fallback at its original place. A replayed page is also
+  judged stale when its stored semantic-unit rows differ from its current projection
+  generation or parser version. The refresh report is typed `dict[str, Any]`, which
+  clears the targeted mypy check. Evidence: the non-replay and unit-generation replay
+  tests, red on 41a103bd and green after the fix; the three
+  `test_semantic_unit_reconcile.py` failures and the three freshness tests pass again
+  with their original setup.
+- [ ] 9.5 **Follow-up, not built here.** `writer_lease._durable_graph_outcome` reports
+  `graph_sync: completed` whenever the acknowledgement covers the committed checkpoint,
+  even when the graph is unavailable and a graph receipt is still queued (a request
+  replay deferral, or the external-pending door). Report `pending` while graph
+  receipts for the committed generation remain queued or availability is withdrawn.

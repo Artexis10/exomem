@@ -73,6 +73,28 @@ Registries are vault-wide: adding an entity or relation type SHALL require an ex
 - **WHEN** an agent supplies an allowed project label for an edge whose canonical target lies outside that grant
 - **THEN** the edge write refuses without modifying either endpoint
 
+### Requirement: Explicit vault edge grants cover future canonical endpoints
+
+A trusted owner SHALL be able to issue a versioned vault-wide `edge.add` grant covering existing and subsequently committed canonical endpoints in one authenticated logical vault. Both endpoints and destinations SHALL be resolved and checked at the leaf commit boundary. A create-and-link payload SHALL independently authorize each effect and prove the new identity's ownership inside that boundary or use separately receipted create then link. A prospective name or supplied project label SHALL NOT prove endpoint ownership. Cross-vault or unresolved targets SHALL refuse under this grant.
+
+Existing grants SHALL retain their exact scope; upgrades, entity creation and programme approval SHALL NOT create or widen a live grant. The extension SHALL have an explicit supported reader/writer floor so older runtimes cannot reinterpret it as a weaker scope. Separate type actions and non-additive effects SHALL remain separately governed. This extension SHALL NOT grant role/convention editing, arbitrary future actions or user Planning commitments.
+
+#### Scenario: A later entity can receive an authorized relation
+
+- **WHEN** a valid explicit vault-edge grant exists and a newly committed entity plus another endpoint resolve to that same vault
+- **THEN** a separately valid typed edge addition can commit without issuing a new endpoint-pair grant
+- **AND** entity creation or type registration still requires its own authority
+
+#### Scenario: A narrow grant stays narrow after upgrade
+
+- **WHEN** a runtime gains vault-edge support while an existing project-edge grant covers one resolved scope
+- **THEN** that grant cannot authorize an edge outside its previous scope or gain future-endpoint authority silently
+
+#### Scenario: Endpoint labels cannot cross a vault boundary
+
+- **WHEN** a request supplies an allowed label for an unresolved or foreign-vault endpoint
+- **THEN** the vault-edge grant refuses the write without modifying either endpoint
+
 ### Requirement: Authority and review bind at every actual write
 
 Each v2 additive structural mutation SHALL validate authority at the canonical leaf immediately before its commit under the same serialization boundary used for the mutation. Exact approval SHALL bind the canonical action payload, target versions and registry hashes; a standing grant SHALL bind its current generation and resolved effects. Authority checks SHALL cover typed tools, generic file writers, imports, schema saves and every equivalent route that can produce those effects. A preview, cached bootstrap, review disposition or previous step's approval SHALL NOT substitute for the live check.

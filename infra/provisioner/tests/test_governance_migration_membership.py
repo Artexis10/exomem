@@ -230,10 +230,39 @@ def test_schema_helpers_refuse_unproven_custody(phase, case):
         _run(source, phase, files=files, now=now)
 
 
-def test_repair_refuses_expired_or_enrolled_custody_and_completion_requires_enrollment():
+def test_successor_refuses_evidence_bound_to_a_different_custody_revision():
+    # Tolerating a closed window removes the bound on how stale a source may be,
+    # so this binding is what still ties the published successor to the bundle the
+    # Job actually inspected.
     source = _source(4)
+    other = membership.build_initial_hosted_authorization_bundle(
+        cell_id=METADATA.subject_id,
+        logical_vault_id=METADATA.tenant_id,
+        replica_id=METADATA.resource_name + "-0",
+        software_version="0.48.0",
+        schema_version=4,
+        recovery_envelope=ENVELOPE,
+        now=NOW,
+        entropy=lambda length: bytes(range(1, length + 1)),
+    )
+    other = membership.transition_hosted_authorization_bundle(
+        other.files,
+        **_identity(4),
+        target_state="DRAINING",
+        target_no_in_flight=True,
+        now=NOW + 1,
+    )
+    assert other.revision != source.revision
+    request, evidence = _proof(other, "inspect")
     with pytest.raises(MetadataConflict):
-        _run(source, "inspect", now=source.expires_at)
+        _run(source, "inspect", request=request, evidence=evidence)
+
+
+def test_repair_accepts_a_closed_window_but_still_requires_unenrolled_custody():
+    source = _source(4)
+    # A fenced generation has no replica of its own to renew the window, so repair
+    # proceeds on a closed one rather than stranding the cell.
+    _run(source, "inspect", now=source.expires_at)
     with pytest.raises(MetadataConflict):
         _run(_source(3, enrolled=True), "inspect")
     with pytest.raises(MetadataConflict):

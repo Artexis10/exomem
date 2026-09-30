@@ -53,6 +53,11 @@ on:
         required: false
         default: false
         type: boolean
+      governance_migration_drill:
+        description: Run the disposable governance v3-to-v4 migration and recovery drill
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -75,6 +80,8 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      migration_paths_changed: ${{ steps.migration-paths.outputs.changed }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -198,13 +205,31 @@ jobs:
           require_python_distribution checkov "$CHECKOV_VERSION"
           require_output_version ansible-galaxy "$COMMUNITY_GENERAL_VERSION" collection list community.general
           require_output_version ansible-galaxy "$COMMUNITY_LIBRARY_INVENTORY_FILTERING_VERSION" collection list community.library_inventory_filtering_v1
+          require_output_version ansible-galaxy "$COMMUNITY_POSTGRESQL_VERSION" collection list community.postgresql
+          require_output_version ansible-galaxy "$COMMUNITY_DOCKER_VERSION" collection list community.docker
           require_output_version trivy "$TRIVY_VERSION" --version
           require_output_version shellcheck "$SHELLCHECK_VERSION" --version
           require_output_version oras "$ORAS_VERSION" version
+      - name: Did this push touch the code the migration drill exercises
+        id: migration-paths
+        run: |
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=false
+          while IFS= read -r path; do
+            case "$path" in
+              infra/provisioner/*|infra/helm/*) changed=true ;;
+            esac
+          done < <(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "migration drill applies: $changed"
       - name: Terraform, TFLint, Checkov, Ansible, Helm, policy, SOPS, types, tests, and secret scan
         run: |
           EXOMEM_RUN_REAL_SOPS_TESTS=1 \
           RUN_K3S_ADMISSION_TEST=1 \
+          RUN_K3S_STORAGE_BINDING_TEST=1 \
           SOPS_BIN="$(command -v sops)" \
           AGE_KEYGEN_BIN="$(command -v age-keygen)" \
           infra/scripts/validate.sh
@@ -268,6 +293,68 @@ jobs:
           uv run --frozen python infra/scripts/verify_provisioner_image.py \
             --image "$PROVISIONER_IMAGE" \
             --require-published
+
+  governance-migration-drill:
+    name: Disposable governance migration and recovery drill
+    # Dispatch-only meant it never ran on its own, and two defects that only this
+    # drill could have caught reached production instead. Run it whenever the
+    # provisioner that performs the migration changes on main, which is before any
+    # image built from that commit can be selected into a deployment lock. The
+    # workflow's own paths are deliberately broad, so scope this ninety-minute job
+    # to the code it exercises rather than to runbook or proposal edits.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.governance_migration_drill)
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main'
+          && needs.static.outputs.migration_paths_changed == 'true')
+    needs: static
+    runs-on: ubuntu-24.04
+    # The drill builds the runtime image, imports it into exact K3s, and replays
+    # the migration once per interruption boundary against a real cluster.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Install the pinned Helm release binary
+        # The shipped Helm adapter refuses any CLI whose version is not exactly
+        # the pin, and a `go install` build reports only major.minor. Install
+        # the checksum-verified release archive the provisioner image uses.
+        run: |
+          source infra/tool-versions.env
+          HELM_SHA256="$(sed -n 's/^ARG HELM_SHA256=//p' infra/provisioner/Dockerfile)"
+          curl --fail --silent --show-error --location \
+            --output /tmp/helm.tar.gz \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  /tmp/helm.tar.gz" | sha256sum --check
+          tar --extract --gzip --file /tmp/helm.tar.gz --directory /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          test "$(helm version --template '{{.Version}}')" = "v${HELM_VERSION}"
+      - name: Build the platform chart dependencies
+        run: |
+          helm repo add hcloud https://charts.hetzner.cloud
+          helm repo add traefik https://traefik.github.io/charts
+          helm repo add jetstack https://charts.jetstack.io
+          helm dependency build infra/helm/platform
+      - name: Replay the governance migration and recovery drill on exact K3s
+        env:
+          RUN_K3S_GOVERNANCE_DRILL_TEST: "1"
+          RUN_K3S_RUNTIME_TEST: "1"
+        run: |
+          HELM_BIN="$(command -v helm)" \
+          uv run --frozen --with-editable ./infra/provisioner \
+            pytest -q -p no:cacheprovider tests/test_hosted_k3s_governance_drill.py
 
   external-blackbox:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.external_blackbox)

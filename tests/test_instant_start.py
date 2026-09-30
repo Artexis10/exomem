@@ -74,6 +74,7 @@ def test_components_tuple_and_initial_state() -> None:
     """The coordinated components, and the never-warmed default state."""
     assert readiness.COMPONENTS == (
         "retrieval_catalog",
+        "graph_handoff",
         "lexical",
         "semantic_corpus",
         "embeddings",
@@ -316,6 +317,7 @@ def test_warming_info_shape_and_transitions() -> None:
     info2 = readiness.warming_info()
     assert set(info2["components"]) == {
         "retrieval_catalog",
+        "graph_handoff",
         "semantic_corpus",
         "embeddings",
         "reranker",

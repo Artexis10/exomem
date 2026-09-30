@@ -7,18 +7,28 @@ caching, and sqlite-vec fallback behavior. Model loading and encoding stay in
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
 import sys
 import threading
+from collections.abc import Callable, Iterator
 from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
 
-from . import index_paths, reserved_paths, semantic_index, sidecar_store, vecstore
+from . import (
+    call_spans,
+    index_paths,
+    recall_space,
+    reserved_paths,
+    semantic_index,
+    sidecar_store,
+    vecstore,
+)
 from .vector_index_common import vec_gate
 
 log = logging.getLogger(__name__)
@@ -34,8 +44,12 @@ def _sqlite_connect_owned(
 ) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
 
-VECTOR_DIM = 768
+#: The width of the legacy English space, kept for callers that name it. A
+#: sidecar's own width is `EmbeddingIndex.dim`, read from its vector-space record.
+VECTOR_DIM = recall_space.LEGACY_DIM
 SEMANTIC_UNIT_SCHEMA_VERSION = 3
+#: The tables holding this sidecar's vectors; the first row read for a legacy width.
+_VECTOR_TABLES = ("chunks", "semantic_unit_vectors")
 
 # Per-path change log for the read-side bounded catch-up (see sidecar_store's
 # "bounded catch-up" note). The table records the generation at which each
@@ -181,7 +195,7 @@ def _splice_path_blocks(
     new_matrix = (
         np.concatenate(parts, axis=0)
         if parts
-        else np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        else np.zeros((0, matrix.shape[1]), dtype=np.float32)
     )
     if len(out_meta) != new_matrix.shape[0]:
         raise ValueError(
@@ -222,6 +236,49 @@ class SemanticUnitVectorRow(NamedTuple):
 SEMANTIC_UNIT_READ_BATCH = 2_000
 
 
+#: Query rows `EmbeddingIndex.search_many` scores per matrix product. Scoring a
+#: whole draft at once holds `queries x rows` float32 scores: 293 MiB for a
+#: 1,000-chunk note against 76,000 rows, where one `search` per chunk peaked at
+#: a single row. A block of 64 bounds that at one block (~19 MiB at 76,000 rows)
+#: and keeps most of the batched speed: for 1,000 chunks against 58,000 rows under
+#: a 2-CPU quota, 5.5 s at 17 MiB peak, against 4.5 s at 225 MiB for one product
+#: and 100 s for one `search` per chunk.
+SEARCH_MANY_BLOCK = 64
+
+
+def _top_admitted(
+    scores: np.ndarray,
+    k: int,
+    total: int,
+    admitted: Callable[[int], bool],
+    metadata: list[tuple[str, int]],
+) -> list[tuple[str, int, float]]:
+    """One query's `k` best admitted rows from its full score row, best first.
+
+    The candidate window holds the query's highest-scoring rows, so the first
+    `k` admitted rows in window order are its top `k` admitted rows overall; the
+    window widens until `k` are found or every row has been considered.
+    """
+    order = -scores
+    window = min(total, max(4 * k, 64))
+    while True:
+        if window >= total:
+            ranked = np.argsort(order, kind="stable")
+        else:
+            candidates = np.argpartition(order, window - 1)[:window]
+            ranked = candidates[np.argsort(order[candidates], kind="stable")]
+        picked: list[int] = []
+        for row in ranked.tolist():
+            if admitted(row):
+                picked.append(row)
+                if len(picked) == k:
+                    break
+        if len(picked) == k or window >= total:
+            break
+        window = min(total, window * 4)
+    return [(metadata[row][0], metadata[row][1], float(scores[row])) for row in picked]
+
+
 class EmbeddingIndex:
     """Per-vault sqlite sidecar holding chunk-level vectors.
 
@@ -242,16 +299,25 @@ class EmbeddingIndex:
     path already hydrates metadata by rowid.
     """
 
-    def __init__(self, vault_root: Path):
+    def __init__(self, vault_root: Path, *, path: Path | None = None):
         self.vault_root = vault_root
-        self.path = index_paths.sidecar_path(vault_root)
+        #: The sidecar this instance reads and writes: the serving one unless
+        #: `path` names another (a new vector space being built beside it).
+        self.path = path if path is not None else index_paths.sidecar_path(vault_root)
+        #: The vector space the sidecar holds, as last read from it; None while
+        #: it holds no vectors and no record. Refreshed on every connection.
+        self._identity: recall_space.SpaceIdentity | None = None
+        self._identity_read = False
         self._cache: _EmbCache | None = None
         # One-slot memo for search()'s allowed-paths row mask (see _MaskCache).
         self._mask_cache: _MaskCache | None = None
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
+        #: Matrix served or loaded: the use signal the idle reaper watches.
+        self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
+        # The vec0 column is declared at the sidecar's own width; see `_vec_prepare`.
         self._vec = vecstore.SqliteVecStore("chunks", "vector", VECTOR_DIM, "vec_chunks")
         self._vec_ready: bool | None = None
         self._vec_quant_synced = False
@@ -337,6 +403,9 @@ class EmbeddingIndex:
                 )
                 sidecar_store.bump_meta(conn, "semantic_unit_generation")
         if target == self.path:
+            self._set_identity(recall_space.read_identity(conn, tables=_VECTOR_TABLES))
+            self._identity_read = True
+        if target == self.path:
             try:
                 reserved_paths._publish_sqlite_owner_family(
                     self.vault_root,
@@ -348,6 +417,105 @@ class EmbeddingIndex:
                 conn.close()
                 raise
         return conn
+
+    # ------------------------------------------------------------ vector space
+
+    @property
+    def identity(self) -> recall_space.SpaceIdentity | None:
+        """The vector space this sidecar holds; None when it holds none.
+
+        Read from the sidecar by this instance's first connection and again by
+        every later one, so it is as current as the last operation. Never
+        creates the sidecar.
+        """
+        if not self._identity_read and self.path.exists():
+            conn = self._connect()
+            conn.close()
+        return self._identity
+
+    @property
+    def dim(self) -> int:
+        """The width of this sidecar's vectors: its record's, or the encoder's in use."""
+        identity = self.identity
+        return identity.dim if identity is not None else recall_space.current_dim()
+
+    def _set_identity(self, identity: recall_space.SpaceIdentity | None) -> None:
+        previous, self._identity = self._identity, identity
+        if identity is None:
+            return
+        if self._vec.dim != identity.dim:
+            self._vec = vecstore.SqliteVecStore("chunks", "vector", identity.dim, "vec_chunks")
+        if previous != identity:
+            # A new record re-runs the vec0 sync check, which redeclares a
+            # column of another width.
+            self._vec_ready = None
+            self._vec_quant_synced = False
+
+    def _vec_prepare(self, conn: sqlite3.Connection) -> bool:
+        """Whether vec0 may be synced now: only once the sidecar has a width.
+
+        A vec0 column is declared at a fixed width, so a sidecar holding no
+        vectors yet must not declare one; its first write records the width
+        and then syncs.
+        """
+        del conn
+        return self._identity is not None
+
+    def _admit(self, conn: sqlite3.Connection, dim: int) -> None:
+        """Record or check the vector space before rows of width `dim` are written."""
+        with conn:
+            identity = recall_space.admit(conn, self._identity, dim)
+        self._set_identity(identity)
+
+    @contextlib.contextmanager
+    def encoding(self, *, load: bool = False) -> Iterator[None]:
+        """Encode for this sidecar inside the block, or refuse before encoding.
+
+        Selects the encoder that serves this sidecar's vector space and checks
+        it against the sidecar's record before anything is encoded, so a query
+        vector or a row made inside the block belongs to this sidecar. A
+        sidecar written by another model than the recall encoder's (one a
+        re-embed has not replaced yet) is served by that model, which warm-up
+        keeps resident and a request never loads: `recall_space.ServingEncoderCold`
+        when it is not resident. `recall_space.VectorSpaceMismatch` when the
+        encoder here is another build than the one the sidecar records. A
+        sidecar holding no vectors takes whatever the recall encoder produces.
+        """
+        identity = self.identity
+        if identity is None:
+            yield
+            return
+        model = recall_space.recall_model()
+        if identity.model != model:
+            if recall_space.cell_mode():
+                # A cell runs no second encoder and never re-embeds in place.
+                raise recall_space.VectorSpaceMismatch(
+                    f"the sidecar holds {identity.model} vectors; this cell encodes with {model}"
+                )
+            if load:
+                recall_space.previous_encoder(identity.model)
+            if recall_space.previous_resident(identity.model) is None:
+                raise recall_space.ServingEncoderCold(
+                    f"{identity.model}, which serves this sidecar, is not resident"
+                )
+            fingerprint = recall_space.resident_fingerprint(identity.model)
+            if not identity.accepts(identity.model, fingerprint):
+                raise recall_space.VectorSpaceMismatch(
+                    f"the sidecar was written by another build of {identity.model}"
+                )
+            with recall_space.selecting(identity.model):
+                yield
+            return
+        if identity.fingerprint is not None and recall_space.resident_fingerprint(model) is None:
+            from . import embeddings
+
+            embeddings.get_model()
+        if not identity.accepts(model, recall_space.resident_fingerprint(model)):
+            raise recall_space.VectorSpaceMismatch(
+                f"the sidecar was written by another build of {model}"
+            )
+        with recall_space.selecting(None):
+            yield
 
     def upsert_file(
         self,
@@ -363,6 +531,8 @@ class EmbeddingIndex:
             )
         conn = self._connect()
         try:
+            if chunks:
+                self._admit(conn, np.asarray(vectors).shape[1])
             vec_on = vec_gate(self, conn)
             with conn:
                 if vec_on:
@@ -506,7 +676,7 @@ class EmbeddingIndex:
                 [cached.metadata[i] for i in keep],
                 cached.matrix[keep]
                 if keep
-                else np.zeros((0, VECTOR_DIM), dtype=np.float32),
+                else np.zeros((0, cached.matrix.shape[1]), dtype=np.float32),
             )
 
     def upsert_semantic_units(
@@ -519,6 +689,8 @@ class EmbeddingIndex:
         rows = self._semantic_unit_rows(state, vectors, mtime)
         conn = self._connect()
         try:
+            if rows:
+                self._admit(conn, np.asarray(vectors).shape[1])
             with conn:
                 conn.execute(
                     "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
@@ -669,7 +841,7 @@ class EmbeddingIndex:
         winners' texts via `_texts_for` when needed.
         """
         if not self.path.exists():
-            return [], np.zeros((0, VECTOR_DIM), dtype=np.float32)
+            return [], np.zeros((0, self.dim), dtype=np.float32)
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
         # reads. This fast path takes no lock — the common case.
         from . import recall_policy
@@ -682,6 +854,7 @@ class EmbeddingIndex:
             else None
         )
         if served is not None:
+            self._hits += 1
             return served.metadata, served.matrix
         with self._lock:
             # Re-check under the lock: another thread may have loaded while we
@@ -693,6 +866,7 @@ class EmbeddingIndex:
                 else None
             )
             if served is not None:
+                self._hits += 1
                 return served.metadata, served.matrix
             # Bounded catch-up BEFORE the full reload: a cache a couple of
             # generations behind (the common case — another instance wrote, or a
@@ -700,7 +874,8 @@ class EmbeddingIndex:
             # paths' rows alone, instead of paying the O(vault) SELECT + stack.
             if c is not None and c.recall_policy_identity == policy_identity:
                 try:
-                    patched = self._catch_up_cache(c)
+                    with call_spans.span("embeddings.matrix_catch_up"):
+                        patched = self._catch_up_cache(c)
                 except Exception as e:  # noqa: BLE001 — always fall back, never raise
                     log.warning(
                         "embedding matrix catch-up failed (%s); taking the full load", e
@@ -708,10 +883,12 @@ class EmbeddingIndex:
                     patched = None
                 if patched is not None:
                     self._cache = patched
+                    self._hits += 1
                     return patched.metadata, patched.matrix
             # Keep this call zero-argument: cache tests and production probes
             # deliberately wrap the named full-reload seam.
-            loaded = self._load_all_rows()
+            with call_spans.span("embeddings.matrix_load"):
+                loaded = self._load_all_rows()
             log.info(
                 "embedding matrix full load: reason=%s rows=%d gen=%d epoch=%d cached_gen=%d",
                 sidecar_store.reload_reason(c, loaded.epoch, loaded.generation),
@@ -721,6 +898,7 @@ class EmbeddingIndex:
                 c.generation if c is not None else -1,
             )
             self._cache = loaded
+            self._hits += 1
             return loaded.metadata, loaded.matrix
 
     def unload_cache(self) -> bool:
@@ -739,9 +917,10 @@ class EmbeddingIndex:
         """Best-effort residency status for this in-memory matrix only."""
         c = self._cache
         if c is None:
-            return {"loaded": False, "rows": 0, "bytes": 0}
+            return {"loaded": False, "rows": 0, "bytes": 0, "hits": self._hits}
         return {
             "loaded": True,
+            "hits": self._hits,
             "rows": len(c.metadata),
             "bytes": int(c.matrix.nbytes),
             "epoch": c.epoch,
@@ -874,7 +1053,7 @@ class EmbeddingIndex:
                 mtime,
                 policy_identity,
                 [],
-                np.zeros((0, VECTOR_DIM), dtype=np.float32),
+                np.zeros((0, self.dim), dtype=np.float32),
             )
         metadata: list[tuple[str, int]] = []
         vectors: list[np.ndarray] = []
@@ -956,6 +1135,62 @@ class EmbeddingIndex:
             log.warning("chunk-text fetch failed (%s); returning hits without text", e)
             texts = {}
         return [(fp, ci, texts.get((fp, ci), ""), score) for fp, ci, score in top]
+
+    def search_many(
+        self,
+        query_vecs: np.ndarray,
+        k: int,
+        *,
+        admits: Callable[[str], bool],
+    ) -> list[list[tuple[str, int, float]]]:
+        """Top-k eligible chunk rows for each query row: `(file_path, chunk_idx, score)`.
+
+        Each list is what `search(query, k, allowed_paths=A)` returns for that
+        row, up to the choice and order among exactly tied scores, where
+        `admits(file_path)` is membership in `A`: the `k` best rows whose file
+        is admitted, best first, fewer only when fewer are admitted. Two things
+        make it cheaper for a caller holding many queries, which is the write
+        advisory scoring every chunk of a draft. The matrix is read once per
+        block of `SEARCH_MANY_BLOCK` queries, in one product for the block,
+        rather than once per query, and no chunk text is hydrated. And
+        eligibility is asked only of files whose rows reach a query's candidate
+        window, each file once, so the caller need not enumerate its whole
+        eligible set to probe a few dozen of them.
+
+        Exact, not approximate: a query's window holds its highest-scoring rows,
+        so the first `k` admitted rows in window order are its top `k` admitted
+        rows overall; the window widens until `k` are found or every row has
+        been considered. Scores agree with `search` to the BLAS kernel wobble
+        the #951 note measured, and a non-finite score sorts last exactly as
+        `search`'s guarded selection leaves it.
+        """
+        metadata, matrix = self.all_vectors()
+        queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, matrix.shape[1])
+        if not len(queries):
+            return []
+        if not metadata or k <= 0:
+            return [[] for _ in range(len(queries))]
+        verdicts: dict[str, bool] = {}
+
+        def admitted(row: int) -> bool:
+            file_path = metadata[row][0]
+            verdict = verdicts.get(file_path)
+            if verdict is None:
+                verdict = verdicts[file_path] = bool(admits(file_path))
+            return verdict
+
+        answers: list[list[tuple[str, int, float]]] = []
+        total = len(metadata)
+        for start in range(0, len(queries), SEARCH_MANY_BLOCK):
+            # `matrix @ q.T`, not `q @ matrix.T`: the same scores, but with the
+            # tall matrix leading OpenBLAS ran a 64-query block ~1.8x faster
+            # (measured at 58k rows under a 2-CPU quota). Rows of the transposed
+            # view are strided; `_top_admitted` reads each one once.
+            block = (matrix @ queries[start : start + SEARCH_MANY_BLOCK].T).T
+            answers.extend(_top_admitted(row, k, total, admitted, metadata) for row in block)
+            # Released before the next product, so two blocks are never alive at once.
+            del block
+        return answers
 
     def _eligibility_mask(
         self, metadata: list[tuple[str, int]], allowed_paths: AbstractSet[str]
@@ -1068,7 +1303,7 @@ class EmbeddingIndex:
         candidates: list[tuple[str, str, str, str, int, np.ndarray]] = []
         for unit_ref, parent_path, generation, source_hash, parser_version, blob in rows:
             vector = np.frombuffer(blob, dtype=np.float32)
-            if vector.shape != (VECTOR_DIM,):
+            if vector.shape != (self.dim,):
                 continue
             candidates.append(
                 (
@@ -1170,6 +1405,75 @@ class EmbeddingIndex:
         finally:
             conn.close()
         return out
+
+    def stored_chunks_for(self, rel_path: str) -> tuple[list[str], float | None]:
+        """One page's published chunk texts in index order, and the file mtime
+        the embedding pass stamped on them.
+
+        `([], None)` when the sidecar or the page's rows are absent, or the rows
+        are not a contiguous `0..n-1` run (a partially replaced generation is not
+        a chunking anyone cut). A reader that must not re-derive a page's
+        chunking -- the context pack, for a media transcript whose chunking is
+        an encode -- compares the mtime with the file it holds and takes these
+        texts as the page's chunking when they match. One primary-key range
+        read; never creates the sidecar.
+        """
+        if not self.path.exists():
+            return [], None
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT chunk_idx, chunk_text, file_mtime FROM chunks "
+                "WHERE file_path = ? ORDER BY chunk_idx",
+                (rel_path,),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows or [int(idx) for idx, _text, _mtime in rows] != list(range(len(rows))):
+            return [], None
+        mtimes = [float(mtime) for _idx, _text, mtime in rows if mtime is not None]
+        if len(mtimes) != len(rows):
+            return [], None
+        return [str(text) for _idx, text, _mtime in rows], max(mtimes)
+
+    def stored_text_vectors(
+        self, rel_path: str
+    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        """One page's published vectors keyed by the exact text each was encoded
+        from: `(chunk_text -> vector, unit content -> vector)`.
+
+        A write that changes one chunk of a long page takes the rest from here
+        instead of encoding them again. A row is offered only when its blob is
+        one full float32 vector at the sidecar's width; anything else is left
+        out, so the caller encodes that text. Reuse assumes what every search
+        over this sidecar already assumes -- one encoder wrote all of it, which
+        the sidecar's vector-space record enforces. Two primary-key range reads
+        on one connection; never creates the sidecar.
+        """
+        if not self.path.exists():
+            return {}, {}
+        conn = self._connect()
+        try:
+            chunk_rows = conn.execute(
+                "SELECT chunk_text, vector FROM chunks WHERE file_path = ?",
+                (rel_path,),
+            ).fetchall()
+            unit_rows = conn.execute(
+                "SELECT content, vector FROM semantic_unit_vectors WHERE parent_path = ?",
+                (rel_path,),
+            ).fetchall()
+        finally:
+            conn.close()
+        width = self.dim * np.dtype(np.float32).itemsize
+
+        def keyed(rows: list[tuple[Any, Any]]) -> dict[str, np.ndarray]:
+            return {
+                str(text): np.frombuffer(blob, dtype=np.float32).copy()
+                for text, blob in rows
+                if isinstance(blob, (bytes, memoryview)) and len(blob) == width
+            }
+
+        return keyed(chunk_rows), keyed(unit_rows)
 
     def _vec_search(
         self, query_vec: np.ndarray, k: int
@@ -1309,7 +1613,7 @@ class EmbeddingIndex:
                         # Truncated or non-buffer blob: this row is unreadable, the
                         # rest of the corpus is not.
                         continue
-                    if vector.shape != (VECTOR_DIM,):
+                    if vector.shape != (self.dim,):
                         continue
                     grouped.setdefault(str(parent_path), []).append(
                         SemanticUnitVectorRow(
@@ -1402,10 +1706,13 @@ class EmbeddingIndex:
             len(flat_texts),
             len(all_chunks),
         )
+        # A rebuild replaces every row, so it is written in the space of the
+        # encoder in use, whatever the sidecar held before.
+        width = recall_space.current_dim()
         vectors = (
             embeddings_module.embed_texts(flat_texts, is_query=False)
             if flat_texts
-            else np.zeros((0, VECTOR_DIM), dtype=np.float32)
+            else np.zeros((0, width), dtype=np.float32)
         )
         unit_texts = [
             unit.content
@@ -1416,8 +1723,9 @@ class EmbeddingIndex:
         unit_vectors = (
             embeddings_module.embed_texts(unit_texts, is_query=False)
             if unit_texts
-            else np.zeros((0, VECTOR_DIM), dtype=np.float32)
+            else np.zeros((0, width), dtype=np.float32)
         )
+        width = int(vectors.shape[1] if len(vectors) else np.asarray(unit_vectors).shape[1])
 
         # Bulk write in ONE transaction. Per-file upsert_file() calls would each
         # open a connection, fsync, and splice the in-memory matrix — O(N²) copies
@@ -1452,10 +1760,31 @@ class EmbeddingIndex:
             if self._projected_source_snapshot() != source_snapshot:
                 log.info("rebuild_embeddings: projected source changed; publication refused")
                 return 0
-            vec_on = vec_gate(self, conn)
+            rebuilt = recall_space.current_identity(width)
+            prior = self._identity
+            # Another space's vec0 column has another width: this rebuild leaves
+            # it for the next sync to redeclare, instead of writing through it.
+            same_space = prior is None or (
+                prior.dim == rebuilt.dim and prior.accepts(rebuilt.model, rebuilt.fingerprint)
+            )
+            if prior is None:
+                # A sidecar with no vectors yet takes the rebuilt width now, so
+                # vec0 is declared at it before the rows below are mirrored.
+                self._set_identity(rebuilt)
+            vec_on = vec_gate(self, conn) if same_space else False
+            drop_vec = (
+                not same_space
+                and not self._vec_failed
+                and vecstore.backend() != "numpy"
+                and self._vec.try_load(conn)
+            )
             with conn:
+                if drop_vec:
+                    self._vec.drop(conn)
                 conn.execute("DELETE FROM chunks")
                 conn.execute("DELETE FROM semantic_unit_vectors")
+                recall_space.clear_identity(conn)
+                identity = recall_space.admit(conn, None, width)
                 conn.executemany(
                     "INSERT INTO chunks "
                     "(file_path, chunk_idx, chunk_text, vector, file_mtime) "
@@ -1493,6 +1822,7 @@ class EmbeddingIndex:
                 sidecar_store.bump_meta(conn, "semantic_unit_generation")
         finally:
             conn.close()
+        self._set_identity(identity)
         with self._lock:
             self._cache = None
         return total

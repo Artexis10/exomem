@@ -308,6 +308,14 @@ def test_receipt_recovery_preserves_public_terminal_schemas_without_leaf_leakage
 
     vault = tmp_path / "vault"
     note = vault / "Knowledge Base/Notes/schema-recovery.md"
+    resolution = {
+        "family": "domain",
+        "requested": "Health",
+        "canonical": "health",
+        "destination": "Health",
+        "match_kind": "normalized",
+        "snapshot": "a" * 64,
+    }
     calls = 0
     manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
     original = manager.idempotency._persist_canonically_committed
@@ -329,6 +337,7 @@ def test_receipt_recovery_preserves_public_terminal_schemas_without_leaf_leakage
         return {
             "path": "Knowledge Base/Notes/schema-recovery.md",
             "warnings": ["private warning"],
+            "vocabulary_resolution": resolution,
             "private_leaf_value": "must not enter the graph receipt",
         }
 
@@ -379,6 +388,8 @@ def test_receipt_recovery_preserves_public_terminal_schemas_without_leaf_leakage
         "warnings_count",
     } <= compact.keys()
     assert full == {**compact, "diagnostics": legacy}
+    assert compact["vocabulary_resolution"] == resolution
+    assert full["vocabulary_resolution"] == resolution
     assert isinstance(legacy, dict)
     assert compact_replay == compact
     assert "private_leaf_value" not in json.dumps(full)

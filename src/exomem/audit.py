@@ -84,8 +84,9 @@ import os
 import re
 import stat
 import sys
+import unicodedata
 from collections import deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
@@ -148,8 +149,12 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "supersession_integrity",
     "entity_type_unregistered",
     "unreflected_outcomes",
+    "unreflected_observations",
     "scope_divergence_semantic",
     "entity_recurrence",
+    "collection_candidate",
+    "artifact_role_promotion",
+    "transient_state_review",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -213,6 +218,7 @@ EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     # union is a calibration decision, on evidence this change deliberately does
     # not yet have (f21 stays withheld).
     "entity_recurrence",
+    "collection_candidate",
 )
 _SEMANTIC_AUDIT_CATEGORIES = frozenset({"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES})
 _LEGACY_BACKLOG_CODE = "RELATION_DISPOSITION_MISSING"
@@ -297,6 +303,11 @@ class AuditReport:
     findings: list[AuditFinding]
     summary: dict[str, int]  # category → count
     metadata: dict | None = None
+    role_state: dict | None = None  # Internal dependency descriptors; never serialized.
+    #: Internal: where each collection's backfill scan resumes, keyed by
+    #: collection id and claims signal, for the recompute to persist. Never
+    #: serialized.
+    backfill_cursors: dict | None = None
 
     def as_dict(self) -> dict:
         value = {
@@ -305,6 +316,8 @@ class AuditReport:
         }
         if self.metadata:
             value["metadata"] = self.metadata
+            if "coverage" in self.metadata:
+                value["meta"] = {"coverage": self.metadata["coverage"]}
         return value
 
     def as_public_dict(
@@ -368,6 +381,8 @@ class AuditReport:
         }
         if self.metadata:
             value["metadata"] = self.metadata
+            if "coverage" in self.metadata:
+                value["meta"] = {"coverage": self.metadata["coverage"]}
         return value
 
 
@@ -461,7 +476,9 @@ def audit(
     *,
     categories: list[str] | None = None,
     today: dt.date | None = None,
+    now: dt.datetime | None = None,
     semantic_detail: Literal["actionable", "full"] = "actionable",
+    retain_reflected_observations: bool = False,
 ) -> AuditReport:
     """Scan the KB and return a structured findings report.
 
@@ -481,6 +498,23 @@ def audit(
 
     findings: list[AuditFinding] = []
     metadata: dict = {}
+    role_state = None
+    backfill_cursors: dict[str, str] = {}
+    role_families = selected & {"artifact_role_promotion", "transient_state_review"}
+    if role_families:
+        from . import artifact_role_state
+        from .governance import egress
+        try:
+            role_state = artifact_role_state.build(vault_root, pages)
+            authorize = (
+                egress.release_walk_filter(vault_root) if role_state["origins"] else None
+            ) or (lambda _path: True)
+            role_findings, coverage = artifact_role_state.inspect(vault_root, role_state, authorize)
+            findings.extend(f for f in role_findings if f.category in role_families)
+            metadata["coverage"] = {key: coverage[key] for key in sorted(role_families)}
+        except Exception:  # noqa: BLE001 - measurement failure is explicit, never a write failure
+            log.debug("artifact role audit unavailable", exc_info=True)
+            metadata["coverage"] = dict.fromkeys(sorted(role_families), "unknown")
     link_categories = selected & {"broken_wikilink", "forward_reference"}
     if link_categories:
         findings.extend(_check_wikilinks(vault_root, pages, link_categories))
@@ -521,6 +555,16 @@ def audit(
         findings.extend(outcome_findings)
         if outcome_metadata:
             metadata["unreflected_outcomes"] = outcome_metadata
+    if "unreflected_observations" in selected:
+        findings.extend(
+            _check_unreflected_observations(
+                vault_root,
+                pages,
+                now=now,
+                retain_reflected=retain_reflected_observations,
+                cursors_out=backfill_cursors,
+            )
+        )
     if "supersession_integrity" in selected:
         findings.extend(_check_supersession_integrity(vault_root, pages))
     if "corpus_contradictions" in selected:
@@ -529,6 +573,8 @@ def audit(
         findings.extend(_check_scope_divergence_semantic(vault_root, pages))
     if "entity_recurrence" in selected:
         findings.extend(_check_entity_recurrence(vault_root, pages))
+    if "collection_candidate" in selected:
+        findings.extend(_check_collection_candidate(vault_root, pages))
     if "relation_registry" in selected:
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
@@ -569,6 +615,8 @@ def audit(
         findings=findings,
         summary=summary,
         metadata=metadata or None,
+        role_state=role_state,
+        backfill_cursors=backfill_cursors,
     )
 
 
@@ -1968,6 +2016,12 @@ def _check_unregistered_entity_types(
                 "schema_version": entity_types_module.EXTENSION_SCHEMA_VERSION,
                 "entity_types": {**current_extensions, type_id: definition},
             }
+            if registry.facets:
+                # A proposal replaces the whole document; keep declared facets.
+                proposal["facets"] = {
+                    facet_type: {facet.name: facet.as_dict() for facet in declared}
+                    for facet_type, declared in registry.facets.items()
+                }
             validation = entity_types_module.validate_proposal(proposal)
             if not validation:
                 proposal_cache[cache_key] = (candidate_entry, proposal, None)
@@ -2485,6 +2539,11 @@ def _check_unprocessed_sources(
     rows: list[tuple[int, AuditFinding]] = []  # (age_days for sort, finding)
     for page in pages:
         if page.frontmatter.get("type") != "source":
+            continue
+        # A conversation recap is not a backlog item: every conversation writes
+        # one, and the recap with its episode ledger is already the coverage
+        # record, so a finding per conversation would only be noise.
+        if page.frontmatter.get("source_type") == "episode":
             continue
         ingested = page.frontmatter.get("ingested_into")
         if not (ingested is None or (isinstance(ingested, list) and len(ingested) == 0)):
@@ -4412,6 +4471,787 @@ def outcome_component(
         "item_title": str(item.values.get("title") or item.identity.key),
         "item_status": str(item.values.get("status") or "open"),
     }
+
+
+def unreflected_observation_component(
+    component: Mapping[str, Any],
+    matched_terms: Iterable[str],
+    matched_predicates: Iterable[str] = (),
+) -> AuditFinding | None:
+    """Compose one claimed observation finding from audience-visible terms.
+
+    A page that satisfies a collection's `claims.match` predicates belongs to it
+    by declaration, so the predicates stand in for the two-term coverage floor
+    and join the signal version; a plain coverage route keeps its old version.
+    """
+    terms = sorted({str(term) for term in matched_terms if str(term)})
+    predicates = sorted({str(item) for item in matched_predicates if str(item)})
+    if len(terms) < 2 and not predicates:
+        return None
+    collection_id = str(component.get("collection_id") or "")
+    observation_ref = str(component.get("observation_ref") or "")
+    page_path = str(component.get("page_path") or "")
+    collection = str(component.get("collection") or "")
+    observed_at = str(component.get("observed_at") or "")
+    if not all((collection_id, observation_ref, page_path, collection, observed_at)):
+        return None
+    from . import due_state as due_state_module
+
+    signal_version = hashlib.sha256(
+        json.dumps(
+            [collection_id, observation_ref, terms, *([predicates] if predicates else [])],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    due_at = due_state_module.observation_due_at(observed_at)
+    if due_at is None:
+        return None
+    stored_component = {
+        key: value for key, value in component.items() if key != "matched_predicates"
+    }
+    stored_component.update(
+        {
+            "family": "unreflected_observations",
+            "matched_terms": terms,
+            **({"matched_predicates": predicates} if predicates else {}),
+        }
+    )
+    title = str(component.get("collection_title") or collection)
+    return AuditFinding(
+        category="unreflected_observations",
+        severity="info",
+        path=page_path,
+        detail=(
+            f"Observation {observation_ref!r} satisfies the declared membership of {title!r} "
+            "and has no reflecting record."
+            if predicates
+            else f"Observation {observation_ref!r} matches {len(terms)} claimed term(s) "
+            f"in {title!r} and has no reflecting record."
+        ),
+        proposed_fix=(
+            "Review the observation and, if it records durable state, append or update "
+            "the matching collection record with a source link. Nothing is auto-written."
+        ),
+        paths=[collection],
+        meta={
+            "signal_version": signal_version,
+            "review_partition": collection_id,
+            "due_since": due_at,
+            "collection": collection,
+            "collection_id": collection_id,
+            "observation_ref": observation_ref,
+            "matched_terms": terms,
+            **({"matched_predicates": predicates} if predicates else {}),
+        },
+        component=stored_component,
+    )
+
+
+#: PROVISIONAL: how many observation references a grouped backfill item names.
+BACKFILL_SAMPLE_REFS = 8
+#: PROVISIONAL: the most pre-lookback pages one recompute parses for backfill,
+#: per collection. The bound is on parsed candidates, not on the walk: a page
+#: sharing fewer than two cheap claim words and no declared predicate is never
+#: parsed. A collection that runs out resumes after its cursor next time.
+BACKFILL_MAX_PAGES = 500
+
+
+def _claims_signal(manifest: Any) -> str:
+    """Identity of a collection's DECLARED claims and predicates.
+
+    Declared only: derived claims move with every ordinary append, and a
+    dismissed backfill must hold until the author changes what the collection
+    claims.
+    """
+    return hashlib.sha256(
+        json.dumps(
+            [
+                {key: sorted(str(term) for term in values)
+                 for key, values in sorted((manifest.claims or {}).items())},
+                {key: sorted(str(value) for value in values)
+                 for key, values in sorted((manifest.claim_match or {}).items())},
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def backfill_component(
+    component: Mapping[str, Any], keep: Callable[[str], bool] | None = None
+) -> AuditFinding | None:
+    """Compose the ONE grouped backfill finding for a collection.
+
+    THE composer for the grouped kind, used by the recompute and by a serve
+    under a narrower audience alike, so the count and sample a withheld page
+    would change are recomposed rather than stored. The signal version is the
+    collection plus the claims it was computed against, never the page list:
+    a decision about it holds while more matching pages accumulate, and
+    changing the claims asks again.
+    """
+    collection = str(component.get("collection") or "")
+    collection_id = str(component.get("collection_id") or "")
+    claims_signal = str(component.get("claims_signal") or "")
+    if not collection or not collection_id or not claims_signal:
+        return None
+    rows = [
+        {"path": str(row["path"]), "ref": str(row["ref"])}
+        for row in component.get("pages") or ()
+        if isinstance(row, Mapping)
+        and type(row.get("path")) is str
+        and type(row.get("ref")) is str
+        and (keep is None or keep(row["path"]))
+    ]
+    if not rows:
+        return None
+    signal_version = hashlib.sha256(
+        json.dumps(
+            ["backfill", collection_id, claims_signal], separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    title = str(component.get("collection_title") or collection)
+    refs = [row["ref"] for row in rows[:BACKFILL_SAMPLE_REFS]]
+    # The scan has not reached every page yet: the count is a lower bound.
+    truncated = component.get("truncated") is True
+    meta = {
+        "signal_version": signal_version,
+        "review_partition": "backfill",
+        "due_since": dt.date.min.isoformat(),
+        "collection": collection,
+        "collection_id": collection_id,
+        "count": len(rows),
+        "truncated": truncated,
+        "refs": refs,
+    }
+    return AuditFinding(
+        category="unreflected_observations",
+        severity="info",
+        path=collection,
+        detail=(
+            f"{'At least ' if truncated else ''}{len(rows)} existing observation(s) "
+            f"match the claims of {title!r} and no record reflects them."
+        ),
+        proposed_fix=(
+            "Ask the user once, in their own terms, whether to file the named "
+            "observations in this collection, at every prominence; file each one, "
+            "citing it in sources, only on a yes. Nothing is auto-written."
+        ),
+        paths=[],
+        meta=meta,
+        component={
+            **dict(component),
+            "family": "unreflected_observations",
+            "kind": "backfill",
+            "pages": rows,
+            "count": len(rows),
+            "truncated": truncated,
+            "refs": refs,
+            "signal_version": signal_version,
+        },
+    )
+
+
+def _observation_page_signal(
+    page: find_module.ParsedPage,
+    *,
+    language: Any,
+    relations: Any,
+) -> tuple[list[str], dict[str, list[str]]]:
+    """The authored vocabulary and facets each write path promises to route.
+
+    Mirrors `semantic_writes._records_routing_terms` / `_records_routing_facets`
+    so a page routes the same at write time and at recompute.
+    """
+    frontmatter = page.frontmatter or {}
+
+    def strings(*names: str) -> list[str]:
+        out: list[str] = []
+        for name in names:
+            raw = frontmatter.get(name)
+            items = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else ()
+            out.extend(str(item) for item in items if type(item) in {str, int, float, bool})
+        return [value for value in out if value.strip()]
+
+    facets = {
+        "type": strings("type"),
+        "category": strings("category"),
+        "project": strings("project", "projects"),
+        "tags": [str(tag) for tag in page.tags],
+    }
+    terms = [page.title, *page.tags]
+    if page.rel_path.startswith(f"{kb_prefix()}Evidence/"):
+        match = re.search(
+            r"(?ms)^## Description\s*$\n(?P<body>.*?)(?=^## |\Z)", page.body
+        )
+        if match:
+            terms.append(match.group("body").strip())
+    else:
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            validate=False,
+            language_registry=language,
+            relation_registry=relations,
+            page_type=page.page_type,
+        )
+        terms.extend(tag for unit in document.units for tag in unit.tags)
+        facets["category"].extend(unit.category for unit in document.units if unit.category)
+    facets = {key: list(dict.fromkeys(values)) for key, values in facets.items() if values}
+    return terms, facets
+
+
+def _backfill_prefilter(
+    page: find_module.ParsedPage, targets: list[tuple[Any, frozenset[str]]]
+) -> list[Any]:
+    """The collections a pre-lookback page could route to, without parsing its body.
+
+    A target qualifies when the page's title and tags share at least two of its
+    claim words and the page's frontmatter does not contradict its predicates,
+    or when its declared predicates hold.
+    """
+    from . import collection_claims
+
+    frontmatter = page.frontmatter or {}
+    cheap_terms = collection_claims.normalize_terms([page.title, *page.tags])
+    projects = frontmatter.get("projects")
+    facets = collection_claims.normalize_match(
+        {
+            "type": frontmatter.get("type"),
+            "category": frontmatter.get("category"),
+            "project": [frontmatter.get("project"), *projects]
+            if isinstance(projects, list)
+            else frontmatter.get("project"),
+            "tags": list(page.tags),
+        }
+    )
+
+    def knowable(target: Any) -> Any:
+        # Unit categories are unknowable without the parse this avoids, so a
+        # `category` predicate is assumed to hold here and decided after it.
+        return replace(
+            target, match={key: values for key, values in target.match.items() if key != "category"}
+        )
+
+    def declared(target: Any) -> bool:
+        if not target.match:
+            return False
+        cheap = knowable(target)
+        return not cheap.match or collection_claims.matched_predicates(cheap, facets) is not None
+
+    return [
+        target
+        for target, claims in targets
+        if declared(target)
+        or (
+            len(cheap_terms & claims) >= collection_claims.MIN_CLAIM_COVERAGE
+            and not collection_claims.contradicts(knowable(target), facets)
+        )
+    ]
+
+
+def _observation_moment(page: find_module.ParsedPage) -> dt.datetime | None:
+    authored = [
+        parsed
+        for name in ("captured", "created", "updated")
+        if (parsed := temporal.parse(page.frontmatter.get(name))) is not None
+    ]
+    if not authored:
+        return None
+    return max(
+        value.instant
+        or dt.datetime.combine(value.day, dt.time(), tzinfo=dt.UTC)
+        for value in authored
+    )
+
+
+def _link_targets_observation(
+    value: Any,
+    *,
+    page_path: str,
+    observation_ref: str,
+    observation_aliases: Iterable[str] = (),
+) -> bool:
+    values = value if isinstance(value, (list, tuple)) else [value]
+    aliases = {
+        text
+        for raw in (page_path, observation_ref, *observation_aliases)
+        if (text := str(raw or "").strip())
+    }
+    path_keys = {
+        _relevance_canon(alias)
+        for alias in aliases
+        if not alias.startswith("exomem://")
+    }
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if text in aliases or _relevance_canon(text) in path_keys:
+            return True
+        wikilinks = WIKILINK_PATTERN.findall(text)
+        if any(_relevance_canon(target) in path_keys for target in wikilinks):
+            return True
+    return False
+
+
+def _record_observation_support(
+    manifest: Any,
+    values: Mapping[str, Any],
+    *,
+    page_path: str,
+    observation_ref: str,
+    matched_terms: Iterable[str],
+    observation_aliases: Iterable[str] = (),
+) -> dict[str, Any] | None:
+    for name, spec in manifest.schema.fields.items():
+        is_link = spec.type == "link" or (
+            spec.type == "array" and spec.items is not None and spec.items.type == "link"
+        )
+        if (is_link or name == "sources") and _link_targets_observation(
+            values.get(name),
+            page_path=page_path,
+            observation_ref=observation_ref,
+            observation_aliases=observation_aliases,
+        ):
+            return {"support": "link"}
+    matched = {
+        unicodedata.normalize("NFKC", str(term)).strip().casefold()
+        for term in matched_terms
+    }
+    key_terms = sorted(
+        {
+            term
+            for name in manifest.schema.natural_key
+            if (term := unicodedata.normalize("NFKC", str(values.get(name) or ""))
+                .strip()
+                .casefold())
+            and term in matched
+        }
+    )
+    return {"support": "natural_key", "terms": key_terms} if key_terms else None
+
+
+def _check_unreflected_observations(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+    *,
+    now: dt.datetime | None = None,
+    retain_reflected: bool = False,
+    cursors_out: dict[str, str] | None = None,
+) -> list[AuditFinding]:
+    """Claimed compiled/Evidence observations with no reflecting record.
+
+    `cursors_out`, when given, receives where each collection's backfill scan
+    resumes, keyed by its collection id and claims signal, for the recompute to
+    persist.
+    """
+    from . import collection_claims, due_state, memory_refs, record_formats
+
+    root = Path(vault_root)
+    effective_now = now or dt.datetime.now(dt.UTC)
+    if effective_now.tzinfo is None:
+        effective_now = effective_now.replace(tzinfo=dt.UTC)
+    effective_now = effective_now.astimezone(dt.UTC)
+    authorize = _release_filter(root)
+    claims_payload = {
+        "claims": due_state._recompute_claims(root, authorize_path=authorize)
+    }
+    targets = due_state.routing_targets(root, payload=claims_payload, authorize_path=authorize)
+    if not targets:
+        return []
+    language = semantic_language_registry.load_registry(root)
+    relations = relation_registry.load_registry(root)
+    projection = due_state.load(root) or {}
+    stored_components = [
+        component
+        for bucket in (
+            (projection.get("categories") or {}).get("unreflected_observations", {}).values()
+        )
+        for entry in due_state._unbucket(bucket)
+        if isinstance((component := entry.get("component")), Mapping)
+    ]
+    tracked = {str(component.get("observation_ref") or "") for component in stored_components}
+    collection_cache: dict[str, tuple[Any, Any]] = {}
+
+    def collection_state(collection: str) -> tuple[Any, Any] | None:
+        cached = collection_cache.get(collection)
+        if cached is None:
+            manifest = due_state._load_manifest(root, collection)
+            if manifest is None:
+                return None
+            try:
+                snapshot = record_formats.load_adapter(
+                    root,
+                    manifest,
+                    authorize_path=None if retain_reflected else authorize,
+                ).read()
+            except Exception:  # noqa: BLE001 -- incomplete collection cannot settle the signal
+                snapshot = None
+            cached = collection_cache[collection] = (manifest, snapshot)
+        return cached
+
+    findings: list[AuditFinding] = []
+    # Existing pages older than the discovery lookback that a collection's
+    # claims cover. They are not individual entries -- that is what the
+    # lookback bounds -- but one grouped item per collection, so creating a
+    # collection or changing its claims looks back at what it now covers.
+    # Each collection parses at most BACKFILL_MAX_PAGES candidates per
+    # recompute, in path order, resuming after the cursor it left last time
+    # under its identity and claims signal (two collections may declare the
+    # same claims, or none); what earlier windows found is carried forward.
+    stored_cursors = projection.get("backfill_cursors")
+    stored_cursors = stored_cursors if isinstance(stored_cursors, Mapping) else {}
+    scans: dict[str, dict[str, Any]] = {}
+    for target in targets:
+        manifest = due_state._load_manifest(root, str(target.collection))
+        if manifest is None:
+            continue
+        signal = _claims_signal(manifest)
+        cursor_key = f"{manifest.collection_id}:{signal}"
+        cursor = stored_cursors.get(cursor_key)
+        scans[str(target.collection)] = {
+            "signal": signal,
+            "cursor_key": cursor_key,
+            "start": cursor if type(cursor) is str else "",
+            "budget": BACKFILL_MAX_PAGES,
+            "last": "",
+            "exhausted": False,
+            "found": [],
+        }
+    historical_pages: dict[str, tuple[str, str, Any]] = {}
+    prefilter_targets = [
+        (target, collection_claims.normalize_terms(target.claims)) for target in targets
+    ]
+    for page in sorted(pages, key=lambda page: page.rel_path):
+        if not (
+            page.rel_path.startswith(f"{kb_prefix()}Notes/")
+            or page.rel_path.startswith(f"{kb_prefix()}Evidence/")
+        ):
+            continue
+        if not authorize(page.rel_path) or (page.status or "active") in {
+            "archived",
+            "draft",
+            "dropped",
+            "superseded",
+        }:
+            continue
+        exomem_id = str(page.frontmatter.get("exomem_id") or "")
+        observation_ref = memory_refs.memory_ref(exomem_id) if exomem_id else ""
+        if not observation_ref:
+            continue
+        companion = page.frontmatter.get("governance_companion")
+        artifact_path = companion.get("artifact_path") if isinstance(companion, Mapping) else None
+        observed_at = _observation_moment(page)
+        age = effective_now - observed_at if observed_at is not None else None
+        if age is None or age < dt.timedelta(0):
+            continue
+        historical = (
+            age > dt.timedelta(days=due_state.OBSERVATION_LOOKBACK_DAYS)
+            and observation_ref not in tracked
+        )
+        charged: set[str] = set()
+        if historical:
+            historical_pages[page.rel_path] = (
+                observation_ref, observed_at.isoformat(), artifact_path
+            )
+            for target in _backfill_prefilter(page, prefilter_targets):
+                scan = scans.get(str(target.collection))
+                if scan is None or page.rel_path <= scan["start"]:
+                    continue
+                if scan["budget"] <= 0:
+                    scan["exhausted"] = True
+                    continue
+                scan["budget"] -= 1
+                scan["last"] = page.rel_path
+                charged.add(str(target.collection))
+            if not charged:
+                continue
+        terms, facets = _observation_page_signal(page, language=language, relations=relations)
+        routing = collection_claims.route(terms, targets, facets=facets)
+        if routing is None:
+            continue
+        collection = str(routing["collection"])
+        if historical and (
+            collection not in charged
+            # Only a confident route joins the group: a moderate word overlap
+            # is not worth one question about many notes.
+            or (routing.get("strength") != "strong" and not routing.get("matched_predicates"))
+        ):
+            continue
+        cached = collection_state(collection)
+        if cached is None:
+            continue
+        manifest, snapshot = cached
+        matched = list(routing.get("matched_terms") or ())
+        reflectors = []
+        for record in snapshot.records if snapshot is not None else ():
+            if record.ambiguous:
+                continue
+            support = _record_observation_support(
+                manifest,
+                record.values,
+                page_path=page.rel_path,
+                observation_ref=observation_ref,
+                matched_terms=matched,
+                observation_aliases=(artifact_path,),
+            )
+            if support is not None:
+                reflectors.append(
+                    {
+                        "path": str(record.source.path),
+                        "key": str(record.identity.key),
+                        **support,
+                    }
+                )
+        if historical:
+            if not reflectors:
+                scans[collection]["found"].append(
+                    (observed_at.isoformat(), page.rel_path, observation_ref)
+                )
+            continue
+        if reflectors and not retain_reflected:
+            continue
+        component = {
+            "collection": collection,
+            "collection_id": str(manifest.collection_id),
+            "collection_title": str(manifest.title),
+            "page_path": page.rel_path,
+            "observation_ref": observation_ref,
+            "observation_aliases": sorted(
+                {
+                    page.rel_path,
+                    observation_ref,
+                    str(artifact_path),
+                }
+            )[:3]
+            if artifact_path
+            else sorted({page.rel_path, observation_ref}),
+            "terms": sorted(collection_claims.normalize_terms(terms)),
+            "observed_at": observed_at.isoformat(),
+            **due_state.observation_facets_component(facets),
+            "reflecting_records": reflectors,
+        }
+        finding = unreflected_observation_component(
+            component, matched, routing.get("matched_predicates") or ()
+        )
+        if finding is not None:
+            findings.append(finding)
+    previous = {
+        str(component.get("collection") or ""): component
+        for component in stored_components
+        if component.get("kind") == due_state.BACKFILL_KIND
+    }
+    for collection, scan in sorted(scans.items()):
+        # The window this recompute scanned: after the start cursor, up to the
+        # last charged page when the budget ran out, else to the end.
+        end = scan["last"] if scan["exhausted"] else None
+        next_cursor = end or ""
+        if cursors_out is not None and next_cursor:
+            cursors_out[scan["cursor_key"]] = next_cursor
+        rows = {path: (moment, ref) for moment, path, ref in scan["found"]}
+        prior = previous.get(collection)
+        if prior is not None and prior.get("claims_signal") == scan["signal"]:
+            for row in prior.get("pages") or ():
+                path = row.get("path") if isinstance(row, Mapping) else None
+                if type(path) is not str or path in rows:
+                    continue
+                if scan["start"] < path and (end is None or path <= end):
+                    continue  # re-scanned this time; the fresh answer stands
+                known = historical_pages.get(path)
+                if known is None or known[0] != row.get("ref"):
+                    continue
+                cached = collection_state(collection)
+                if cached is None:
+                    continue
+                manifest, snapshot = cached
+                if any(
+                    not record.ambiguous
+                    and _record_observation_support(
+                        manifest,
+                        record.values,
+                        page_path=path,
+                        observation_ref=known[0],
+                        matched_terms=(),
+                        observation_aliases=(known[2],),
+                    )
+                    for record in (snapshot.records if snapshot is not None else ())
+                ):
+                    continue
+                rows[path] = (known[1], known[0])
+        if not rows:
+            continue
+        cached = collection_state(collection)
+        if cached is None:
+            continue
+        manifest, _snapshot = cached
+        finding = backfill_component(
+            {
+                "collection": collection,
+                "collection_id": str(manifest.collection_id),
+                "collection_title": str(manifest.title),
+                "claims_signal": scan["signal"],
+                "pages": [
+                    {"path": path, "ref": ref}
+                    for path, (_moment, ref) in sorted(
+                        rows.items(), key=lambda item: (item[1][0], item[0])
+                    )
+                ],
+                "truncated": bool(next_cursor),
+            }
+        )
+        if finding is not None:
+            findings.append(finding)
+    return sorted(
+        findings,
+        key=lambda finding: (
+            finding.path,
+            str((finding.meta or {}).get("collection_id") or ""),
+        ),
+    )
+
+
+def _collection_candidate_finding(
+    candidate: Any,
+    rows: list[Mapping[str, Any]],
+    *,
+    project_terms: Iterable[str] = (),
+    common_terms: Iterable[str] = (),
+) -> AuditFinding | None:
+    supporting_rows = sorted(
+        (
+            dict(row)
+            for row in rows
+            if candidate.term in {str(term) for term in row.get("terms") or ()}
+        ),
+        key=lambda row: (
+            str(row.get("date") or ""),
+            str(row.get("page") or ""),
+            str(row.get("unit_ref") or ""),
+        ),
+    )
+    if not supporting_rows:
+        return None
+    supporting = sorted(
+        {
+            (str(row.get("page") or ""), str(row.get("unit_ref") or ""))
+            for row in supporting_rows
+        }
+    )
+    anchor = supporting[0][0]
+    paths = sorted({path for path, _ref in supporting if path != anchor})
+    meta = {
+        "review_partition": candidate.term,
+        "domain_terms": list(candidate.domain_terms),
+        "evidence_units": list(candidate.evidence_units),
+        "strength": candidate.strength,
+        "signal_version": candidate.signal_version,
+        "due_since": dt.date.min.isoformat(),
+    }
+    return AuditFinding(
+        category="collection_candidate",
+        severity="info",
+        path=anchor,
+        detail=(
+            f"Recurring state observations for {candidate.term!r} span enough pages "
+            "and dates to review as a structured collection."
+        ),
+        proposed_fix=(
+            "Review the cited units, draft and validate a collection schema, then ask "
+            "for confirmation before creating it. Nothing is auto-created or backfilled."
+        ),
+        paths=paths,
+        meta=meta,
+        component={
+            "family": "collection_candidate",
+            "term": candidate.term,
+            "units": supporting_rows,
+            "project_terms": sorted({str(term) for term in project_terms}),
+            # The whole table's too-widespread terms, narrowed to the ones these
+            # units carry, so a serve recomposing from them keeps the verdict.
+            "common_terms": sorted(
+                {str(term) for term in common_terms}
+                & {str(term) for row in supporting_rows for term in row.get("terms") or ()}
+            ),
+            "meta": meta,
+            **meta,
+        },
+    )
+
+
+def _check_collection_candidate(
+    vault_root: Path, pages: list[find_module.ParsedPage]
+) -> list[AuditFinding]:
+    """Recurring longitudinal unit terms not covered by effective claims."""
+    from . import collection_candidate, due_state, memory_refs, project_keys
+
+    root = Path(vault_root)
+    authorize = _release_filter(root)
+    language = semantic_language_registry.load_registry(root)
+    relations = relation_registry.load_registry(root)
+    rows: list[dict[str, Any]] = []
+    for page in pages:
+        if not page.rel_path.startswith(f"{kb_prefix()}Notes/") or not authorize(
+            page.rel_path
+        ):
+            continue
+        if (page.status or "active") in {"archived", "draft", "dropped", "superseded"}:
+            continue
+        moment = temporal.parse(page.frontmatter.get("created") or page.frontmatter.get("updated"))
+        if moment is None:
+            continue
+        exomem_id = str(page.frontmatter.get("exomem_id") or "")
+        parent_ref = memory_refs.memory_ref(exomem_id) if exomem_id else None
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            parent_ref=parent_ref,
+            validate=False,
+            language_registry=language,
+            relation_registry=relations,
+            page_type=page.page_type,
+        )
+        for unit in document.units:
+            if not unit.unit_ref:
+                continue
+            rows.append(
+                {
+                    "page": page.rel_path,
+                    "unit_ref": unit.unit_ref,
+                    "terms": sorted({*page.tags, *unit.tags, unit.category}),
+                    "date": moment.day.isoformat(),
+                    "text": unit.content,
+                }
+            )
+    claims_payload = {
+        "claims": due_state._recompute_claims(root, authorize_path=authorize)
+    }
+    covered = {
+        term
+        for target in due_state.routing_targets(
+            root, payload=claims_payload, authorize_path=authorize
+        )
+        for term in target.claims
+    }
+    projects = project_keys.load_project_registry(root).keys
+    common = collection_candidate.common_terms(rows)
+    candidates = collection_candidate.select(
+        collection_candidate.detect(
+            rows, covered_terms=covered, project_terms=projects, common_terms=common
+        ),
+        rows,
+    )
+    findings = [
+        finding
+        for candidate in candidates
+        if (
+            finding := _collection_candidate_finding(
+                candidate, rows, project_terms=projects, common_terms=common
+            )
+        )
+        is not None
+    ]
+    return sorted(findings, key=lambda finding: str((finding.meta or {}).get("review_partition")))
 
 
 def unreflected_component(

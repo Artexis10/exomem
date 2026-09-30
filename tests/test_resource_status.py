@@ -230,3 +230,19 @@ def test_gpu_headroom_is_unknown_when_no_probe_exists(monkeypatch) -> None:
 
     assert gpu["status"] == "unknown"
     assert gpu["usable"] is None
+
+
+def test_status_reports_the_dreamer_without_allocation(monkeypatch, tmp_path: Path) -> None:
+    import threading
+
+    from exomem import dreamer, dreamer_store
+
+    _forbid_torch_import(monkeypatch)
+    status = resource_status.collect(tmp_path)
+    assert status["dreamer"]["setting"] == "off"
+    assert status["dreamer"]["state"] == "off"
+    assert status["dreamer"]["running"] is False
+    assert not dreamer_store.sidecar_path(tmp_path).exists()
+    assert [t for t in threading.enumerate() if t.name == dreamer.THREAD_NAME] == []
+    encoded = json.dumps(status["dreamer"])
+    assert str(tmp_path) not in encoded

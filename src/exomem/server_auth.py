@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import math
 import os
@@ -25,6 +26,7 @@ from key_value.aio.stores.filetree import (
 from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
 from .auth_sessions import SessionAuthority
+from .governance.principal import remote_owner_binding_state
 from .remote_oauth_storage import ReadThroughMirrorStorage, RemoteOAuthStorage
 from .session_oauth import OAUTH_AUTHORIZATION_SCOPES, ExomemSessionOAuthProxy
 from .session_validation_cache import SessionValidationCache
@@ -84,6 +86,57 @@ class HostedCellTokenVerifier(TokenVerifier):
             client_id=self._config.cell_id,
             scopes=["hosted:cell"],
             claims=claims,
+        )
+
+
+class CloudCellTokenVerifier(TokenVerifier):
+    """FastMCP bearer verifier for one Exomem Cloud cell's per-cell bearer (D1).
+
+    Accepts a bearer equal to the current token, or, during rotation, the
+    previous one, each compared in constant time (fixed-length digest
+    comparison via `hmac.compare_digest`, mirroring
+    `HostedCellConfig.matches_service_credential`). The resulting principal
+    carries fixed claims that are never derived from the bearer or a key
+    version, and always resolve to a non-owner -- exactly like a remote OAuth
+    principal on the desktop.
+    """
+
+    def __init__(
+        self,
+        *,
+        cell_id: str,
+        token: str,
+        previous_token: str | None = None,
+    ) -> None:
+        super().__init__(required_scopes=["cloud:cell"])
+        if not cell_id.strip():
+            raise ValueError("cell_id is required")
+        if not token:
+            raise ValueError("token is required")
+        self._cell_id = cell_id
+        self._expected = hashlib.sha256(token.encode("utf-8")).digest()
+        self._previous = (
+            hashlib.sha256(previous_token.encode("utf-8")).digest()
+            if previous_token
+            else None
+        )
+
+    def _matches(self, presented: str) -> bool:
+        candidate = hashlib.sha256(presented.encode("utf-8")).digest()
+        matched_current = hmac.compare_digest(self._expected, candidate)
+        matched_previous = self._previous is not None and hmac.compare_digest(
+            self._previous, candidate
+        )
+        return matched_current or matched_previous
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not token or not self._matches(token):
+            return None
+        return AccessToken(
+            token="exomem-cloud-cell",
+            client_id=self._cell_id,
+            scopes=["cloud:cell"],
+            claims={"sub": self._cell_id, "iss": "exomem-cloud-cell"},
         )
 
 
@@ -195,9 +248,19 @@ def _shared_storage_settings() -> tuple[str, str, str, float] | None:
     return storage_url, namespace, storage_token, timeout
 
 
+def _allowed_github_user_id() -> int | None:
+    """The account allowed to sign in, or None when none is configured."""
+    try:
+        value = int(os.environ.get("EXOMEM_GITHUB_USER_ID", "").strip())
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def build_session_authority(*, base_url: str) -> SessionAuthority:
     """Build the authoritative durable session store for this deployment."""
     signing_root = _required_signing_root()
+    allowed_github_user_id = _allowed_github_user_id()
     issuer = base_url.rstrip("/")
     audience = f"{issuer}/mcp"
     shared = _shared_storage_settings()
@@ -231,6 +294,7 @@ def build_session_authority(*, base_url: str) -> SessionAuthority:
             timeout=timeout,
             validation_cache=cache,
             stale_grace_seconds=stale_grace_seconds,
+            allowed_github_user_id=allowed_github_user_id,
         )
 
     from fastmcp import settings
@@ -240,6 +304,44 @@ def build_session_authority(*, base_url: str) -> SessionAuthority:
         signing_root=signing_root,
         issuer=issuer,
         audience=audience,
+        allowed_github_user_id=allowed_github_user_id,
+    )
+
+
+def build_local_session_authority() -> SessionAuthority:
+    """The local-ingress session authority: the same store, a separate audience.
+
+    Same signing root, storage and allowed account as the public authority, so
+    `exomem auth sessions`, `revoke <id>` and `revoke --all` cover local
+    sessions too. Only the issuer and audience differ, which is what makes each
+    authority refuse the other's sessions.
+    """
+    from .local_ingress import LOCAL_AUDIENCE, LOCAL_ISSUER
+
+    signing_root = _required_signing_root()
+    allowed_github_user_id = _allowed_github_user_id()
+    shared = _shared_storage_settings()
+    if shared is not None:
+        storage_url, namespace, storage_token, timeout = shared
+        return SessionAuthority.remote(
+            url=storage_url,
+            namespace=namespace,
+            storage_token=storage_token,
+            signing_root=signing_root,
+            issuer=LOCAL_ISSUER,
+            audience=LOCAL_AUDIENCE,
+            timeout=timeout,
+            allowed_github_user_id=allowed_github_user_id,
+        )
+
+    from fastmcp import settings
+
+    return SessionAuthority.local(
+        directory=settings.home / "oauth-sessions",
+        signing_root=signing_root,
+        issuer=LOCAL_ISSUER,
+        audience=LOCAL_AUDIENCE,
+        allowed_github_user_id=allowed_github_user_id,
     )
 
 
@@ -301,8 +403,14 @@ def _build_oauth_client_storage(*, signing_root: str) -> Any | None:
     )
 
 
-def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
-    """Return the durable GitHub-bootstrap OAuth proxy, or None for stdio."""
+def build_oauth(
+    *, require_auth: bool, base_url: str, local_ingress: bool = False
+) -> OAuthProxy | None:
+    """Return the durable GitHub-bootstrap OAuth proxy, or None for stdio.
+
+    ``local_ingress`` arms the local-ingress gate in front of authentication;
+    only a supervisor-owned worker asks for it.
+    """
     if not require_auth:
         return None
 
@@ -346,12 +454,22 @@ def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
             "EXOMEM_GITHUB_USER_ID must be a positive numeric GitHub user ID"
         )
 
+    # The owner binding is optional: a malformed or unreachable value reads as
+    # unset rather than stopping the connector. This line names the state only,
+    # never the bound id or login.
+    log.info("event=remote_owner_binding state=%s", remote_owner_binding_state())
+
     authority = build_session_authority(base_url=base_url)
     client_storage = _build_oauth_client_storage(signing_root=signing_root)
     verifier = SingleUserGitHubVerifier(
         allowed_login=gh_username,
         allowed_user_id=github_user_id,
     )
+    local_verifier = None
+    if local_ingress:
+        from .local_ingress import LocalCredentialVerifier
+
+        local_verifier = LocalCredentialVerifier()
     return ExomemSessionOAuthProxy(
         session_authority=authority,
         upstream_authorization_endpoint="https://github.com/login/oauth/authorize",
@@ -364,4 +482,5 @@ def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
         jwt_signing_key=signing_root,
         client_storage=client_storage,
         valid_scopes=list(OAUTH_AUTHORIZATION_SCOPES),
+        local_verifier=local_verifier,
     )

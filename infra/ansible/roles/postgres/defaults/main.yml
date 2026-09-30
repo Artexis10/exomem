@@ -1,0 +1,108 @@
+---
+postgres_major_version: "17"
+postgres_database_name: exomem_control
+postgres_data_dir: "/var/lib/postgresql/{{ postgres_major_version }}/main"
+postgres_config_dir: "/etc/postgresql/{{ postgres_major_version }}/main"
+postgres_private_network_cidr: 10.50.0.0/16
+postgres_private_ip: ""
+
+# Public DNS name of the PgBouncer TLS listener; also the certificate CN/SAN.
+postgres_database_hostname: ""
+postgres_public_port: 6432
+
+# The four Substrate roles (D12), as four separate plain-string variables
+# rather than one dict-shaped variable: infra/scripts/secret_handoff.py's
+# sops_ansible_vars destination can only ever write {"<variable>": "<one
+# string>"} (confirmed by reading _seal_named_document -- it always decodes
+# the secret source to a single UTF-8 string and writes exactly one key), so
+# a single "postgres_role_passwords" dict variable was never a shape it
+# could actually produce (OM-3). Each password is its own secret-matrix
+# entry (infra/contracts/secret-destinations-v1.json) and its own SOPS file.
+postgres_substrate_owner_password: ""
+postgres_substrate_app_password: ""
+postgres_exomem_gateway_password: ""
+postgres_exomem_cellctl_password: ""
+
+# Reassembled here, once, so every task below keeps using the dict shape
+# (community.postgresql.postgresql_user's loop, the assert task). Values are
+# required and must not be empty; see the assert task. exomem_gateway and
+# exomem_cellctl never reach the public PgBouncer listener (auth_hba_file
+# admits them only from postgres_private_network_cidr).
+postgres_role_passwords:
+  substrate_owner: "{{ postgres_substrate_owner_password }}"
+  substrate_app: "{{ postgres_substrate_app_password }}"
+  exomem_gateway: "{{ postgres_exomem_gateway_password }}"
+  exomem_cellctl: "{{ postgres_exomem_cellctl_password }}"
+
+# ACME DNS-01 certificate issuance. When disabled (used only by the
+# disposable role test), the role copies a pre-provisioned certificate pair
+# from the controller instead of running certbot, so the test can exercise a
+# local CA in place of Let's Encrypt.
+postgres_acme_enabled: true
+postgres_acme_email: ""
+postgres_cloudflare_dns_token: ""
+postgres_tls_source_fullchain: ""
+postgres_tls_source_privkey: ""
+postgres_tls_dir: /etc/exomem/tls
+
+# pgBackRest / B2 (or any S3-compatible endpoint in the disposable test).
+postgres_pgbackrest_repo_type: s3
+postgres_pgbackrest_s3_endpoint: ""
+postgres_pgbackrest_s3_region: ""
+postgres_pgbackrest_s3_bucket: ""
+postgres_pgbackrest_s3_key: ""
+postgres_pgbackrest_s3_key_secret: ""
+postgres_pgbackrest_s3_key_prefix: control-db
+postgres_pgbackrest_s3_verify_tls: true
+postgres_pgbackrest_full_retention: 4
+postgres_pgbackrest_stanza: control
+# Client-side pgBackRest repository encryption passphrase (repo1-cipher-pass,
+# repo1-cipher-type=aes-256-cbc -- pgBackRest 2.59's only real cipher; there
+# is no aes-256-gcm). This passphrase must already be in place the first
+# time `stanza-create` runs: pgBackRest bakes the cipher settings into
+# backup.info at stanza creation, and every backup and WAL segment
+# afterward is encrypted with it. There is no way to decrypt or restore a
+# single file in the repository without it -- losing this passphrase loses
+# every backup as completely as losing the bucket itself would. Its SOPS
+# copy (alongside the B2 key, in group_vars/control_nodes.example.yml's
+# real counterpart) is therefore the actual recovery path, not the repo1-s3
+# credentials alone.
+postgres_pgbackrest_repo_cipher_pass: ""
+
+# nftables per-source limits on the public PgBouncer port. Deliberately
+# flood-only, not brute-force-only: Vercel production shares egress IPs and
+# opens pooled connections per function instance, so a burst of legitimate
+# Substrate traffic from one IP is expected. See the "prevented / cost /
+# payer" comment beside where these are consumed
+# (templates/exomem-postgres.nft.j2) for why they sit this high rather than
+# lower.
+postgres_nft_conn_limit_per_source: 200
+postgres_nft_new_conn_rate_per_minute: 600
+
+# Set only by the gated live-role test (OM-5) via -e, together with
+# --skip-tags services. Skipping the `services`-tagged tasks alone is not
+# enough: Ansible always runs any handler a task notified by the natural end
+# of the play, regardless of tags -- only an explicit, tagged
+# `meta: flush_handlers` respects tag filtering, and several of this role's
+# config-template tasks unconditionally notify a restart handler. This
+# guards the handlers themselves (handlers/main.yml), which `when:` always
+# honors, so the test's config-only run never touches systemd at all.
+# Production never sets this, so its own restarts are unaffected.
+postgres_manage_services: true
+
+# NC-B: postgres_manage_services: false is refused (see the "Validate
+# service-management mode" assert) unless this is also true -- production
+# must never be able to silently skip enabling/starting/restarting its own
+# units by, say, a stray or mistyped -e. Only the gated live-role test sets
+# either variable at all, and it sets both.
+postgres_unmanaged_services_test_mode: false
+
+# PgBouncer's own limits (D12 NEW-1). PgBouncer serves only substrate_app and
+# substrate_owner; max_user_connections bounds each of those two roles'
+# backend connections regardless of source IP (nftables above handles the
+# per-source-IP case, on the raw port). max_client_conn is PgBouncer's global
+# ceiling across both roles combined; client_login_timeout bounds how long a
+# half-open client TLS/auth handshake can hold a slot before being dropped.
+postgres_pgbouncer_max_user_connections: 50
+postgres_pgbouncer_max_client_conn: 2000
+postgres_pgbouncer_client_login_timeout: 10

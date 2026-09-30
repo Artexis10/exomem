@@ -7,7 +7,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from .adapters import HCloudVolumeAdapter, KubernetesVolumeAdapter
+from .adapters import HCloudVolumeAdapter, KubernetesCellAdapter, KubernetesVolumeAdapter
 from .config import ProvisionerSettings, VolumeWorkerSettings
 from .crypto import AesGcmEnvelopeCodec
 from .database import ProvisionerDatabase
@@ -25,6 +25,7 @@ from .production import build_live_capacity_admission
 from .provider_identity import ProviderRecoveryIdentityCodec
 from .repository import OperationRepository
 from .worker import CapacityAdmission, ProvisionerWorker
+from .worker_loop import run_polling_loop
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,9 +59,17 @@ def build_volume_provider_components(
         hcloud,
         identity_codec=identity_codec,
     )
+    image = settings.deployment_lock.selected_runtime(settings.runtime_selection).image
     return VolumeProviderComponents(
         worker=volume_worker,
-        driver=VolumeRegistrationDriver(volume_worker, identity_verifier=verifier),
+        driver=VolumeRegistrationDriver(
+            volume_worker,
+            identity_verifier=verifier,
+            binding_observer=KubernetesCellAdapter(
+                core_v1=core_v1, apps_v1=None, identity_verifier=verifier
+            ),
+            runtime_image=image,
+        ),
     )
 
 
@@ -90,6 +99,7 @@ def build_volume_registration_worker(
         driver,
         worker_id=worker_id,
         include_checkpoints=frozenset({"volume-registration-required"}),
+        include_checkpoint_prefixes=frozenset({"gpi1:registering:"}),
         capacity_admission=capacity_admission,
     )
 
@@ -124,9 +134,11 @@ async def _run_volume_worker() -> None:
         capacity_admission=capacity,
     )
     try:
-        while True:
-            if not await worker.run_once():
-                await asyncio.sleep(settings.poll_seconds)
+        await run_polling_loop(
+            worker,
+            poll_seconds=settings.poll_seconds,
+            idle_poll_seconds=settings.idle_poll_seconds,
+        )
     finally:
         await database.dispose()
         await asyncio.to_thread(api_client.close)

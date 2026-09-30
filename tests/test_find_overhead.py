@@ -99,6 +99,7 @@ def test_bm25_cache_status_and_unload_rebuilds(vault: Path, monkeypatch) -> None
     monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
     bm25.clear_cache()
     cold = bm25.cache_status()
+    cold.pop("hits", None)  # the reaper's use counter runs across the whole process
     assert cold == {
         "loaded": False,
         "corpora": 0,
@@ -146,6 +147,15 @@ def test_derived_text_invalidates_with_page(vault: Path) -> None:
     assert page2 is not page1
     assert "charlie" in page2.body_norm
     assert bm25.stem_word("alpha") not in page2.stem_set
+
+
+def test_stem_set_holds_cjk_bigrams_and_accent_folded_variants(vault: Path) -> None:
+    p = vault / "Knowledge Base" / "Notes" / "derived-multilingual-probe.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# 東京タワー\n\nZölvarn prüft книги\n", encoding="utf-8")
+    page = find_module._CACHE.get(p, vault)
+    assert {"東京", "京タ", "タワ", "ワー"} <= page.stem_set
+    assert {"zölvarn", "zolvarn", "prüft", "pruft", "книг"} <= page.stem_set
 
 
 @pytest.mark.parametrize("prefer_compiled", [True, False])
@@ -228,6 +238,10 @@ def test_warm_caches_populates(vault: Path, monkeypatch) -> None:
     else:
         assert (vault, "kb") in bm25._INDEX._cache
         assert (vault, "vault") in bm25._INDEX._cache
+    # The recall resolver primer moved out of `warm_caches` to the unconditional
+    # start-up path: it is not a disposable cache, it is what keeps a
+    # replacement worker's first governed write off the whole-vault path.
+    warmup.warm_graph_handoff(vault)
     assert vault in find_module._RECALL_RESOLVER_CACHE
     # Warmed state means the first query pays no corpus build.
     bm25._INDEX.last_tokenized = 0

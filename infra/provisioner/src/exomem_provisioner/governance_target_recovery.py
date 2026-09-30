@@ -65,6 +65,15 @@ def recover_expired_serving_bundle(
             reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
         )
 
+    return membership.inspect_hosted_authorization_bundle(
+        _draining_successor_files(source, issued_at=issued_at), **identity
+    )
+
+
+def _draining_successor_files(
+    source: membership.HostedAuthorizationBundle, *, issued_at: int
+) -> dict[str, bytes]:
+    """Sign bytes only; each migration caller owns its distinct authorization checks."""
     # Parse only already authenticated canonical bytes, retaining key/attachment,
     # software/schema and the enrolled activation tuple. Reuse the wire signer.
     keyring = json.loads(source.keyring)
@@ -99,11 +108,8 @@ def recover_expired_serving_bundle(
         expires_at=expires_at,
     )
     control["mac"] = membership._mac(key, membership._control_mac_input(control))
-    return membership.inspect_hosted_authorization_bundle(
-        {
-            "keyring.json": source.keyring,
-            "control.json": membership._canonical(control),
-            "serving-membership.json": record_raw,
-        },
-        **identity,
-    )
+    return {
+        "keyring.json": source.keyring,
+        "control.json": membership._canonical(control),
+        "serving-membership.json": record_raw,
+    }

@@ -11,7 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .get_page import GetError, PreparedPageRead, prepare_page_read
+from .get_page import (
+    NOT_UTF8_REASON,
+    GetError,
+    PreparedPageRead,
+    prepare_page_read,
+    unreadable_or_absent,
+)
 from .vault import parse_frontmatter
 
 log = logging.getLogger(__name__)
@@ -53,10 +59,14 @@ def get_frontmatter(
 
     try:
         text = prepared.raw.decode("utf-8")
-    except UnicodeDecodeError as e:
-        raise GetFrontmatterError(
-            code="UNREADABLE", reason=f"could not read {prepared.path}: {e}"
-        ) from e
+    except UnicodeDecodeError:
+        refusal = unreadable_or_absent(
+            vault_root,
+            (prepared.path, prepared.resolved_relative),
+            prepared.missing_path,
+            f"could not read {prepared.path}: {NOT_UTF8_REASON}",
+        )
+        raise GetFrontmatterError(code=refusal.code, reason=refusal.reason) from None
 
     fm, _body, fm_text = parse_frontmatter(text)
     return GetFrontmatterResult(

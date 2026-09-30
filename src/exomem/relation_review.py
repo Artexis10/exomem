@@ -2929,10 +2929,8 @@ def _relation_candidates(
     corpus: semantic_contract.SemanticCorpusContext,
 ) -> tuple[tuple[RelationCandidate, ...], int]:
     candidates: list[RelationCandidate] = []
-    for direction, facts in (
-        ("inbound", corpus.inbound.get(page.path, ())),
-        ("outbound", corpus.outbound.get(page.path, ())),
-    ):
+    outbound, inbound, _visible = semantic_contract.writer_view_relations(page, corpus)
+    for direction, facts in (("inbound", inbound), ("outbound", outbound)):
         for fact in facts:
             qualification = semantic_contract.qualify_relation(
                 fact, registry=corpus.registry, corpus=corpus
@@ -3804,6 +3802,7 @@ def commit_prepared_creation_draft(
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     semantic_state: Any | None = None,
+    extra_required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = (),
 ) -> CreationDraftCommit:
     """Commit a draft already validated by ``prepare_commit_creation_draft``.
 
@@ -3829,7 +3828,9 @@ def commit_prepared_creation_draft(
         reuse = prepared.reuse
         preliminary_commit_result = prepared.preliminary_commit_result
         activation_manifest.ensure_manifest(
-            root, census=preliminary.before_corpus.activation_census
+            root,
+            census=preliminary.before_corpus.activation_census,
+            commit_point=False,
         )
         with vault.vault_creation_lock(root, "semantic-creation"):
             attempt = _attempt(
@@ -3868,7 +3869,7 @@ def commit_prepared_creation_draft(
             resumed = False
             required_guards: tuple[
                 vault.PathGuard | vault.DirectoryCensusGuard, ...
-            ] = ()
+            ] = tuple(extra_required_guards)
             writes: list[vault.PlannedWrite] = []
             if existing_artifact is not None:
                 if attempt.artifact_bytes_hash is None:
@@ -3876,6 +3877,7 @@ def commit_prepared_creation_draft(
                         "DRAFT_ID_IN_USE", "draft identity is already reserved"
                     )
                 required_guards = (
+                    *required_guards,
                     vault.PathGuard.capture(
                         root,
                         artifact_rel,
@@ -3976,6 +3978,11 @@ def commit_prepared_creation_draft(
                     "DRAFT_ID_IN_USE", "draft identity became reserved"
                 ) from error
             except vault.PathGuardError:
+                if extra_required_guards:
+                    raise RelationReviewError(
+                        "STALE_VOCABULARY_BINDING",
+                        "domain vocabulary changed during commit; validate a fresh draft",
+                    ) from None
                 if attempt.lifecycle_guard is not None:
                     try:
                         attempt.lifecycle_guard.recheck(root)

@@ -1,0 +1,29 @@
+## Managed by Ansible (role: postgres).
+##
+## This is PgBouncer's own admission control (D12 NEW-1: PgBouncer serves
+## only substrate_app and substrate_owner; exomem_gateway and exomem_cellctl
+## connect directly to Postgres on port 5432 over the private network and
+## are never admitted here at all), enforced on the single public
+## listen_port by source IP and role, independent of the Hetzner firewall.
+## Unmatched (user, source) pairs are refused, same as Postgres's own
+## pg_hba.conf.
+##
+## PgBouncer's own administrative "pgbouncer" pseudo-database is matched
+## against this same file when auth_type=hba (confirmed live: with no rule
+## here at all, a unix-socket connection as postgres to it was refused
+## outright -- there is no unconditional same-uid admin bypass independent
+## of auth_hba_file/admin_users the way Postgres's own peer auth works).
+## `peer`, not `trust`: this unix socket directory is mode 777 (shared with
+## PgBouncer's own client listener and Postgres's), so ANY local OS user can
+## open it -- `trust` here let the reviewer reach SHOW VERSION as `nobody`.
+## `peer` checks the connecting process's real OS uid against the requested
+## database user (postgres), so only a process already running as postgres
+## is admitted; `admin_users = postgres` below still governs admin rights
+## once connected, and neither ever applies over TCP, from any source.
+local   pgbouncer       postgres                                       peer
+hostssl {{ postgres_database_name }}          substrate_owner  0.0.0.0/0 scram-sha-256
+hostssl {{ postgres_database_name }}          substrate_app    0.0.0.0/0 scram-sha-256
+hostssl {{ postgres_database_name }}          substrate_owner  ::/0      scram-sha-256
+hostssl {{ postgres_database_name }}          substrate_app    ::/0      scram-sha-256
+hostssl {{ postgres_database_name }}_session  substrate_owner  0.0.0.0/0 scram-sha-256
+hostssl {{ postgres_database_name }}_session  substrate_owner  ::/0      scram-sha-256

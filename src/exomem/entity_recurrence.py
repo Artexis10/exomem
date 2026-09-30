@@ -53,6 +53,7 @@ from . import markdown_relations
 from .entity_candidates import _aliases as alias_values
 from .entity_candidates import identity_key
 from .entity_types import EntityTypeRegistry
+from .find_corpus import NAVIGATION_BASENAMES
 from .kbdir import kb_prefix
 from .vault import (
     AmbiguousWikilinkError,
@@ -240,11 +241,21 @@ _EXACT_DATETIME_SHAPES = (
 # literal, and a threshold can move without rewriting what a test means.
 # ---------------------------------------------------------------------------
 
-#: How many DISTINCT pages must reach for one identity before it is a candidate.
-#: Distinct pages, never mentions: frequency inside one note is emphasis, not
-#: recurrence, and treating it as recurrence is exactly the incidental-mention
-#: false positive f21 freezes budgets against.
+#: How many DISTINCT pages must reach for one identity before it is a candidate,
+#: for the closed ordinary-text grammar lane (`identity-frames-v1`). Distinct
+#: pages, never mentions: frequency inside one note is emphasis, not recurrence,
+#: and treating it as recurrence is exactly the incidental-mention false
+#: positive f21 freezes budgets against. The grammar lane's measured population
+#: has one identity on two pages, so this gate carries its own precision
+#: argument and stays untouched by `capture-identities-at-write-time` (design D3).
 SPREAD_MIN_PAGES = 3  # PROVISIONAL
+
+#: The unresolved-wikilink lane's own spread gate, split from `SPREAD_MIN_PAGES`
+#: (`capture-identities-at-write-time` design D3): on the measured vault, four
+#: identities sit on exactly two pages and would wait indefinitely for a third,
+#: and the wikilink lane's independence argument -- distinct eligible pages,
+#: nothing about mention frequency or origin -- holds just as well at two.
+WIKILINK_SPREAD_MIN_PAGES = 2
 
 #: How many registry near-matches ride one finding. A bounded, ordered list is
 #: advice; an unbounded one is a second search result the agent has to triage.
@@ -626,41 +637,12 @@ def _origin_ref(page: Any) -> str:
 
 def _origin_refs(pages: tuple[Any, ...]) -> dict[str, str]:
     """Collapse overlapping Source declarations into derivative components."""
-    parent = list(range(len(pages)))
+    from . import provenance
 
-    def find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def union(left: int, right: int) -> None:
-        left_root = find(left)
-        right_root = find(right)
-        if left_root != right_root:
-            parent[max(left_root, right_root)] = min(left_root, right_root)
-
-    sources_by_index = tuple(_source_refs(page) for page in pages)
-    first_by_source: dict[str, int] = {}
-    for index, sources in enumerate(sources_by_index):
-        for source in sorted(sources):
-            previous = first_by_source.setdefault(source, index)
-            union(index, previous)
-
-    component_sources: dict[int, set[str]] = {}
-    for index, sources in enumerate(sources_by_index):
-        if sources:
-            component_sources.setdefault(find(index), set()).update(sources)
-
-    origins: dict[str, str] = {}
-    for index, page in enumerate(pages):
-        sources = sources_by_index[index]
-        origins[str(page.rel_path)] = (
-            "source:" + _digest(sorted(component_sources[find(index)]))
-            if sources
-            else _origin_ref(page)
-        )
-    return origins
+    return provenance.origin_keys(
+        {str(page.rel_path): _source_refs(page) for page in pages},
+        fallback={str(page.rel_path): _origin_ref(page) for page in pages},
+    )
 
 
 def _cue_snapshot(
@@ -1252,6 +1234,13 @@ def collect(
             if context.identity and context.identity not in self_identities:
                 ordinary.setdefault(context.identity, []).append(context)
 
+        if Path(rel_path).name in NAVIGATION_BASENAMES:
+            # A navigation page (design D4, `capture-identities-at-write-time`)
+            # lists things; it does not reach for them. Excluded from the
+            # wikilink lane's evidence only -- it never supplies spread and
+            # never anchors a finding -- and left alone for the ordinary-text
+            # grammar lane above, whose gates this change does not touch.
+            continue
         for match in find_body_wikilinks(page.body):
             link = parse_link(match.group(1))
             if link is None:
@@ -1274,7 +1263,7 @@ def collect(
     all_identities = set(mentions) | set(ordinary)
     for identity in sorted(all_identities):
         by_page = mentions.get(identity, {})
-        legacy_qualifies = len(by_page) >= SPREAD_MIN_PAGES
+        legacy_qualifies = len(by_page) >= WIKILINK_SPREAD_MIN_PAGES
         if legacy_qualifies and any(
             attachment_probe(target) for target in sorted(suffixed.get(identity, ()))
         ):

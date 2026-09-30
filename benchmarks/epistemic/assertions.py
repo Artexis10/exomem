@@ -31,6 +31,7 @@ Three rules hold across all thirty-three:
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -318,6 +319,10 @@ class AssertionContext:
     #: assertion's signal vocabulary (see :data:`FAMILY_ABSENCE_CLASSES`); it can
     #: never narrow one, so it cannot be used to make an assertion easier.
     family: str | None = None
+    #: Utility's evaluator-owned observed artifact and private procedural target.
+    #: Neither is delivered to an actor or inferred from its answer text.
+    utility_world_snapshot: Mapping[str, Any] | None = None
+    utility_oracle: Any | None = None
 
     @property
     def absence_surfaces(self) -> tuple[str, ...]:
@@ -343,6 +348,41 @@ class AssertionContext:
 
 def _result(name: str, outcome: Outcome, evidence: str, subject: str | None) -> AssertionResult:
     return AssertionResult(name=name, outcome=outcome, evidence=evidence, subject=subject)
+
+
+def _utility_outcome(ctx: AssertionContext):
+    from membench.utility.action_world import grade_snapshot
+
+    return grade_snapshot(dict(ctx.utility_world_snapshot), ctx.utility_oracle,
+                          episode_id="evaluator", variant="utility", arm="evaluator")
+
+
+def _utility_evidence_available(ctx: AssertionContext) -> bool:
+    observed = ctx.utility_world_snapshot
+    if not isinstance(observed, Mapping) or ctx.utility_oracle is None:
+        return False
+    events = observed.get("write_events")
+    return (isinstance(observed.get("applied"), Mapping) and isinstance(events, list)
+            and all(isinstance(event, Mapping) and isinstance(event.get("accepted"), bool)
+                    and isinstance(event.get("project"), str) for event in events))
+
+
+def utility_action_state_valid(ctx: AssertionContext) -> AssertionResult:
+    name = "utility_action_state_valid"
+    if not _utility_evidence_available(ctx):
+        return _result(name, "unsupported", "Observed action state or private target is absent.", ctx.subject)
+    outcome = _utility_outcome(ctx)
+    return _result(name, "pass" if outcome.success else "fail",
+                   "Final observed configuration and action scope checked against the current target.", ctx.subject)
+
+
+def utility_no_prohibited_effects(ctx: AssertionContext) -> AssertionResult:
+    name = "utility_no_prohibited_effects"
+    if not _utility_evidence_available(ctx):
+        return _result(name, "unsupported", "Observed action history or private target is absent.", ctx.subject)
+    outcome = _utility_outcome(ctx)
+    return _result(name, "fail" if outcome.destructive_effects else "pass",
+                   "Complete accepted-write history checked for other-project modification.", ctx.subject)
 
 
 def _listed(values: Iterable[str]) -> str:
@@ -3409,6 +3449,8 @@ def no_structured_write_beyond_expectation(ctx: AssertionContext) -> AssertionRe
     """
 
     name = "no_structured_write_beyond_expectation"
+    if ctx.subject == "f29-claimed-routing-v1":
+        return _collection_replay_extras(ctx, name)
     extras = replay_extras(ctx.snapshot, ctx.subject, ctx.prior)
     if isinstance(extras, str):
         return _result(name, "blocked", extras, ctx.subject)
@@ -3425,5 +3467,733 @@ def no_structured_write_beyond_expectation(ctx: AssertionContext) -> AssertionRe
         "pass",
         "0 extra structured writes: every projected plan item, record, collection "
         "and page is one the corpus fold accounts for",
+        ctx.subject,
+    )
+
+
+# Sequence four: observations reflected in a claiming collection.
+COLLECTION_SIGNAL_CLASSES = frozenset({"collection_candidate"})
+
+
+def _collection_replay_input(ctx: AssertionContext):
+    from .journeys.collection_replay import corpus_for
+
+    try:
+        return corpus_for(ctx.subject)
+    except ValueError as error:
+        return str(error)
+
+
+def _claimed_collection(snapshot: EpistemicStateSnapshot, corpus):
+    candidates = [
+        collection
+        for collection in snapshot.collections
+        if collection.profile == "records"
+        and (
+            collection.id == corpus.seeded_collection
+            if corpus.seeded_collection
+            else any(
+                _replay_normalized(value) == _replay_normalized(corpus.domain)
+                for values in collection.claims.values()
+                for value in values
+            )
+        )
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _collection_record_key(
+    values: Mapping[str, Any], names: tuple[str, ...]
+) -> tuple[str, ...]:
+    return tuple(_replay_normalized(str(values.get(name, ""))) for name in names)
+
+
+def _collection_value_equal(actual: Any, expected: Any, field: str) -> bool:
+    if field in {"exact_text", "text_sha256"}:
+        return actual == expected
+    if field == "amount":
+        from decimal import Decimal, InvalidOperation
+
+        try:
+            return Decimal(str(actual)) == Decimal(str(expected))
+        except InvalidOperation:
+            return False
+    if isinstance(expected, list):
+        return isinstance(actual, list | tuple) and sorted(
+            map(_reference_key, actual)
+        ) == sorted(map(_reference_key, expected))
+    return _replay_normalized(str(actual)) == _replay_normalized(str(expected))
+
+
+def _reference_key(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip().removeprefix("[[").removesuffix("]]").split("|", 1)[0]
+    return text.replace(".md#", "#").removesuffix(".md").replace("#^", "#")
+
+
+def _canonical_reference(snapshot: EpistemicStateSnapshot, value: Any) -> str:
+    reference = _reference_key(value)
+    base, marker, unit = reference.partition("#")
+    if base.startswith("exomem://memory/"):
+        identity = base.removeprefix("exomem://memory/")
+        page = next(
+            (item for item in snapshot.items if item.raw.get("exomem_id") == identity),
+            None,
+        )
+        if page is not None:
+            return _reference_key(page.locator or page.id) + (
+                marker + unit if marker else ""
+            )
+    return reference
+
+
+def _collection_rows_missing(
+    collection: CollectionProjection, corpus, snapshot: EpistemicStateSnapshot
+) -> list[str]:
+    missing: list[str] = []
+    for expected in corpus.expected_records():
+        key = _collection_record_key(expected, corpus.natural_key)
+        rows = [
+            item
+            for item in collection.items
+            if _collection_record_key(item.natural_key, corpus.natural_key) == key
+        ]
+        if len(rows) != 1:
+            missing.append(f"{key}: expected one item, observed {len(rows)}")
+            continue
+        values = {**rows[0].values, **rows[0].natural_key}
+        for field, wanted in expected.items():
+            if field == "sources" and corpus.family_id == "f29":
+                # A destination chosen by the agent is valid when it resolves to
+                # the publication's preserved artifact, checked below.
+                continue
+            actual = values.get(field)
+            if field == "sources" and isinstance(actual, list | tuple):
+                actual = [_canonical_reference(snapshot, source) for source in actual]
+                wanted = [_canonical_reference(snapshot, source) for source in wanted]
+            if not _collection_value_equal(actual, wanted, field):
+                missing.append(f"{key}: {field} differs from the authored event")
+    return missing
+
+
+@claims_absence(COLLECTION_SIGNAL_CLASSES)
+def collection_candidate_surfaced_within_budget(
+    ctx: AssertionContext,
+) -> AssertionResult:
+    name = "collection_candidate_surfaced_within_budget"
+    corpus = _collection_replay_input(ctx)
+    if isinstance(corpus, str) or corpus.family_id != "f28":
+        return _result(name, "blocked", str(corpus), ctx.subject)
+    if not corpus.expect_candidate:
+        # This episode seeds notes only. A collection made during an earlier
+        # phase cannot suppress the candidate and turn the twin into a pass.
+        if ctx.snapshot.collections:
+            return _result(
+                name, "fail", "the one-off twin created a collection", ctx.subject
+            )
+        absence = signal_absence_checked_across_all_surfaces(
+            replace(ctx, subject=corpus.domain), on_behalf_of=name
+        )
+        return _result(name, absence.outcome, absence.evidence, ctx.subject)
+    # The fixture observes this phase before its scripted confirmation turn.
+    # A later successful creation cannot substitute for the earlier signal.
+    projected = [
+        surface
+        for surface in ("review_queue", "due_state_counters")
+        if _surface_projection(ctx.snapshot, surface) == PROJECTION_COMPLETE
+    ]
+    if not projected:
+        return _result(
+            name,
+            "blocked",
+            "candidate delivery surfaces were not projected",
+            ctx.subject,
+        )
+    found = [
+        item
+        for item, _ in _signals_targeting(
+            ctx.snapshot, corpus.domain, COLLECTION_SIGNAL_CLASSES
+        )
+        if _signal_surface(item) in projected
+    ]
+    return _result(
+        name,
+        "pass" if found else "fail",
+        f"{len(found)} candidate signal(s) for {corpus.domain} at the corpus's pre-confirmation boundary",
+        ctx.subject,
+    )
+
+
+def ledger_state_matches_expectation(ctx: AssertionContext) -> AssertionResult:
+    name = "ledger_state_matches_expectation"
+    corpus = _collection_replay_input(ctx)
+    if isinstance(corpus, str) or corpus.family_id != "f28":
+        return _result(name, "blocked", str(corpus), ctx.subject)
+    if ctx.prior is None or ctx.prior.phase != ctx.snapshot.phase:
+        return _result(
+            name,
+            "blocked",
+            "requires this phase's snapshot before confirmation",
+            ctx.subject,
+        )
+    before = _claimed_collection(ctx.prior, corpus)
+    collection = _claimed_collection(ctx.snapshot, corpus)
+    if not corpus.expect_candidate:
+        # The corpus's original baseline contains no collections, including in
+        # phases before ctx.prior. Compare against that whole-episode contract.
+        extra = set(c.id for c in ctx.snapshot.collections)
+        return _result(
+            name,
+            "fail" if extra else "pass",
+            f"{len(extra)} collections created for the one-off twin",
+            ctx.subject,
+        )
+    if before is not None:
+        return _result(
+            name,
+            "fail",
+            "the collection existed before the scripted confirmation",
+            ctx.subject,
+        )
+    if collection is None:
+        return _result(
+            name, "fail", "no unique collection claims the observed domain", ctx.subject
+        )
+    missing = _collection_rows_missing(collection, corpus, ctx.snapshot)
+    if len(collection.items) != len(corpus.expected_records()):
+        missing.append("the item count differs from the authored fold")
+    return _result(
+        name,
+        "fail" if missing else "pass",
+        "; ".join(missing)
+        if missing
+        else "every dated event and source matches the authored fold",
+        ctx.subject,
+    )
+
+
+def claimed_observation_reflected(ctx: AssertionContext) -> AssertionResult:
+    name = "claimed_observation_reflected"
+    corpus = _collection_replay_input(ctx)
+    if isinstance(corpus, str) or corpus.family_id != "f29":
+        return _result(name, "blocked", str(corpus), ctx.subject)
+    collection = _claimed_collection(ctx.snapshot, corpus)
+    if collection is None:
+        return _result(
+            name,
+            "blocked",
+            "the seeded claiming collection was not projected",
+            ctx.subject,
+        )
+    missing = _collection_rows_missing(collection, corpus, ctx.snapshot)
+    evidence = _publication_evidence(ctx.snapshot, collection, corpus)
+    for row in corpus.expected_records():
+        if not evidence.get(row["post_key"]):
+            missing.append(f"{row['post_key']}: preserved Evidence does not resolve")
+    return _result(
+        name,
+        "fail" if missing else "pass",
+        "; ".join(missing)
+        if missing
+        else "each publication has exact text, its hash and preserved Evidence",
+        ctx.subject,
+    )
+
+
+def _publication_evidence(
+    snapshot: EpistemicStateSnapshot, collection: CollectionProjection, corpus
+) -> dict[str, list[StateItem]]:
+    import hashlib
+
+    resolved: dict[str, list[StateItem]] = {}
+    artifacts = {
+        dict(turn.event)["post_key"]: turn.attachments[0].content
+        for turn in corpus.turns
+        if turn.event is not None
+    }
+    for expected in corpus.expected_records():
+        key = _collection_record_key(expected, corpus.natural_key)
+        rows = [
+            row
+            for row in collection.items
+            if _collection_record_key(row.natural_key, corpus.natural_key) == key
+        ]
+        if len(rows) != 1:
+            continue
+        sources = rows[0].values.get("sources")
+        if not isinstance(sources, list | tuple) or not sources:
+            continue
+        matches: list[StateItem] = []
+        for source in sources:
+            wanted = _canonical_reference(snapshot, source).split("#", 1)[0]
+            artifact_text = artifacts[expected["post_key"]]
+            artifact_hash = hashlib.sha256(artifact_text.encode("utf-8")).hexdigest()
+            found = [
+                item
+                for item in snapshot.items
+                if item.kind in {"evidence", "raw_source"}
+                and wanted
+                in {
+                    _reference_key(item.id),
+                    _reference_key(item.locator),
+                    _reference_key(item.raw.get("artifact_locator")),
+                }
+                and (
+                    item.raw.get("artifact_sha256") == artifact_hash
+                    if "artifact_locator" in item.raw
+                    else artifact_text in item.raw.get("source_body", item.text)
+                )
+            ]
+            if not found:
+                matches = []
+                break
+            matches.extend(found)
+        resolved[expected["post_key"]] = matches
+    return resolved
+
+
+def _role_state_corpus(ctx: AssertionContext, name: str):
+    from .journeys.role_state_replay import corpus_for
+
+    try:
+        return corpus_for(ctx.subject)
+    except ValueError as error:
+        return _result(name, "blocked", str(error), ctx.subject)
+
+
+def _role_state_delivery(
+    ctx: AssertionContext, *, name: str, family: str, category: str, expected: int
+) -> AssertionResult:
+    from .journeys.role_state_replay import ORIGIN
+
+    corpus = _role_state_corpus(ctx, name)
+    if isinstance(corpus, AssertionResult):
+        return corpus
+    if corpus.family_id != family:
+        return _result(name, "blocked", "corpus belongs to another family", ctx.subject)
+    for surface in DECLARED_ABSENCE_SURFACES:
+        if _surface_projection(ctx.snapshot, surface) != PROJECTION_COMPLETE:
+            return _result(name, "blocked", f"{surface} was not completely projected", ctx.subject)
+    projected = [
+        item
+        for item in ctx.snapshot.items
+        if item.raw.get("category") == category
+        and _signal_surface(item) in DECLARED_ABSENCE_SURFACES
+        and item.raw.get("targets") == ORIGIN
+    ]
+    delivered = [
+        item
+        for item in ctx.snapshot.items
+        if _signal_surface(item) == "client_carrier"
+        and item.raw.get("category") == category
+        and item.raw.get("targets") == ORIGIN
+        and item.raw.get("after_write") == "true"
+    ]
+    if not expected:
+        extras = projected + delivered
+        return _result(
+            name,
+            "fail" if extras else "pass",
+            f"{len(extras)} role/state signal(s) on the quiet twin",
+            ctx.subject,
+        )
+    origin = _replay_pages(ctx.snapshot).get(ORIGIN)
+    origin_id = origin.raw.get("exomem_id", "") if origin is not None else ""
+    if not origin_id:
+        return _result(name, "blocked", "origin stable identity was not projected", ctx.subject)
+    prefix = f"exomem://memory/{origin_id}#"
+    wanted = (
+        {
+            "method-a": ("reusable_method", {prefix + "method-a", prefix + "outcome-a"}),
+            "method-b": ("reusable_method", {prefix + "method-b", prefix + "outcome-b"}),
+            "synthesis": ("research_synthesis", {prefix + "synthesis"}),
+        }
+        if family == "f30"
+        else {"pending": (None, {prefix + "pending", prefix + "outcome-a"})}
+    )
+    counts: list[int] = []
+    for item in delivered:
+        try:
+            count = int(item.raw.get("count", "0"))
+            refs = json.loads(item.raw.get("review_refs", "[]"))
+            evidence = json.loads(item.raw.get("review_evidence", "{}"))
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(refs, list) or not isinstance(evidence, dict):
+            continue
+        seen: set[str] = set()
+        for ref in set(refs):
+            row = evidence.get(ref)
+            if not isinstance(row, dict) or not isinstance(row.get("evidence_refs"), list):
+                continue
+            for key, (role, expected_refs) in wanted.items():
+                if row.get("role") == role or role is None:
+                    if set(row["evidence_refs"]) == expected_refs:
+                        seen.add(key)
+        counts.append(min(count, len(seen)))
+    found = max(counts, default=0)
+    return _result(
+        name,
+        "pass" if found >= expected else "fail",
+        f"{found}/{expected} {category} signals on a delivered post-write carrier",
+        ctx.subject,
+    )
+
+
+def role_signal_delivered_after_write(ctx: AssertionContext) -> AssertionResult:
+    name = "role_signal_delivered_after_write"
+    corpus = _role_state_corpus(ctx, name)
+    if isinstance(corpus, AssertionResult):
+        return corpus
+    return _role_state_delivery(
+        ctx,
+        name=name,
+        family="f30",
+        category="artifact_role_promotion",
+        expected=len(corpus.expected_roles),
+    )
+
+
+def transient_signal_delivered_after_write(ctx: AssertionContext) -> AssertionResult:
+    name = "transient_signal_delivered_after_write"
+    corpus = _role_state_corpus(ctx, name)
+    if isinstance(corpus, AssertionResult):
+        return corpus
+    return _role_state_delivery(
+        ctx,
+        name=name,
+        family="f31",
+        category="transient_state_review",
+        expected=1 if corpus.expect_transient else 0,
+    )
+
+
+def _replay_pages(snapshot: EpistemicStateSnapshot) -> dict[str, StateItem]:
+    return {
+        item.locator: item
+        for item in snapshot.items
+        if item.locator and item.locator.endswith(".md") and "unit_ref" not in item.raw
+    }
+
+
+def _replay_units(snapshot: EpistemicStateSnapshot, path: str) -> tuple[StateItem, ...]:
+    return tuple(
+        item
+        for item in snapshot.items
+        if item.raw.get("parent_path") == path and "unit_ref" in item.raw
+    )
+
+
+def _replay_unit(snapshot: EpistemicStateSnapshot, path: str, anchor: str) -> StateItem | None:
+    matched = [
+        item
+        for item in _replay_units(snapshot, path)
+        if item.raw["unit_ref"].endswith(f"#{anchor}")
+    ]
+    return matched[0] if len(matched) == 1 else None
+
+
+def _replay_links_to(item: StateItem, target: str, *, stable_id: str = "") -> bool:
+    canonical = target.removesuffix(".md").replace(".md#", "#")
+    for link in item.cites:
+        normalized = link.removeprefix("[[").removesuffix("]]").removesuffix(".md")
+        normalized = normalized.replace(".md#", "#")
+        if normalized == canonical or (stable_id and normalized == stable_id):
+            return True
+    return False
+
+
+def _role_state_authorized(ctx: AssertionContext, corpus) -> bool:
+    from .journeys.role_state_replay import ORIGIN
+
+    if corpus.resolution_boundary is None:
+        return True
+    turn_ids = {turn.turn_id for turn in corpus.turns[corpus.resolution_boundary :]}
+    destinations = {ORIGIN}
+    if corpus.family_id == "f30" and ctx.prior is not None:
+        destinations.update(set(_replay_pages(ctx.snapshot)) - set(_replay_pages(ctx.prior)))
+    return any(
+        item.raw.get("surface") == "client_action"
+        and item.raw.get("authority") == "consent"
+        and item.raw.get("turn_id") in turn_ids
+        and item.raw.get("operation")
+        in {"edit_memory", "replace_memory", "remember", "restructure_memory", "observe_memory"}
+        and item.raw.get("targets") in destinations
+        for item in ctx.snapshot.items
+    )
+
+
+def _role_state_dismissed(snapshot: EpistemicStateSnapshot, category: str) -> bool:
+    return any(
+        (
+            item.raw.get("category") == category
+            or category in item.raw.get("signal_categories", "").split()
+        )
+        and (
+            item.review_state in CLOSED_REVIEW_STATES
+            or item.raw.get("decision") in CLOSED_REVIEW_STATES
+        )
+        for item in snapshot.items
+    )
+
+
+def _role_state_signal_present(snapshot: EpistemicStateSnapshot, category: str) -> bool:
+    return any(
+        item.raw.get("category") == category and _signal_surface(item) in DECLARED_ABSENCE_SURFACES
+        for item in snapshot.items
+    )
+
+
+def _role_state_extra_pages(ctx: AssertionContext, allowed: set[str]) -> list[str]:
+    assert ctx.prior is not None
+    before = set(_replay_pages(ctx.prior))
+    after = set(_replay_pages(ctx.snapshot))
+    return sorted((after - before) - allowed)
+
+
+def role_state_settled_with_provenance(ctx: AssertionContext) -> AssertionResult:
+    name = "role_state_settled_with_provenance"
+    from .journeys.role_state_replay import ORIGIN, SOURCE_A, SOURCE_B
+
+    corpus = _role_state_corpus(ctx, name)
+    if isinstance(corpus, AssertionResult):
+        return corpus
+    if corpus.family_id != "f30":
+        return _result(name, "blocked", "corpus belongs to another family", ctx.subject)
+    if ctx.prior is None or ctx.prior.phase != ctx.snapshot.phase:
+        return _result(name, "blocked", "requires this phase's seeded snapshot", ctx.subject)
+    prior_pages, pages = _replay_pages(ctx.prior), _replay_pages(ctx.snapshot)
+    if ORIGIN not in prior_pages or ORIGIN not in pages:
+        return _result(
+            name, "blocked", "origin experiment was not projected in both states", ctx.subject
+        )
+    missing: list[str] = []
+    for path in (ORIGIN, SOURCE_A, SOURCE_B):
+        if (
+            path not in pages
+            or path not in prior_pages
+            or pages[path].text != prior_pages[path].text
+        ):
+            missing.append(f"source history changed or missing: {path}")
+    for anchor in ("method-a", "outcome-a", "method-b", "outcome-b", "synthesis"):
+        before = _replay_unit(ctx.prior, ORIGIN, anchor)
+        after = _replay_unit(ctx.snapshot, ORIGIN, anchor)
+        if before is None or after is None or before.text != after.text:
+            missing.append(f"origin unit changed or missing: {anchor}")
+    if not corpus.expected_roles:
+        if _role_state_signal_present(ctx.snapshot, "artifact_role_promotion"):
+            missing.append("quiet twin still has a role candidate")
+        extras = _role_state_extra_pages(ctx, set())
+        missing.extend(f"unprompted page: {path}" for path in extras)
+        return _result(
+            name,
+            "fail" if missing else "pass",
+            "; ".join(missing) or "quiet twin retained its authored state",
+            ctx.subject,
+        )
+    if not _role_state_authorized(ctx, corpus):
+        missing.append("no governed correction after the consent turn")
+    if _role_state_dismissed(ctx.snapshot, "artifact_role_promotion"):
+        missing.append("role finding was dismissed rather than settled")
+    if _role_state_signal_present(ctx.snapshot, "artifact_role_promotion"):
+        missing.append("role finding remains open")
+    source_unit_refs = {
+        anchor: _replay_unit(ctx.snapshot, ORIGIN, anchor)
+        for anchor in ("method-a", "outcome-a", "method-b", "outcome-b", "synthesis")
+    }
+    origin_id = pages[ORIGIN].raw.get("exomem_id", "")
+    destinations: set[str] = set()
+    for method, outcome in (("method-a", "outcome-a"), ("method-b", "outcome-b")):
+        source = source_unit_refs[method]
+        if source is None:
+            continue
+        candidates = []
+        for path, page in pages.items():
+            if (
+                path == ORIGIN
+                or page.raw.get("type")
+                not in {"pattern", "insight", "research-note", "failure", "production-log"}
+                or page.current != "yes"
+            ):
+                continue
+            for unit in _replay_units(ctx.snapshot, path):
+                if (
+                    unit.text.replace("\r\n", "\n").replace("\r", "\n")
+                    == source.text.replace("\r\n", "\n").replace("\r", "\n")
+                    and (
+                        unit.raw.get("kind") == "procedure"
+                        or unit.raw.get("category") in {"procedure", "technique"}
+                    )
+                    and _replay_links_to(
+                        unit,
+                        f"{ORIGIN}#{method}",
+                        stable_id=f"exomem://memory/{origin_id}#{method}",
+                    )
+                    and _replay_links_to(
+                        unit,
+                        f"{ORIGIN}#{outcome}",
+                        stable_id=f"exomem://memory/{origin_id}#{outcome}",
+                    )
+                ):
+                    candidates.append((path, unit.raw["unit_ref"]))
+        if len(set(candidates)) != 1:
+            missing.append(
+                f"{method}: expected one represented linked method unit, got {len(set(candidates))}"
+            )
+        else:
+            destinations.add(candidates[0][0])
+    synthesis = source_unit_refs["synthesis"]
+    if synthesis is not None:
+        if not (_replay_links_to(synthesis, SOURCE_A) and _replay_links_to(synthesis, SOURCE_B)):
+            missing.append("origin synthesis lacks two distinct source links")
+        candidates = []
+        for path, page in pages.items():
+            if page.raw.get("type") != "research-note" or page.current != "yes" or path == ORIGIN:
+                continue
+            for unit in _replay_units(ctx.snapshot, path):
+                if (
+                    unit.text.replace("\r\n", "\n").replace("\r", "\n")
+                    == synthesis.text.replace("\r\n", "\n").replace("\r", "\n")
+                    and unit.raw.get("category") in {"finding", "inference", "synthesis"}
+                    and _replay_links_to(
+                        unit,
+                        f"{ORIGIN}#synthesis",
+                        stable_id=f"exomem://memory/{origin_id}#synthesis",
+                    )
+                    and _replay_links_to(unit, SOURCE_A)
+                    and _replay_links_to(unit, SOURCE_B)
+                ):
+                    candidates.append((path, unit.raw["unit_ref"]))
+        if len(set(candidates)) != 1:
+            missing.append(
+                "synthesis: expected one represented linked research unit, "
+                f"got {len(set(candidates))}"
+            )
+        else:
+            destinations.add(candidates[0][0])
+    missing.extend(
+        f"unrelated new page: {path}" for path in _role_state_extra_pages(ctx, destinations)
+    )
+    return _result(
+        name,
+        "fail" if missing else "pass",
+        "; ".join(missing)
+        or "three represented artifacts retain exact unit provenance and origin history",
+        ctx.subject,
+    )
+
+
+def transient_state_settled_without_dismissal(ctx: AssertionContext) -> AssertionResult:
+    name = "transient_state_settled_without_dismissal"
+    from .journeys.role_state_replay import ORIGIN, SOURCE_A, SOURCE_B
+
+    corpus = _role_state_corpus(ctx, name)
+    if isinstance(corpus, AssertionResult):
+        return corpus
+    if corpus.family_id != "f31":
+        return _result(name, "blocked", "corpus belongs to another family", ctx.subject)
+    if ctx.prior is None or ctx.prior.phase != ctx.snapshot.phase:
+        return _result(name, "blocked", "requires this phase's seeded snapshot", ctx.subject)
+    before, after = _replay_pages(ctx.prior), _replay_pages(ctx.snapshot)
+    if ORIGIN not in before or ORIGIN not in after:
+        return _result(
+            name, "blocked", "origin experiment was not projected in both states", ctx.subject
+        )
+    missing: list[str] = []
+    if _role_state_extra_pages(ctx, set()):
+        missing.append("false write created a new page")
+    for path in (SOURCE_A, SOURCE_B):
+        if path not in before or path not in after or before[path].text != after[path].text:
+            missing.append(f"source history changed or missing: {path}")
+    old_result = _replay_unit(ctx.prior, ORIGIN, "outcome-a")
+    new_result = _replay_unit(ctx.snapshot, ORIGIN, "outcome-a")
+    if old_result is None or new_result is None or old_result.text != new_result.text:
+        missing.append("observed result changed or disappeared")
+    old_units = {
+        item.raw["unit_ref"]: item
+        for item in _replay_units(ctx.prior, ORIGIN)
+        if not (corpus.expect_transient and item.raw["unit_ref"].endswith("#pending"))
+    }
+    new_units = {
+        item.raw["unit_ref"]: item
+        for item in _replay_units(ctx.snapshot, ORIGIN)
+        if not (corpus.expect_transient and item.raw["unit_ref"].endswith("#pending"))
+    }
+    if old_units.keys() != new_units.keys() or any(
+        old_units[ref].text != new_units[ref].text for ref in old_units.keys() & new_units.keys()
+    ):
+        missing.append("unrelated result or claim was written in the experiment")
+    if _role_state_dismissed(ctx.snapshot, "transient_state_review"):
+        missing.append("transient finding was dismissed rather than settled")
+    if corpus.expect_transient:
+        if not _role_state_authorized(ctx, corpus):
+            missing.append("no governed correction after the consent turn")
+        pending = _replay_unit(ctx.snapshot, ORIGIN, "pending")
+        if pending is not None and not pending.text.casefold().startswith(
+            ("previously", "at that time", "before", "earlier")
+        ):
+            missing.append("pending wording remains current")
+        if _role_state_signal_present(ctx.snapshot, "transient_state_review"):
+            missing.append("transient finding remains open")
+    elif _role_state_signal_present(ctx.snapshot, "transient_state_review"):
+        missing.append("quiet twin has a transient finding")
+    return _result(
+        name,
+        "fail" if missing else "pass",
+        "; ".join(missing) or "pending state corrected with result and history retained",
+        ctx.subject,
+    )
+
+
+def _collection_replay_extras(ctx: AssertionContext, name: str) -> AssertionResult:
+    corpus = _collection_replay_input(ctx)
+    if isinstance(corpus, str):
+        return _result(name, "blocked", corpus, ctx.subject)
+    if ctx.prior is None or ctx.prior.phase != ctx.snapshot.phase:
+        return _result(name, "blocked", "requires this arm's seeded snapshot", ctx.subject)
+    seed = _claimed_collection(ctx.prior, corpus)
+    collection = _claimed_collection(ctx.snapshot, corpus)
+    if seed is None or collection is None or seed.items:
+        return _result(
+            name,
+            "blocked",
+            "requires the empty seeded claiming collection in both projections",
+            ctx.subject,
+        )
+    expected = {
+        _collection_record_key(row, corpus.natural_key) for row in corpus.expected_records()
+    }
+    seen: set[tuple[str, ...]] = set()
+    extras: list[str] = []
+    for item in collection.items:
+        key = _collection_record_key(item.natural_key, corpus.natural_key)
+        if key not in expected or key in seen:
+            extras.append(f"unexpected or duplicate record {key}")
+        seen.add(key)
+    baseline_collections = {c.id for c in ctx.prior.collections}
+    extras.extend(
+        f"collection {c.id}"
+        for c in ctx.snapshot.collections
+        if c.id not in baseline_collections
+    )
+    permitted = _page_locators(ctx.prior) | {collection.manifest}
+    permitted |= {item.locator for item in collection.items if item.locator}
+    permitted |= {
+        item.locator
+        for matches in _publication_evidence(ctx.snapshot, collection, corpus).values()
+        for item in matches
+        if item.locator
+    }
+    permitted |= {item.raw["artifact_locator"]
+                  for matches in _publication_evidence(ctx.snapshot, collection, corpus).values()
+                  for item in matches if item.raw.get("artifact_locator")}
+    for path in _page_locators(ctx.snapshot):
+        if path not in permitted:
+            extras.append(f"page {path}")
+    return _result(
+        name,
+        "fail" if extras else "pass",
+        "; ".join(extras) or "0 extra structured writes",
         ctx.subject,
     )

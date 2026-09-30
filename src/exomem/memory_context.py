@@ -8,6 +8,7 @@ from typing import Any
 from . import context_pack, epistemic_graph, get_page, memory_refs, vault
 from . import find as find_module
 from .find_types import Hit, ParsedPage
+from .governance import egress
 
 
 def assemble_context(
@@ -26,6 +27,7 @@ def assemble_context(
     traversal_profile: str | None = None,
     limit: int = 5,
     max_body_chars: int = 3000,
+    entity_type_families: list[str] | None = None,
 ) -> dict[str, Any]:
     """Return a single bounded context envelope for one page or a query."""
     unit_controls = unit_ref is not None or bool(categories) or bool(kinds)
@@ -38,34 +40,50 @@ def assemble_context(
     max_edges = max(0, min(int(max_edges), 400))
     limit = max(1, min(int(limit), 10))
     max_body_chars = max(500, min(int(max_body_chars), 6000))
+    # A caller other than the owner gets a context assembled from the pages it
+    # may see: seeds, packed pages and the neighbourhood are decided before
+    # they are assembled, so nothing counted, ranked or packed rests on a
+    # withheld page. The owner's assembly is unchanged (`keep` is None).
+    keep = egress.restricted_release_filter(vault_root)
     graph: dict[str, Any] | None = None
     if unit_controls:
         if path:
-            try:
-                path = get_page.get_page(vault_root, path=path).path
-            except get_page.GetError as exc:
-                raise ValueError(f"{exc.code}: {exc.reason}") from exc
-        if unit_ref is not None and path:
-            _validate_unit_parent_path(vault_root, unit_ref=unit_ref, path=path)
+            path = _canonical_path(vault_root, path, keep)
+        # A unit seed is a fact about its parent page: against a withheld
+        # parent it resolves, and validates, as a unit of an absent page does.
+        # The caller's own reference is still what the envelope echoes.
+        graph_unit_ref = unit_ref
+        if unit_ref is not None and egress.unit_parent_withheld(vault_root, unit_ref):
+            graph_unit_ref = egress.UNRESOLVABLE_UNIT_REF
+        if graph_unit_ref is not None and path:
+            _validate_unit_parent_path(vault_root, unit_ref=graph_unit_ref, path=path)
         graph = epistemic_graph.graph_context(
             vault_root,
             path=path,
             query=query,
-            unit_ref=unit_ref,
+            unit_ref=graph_unit_ref,
             categories=categories,
             kinds=kinds,
             depth=depth,
             relation_types=relation_types,
             node_types=node_types,
+            entity_type_families=entity_type_families,
             max_nodes=max_nodes,
             max_edges=max_edges,
             traversal_profile=traversal_profile,
+            keep=keep,
         )
+        if keep is not None:
+            graph = egress.guard_graph_context(vault_root, graph)
         hits = _hits_for_graph_seeds(vault_root, graph, limit=limit)
     elif path or query:
-        hits = _context_hits(vault_root, path=path, query=query, limit=limit)
+        hits = _context_hits(vault_root, path=path, query=query, limit=limit, keep=keep)
     else:
         hits = []
+    release = None
+    if keep is not None:
+        release = egress.annotate_hits(vault_root, hits, limit=limit)
+        hits = release.hits
     pages = [
         page
         for hit in hits
@@ -78,6 +96,8 @@ def assemble_context(
         max_neighbors=max_nodes,
         max_tension=min(max_edges, 20),
     )
+    if release is not None:
+        pack = egress.annotate_pack(pack, release) or pack
     ref_index = memory_refs.ReferenceIndex(vault_root)
     documents: list[dict[str, Any]] = []
     provenance: list[dict[str, Any]] = []
@@ -124,16 +144,25 @@ def assemble_context(
             depth=depth,
             relation_types=relation_types,
             node_types=node_types,
+            entity_type_families=entity_type_families,
             max_nodes=max_nodes,
             max_edges=max_edges,
             traversal_profile=traversal_profile,
+            keep=keep,
         )
+        if keep is not None:
+            graph = egress.guard_graph_context(vault_root, graph)
     truncation.extend(str(item) for item in graph.get("truncation", []))
     resolved_seed_path = hits[0].path if path and hits else path
     seed: dict[str, Any] = {"path": resolved_seed_path, "query": query}
     if path:
         seed["ref"] = ref_index.ref_for_path(str(resolved_seed_path))
-    if unit_ref is not None:
+    # A unit seed that resolves to no unit is not restated to a caller other
+    # than the owner: the entry filter decides the page a reference names, so
+    # the echo would survive for an absent page and not for a withheld one.
+    if unit_ref is not None and not (
+        keep is not None and (graph or {}).get("unit_status") == "missing"
+    ):
         seed["unit_ref"] = unit_ref
     if categories:
         seed["categories"] = list(categories)
@@ -155,14 +184,22 @@ def assemble_context(
     }
 
 
+def _canonical_path(vault_root: Path, path: str, keep: Any) -> str:
+    """The page `path` names, refused exactly as a missing page when withheld."""
+    try:
+        canonical_path = get_page.get_page(vault_root, path=path).path
+    except get_page.GetError as exc:
+        raise ValueError(f"{exc.code}: {exc.reason}") from exc
+    if keep is not None and not keep(canonical_path):
+        raise ValueError(f"NOT_FOUND: file does not exist: {get_page.missing_path_for(path)}")
+    return canonical_path
+
+
 def _context_hits(
-    vault_root: Path, *, path: str | None, query: str | None, limit: int
+    vault_root: Path, *, path: str | None, query: str | None, limit: int, keep: Any = None
 ) -> list[Hit]:
     if path:
-        try:
-            canonical_path = get_page.get_page(vault_root, path=path).path
-        except get_page.GetError as exc:
-            raise ValueError(f"{exc.code}: {exc.reason}") from exc
+        canonical_path = _canonical_path(vault_root, path, keep)
         page = find_module._CACHE.get(vault_root / canonical_path, vault_root)
         if page is None:
             raise ValueError(f"NOT_FOUND: no readable page at {canonical_path}")
@@ -170,10 +207,14 @@ def _context_hits(
     return find_module.find(
         vault_root,
         query=query or "",
-        limit=limit,
+        # The same request-sized over-fetch `find` uses, so a withheld hit's
+        # slot is backfilled rather than left short.
+        limit=limit if keep is None else egress.pool_limit(limit),
         scope="kb",
         mode="hybrid",
-        graph=True,
+        # No graph lane for a caller other than the owner: its hops follow
+        # link resolution over the whole vault.
+        graph=keep is None,
         rerank=False,
         prefer_compiled=True,
         prefer_active=True,
@@ -238,6 +279,8 @@ def _merge_graph_contexts(
     max_nodes: int,
     max_edges: int,
     traversal_profile: str | None = None,
+    keep: Any = None,
+    entity_type_families: list[str] | None = None,
 ) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: dict[str, dict[str, Any]] = {}
@@ -258,9 +301,11 @@ def _merge_graph_contexts(
             depth=depth,
             relation_types=relation_types,
             node_types=node_types,
+            entity_type_families=entity_type_families,
             max_nodes=max_nodes,
             max_edges=max_edges,
             traversal_profile=traversal_profile,
+            keep=keep,
         )
         if not context.get("available"):
             warnings.append(str(context.get("reason") or "graph unavailable"))

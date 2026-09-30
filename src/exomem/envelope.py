@@ -102,7 +102,8 @@ CONFIRM_SHORTCUT: str = (
 FOUNDER_GATE: str = (
     "standing delegation of restructure execution would be an envelope cell above "
     "the current ceiling. It does not exist in v1, and only a deliberate founder "
-    "ratification may ever create one"
+    "ratification may ever create one; requests to create collections automatically "
+    "are refused by this rule"
 )
 
 #: The confirm-required contract, served rather than implied.
@@ -114,15 +115,19 @@ FOUNDER_GATE: str = (
 #: confirmation parameter, because that is a tool-schema change behind the
 #: documented two-phase rollout.
 #:
+#: Additive entity creation is not on the list: the entity writer resolves
+#: before it creates, so a new identity is `proactive_capture` on a personal
+#: vault, while merge, supersession and deletion stay confirm-required.
+#:
 #: Command-free on purpose, exactly like the epistemic commitments:
 #: `commands._filter_bootstrap_payload` deletes any string naming a command the
 #: active surface cannot call, and a ceiling that vanished on a reduced surface
 #: would be a ceiling nobody was told about.
 CONFIRM_REQUIRED: str = (
-    "the confirm-required surfaces are restructure application, supersession commit, "
-    "entity creation and deletion. Deletion has a server-side confirm parameter and "
-    "adoption apply is preview-first; supersession and entity creation have no "
-    "server-side gate today — named future work, not an implied one"
+    "confirm-required: restructure application, collection creation, supersession commit, "
+    "entity merge and deletion. Deletion has a server-side confirm parameter; adoption "
+    "apply is preview-first; supersession has no server-side gate yet: future work. On a "
+    "personal vault, additive entity creation follows proactive_capture"
 )
 
 #: The protocol the agent contract teaches, per action the agent is about to
@@ -172,7 +177,9 @@ def parse_envelope_ref(value: str) -> str:
     return _normalize_class(raw[len(ENVELOPE_PREFIX) :])
 
 
-def derive_envelope(level: str) -> dict[str, str]:
+def derive_envelope(
+    level: str, *, proactive_capture_permitted: bool | None = None
+) -> dict[str, str]:
     """``action class -> disposition`` for one prominence level. Pure; no I/O.
 
     The design's derivation table, and the only place it exists. `disclosure`
@@ -188,9 +195,20 @@ def derive_envelope(level: str) -> dict[str, str]:
     prominence axis it already is. Tightening it would turn every routine
     capture into a question, which is a nag increase inside the programme that
     exists to remove nags.
+
+    `proactive_capture_permitted` overrides the level's own answer for that one
+    row. The level is not always the whole story about capture authority: an
+    unreadable preference record resolves to `balanced` for recall and
+    narration while capture drops to `off` (`prominence.effective_capture_level`).
+    Deriving this row from the level alone put the withheld write authority back
+    one key over, next to the gate that had just refused it. Callers with a
+    request in hand pass what that request's gate decided; a caller asking what
+    a level would give passes nothing and gets the table.
     """
     resolved = str(level or "").strip().lower()
-    proactive = "silent" if resolved in {"balanced", "maximal"} else "off"
+    if proactive_capture_permitted is None:
+        proactive_capture_permitted = resolved in {"balanced", "maximal"}
+    proactive = "silent" if proactive_capture_permitted else "off"
     advisory = "off" if resolved == "off" else "advisory"
     return {
         "hygiene_writes": FIXED["hygiene_writes"],
@@ -244,24 +262,61 @@ def stored_overrides() -> tuple[dict[str, str], list[dict]]:
 def active(level: str | None = None) -> dict[str, str]:
     """``action class -> the disposition in force``, overrides applied."""
     resolved_level = level or _active_level()
-    derived = derive_envelope(resolved_level)
+    derived = derive_envelope(
+        resolved_level, proactive_capture_permitted=_proactive_permitted(level)
+    )
     overrides, _ignored = stored_overrides()
     derived.update(overrides)
     return derived
 
 
-def resolved(level: str | None = None, surface: str | None = None) -> dict:
+def _proactive_permitted(
+    level: str | None = None, surface: str | None = None, gate: dict | None = None
+) -> bool | None:
+    """Whether this request may capture proactively, or None to use the table.
+
+    An explicit `level` is a "what would this level give?" question and keeps
+    the table's answer. Everything else asks `prominence` about the request in
+    hand, so a caller with no `engagement` payload to take a gate from --
+    `capture_sweep` through `active()`, most importantly -- still picks up a
+    floor it was never handed.
+    """
+    from . import prominence as prominence_module
+
+    if gate is None:
+        if level is not None:
+            return None
+        gate = prominence_module.capture_gate(surface=surface)
+    # `all`, not `any`: the envelope row is one disposition covering both
+    # capture kinds, so it may only say "act" when the gate permits both. The
+    # table agrees at every canonical level today; if a level ever permits
+    # one kind and withholds the other, the envelope must take the withheld
+    # side, or it grants back exactly what this row exists to refuse.
+    return all(bool(rule.get("proactive_permitted")) for rule in gate.values())
+
+
+def resolved(
+    level: str | None = None, surface: str | None = None, *, capture_gate: dict | None = None
+) -> dict:
     """Bootstrap-shaped view: every class, its ceiling, disposition and provenance.
 
     `disclosure` appears with a null disposition and `governance-owned`
     provenance rather than being omitted: a client that cannot see the class at
     all would have no way to learn that the class exists and is somebody else's
     to decide.
+
+    `capture_gate` is the gate the caller already computed for this request.
+    Pass it whenever the envelope is served BESIDE that gate -- both keys of one
+    `engagement` block then come from one object, so they cannot drift apart in
+    the payload an agent actually reads.
     """
     from . import prominence as prominence_module
 
     resolved_level = prominence_module.normalize(level) or prominence_module.resolve(surface)
-    derived = derive_envelope(resolved_level)
+    derived = derive_envelope(
+        resolved_level,
+        proactive_capture_permitted=_proactive_permitted(level, surface, capture_gate),
+    )
     overrides, ignored = stored_overrides()
 
     classes: dict[str, dict] = {}

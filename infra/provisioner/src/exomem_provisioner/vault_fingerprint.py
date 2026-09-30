@@ -65,6 +65,7 @@ _RESERVED_EXACT = {
     ".graph-sync-floor.json",
     ".review-state.json",
     ".due-state.json",
+    ".due-state-emission.json",
 }
 _RESERVED_TREES = {
     "_governance",
@@ -75,7 +76,7 @@ _RESERVED_TREES = {
 }
 _RESERVED_ROOT_PATTERNS = (
     re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$"),
-    re.compile(r"^\.\.due-state\.json\.[a-z0-9_]{8}\.tmp$"),
+    re.compile(r"^\.\.due-state(?:-emission)?\.json\.[a-z0-9_]{8}\.tmp$"),
     re.compile(r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$"),
     re.compile(r"^\.lexical\.sqlite(?:-(?:wal|shm))?\.quarantine-[0-9a-f]{32}$"),
     re.compile(r"^\.graph-rebuild-[0-9a-f]{64}-[0-9a-f]{24}\.sqlite(?:-(?:wal|shm|journal))?$"),
