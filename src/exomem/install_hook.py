@@ -220,6 +220,7 @@ def _is_private_group(gid: int) -> bool:
         group = grp.getgrgid(gid)
         if any(member != user.pw_name for member in group.gr_mem):
             return False
+        # gr_mem omits primary-group users, so an empty list can still be shared.
         return not any(
             member.pw_gid == gid and member.pw_name != user.pw_name
             for member in pwd.getpwall()

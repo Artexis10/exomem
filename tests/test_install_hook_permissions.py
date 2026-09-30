@@ -190,3 +190,44 @@ def test_install_new_config_under_explicit_umask(tmp_path: Path, private_group, 
         assert hook_module.install_hook(hook_dir=home / "hooks", settings_path=config)["wired"]
     finally:
         os.umask(previous)
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+def test_install_refuses_shared_primary_group_under_umask_0002(
+    tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch, client: str,
+) -> None:
+    pwd = pytest.importorskip("pwd")
+    user = pwd.getpwuid(os.geteuid())
+    private_group.gr_name = "users"
+    assert private_group.gr_mem == []
+    other_user = SimpleNamespace(
+        pw_name="another-user", pw_gid=private_group.gr_gid, pw_uid=os.geteuid() + 1,
+    )
+    monkeypatch.setattr(pwd, "getpwall", lambda: [user, other_user])
+
+    previous = os.umask(0o002)
+    try:
+        home = tmp_path / client
+        home.mkdir()
+        config = home / ("hooks.json" if client == "codex" else "settings.json")
+        original = b'{"theme":"dark"}\n'
+        config.write_bytes(original)
+        assert stat.S_IMODE(home.stat().st_mode) == 0o775
+        assert stat.S_IMODE(config.stat().st_mode) == 0o664
+        assert home.stat().st_gid == config.stat().st_gid == user.pw_gid
+
+        with pytest.raises(OSError, match="unsafe|writable|trusted"):
+            hook_module.install_hook(
+                hook_dir=home / "hooks", settings_path=config, client=client,
+            )
+
+        assert config.read_bytes() == original
+        assert not list(home.glob("*.backup-*"))
+        report = hook_module.check_hooks(
+            clients=(client,), hook_dir=home / "hooks", settings_path=config,
+        )
+        assert next(
+            row for row in report["clients"][0]["checks"] if row["id"] == "config.file"
+        )["status"] == "fail"
+    finally:
+        os.umask(previous)
