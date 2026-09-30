@@ -249,6 +249,11 @@ CMD ["--transport", "http", "--port", "8765"]
 # image layer under HF_HOME and the hub client is pinned offline — an
 # accidental fetch must fail loudly at load rather than hang a tenant query
 # against a blocked NetworkPolicy until the client's deadline.
+#
+# MALLOC_ARENA_MAX=2 bounds glibc's per-thread arenas, whose freed-but-held
+# high-water otherwise grows with the thread count and never returns to the
+# OS; the runtime also calls malloc_trim(0) after model reaps and derived
+# drain batches. The cloud stage inherits both.
 ########################################################################
 FROM python:3.12-slim AS hosted
 COPY --from=builder-hosted /app/.venv /app/.venv
@@ -270,6 +275,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_DISABLE_RANKING=1 \
     EXOMEM_EMBED_BACKEND=onnx \
     EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5 \
+    MALLOC_ARENA_MAX=2 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

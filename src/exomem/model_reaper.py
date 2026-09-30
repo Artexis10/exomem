@@ -24,7 +24,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import accel, readiness
+from . import accel, process_memory, readiness
 
 log = logging.getLogger(__name__)
 
@@ -208,6 +208,8 @@ def _reap_once(slots: list[ResourceSlot], now: float, threshold: float) -> list[
                     log.info("reaped idle model %s (gpu_mem %s -> %s)", s.name, before, accel.gpu_mem())
         except Exception:  # noqa: BLE001 — a reaper tick must never crash the thread
             log.warning("reaper tick failed for %s", s.name, exc_info=True)
+    if reaped:
+        process_memory.trim_allocator()
     return reaped
 
 

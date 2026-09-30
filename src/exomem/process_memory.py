@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+from collections.abc import Callable
 from typing import Any
 
 _RUSAGE_INFO_V0 = 0
@@ -41,6 +42,40 @@ def _darwin_physical_footprint_bytes(pid: int) -> int | None:
         return int(usage.ri_phys_footprint) or None
     except Exception:  # noqa: BLE001 - native sampling must always fall back to RSS
         return None
+
+
+_UNRESOLVED: Any = object()
+_MALLOC_TRIM: Any = _UNRESOLVED
+
+
+def _resolve_malloc_trim() -> Callable[[int], int] | None:
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        trim = ctypes.CDLL("libc.so.6").malloc_trim
+        trim.argtypes = [ctypes.c_size_t]
+        trim.restype = ctypes.c_int
+        return trim
+    except Exception:  # noqa: BLE001 - musl, a stripped libc, or no libc: nothing to trim
+        return None
+
+
+def trim_allocator() -> bool:
+    """Ask glibc to return freed heap to the OS: ``malloc_trim(0)``.
+
+    Freed heap otherwise stays in the allocator's arenas as resident high-water
+    after a model reap or a drain batch. Off glibc this is a no-op, and it never
+    raises: its callers are background threads that must keep running. Returns
+    whether glibc reported releasing memory.
+    """
+    global _MALLOC_TRIM
+    try:
+        if _MALLOC_TRIM is _UNRESOLVED:
+            _MALLOC_TRIM = _resolve_malloc_trim()
+        trim = _MALLOC_TRIM
+        return trim is not None and bool(trim(0))
+    except Exception:  # noqa: BLE001 - trimming is an optimisation, never a failure
+        return False
 
 
 def enrich_process_memory(pid: int, rss_mb: float) -> dict[str, float | str | None]:

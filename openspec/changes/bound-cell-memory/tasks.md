@@ -8,7 +8,7 @@
 
 ## 2. Quick wins (D2, D3, D4, D5 step 1, D6); each PR carries a harness before/after
 
-- [ ] 2.1 Allocator hygiene: set `MALLOC_ARENA_MAX=2` in the hosted image, and call a guarded `malloc_trim(0)` after model reaps and drain batches.
+- [x] 2.1 Allocator hygiene: set `MALLOC_ARENA_MAX=2` in the hosted image, and call a guarded `malloc_trim(0)` after model reaps and drain batches.
 - [ ] 2.2 vec0 for hosted cells: default to `EXOMEM_VEC_BACKEND=sqlite-vec` in hosted mode, verify the image loads the extension, and refuse at start with a stable code when it cannot. Gates: golden floors, backend parity, and latency at the owner-vault chunk count.
 - [ ] 2.3 Byte-bounded `FrontmatterCache` with an environment override; the hosted default is set from 1.3.
 - [ ] 2.4 `bm25.warm` declines when FTS5 is present but busy or unsynced, with a red-first test for the locked-sidecar case.
