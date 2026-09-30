@@ -56,7 +56,7 @@ ENGLISH_SET_DIGEST = "a49d85f49b18c2ce8f0349933ed01ceb4fb5ca176dca066700c9c2f936
 
 #: The pinned digest of this group. Editing any fixture field, gold list
 #: included, changes it, and that voids every run manifest that names the old one.
-CONVERSATION_SET_DIGEST = "1c81d3e957b975c1ee72ff2e16fe6ba401179679101bdbb35edb7172a82a13e9"
+CONVERSATION_SET_DIGEST = "f8cad6d57da87d8c29767e76d7d71a968ada27f182594d0fbeb4798a2d56b59b"
 
 RICH = [case for case in CASES if case.group == "rich_turn" and case.kind in POSITIVE_KINDS]
 MULTI = [case for case in CASES if case.group == "multi_turn" and case.kind in POSITIVE_KINDS]
@@ -78,7 +78,17 @@ def _sentences(text: str) -> int:
 
 
 def _twins_of(case: ConversationCase) -> list[ConversationCase]:
-    return [item for item in CASES if item.pairs_with == case.case_id and item.kind == f"{case.kind}_twin"]
+    """The case's one negative twin (the pronoun-bearing negatives are extra)."""
+    return [
+        item
+        for item in CASES
+        if item.pairs_with == case.case_id
+        and item.kind == f"{case.kind}_twin"
+        and item.twin_mode != "pronoun_negative"
+    ]
+
+
+PRONOUN_NEGATIVES = [case for case in CASES if case.twin_mode == "pronoun_negative"]
 
 
 def _with(case: ConversationCase, **change) -> tuple[ConversationCase, ...]:
@@ -162,6 +172,23 @@ def test_every_rich_and_multi_turn_case_has_exactly_one_negative_twin() -> None:
             assert (twin.conversation or {}).get("focus") in (None, "closing pleasantries")
             assert not ANAPHORS.search(twin.turn) or case.kind.startswith("rich"), twin.case_id
         assert set(twin.gold).isdisjoint(case.poison), twin.case_id
+
+
+def test_at_least_twenty_pronoun_bearing_negatives_guard_the_anaphoric_carry() -> None:
+    """Ruling C1 on #1463: ordinary turns carrying a pronoun, a demonstrative or
+    a temporal deictic that points back at nothing, sent with a carry case's
+    earlier turns, must never be carried and never serve that subject."""
+    assert len(PRONOUN_NEGATIVES) >= 20
+    for negative in PRONOUN_NEGATIVES:
+        case = case_by_id(negative.pairs_with)
+        assert case.kind == "anaphoric_carry" and negative.kind == "anaphoric_carry_twin"
+        assert ANAPHORS.search(negative.turn) or re.search(r"\b(next|other)\b", negative.turn, re.I), negative.case_id
+        assert negative.conversation["recent"] == case.conversation["recent"], negative.case_id
+        assert negative.conversation["focus"] == "closing pleasantries", negative.case_id
+        assert negative.arms == ARMS
+        assert negative.expected_status == "unresolved" and negative.expected_carried_by is None
+        assert set(case.gold) <= set(negative.poison), negative.case_id
+        assert set(case.must_include) <= set(negative.must_exclude), negative.case_id
 
 
 def test_a_twin_never_expects_more_than_its_case_resolves() -> None:

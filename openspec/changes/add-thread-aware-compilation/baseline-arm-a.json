@@ -2,6 +2,798 @@
   "arm_a": [
     {
       "arm": "a",
+      "case_id": "N1",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N10",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N11",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N12",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N13",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N14",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N15",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N16",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N17",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N18",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N19",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N2",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N20",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N21",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N22",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N3",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N4",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N5",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N6",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N7",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N8",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
+      "case_id": "N9",
+      "drowned": false,
+      "expected": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "origin": {},
+        "status": "unresolved"
+      },
+      "failure_reasons": [],
+      "kind": "anaphoric_carry_twin",
+      "observed": {
+        "carried_by": null,
+        "disambiguated_by": null,
+        "generation_conversation": "absent",
+        "origin": {},
+        "status": "unresolved"
+      },
+      "origin_verdict": "not_applicable",
+      "other_resolved": [],
+      "packet_chars": 0,
+      "passed": true,
+      "per_anchor_kind": {
+        "entity": {
+          "gold": 0,
+          "gold_served": 0,
+          "other_served": 0,
+          "poison": 1,
+          "poison_served": 0,
+          "recall": null
+        }
+      },
+      "poison_served": [],
+      "served": []
+    },
+    {
+      "arm": "a",
       "case_id": "V1",
       "drowned": false,
       "expected": {
@@ -2857,10 +3649,10 @@
       }
     ]
   },
-  "corpus_hash": "49bd66dfb1186d24ae6a26ada964deb30013045d87435251e0e11f86ad061a22",
+  "corpus_hash": "30c2147ee0f81f0a0738c42d56b0d5ab1b279a9f43e942edd98439f94c3ccca5",
   "corpus_hash_note": "sha256 over the corpus pages with the product writers' minted ids and audit trailers removed; the exact-bytes hash differs on every build",
   "corpus_id": "context-activation-conversation-corpus-v1",
-  "fixture_set_digest": "1c81d3e957b975c1ee72ff2e16fe6ba401179679101bdbb35edb7172a82a13e9",
+  "fixture_set_digest": "f8cad6d57da87d8c29767e76d7d71a968ada27f182594d0fbeb4798a2d56b59b",
   "fixture_set_id": "context-activation-conversation-v1",
   "manifest": "context-activation-conversation-baseline-arm-a",
   "verdicts": {

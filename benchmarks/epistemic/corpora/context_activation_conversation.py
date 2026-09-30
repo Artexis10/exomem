@@ -88,7 +88,11 @@ CARRIED_BY: tuple[str | None, ...] = (None, "conversation")
 #: the current turn"). `agent_choice` is deliberately absent: a `focus` origin
 #: is never the agent's `anchor` choice.
 ORIGINS: tuple[str, ...] = ("turn", "focus", "turn_and_focus", "conversation")
-TWIN_MODES: tuple[str, ...] = ("unrelated_conversation", "empty_turn")
+#: `pronoun_negative`: an ordinary turn that carries a pronoun, demonstrative
+#: or temporal deictic pointing back at nothing, sent with an anaphoric-carry
+#: case's conversation. It must never be carried (ruling C1 on #1463). These
+#: are extra negatives, not the case's one twin.
+TWIN_MODES: tuple[str, ...] = ("unrelated_conversation", "empty_turn", "pronoun_negative")
 _ARM_OVERRIDE_FIELDS = frozenset({"status", "carried_by", "origin", "disambiguated_by"})
 
 POSITIVE_KINDS: frozenset[str] = frozenset(
@@ -1187,6 +1191,65 @@ _MULTI_TWINS = (
     ),
 )
 
+# -- Pronoun-bearing negatives of the anaphoric carry (ruling C1 on #1463) ----- #
+# Ordinary turns that carry "it", "that", "this", "next" or "other" but point
+# back at nothing: an expletive "it", a complementiser or relative "that",
+# temporal deixis, a same-turn antecedent, a closing acknowledgement. Each is
+# sent with its carry case's earlier turns (the focus names nothing), and must
+# serve nothing from them on every arm.
+
+
+def _pronoun_negative(case: ConversationCase, case_id: str, turn: str) -> ConversationCase:
+    return _twin(
+        case, case_id, "pronoun_negative",
+        conversation=_quiet(case),
+        turn=turn,
+        poison=case.gold,
+        must_exclude=case.must_include,
+    )
+
+
+_PRONOUN_NEGATIVES = (
+    *(
+        _pronoun_negative(_CARRY_1, f"N{index}", turn)
+        for index, turn in enumerate(
+            (
+                "Is it possible to install Python 3.13 on my laptop?",
+                "It looks like rain later, should I bring an umbrella?",
+                "It's raining again, what should I cook for dinner?",
+                "What time is it in Tokyo right now?",
+                "Would it be okay to swap the rice for quinoa in the recipe?",
+                "It takes forty minutes to walk to the station.",
+                "Let's switch to the grocery list, can you make it shorter?",
+                "I bought a new kettle yesterday and it already leaks.",
+                "I think that we should buy groceries on the way home.",
+                "I know that tomatoes are technically a fruit.",
+                "The other day I went hiking in the hills.",
+            ),
+            start=1,
+        )
+    ),
+    *(
+        _pronoun_negative(_CARRY_2, f"N{index}", turn)
+        for index, turn in enumerate(
+            (
+                "It seems that the library closes early on Sundays.",
+                "It turns out the bakery on the corner does gluten-free bread.",
+                "It's hard to say which laptop is better for music.",
+                "My sister said that the museum is free on Sundays.",
+                "I hope that the weather holds for the picnic.",
+                "I'm sure that the train leaves at nine.",
+                "The recipe that my aunt sent needs two eggs.",
+                "What should I cook this week for dinner?",
+                "These days I mostly read on the train.",
+                "Next week I want to try a new running route.",
+                "Thanks, that's all for today.",
+            ),
+            start=12,
+        )
+    ),
+)
+
 # -- Attachments: a content-free turn plus cue-only focus ---------------------- #
 
 _ATTACHMENT_1 = _case(
@@ -1308,6 +1371,7 @@ CASES: tuple[ConversationCase, ...] = (
     *_MULTI_TWINS,
     _ATTACHMENT_TWIN,
     _ABSENT_REF,
+    *_PRONOUN_NEGATIVES,
 )
 CASE_IDS: tuple[str, ...] = tuple(case.case_id for case in CASES)
 
@@ -1422,9 +1486,18 @@ def assert_manifest_consistent(cases: tuple[ConversationCase, ...] = CASES) -> N
             raise FixtureError(f"{case.case_id}: only a twin pairs with a case")
     for case in cases:
         if case.group in ("rich_turn", "multi_turn") and case.kind in POSITIVE_KINDS:
-            twins = [twin for twin in cases if twin.pairs_with == case.case_id and twin.kind == f"{case.kind}_twin"]
+            twins = [
+                twin
+                for twin in cases
+                if twin.pairs_with == case.case_id
+                and twin.kind == f"{case.kind}_twin"
+                and twin.twin_mode != "pronoun_negative"
+            ]
             if len(twins) != 1:
                 raise FixtureError(f"{case.case_id}: a case needs exactly one negative twin")
+    for case in cases:
+        if case.twin_mode == "pronoun_negative" and case.kind != "anaphoric_carry_twin":
+            raise FixtureError(f"{case.case_id}: a pronoun negative pairs with an anaphoric-carry case")
     if any(case.group == "attachment" and case.kind == "attachment" for case in cases) and not any(
         case.kind == "attachment_twin" for case in cases
     ):

@@ -9,6 +9,7 @@ shipped follow-up carry (each unchanged), before the retrieval carry.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -91,10 +92,68 @@ def _titles(packet: dict) -> list[str]:
         "the second one",
         "and what about the next quarter",
         "continue",
+        # Contractions are the pronoun they carry.
+        "it's still on track for the autumn?",
+        "that's what I meant",
+        "I think that's the wrong page",
+        "they're late again, aren't they?",
+        "is it still on track to finish by June?",
+        "can we move it to next week?",
+        "is it worth it?",
+        "does it need sign-off?",
+        "I think that is what she meant",
+        "can you check whether it still works",
     ],
 )
 def test_an_anaphoric_turn_is_recognised(turn: str) -> None:
     assert analyze(turn).anaphoric, turn
+
+
+#: Ordinary, pronoun-bearing turns that point back at nothing (ruling C1 on
+#: #1463): expletive "it", complementiser and relative "that", temporal
+#: deixis, a same-turn antecedent and a closing acknowledgement.
+PRONOUN_BEARING_NEGATIVES = (
+    "Is it possible to install Python 3.13 on my laptop?",
+    "It is worth checking the tyre pressure before a long drive.",
+    "It looks like rain later, should I bring an umbrella?",
+    "It's raining again, what should I cook for dinner?",
+    "What time is it in Tokyo right now?",
+    "It seems that the library closes early on Sundays.",
+    "Would it be okay to swap the rice for quinoa in the recipe?",
+    "It turns out the bakery on the corner does gluten-free bread.",
+    "It takes forty minutes to walk to the station.",
+    "It's hard to say which laptop is better for music.",
+    "It's time to book the summer holiday.",
+    "Let's switch to the grocery list, can you make it shorter?",
+    "I bought a new kettle yesterday and it already leaks.",
+    "I think that we should buy groceries on the way home.",
+    "My sister said that the museum is free on Sundays.",
+    "I know that tomatoes are technically a fruit.",
+    "Do you believe that people can learn a language in three months?",
+    "I hope that the weather holds for the picnic.",
+    "I'm sure that the train leaves at nine.",
+    "I read that coffee is fine in moderation.",
+    "The recipe that my aunt sent needs two eggs.",
+    "The other day I went hiking in the hills.",
+    "What should I cook this week for dinner?",
+    "We need to plan this week's rota for the kitchen.",
+    "These days I mostly read on the train.",
+    "Next week I want to try a new running route.",
+    "I have a dentist appointment this afternoon, any tips for the nerves?",
+    "On the other hand, it rains a lot in Galway.",
+    "Thanks, that's all for today.",
+)
+
+
+@pytest.mark.parametrize("turn", PRONOUN_BEARING_NEGATIVES)
+def test_a_pronoun_that_points_back_at_nothing_is_not_an_anaphor(turn: str) -> None:
+    assert not analyze(turn).anaphoric, turn
+
+
+def test_the_negative_set_is_at_least_twenty_pronoun_bearing_turns() -> None:
+    pronoun = re.compile(r"\b(it|it's|its|that|that's|this|these|next|other)\b", re.IGNORECASE)
+    assert len(PRONOUN_BEARING_NEGATIVES) >= 20
+    assert all(pronoun.search(turn) for turn in PRONOUN_BEARING_NEGATIVES)
 
 
 @pytest.mark.parametrize(
@@ -134,6 +193,29 @@ def test_a_rich_follow_up_keeps_the_conversations_subject(cvault: Path) -> None:
     assert anchor["origin"] == "conversation"
     assert carried["generation"]["carried_by"] == "conversation"
     assert carried["units"], "the carried anchor's material is served under the ordinary lanes"
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "Let's switch to the grocery list, can you make it shorter?",
+        "I think that we should run the unit tests now",
+        "is it possible to install python 3.13",
+        "the other day I went hiking",
+        "Thanks, that's all for today.",
+    ],
+)
+def test_an_ordinary_turn_is_never_carried_from_the_conversation(cvault: Path, turn: str) -> None:
+    packet = _activate(cvault, turn, conversation=THREAD)
+    assert packet["generation"].get("carried_by") != "conversation", turn
+    assert "Ottilie Marsh" not in _titles(packet), turn
+
+
+@pytest.mark.parametrize("turn", ["it's still on track for the autumn?", "that's what I meant"])
+def test_a_contracted_anaphor_is_carried(cvault: Path, turn: str) -> None:
+    packet = _activate(cvault, turn, conversation=THREAD)
+    assert packet["generation"].get("carried_by") == "conversation", turn
+    assert _titles(packet) == ["Ottilie Marsh"]
 
 
 def test_the_newest_subject_wins_over_an_older_one(cvault: Path) -> None:
