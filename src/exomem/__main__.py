@@ -2871,6 +2871,29 @@ def _install_hook_main(argv: list[str]) -> int:
 
     from . import install_hook as hook_module
 
+    def print_alternates(result: dict) -> None:
+        """Name every yadm alternate source, including the ones we skipped.
+
+        A source we could not parse is one the user still has to edit by hand,
+        so a run that leaves it unnamed has dropped it silently -- and a source
+        we did wire needs committing, or the next alternate selection
+        regenerates the deployed file from the committed copy and undoes it.
+        """
+        rows = result.get("alternates") or []
+        for row in rows:
+            if row["skipped"]:
+                print(f"  ! yadm alternate {row['path']} skipped: {row['error']}")
+            elif row["changed"]:
+                print(f"  also wired into yadm alternate source {row['path']}")
+            else:
+                print(f"  yadm alternate source {row['path']} already had them")
+        if rows:
+            print(
+                "Those are yadm alternate sources: commit them, or the next alternate "
+                "selection (an ordinary yadm status triggers one) regenerates the "
+                "deployed file from the committed copy."
+            )
+
     if args.uninstall:
         if args.check or args.print_only:
             parser.error("--uninstall cannot be combined with --check or --print-only")
@@ -2940,6 +2963,7 @@ def _install_hook_main(argv: list[str]) -> int:
                     result = row["result"]
                     destination = result["settings"] or "print-only output"
                     print(f"Installed hooks for {row['client']} into {destination}.")
+                    print_alternates(result)
                 else:
                     print(
                         f"Failed to install hooks for {row['client']}: {row['error']}",
@@ -2968,6 +2992,7 @@ def _install_hook_main(argv: list[str]) -> int:
         print(f"  {item['event']:<16} {item['script']}")
     if report["wired"]:
         print(f"Wired into {report['settings']}.")
+        print_alternates(report)
         print(f"Restart {client_label} to activate. Triggers log to:")
         home = "~/.codex" if report["client"] == "codex" else "~/.claude"
         print(f"  {home}/exomem-capture-nudge.log   (write / capture)")
