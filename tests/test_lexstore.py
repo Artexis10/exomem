@@ -1711,7 +1711,7 @@ def test_catalogue_schema_carries_tokenizer_v2():
     from exomem import bm25
 
     assert bm25.TOKENIZER_VERSION == 2
-    assert lexstore.SCHEMA_VERSION == 11
+    assert lexstore.SCHEMA_VERSION == 12
 
 
 def test_fts5_vocabulary_round_trips_every_tokenizer_token(tmp_path):

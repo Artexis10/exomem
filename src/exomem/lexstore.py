@@ -535,7 +535,9 @@ def _eligibility_predicate(eligibility: Any, scope_column: str) -> tuple[str, li
 #: 11: tokenizer v2 (`bm25.TOKENIZER_VERSION` 2) and the unicode61 declaration
 #: that keeps its Unicode tokens whole. A v10 catalogue reads not-current and is
 #: rebuilt by the existing background rebuild.
-SCHEMA_VERSION = 11
+#: 12: transactional frequency revisions and page/FTS-content mutation triggers.
+#: A v11 catalogue is rebuilt before revision-bound counts can be cached.
+SCHEMA_VERSION = 12
 
 #: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -3276,6 +3278,7 @@ class LexicalStore:
         # adopted, awaiting the one heal that reconciles it (single use).
         self._adopted_rows: dict[str, tuple] | None = None
         self._lock = threading.Lock()
+        self._term_frequency_cache_lock = threading.Lock()
         # ((scope, catalogue generation), {stem: document frequency}, pages in
         # scope) for bounded queries; see `_catalogue_term_frequencies`.
         self._term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
@@ -4093,6 +4096,11 @@ class LexicalStore:
         # attestation that lets a restart skip the exact verify.
         conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
         conn.execute(
+            "INSERT OR IGNORE INTO meta(key, value) "
+            "VALUES('frequency_revision', hex(randomblob(16)))"
+        )
+        self._create_frequency_revision_triggers(conn, "pages")
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS semantic_units("
             " record_type TEXT NOT NULL CHECK(record_type = 'semantic_unit'),"
             " unit_ref TEXT NOT NULL,"
@@ -4129,6 +4137,24 @@ class LexicalStore:
             " tags_canonical_json TEXT,"
             " UNIQUE(parent_path, unit_ref))"
         )
+
+    def _create_frequency_revision_triggers(
+        self, conn: sqlite3.Connection, table: str
+    ) -> None:
+        """Attest mutations from every connection in the writer's transaction.
+
+        Random revisions separate independently built/replaced catalogues too.
+        FTS5 forbids virtual-table triggers; its internal-content shadow table
+        carries every FTS row insert/update/delete instead. Posting-table
+        triggers would reenter FTS5's flush while another trigger is executing.
+        """
+        for operation in ("INSERT", "UPDATE", "DELETE"):
+            conn.execute(
+                f"CREATE TRIGGER IF NOT EXISTS frequency_revision_{table}_{operation} "
+                f"AFTER {operation} ON {table} BEGIN "
+                "UPDATE meta SET value = hex(randomblob(16)) "
+                "WHERE key = 'frequency_revision'; END"
+            )
 
     def _create_catalog_indexes(self, conn: sqlite3.Connection) -> None:
         # Covering indexes so the per-corpus-change count/max reconcile stays
@@ -4212,6 +4238,7 @@ class LexicalStore:
             conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(stemmed, {_FTS_TOKENIZE})"
             )
+            self._create_frequency_revision_triggers(conn, "fts_content")
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS tri USING fts5("
                 "title_lower, body_lower, tokenize='trigram case_sensitive 1')"
@@ -6905,66 +6932,98 @@ class LexicalStore:
         exclude_raw_material: bool = False,
         exclude_statuses: tuple[str, ...] = (),
     ) -> tuple[dict[str, int], int]:
-        """`({stem: pages in `scope` holding it}, pages in `scope`)`.
+        """Exact counts cached against the revision of the counts' SQL snapshot.
 
-        The informativeness a bounded query ranks its units by, counted by
-        `_document_frequency_query` over the same `fts`/`pages` join and scope
-        column the MATCH reads, so a word held only outside the scope is
-        absent from it rather than rare.
-
-        Cached per catalogue generation, keyed by the scope, exclusions, the stored
-        checkpoints and the catalogue identity read on `conn`'s own snapshot,
-        so only stems this generation has not been asked about are counted.
-        Every path that replaces the live catalogue in this process clears the
-        cache as well, since a stale count is not harmless: a frequency decides
-        which units reach the MATCH, and a stale 0 drops the unit, so a page is
-        not reached through its words until the key moves.
+        Read connections are short-lived, so their PRAGMA data_version values
+        cannot identify revisions across requests. Mutation triggers persist
+        that identity instead. Never mix cached counts with a different snapshot.
         """
-        generation = (
-            scope,
-            exclude_navigation,
-            exclude_raw_material,
-            exclude_statuses,
-            *conn.execute(
-                "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' "
-                "OR key = 'catalog_identity' ORDER BY key"
-            ).fetchall(),
-        )
-        # The carry excludes navigation, raw material and retired pages. Keep
-        # its counts separate from the ranking query's unfiltered frequencies,
-        # so alternating the two stages does not recount the corpus every turn.
-        filtered = exclude_navigation or exclude_raw_material or bool(exclude_statuses)
-        cached = (
-            self._filtered_term_frequency_cache if filtered else self._term_frequency_cache
-        )
-        if cached is not None and cached[0] == generation:
-            known, pages = cached[1], cached[2]
-        else:
-            known, pages = MappingProxyType({}), None
-        missing = [token for token in dict.fromkeys(tokens) if token not in known]
-        if missing or pages is None:
-            found, pages = self._document_frequency_query(
-                conn, missing, scope,
-                exclude_navigation=exclude_navigation,
-                exclude_raw_material=exclude_raw_material,
-                exclude_statuses=exclude_statuses,
-                pages_in_scope=pages,
+        owns_snapshot = not conn.in_transaction
+        if owns_snapshot:
+            conn.execute("BEGIN")
+        try:
+            revision = self._frequency_revision(conn)
+            generation = (
+                scope,
+                exclude_navigation,
+                exclude_raw_material,
+                exclude_statuses,
+                revision,
+                *conn.execute(
+                    "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' "
+                    "OR key = 'catalog_identity' ORDER BY key"
+                ).fetchall(),
             )
-            # Evict unrelated stems, keeping the counts this request needs.
-            merged = (
-                {token: known[token] for token in tokens if token in known}
-                if len(known) + len(missing) > _TERM_FREQUENCY_CACHE_MAX
-                else dict(known)
+            # Keep carry filters separate from ranking's unfiltered counts.
+            filtered = exclude_navigation or exclude_raw_material or bool(exclude_statuses)
+            cached = (
+                self._filtered_term_frequency_cache if filtered else self._term_frequency_cache
             )
-            merged.update((token, int(found.get(token, 0))) for token in missing)
-            # Replaced whole, never mutated: a concurrent reader keeps the
-            # mapping it already holds.
-            known = MappingProxyType(merged)
-            if filtered:
-                self._filtered_term_frequency_cache = (generation, known, pages)
+            if cached is not None and cached[0] == generation:
+                known, pages = cached[1], cached[2]
             else:
-                self._term_frequency_cache = (generation, known, pages)
-        return {token: int(known.get(token, 0)) for token in tokens}, pages
+                known, pages = MappingProxyType({}), None
+            missing = [token for token in dict.fromkeys(tokens) if token not in known]
+            if missing or pages is None:
+                found, pages = self._document_frequency_query(
+                    conn, missing, scope,
+                    exclude_navigation=exclude_navigation,
+                    exclude_raw_material=exclude_raw_material,
+                    exclude_statuses=exclude_statuses,
+                    pages_in_scope=pages,
+                )
+                # The full response survives eviction, even if the request alone
+                # is larger than the retention bound.
+                response = {
+                    token: int(known[token] if token in known else found[token])
+                    for token in tokens
+                }
+                if len(known) + len(missing) > _TERM_FREQUENCY_CACHE_MAX:
+                    retained = {
+                        token: response[token]
+                        for _, token in zip(range(_TERM_FREQUENCY_CACHE_MAX), response)
+                    }
+                else:
+                    retained = dict(known)
+                    retained.update(found)
+                self._install_term_frequency_cache(
+                    revision, (generation, MappingProxyType(retained), pages), filtered=filtered
+                )
+                return response, pages
+            return {token: int(known[token]) for token in tokens}, pages
+        finally:
+            if owns_snapshot:
+                conn.rollback()
+
+    @staticmethod
+    def _frequency_revision(conn: sqlite3.Connection) -> str:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'frequency_revision'").fetchone()
+        if row is None:
+            raise sqlite3.OperationalError("catalogue frequency revision is missing")
+        return str(row[0])
+
+    def _install_term_frequency_cache(
+        self, revision: str, entry: tuple[tuple, Mapping[str, int], int], *, filtered: bool
+    ) -> None:
+        """Compare-and-set against a fresh live snapshot, serializing installers.
+
+        The computing reader may still hold a pre-publication snapshot. A fresh
+        connection sees a repair/purge/rebuild that committed since computation.
+        A write after this comparison still cannot use this entry: every lookup
+        compares the entry's revision with its own pinned counts snapshot.
+        """
+        with self._term_frequency_cache_lock:
+            current = self._connect()
+            try:
+                current.execute("BEGIN")
+                if self._frequency_revision(current) != revision:
+                    return
+                if filtered:
+                    self._filtered_term_frequency_cache = entry
+                else:
+                    self._term_frequency_cache = entry
+            finally:
+                current.close()
 
     def _bm25_query(
         self,
