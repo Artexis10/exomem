@@ -1261,10 +1261,6 @@ _CORPUS_CONTEXT_LANGUAGE_HASHES: dict[tuple[str, str], str] = {}
 _CORPUS_CONTEXT_CACHE_LOCK = threading.Lock()
 _CORPUS_CONTEXT_UPDATE_LOCK = threading.RLock()
 _CORPUS_CONTEXT_CACHE_MAX_VAULTS = 2
-#: Requests that asked for a corpus context: the idle reaper's use fingerprint
-#: (see `corpus_context_activity`). A lost increment under a race only delays
-#: one tick's idea of "used"; it never releases a context mid-use.
-_CORPUS_CONTEXT_USES = 0
 
 #: Bounds populate-on-miss (#539). Both halves exist because that build is
 #: paid by a WRITER: without them, a state that keeps the cache cold -- a
@@ -1370,40 +1366,6 @@ def reset_corpus_context_cache() -> None:
         _CORPUS_CONTEXT_LANGUAGE_HASHES.clear()
 
 
-def _note_corpus_context_use() -> None:
-    global _CORPUS_CONTEXT_USES
-    _CORPUS_CONTEXT_USES += 1
-
-
-def corpus_context_activity() -> int:
-    """A cheap fingerprint of corpus-context USE for the idle reaper."""
-    return _CORPUS_CONTEXT_USES
-
-
-def corpus_context_resident() -> bool:
-    """Whether any corpus context is held, for the idle reaper."""
-    with _CORPUS_CONTEXT_CACHE_LOCK:
-        return bool(_CORPUS_CONTEXT_CACHE)
-
-
-def release_idle_corpus_contexts() -> bool:
-    """Drop every resident corpus context; the idle reaper's release hook.
-
-    Each context is a whole-vault projection, so an idle cell should not keep
-    one resident. The next use rebuilds it. A request already holding a
-    context keeps its immutable object, and every cache writer publishes only
-    over the entry it read, so a release mid-update costs a rebuild, never a
-    stale publish. The populate memo stays, as for `evict_corpus_context`.
-    """
-    with _CORPUS_CONTEXT_CACHE_LOCK:
-        released = bool(_CORPUS_CONTEXT_CACHE)
-        _CORPUS_CONTEXT_CACHE.clear()
-        _CORPUS_CONTEXT_EVENT_TOKENS.clear()
-        _CORPUS_CONTEXT_EVENT_CHECKPOINTS.clear()
-        _CORPUS_CONTEXT_LANGUAGE_HASHES.clear()
-    return released
-
-
 def evict_corpus_context(vault_root: Path) -> bool:
     """Withdraw one vault's corpus projection after an unbridgeable event gap."""
     cache_key = _corpus_cache_key(Path(vault_root))
@@ -1418,7 +1380,6 @@ def current_reference_identity_snapshot(
     vault_root: Path,
 ) -> ReferenceIdentitySnapshot | None:
     """Return the current cached identity authority without filesystem corpus work."""
-    _note_corpus_context_use()
     root = Path(vault_root)
     with _CORPUS_CONTEXT_UPDATE_LOCK:
         if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
@@ -1488,7 +1449,6 @@ def current_writer_resolver_entries(
     untouched for the existing disk fallback to handle.
     """
     root = Path(vault_root)
-    _note_corpus_context_use()
     try:
         cache_key = _corpus_cache_key(root)
     except Exception:  # noqa: BLE001 - an unkeyable root has no authority
@@ -2662,7 +2622,6 @@ def build_corpus_context_with_census(
     its own fresh walk — same as before this existed.
     """
     root = Path(vault_root)
-    _note_corpus_context_use()
     relation_definitions = registry or relation_registry.load_registry(root)
     language = language_registry or semantic_language_registry.load_registry(root)
 
