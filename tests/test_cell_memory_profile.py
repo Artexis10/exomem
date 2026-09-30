@@ -8,6 +8,7 @@ here, and so is the rule that no vault string ever reaches the report.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
@@ -20,6 +21,12 @@ import pytest
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "cell_memory_profile.py"
 MIB = 1024 * 1024
+#: The harness reads Linux's per-process memory accounting; without it every
+#: figure it exists to produce is unknown.
+needs_proc_memory = pytest.mark.skipif(
+    not Path("/proc/self/smaps_rollup").exists(),
+    reason="needs /proc/self/smaps_rollup (Linux 4.14+)",
+)
 
 
 def _load():
@@ -108,6 +115,127 @@ def test_derived_figures_are_unknown_without_smaps() -> None:
     profile.derive(points)
 
     assert set(_derived(points, "model_load").values()) == {None}
+
+
+def test_the_warm_encode_reading_is_the_model_when_there_is_one() -> None:
+    points = _cell_points()
+    # One encode grows the session's arena: untraced 848 against import's 180.
+    points.insert(
+        2, _point("model_warm", rss=1060, anon=1000, traced=132, overhead=20, model=True)
+    )
+
+    estimate = profile.derive(points)
+
+    assert {k: v // MIB for k, v in estimate.items() if isinstance(v, int)} == {
+        "load_delta_bytes": 598,
+        "warm_delta_bytes": 668,
+        "attributed_bytes": 668,
+    }
+    assert estimate["basis"] == "model_warm"
+    assert _derived(points, "first_hybrid_find")["unreturned_allocator_bytes"] == 180
+
+
+def test_a_model_delta_is_recorded_raw_never_clamped() -> None:
+    points = _cell_points()
+    # Untraced anon FELL across the load (170 against 180): report that, not 0.
+    points[1] = _point("model_load", rss=350, anon=290, traced=100, overhead=20, model=True)
+
+    estimate = profile.derive(points)
+
+    assert estimate["load_delta_bytes"] == -10 * MIB
+    assert _derived(points, "model_load")["model_native_bytes"] == -10
+
+
+def test_a_stub_run_records_its_raw_deltas_but_attributes_nothing() -> None:
+    points = _cell_points()
+
+    estimate = profile.derive(points, native_model=False)
+
+    assert estimate["load_delta_bytes"] == 598 * MIB
+    assert estimate["attributed_bytes"] == 0
+    assert estimate["basis"] == "stub"
+
+
+def test_a_point_reads_memory_before_it_snapshots_tracemalloc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The snapshot frees what it allocates; read first, or that lands in the residual."""
+    calls: list[str] = []
+
+    def recorder(name: str, value: object = None):
+        def record(*_args, **_kwargs):
+            calls.append(name)
+            return value
+
+        return record
+
+    monkeypatch.setattr(profile, "read_smaps_rollup", recorder("smaps", {}))
+    monkeypatch.setattr(profile, "read_peak_rss", recorder("vm_hwm", 0))
+    monkeypatch.setattr(profile, "glibc_mallinfo", recorder("mallinfo", {}))
+    monkeypatch.setattr(profile, "product_counters", recorder("counters", {}))
+    monkeypatch.setattr(profile, "tracemalloc_sample", recorder("snapshot", {}))
+    monkeypatch.setattr(profile.tracemalloc, "reset_peak", recorder("reset_tracemalloc_peak"))
+    monkeypatch.setattr(profile, "reset_peak_rss", recorder("reset_rss_peak", True))
+
+    profile.sample("import", top=1, started=0.0)
+
+    assert calls == [
+        "smaps",
+        "vm_hwm",
+        "mallinfo",
+        "counters",
+        "snapshot",
+        "reset_tracemalloc_peak",
+        "reset_rss_peak",
+    ]
+
+
+def test_stage_env_bounds_glibc_arenas_like_the_image(tmp_path: Path) -> None:
+    base = {"PATH": "/bin", "MALLOC_ARENA_MAX": "8", "EXOMEM_MODE": "performance"}
+
+    bounded = profile.cell_environment(tmp_path, encoder="stub", base=base, malloc_arena_max=2)
+    unset = profile.cell_environment(tmp_path, encoder="stub", base=base, malloc_arena_max=0)
+
+    assert bounded["MALLOC_ARENA_MAX"] == "2"
+    # 0 is glibc's own default: nothing set, not even what the caller had.
+    assert "MALLOC_ARENA_MAX" not in unset
+    assert "EXOMEM_MODE" not in bounded
+
+
+def _stage_args(tmp_path: Path) -> argparse.Namespace:
+    args = profile._parser().parse_args(["--encoder", "stub"])
+    args.scratch = str(tmp_path)
+    return args
+
+
+def test_a_failed_stage_prints_its_captured_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def failing(*_args, **kwargs):
+        assert kwargs.get("capture_output") is True
+        return subprocess.CompletedProcess([], 1, stdout="child said this", stderr="child failed")
+
+    monkeypatch.setattr(profile.subprocess, "run", failing)
+
+    with pytest.raises(SystemExit, match="stage build failed"):
+        profile._run_stage("build", _stage_args(tmp_path), {})
+    printed = capsys.readouterr()
+    assert "child said this" in printed.err
+    assert "child failed" in printed.err
+
+
+def test_a_passing_stage_prints_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def passing(*_args, **_kwargs):
+        (tmp_path / "build.json").write_text('{"points": []}', encoding="utf-8")
+        return subprocess.CompletedProcess([], 0, stdout="noisy log", stderr="noisy warning")
+
+    monkeypatch.setattr(profile.subprocess, "run", passing)
+
+    assert profile._run_stage("build", _stage_args(tmp_path), {})["points"] == []
+    printed = capsys.readouterr()
+    assert printed.out == printed.err == ""
 
 
 @pytest.mark.parametrize(
@@ -201,6 +329,7 @@ def _assert_content_free(report: dict, tmp_path: Path, notes: int, links: int) -
     assert str(tmp_path) not in json.dumps(report)
 
 
+@needs_proc_memory
 @pytest.mark.timeout(600)
 def test_smoke_run_profiles_a_real_cloud_cell_and_stays_content_free(tmp_path: Path) -> None:
     proc, report = _run_harness(
@@ -222,11 +351,16 @@ def test_smoke_run_profiles_a_real_cloud_cell_and_stays_content_free(tmp_path: P
     assert "embeddings" in cell["reaper_tick"]["facts"]["reaped"]
     assert cell["cell_ready"]["counters"]["caches"]["vector_matrices"]["embedding"]["rows"] > 0
     assert "first_governed_write" in proc.stdout
+    assert report["malloc_arena_max"] == 2
+    assert "lazily" in report["note"]
+    assert report["cell"]["model_estimate"]["basis"] == "stub"
+    assert report["cell"]["model_estimate"]["warm_delta_bytes"] is not None
 
     _assert_content_free(report, tmp_path, notes=12, links=3)
 
 
 @pytest.mark.embeddings
+@needs_proc_memory
 @pytest.mark.timeout(900)
 def test_real_model_run_attributes_native_memory_to_the_model(tmp_path: Path) -> None:
     pytest.importorskip("onnxruntime")

@@ -22,8 +22,11 @@ because resident memory is a property of a process's whole history:
   threshold, instead of waiting fifteen minutes for the daemon.
 
 The model is loaded explicitly right after import, through the same singleton
-(``embeddings.get_model``) the cell loads lazily, so its cost is isolated from
-startup. ``--encoder stub`` swaps the encoder for a deterministic hashing one at
+(``embeddings.get_model``) the cell loads lazily, and warmed by one query
+encode, so its cost is isolated from startup; the report's ``note`` says so.
+Stages run with ``MALLOC_ARENA_MAX=2`` as the hosted image does, so figures do
+not depend on the machine's core count; ``--malloc-arena-max 0`` leaves glibc's
+default. ``--encoder stub`` swaps the encoder for a deterministic hashing one at
 the model's declared width: every vault-proportional structure is the same
 size, and no native model memory is held. CI uses it; ``--encoder onnx`` is the
 real served model.
@@ -37,12 +40,13 @@ counters (``resource_status``). Derived per point:
 
 - ``untraced_anon_bytes`` = Anonymous - tracemalloc current - tracemalloc
   overhead: anonymous memory no Python allocation accounts for.
-- ``model_native_bytes``: the ONNX Runtime session and tokenizer, estimated as
-  the growth of ``untraced_anon_bytes`` across the model-load point, while the
-  model stays resident (zero after a reap, and always zero for the stub). The
-  runtime libraries are imported before the import point, so the delta holds
-  the session rather than library initialisation. It is the load-time
-  footprint; arena growth on first inference lands in the residual below.
+- ``model_native_bytes``: the ONNX Runtime session, tokenizer and arena,
+  estimated as the growth of ``untraced_anon_bytes`` from the import point to
+  the warm point (after one query encode), while the model stays resident (zero
+  after a reap, and always zero for the stub). Each stage's ``model_estimate``
+  records the raw load and warm deltas, unclamped, including a stub's. The
+  runtime libraries are imported before the import point, so the deltas hold
+  the session rather than library initialisation.
 - ``unreturned_allocator_bytes`` = untraced anon - model native: design D1's
   RSS - tracemalloc - ONNX arena, taken over Anonymous rather than Rss, since
   file-backed pages (shared-library text, mapped files) are not allocator
@@ -88,10 +92,11 @@ SCRIPTS = ROOT / "scripts"
 SRC = ROOT / "src"
 
 SCHEMA_VERSION = 1
-BUILD_POINTS = ("import", "model_load", "index_build")
+BUILD_POINTS = ("import", "model_load", "model_warm", "index_build")
 CELL_POINTS = (
     "import",
     "model_load",
+    "model_warm",
     "cell_ready",
     "first_hybrid_find",
     "first_governed_write",
@@ -120,6 +125,11 @@ _SMAPS_FIELDS = {
     "Anonymous": "anonymous_bytes",
 }
 MIB = 1024 * 1024
+NOTE = (
+    "The model loads eagerly, and is warmed by one query encode, before the app "
+    "starts; a real cell loads it lazily on first use. Startup and first-request "
+    "points therefore carry the model already."
+)
 
 
 # ---------------------------------------------------------------- measurement
@@ -260,18 +270,23 @@ def product_counters() -> dict[str, Any]:
 
 
 def sample(name: str, *, top: int, started: float, **facts: Any) -> dict[str, Any]:
-    """One fixed point. Resets the phase peaks for the next point."""
-    point = {
+    """One fixed point. Resets the phase peaks for the next point.
+
+    The memory readings come first and the tracemalloc snapshot last: the
+    snapshot allocates and frees tens of MiB, which would otherwise land in the
+    untraced, unreturned and glibc-free figures of the point it describes.
+    """
+    point: dict[str, Any] = {
         "name": name,
         "elapsed_seconds": round(time.monotonic() - started, 3),
-        "tracemalloc": tracemalloc_sample(top),
-        "smaps_rollup": read_smaps_rollup(),
-        "phase_peak_rss_bytes": read_peak_rss(),
-        "glibc": glibc_mallinfo(),
-        "threads": threading.active_count(),
-        "counters": product_counters() if "exomem" in sys.modules else None,
-        "facts": facts,
     }
+    point["smaps_rollup"] = read_smaps_rollup()
+    point["phase_peak_rss_bytes"] = read_peak_rss()
+    point["glibc"] = glibc_mallinfo()
+    point["threads"] = threading.active_count()
+    point["counters"] = product_counters() if "exomem" in sys.modules else None
+    point["tracemalloc"] = tracemalloc_sample(top)
+    point["facts"] = facts
     tracemalloc.reset_peak()
     reset_peak_rss()
     return point
@@ -280,11 +295,15 @@ def sample(name: str, *, top: int, started: float, **facts: Any) -> dict[str, An
 # ------------------------------------------------------------------- derived
 
 
-def derive(points: list[dict[str, Any]], *, native_model: bool = True) -> None:
+def derive(points: list[dict[str, Any]], *, native_model: bool = True) -> dict[str, Any]:
     """Add the derived fields (module docstring) to each point, in place.
 
-    ``native_model`` is False for the stub encoder, which holds no native memory,
-    so nothing is attributed to a model.
+    Returns the model estimate: the raw growth of untraced anon from the import
+    point to the model-load point and to the warm-encode point, never clamped,
+    and the one attributed to the model while it is resident (the warm reading
+    when there is one, since it includes the arena a first encode grows).
+    ``native_model`` is False for the stub encoder, which holds no native
+    memory, so nothing is attributed; its raw deltas are still recorded.
     """
     def untraced(point: dict[str, Any]) -> int | None:
         smaps = point.get("smaps_rollup") or {}
@@ -294,17 +313,26 @@ def derive(points: list[dict[str, Any]], *, native_model: bool = True) -> None:
         return smaps["anonymous_bytes"] - tm["current_bytes"] - tm["overhead_bytes"]
 
     by_name = {p["name"]: p for p in points}
-    base = untraced(by_name["import"]) if "import" in by_name else None
-    loaded = untraced(by_name["model_load"]) if "model_load" in by_name else None
-    model_native = max(0, loaded - base) if base is not None and loaded is not None else None
+
+    def delta(name: str) -> int | None:
+        base = untraced(by_name["import"]) if "import" in by_name else None
+        reading = untraced(by_name[name]) if name in by_name else None
+        return reading - base if base is not None and reading is not None else None
+
+    load_delta, warm_delta = delta("model_load"), delta("model_warm")
+    model_native: int | None
     if not native_model:
-        model_native = 0
+        basis, model_native = "stub", 0
+    elif warm_delta is not None:
+        basis, model_native = "model_warm", warm_delta
+    else:
+        basis, model_native = "model_load", load_delta
     for point in points:
         smaps = point.get("smaps_rollup") or {}
         residual = untraced(point)
         models = ((point.get("counters") or {}).get("models")) or {}
         resident = bool(models.get("embeddings")) if point["name"] != "import" else False
-        native = (model_native or 0) if resident else 0
+        native = model_native if resident and model_native is not None else 0
         point["derived"] = {
             "untraced_anon_bytes": residual,
             "model_native_bytes": native if model_native is not None else None,
@@ -317,6 +345,12 @@ def derive(points: list[dict[str, Any]], *, native_model: bool = True) -> None:
                 else None
             ),
         }
+    return {
+        "load_delta_bytes": load_delta,
+        "warm_delta_bytes": warm_delta,
+        "attributed_bytes": model_native,
+        "basis": basis,
+    }
 
 
 # --------------------------------------------------------------- content-free
@@ -368,13 +402,23 @@ def vault_strings(vault_root: Path, scratch_root: Path, notes: Iterable[str]) ->
 # --------------------------------------------------------------- environment
 
 
-def cell_environment(scratch: Path, *, encoder: str, base: Mapping[str, str]) -> dict[str, str]:
+def cell_environment(
+    scratch: Path, *, encoder: str, base: Mapping[str, str], malloc_arena_max: int = 2
+) -> dict[str, str]:
     """The cloud image's and cellctl's cell environment, with all state in `scratch`.
 
     Every inherited ``EXOMEM_*`` (and legacy ``KB_MCP_*`` alias) is dropped so an
     operator's or test runner's own settings never shape the measurement.
     """
-    env = {k: v for k, v in base.items() if not k.startswith(("EXOMEM_", "KB_MCP_"))}
+    env = {
+        k: v
+        for k, v in base.items()
+        if not k.startswith(("EXOMEM_", "KB_MCP_")) and k != "MALLOC_ARENA_MAX"
+    }
+    if malloc_arena_max > 0:
+        # The hosted image's bound (Dockerfile). Unbounded, glibc makes up to
+        # 8 arenas per core, so figures would depend on the machine's core count.
+        env["MALLOC_ARENA_MAX"] = str(malloc_arena_max)
     home = scratch / "home"
     env.update(
         {
@@ -490,6 +534,14 @@ def _load_model(encoder: str) -> None:
     embeddings.get_model()
 
 
+def _warm_model() -> None:
+    """One query encode, through the product's own path: the arena a first
+    inference grows is part of what the model holds while resident."""
+    from exomem import embeddings
+
+    embeddings.embed_texts([QUERY], is_query=True)
+
+
 def _settle(timeout: float, vault_root: Path | None = None) -> dict[str, Any]:
     """Wait for transient startup/follow-up threads and queued derived work."""
     deadline = time.monotonic() + timeout
@@ -539,6 +591,8 @@ def stage_build(args: argparse.Namespace) -> dict[str, Any]:
     points = [sample("import", top=args.top, started=started)]
     _load_model(args.encoder)
     points.append(sample("model_load", top=args.top, started=started))
+    _warm_model()
+    points.append(sample("model_warm", top=args.top, started=started))
     chunks = embeddings.get_embedding_index(scratch / "vault").rebuild_all()
     points.append(sample("index_build", top=args.top, started=started, chunks=int(chunks)))
     return {"points": points}
@@ -676,6 +730,8 @@ def stage_cell(args: argparse.Namespace) -> dict[str, Any]:
     points = [sample("import", top=args.top, started=started)]
     _load_model(args.encoder)
     points.append(sample("model_load", top=args.top, started=started))
+    _warm_model()
+    points.append(sample("model_warm", top=args.top, started=started))
     ok = asyncio.run(_cell_scenario(args, points, started))
     return {"points": points, "ok": ok}
 
@@ -702,8 +758,13 @@ def _run_stage(stage: str, args: argparse.Namespace, env: dict[str, str]) -> dic
         "--settle-seconds", str(args.settle_seconds),
     ]
     started = time.monotonic()
-    proc = subprocess.run(command, env=env, cwd=str(ROOT), check=False)
+    # A cell logs a great deal; it is only worth reading when a stage fails.
+    proc = subprocess.run(
+        command, env=env, cwd=str(ROOT), check=False, capture_output=True, text=True
+    )
     if proc.returncode != 0 or not out.exists():
+        print(f"--- stage {stage} stdout ---\n{proc.stdout}", file=sys.stderr)
+        print(f"--- stage {stage} stderr ---\n{proc.stderr}", file=sys.stderr)
         raise SystemExit(f"stage {stage} failed with exit code {proc.returncode}")
     result = json.loads(out.read_text(encoding="utf-8"))
     result["wall_seconds"] = round(time.monotonic() - started, 3)
@@ -725,13 +786,16 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
     scratch = Path(tempfile.mkdtemp(prefix="exomem-cell-memory-"))
     args.scratch = str(scratch)
     try:
-        env = cell_environment(scratch, encoder=args.encoder, base=os.environ)
+        env = cell_environment(
+            scratch, encoder=args.encoder, base=os.environ,
+            malloc_arena_max=args.malloc_arena_max,
+        )
         setup = _run_stage("setup", args, env)
         notes = setup.pop("rels")
         build = _run_stage("build", args, env)
         cell = _run_stage("cell", args, env)
-        derive(build["points"], native_model=args.encoder == "onnx")
-        derive(cell["points"], native_model=args.encoder == "onnx")
+        build["model_estimate"] = derive(build["points"], native_model=args.encoder == "onnx")
+        cell["model_estimate"] = derive(cell["points"], native_model=args.encoder == "onnx")
         report = {
             "schema": SCHEMA_VERSION,
             "harness": "scripts/cell_memory_profile.py",
@@ -741,6 +805,8 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
             "cpus": os.cpu_count(),
             "encoder": args.encoder,
             "model": env["EXOMEM_RECALL_MODEL"],
+            "malloc_arena_max": int(env["MALLOC_ARENA_MAX"]) if "MALLOC_ARENA_MAX" in env else None,
+            "note": NOTE,
             "vault": {**setup, "links_per_note": args.links_per_note},
             "build": build,
             "cell": cell,
@@ -763,7 +829,9 @@ def render_table(report: dict[str, Any]) -> str:
     )
     lines = [
         f"vault: {report['vault']['notes']} notes, {_mib(report['vault']['markdown_bytes'])} MiB "
-        f"markdown; encoder {report['encoder']} ({report['model']}); MiB unless noted",
+        f"markdown; encoder {report['encoder']} ({report['model']}); "
+        f"MALLOC_ARENA_MAX={report['malloc_arena_max'] or 'unset'}; MiB unless noted",
+        f"note: {report['note']}",
         header,
         "-" * len(header),
     ]
@@ -800,6 +868,10 @@ def _parser() -> argparse.ArgumentParser:
         help="onnx: the served model; stub: deterministic hashing at its width",
     )
     parser.add_argument("--top", type=int, default=15, help="allocation sites per point")
+    parser.add_argument(
+        "--malloc-arena-max", type=int, default=2,
+        help="MALLOC_ARENA_MAX for the stages; 2 mirrors the image, 0 leaves it unset",
+    )
     parser.add_argument("--timeout", type=float, default=900.0, help="cell readiness/find budget")
     parser.add_argument("--settle-seconds", type=float, default=120.0)
     parser.add_argument("--out", type=Path, help="write the JSON report here")
