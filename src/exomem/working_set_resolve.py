@@ -1966,14 +1966,16 @@ def band_yieldable_paths(resolution: Resolution) -> frozenset[str]:
 
     Non-empty only when EVERY resolved anchor carries `vector_band`, would
     fall back to `partial` without it (in practice `rare_term` + the band,
-    the third clause), and was reached through a name word the turn wrote in
-    lower case although its casing marks names elsewhere (`name_lower_case`,
-    the signal `_spoken_as_name` reads for the same question). A turn with
-    any anchor resolved on its own words is resolved with or without the
-    band, so the band decided nothing about it. A name word the turn
-    capitalised away from a sentence start, or wrote in a script with no
-    case, is taken as naming the anchor, and a phrase another page shares
-    with the turn does not overrule that. What is left, "convert the grill's
+    the third clause), and was reached through name words the turn never
+    writes with an initial capital, in a turn that has a casing signal
+    (`name_lower_case`, the signal `_spoken_as_name` reads for the same
+    question; `_casing_signal` counts a sentence-initial capital). A turn
+    with any anchor resolved on its own words is resolved with or without
+    the band, so the band decided nothing about it. A name word the turn
+    capitalises anywhere, or writes in a script with no case, is taken as
+    naming the anchor, and a phrase another page shares with the turn does
+    not overrule that. A turn typed entirely in lower case has no casing
+    signal and never yields. What is left, "convert the grill's
     target temperature", is a common noun the band pulled a page in on, and
     the caller may ask the carry what the turn names instead.
     """

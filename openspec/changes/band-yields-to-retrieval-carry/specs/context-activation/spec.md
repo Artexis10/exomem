@@ -2,10 +2,14 @@
 
 ### Requirement: A band resolution on an ordinary word yields to a different carried page
 A turn's band resolution is yieldable when every anchor the turn resolved carries
-`vector_band`, would be at most `partial` without it, and was reached through a name
-word the turn wrote in lower case while its casing marks names elsewhere in the turn.
-A name word the turn capitalised away from a sentence start, or wrote in a script
-with no case, names the anchor, and that resolution SHALL NOT yield. For a yieldable
+`vector_band`, would be at most `partial` without it, and was reached through name
+words that are all in a cased script and that the turn never writes with an initial
+capital, in a turn that carries a casing signal. A turn carries a casing signal when
+it writes at least one cased word with an initial capital and at least one cased word
+without one; a sentence-initial capital counts. A name word the turn writes with an
+initial capital anywhere, sentence start included, or writes in a script with no
+case, names the anchor, and that resolution SHALL NOT yield. A turn with no casing
+signal (all lower case, all capitals, or every word capitalised) SHALL NOT yield. For a yieldable
 turn that is not referential and names no agent-chosen anchor, the operation SHALL ask
 the retrieval carry for the pages the turn names. When the carry names exactly one
 dominant page that is not one of the band-resolved pages, and a carried packet can be
@@ -18,8 +22,9 @@ carry for this purpose, and the rule SHALL NOT change which evidence kinds resol
 anchor.
 
 #### Scenario: A common noun plus the band yields to the page the carry names
-- **WHEN** a cased turn about unit conversion writes a rare word from an equipment
-  page's name in lower case ("convert the grill's target temperature"), the page
+- **WHEN** a turn with a casing signal about unit conversion ("Can you convert the
+  grill's target temperature from Fahrenheit to Celsius?") writes a rare word from an
+  equipment page's name without a capital, the page
   resolves only on `rare_term` + `vector_band`, and the retrieval carry names a
   temperature-conversions note as the one dominant page
 - **THEN** the equipment page is not `resolved`, the packet carries the note at
@@ -53,3 +58,10 @@ anchor.
 - **WHEN** a turn resolves one anchor on `exact_alias` and another on `rare_term` +
   `vector_band`
 - **THEN** the carry is not asked for this rule and both anchors keep their status
+
+#### Scenario: Known limit: a turn with no casing signal never yields
+- **WHEN** the same unit-conversion turn is typed entirely in lower case ("can you
+  convert the grill's target temperature from fahrenheit to celsius?")
+- **THEN** the turn carries no casing signal, the band's resolution is not yieldable,
+  and the equipment page resolves on `rare_term` + `vector_band` exactly as it did
+  before this requirement

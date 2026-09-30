@@ -4,7 +4,7 @@ With semantic evidence on, a turn that brushes a page's rare name resolves that 
 
 ## What Changes
 
-- A band resolution is yieldable when the band is what resolved the turn (every resolved anchor carries `vector_band` and would be `partial` without it) and the anchor's rare word was written as an ordinary word: in lower case, in a turn whose casing marks names elsewhere. This is the existing `name_lower_case` signal that bare-name ambiguity already reads.
+- A band resolution is yieldable when the band is what resolved the turn (every resolved anchor carries `vector_band` and would be `partial` without it) and the anchor's rare word was written as an ordinary word: never with an initial capital, in a turn that writes some cased word with a capital (sentence-initial included) and some without. A turn typed entirely in lower case carries no such signal and never yields, which is a known limit. This is the existing `name_lower_case` signal that bare-name ambiguity already reads.
 - On a yieldable turn the compiler asks the retrieval carry what the turn names. If the carry names one dominant page that is not the band's page, and a carried packet builds from it, that packet is served, the same one the turn gets with semantic evidence off.
 - In every other case the band's resolution stands: a capitalised name or a name in a script with no case, the carry naming the same page, several pages or none, or a carried page the lanes read nothing off. A yield never leaves the turn with nothing, and a phrase an unrelated note shares with the turn never overrules a rare name.
 - The `rare_term` + `vector_band` pair is unchanged. Only yieldable turns pay for the early carry (about 16 ms at p95 on the embeddings job).
