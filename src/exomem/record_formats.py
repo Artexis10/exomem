@@ -1401,7 +1401,7 @@ def render_markdown_item_update(
     delete_fields: tuple[str, ...] = (),
     body: str | None = None,
 ) -> str:
-    """Replace complete top-level YAML nodes while retaining unrelated source bytes."""
+    """Splice YAML nodes, preserving source key order and appending new keys in changes order."""
     bom = "\ufeff" if source.startswith("\ufeff") else ""
     text = source[len(bom) :]
     newline = "\r\n" if "\r\n" in text else "\n"
@@ -1433,6 +1433,7 @@ def render_markdown_item_update(
     # matters for a frontmatter block that is not newline-terminated at all.
     trailing = _span_terminator(yaml_text, (0, len(yaml_text))) or newline
     replacements: list[tuple[int, int, str]] = []
+    appended: list[str] = []
     for name in delete_fields:
         span = spans.get(name)
         if span is None:
@@ -1463,7 +1464,7 @@ def render_markdown_item_update(
         )
         rendered = vault.serialize_frontmatter({name: value}).replace("\n", local)
         if span is None:
-            replacements.append((len(yaml_text), len(yaml_text), rendered + trailing))
+            appended.append(rendered + trailing)
         else:
             # Block-style original values (dict/list-with-nested-items, or a
             # literal/folded scalar) end their compose span *after* their own
@@ -1480,6 +1481,10 @@ def render_markdown_item_update(
             if consumed and not rendered.endswith(consumed):
                 rendered += consumed
             replacements.append((*span, rendered))
+    if appended:
+        # New fields share one insertion offset. Group them so tuple sorting
+        # cannot use their rendered YAML as a tie-breaker and reorder them.
+        replacements.append((len(yaml_text), len(yaml_text), "".join(appended)))
     updated_yaml = yaml_text
     for start, end, rendered in sorted(replacements, reverse=True):
         updated_yaml = updated_yaml[:start] + rendered + updated_yaml[end:]
