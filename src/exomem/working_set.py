@@ -2232,7 +2232,23 @@ def compile_packet(
                 recent_context=recent,
             )
 
-    if not anchor and resolution.status == "unresolved" and not analysis.referential:
+    # The band yields to the carry. A turn the band resolved (its page on
+    # `rare_term` + `vector_band`, nothing on its words alone) would, without
+    # the band, have been `unresolved` and asked the carry below. Where the
+    # carry names one DIFFERENT dominant page, the band's page is an adjacent
+    # match the turn's words brushed ("convert the grill's target
+    # temperature" beside the grill page), not the page the turn named, so it
+    # is held at `partial` and the turn is carried as it would be without the
+    # band. The pair itself is not tightened: where the carry names the same
+    # page, several pages or none, the band's resolution stands, which is what
+    # a rare name plus the band in another language needs. Asked only on a
+    # band-decided turn, so no other turn pays for the carry.
+    named: tuple[tuple[str, float], ...] | None = None
+    if (
+        not anchor
+        and not analysis.referential
+        and (band_paths := working_set_resolve.band_decided_paths(resolution))
+    ):
         named = _carry_by_retrieval(
             root,
             turn=turn,
@@ -2240,6 +2256,19 @@ def compile_packet(
             freshness_snapshot=freshness_snapshot,
             lexical_seconds=lexical_seconds,
         )
+        rival = dominant_carry(named)
+        if rival is not None and rival[0] not in band_paths:
+            resolution = working_set_resolve.band_yielded(resolution)
+
+    if not anchor and resolution.status == "unresolved" and not analysis.referential:
+        if named is None:
+            named = _carry_by_retrieval(
+                root,
+                turn=turn,
+                timings=timings,
+                freshness_snapshot=freshness_snapshot,
+                lexical_seconds=lexical_seconds,
+            )
         carried = dominant_carry(named)
         if carried is None and named:
             # The turn named several pages. Nothing is carried, but an

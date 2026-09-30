@@ -351,6 +351,57 @@ def test_vector_band_is_absent_without_vectors() -> None:
     assert "vector_band" not in candidates[0].evidence
 
 
+def test_a_turn_the_band_resolved_names_its_band_decided_pages() -> None:
+    resolution = resolve_module.resolve(
+        [_facts("grill.md", evidence=("rare_term", "vector_band")), _facts("oven.md", evidence=("rare_term",))]
+    )
+
+    assert resolution.status == "resolved"
+    assert resolve_module.band_decided_paths(resolution) == frozenset({"grill.md"})
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        ("rare_term", "retrieval"),
+        ("rare_term", "retrieval", "vector_band"),
+        ("exact_alias", "vector_band"),
+        ("lexical_overlap", "claims_match", "vector_band"),
+    ],
+)
+def test_a_page_resolved_on_more_than_the_band_is_not_band_decided(evidence: tuple[str, ...]) -> None:
+    resolution = resolve_module.resolve([_facts("grill.md", evidence=evidence)])
+
+    assert resolution.status == "resolved"
+    assert resolve_module.band_decided_paths(resolution) == frozenset()
+
+
+def test_one_anchor_resolved_on_its_words_means_the_band_decided_nothing() -> None:
+    resolution = resolve_module.resolve(
+        [
+            _facts("grill.md", kind="resource", evidence=("rare_term", "vector_band")),
+            _facts("plan.md", kind="plan", evidence=("exact_alias",)),
+        ]
+    )
+
+    assert {anchor.path for anchor in resolution.resolved_anchors} == {"grill.md", "plan.md"}
+    assert resolve_module.band_decided_paths(resolution) == frozenset()
+
+
+def test_a_yielded_band_resolution_holds_its_page_at_partial() -> None:
+    resolution = resolve_module.resolve(
+        [_facts("grill.md", evidence=("rare_term", "vector_band")), _facts("oven.md", evidence=("rare_term",))]
+    )
+
+    yielded = resolve_module.band_yielded(resolution)
+
+    assert yielded.status == "unresolved"
+    assert yielded.ambiguity == ()
+    assert [(anchor.path, anchor.status, anchor.evidence) for anchor in yielded.anchors] == [
+        (anchor.path, "partial", anchor.evidence) for anchor in resolution.anchors
+    ]
+
+
 def test_graph_corroboration_counts_an_edge_between_two_candidates() -> None:
     """Counted even when both candidates already appear in ordinary recall.
 
