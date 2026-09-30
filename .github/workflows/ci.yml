@@ -421,7 +421,7 @@ jobs:
       - name: Certify exact-capacity hidden-corpus vector CPU routes
         env:
           EXOMEM_GOVERNANCE_TIMING_PROFILE: vectors-cpu-torch-v1
-          # The profile certifies the English torch model hosted cells serve.
+          # The profile certifies the English torch model its timing budget was set on.
           EXOMEM_RECALL_MODEL: BAAI/bge-base-en-v1.5
           EXOMEM_GOVERNANCE_TIMING_ROUTE: ${{ matrix.route }}
           EXOMEM_DISABLE_MEDIA_EXTRACTION: "1"
