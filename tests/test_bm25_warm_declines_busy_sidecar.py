@@ -147,3 +147,89 @@ def test_a_retired_sidecar_warms_the_python_rung(
     lexstore.get_store(tmp_path)._failed = True
     assert bm25.warm(tmp_path, "kb") == "python"
     assert python_builds == ["kb"]
+
+
+# ------------------------------------------------------- unclassified errors
+
+
+def _sidecar_fails(monkeypatch: pytest.MonkeyPatch, error_classes) -> None:
+    """Every warm probe declines, with the given error class behind each."""
+    classes = iter(error_classes)
+    current: dict[str, str | None] = {}
+
+    def probe(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        current["class"] = next(classes)
+        return None
+
+    monkeypatch.setattr(lexstore, "search_bm25", probe)
+    monkeypatch.setattr(lexstore, "cache_token", lambda _root: "fts5")
+    monkeypatch.setattr(lexstore, "last_bm25_error_class", lambda: current["class"])
+
+
+def test_unclassified_errors_decline_warm_until_the_bound_then_warm_python_once_logged(
+    tmp_path: Path,
+    python_builds: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _write_page(tmp_path, "Knowledge Base/a.md", "kubernetes ingress configuration")
+    bound = bm25.UNKNOWN_ERROR_RETIREMENT
+    _sidecar_fails(monkeypatch, ["unknown"] * (bound + 1))
+    for _ in range(bound - 1):
+        assert bm25.warm(tmp_path, "kb") == "declined"
+    assert python_builds == []
+
+    with caplog.at_level("WARNING", logger=bm25.log.name):
+        assert bm25.warm(tmp_path, "kb") == "python"
+        assert bm25.warm(tmp_path, "kb") == "python"
+    assert python_builds == ["kb"]  # the second warm finds it fresh
+    assert len([r for r in caplog.records if "treated as retired" in r.getMessage()]) == 1
+
+
+def test_a_lock_breaks_an_unclassified_error_streak(
+    tmp_path: Path, python_builds: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_page(tmp_path, "Knowledge Base/a.md", "kubernetes ingress configuration")
+    bound = bm25.UNKNOWN_ERROR_RETIREMENT
+    _sidecar_fails(
+        monkeypatch, ["unknown"] * (bound - 1) + ["transient"] + ["unknown"] * (bound - 1)
+    )
+    for _ in range(2 * bound - 1):
+        assert bm25.warm(tmp_path, "kb") == "declined"
+    assert python_builds == []
+
+
+def test_the_streak_is_keyed_by_the_resolved_vault(
+    tmp_path: Path, python_builds: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_page(tmp_path, "Knowledge Base/a.md", "kubernetes ingress configuration")
+    (tmp_path / "sub").mkdir()
+    spelled = tmp_path / "sub" / ".."
+    bound = bm25.UNKNOWN_ERROR_RETIREMENT
+    _sidecar_fails(monkeypatch, ["unknown"] * bound)
+    for i in range(bound - 1):
+        assert bm25.warm(spelled if i % 2 else tmp_path, "kb") == "declined"
+    assert bm25.warm(spelled, "kb") == "python"
+
+
+@needs_fts5
+@pytest.mark.parametrize(
+    ("message", "error_class"),
+    [("database is locked", "transient"), ("unexpected sidecar condition", "unknown")],
+)
+def test_the_sidecar_reports_the_error_class_behind_a_decline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, message: str, error_class: str
+) -> None:
+    _synced_vault(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_query = store._bm25_query
+
+    def failing(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise sqlite3.OperationalError(message)
+
+    monkeypatch.setattr(store, "_bm25_query", failing)
+    assert lexstore.search_bm25(tmp_path, "kubernetes", 5) is None
+    assert lexstore.last_bm25_error_class() == error_class
+    monkeypatch.setattr(store, "_bm25_query", real_query)
+    assert lexstore.search_bm25(tmp_path, "kubernetes", 5)
+    assert lexstore.last_bm25_error_class() is None
