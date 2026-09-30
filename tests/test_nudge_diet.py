@@ -38,8 +38,10 @@ checkpoint = _load("exomem_continuation_checkpoint")
 CEILINGS = {
     "capture short": (capture.REMINDER_SHORT, 320),
     "episode ask": (capture.EPISODE_ASK, 340),
-    "retrieval reminder": (retrieve.REMINDER, 300),
-    "retrieval pointer": (retrieve.REMINDER_POINTER, 120),
+    # 300 -> 332 (was 272 in use): the two rules the diet dropped (no repeat searches on a recurring
+    # reminder, the KB is the source of truth) are restored for at most 60 bytes.
+    "retrieval reminder": (retrieve.REMINDER, 332),
+    "retrieval pointer": (retrieve.REMINDER_POINTER, 160),
 }
 
 
@@ -81,6 +83,20 @@ def test_the_retrieval_texts_keep_recall_the_miss_reading_and_the_skip():
     assert "not found in that scope" in text
     assert "skip" in text
     assert "activate_context" in retrieve.REMINDER_POINTER
+
+
+def test_the_retrieval_reminder_keeps_the_two_rules_the_diet_once_dropped():
+    """Both came from the pre-diet text and prevent a known failure: re-running the same
+    search every time a recurring reminder appears, and reading a KB miss as absence."""
+    text = retrieve.REMINDER
+    assert "source of truth for prior conclusions" in text
+    assert "reuse fresh KB context" in text
+    assert "reminder recurs" in text and "repeat" in text
+
+
+def test_the_maximal_pointer_keeps_the_already_covered_escape():
+    pointer = retrieve.REMINDER_POINTER
+    assert "already covers" in pointer and "skip" in pointer
 
 
 def _run(script: str, event: dict, home: Path, **env: str) -> str:
