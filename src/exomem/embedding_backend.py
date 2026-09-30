@@ -510,13 +510,24 @@ class _OnnxEncoder:
 
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self.share_weights = False
         if served is None:
             runtime_resources.configure_onnx_session_options(options)
         else:
             runtime_resources.configure_onnx_session_options(options, default_threads=SERVED_DEFAULT_THREADS)
+            self.share_weights = runtime_resources.onnx_share_weights_enabled()
+            if self.share_weights:
+                options.add_session_config_entry("session.disable_prepacking", "1")
         self._session = ort.InferenceSession(onnx_path, sess_options=options, providers=providers)
         self._inputs = {spec.name for spec in self._session.get_inputs()}
         self.device = device
+        log.info(
+            "ONNX runtime shape: device=%s intra_op_threads=%s inter_op_threads=%s share_weights=%s",
+            device,
+            options.intra_op_num_threads,
+            options.inter_op_num_threads,
+            self.share_weights,
+        )
 
     def encode(
         self,

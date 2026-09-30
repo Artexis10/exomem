@@ -133,6 +133,131 @@ def test_providers_always_end_in_cpu() -> None:
         assert embedding_backend._providers(device)[-1] == "CPUExecutionProvider"
 
 
+def _fake_onnx_encoder(
+    monkeypatch: pytest.MonkeyPatch, *, served: bool
+) -> tuple[embedding_backend._OnnxEncoder, object, dict[str, str]]:
+    class Options:
+        def __init__(self) -> None:
+            self.entries: dict[str, str] = {}
+
+        def add_session_config_entry(self, key: str, value: str) -> None:
+            self.entries[key] = value
+
+    options = Options()
+    entries_at_session_creation: dict[str, str] = {}
+    session = types.SimpleNamespace(get_inputs=lambda: [])
+
+    def inference_session(*_args: object, **kwargs: object) -> object:
+        session_options = kwargs["sess_options"]
+        entries_at_session_creation.update(session_options.entries)
+        return session
+
+    ort = types.SimpleNamespace(
+        SessionOptions=lambda: options,
+        GraphOptimizationLevel=types.SimpleNamespace(ORT_ENABLE_ALL="all"),
+        InferenceSession=inference_session,
+        get_available_providers=lambda: ["CPUExecutionProvider"],
+    )
+    tokenizer = types.SimpleNamespace(
+        enable_truncation=lambda **_kwargs: None,
+        enable_padding=lambda **_kwargs: None,
+        token_to_id=lambda _token: 0,
+    )
+    profile = embedding_backend.EncoderProfile(
+        model="model",
+        pooling="mean",
+        query_prefix="",
+        passage_prefix="",
+        max_seq=512,
+        pad_token="<pad>",
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", ort)
+    monkeypatch.setitem(
+        sys.modules,
+        "tokenizers",
+        types.SimpleNamespace(Tokenizer=types.SimpleNamespace(from_file=lambda _path: tokenizer)),
+    )
+    monkeypatch.setattr(embedding_backend, "require_tokenizer", lambda _name: "tokenizer.json")
+    monkeypatch.setattr(embedding_backend, "read_profile", lambda _name: profile)
+    monkeypatch.setattr(
+        embedding_backend,
+        "served_artifact",
+        lambda _name: types.SimpleNamespace() if served else None,
+    )
+    monkeypatch.setattr(embedding_backend, "ensure_artifact", lambda *_args: ("served.onnx", "abc"))
+    monkeypatch.setattr(embedding_backend, "_model_file", lambda *_args: "hub.onnx")
+
+    encoder = embedding_backend._OnnxEncoder("model", "cpu")
+    return encoder, options, entries_at_session_creation
+
+
+def test_cloud_weight_sharing_is_applied_to_the_served_onnx_path(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.delenv("EXOMEM_HOSTED_CELL", raising=False)
+    monkeypatch.delenv("EXOMEM_ONNX_SHARE_WEIGHTS", raising=False)
+
+    with caplog.at_level("INFO", logger=embedding_backend.__name__):
+        encoder, options, entries_at_session_creation = _fake_onnx_encoder(
+            monkeypatch, served=True
+        )
+
+    assert encoder.share_weights is True
+    assert options.entries == {"session.disable_prepacking": "1"}
+    assert entries_at_session_creation == {"session.disable_prepacking": "1"}
+    assert any(
+        record.getMessage().startswith("ONNX runtime shape:")
+        and "share_weights=True" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {},
+        {"EXOMEM_HOSTED_CELL": "1"},
+        {"EXOMEM_CLOUD_CELL": "1", "EXOMEM_ONNX_SHARE_WEIGHTS": "0"},
+    ],
+    ids=("personal", "hosted", "cloud-explicitly-disabled"),
+)
+def test_served_onnx_keeps_prepacking_when_weight_sharing_is_off(
+    monkeypatch: pytest.MonkeyPatch, environment: dict[str, str]
+) -> None:
+    for name in (
+        "EXOMEM_CLOUD_CELL",
+        "EXOMEM_HOSTED_CELL",
+        "EXOMEM_ONNX_SHARE_WEIGHTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    encoder, options, entries_at_session_creation = _fake_onnx_encoder(
+        monkeypatch, served=True
+    )
+
+    assert encoder.share_weights is False
+    assert options.entries == {}
+    assert entries_at_session_creation == {}
+
+
+def test_cloud_weight_sharing_is_not_applied_to_a_hub_onnx_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.delenv("EXOMEM_ONNX_SHARE_WEIGHTS", raising=False)
+
+    encoder, options, entries_at_session_creation = _fake_onnx_encoder(
+        monkeypatch, served=False
+    )
+
+    assert encoder.share_weights is False
+    assert options.entries == {}
+    assert entries_at_session_creation == {}
+
+
 @pytest.mark.skipif(not RUN_EQUIVALENCE, reason="set RUN_EMBED_EQUIVALENCE_TEST=1")
 @pytest.mark.parametrize(
     "model_name",
