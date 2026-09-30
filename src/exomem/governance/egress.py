@@ -5236,6 +5236,7 @@ def release_level_for_path_only(
     purpose: str | None = None,
     receipt_decision: str | None = None,
     policy: Any | None = None,
+    tombstones: frozenset[str] | None = None,
 ) -> int:
     """Decide an opaque candidate without parsing its bytes.
 
@@ -5248,9 +5249,18 @@ def release_level_for_path_only(
     authoring guard per path cost 8.9 s of a 33 s structured write — the guard
     probe stats the governance root on every `policy_module.load`. Omitting it
     keeps the original per-call load, so every existing caller is unchanged.
+
+    `tombstones` is the same idea for the tombstone set: `is_tombstoned` stats
+    every tombstone, recovery marker and event file to prove its cached answer
+    is still true, once per path. A pass over N paths hands in the set it read
+    once (`lifecycle.tombstoned_paths`), for the same reason `policy` is handed
+    in: the plane does not move while one pass runs.
     """
     vault_root = Path(vault_root)
-    if lifecycle.is_tombstoned(vault_root, rel_path):
+    if tombstones is None:
+        if lifecycle.is_tombstoned(vault_root, rel_path):
+            return DISCLOSURE_MIN
+    elif lifecycle.is_tombstoned_in(tombstones, rel_path):
         return DISCLOSURE_MIN
     if policy is None:
         policy = policy_module.load(vault_root)

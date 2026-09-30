@@ -1998,9 +1998,22 @@ def inspect_audit_gap(
     collection: str | Path | collections.CollectionManifest,
     *,
     authorize_path: Callable[[str], bool] | None = None,
+    snapshot: record_formats.AdapterSnapshot | None = None,
+    snapshot_denied: bool = False,
 ) -> dict[str, Any]:
-    """Report, without repair, whether current bytes prove an audit transition chain."""
-    chain = _inspect_audit_chain(Path(vault_root), collection, authorize_path=authorize_path)
+    """Report, without repair, whether current bytes prove an audit transition chain.
+
+    `snapshot` is one the caller already read through this same `authorize_path`;
+    `snapshot_denied` says whether that read skipped any path the authorizer refused,
+    which is what makes a chain built from it incomplete rather than clean.
+    """
+    chain = _inspect_audit_chain(
+        Path(vault_root),
+        collection,
+        authorize_path=authorize_path,
+        snapshot=snapshot,
+        snapshot_denied=snapshot_denied,
+    )
     payload: dict[str, Any] = {"status": chain.status, "gaps": list(chain.gaps)}
     if chain.discontinuity is not None:
         payload["discontinuity"] = dict(chain.discontinuity)
@@ -2037,8 +2050,10 @@ def _inspect_audit_chain(
     collection: str | Path | collections.CollectionManifest,
     *,
     authorize_path: Callable[[str], bool] | None,
+    snapshot: record_formats.AdapterSnapshot | None = None,
+    snapshot_denied: bool = False,
 ) -> _AuditChain:
-    denied = False
+    denied = snapshot_denied
 
     def authorize(relative: str) -> bool:
         nonlocal denied
@@ -2079,7 +2094,10 @@ def _inspect_audit_chain(
     if not authorize(manifest.storage.source):
         return _incomplete_audit_chain()
     try:
-        snapshot = record_formats.load_adapter(root, manifest, authorize_path=authorize).read()
+        if snapshot is None:
+            snapshot = record_formats.load_adapter(
+                root, manifest, authorize_path=authorize
+            ).read()
     except collections.CollectionError:
         if denied:
             return _incomplete_audit_chain()
@@ -2107,8 +2125,7 @@ def _inspect_audit_chain(
             else snapshot.snapshot
         )
         try:
-            for path_guard in snapshot.path_guards:
-                path_guard.recheck(root)
+            vault.recheck_path_guards(root, snapshot.path_guards)
             for directory_guard in snapshot.directory_guards:
                 directory_guard.recheck(root)
         except vault.PathGuardError:
