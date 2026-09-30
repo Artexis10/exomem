@@ -484,7 +484,8 @@ def test_current_state_comes_from_records_first(stateful_vault: Path) -> None:
     assert entry["source"] == "records"
     assert entry["as_of"] == "2026-09-10"
     assert "abroad" in entry["statement"]
-    assert set(entry) == {"anchor", "source", "as_of", "statement"}
+    assert set(entry) == {"anchor", "source", "path", "as_of", "statement"}
+    assert entry["path"] == collection.path
 
 
 def test_compile_abstains_on_a_turn_that_reaches_nothing(stateful_vault: Path) -> None:

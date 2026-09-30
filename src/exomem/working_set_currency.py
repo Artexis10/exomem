@@ -46,9 +46,9 @@ _VAULT_REF_PREFIX = "exomem://vault/"
 
 def own_time(context: str | None) -> str:
     """The unit's own authored date, read from its context slot; else empty."""
-    text = str(context or "")
+    text = str(context or "")[:512]
     for match in _ISO_DATE.finditer(text):
-        if _DEADLINE_CUE.search(text[: match.start()]):
+        if _DEADLINE_CUE.search(text[max(0, match.start() - 32) : match.start()]):
             continue
         try:
             date.fromisoformat(match.group(1))
