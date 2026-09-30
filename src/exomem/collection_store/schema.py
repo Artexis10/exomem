@@ -9,7 +9,8 @@ Contract held here, not in the writers:
 - every table is ``STRICT``;
 - ``txns``, ``audit_effects``, ``item_versions``, ``item_sources``,
   ``collection_manifests`` and ``collection_type_versions`` are append-only:
-  ``BEFORE UPDATE`` and ``BEFORE DELETE`` triggers abort the statement;
+  conflicting ``BEFORE INSERT``, ``BEFORE UPDATE`` and ``BEFORE DELETE``
+  triggers abort the statement;
 - ``items`` rows are never deleted (Records and Planning have no delete);
 - a natural key is unique per collection when complete (a partial unique
   index), and a view path is unique across the store;
@@ -247,15 +248,40 @@ _TABLES_V1 = (
 )
 
 
-def _append_only_triggers(table: str) -> tuple[str, str]:
+# Every primary/unique key that replacement conflict handling could delete.
+_CONFLICT_KEYS = {
+    "txns": (("txn_id",), ("transition_id",), ("request_id",), ("commit_seq",), ("store_head_hash",)),
+    "audit_effects": (("txn_id", "ordinal"),),
+    "item_versions": (("row_id", "row_version"),),
+    "item_sources": (("row_id", "row_version", "ordinal"),),
+    "collection_manifests": (("collection_id", "manifest_version"),),
+    "collection_type_versions": (("name", "version"),),
+    "items": (("row_id",), ("collection_id", "item_key"), ("view_path",), ("collection_id", "natural_key")),
+}
+
+
+def _conflicting_insert_trigger(table: str, name: str, message: str) -> str:
+    conflicts = " OR ".join(
+        "(" + " AND ".join(f"{column} = NEW.{column}" for column in key) + ")"
+        for key in _CONFLICT_KEYS[table]
+    )
+    return f"""
+        CREATE TRIGGER IF NOT EXISTS {name} BEFORE INSERT ON {table}
+        WHEN EXISTS (SELECT 1 FROM {table} WHERE {conflicts})
+        BEGIN SELECT RAISE(ABORT, '{message}'); END
+        """
+
+
+def _append_only_triggers(table: str) -> tuple[str, str, str]:
     message = f"append-only: {table} rows cannot be changed"
     return (
+        _conflicting_insert_trigger(table, f"{table}_append_only_insert", message),
         f"""
-        CREATE TRIGGER {table}_append_only_update BEFORE UPDATE ON {table}
+        CREATE TRIGGER IF NOT EXISTS {table}_append_only_update BEFORE UPDATE ON {table}
         BEGIN SELECT RAISE(ABORT, '{message}'); END
         """,
         f"""
-        CREATE TRIGGER {table}_append_only_delete BEFORE DELETE ON {table}
+        CREATE TRIGGER IF NOT EXISTS {table}_append_only_delete BEFORE DELETE ON {table}
         BEGIN SELECT RAISE(ABORT, '{message}'); END
         """,
     )
@@ -264,18 +290,22 @@ def _append_only_triggers(table: str) -> tuple[str, str]:
 _TRIGGERS_V1 = (
     *(statement for table in APPEND_ONLY_TABLES for statement in _append_only_triggers(table)),
     """
-    CREATE TRIGGER items_never_deleted BEFORE DELETE ON items
+    CREATE TRIGGER IF NOT EXISTS items_never_deleted BEFORE DELETE ON items
     BEGIN SELECT RAISE(ABORT, 'items rows are never deleted'); END
     """,
+    _conflicting_insert_trigger(
+        "items", "items_never_replaced",
+        "items rows cannot be replaced: row_id, item_key, view_path, natural_key conflict",
+    ),
     # The store-wide sequence is contiguous from 1 and follows the recorded head.
     """
-    CREATE TRIGGER txns_commit_seq_contiguous BEFORE INSERT ON txns
+    CREATE TRIGGER IF NOT EXISTS txns_commit_seq_contiguous BEFORE INSERT ON txns
     WHEN NEW.commit_seq IS NOT
       (SELECT CAST(value AS INTEGER) + 1 FROM store_meta WHERE key = 'commit_seq')
     BEGIN SELECT RAISE(ABORT, 'commit_seq must be contiguous with the store head'); END
     """,
     """
-    CREATE TRIGGER txns_advance_store_head AFTER INSERT ON txns
+    CREATE TRIGGER IF NOT EXISTS txns_advance_store_head AFTER INSERT ON txns
     BEGIN
       UPDATE store_meta SET value = CAST(NEW.commit_seq AS TEXT) WHERE key = 'commit_seq';
       INSERT OR REPLACE INTO store_meta(key, value)
@@ -354,8 +384,6 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
     nothing. A store newer than this release refuses rather than downgrading.
     """
     target = SCHEMA_VERSION
-    if schema_version(conn) == target:
-        return target
     conn.execute("BEGIN IMMEDIATE")
     try:
         current = schema_version(conn)
@@ -363,13 +391,17 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
             raise SchemaVersionError(current, target)
         for version in range(current + 1, target + 1):
             MIGRATIONS[version](conn)
+        # Repair missing protections even when the recorded version is current.
+        for statement in _TRIGGERS_V1:
+            conn.execute(statement)
         conn.execute(
             "INSERT INTO store_meta(key, value) VALUES (?, ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (META_SCHEMA_VERSION, str(target)),
         )
+        conn.execute("COMMIT")
     except BaseException:
-        conn.execute("ROLLBACK")
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
         raise
-    conn.execute("COMMIT")
     return target

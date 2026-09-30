@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterator
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -107,8 +108,9 @@ def _seed_collection(conn: sqlite3.Connection, collection_id: str = COLLECTION_I
         ("records", 1, 1),
     )
     conn.execute(
-        "INSERT OR IGNORE INTO collection_type_versions(name, version, declaration_json,"
-        " declaration_hash, change_class, txn_id) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO collection_type_versions(name, version, declaration_json,"
+        " declaration_hash, change_class, txn_id) SELECT ?,?,?,?,?,?"
+        " WHERE NOT EXISTS (SELECT 1 FROM collection_type_versions WHERE name='records' AND version=1)",
         ("records", 1, "{}", H, "builtin", 1),
     )
     conn.execute(
@@ -372,9 +374,8 @@ def test_a_new_store_is_schema_version_1_with_identity(store: connection.WriterC
 
 def test_reopening_a_store_keeps_its_identity(tmp_path: Path) -> None:
     target = tmp_path / "state" / "collections.sqlite"
-    first = connection.open_writer(target, lease_check=_allow)
-    identity = dict(first.connection.execute("SELECT key, value FROM store_meta").fetchall())
-    first.close()
+    with connection.open_writer(target, lease_check=_allow) as first:
+        identity = dict(first.connection.execute("SELECT key, value FROM store_meta").fetchall())
     second = connection.open_writer(target, lease_check=_allow)
     try:
         again = dict(second.connection.execute("SELECT key, value FROM store_meta").fetchall())
@@ -385,13 +386,12 @@ def test_reopening_a_store_keeps_its_identity(tmp_path: Path) -> None:
 
 def test_a_store_newer_than_this_release_refuses(tmp_path: Path) -> None:
     target = tmp_path / "state" / "collections.sqlite"
-    writer = connection.open_writer(target, lease_check=_allow)
-    with writer.transaction() as tx:
-        tx.execute(
-            "UPDATE store_meta SET value = ? WHERE key = 'schema_version'",
-            (str(schema.SCHEMA_VERSION + 1),),
-        )
-    writer.close()
+    with connection.open_writer(target, lease_check=_allow) as writer:
+        with writer.transaction() as tx:
+            tx.execute(
+                "UPDATE store_meta SET value = ? WHERE key = 'schema_version'",
+                (str(schema.SCHEMA_VERSION + 1),),
+            )
 
     with pytest.raises(connection.CollectionStoreError) as refused:
         connection.open_writer(target, lease_check=_allow)
@@ -424,11 +424,12 @@ def test_forward_migrations_run_in_order_from_the_recorded_version(
 
 
 def test_writes_require_the_writer_lease(tmp_path: Path) -> None:
-    held = {"lease": False}
+    held = {"lease": True}
     writer = connection.open_writer(
         tmp_path / "state" / "collections.sqlite", lease_check=lambda: held["lease"]
     )
     try:
+        held["lease"] = False
         with pytest.raises(connection.CollectionStoreError) as refused, writer.transaction():
             pass
         assert refused.value.code == "COLLECTION_STORE_LEASE_REQUIRED"
@@ -578,42 +579,296 @@ def test_a_broken_chain_is_detected(store: connection.WriterConnection) -> None:
 
 
 def test_forks_are_decided_by_head_never_by_colliding_txn_ids(tmp_path: Path) -> None:
-    origin = connection.open_writer(tmp_path / "a" / "collections.sqlite", lease_check=_allow)
-    with origin.transaction() as tx:
-        shared = _txn(tx, txn_id=1, commit_seq=1, event_hash="1" * 64, prev_head=None)
-
-    fork_path = tmp_path / "b" / "collections.sqlite"
-    fork_path.parent.mkdir()
-    copy = sqlite3.connect(fork_path)
-    origin.connection.backup(copy)
-    copy.close()
-    fork = connection.open_writer(fork_path, lease_check=_allow)
-
-    try:
-        # Both sides commit their own transaction 2: the txn_id integers collide.
+    with connection.open_writer(tmp_path / "a" / "collections.sqlite", lease_check=_allow) as origin:
         with origin.transaction() as tx:
-            origin_head = _txn(tx, txn_id=2, commit_seq=2, event_hash="a" * 64, prev_head=shared)
-        with fork.transaction() as tx:
-            fork_head = _txn(tx, txn_id=2, commit_seq=2, event_hash="b" * 64, prev_head=shared)
+            shared = _txn(tx, txn_id=1, commit_seq=1, event_hash="1" * 64, prev_head=None)
 
-        def txn_ids(writer: connection.WriterConnection) -> list[int]:
-            return [r[0] for r in writer.connection.execute("SELECT txn_id FROM txns")]
+        fork_path = tmp_path / "b" / "collections.sqlite"
+        fork_path.parent.mkdir()
+        with closing(sqlite3.connect(fork_path)) as copy:
+            origin.connection.backup(copy)
+        with connection.open_writer(fork_path, lease_check=_allow) as fork:
+            # Both sides commit their own transaction 2: the txn_id integers collide.
+            with origin.transaction() as tx:
+                origin_head = _txn(tx, txn_id=2, commit_seq=2, event_hash="a" * 64, prev_head=shared)
+            with fork.transaction() as tx:
+                fork_head = _txn(tx, txn_id=2, commit_seq=2, event_hash="b" * 64, prev_head=shared)
 
-        assert txn_ids(origin) == txn_ids(fork) == [1, 2]
-        assert origin_head != fork_head
+            def txn_ids(writer: connection.WriterConnection) -> list[int]:
+                return [r[0] for r in writer.connection.execute("SELECT txn_id FROM txns")]
 
-        assert chain.head_relation(origin.connection, 2, origin_head) == "same"
-        assert chain.head_relation(origin.connection, 2, fork_head) == "fork"
-        assert chain.head_relation(fork.connection, 2, origin_head) == "fork"
-        assert chain.head_relation(origin.connection, 1, shared) == "ancestor"
-        assert chain.head_relation(origin.connection, 1, "c" * 64) == "fork"
-        assert chain.head_relation(origin.connection, 3, "d" * 64) == "ahead"
-        # Both copies still carry one store lineage identity.
-        store_ids = {
-            w.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
-            for w in (origin, fork)
-        }
-        assert len(store_ids) == 1
+            assert txn_ids(origin) == txn_ids(fork) == [1, 2]
+            assert origin_head != fork_head
+
+            assert chain.head_relation(origin.connection, 2, origin_head) == "same"
+            assert chain.head_relation(origin.connection, 2, fork_head) == "fork"
+            assert chain.head_relation(fork.connection, 2, origin_head) == "fork"
+            assert chain.head_relation(origin.connection, 1, shared) == "ancestor"
+            assert chain.head_relation(origin.connection, 1, "c" * 64) == "fork"
+            assert chain.head_relation(origin.connection, 3, "d" * 64) == "ahead"
+            # Both copies still carry one store lineage identity.
+            store_ids = {
+                w.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+                for w in (origin, fork)
+            }
+            assert len(store_ids) == 1
+
+
+@pytest.mark.parametrize("table", APPEND_ONLY)
+@pytest.mark.parametrize("statement", ["REPLACE", "INSERT OR REPLACE", "UPSERT"])
+@pytest.mark.parametrize("recursive", [0, 1])
+def test_history_conflicting_inserts_are_refused(
+    store: connection.WriterConnection, table: str, statement: str, recursive: int
+) -> None:
+    _populated(store)
+    conn = store.connection
+    conn.execute(f"PRAGMA recursive_triggers={recursive}")
+    columns = [row[1] for row in conn.execute(f"PRAGMA table_info('{table}')")]
+    before = conn.execute(f"SELECT * FROM {table}").fetchall()
+    values = dict(zip(columns, before[0], strict=True))
+    if table == "txns":
+        # A valid next head avoids a false refusal from the sequence trigger.
+        values["commit_seq"] = 2
+        values["store_head_hash"] = tokens.store_head_hash(values["store_head_hash"], 2, H)
+        values["why"] = "REPLACED"
+    elif table == "item_versions":
+        values["body"] = "REPLACED"
+    prefix = "INSERT" if statement == "UPSERT" else statement
+    sql = f"{prefix} INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})"
+    if statement == "UPSERT":
+        sql += f" ON CONFLICT DO UPDATE SET {columns[-1]}=excluded.{columns[-1]}"
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"), store.transaction() as tx:
+        tx.execute(sql, tuple(values.values()))
+    assert conn.execute(f"SELECT * FROM {table}").fetchall() == before
+    assert chain.verify_store_chain(conn)[0] == 1
+
+
+@pytest.mark.parametrize("key", ["row_id", "item_key", "view_path", "natural_key"])
+@pytest.mark.parametrize("statement", ["REPLACE", "INSERT OR REPLACE", "UPSERT"])
+@pytest.mark.parametrize("recursive", [0, 1])
+def test_item_conflicting_inserts_are_refused(
+    store: connection.WriterConnection, key: str, statement: str, recursive: int
+) -> None:
+    _populated(store)
+    conn = store.connection
+    conn.execute(f"PRAGMA recursive_triggers={recursive}")
+    columns = [row[1] for row in conn.execute("PRAGMA table_info('items')")]
+    before = conn.execute("SELECT * FROM items").fetchall()
+    values = dict(zip(columns, before[0], strict=True))
+    for column, replacement in (
+        ("row_id", 2), ("item_key", "k2"), ("view_path", "v/b.md"), ("natural_key", "other")
+    ):
+        if column != key:
+            values[column] = replacement
+    values["body"] = "REPLACED"
+    prefix = "INSERT" if statement == "UPSERT" else statement
+    sql = f"{prefix} INTO items ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})"
+    if statement == "UPSERT":
+        sql += " ON CONFLICT DO UPDATE SET body=excluded.body"
+    with pytest.raises(sqlite3.IntegrityError, match="items"), store.transaction() as tx:
+        tx.execute(sql, tuple(values.values()))
+    assert conn.execute("SELECT * FROM items").fetchall() == before
+
+
+def test_schema_ensure_restores_protection_at_current_version(
+    store: connection.WriterConnection,
+) -> None:
+    conn = store.connection
+    _populated(store)
+    triggers = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+    for name in triggers:
+        conn.execute(f"DROP TRIGGER {name}")
+    assert schema.schema_version(conn) == schema.SCHEMA_VERSION
+    schema.ensure_schema(conn)
+    restored = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+    expected = {
+        f"{table}_append_only_{action}"
+        for table in APPEND_ONLY for action in ("insert", "update", "delete")
+    } | {"items_never_deleted", "items_never_replaced", "txns_commit_seq_contiguous", "txns_advance_store_head"}
+    assert expected <= restored
+    conn.execute("PRAGMA recursive_triggers=OFF")
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("REPLACE INTO item_versions SELECT * FROM item_versions")
+
+
+def test_every_package_connection_enables_recursive_triggers(
+    store: connection.WriterConnection,
+) -> None:
+    assert store.connection.execute("PRAGMA recursive_triggers").fetchone()[0] == 1
+    reader = connection.open_reader(store.path)
+    try:
+        assert reader.execute("PRAGMA recursive_triggers").fetchone()[0] == 1
     finally:
-        origin.close()
-        fork.close()
+        reader.close()
+
+
+def test_open_without_authority_refuses_before_creating_schema(tmp_path: Path) -> None:
+    target = tmp_path / "refused" / "collections.sqlite"
+    with pytest.raises(connection.CollectionStoreError) as refused:
+        with connection.open_writer(target, lease_check=lambda: False):
+            pass
+    assert refused.value.code == "COLLECTION_STORE_LEASE_REQUIRED"
+    assert not target.parent.exists()
+
+
+def test_unbound_store_does_not_accept_any_vault_boundary(tmp_path: Path) -> None:
+    from exomem.mutation_lock import VaultMutationCoordinator
+
+    coordinator = VaultMutationCoordinator(tmp_path / "locks", tmp_path / "vault-a")
+    target = tmp_path / "vault-b-state" / "collections.sqlite"
+    with coordinator.hold(), pytest.raises(connection.CollectionStoreError) as refused:
+        with connection.open_writer(target) as writer, writer.transaction() as tx:
+            tx.execute("INSERT INTO store_meta VALUES ('wrong-vault', 'committed')")
+    assert refused.value.code == "COLLECTION_STORE_LEASE_REQUIRED"
+    assert not target.exists()
+
+
+def test_writer_is_bound_to_its_vault_boundary(tmp_path: Path) -> None:
+    from exomem.mutation_lock import VaultMutationCoordinator
+    from exomem.writer_lease import LeaseConfig
+
+    vault_a, vault_b = tmp_path / "vault-a", tmp_path / "vault-b"
+    state = LeaseConfig.from_env().state_dir
+    coordinator_a = VaultMutationCoordinator(state, vault_a)
+    coordinator_b = VaultMutationCoordinator(state, vault_b)
+    target = connection.store_path(vault_b)
+    with coordinator_a.hold(), pytest.raises(connection.CollectionStoreError) as refused:
+        with connection.open_writer(target, vault_root=vault_b):
+            pass
+    assert refused.value.code == "COLLECTION_STORE_LEASE_REQUIRED"
+    assert not target.exists()
+    with coordinator_b.hold():
+        writer = connection.open_writer(target, vault_root=vault_b)
+    try:
+        with coordinator_a.hold(), pytest.raises(connection.CollectionStoreError):
+            with writer.transaction() as tx:
+                tx.execute("INSERT INTO store_meta VALUES ('wrong-vault', 'committed')")
+        with coordinator_b.hold(), writer.transaction() as tx:
+            tx.execute("INSERT INTO store_meta VALUES ('right-vault', 'committed')")
+        assert writer.connection.execute("SELECT value FROM store_meta WHERE key='wrong-vault'").fetchone() is None
+        assert writer.connection.execute("SELECT value FROM store_meta WHERE key='right-vault'").fetchone() == ("committed",)
+    finally:
+        writer.close()
+
+
+def test_writer_refuses_a_path_outside_its_bound_vault(tmp_path: Path) -> None:
+    from exomem.mutation_lock import VaultMutationCoordinator
+    from exomem.writer_lease import LeaseConfig
+
+    vault = tmp_path / "vault-a"
+    coordinator = VaultMutationCoordinator(LeaseConfig.from_env().state_dir, vault)
+    target = connection.store_path(tmp_path / "vault-b")
+    with coordinator.hold(), pytest.raises(connection.CollectionStoreError) as refused:
+        with connection.open_writer(target, vault_root=vault):
+            pass
+    assert refused.value.code == "COLLECTION_STORE_VAULT_MISMATCH"
+    assert not target.exists()
+
+
+def test_only_one_writer_owns_a_store_until_close(store: connection.WriterConnection) -> None:
+    with pytest.raises(connection.CollectionStoreError) as refused:
+        with connection.open_writer(store.path.parent / "." / store.path.name, lease_check=_allow):
+            pass
+    assert refused.value.code == "COLLECTION_STORE_WRITER_OPEN"
+    store.close()
+    with connection.open_writer(store.path, lease_check=_allow) as reopened:
+        with reopened.transaction() as tx:
+            tx.execute("INSERT INTO store_meta VALUES ('reopened', 'ok')")
+
+
+def test_writer_transactions_belong_to_the_opening_thread(store: connection.WriterConnection) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def write_elsewhere() -> None:
+        with store.transaction() as tx:
+            tx.execute("INSERT INTO store_meta VALUES ('other-thread', 'committed')")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with pytest.raises(connection.CollectionStoreError) as refused:
+            pool.submit(write_elsewhere).result()
+    assert refused.value.code == "COLLECTION_STORE_WRITER_THREAD"
+    assert not store.connection.in_transaction
+
+
+def test_deferred_commit_failure_rolls_back_and_writer_can_be_reused(
+    store: connection.WriterConnection,
+) -> None:
+    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
+        with store.transaction() as tx:
+            tx.execute("INSERT INTO audit_effects(txn_id, ordinal, effect) VALUES (999, 0, 'insert')")
+    assert not store.connection.in_transaction
+    assert store.connection.execute("SELECT count(*) FROM audit_effects").fetchone() == (0,)
+    with store.transaction() as tx:
+        tx.execute("INSERT INTO store_meta VALUES ('after-failed-commit', 'ok')")
+    assert store.connection.execute("SELECT value FROM store_meta WHERE key='after-failed-commit'").fetchone() == ("ok",)
+
+
+def test_schema_deferred_commit_failure_rolls_back_and_connection_can_be_reused(
+    store: connection.WriterConnection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failed_migration(conn: sqlite3.Connection) -> None:
+        conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT")
+        conn.execute("INSERT INTO audit_effects(txn_id, ordinal, effect) VALUES (999, 0, 'insert')")
+
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", 2)
+    monkeypatch.setitem(schema.MIGRATIONS, 2, failed_migration)
+    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
+        schema.ensure_schema(store.connection)
+    assert not store.connection.in_transaction
+    assert schema.schema_version(store.connection) == 1
+    assert store.connection.execute("SELECT count(*) FROM audit_effects").fetchone() == (0,)
+    assert store.connection.execute("SELECT name FROM sqlite_master WHERE name='migration_probe'").fetchone() is None
+    monkeypatch.setitem(schema.MIGRATIONS, 2, lambda conn: conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT"))
+    assert schema.ensure_schema(store.connection) == 2
+    with store.transaction() as tx:
+        tx.execute("INSERT INTO migration_probe VALUES (1)")
+    assert store.connection.execute("SELECT x FROM migration_probe").fetchone() == (1,)
+
+
+@pytest.mark.parametrize(
+    ("setup", "failure"),
+    [
+        ("test_forks_are_decided_by_head_never_by_colliding_txn_ids", "backup"),
+        ("test_reopening_a_store_keeps_its_identity", "SELECT key, value FROM store_meta"),
+        ("test_a_store_newer_than_this_release_refuses", "UPDATE store_meta SET value"),
+    ],
+)
+def test_setup_connections_close_on_exceptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setup: str, failure: str,
+) -> None:
+    opened: list[sqlite3.Connection] = []
+    closed: list[sqlite3.Connection] = []
+    original_connect = sqlite3.connect
+
+    class TrackedConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql.startswith(failure):
+                raise sqlite3.OperationalError("invented setup failure")
+            return super().execute(sql, *args)
+
+        def backup(self, target, *args, **kwargs):
+            if failure == "backup":
+                raise sqlite3.OperationalError("invented setup failure")
+            return super().backup(target, *args, **kwargs)
+
+        def close(self):
+            closed.append(self)
+            return super().close()
+
+    def tracked_connect(*args, **kwargs):
+        kwargs["factory"] = TrackedConnection
+        conn = original_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="invented setup failure"):
+            globals()[setup](tmp_path)
+        assert opened
+        assert set(opened) <= set(closed), "setup must close every connection it opened"
+    finally:
+        # Clean up even while exercising the buggy setup during the red run.
+        for conn in opened:
+            if conn not in closed:
+                conn.close()

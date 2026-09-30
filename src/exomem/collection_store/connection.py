@@ -18,6 +18,7 @@ timeout.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -31,6 +32,11 @@ BUSY_TIMEOUT_MS = 5000
 #: Connection class used for every store connection (a test seam for engines
 #: whose journal mode does not take effect).
 _CONNECTION_FACTORY: type[sqlite3.Connection] = sqlite3.Connection
+
+# Process-local connection ownership; the existing vault lease remains the
+# cross-process authority. Reserve before opening, release on failure or close.
+_WRITERS_GUARD = threading.Lock()
+_WRITER_PATHS: set[Path] = set()
 
 
 class CollectionStoreUnavailable(RuntimeError):
@@ -84,6 +90,7 @@ def _connect(database: str, *, uri: bool = False) -> sqlite3.Connection:
 
 
 def _apply_writer_pragmas(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA recursive_triggers=ON")
     conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()
     if mode is None or str(mode[0]).lower() != "wal":
@@ -96,10 +103,28 @@ def _apply_writer_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys=ON")
 
 
-def _default_lease_check() -> bool:
-    from .. import mutation_lock
+def _require_lease(lease_check: Callable[[], bool]) -> None:
+    if not lease_check():
+        raise CollectionStoreError(
+            "COLLECTION_STORE_LEASE_REQUIRED",
+            "collection store writes run only inside this vault's writer lease",
+        )
 
-    return mutation_lock.current_thread_holds_boundary()
+
+def _vault_lease_check(path: Path, vault_root: Path | None) -> Callable[[], bool]:
+    from ..mutation_lock import VaultMutationCoordinator
+    from ..writer_lease import LeaseConfig
+
+    if vault_root is None:
+        raise CollectionStoreError(
+            "COLLECTION_STORE_LEASE_REQUIRED", "a writer must be bound to its vault"
+        )
+    if path != store_path(vault_root).resolve():
+        raise CollectionStoreError(
+            "COLLECTION_STORE_VAULT_MISMATCH", "the store path does not belong to this vault"
+        )
+    coordinator = VaultMutationCoordinator(LeaseConfig.from_env().state_dir, Path(vault_root))
+    return coordinator.current_thread_holds_boundary
 
 
 class WriterConnection:
@@ -111,26 +136,32 @@ class WriterConnection:
         self.path = path
         self.connection = conn
         self._lease_check = lease_check
+        self._owner_thread = threading.get_ident()
+        self._closed = False
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
-        if not self._lease_check():
+        if threading.get_ident() != self._owner_thread:
             raise CollectionStoreError(
-                "COLLECTION_STORE_LEASE_REQUIRED",
-                "collection store writes run only inside the writer lease",
+                "COLLECTION_STORE_WRITER_THREAD", "the opening thread owns the writer connection"
             )
+        _require_lease(self._lease_check)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             yield self.connection
+            self.connection.execute("COMMIT")
         except BaseException:
             if self.connection.in_transaction:
                 self.connection.execute("ROLLBACK")
             raise
-        self.connection.execute("COMMIT")
 
     def close(self) -> None:
-        self.connection.close()
+        if not self._closed:
+            self.connection.close()
+            self._closed = True
+            with _WRITERS_GUARD:
+                _WRITER_PATHS.remove(self.path)
 
     def __enter__(self) -> WriterConnection:
         return self
@@ -140,28 +171,44 @@ class WriterConnection:
 
 
 def open_writer(
-    path: Path, *, lease_check: Callable[[], bool] | None = None
+    path: Path, *, vault_root: Path | None = None,
+    lease_check: Callable[[], bool] | None = None,
 ) -> WriterConnection:
-    """Open (creating or migrating) the store for writing.
+    """Open the vault's single writer, under its mutation boundary.
 
-    ``lease_check`` decides whether the caller holds the writer lease when a
-    write transaction starts; by default it is the process-local mutation
-    boundary.
+    ``vault_root`` binds the default authority and store placement to the same
+    vault. Opening (including schema repair/migration) and each transaction
+    require that boundary. The opening thread owns this connection until close.
+    ``lease_check`` is a trusted adapter/test seam: its caller must supply the
+    exact store's scoped authority, never the process-wide scheduler predicate.
     """
     check_sqlite_version()
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    conn = _connect(str(target))
+    target = Path(path).resolve()
+    check = lease_check if lease_check is not None else _vault_lease_check(target, vault_root)
+    _require_lease(check)
+    with _WRITERS_GUARD:
+        if target in _WRITER_PATHS:
+            raise CollectionStoreError(
+                "COLLECTION_STORE_WRITER_OPEN", "this store already has an open writer connection"
+            )
+        _WRITER_PATHS.add(target)
+    conn = None
     try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        conn = _connect(str(target))
         _apply_writer_pragmas(conn)
+        _require_lease(check)
         try:
             schema.ensure_schema(conn)
         except schema.SchemaVersionError as error:
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_NEWER", str(error)) from error
+        return WriterConnection(target, conn, check)
     except BaseException:
-        conn.close()
+        if conn is not None:
+            conn.close()
+        with _WRITERS_GUARD:
+            _WRITER_PATHS.remove(target)
         raise
-    return WriterConnection(target, conn, lease_check or _default_lease_check)
 
 
 def open_reader(path: Path) -> sqlite3.Connection:
@@ -172,6 +219,7 @@ def open_reader(path: Path) -> sqlite3.Connection:
         raise CollectionStoreError("COLLECTION_STORE_ABSENT", "the collection store does not exist")
     conn = _connect(f"{target.resolve().as_uri()}?mode=ro", uri=True)
     try:
+        conn.execute("PRAGMA recursive_triggers=ON")
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA foreign_keys=ON")
