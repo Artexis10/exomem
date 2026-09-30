@@ -726,15 +726,18 @@ number of pages the rarity gate can admit at the current corpus size. Candidates
 result is limited, and raw-material and navigation pages SHALL be excluded
 inside the ranking query, before its row limit applies, so that the limit
 counts only rows that can be candidates. A page SHALL be carried only when it is the ONLY surviving
-candidate; where two or more survive, the turn SHALL abstain `unresolved`,
-SHALL NOT select between them by ranking score, and SHALL report them under
-`anchors[]` at a distinct status meaning "named, not carried" — never the
-carried status and never as resolution ambiguity. Those entries SHALL cross
+candidate of the phrase that named it. A turn that names several things by
+several phrases, each answered to by exactly one page, names several domains
+and SHALL carry each such page (at most three, by score). Where two or more
+pages survive for ONE phrase and no other phrase names a page, the turn SHALL
+abstain `unresolved`, SHALL NOT select between them by ranking score, and SHALL
+report them under `anchors[]` at a distinct status meaning "named, not carried"
+— never the carried status and never as resolution ambiguity. Those entries SHALL cross
 the release plane as anchors do. A candidate
 the ranking scored at or below a declared sanity bound SHALL NOT be carried.
 
-A carried packet SHALL report that page as its one anchor entry, of kind `page`,
-at status `retrieval_carried`, with `retrieval` as its only evidence, and SHALL
+A carried packet SHALL report each carried page as its own anchor entry, of kind
+`page`, at status `retrieval_carried`, with `retrieval` as its only evidence, and SHALL
 mark itself `generation.carried_by = "retrieval"`. Its material SHALL come from
 that page through the existing bounded unit lanes. The continuity token minted
 from a carried packet SHALL name the carried page's path, so that a following

@@ -1428,12 +1428,15 @@ def _packet_lines(packet: dict) -> list[str]:
             continue
         text = str(unit.get("text") or "").strip()
         ref = str(unit.get("ref") or "")
-        if not ref:
-            provenance = unit.get("provenance")
-            if isinstance(provenance, dict):
-                ref = str(provenance.get("path") or "")
+        provenance = unit.get("provenance")
+        if not ref and isinstance(provenance, dict):
+            ref = str(provenance.get("path") or "")
+        # A unit carried beside the resolved anchors because the turn named its
+        # page says so: three bytes, so "you named this anchor" and "this was
+        # carried because you named it" stay distinguishable in the block.
+        carried = isinstance(provenance, dict) and provenance.get("carried") is True
         if text:
-            lines.append(_packet_line("unit", text, ref))
+            lines.append(_packet_line("carried" if carried else "unit", text, ref))
     for pointer in packet.get("pointers") or ():
         if not isinstance(pointer, dict):
             continue

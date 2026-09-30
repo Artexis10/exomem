@@ -7329,6 +7329,42 @@ class LexicalStore:
         finally:
             conn.close()
 
+    def unit_categories_of(self, paths: Iterable[str]) -> dict[str, frozenset[str]] | None:
+        """The categories each page's own semantic units are filed under.
+
+        One indexed read of the maintained `semantic_units` table, bounded by
+        the caller's own path list and by nothing else: no hydration, no
+        eligibility check, no ranking. A caller uses it to choose WHICH lenses
+        to read a page through, never to serve anything from it. None when the
+        catalogue is absent or stale, so a caller keeps its unfiltered lenses.
+        """
+        wanted = sorted({str(path) for path in paths if str(path)})
+        if not wanted or self._failed or not self.path.exists():
+            return None
+        try:
+            conn = self._connect()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical unit-category probe declined (%s)")
+            return None
+        try:
+            if not self._schema_is_current(conn):
+                return None
+            rows = conn.execute(
+                "SELECT DISTINCT parent_path, category FROM semantic_units "
+                "WHERE parent_path IN (SELECT value FROM json_each(?))",
+                (json.dumps(wanted, ensure_ascii=False),),
+            ).fetchall()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical unit-category probe declined (%s)")
+            return None
+        finally:
+            conn.close()
+        out: dict[str, set[str]] = {}
+        for parent, category in rows:
+            if category:
+                out.setdefault(str(parent), set()).add(str(category))
+        return {path: frozenset(found) for path, found in out.items()}
+
     def tag_members_by_page(self) -> list[tuple[str, list[str]]] | None:
         """Each Knowledge Base page's stored `page.tags` members, by path.
 

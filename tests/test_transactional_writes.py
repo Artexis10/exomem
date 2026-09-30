@@ -2664,3 +2664,11 @@ def test_move_file_rolls_back_rename_when_link_batch_fails(
     assert old.exists()
     assert not (old.parent / "new.md").exists()
     assert "[[Knowledge Base/Notes/old]]" in inbound.read_text(encoding="utf-8")
+
+
+def test_batch_write_without_a_vault_root_or_guards_publishes(tmp_path: Path) -> None:
+    """No guarded ancestors means no vault_root; the batched guard recheck must not need one."""
+    target = tmp_path / "plain.md"
+    result = vault_module.batch_atomic_write([vault_module.PlannedWrite(target, "# plain\n")])
+    assert target.read_text() == "# plain\n"
+    assert result is not None

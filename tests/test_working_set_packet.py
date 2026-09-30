@@ -162,7 +162,10 @@ def test_withheld_collection_claims_do_not_change_visible_claim_routing(
     assert populations[-1] == (visible_path,)
 
 
-def test_unit_text_is_capped() -> None:
+def test_a_unit_over_the_ceiling_is_a_pointer_not_a_cut_unit() -> None:
+    """Amended (standing precedent): a unit is never cut, because a cut can drop
+    a scope qualifier and leave a half-claim. Past `MAX_UNIT_HARD_CHARS` it is
+    reported as a pointer instead."""
     packet = working_set.build_packet(
         items=(_item("resources", text="y" * 1000),),
         anchors=(),
@@ -175,7 +178,8 @@ def test_unit_text_is_capped() -> None:
         status="resolved",
     )
 
-    assert len(packet["units"][0]["text"]) == working_set.MAX_UNIT_CHARS
+    assert packet["units"] == []
+    assert [p["reason"] for p in packet["pointers"]] == ["unit_too_long"]
 
 
 def test_packet_never_carries_the_due_state_carrier() -> None:
@@ -612,7 +616,8 @@ def test_pointers_carry_a_why() -> None:
 
 
 def test_unit_text_is_never_cut_inside_a_wikilink() -> None:
-    """A half-written wikilink is both unreadable and unscannable.
+    """A half-written wikilink is both unreadable and unscannable. A unit is now
+    served whole or not at all, so a wikilink is never split either way.
 
     The egress guard finds a withheld page by matching `[[…]]`, so a cut that
     leaves `[[norther` hides the reference from the scan as well as from the
@@ -632,9 +637,8 @@ def test_unit_text_is_never_cut_inside_a_wikilink() -> None:
     )
 
     text = packet["units"][0]["text"]
-    assert len(text) <= working_set.MAX_UNIT_CHARS
+    assert text == f"{head}[[northern-corridor-hub]] tail"
     assert text.count("[[") == text.count("]]")
-    assert "[[norther" not in text or "]]" in text
 
 
 def test_a_closed_wikilink_inside_the_cap_survives() -> None:

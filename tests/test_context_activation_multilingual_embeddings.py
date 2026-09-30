@@ -62,6 +62,39 @@ SEMANTIC_STAGE_P95_MS = 250.0
 #: Latency samples per content turn: every on-arm turn is compiled this many
 #: times from a cold packet cache, so the p95 is over more than one pass.
 LATENCY_PASSES = 3
+#: The named golds, and one ordinary note each that shares a phrase with the
+#: turn but is not what the turn names: a cleaning rota that mentions the
+#: glaze firing, a shed roof that leaks after winter, a shopping list for next
+#: month's retreat. Written into the multilingual vault after it has been
+#: measured, so every other assertion here reads the vault without them.
+NAMED_GOLDS = ("M1-de", "M1-ru", "M5-ja")
+INCIDENTAL_NOTES = {
+    "putzplan.md": (
+        "Putzplan Gemeinschaftsraum",
+        "Nach dem Glasurbrand am Donnerstag ist die Teeküche dran; Besen und Eimer stehen im Flur.",
+    ),
+    "saraj.md": (
+        "Сарай у озера",
+        "Крыша сарая протекает после зимы; ведро стоит у двери, пока не придёт кровельщик.",
+    ),
+    "kaidashi.md": (
+        "備品メモ",
+        "来月の合宿でプロジェクターをまた借りられるか確認してくれる人を探す。",
+    ),
+}
+_INCIDENTAL_NOTE = """---
+type: note
+status: active
+tags: [misc]
+created: "2026-09-01T02:00:39Z"
+updated: "2026-09-01T02:00:39Z"
+---
+# {title}
+
+## Observations
+
+- [note] {body} #misc
+"""
 
 
 @dataclasses.dataclass
@@ -77,6 +110,8 @@ class Measured:
     english_vectors: int
     fingerprint: str
     dim: int
+    incidental: dict[str, dict[str, dict]]
+    incidental_carry: dict[str, tuple[str, ...]]
 
 
 _MEASURED: dict[str, Measured] = {}
@@ -155,6 +190,22 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
             packet = commands.op_activate_context(root, turn=case.turn, include_timings=True)
             semantic_ms.append(float(packet["timings"]["stages"]["working_set.semantic"]["ms"]))
 
+    # The same vault with an ordinary note beside each named gold that shares
+    # a phrase with its turn, so the retrieval carry names that note instead.
+    for name, (title, body) in INCIDENTAL_NOTES.items():
+        (root / "Knowledge Base" / "Notes" / "Insights" / name).write_text(
+            _INCIDENTAL_NOTE.format(title=title, body=body), encoding="utf-8"
+        )
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(root).rebuild(load_encoder=True)
+    lexstore.ensure_fresh(root)
+    named_cases = [case for case in CASES if case.case_id in NAMED_GOLDS]
+    incidental_carry = {
+        case.case_id: tuple(path for path, _score in working_set_runtime.carry_candidates(root, case.turn)[0])
+        for case in named_cases
+    }
+    incidental = _compile_arms(root, [(case.case_id, case.prior_turn, case.turn) for case in named_cases], monkeypatch)
+
     # The English corpus carries its own recency on disk, in its own vault
     # root's heat sidecar -- untouched by the seeding above -- and its turns
     # are timed by nobody.
@@ -205,6 +256,8 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
         english_vectors,
         fingerprint,
         dim,
+        incidental,
+        incidental_carry,
     )
 
 
@@ -256,6 +309,30 @@ def test_every_named_positive_resolves_its_gold(measured: Measured) -> None:
         assert row["gold_resolved"] is True, (case_id, row)
         assert row["observed_status"]["off"] == "partial", (case_id, row)
     assert report["summary"]["named_resolution_rate"] == 1.0
+
+
+def test_an_incidental_note_the_carry_names_never_costs_a_named_gold(measured: Measured) -> None:
+    """Each named gold's turn also shares a phrase with an ordinary note. The
+    carry names that note for the German and Russian turns (an unspaced
+    Japanese turn has no phrase the carry can pair, so it names nothing).
+    The turn named the gold by its rare name, not the note, so the gold still
+    resolves on the band, exactly as it does with no such note in the vault,
+    and never resolves without it."""
+    notes = {name: f"Knowledge Base/Notes/Insights/{name}" for name in INCIDENTAL_NOTES}
+    assert measured.incidental_carry == {
+        "M1-de": (notes["putzplan.md"],),
+        "M1-ru": (notes["saraj.md"],),
+        "M5-ja": (),
+    }
+    for case in CASES:
+        if case.case_id not in NAMED_GOLDS:
+            continue
+        (gold,) = (measured.manifest.key_to_path[key] for key in case.gold)
+        on = {item["path"]: item["status"] for item in measured.incidental["on"][case.case_id]["anchors"]}
+        off = {item["path"]: item["status"] for item in measured.incidental["off"][case.case_id]["anchors"]}
+        assert on.get(gold) == "resolved", (case.case_id, on)
+        assert "carried_by" not in measured.incidental["on"][case.case_id]["generation"], case.case_id
+        assert off.get(gold) != "resolved", (case.case_id, off)
 
 
 def test_no_poison_is_banded_or_promoted(measured: Measured) -> None:
@@ -333,9 +410,8 @@ def test_the_semantic_stage_meets_its_latency_bar(measured: Measured) -> None:
 def test_the_english_set_keeps_its_v1_verdicts_with_semantic_evidence_on(measured: Measured) -> None:
     """The E-arm: the 18 English fixtures, semantic on against semantic off,
     with the band actually running. No case's v1 verdict moves, no gold is
-    lost and no poison is gained. Two statuses do move; they are pinned as
-    known limits below. As shipped, this 18-anchor catalogue is under the
-    band's floor and nothing moves at all."""
+    lost and no poison is gained. As shipped, this 18-anchor catalogue is
+    under the band's floor and nothing moves at all."""
     assert measured.english_state == "ready"
     assert len(measured.english) == 18
     moved = {}
@@ -356,34 +432,46 @@ def _english_anchors(measured: Measured, arm: str, case_id: str) -> dict[str, tu
     }
 
 
-def test_known_limit_a_rare_word_plus_the_band_resolves_an_adjacent_turns_page(measured: Measured) -> None:
-    """KNOWN LIMIT (step-4 ruling, 2026-09-25). T6 asks to convert the grill's
-    target temperature, a turn about unit conversion that names the grill.
-    "grill" is a rare word naming the grill page and the turn clears the band
-    against it, so the page resolves on exactly the pair that resolves the
-    multilingual golds (M1-de, M1-ru, M5-ja): tightening the rule would cost
-    those. The off arm already hands out the same page as a partial. The agent
-    can discount it; step-5 learning from agent picks is the corrective."""
+def test_the_band_yields_to_a_different_page_the_retrieval_carry_names(measured: Measured) -> None:
+    """T6 asks to convert the grill's target temperature, a turn about unit
+    conversion that names the grill. "grill" is a rare word naming the grill
+    page and the turn clears the band against it, so on its own evidence the
+    page would resolve on `rare_term` + `vector_band`: a poison, since T6
+    expects `unresolved`. Tightening that pair is ruled out, because it is what
+    resolves the multilingual golds M1-de, M1-ru and M5-ja.
+
+    Without the band the turn resolves nothing, and the retrieval-carry lane
+    carries a different page, the oven-conversions note. The band does not
+    get to resolve a page against that: where the band is what resolved the
+    turn and the carry names a different dominant page, the band-resolved
+    page is held at `partial` and the turn is carried exactly as the off arm
+    carries it, so the band gains no poison here."""
     grill = measured.english_key_to_path["c2_grill_equipment_page"]
     on = _english_anchors(measured, "on", "T6")
     off = _english_anchors(measured, "off", "T6")
-    assert measured.english["T6"]["on"].observed_status == "resolved"
-    assert [path for path, (status, _e) in on.items() if status == "resolved"] == [grill], on
-    assert {"rare_term", "vector_band"} <= on[grill][1], on[grill]
-    assert off[grill][0] == "partial" and "vector_band" not in off[grill][1], off.get(grill)
+    carried = {"Knowledge Base/Notes/Kitchen/oven-temperature-conversions.md": "retrieval_carried"}
+    assert grill not in off, off
+    assert {path: status for path, (status, _e) in off.items()} == carried, off
+    assert on.get(grill, ("absent",))[0] != "resolved", on
+    assert {path: status for path, (status, _e) in on.items()} == carried, on
+    assert measured.english_packets["on"]["T6"]["generation"]["carried_by"] == "retrieval"
+    assert measured.english["T6"]["on"].poison_hit <= measured.english["T6"]["off"].poison_hit
 
 
-def test_known_limit_the_band_completes_an_ambiguity_between_two_named_senses(measured: Measured) -> None:
-    """KNOWN LIMIT (step-4 ruling, 2026-09-25). T4 names "Alex", whom two
-    entities share, beside a deployment issue. With the band, both senses
-    reach resolution and the packet reports them as `ambiguous`, which is
-    T4's own expected status; without it the turn abstains `unresolved`. The
-    band adds contact to senses the turn already named; it names none."""
+def test_a_bare_shared_first_name_is_ambiguous_with_and_without_the_band(measured: Measured) -> None:
+    """T4 names "Alex", whom two entities share, beside a deployment issue.
+    Since the activation-quality round a bare name two people share is asked
+    about on its own (`working_set_resolve._bare_name_groups`), so the turn is
+    `ambiguous` between both senses on the off arm as well, which is T4's own
+    expected status. It was a known limit while only the band completed the
+    ambiguity (the off arm abstained `unresolved`); the band no longer adds
+    anything here, and it must not change the senses either arm names."""
     on = measured.english_packets["on"]["T4"]
+    off = measured.english_packets["off"]["T4"]
     assert measured.english["T4"]["on"].observed_status == "ambiguous", on["anchors"]
-    assert measured.english["T4"]["off"].observed_status == "unresolved"
+    assert measured.english["T4"]["off"].observed_status == "ambiguous", off["anchors"]
     gold = {measured.english_key_to_path[key] for key in english_set.fixture_by_id("T4").gold}
-    ref_to_path = {item["ref"]: item["path"] for item in on["anchors"]}
-    senses = {ref_to_path.get(item["ref"], item["ref"]) for item in on["ambiguity"]}
-    assert senses == gold, (senses, gold)
-
+    for packet in (on, off):
+        ref_to_path = {item["ref"]: item["path"] for item in packet["anchors"]}
+        senses = {ref_to_path.get(item["ref"], item["ref"]) for item in packet["ambiguity"]}
+        assert senses == gold, (senses, gold)

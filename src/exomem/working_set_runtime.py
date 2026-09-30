@@ -1083,6 +1083,7 @@ def adjacent_rare_pairs(
     rare_terms: Sequence[str],
     *,
     window: int | None = None,
+    partners: Sequence[str] = (),
 ) -> tuple[tuple[str, str], ...]:
     """Pairs of distinctive stems the turn said close enough together to be
     reading as one name, measured on the turn's OWN token positions.
@@ -1119,12 +1120,18 @@ def adjacent_rare_pairs(
 
     Each pair is returned once, sorted, so the caller's query sees a stable
     set.
+
+    `partners` widens a pair to one distinctive stem and any of these other
+    stems said beside it; a pair of two partners is never returned. It exists
+    for `carry_title_groups`, where the page's own TITLE, checked by the
+    caller, is what makes an ordinary word part of a name.
     """
     from . import bm25 as bm25_module
 
     span = working_set.RETRIEVAL_CARRY_RARE_WINDOW if window is None else int(window)
-    wanted = {str(term) for term in rare_terms}
-    if len(wanted) < 2:
+    distinctive = {str(term) for term in rare_terms}
+    wanted = distinctive | {str(term) for term in partners}
+    if len(wanted) < 2 or not distinctive:
         return ()
     pairs: set[tuple[str, str]] = set()
     # Split the RAW text: `normalize` folds case and width but keeps the
@@ -1148,7 +1155,11 @@ def adjacent_rare_pairs(
             for right_at, right_unit, right in placed[position + 1 :]:
                 if right_at - left_at > span:
                     break
-                if left != right and left_unit != right_unit:
+                if (
+                    left != right
+                    and left_unit != right_unit
+                    and (left in distinctive or right in distinctive)
+                ):
                     first, second = sorted((left, right))
                     pairs.add((first, second))
     return tuple(sorted(pairs))
@@ -1217,6 +1228,203 @@ def rare_turn_terms(
     return rare, int(corpus_pages), "available"
 
 
+def phrase_components(
+    pairs: Sequence[tuple[str, str]],
+) -> tuple[tuple[tuple[str, str], ...], ...]:
+    """The pairs of distinctive stems, grouped into the phrases they name.
+
+    Two pairs sharing a stem are one phrase said with three words ("kelvane
+    throughput", "throughput ceiling"); pairs sharing nothing are two
+    phrases, each naming its own thing. Order follows first appearance, so
+    the grouping is stable for one set of pairs.
+    """
+    groups: list[tuple[set[str], list[tuple[str, str]]]] = []
+    for pair in pairs:
+        merged_stems = set(pair)
+        merged_pairs = [pair]
+        rest: list[tuple[set[str], list[tuple[str, str]]]] = []
+        for stems, members in groups:
+            if stems & merged_stems:
+                merged_stems |= stems
+                merged_pairs = members + merged_pairs
+            else:
+                rest.append((stems, members))
+        groups = [*rest, (merged_stems, merged_pairs)]
+    return tuple(tuple(sorted(set(members))) for _stems, members in groups)
+
+
+def carry_named_groups(
+    vault_root: Path,
+    turn: str,
+    *,
+    limit: int | None = None,
+    freshness=None,
+    recall_checkpoint=None,
+    skip_terms: str = "",
+) -> tuple[tuple[tuple[tuple[str, float], ...], ...], str]:
+    """The pages this turn NAMED, one group per phrase that named them.
+    Returns `(groups, readiness status)`.
+
+    Each group is the current pages ONE phrase of the turn (a set of
+    distinctive stems that pair with one another) is said of. A group of one
+    page is a domain the turn named; a group of several is a phrase two pages
+    answer to, which the caller treats as a question. A turn that names one
+    thing has one group, and its pages are exactly what `carry_candidates`
+    always returned.
+
+    `skip_terms` is text whose words are already accounted for (the names a
+    resolved anchor consumed): a pair made only of its stems is not a phrase
+    about anything new, and a turn with no other pair asks no query at all.
+
+    Everything else is `carry_candidates`' contract, unchanged: the
+    maintained catalogue only, no foreground delta, an incomplete catalogue
+    reported rather than repaired, raw material, navigation and retired
+    pages dropped before anyone counts.
+    """
+    from . import lexstore
+
+    try:
+        stems = pairable_stems(turn)
+        skipped = frozenset(pairable_stems(skip_terms)) if skip_terms else frozenset()
+        stems = tuple(stem for stem in stems if stem not in skipped) if skipped else stems
+        if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
+            return (), "available"
+        rare, corpus_pages, state = rare_turn_terms(
+            vault_root,
+            stems,
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
+        )
+        if state != "available":
+            return (), state
+        if corpus_pages < working_set.RETRIEVAL_CARRY_MIN_PAGES:
+            return (), "available"
+        if not rare:
+            return (), "available"
+        pairs = (
+            adjacent_rare_pairs(turn, rare)
+            if len(rare) >= working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS
+            else ()
+        )
+        components = phrase_components(pairs) if pairs else ()
+        if len(components) > working_set.RETRIEVAL_CARRY_MAX_PHRASES:
+            # A turn saying that many separate things names a list, not a
+            # set of domains: one query over every pair, one group.
+            components = (tuple(pairs),)
+        groups: list[tuple[tuple[str, float], ...]] = []
+        for component in components:
+            result = lexstore.search_bm25_result(
+                vault_root,
+                content_words(turn),
+                working_set.carry_fetch_size(corpus_pages) if limit is None else limit,
+                scope="kb",
+                freshness=freshness,
+                allow_delta=False,
+                corroboration_tokens=list(rare),
+                corroboration_groups=[list(pair) for pair in component],
+                recall_checkpoint=recall_checkpoint,
+                # The first lexical pass's budget (main): the rarest units only.
+                term_budget=lexical_term_budget(),
+                exclude_navigation=True,
+                exclude_raw_material=True,
+            )
+            if not result.readiness.complete:
+                return (), result.readiness.status
+            hits = tuple(
+                (str(path), float(score))
+                for path, score in (result.value or ())
+                if not _is_raw_material(path)
+                and not _is_navigation_page(path)
+                and working_set._is_current_page(vault_root, str(path))
+            )
+            if hits:
+                groups.append(hits)
+        if not groups:
+            groups = _carry_title_groups(
+                vault_root,
+                turn,
+                rare=rare,
+                stems=stems,
+                pairs=pairs,
+                corpus_pages=corpus_pages,
+                limit=limit,
+                freshness=freshness,
+                recall_checkpoint=recall_checkpoint,
+            )
+        return tuple(groups), "available"
+    except Exception:  # noqa: BLE001 - the carry is additive; it abstains, never raises
+        log.debug("activation carry recall unavailable", exc_info=True)
+        return (), "unavailable"
+
+
+def _carry_title_groups(
+    vault_root: Path,
+    turn: str,
+    *,
+    rare: Sequence[str],
+    stems: Sequence[str],
+    pairs: Sequence[tuple[str, str]],
+    corpus_pages: int,
+    limit: int | None,
+    freshness,
+    recall_checkpoint,
+) -> list[tuple[tuple[str, float], ...]]:
+    """Pages a turn names by TITLE when no two distinctive words name them.
+
+    A page called "Support rota current" is named by "the support rota" even
+    though "support" is an ordinary word: one distinctive word (`rota`) beside
+    an ordinary one, and the page's own title carries both. The ordinary word
+    is a name word only because the title says so, so the title is checked
+    here, on the pages the ranked query admits, and nowhere else. A turn whose
+    distinctive word and neighbour do not both sit in some current page's
+    title names nothing, exactly as before; a title made only of ordinary
+    words never qualifies, because at least one word of the pair is distinctive.
+    Runs only when the strict phrase rule found no page.
+    """
+    from . import lexstore
+
+    loose = tuple(
+        pair
+        for pair in adjacent_rare_pairs(turn, rare, partners=stems)
+        if pair not in set(pairs)
+    )
+    if not loose:
+        return []
+    result = lexstore.search_bm25_result(
+        vault_root,
+        content_words(turn),
+        working_set.carry_fetch_size(corpus_pages) if limit is None else limit,
+        scope="kb",
+        freshness=freshness,
+        allow_delta=False,
+        corroboration_tokens=list(rare),
+        corroboration_groups=[list(pair) for pair in loose],
+        recall_checkpoint=recall_checkpoint,
+        exclude_navigation=True,
+        exclude_raw_material=True,
+    )
+    if not result.readiness.complete:
+        return []
+    components = phrase_components(loose)
+    by_component: list[list[tuple[str, float]]] = [[] for _ in components]
+    for path, score in result.value or ():
+        path = str(path)
+        if (
+            _is_raw_material(path)
+            or _is_navigation_page(path)
+            or not working_set._is_current_page(vault_root, path)
+        ):
+            continue
+        title = working_set._page_title(vault_root, path)
+        if not title:
+            continue
+        title_stems = frozenset(pairable_stems(title))
+        for index, component in enumerate(components):
+            if any(set(pair) <= title_stems for pair in component):
+                by_component[index].append((path, float(score)))
+    return [tuple(group) for group in by_component if group]
+
+
 def carry_candidates(
     vault_root: Path,
     turn: str,
@@ -1267,92 +1475,19 @@ def carry_candidates(
     Everything else is the existing bounded contract: the maintained
     catalogue only, no foreground delta (`allow_delta=False`), no corpus
     walk, no directory enumeration, and an incomplete catalogue reported
-    rather than repaired.
+    rather than repaired. Callers that need to know WHICH phrase named which
+    page use `carry_named_groups`, which this flattens.
     """
-    from . import lexstore
-
-    try:
-        # Only stems that can pair are worth a rarity lookup: an unspaced
-        # run's bigrams never pair, and on a 1,600-page Japanese vault a long
-        # Japanese turn spent 0.65-0.83 s looking them up.
-        stems = pairable_stems(turn)
-        if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
-            return (), "available"
-        rare, corpus_pages, state = rare_turn_terms(
-            vault_root,
-            stems,
-            freshness=freshness,
-            recall_checkpoint=recall_checkpoint,
-        )
-        if state != "available":
-            return (), state
-        if corpus_pages < working_set.RETRIEVAL_CARRY_MIN_PAGES:
-            # Rarity needs a corpus. The page count came back with the
-            # frequencies, so this costs nothing beyond the lookup already
-            # made, and it refuses before the ranking query.
-            return (), "available"
-        if len(rare) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
-            return (), "available"
-        # Rarity says a word is name-shaped; proximity says the turn used it
-        # to NAME something. Two distinctive words said together are a
-        # phrase; the same two nine tokens apart are two things the speaker
-        # mentioned. No phrase, no candidate — a page that enumerates many
-        # things contains any few of them, so scattering is what tells a
-        # list from a name.
-        pairs = adjacent_rare_pairs(turn, rare)
-        if not pairs:
-            return (), "available"
-        result = lexstore.search_bm25_result(
-            vault_root,
-            # The turn's WORDS, not its stems: this query stems what it is
-            # given, and stemming a stem is not a no-op.
-            content_words(turn),
-            # Wider than the rarity gate can admit, which grows with the
-            # corpus: a window a run of retired rows can fill is a window
-            # that decides "one named page or two" by where it ends.
-            working_set.carry_fetch_size(corpus_pages) if limit is None else limit,
-            scope="kb",
-            freshness=freshness,
-            allow_delta=False,
-            corroboration_tokens=list(rare),
-            corroboration_groups=[list(pair) for pair in pairs],
-            recall_checkpoint=recall_checkpoint,
-            # The first lexical pass's budget: the rarest units only. The
-            # carry ran every content word of a verbatim prompt against the
-            # whole knowledge base, and was the costliest stage of an
-            # abstaining turn; the rare stems the phrase gate reads are the
-            # ones the budget keeps.
-            term_budget=lexical_term_budget(),
-            # Inside the query, so the LIMIT counts only rows that can be
-            # candidates: twelve captures that repeat the turn filled the
-            # window on their own when they were cut after it.
-            exclude_navigation=True,
-            exclude_raw_material=True,
-        )
-        if not result.readiness.complete:
-            return (), result.readiness.status
-        # Raw material, navigation pages and retired pages are dropped
-        # BEFORE the caller counts what the turn named. The query already
-        # left the first two out; the check stays here too, where the path
-        # is read the way the index reads it (backslashes folded). A superseded note
-        # and the note that superseded it answer to the same phrase, so
-        # leaving it in would read as two named pages and refuse every
-        # revised page in the vault; an index or a log repeats every title
-        # in the vault, so leaving one in did exactly that to every turn that
-        # named a page by its title.
-        return (
-            tuple(
-                (str(path), float(score))
-                for path, score in (result.value or ())
-                if not _is_raw_material(path)
-                and not _is_navigation_page(path)
-                and working_set._is_current_page(vault_root, str(path))
-            ),
-            "available",
-        )
-    except Exception:  # noqa: BLE001 - the carry is additive; it abstains, never raises
-        log.debug("activation carry recall unavailable", exc_info=True)
-        return (), "unavailable"
+    groups, state = carry_named_groups(
+        vault_root, turn, limit=limit, freshness=freshness, recall_checkpoint=recall_checkpoint
+    )
+    if len(groups) == 1:
+        return groups[0], state
+    merged: dict[str, float] = {}
+    for group in groups:
+        for path, score in group:
+            merged[path] = max(score, merged.get(path, score))
+    return tuple(sorted(merged.items(), key=lambda item: (-item[1], item[0]))), state
 
 
 def refresh_index(index: working_set_index.WorkingSetIndex, *, freshness_stamp: str = "") -> bool:
