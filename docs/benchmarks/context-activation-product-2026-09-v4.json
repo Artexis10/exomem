@@ -1820,7 +1820,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "ambiguous",
-      "packet_chars": 267,
+      "packet_chars": 299,
       "passed": true,
       "poison": {
         "hit": 0,
@@ -2018,7 +2018,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "ambiguous",
-      "packet_chars": 334,
+      "packet_chars": 366,
       "passed": true,
       "poison": {
         "hit": 0,

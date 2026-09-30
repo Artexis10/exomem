@@ -144,8 +144,15 @@ def _clip(value: object) -> str:
     return text if len(text) <= _MAX_FIELD_CHARS else text[:_MAX_FIELD_CHARS]
 
 
+#: Arguments that carry conversation text the caller never meant to persist:
+#: recorded by presence and byte length only, never hashed, in every mode. A
+#: hash of a short, guessable conversation is a confirmation oracle.
+_LENGTH_ONLY_ARG_NAMES = frozenset({"conversation"})
+
+
 def _argument_shape(arguments: dict[str, Any]) -> tuple[list[str], dict[str, dict], bool]:
-    """Names, byte length, and sha256 per argument. Never a value.
+    """Names, byte length, and sha256 per argument (length only for
+    `_LENGTH_ONLY_ARG_NAMES`). Never a value.
 
     The serialized form is hashed rather than `repr`, so the same argument
     hashes identically across calls and processes -- which is what makes the
@@ -172,7 +179,7 @@ def _argument_shape(arguments: dict[str, Any]) -> tuple[list[str], dict[str, dic
         key = f"arg{index}" if private else _clip(name)
         clipped_names.append(key)
         entry: dict[str, Any] = {"len": len(raw)}
-        if not private:
+        if not private and name not in _LENGTH_ONLY_ARG_NAMES:
             entry["sha256"] = hashlib.sha256(raw).hexdigest()
         shape[key] = entry
     return clipped_names, shape, truncated
