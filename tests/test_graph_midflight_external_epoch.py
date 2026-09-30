@@ -510,14 +510,17 @@ def test_the_retry_does_not_mask_a_class_c_that_lands_after_it(
         lambda *_args, **_kwargs: locked_calls < 2,
     )
     _registry_behind_the_disk(monkeypatch)
+    marks = _count_marks(monkeypatch)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved) as raised:
         EpistemicGraphIndex(vault)._rebuild_all_off_boundary()
 
     assert type(raised.value) is epistemic_graph.GraphProjectionMoved
     assert locked_calls == 2, "the supersession must have been retried exactly once"
-    # Attempt 2's Class C marked once more, and the loop retired that mark
-    # before handing the verdict through.
+    # Exactly two epochs: the superseding event on attempt 1, and attempt 2's
+    # own Class C mark. The retry did not absorb the Class C, and the loop
+    # retired its mark before handing the verdict through.
+    assert len(marks) == 2, marks
     assert freshness.external_pending(vault) is False
 
 

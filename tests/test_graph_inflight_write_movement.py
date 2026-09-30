@@ -385,6 +385,137 @@ def test_a_foreign_edit_that_keeps_mtime_and_size_during_a_snapshot_is_unexplain
     )
 
 
+def _hold_on_writer(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: Any,
+    name: str,
+    *,
+    before: bool = False,
+    when: Callable[..., bool] = lambda *_args, **_kwargs: True,
+) -> tuple[threading.Event, threading.Event]:
+    """Hold the writer thread once, right after `owner.name` returns.
+
+    `before=True` holds it just before the call instead; `when` picks the call.
+    """
+    reached, release = threading.Event(), threading.Event()
+    original = getattr(owner, name)
+
+    def hold(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        if (
+            threading.current_thread().name == WRITER_THREAD
+            and not reached.is_set()
+            and when(*args, **kwargs)
+        ):
+            reached.set()
+            release.wait(timeout=30.0)
+
+    def held(*args: Any, **kwargs: Any) -> Any:
+        if before:
+            hold(args, kwargs)
+        result = original(*args, **kwargs)
+        if not before:
+            hold(args, kwargs)
+        return result
+
+    monkeypatch.setattr(owner, name, held)
+    return reached, release
+
+
+def _start_writer(vault: Path, content: str) -> tuple[threading.Thread, list[BaseException]]:
+    failure: list[BaseException] = []
+    thread = threading.Thread(
+        target=_run_governed_write, args=(vault, PAGE_B, content, failure), name=WRITER_THREAD
+    )
+    thread.start()
+    return thread, failure
+
+
+def test_a_write_held_in_its_installing_window_is_recorded(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Installing, not yet renamed: the snapshot's ctime move is still the writer's."""
+    before = (vault / PAGE_B).read_bytes()
+    target_key = file_watcher._publication_key(vault, vault / PAGE_B)
+
+    def installs_b(intents: Any) -> bool:
+        return any(intent.key == target_key for intent in intents)
+
+    installing, release = _hold_on_writer(
+        monkeypatch, file_watcher, "begin_publication_installation", when=installs_b
+    )
+    thread, failure = _start_writer(vault, _page("B", "B, rewritten in its installing window."))
+    try:
+        assert installing.wait(timeout=30.0), "the governed write never began installing"
+        assert (vault / PAGE_B).read_bytes() == before
+        intent = file_watcher._PUBLICATION_INTENTS[target_key]
+        assert (intent.phase, intent.disposition) == ("installing", "active")
+
+        sample = EpistemicGraphIndex(vault)._unexplained_differences()
+
+        assert sample is not None
+        assert PAGE_B in sample[2], "the snapshot did not move the ctime"
+        assert PAGE_B not in sample[3], (
+            "a governed write in its installing window was classified as unrecorded movement"
+        )
+    finally:
+        release.set()
+        thread.join(timeout=60.0)
+    assert not failure, failure
+
+
+@pytest.mark.parametrize("foreign_after_rename", [False, True])
+def test_a_before_shaped_sample_proven_after_the_rename(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, foreign_after_rename: bool
+) -> None:
+    """Sampled while only the ctime had moved, proven once the writer renamed.
+
+    The current file then holds the writer's staged bytes, which its publication
+    records next, so the sampled difference is the writer's. A foreign
+    replacement of those bytes is still evidence.
+    """
+    snapshotted, release_snapshot = _hold_on_writer(
+        monkeypatch, vault_module, "_restore_bound_source_timestamps"
+    )
+    renamed, release_publication = _hold_on_writer(
+        monkeypatch, file_watcher, "register_self_write", before=True
+    )
+    staged = _page("B", "B, renamed between the sample and its proof.")
+    thread, failure = _start_writer(vault, staged)
+    original = file_watcher.inflight_publications_explain
+
+    def advance_then_prove(root: Path, candidates: Any) -> set[str]:
+        if not renamed.is_set():
+            release_snapshot.set()
+            assert renamed.wait(timeout=30.0), "the governed write never renamed"
+            assert (vault / PAGE_B).read_text(encoding="utf-8") == staged
+            if foreign_after_rename:
+                foreign = staged.replace("renamed", "RENAMED")
+                assert len(foreign) == len(staged)
+                (vault / PAGE_B).write_text(foreign, encoding="utf-8")
+        return original(root, candidates)
+
+    monkeypatch.setattr(file_watcher, "inflight_publications_explain", advance_then_prove)
+    try:
+        assert snapshotted.wait(timeout=30.0), "the governed write never snapshotted"
+
+        sample = EpistemicGraphIndex(vault)._unexplained_differences()
+
+        assert sample is not None
+        if foreign_after_rename:
+            assert PAGE_B in sample[3], "a foreign replacement after the rename was explained"
+        else:
+            assert PAGE_B not in sample[3], (
+                "a before-shaped sample proven after the writer renamed was classified "
+                "as unrecorded movement"
+            )
+    finally:
+        release_snapshot.set()
+        release_publication.set()
+        thread.join(timeout=60.0)
+    if not foreign_after_rename:
+        assert not failure, failure
+
+
 # --- the bound: a foreign edit on the same path is still evidence ------------
 
 
@@ -488,19 +619,22 @@ def test_retiring_the_mark_never_retires_a_newer_one(
         "_classify_movement",
         lambda *_args, **_kwargs: ("unrecorded", frozenset({PAGE_B})),
     )
-    original = EpistemicGraphIndex._reconcile_recall_publication
+    original = freshness.reconcile
+    newer: list[int] = []
 
-    def reconcile_then_a_newer_event(index: EpistemicGraphIndex) -> None:
-        original(index)
-        freshness.mark_external_pending(vault, paths=[vault / PAGE_C])
+    def a_newer_event_lands_mid_reconcile(*args: Any, **kwargs: Any) -> Any:
+        # After the reconcile sampled the epoch it may clear through, before it
+        # clears: the one window a clear-through bug would swallow this event in.
+        if freshness.external_pending(vault) and not newer:
+            newer.append(freshness.mark_external_pending(vault, paths=[vault / PAGE_C]))
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(
-        EpistemicGraphIndex, "_reconcile_recall_publication", reconcile_then_a_newer_event
-    )
+    monkeypatch.setattr(freshness, "reconcile", a_newer_event_lands_mid_reconcile)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved):
         EpistemicGraphIndex(vault).rebuild_all()
 
+    assert newer, "the newer event never landed inside the graph's reconcile"
     assert freshness.external_pending_paths(vault) == frozenset({str((vault / PAGE_C).resolve())})
 
 
