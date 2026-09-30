@@ -6259,28 +6259,10 @@ def op_activate_context(
     as a single `partial` anchor with `generation.carried_by: "follow_up"`;
     where two are close, both are listed under `ambiguity` for `anchor`.
 
-    In a longer conversation, or when the user's words lean on attachments, also
-    pass `conversation` (every field optional; `turn` stays verbatim, never
-    rewritten): `focus`, one line (at most 240 characters) naming the subjects
-    now in play, including names or objects you read from the user's
-    attachments; `refs`, the pages you already read (at most 12); and, if you
-    wish, `recent`, earlier turns oldest first as `{role, text}` (at most 6
-    entries, user text cut at 600 characters, assistant text at 300, 2,400 in
-    all). The server enforces every bound itself and never refuses over it:
-    `generation.conversation` says `applied`, `truncated` or `absent`.
-    Each anchor carries `origin`: `turn` (the user's words reached it), `focus`,
-    or `turn_and_focus` (your `focus` reached it, alone or with the user's
-    words), or `conversation` (carried from an earlier user turn). A `focus`
-    origin is your cue, not the user's words: it is there because you named it,
-    and is matched by worded evidence only, never counts as your `anchor` choice, and
-    cannot settle an ambiguity between anchors the user's own words reached.
-    Earlier turns and refs never reach an anchor by themselves: they only
-    strengthen one the turn or your `focus` already reached, or break a tie when
-    exactly one competitor was named before (`generation.disambiguated_by`).
-    Activation reads no attachment itself and runs no media model; only the
-    names you put into `focus` count. Conversation text is used for this one
-    call and never stored, and a request carrying one is never served from
-    cache.
+    In a long thread or with attachments, also pass `conversation` (optional,
+    server-bounded): `focus`, one line naming the subjects in play, attachment
+    names included; `refs`, pages you read; `recent`, earlier `{role, text}`
+    turns. Anchors report `origin`. Details: the skill's engagement reference.
 
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
@@ -6380,9 +6362,9 @@ def op_activate_context(
             Only a salted hash of it is stored. Omitting both keys, a turn
             that names nothing is answered from this conversation's
             `continuity` thread alone, never from other conversations' work.
-        conversation: Optional bounded view of the conversation, see above:
-            `{focus?: str, recent?: [{role: "user"|"assistant", text: str}],
-            refs?: [str]}`. Anything else is ignored, never an error.
+        conversation: Optional: `{focus?: str, recent?: [{role:
+            "user"|"assistant", text: str}], refs?: [str]}`. Anything else is
+            ignored, never an error.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,

@@ -191,6 +191,39 @@ then attest with `resume` and `postcommit=true`. A committed note or a Saved
 marker is not coverage, and the server never claims your candidates exhaust
 the input.
 
+## Passing the conversation to activation
+
+In a longer conversation, or when the user's words lean on attachments, pass
+`conversation` to `activate_context` beside the verbatim `turn` (never
+rewrite the turn). Every field is optional:
+
+- `focus`: one line, at most 240 characters, naming the subjects now in play,
+  including names or objects you read from the user's attachments.
+- `refs`: the pages you already read, at most 12.
+- `recent`: earlier turns, oldest first, as `{role, text}`: at most 6 entries,
+  user text cut at 600 characters, assistant text at 300, 2,400 in all.
+
+The server enforces every bound itself and never refuses over one:
+`generation.conversation` says `applied`, `truncated` or `absent`. A
+credential in the text is removed before anything is matched.
+
+Each anchor carries `origin`: `turn` (the user's words reached it), `focus` or
+`turn_and_focus` (your `focus` reached it, alone or with the user's words), or
+`conversation` (carried from an earlier user turn). A `focus` origin is your
+cue, not the user's words: it is matched by worded evidence only, never counts
+as your `anchor` choice, and cannot settle an ambiguity between anchors the
+user's own words reached. Earlier turns and refs never reach an anchor by
+themselves: they strengthen one the turn or your `focus` already reached, or
+break a tie when exactly one competitor was named before
+(`generation.disambiguated_by`). A turn that points back ("is it still on
+track?") and names nothing is carried from the newest earlier user turn that
+named one subject; an ordinary turn that only happens to contain "it" or
+"that" is not.
+
+Activation reads no attachment itself and runs no media model: only the names
+you put into `focus` count. Conversation text is used for that one call and
+never stored, and a request carrying one is never served from cache.
+
 ## Activation conventions and learning from corrections
 
 Every activation packet's `generation` says which registries shaped it:

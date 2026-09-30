@@ -31,8 +31,39 @@ def test_the_instructions_point_at_the_tool_and_stay_within_the_length_bound() -
     assert len(text) <= 900, len(text)
 
 
-def test_the_tool_description_states_bounds_attachments_origin_and_no_attachment_reads() -> None:
+def test_the_instructions_still_say_what_the_server_is() -> None:
+    """Ruling L1 on #1463: the identity sentence survives the compression."""
+    text = server.SERVER_INSTRUCTIONS
+    assert text.startswith("This server is the user's long-term governed memory.")
+    assert len(text) <= 900, len(text)
+
+
+ENGAGEMENT = SCAFFOLD_SKILL.parent / "references" / "engagement.md"
+#: Ruling BYTES on #1463: the conversation guidance in the tool description is
+#: a short pointer; the full guidance lives in the engagement reference.
+CONVERSATION_PARAGRAPH_MAX_BYTES = 300
+
+
+def _conversation_paragraph(doc: str) -> str:
+    start = doc.index("also pass `conversation`")
+    start = doc.rindex("\n\n", 0, start) + 2
+    end = doc.index("\n\n", start)
+    return " ".join(doc[start:end].split())
+
+
+def test_the_tool_description_carries_a_short_conversation_pointer() -> None:
     doc = commands.op_activate_context.__doc__ or ""
+    paragraph = _conversation_paragraph(doc)
+    assert len(paragraph.encode("utf-8")) <= CONVERSATION_PARAGRAPH_MAX_BYTES, len(paragraph.encode())
+    for required in ("`conversation`", "optional", "attachment", "`focus`", "`refs`", "`recent`", "`origin`", "engagement reference"):
+        assert required in paragraph, required
+    assert "verbatim" in doc
+
+
+def test_the_engagement_reference_states_bounds_attachments_origin_and_no_attachment_reads() -> None:
+    text = ENGAGEMENT.read_text(encoding="utf-8")
+    section = text[text.index("## Passing the conversation to activation") :]
+    section = section[: section.index("\n## ", 3)]
     for required in (
         "conversation",
         "240",  # focus bound
@@ -48,7 +79,7 @@ def test_the_tool_description_states_bounds_attachments_origin_and_no_attachment
         "reads no attachment",
         "verbatim",
     ):
-        assert required in doc, required
+        assert required in section, required
 
 
 def test_the_scaffold_line_names_conversation_and_attachments_generically() -> None:
