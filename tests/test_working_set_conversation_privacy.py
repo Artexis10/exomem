@@ -8,6 +8,7 @@ absent one, `generation` included.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -17,6 +18,7 @@ from conversation_vault import seed
 from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import (
+    call_ledger,
     commands,
     lexstore,
     query_log,
@@ -47,37 +49,66 @@ def _all_files(*roots: Path) -> list[Path]:
     return [path for root in roots if root.exists() for path in root.rglob("*") if path.is_file()]
 
 
+def _call_through_the_server(vault: Path, monkeypatch: pytest.MonkeyPatch, arguments: dict) -> dict:
+    """One `activate_context` call through the built MCP server WITH its
+    middleware, so the call ledger records it exactly as in production."""
+    from exomem import server as server_module
+
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
+    for name in ("EXOMEM_DISABLE_EMBEDDINGS", "EXOMEM_DISABLE_RELEVANCE_CHECK", "EXOMEM_DISABLE_FILE_WATCHER"):
+        monkeypatch.setenv(name, "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_CALL_LEDGER", raising=False)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    mcp = server_module.build_server(require_auth=False)
+    result = asyncio.run(mcp.call_tool("activate_context", arguments))
+    if isinstance(result.structured_content, dict):
+        payload = result.structured_content
+        return payload.get("result", payload) if "abstained" not in payload else payload
+    return json.loads(result.content[0].text)
+
+
 def test_no_state_file_holds_the_conversation_or_its_hash(
     cvault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     logs = tmp_path / "logs"
+    ledger = tmp_path / "ledger"
     monkeypatch.setenv("EXOMEM_LOG_DIR", str(logs))
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(ledger))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
     monkeypatch.setattr(query_log, "_disabled", lambda: False)
+    call_ledger.reset_chain_cache()
     text = f"we agreed the {SENTINEL} wording before the Tidewater Grant call"
-    packet = commands.op_activate_context(
-        cvault,
-        turn=TURN,
-        conversation={
-            "focus": f"{SENTINEL} focus",
-            "recent": [{"role": "user", "text": text}],
-            "refs": [HUB_PATH],
-        },
-    )
+    conversation = {
+        "focus": f"{SENTINEL} focus",
+        "recent": [{"role": "user", "text": text}],
+        "refs": [HUB_PATH],
+    }
+    packet = _call_through_the_server(cvault, monkeypatch, {"turn": TURN, "conversation": conversation})
     assert packet["generation"]["conversation"] == "applied"
+    # Every digest a ledger or log could plausibly hold: each text, and the
+    # serialised argument itself in the ledger's own canonical form and in
+    # ordinary JSON (the forms a per-argument hash is taken over).
+    serialised = (
+        call_ledger.canonical_json({"v": conversation}),
+        call_ledger.canonical_json(conversation),
+        json.dumps(conversation).encode("utf-8"),
+    )
     digests = {
         hashlib.sha256(value.encode("utf-8")).hexdigest()
         for value in (text, f"{SENTINEL} focus", SENTINEL, HUB_PATH)
-    }
+    } | {hashlib.sha256(blob).hexdigest() for blob in serialised}
     state_root = tmp_path / "xdg-state"
-    files = _all_files(state_root, logs, cvault)
-    assert files
+    files = _all_files(state_root, logs, ledger, cvault)
+    assert (ledger / "ledger.jsonl") in files, "the call went through the ledgered middleware"
     for path in files:
         blob = path.read_bytes()
         assert SENTINEL.encode() not in blob, path
         for digest in digests:
             assert digest.encode() not in blob, path
+    (row,) = [json.loads(line) for line in (ledger / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert row["args"]["conversation"] == {"len": len(serialised[0])}
     assert SENTINEL not in json.dumps(packet)
+    call_ledger.reset_chain_cache()
 
 
 def test_the_activation_log_holds_only_presence_counts_and_the_state(

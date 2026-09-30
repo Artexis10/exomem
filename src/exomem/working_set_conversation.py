@@ -13,7 +13,9 @@ in. Three optional fields, each capped by the SERVER, deterministically:
   `REFS_MAX`. Also a qualifier.
 
 Nothing here refuses: a malformed object is `absent`, and a bound that cuts
-anything reports `truncated`. Nothing here is stored: the conversation lives in
+anything reports `truncated`. Every text field passes the shared egress
+scrubber first (`governance.scrubber`): a credential is removed, never
+matched, and its removal is a cut. Nothing here is stored: the conversation lives in
 the request and is matched against the caller's own view of the catalogue.
 Matching runs the turn's own token and stopword rules over ONE entry at a time
 (never across entries) by alias and lexical kinds only. No recall query, no
@@ -100,6 +102,18 @@ def _cut(text: str, limit: int) -> tuple[str, bool]:
     return (head[:space] if space > 0 else head[:limit]).rstrip(), True
 
 
+def _scrubbed(text: str) -> tuple[str, bool]:
+    """`text` with every credential the shared egress scrubber recognises
+    removed, and whether it removed one. The scrubber's fixed notice is taken
+    out again, so it can never be matched as the user's words."""
+    from .governance import scrubber
+
+    cleaned, blocked = scrubber.scrub_text(text)
+    if not blocked:
+        return text, False
+    return " ".join(cleaned.replace(scrubber.NOTICE, " ").split()), True
+
+
 def bound(raw: Any) -> Conversation:
     """The bounded conversation for a caller's raw `conversation` argument.
 
@@ -115,7 +129,8 @@ def bound(raw: Any) -> Conversation:
     focus_text = ""
     if isinstance(focus, str) and focus.strip():
         focus_text, was_cut = _cut(focus.strip(), FOCUS_MAX_CHARS)
-        cut = cut or was_cut
+        focus_text, was_scrubbed = _scrubbed(focus_text)
+        cut = cut or was_cut or was_scrubbed
     elif focus not in (None, ""):
         cut = True
 
@@ -130,7 +145,10 @@ def bound(raw: Any) -> Conversation:
                 continue
             limit = USER_ENTRY_MAX_CHARS if role == "user" else ASSISTANT_ENTRY_MAX_CHARS
             body, was_cut = _cut(text.strip(), limit)
-            cut = cut or was_cut
+            body, was_scrubbed = _scrubbed(body)
+            cut = cut or was_cut or was_scrubbed
+            if not body:
+                continue
             entries.append(Entry(role, body))
     elif recent not in (None, "", []):
         cut = True

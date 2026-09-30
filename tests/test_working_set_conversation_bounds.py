@@ -117,6 +117,33 @@ def test_an_unknown_role_or_empty_entry_is_dropped() -> None:
     assert result.state == "truncated"
 
 
+#: Built at run time so no credential-shaped literal sits in the source.
+_FAKE_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
+
+
+def test_a_credential_is_scrubbed_out_of_every_text_field_by_the_shared_scrubber() -> None:
+    """The egress scrubber runs over `focus` and every entry before anything is
+    matched: the credential is gone, the ordinary words around it stay, and the
+    cut is reported. Its fixed notice is not left behind as matchable words."""
+    result = bound(
+        {
+            "focus": f"Marlow Quay Survey {_FAKE_KEY}",
+            "recent": [
+                {"role": "user", "text": f"aws_secret_access_key = {_FAKE_KEY} for the Marlow Quay Survey"},
+                {"role": "assistant", "text": f"Stored {_FAKE_KEY} for you."},
+            ],
+        }
+    )
+    texts = [result.focus, *(entry.text for entry in result.recent)]
+    assert all(_FAKE_KEY not in text for text in texts), texts
+    assert all("credential blocked" not in text for text in texts), texts
+    assert "Marlow Quay Survey" in result.focus
+    assert "Marlow Quay Survey" in result.recent[0].text
+    assert result.state == "truncated"
+    clean = bound({"recent": [{"role": "user", "text": "plan the Marlow Quay Survey rounds"}]})
+    assert clean.state == "applied"
+
+
 # --------------------------------------------------------------------------- #
 # The packet
 # --------------------------------------------------------------------------- #

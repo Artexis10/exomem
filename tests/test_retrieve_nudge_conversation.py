@@ -97,6 +97,36 @@ def test_nothing_excluded_reaches_the_conversation() -> None:
     assert "Exomem working set" not in blob
 
 
+CLAUDE_LEAKS = FIXTURES / "claude_code_leaks.jsonl"
+CODEX_LEAKS = FIXTURES / "codex_rollout_leaks.jsonl"
+
+
+def test_only_human_typed_claude_code_turns_are_user_entries() -> None:
+    """An allowlist, not a denylist: shell input and output, task notifications,
+    reminders, slash-command envelopes, compaction summaries, transcript-only,
+    meta and sidechain records, tool results and records carrying an unknown
+    true flag never become a user turn."""
+    conversation = hook._conversation_from_transcript(str(CLAUDE_LEAKS), "current")
+    assert _pairs(conversation) == [
+        ("user", "Plan the spring rounds of the Marlow Quay Survey."),
+        ("assistant", "The survey has two rounds left."),
+        ("user", "And who owns the rota now?"),
+        ("assistant", "Bram Quillfeather owns the rota."),
+    ]
+    blob = json.dumps(conversation)
+    assert "SENTINEL" not in blob
+    assert "aws_secret_access_key" not in blob
+
+
+def test_only_human_typed_codex_turns_are_user_entries() -> None:
+    conversation = hook._conversation_from_transcript(str(CODEX_LEAKS), "Then who signs it off?")
+    assert _pairs(conversation) == [
+        ("user", "Which budget line covers the Harbor Lantern Budget glass work?"),
+        ("assistant", "The glass work sits in the second budget line."),
+    ]
+    assert "SENTINEL" not in json.dumps(conversation)
+
+
 def test_the_current_prompt_is_not_repeated() -> None:
     conversation = hook._conversation_from_transcript(str(CLAUDE), CURRENT)
     assert CURRENT not in json.dumps(conversation)

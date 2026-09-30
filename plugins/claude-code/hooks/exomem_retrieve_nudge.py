@@ -978,8 +978,27 @@ _CONVERSATION_MAX_REFS = 12
 #: carrying one is never conversation: feeding the hook's own previous
 #: injection back would be a self-reinforcing loop.
 _INJECTED_MARKERS = ("[Exomem working set", "[Exomem retrieval check]", "KB routing stubs.")
-#: Text a client wraps around its own system and hook messages.
-_CLIENT_WRAPPERS = ("<system-reminder>", "<command-name>", "<command-message>", "<local-command")
+#: Envelopes a client wraps around text no human typed: shell input and
+#: output, task and subagent notifications, reminders, slash-command traffic,
+#: Codex's environment, instruction and skill bodies. A block that starts with
+#: ANY tag is refused (the allowlist below), and a block that carries one of
+#: these anywhere is refused too, so a reminder appended to typed text cannot
+#: ride along with it.
+_MACHINE_TAGS = (
+    "<bash-",
+    "<task-notification>",
+    "<system-reminder>",
+    "<command-",
+    "<local-command",
+    "<environment_context>",
+    "<user_instructions>",
+    "<skill>",
+    "<instructions>",
+)
+#: A block opening with a tag is client plumbing, never a typed turn.
+_LEADING_TAG_RE = re.compile(r"\A\s*<[A-Za-z][A-Za-z0-9_-]*[ >/]")
+#: Codex's instruction preamble, sent as a user message.
+_INSTRUCTION_HEADERS = ("# AGENTS.md instructions",)
 #: The Exomem tools whose ARGUMENTS name a page the conversation touched.
 _READ_TOOL_SUFFIX = "read_memory"
 _ANCHOR_TOOL_SUFFIX = "activate_context"
@@ -1018,9 +1037,30 @@ def _transcript_tail_lines(path: str) -> list[str]:
     return [line for line in lines if line.strip()]
 
 
-def _is_injected_or_wrapped(text: str) -> bool:
+def _is_typed_text(text: str) -> bool:
+    """Could a human have typed this block? The ALLOWLIST test every user and
+    assistant text block passes: not empty, not opening with a tag or an
+    instruction header, carrying no machine envelope and none of Exomem's own
+    injected headers anywhere."""
     head = text.lstrip()
-    return any(marker in text for marker in _INJECTED_MARKERS) or head.startswith(_CLIENT_WRAPPERS)
+    if not head or _LEADING_TAG_RE.match(head) or head.startswith(_INSTRUCTION_HEADERS):
+        return False
+    lowered = text.lower()
+    if any(tag in lowered for tag in _MACHINE_TAGS):
+        return False
+    return not any(marker in text for marker in _INJECTED_MARKERS)
+
+
+def _flagged(record: dict) -> bool:
+    """A Claude Code record carrying any true `is…` flag (meta, sidechain,
+    compaction summary, transcript-only, or one this hook does not know yet),
+    or a tool result, is not a human turn. Unknown flags refuse: an allowlist."""
+    if record.get("toolUseResult") is not None:
+        return True
+    return any(
+        isinstance(key, str) and key.startswith("is") and value is True
+        for key, value in record.items()
+    )
 
 
 def _text_blocks(content) -> list[str] | None:
@@ -1059,7 +1099,9 @@ def _tool_refs(name: str, arguments) -> list[str]:
 def _claude_records(lines: list[str], deadline: float) -> list[tuple[str, str]]:
     """Claude Code JSONL, as `(kind, text)` events in order: `user` (a
     human-typed turn), `assistant` (a text turn) and `ref`. An unrecognised
-    line is skipped."""
+    line is skipped. A user turn is ADMITTED, not filtered: an unflagged user
+    record whose text blocks pass `_is_typed_text`; anything else, including a
+    shape this hook has never seen, is dropped."""
     events: list[tuple[str, str]] = []
     for line in lines:
         if time.monotonic() > deadline:
@@ -1071,7 +1113,7 @@ def _claude_records(lines: list[str], deadline: float) -> list[tuple[str, str]]:
         if not isinstance(record, dict) or record.get("type") not in {"user", "assistant"}:
             continue
         message = record.get("message")
-        if not isinstance(message, dict):
+        if not isinstance(message, dict) or _flagged(record):
             continue
         content = message.get("content")
         if record["type"] == "assistant":
@@ -1081,19 +1123,15 @@ def _claude_records(lines: list[str], deadline: float) -> list[tuple[str, str]]:
                         events.append(("ref", ref))
             texts = _text_blocks(content) or []
             text = "\n".join(part.strip() for part in texts if part.strip())
-            if text and not _is_injected_or_wrapped(text):
+            if text and _is_typed_text(text):
                 events.append(("assistant", text))
         else:
-            if record.get("isMeta") or record.get("isSidechain"):
+            if message.get("role") != "user":
                 continue
             texts = _text_blocks(content)
             if not texts:
                 continue
-            human = [
-                part.strip()
-                for part in texts
-                if part.strip() and not _is_injected_or_wrapped(part)
-            ]
+            human = [part.strip() for part in texts if _is_typed_text(part)]
             if human:
                 events.append(("user", "\n".join(human)))
     return events
@@ -1127,9 +1165,7 @@ def _codex_records(lines: list[str], deadline: float) -> list[tuple[str, str]]:
                 events.append(("ref", ref))
         elif kind == "message" and payload.get("role") in {"user", "assistant"}:
             texts = _text_blocks(payload.get("content")) or []
-            parts = [
-                part.strip() for part in texts if part.strip() and not _is_injected_or_wrapped(part)
-            ]
+            parts = [part.strip() for part in texts if _is_typed_text(part)]
             if parts:
                 events.append((payload["role"], "\n".join(parts)))
     return events
