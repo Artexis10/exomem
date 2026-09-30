@@ -332,7 +332,8 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
             issues.append("denial_not_observed")
         unnegated = re.sub(
             r"\b(not|never|could not|couldn't|wasn't|isn't|haven't|hasn't|didn't|nothing was)"
-            r"\s+(?:been\s+)?(?:saved|stored|recorded)\b",
+            r"\s+(?:been\s+)?(?:saved|stored|recorded)\b"
+            r"(?:\s+(?:and|or)\s+(?:saved|stored|recorded)\b)*",
             "",
             answer.casefold(),
         )

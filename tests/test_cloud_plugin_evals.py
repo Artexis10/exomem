@@ -332,6 +332,10 @@ def test_denied_write_cannot_be_reported_saved():
     assert not checks.evaluate_trace(value, case("denied-write"), IDENTITY)["ok"]
     value["observations"][-1]["text"] = "Permission denied; not saved there. Saved it elsewhere."
     assert not checks.evaluate_trace(value, case("denied-write"), IDENTITY)["ok"]
+    value["observations"][-1]["text"] = "Permission denied; not saved or stored."
+    assert checks.evaluate_trace(value, case("denied-write"), IDENTITY)["ok"]
+    value["observations"][-1]["text"] = "Permission denied; not saved or stored. Recorded it elsewhere."
+    assert not checks.evaluate_trace(value, case("denied-write"), IDENTITY)["ok"]
 
 
 def test_trivial_turn_rejects_mutations():
