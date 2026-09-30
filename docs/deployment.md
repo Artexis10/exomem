@@ -369,6 +369,15 @@ kb --version
 On macOS/Linux, `bash scripts/upgrade.sh` provides the same behavior with
 `--cli-sync auto|always|never`.
 
+A second service on the same machine (its own unit, port and vault, such as a
+client cell beside a personal one) upgrades with `--unit-file <its unit>`. The
+script reads that service's vault from the unit's own environment, never from the
+checkout's `.env`, and refuses to continue when the unit names none: pass `--vault`
+then. For a unit that is not the default one, `--cli-sync auto` leaves the uv-tool
+CLI alone, and the managed-install manifest keeps naming the service it already
+names. A CLI sync keeps an operator-owned launcher (a regular file where uv would
+put its symlink) in uv's bin directory.
+
 ### Windows upgrade: legacy idempotency runtime DACL
 
 Exomem 0.47.0 began requiring a protected, principal-private DACL on Windows

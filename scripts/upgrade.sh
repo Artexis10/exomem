@@ -99,6 +99,13 @@ fi
 SERVICE_ID="$(exomem_service_id "$UNIT_FILE")" \
     || die "could not resolve the service-manager identity from $UNIT_FILE"
 
+# The one uv-tool CLI serves the default service. Aligning it to a second
+# service's release would split it from the service its hooks talk to.
+if [[ "$CLI_SYNC" == "auto" ]] && ! exomem_unit_is_default "$UNIT_FILE"; then
+    echo "CLI sync: $UNIT_FILE is not the default unit; leaving the uv-tool CLI alone."
+    CLI_SYNC="never"
+fi
+
 if exomem_service_is_managed "$UNIT_FILE"; then
     [[ "$OS" == "Linux" ]] || die "managed upgrades are supported only on Linux/WSL"
     [[ "$RESUME_STOPPED_TRANSITION" == 0 ]] \
@@ -122,7 +129,7 @@ if exomem_service_is_managed "$UNIT_FILE"; then
     if [[ "$CLI_SYNC" == "always" ]] || { [[ "$CLI_SYNC" == "auto" ]] && exomem_uv_tool_has_exomem; }; then
         CLI_REQUIRED=1
     fi
-    exomem_write_managed_manifest "$VENV_PYTHON" "$SERVED" "$PROFILE" "http://127.0.0.1:$PORT"
+    exomem_write_owned_managed_manifest "$UNIT_FILE" "$VENV_PYTHON" "$SERVED" "$PROFILE" "http://127.0.0.1:$PORT"
     exomem_sync_uv_cli "${CLI_SYNC}" "$SERVED"
     if [[ "$CLI_SYNC" != "never" ]]; then
         exomem_verify_visible_clis "$SERVED" "$VENV_PYTHON" "$CLI_REQUIRED"
@@ -152,7 +159,13 @@ echo "  repo:      $(exomem_repo_version "$REPO_ROOT")"
 
 # Resolve every authority before entering the stop window. No state mutation or
 # package replacement has happened yet.
+# The unit's own environment names its vault. The checkout's .env and the
+# shell describe the default service, so a second service never falls back to
+# them: that would migrate and doctor the wrong vault.
+[[ -z "$VAULT" ]] && VAULT="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_VAULT_PATH "$VENV_PYTHON")"
 if [[ -z "$VAULT" ]]; then
+    exomem_unit_is_default "$UNIT_FILE" \
+        || die "no vault in $UNIT_FILE or its EnvironmentFile; pass --vault for a service that is not the default unit"
     VAULT="$(exomem_dotenv_value "$REPO_ROOT" EXOMEM_VAULT_PATH)"
 fi
 [[ -z "$VAULT" ]] && VAULT="${EXOMEM_VAULT_PATH:-}"
@@ -349,7 +362,7 @@ CLI_REQUIRED=0
 if [[ "$CLI_SYNC" == "always" ]] || { [[ "$CLI_SYNC" == "auto" ]] && exomem_uv_tool_has_exomem; }; then
     CLI_REQUIRED=1
 fi
-exomem_write_managed_manifest "$VENV_PYTHON" "$SERVED" "$PROFILE" "http://127.0.0.1:$PORT"
+exomem_write_owned_managed_manifest "$UNIT_FILE" "$VENV_PYTHON" "$SERVED" "$PROFILE" "http://127.0.0.1:$PORT"
 exomem_sync_uv_cli "$CLI_SYNC" "$SERVED"
 if [[ "$CLI_SYNC" != "never" ]]; then
     exomem_verify_visible_clis "$SERVED" "$VENV_PYTHON" "$CLI_REQUIRED"
