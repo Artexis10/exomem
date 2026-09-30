@@ -108,6 +108,106 @@ class CollectionWriter:
     def _container(self, row: Mapping[str, Any]) -> str:
         return tokens.container_hash(row["collection_id"], row["generation"], row["audit_head"])
 
+    def inspect_collection(self, collection) -> dict[str, Any]:
+        """Report the dark writer's canonical state without publishing or repairing.
+
+        This preview contract supports guard refresh and writer wire goldens.
+        Production reader routing and row authorization belong to later slices.
+        """
+        self.connection.execute("BEGIN")
+        try:
+            return self._inspect_collection(collection)
+        finally:
+            self.connection.execute("ROLLBACK")
+
+    def _inspect_collection(self, collection) -> dict[str, Any]:
+        from .. import due_state, record_governance
+
+        row, manifest, declared = self._collection(collection)
+        items = [
+            dict(zip((column[0] for column in cursor.description), item, strict=True))
+            for cursor in [self.connection.execute(
+                "SELECT * FROM items WHERE collection_id = ? ORDER BY view_path",
+                (manifest.collection_id,),
+            )]
+            for item in cursor
+        ]
+        source_versions = [manifest.manifest_version]
+        parsed = []
+        for item in items:
+            version = collections.SourceVersion(
+                item["view_path"].split("#")[0], self._version(item)
+            )
+            source_versions.append(version)
+            parsed.append(record_formats.Record(
+                collections.ItemIdentity(manifest.collection_id, item["item_key"]),
+                json.loads(item["values_json"]), version, record_formats.SourceSpan(0, 0),
+                body=item["body"],
+            ))
+        snapshot = record_formats.AdapterSnapshot(
+            records=tuple(parsed), snapshot=self._container(row), data_snapshot=self._container(row),
+            source_versions=tuple(source_versions),
+        )
+        inspection = record_formats.inspect_collection(self.root, manifest, snapshot=snapshot)
+        diagnostics = record_governance._inspection_diagnostics(inspection.diagnostics)
+        record_governance._inspection_templates(self.root, manifest, diagnostics)
+        links = record_governance._LinkProjector.create(self.root, manifest)
+        saved_views = record_governance._inspection_saved_views(self.root, manifest, links, diagnostics)
+        pending = self.connection.execute(
+            "SELECT COUNT(*) FROM projection_state WHERE collection_id = ? AND state = 'pending'",
+            (manifest.collection_id,),
+        ).fetchone()[0]
+        held = self.connection.execute(
+            "SELECT held_id, updated_at, candidate_json, diagnostics_json, kind, code "
+            "FROM held_candidates WHERE collection_id = ? ORDER BY held_id",
+            (manifest.collection_id,),
+        ).fetchall()
+        corrections = [candidate for candidate in held if candidate[4] != "write-refusal"]
+        if pending:
+            diagnostics.append({"code": "PROJECTION_PENDING", "reason": "collection views are pending publication"})
+        for code in sorted({candidate[5] for candidate in corrections}):
+            diagnostics.append({"code": code, "reason": "held collection view correction"})
+        guards = {"expected_manifest_hash": manifest.manifest_version.hash,
+                  "expected_container_hash": self._container(row)}
+        payload = {
+            "kind": "collection", "report_only": True,
+            "contract": record_governance._inspection_contract(manifest),
+            "snapshot": self._container(row),
+            "source_versions": [{"path": v.path, "hash": v.hash} for v in source_versions[:record_governance._MAX_ITEM_ENTRIES]],
+            "diagnostics": diagnostics[:64],
+            "audit": {"status": "ok" if row["audit_head"] else "baseline", "gaps": []},
+            "saved_views": saved_views, "lifecycle_guards": guards,
+        }
+        if manifest.item_presentation or manifest.record_presentation or manifest.item_filename:
+            payload["presentation"] = record_governance._presentation_inspection(inspection.presentation, manifest)
+        if declared.kind == "intended":
+            payload["contract"].pop("plans")
+            payload["contract"].pop("claims", None)
+            return planning._project_inspection(payload, manifest)
+        observations = due_state.collection_observation_coverage(
+            self.root, manifest.path, authorize_path=lambda path: True
+        )
+        payload.update({
+            "legacy": None,
+            "observed_values": dict(inspection.observed_values or {}),
+            "coverage": {
+                "committed": len(items), "held": len(held), "unreadable": 0,
+                "held_refs": [
+                    {"held_id": candidate[0], "held_at": candidate[1],
+                     "attempted_action": json.loads(candidate[2]).get("action", "update"),
+                     "diagnostics": record_governance._diagnostics_summary(json.loads(candidate[3]))}
+                    for candidate in held[:record_governance._HELD_REFERENCE_LIMIT]
+                ],
+                "unreflected": len(observations["unreflected"]),
+                "unreflected_refs": list(observations["unreflected"])[:20],
+                "pending": len(observations["pending"]),
+                "pending_refs": list(observations["pending"])[:20],
+                "state": "blocked" if held else "unknown" if not observations["complete"] else "partial" if observations["unreflected"] else "complete",
+            },
+            "projection": {"pending_views": pending, "held_view_corrections": len(corrections)},
+        })
+        return payload
+
     def _version(self, row: Mapping[str, Any]) -> str:
         return tokens.item_version(
             row["collection_id"], row["item_key"], row["row_version"], row["payload_hash"]

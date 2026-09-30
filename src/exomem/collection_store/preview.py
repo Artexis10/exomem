@@ -61,6 +61,8 @@ def dispatch(
             "PLANNING_PROFILE_REQUIRED" if profile == "planning" else "RECORDS_PROFILE_REQUIRED",
             f"{profile.title()} collection is required",
         )
+    if action == "inspect":
+        return True, writer.inspect_collection(args["collection"])
     if action == "create":
         if profile == "planning" and args.get("scaffold", True):
             args["manifest_text"] = planning._with_default_scaffold(args["manifest_text"], proposed)
