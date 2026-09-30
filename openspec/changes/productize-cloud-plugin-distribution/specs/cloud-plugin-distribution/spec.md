@@ -46,12 +46,30 @@ Supported local hook surfaces SHALL use release-owned retrieval, capture and con
 - **THEN** the canonical capture parser recognizes stable Codex messages and hook state remains local to that profile
 - **AND** unsupported lifecycle events are not invented
 
+#### Scenario: MCP hook logs contain no conversation content
+- **WHEN** a native-MCP hook emits a retrieval or capture instruction
+- **THEN** its local observability contains metadata only, not user prompts or assistant response snippets
+
+#### Scenario: Unsafe independent hook state is refused
+- **WHEN** an explicitly selected state home has an unsafe ancestor or a state target is replaced with a symlink
+- **THEN** installation or runtime state writing refuses that target without modifying the redirect destination
+
+#### Scenario: Native MCP capture does not depend on a legacy restart marker
+- **WHEN** a substantive Codex turn uses native-MCP mode and the client exposes only code-mode nested-call observations
+- **THEN** a legacy restart marker does not silence its capability-guarded capture instruction
+- **AND** JavaScript or model-printed output does not count as trusted tool availability or successful write evidence
+
 ### Requirement: Native provider packaging
-The Claude bundle SHALL support Chat, Cowork and Code with a fixed remote MCP URL and complete resources. The public OpenAI archive SHALL use the portable root manifest and MCP schemas and SHALL exclude private app bindings, including bindings in compatibility manifests. Both packages SHALL contain valid identity, legal/support metadata, contained assets and safe deterministic archives.
+The Claude bundle SHALL support Chat, Cowork and Code with a fixed remote MCP URL and complete resources, including thin registrations of release-owned hooks on supported execution surfaces. The public OpenAI archive SHALL use the portable root manifest and MCP schemas and SHALL exclude app references and lifecycle hooks under the current submission contract, including declarations in compatibility manifests. This submission restriction SHALL NOT disable separately installed local Codex hooks. Both packages SHALL contain valid identity, complete documentation/legal/support links, contained icons, explicit data-handling disclosure and safe deterministic archives.
 
 #### Scenario: Public package validation
 - **WHEN** public archives are checked
 - **THEN** validators reject drift, missing resources, unsafe paths, private app bindings or invalid transport declarations
+
+#### Scenario: Public submission and local hooks are distinct
+- **WHEN** Claude and OpenAI directory archives are generated
+- **THEN** Claude hook payloads match canonical release bytes and bind writable local state with native-MCP-only activation
+- **AND** OpenAI's directory archive excludes lifecycle hooks while its identical Skills continue to govern context activation
 
 ### Requirement: Shared behavioural evaluation
 One versioned corpus SHALL define expected observable behaviour for all provider surfaces. Evaluation SHALL inspect actual tool calls, arguments, responses, citations and independent mutation readbacks. Unit observations or connection-only evidence MUST NOT count as native acceptance.

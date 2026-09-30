@@ -59,12 +59,72 @@ def _zip_tree(source: Path, target: Path) -> None:
 
 
 def _validate_openai(root: Path, package: Path) -> None:
+    # Public submission is narrower than the local/workspace plugin runtime.
+    # https://developers.openai.com/plugins/deploy/submission
+    manifests = [json.loads((package / "plugin.json").read_text(encoding="utf-8"))]
+    for directory in (".codex-plugin", ".claude-plugin"):
+        compatibility = package / directory / "plugin.json"
+        if compatibility.exists():
+            manifests.append(json.loads(compatibility.read_text(encoding="utf-8")))
+
+    def declares(value: object, field: str) -> bool:
+        if isinstance(value, dict):
+            return field in value or any(declares(item, field) for item in value.values())
+        if isinstance(value, list):
+            return any(declares(item, field) for item in value)
+        return False
+
+    if any(declares(manifest, "hooks") for manifest in manifests) or any(
+        package.rglob("hooks.json")
+    ):
+        raise ValueError("OpenAI public submission does not support lifecycle hooks")
+    if any(declares(manifest, "apps") for manifest in manifests) or any(package.rglob(".app.json")):
+        raise ValueError("OpenAI public submission does not support app references")
     for stem, filename in (("plugin", "plugin.json"), ("mcp", "mcp.json")):
         schema = json.loads(
             (root / "plugins/cloud/schemas" / f"{stem}.schema.json").read_text(encoding="utf-8")
         )
         value = json.loads((package / filename).read_text(encoding="utf-8"))
         jsonschema.validate(value, schema)
+
+
+def _claude_hooks(root: Path, target: Path) -> None:
+    """Register release-owned hooks without implementing provider behaviour."""
+    hooks = target / "hooks"
+    hooks.mkdir()
+    for stem in ("retrieve-nudge", "capture-nudge", "continuation-checkpoint"):
+        for filename in (f"exomem-{stem}.sh", f"exomem_{stem.replace('-', '_')}.py"):
+            shutil.copyfile(root / "src/exomem/_hooks" / filename, hooks / filename)
+    events = (
+        ("UserPromptSubmit", "retrieve-nudge", None),
+        ("Stop", "capture-nudge", None),
+        ("PreCompact", "continuation-checkpoint", "manual|auto"),
+        ("SessionEnd", "continuation-checkpoint", None),
+        ("SessionStart", "continuation-checkpoint", "compact|resume"),
+    )
+    registrations = {}
+    for event, stem, matcher in events:
+        args = [
+            f"${{CLAUDE_PLUGIN_ROOT}}/hooks/exomem_{stem.replace('-', '_')}.py",
+            "--client",
+            "claude",
+            "--hook-home",
+            "${CLAUDE_PLUGIN_DATA}",
+        ]
+        if stem != "continuation-checkpoint":
+            args.extend(("--activation-mode", "mcp"))
+        group = {"hooks": [{"type": "command", "command": "python3", "args": args, "timeout": 5}]}
+        if matcher:
+            group["matcher"] = matcher
+        registrations[event] = [group]
+    (hooks / "hooks.json").write_bytes(
+        _json_bytes(
+            {
+                "description": "Canonical Exomem MCP activation, governed capture and local continuation.",
+                "hooks": registrations,
+            }
+        )
+    )
 
 
 def build_packages(root: Path, output: Path | None = None) -> dict:
@@ -96,19 +156,67 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             "and connects related knowledge without treating a summary as its source. "
             "The bundled skills explain recall, continuity, capture and review. "
             "Connect the remote MCP server through your provider's authorization flow. "
-            "The live bootstrap response determines available tools and current policy. "
-            "Publisher: Substrate Systems OÜ. Support: " + definition["support"] + "\n"
+            "The live bootstrap response determines available tools and current policy.\n\n"
+            "## Getting started\n\n"
+            "Connect your existing Exomem Cloud account through OAuth. Use the bundled "
+            "Exomem skill to call `bootstrap`, then `activate_context` with the raw user "
+            "turn when context is needed. Reuse context already supplied for this turn; "
+            "do not activate twice. The same canonical skills govern recall, capture and "
+            "review on every supported surface. Workflow skills are user-invocable; "
+            "separate commands and agents are not required copies of those workflows.\n\n"
+            "## Data handling\n\n"
+            "MCP tool arguments, including user turns sent to `activate_context`, reach "
+            "the authenticated Exomem Cloud service. Reads return authorized account "
+            "content; successful writes persist governed memory in that account. OAuth "
+            "selects the account. This package does not import a local vault, read local "
+            "service credentials, or share authorization between accounts. Your AI "
+            "provider also processes the conversation and tool results under its policies.\n\n"
+            "## Surface support\n\n"
+            "Skills and the remote MCP connector carry the portable operating contract. "
+            "Lifecycle hooks run only where the client supports and trusts them; they "
+            "do not run in ordinary Claude Chat or ChatGPT conversations. The public "
+            "OpenAI directory package deliberately contains no lifecycle hooks: current "
+            "submission rules forbid them, although local Codex configurations support "
+            "hooks. Local profile hook installation is a separate release-owned path. "
+            "A delegated MCP activation is not a pre-injected context packet.\n\n"
+            f"Publisher: {definition['author']['name']}.\n\n"
+            f"[Documentation]({definition['documentation']}) · "
+            f"[Privacy policy]({definition['privacy']}) · "
+            f"[Terms of service]({definition['terms']}) · "
+            f"[Support]({definition['support']})\n"
         )
         (target / "README.md").write_text(readme, encoding="utf-8", newline="\n")
         if provider == "claude":
+            _claude_hooks(root, target)
+            with (target / "README.md").open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write(
+                    "\n## Claude lifecycle hooks\n\n"
+                    "On supported Cowork/Claude Code surfaces, trust the plugin's command "
+                    "hooks through the normal client approval flow. They invoke canonical "
+                    "Python scripts directly and require a real `python3` executable on "
+                    "the execution host; Python dependencies are not installed "
+                    "by this package. Hooks use the admitted MCP connection, never a local "
+                    "service credential. Retrieval requests context activation; capture "
+                    "asks the assistant to preserve governed outcomes. Neither bypasses "
+                    "the live server's write policy. Local hooks inspect the client "
+                    "transcript and workspace metadata for cadence and structural "
+                    "continuation, keeping bounded state in `CLAUDE_PLUGIN_DATA`, not "
+                    "inside the versioned package. Hook logs contain metadata only, "
+                    "not prompt or assistant snippets. Hooks do not execute in Claude Chat.\n"
+                )
             manifest = {
                 "name": definition["name"],
+                "displayName": definition["display_name"],
                 "description": definition["description"],
                 "version": identity["version"],
                 "author": definition["author"],
                 "homepage": definition["homepage"],
                 "repository": definition["repository"],
                 "privacyPolicyUrl": definition["privacy"],
+                "supportUrl": definition["support"],
+                "documentationUrl": definition["documentation"],
+                "termsOfServiceUrl": definition["terms"],
+                "icon": "./assets/icon.svg",
                 "license": definition["license"],
                 "keywords": definition["keywords"],
             }

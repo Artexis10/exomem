@@ -13,6 +13,7 @@
   "privacy": "https://substratesystems.io/exomem/privacy",
   "terms": "https://substratesystems.io/exomem/terms",
   "support": "https://substratesystems.io/exomem/support",
+  "documentation": "https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md",
   "license": "AGPL-3.0-or-later",
   "keywords": ["memory", "knowledge-base", "mcp", "notes"]
 }

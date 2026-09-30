@@ -26,6 +26,29 @@ and `mcp.json`, complete canonical skills, public assets, two deterministic ZIPs
 and `release.json`. Check regenerates into temporary storage and rejects drift,
 missing/extra files and symlinks. A valid bundle is not proof of native behaviour.
 
+Claude's bundle also registers the release-owned retrieval, capture and
+continuation hooks through `hooks/hooks.json`. The adapter copies canonical
+scripts byte-for-byte, passes `--client claude` and a writable plugin-local
+state home, and uses `--activation-mode mcp` for retrieval/capture. The hooks
+delegate to the client's admitted MCP connection; they do not read local
+service credentials or directly inject a compiler packet. Exec-form registrations
+invoke the canonical Python scripts directly and require a real `python3`
+executable on a supported, normally trusted execution surface. They do not
+run in Claude Chat. Skills remain the same portable operating contract.
+
+Hook installation health does not prove that the client loaded or executed the
+registration. Native acceptance must observe a normally trusted fresh session,
+its compiler call, and governed capture/readback. Explicit MCP mode instructs
+the agent to check live capabilities before capture; a legacy local restart marker is not
+MCP availability evidence. Nested Codex code-mode JavaScript or printed output
+does not establish successful writes or available tools for reserved owner gates.
+
+The public OpenAI ZIP deliberately has no lifecycle hooks or app references:
+[current submission rules](https://developers.openai.com/plugins/deploy/submission)
+reject both. This is separate from local Codex hook support and the release's
+`install-hook` profile provisioning. Workflow Skills already provide the
+user-invocable workflows; additional command/agent copies are not required.
+
 The package version comes from the checked-out `pyproject.toml`, not an installed
 Python distribution. Regenerate when the release version, canonical skill,
 definition or `plugins/cloud/evals/cases.json` changes. Release Please regenerates
