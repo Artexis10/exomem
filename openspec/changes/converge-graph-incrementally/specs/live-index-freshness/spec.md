@@ -58,11 +58,12 @@ that the registry is behind the disk (Class C, #508 §1 as amended here):
 
 Movement the registry accounts for — a governed write the service committed, or an
 external event the watcher recorded or marked — SHALL NOT mark the registry externally
-pending or invalidate it. A governed write still in flight between its canonical rename
-and its registry publication is accounted for: the path explains itself while an
-outstanding publication intent names it and the sampled file is byte-for-byte the
-content that write staged. Any other bytes on that path, including a same-size foreign
-edit landing mid-write, remain unexplained. A pass that cannot stabilize under it is a publication
+pending or invalidate it. A governed write still in flight is accounted for while an
+outstanding publication intent names the path: after its canonical rename and before
+its registry publication, when the sampled file is byte-for-byte the content that write
+staged; before its rename, when the file is byte-for-byte the content it snapshotted
+and only its ctime moved from what the registry recorded. Any other bytes on that path,
+including a same-size foreign edit landing mid-write, remain unexplained. A pass that cannot stabilize under it is a publication
 failure (Class B): the graph's own recovery state and retry memo, as for any other
 publication failure. A comparison that cannot complete, because the registry is not
 live or its history is incomplete, proves nothing and is Class B too.
@@ -95,10 +96,10 @@ NFD name on a byte-exact file system -- is in the resolver, and is never evidenc
 - **AND** the rebuild retires that mark before the refusal propagates, leaving the edit
   recorded in the registry and the stale graph unavailable to public reads
 
-#### Scenario: A governed write sampled between its rename and its registry publication
+#### Scenario: A governed write sampled before its registry publication
 
 - **WHEN** a whole-vault pass samples a page a narrow-boundary governed write has
-  renamed into place but not yet published to the registry
+  snapshotted, or renamed into place but not yet published to the registry
 - **THEN** the page is not unexplained movement and no external-pending epoch is allocated
 - **AND** a foreign edit replacing those bytes before the publication is still unexplained
 

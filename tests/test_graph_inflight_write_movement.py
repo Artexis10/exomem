@@ -28,6 +28,7 @@ The contract pinned here:
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -279,6 +280,111 @@ def test_a_rebuild_racing_an_in_flight_write_leaves_no_fence_behind(
     assert freshness.external_pending(vault) is False
 
 
+class _HeldAfterSnapshot:
+    """A governed write held just after it snapshotted its destination.
+
+    Capturing the snapshot reads the file and restores its atime and mtime
+    through the open descriptor, which moves the inode's ctime while the
+    bytes, mtime and size stay exactly what the registry recorded. The
+    convergence gate kept sampling that window too.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, root: Path, rel: str):
+        self.root = root
+        self.rel = rel
+        self.restored = threading.Event()
+        self.release = threading.Event()
+        self.failure: list[BaseException] = []
+        self.thread: threading.Thread | None = None
+        original = vault_module._restore_bound_source_timestamps
+
+        def held(*args: Any, **kwargs: Any) -> Any:
+            result = original(*args, **kwargs)
+            if threading.current_thread().name == WRITER_THREAD and not self.restored.is_set():
+                self.restored.set()
+                self.release.wait(timeout=30.0)
+            return result
+
+        monkeypatch.setattr(vault_module, "_restore_bound_source_timestamps", held)
+
+    def start(self) -> None:
+        self.thread = threading.Thread(
+            target=_run_governed_write,
+            args=(
+                self.root,
+                self.rel,
+                _page("B", "B is a plain claim, rewritten after its snapshot."),
+                self.failure,
+            ),
+            name=WRITER_THREAD,
+        )
+        self.thread.start()
+        assert self.restored.wait(timeout=30.0), "the governed write never snapshotted"
+
+    def finish(self) -> None:
+        self.release.set()
+        if self.thread is not None:
+            self.thread.join(timeout=60.0)
+            assert not self.thread.is_alive(), "the held governed write did not finish"
+            self.thread = None
+        if self.failure:
+            raise self.failure[0]
+
+
+@pytest.fixture
+def held_after_snapshot(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[_HeldAfterSnapshot]:
+    held = _HeldAfterSnapshot(monkeypatch, vault, PAGE_B)
+    try:
+        yield held
+    finally:
+        held.release.set()
+        if held.thread is not None:
+            held.thread.join(timeout=60.0)
+
+
+def test_a_write_that_only_restored_its_snapshot_timestamps_is_recorded(
+    vault: Path, held_after_snapshot: _HeldAfterSnapshot
+) -> None:
+    """The writer's own timestamp restore moves ctime and nothing else."""
+    before = (vault / PAGE_B).read_bytes()
+    held_after_snapshot.start()
+    assert (vault / PAGE_B).read_bytes() == before
+
+    sample = EpistemicGraphIndex(vault)._unexplained_differences()
+
+    assert sample is not None
+    _lineage, _disk, differing, unexplained = sample
+    assert PAGE_B in differing, "the snapshot's timestamp restore did not move the ctime"
+    assert PAGE_B not in unexplained, (
+        "a governed write's own snapshot timestamp restore was classified as unrecorded movement"
+    )
+    held_after_snapshot.finish()
+
+
+def test_a_foreign_edit_that_keeps_mtime_and_size_during_a_snapshot_is_unexplained(
+    vault: Path, held_after_snapshot: _HeldAfterSnapshot
+) -> None:
+    """Only the bytes the writer snapshotted are explained, not merely their stat."""
+    target = vault / PAGE_B
+    held_after_snapshot.start()
+    info = target.stat()
+    before = target.read_bytes()
+    foreign = before[:-2] + (b"Z\n" if before[-2:] != b"Z\n" else b"Y\n")
+    assert len(foreign) == len(before) and foreign != before
+    target.write_bytes(foreign)
+    os.utime(target, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+    sample = EpistemicGraphIndex(vault)._unexplained_differences()
+
+    assert sample is not None
+    assert PAGE_B in sample[3], (
+        "a foreign edit that preserved mtime and size was hidden behind the "
+        "writer's snapshot intent"
+    )
+
+
 # --- the bound: a foreign edit on the same path is still evidence ------------
 
 
@@ -307,9 +413,7 @@ def test_a_foreign_edit_during_an_in_flight_write_is_still_unexplained(
     )
 
 
-def test_an_aborted_write_explains_nothing(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_an_aborted_write_explains_nothing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only an outstanding intent explains movement; a terminal one does not."""
     target = vault / PAGE_B
     content = _page("B", "B, staged by a write that will abort.").encode("utf-8")
@@ -397,9 +501,7 @@ def test_retiring_the_mark_never_retires_a_newer_one(
     with pytest.raises(epistemic_graph.GraphProjectionMoved):
         EpistemicGraphIndex(vault).rebuild_all()
 
-    assert freshness.external_pending_paths(vault) == frozenset(
-        {str((vault / PAGE_C).resolve())}
-    )
+    assert freshness.external_pending_paths(vault) == frozenset({str((vault / PAGE_C).resolve())})
 
 
 # --- (c) graph_drift names the refusal it hit ---------------------------------

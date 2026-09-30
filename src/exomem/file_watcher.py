@@ -473,35 +473,42 @@ def publication_intent_deadline(intent: _PublicationIntent) -> float | None:
 #: then are not the writer's.
 _INSTALLING_OR_LATER = frozenset({"installing", "installed", "postpublish_verified"})
 
+_StatPair = tuple[int, int]
+
 
 def inflight_publications_explain(
     vault_root: Path,
-    candidates: Mapping[str, tuple[int, int] | None],
+    candidates: Mapping[str, tuple[_StatPair | None, _StatPair | None]],
 ) -> set[str]:
-    """Vault-relative paths whose sampled bytes are an in-flight governed write's.
+    """Vault-relative paths whose sampled difference is an in-flight governed write.
 
-    `candidates` maps a vault-relative POSIX path to the `(mtime_ns, size)` a
-    caller sampled from disk (None for a path absent there). A path is
-    explained only when all of these hold at once:
+    `candidates` maps a vault-relative POSIX path to two `(mtime_ns, size)`
+    pairs: what the caller sampled from disk, and what the registry recorded
+    (either None when absent). An outstanding publication intent -- registered
+    before the writer touches the file, not yet expired, aborted or
+    superseded -- explains a path in exactly two shapes:
 
-    * an outstanding publication intent names it -- registered before the
-      writer's first rename, not yet expired, aborted or superseded -- and
-      the writer has begun installing (a `prepared` intent explains nothing);
-    * the file on disk now is byte-for-byte the content the writer staged:
-      same SHA-256 and size, read through one bounded, stable descriptor;
-    * that file is the one the caller sampled: same mtime and size.
+    * AFTER: the writer has begun installing, and the file is byte-for-byte
+      the content it staged (same SHA-256 and size through one bounded, stable
+      descriptor) with the mtime the caller sampled. This is the window
+      between the canonical rename and the registry publication.
+    * BEFORE: the writer has not begun installing, the file is byte-for-byte
+      the content it snapshotted, and its mtime and size are still the ones
+      the registry recorded. Capturing the snapshot restores the file's
+      timestamps through its descriptor, which moves only the ctime.
 
-    So a foreign edit on the same path while the write is in flight -- even
-    one of identical size -- explains nothing, and neither does a write whose
-    publication failed. The one case it cannot separate is a foreign writer
-    installing exactly the governed writer's bytes, which is not a difference.
+    Any other bytes on the path -- a foreign edit landing while the write is
+    in flight, even one of identical size, or one that also restores the
+    mtime -- explain nothing, and neither does a write whose publication
+    failed. The one case it cannot separate is a foreign writer producing
+    exactly the governed writer's bytes, which is not a content difference.
     """
     root = _canon_root(vault_root)
     now = time.monotonic()
     notifications: list[tuple[_PublicationIntent, list[_PublicationObservation]]] = []
-    pending: list[tuple[str, _PublicationIntent, tuple[int, int]]] = []
+    pending: list[tuple[str, _PublicationIntent, str, _StatPair]] = []
     with _SUPPRESS_LOCK:
-        for rel, sampled in candidates.items():
+        for rel, (sampled, recorded) in candidates.items():
             if sampled is None:
                 continue
             intent = _PUBLICATION_INTENTS.get((root, rel))
@@ -510,28 +517,39 @@ def inflight_publications_explain(
             expired = _expire_publication_intent_locked(intent, now)
             if expired:
                 notifications.append((intent, expired))
-            if intent.disposition == "active" and intent.phase in _INSTALLING_OR_LATER:
-                pending.append((rel, intent, sampled))
+            if intent.disposition != "active":
+                continue
+            if intent.phase in _INSTALLING_OR_LATER and sampled[1] == intent.size:
+                pending.append((rel, intent, "after", sampled))
+            elif (
+                intent.phase == "prepared"
+                and intent.before_content_hash is not None
+                and sampled[1] == intent.before_size
+                and recorded == sampled
+            ):
+                pending.append((rel, intent, "before", sampled))
     for intent, observers in notifications:
         _notify_publication_observers(observers, intent, intent.disposition)
     explained: set[str] = set()
-    for rel, intent, (sampled_mtime_ns, sampled_size) in pending:
-        if sampled_size != intent.size:
-            continue
-        proof = _bounded_descriptor_digest(Path(root) / rel, intent.size)
+    for rel, intent, shape, (sampled_mtime_ns, sampled_size) in pending:
+        expected_hash = intent.content_hash if shape == "after" else intent.before_content_hash
+        proof = _bounded_descriptor_digest(Path(root) / rel, sampled_size)
         if (
             proof is None
-            or proof[0] != intent.content_hash
+            or proof[0] != expected_hash
             or proof[1] != sampled_mtime_ns
             or proof[2] != sampled_size
         ):
             continue
         with _SUPPRESS_LOCK:
             # Still the same token, and not failed while the file was read. A
-            # token that succeeded meanwhile published these exact bytes.
-            if _PUBLICATION_INTENTS.get(intent.key) is intent and (
-                intent.disposition in {"active", "succeeded"}
-            ):
+            # token that succeeded meanwhile published its AFTER bytes; a
+            # BEFORE match is admissible only while nothing was installed.
+            if _PUBLICATION_INTENTS.get(intent.key) is not intent:
+                continue
+            if shape == "after" and intent.disposition in {"active", "succeeded"}:
+                explained.add(rel)
+            elif shape == "before" and intent.disposition == "active":
                 explained.add(rel)
     return explained
 

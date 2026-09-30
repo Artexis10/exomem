@@ -4212,7 +4212,10 @@ class EpistemicGraphIndex:
         self,
         lineage: freshness.RecallFreshnessCheckpoint,
         *,
-        inflight_candidates: dict[str, freshness.FileSignature | None] | None = None,
+        inflight_candidates: dict[
+            str, tuple[freshness.FileSignature | None, freshness.FileSignature | None]
+        ]
+        | None = None,
     ) -> set[str] | None:
         """Paths the registry accounts for since `lineage`, or None if it cannot say.
 
@@ -4221,14 +4224,16 @@ class EpistemicGraphIndex:
         recorded, just not yet published.
 
         Plus, of `inflight_candidates` (path -> the disk signature the caller
-        sampled), every path whose sampled bytes are exactly those an
-        outstanding governed write is publishing. A narrow-boundary writer
-        (`remember`) renames its staged bytes and publishes them to the
-        registry under no lock a rebuild waits on, so the registry is
-        legitimately behind the disk between the two. That window is not
-        evidence the registry missed anything: the write registered its exact
-        bytes before the rename, and publishes them next. Anything else on the
-        path -- a foreign edit landing mid-write -- is still unexplained.
+        sampled and the one the registry recorded), every path whose sampled
+        difference is an outstanding governed write's own doing. A
+        narrow-boundary writer (`remember`) snapshots, renames and publishes
+        to the registry under no lock a rebuild waits on, so the registry is
+        legitimately behind the disk while it runs: its snapshot restores the
+        file's timestamps (moving the ctime), and its rename lands before the
+        publication. Neither is evidence the registry missed anything; the
+        write registered its exact before and after bytes first. Anything
+        else on the path -- a foreign edit landing mid-write -- is still
+        unexplained (`file_watcher.inflight_publications_explain`).
         """
         delta = freshness.recall_delta_since(self.vault_root, "vault", lineage)
         if not delta.complete:
@@ -4246,9 +4251,12 @@ class EpistemicGraphIndex:
         if inflight_candidates:
             from . import file_watcher
 
+            def stat_pair(signature: freshness.FileSignature | None) -> tuple[int, int] | None:
+                return (signature[0], signature[2]) if signature is not None else None
+
             unaccounted = {
-                rel: (signature[0], signature[2]) if signature is not None else None
-                for rel, signature in inflight_candidates.items()
+                rel: (stat_pair(sampled), stat_pair(registered))
+                for rel, (sampled, registered) in inflight_candidates.items()
                 if rel not in recorded
             }
             if unaccounted:
@@ -4273,8 +4281,8 @@ class EpistemicGraphIndex:
         Returns the registry checkpoint `c1` the comparison was taken against,
         the disk stat map keyed by relative path, the paths on which registry
         and disk differ, and those of them the registry's complete history from
-        `c1` (plus standing path-scoped watcher marks, plus the exact staged
-        bytes of an in-flight governed write) does not explain.
+        `c1` (plus standing path-scoped watcher marks, plus an in-flight
+        governed write's own exact bytes) does not explain.
         """
         try:
             lineage, registry = freshness.recall_projection_snapshot(
@@ -4292,7 +4300,10 @@ class EpistemicGraphIndex:
         unexplained: set[str] = set()
         if differing:
             explained = self._recorded_since(
-                lineage, inflight_candidates={rel: disk.get(rel) for rel in differing}
+                lineage,
+                inflight_candidates={
+                    rel: (disk.get(rel), recorded_map.get(rel)) for rel in differing
+                },
             )
             if explained is None:
                 return None
@@ -4301,7 +4312,10 @@ class EpistemicGraphIndex:
                 with _sampling_boundary(self._canonical_mutation_coordinator()):
                     pass
                 explained = self._recorded_since(
-                    lineage, inflight_candidates={rel: disk.get(rel) for rel in unexplained}
+                    lineage,
+                    inflight_candidates={
+                        rel: (disk.get(rel), recorded_map.get(rel)) for rel in unexplained
+                    },
                 )
                 if explained is None:
                     return None
