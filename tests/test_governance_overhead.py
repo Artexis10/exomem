@@ -595,10 +595,23 @@ def _measure_receipt_case(
     sink_append = _serializing_receipt_sink()
 
     def call(append: Callable[..., dict[str, Any]]) -> tuple[int, Any]:
-        monkeypatch.setattr(receipts_module, "append_event", append)
-        started = time.perf_counter_ns()
+        elapsed_ns = 0
+
+        def timed_append(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            nonlocal elapsed_ns
+            started = time.perf_counter_ns()
+            try:
+                return append(*args, **kwargs)
+            finally:
+                elapsed_ns += time.perf_counter_ns() - started
+
+        # Measure the complete append inside the real governed operation.
+        # Adjacent whole-operation subtraction otherwise charges unrelated
+        # projection/scheduling variance to incremental receipt storage.
+        monkeypatch.setattr(receipts_module, "append_event", timed_append)
         result = invoke()
-        return time.perf_counter_ns() - started, result
+        assert elapsed_ns > 0, f"{case_name} reached no receipt append"
+        return elapsed_ns, result
 
     # Like timeit, exclude cyclic-collector scheduling from the timed region.
     # Both arms still allocate, validate, hash, and serialize the same receipt;
