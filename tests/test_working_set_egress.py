@@ -3206,6 +3206,135 @@ def _recent_packet(entries: list[dict]) -> dict:
     return packet
 
 
+@pytest.mark.parametrize("hidden_contact", [False, True])
+def test_recent_context_is_identical_without_a_withheld_page(
+    vault: Path, tmp_path: Path, hidden_contact: bool
+) -> None:
+    """A withheld manifest cannot suppress its visible recent siblings."""
+    import shutil
+
+    from conftest import initialize_vault_state_offline
+    from test_working_set_hot_projection import _one_old_tick
+    from test_working_set_index import _seed_structure, _write
+
+    from exomem import commands, working_set_heat, working_set_runtime
+    from exomem.governance.principal import owner_principal
+
+    _seed_structure(vault)
+    hidden = "Knowledge Base/Records/Depot Stock/_collection.md"
+    visible_paths = [
+        "Knowledge Base/Records/Depot Stock/first.md",
+        "Knowledge Base/Records/Depot Stock/second.md",
+    ]
+    for n, path in enumerate(visible_paths):
+        _write(vault / path, f"---\nstatus: active\n---\n\n# Recent work {n}\n")
+    write_scope(vault, paths=hidden, name="Withheld recent page")
+    write_rule(vault, ceiling=0)
+
+    # The twins differ by exactly one content page, with independent temp state.
+    absent = tmp_path / "absent"
+    shutil.copytree(vault, absent)
+    (absent / hidden).unlink()
+    initialize_vault_state_offline(absent, source="recent context twin fixture")
+    stamp = 1_790_000_000_000_000_000
+    for root in (absent, vault):
+        _one_old_tick(root)
+        _indexed(root)
+        working_set_heat.profile(root)  # seed the old, single-burst pages
+        events = [
+            working_set_heat.HeatEvent(stamp + n, path, "work", origin="edit_memory")
+            for n, path in enumerate(visible_paths)
+        ]
+        if root == vault and hidden_contact:
+            events.append(
+                working_set_heat.HeatEvent(
+                    stamp + len(events), hidden, "work", origin="edit_memory"
+                )
+            )
+        assert working_set_heat.append(root, events)
+
+    def activate(root: Path, *, external: bool) -> dict:
+        working_set_runtime.reset_caches_for_tests()
+        with request_scope(_external() if external else owner_principal(surface="mcp")):
+            packet = commands.op_activate_context(root, turn="ok continue")
+        # These describe the request/index instance, not released content.
+        packet.pop("timings", None)
+        packet.pop("continuity", None)
+        packet["generation"].pop("freshness_key", None)
+        return packet
+
+    without_hidden = activate(absent, external=True)
+    with_hidden = activate(vault, external=True)
+    assert [entry["path"] for entry in without_hidden["recent_context"]] == visible_paths[::-1]
+    assert with_hidden["recent_context"] == without_hidden["recent_context"]
+    assert with_hidden["budget"]["used_chars"] == without_hidden["budget"]["used_chars"]
+    assert with_hidden == without_hidden
+
+    if hidden_contact:
+        owner = activate(vault, external=False)
+        assert [entry["path"] for entry in owner["recent_context"]] == [hidden]
+
+
+def test_recent_planning_reserves_only_visible_rows(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unmentioned plan must not spend one of the visible pages' slots."""
+    from dataclasses import replace
+
+    from test_working_set_index import _seed_structure, _write
+
+    from exomem import working_set, working_set_heat, working_set_index
+
+    _seed_structure(vault)
+    hidden = "Knowledge Base/Planning/hidden-commitment.md"
+    _write(vault / hidden, "---\nstatus: active\n---\n\n# Unmentioned commitment\n")
+    visible_paths = [
+        f"Knowledge Base/Notes/Insights/recent-work-{n}.md"
+        for n in range(working_set.RECENT_CONTEXT_MAX_ENTRIES)
+    ]
+    for path in visible_paths:
+        _write(vault / path, "---\nstatus: active\n---\n\n# Recent work\n")
+    write_scope(vault, paths=hidden, name="Withheld plan")
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+    index = working_set_index.WorkingSetIndex(vault)
+    rows = index.anchors()
+    # Supply the typed plan row at the index boundary, independently of
+    # collection discovery; the compiler must decide every such row itself.
+    plan = replace(
+        rows[0],
+        anchor_id=hidden,
+        path=hidden,
+        ref=hidden,
+        title="Unmentioned commitment",
+        kind="plan",
+        lifecycle="active",
+        aliases=(),
+        terms=(),
+        categories=("action",),
+        links=(),
+        anchor_neighbourhood=frozenset(),
+    )
+    heat = working_set_heat.build_profile(
+        working_set_heat.HeatEvent(1_790_000_000_000_000_000 + n, path, "work")
+        for n, path in enumerate(visible_paths)
+    )
+    monkeypatch.setattr(index, "anchors", lambda: rows)
+    with request_scope(_external()):
+        absent = working_set.compile_packet(vault, turn="ok continue", index=index, heat_profile=heat)
+    monkeypatch.setattr(index, "anchors", lambda: (*rows, plan))
+    with request_scope(_external()):
+        withheld = working_set.compile_packet(vault, turn="ok continue", index=index, heat_profile=heat)
+    assert len(absent["recent_context"]) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+    assert withheld["recent_context"] == absent["recent_context"]
+    assert withheld["budget"]["used_chars"] == absent["budget"]["used_chars"]
+    assert withheld == absent
+
+    owner = working_set.compile_packet(vault, turn="ok continue", index=index, heat_profile=heat)
+    plans = {entry["path"] for entry in owner["recent_context"] if entry["why"] == "planning"}
+    assert plans == {hidden}
+
+
 def test_a_withheld_recent_page_leaves_the_block_and_the_others_serve(vault: Path) -> None:
     """The block is the first thing a fresh session reads, so it is also the
     first place a withheld page would surface as an existence oracle."""
