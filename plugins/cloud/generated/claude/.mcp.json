@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "exomem": {
+      "type": "http",
+      "url": "https://exomem.substratesystems.io/mcp"
+    }
+  }
+}
