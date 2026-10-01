@@ -217,3 +217,15 @@ authority and can be rolled back independently.
       arrival order (`_FairCaptureQueue`) around `idempotency.run`.
 - [ ] 10.3 Live: after deploy, `exomem_mutation_busy_total` stays flat under
       maximal capture and `contention_absorbed` log rows show the waits.
+
+## 11. Graph receipt identity after authority release
+
+- [ ] 11.1 Carry the dispatch checkpoint through the internal index report and
+      both handoff/completion checks without exposing it in public dictionaries.
+- [ ] 11.2 Reproduce a real sibling commit after completed dispatch; verify
+      registration and queued coverage survive a newer epoch, while missing
+      identities, missing flights and stale queue generations still refuse.
+- [ ] 11.3 Run affected suites, independent review, privacy, strict OpenSpec
+      validation and completion CI; deliver after the frozen 0.102 release.
+- [ ] 11.4 Verify live committed receipts and graph convergence after managed
+      upgrade before closing the graph incident or friend-readiness hold.

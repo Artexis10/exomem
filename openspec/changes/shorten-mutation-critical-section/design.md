@@ -287,3 +287,24 @@ and never advances graph-sync acknowledgement. No expensive preparation falls
 back under the held boundary. Missed external edits remain subject to the
 existing watcher/reconcile contract; arbitrary-editor linearizability is not
 introduced.
+
+## Post-terminal graph receipts retain their dispatch checkpoint
+
+After canonical authority is released, another writer may advance the graph
+checkpoint before the first writer finishes indexing. `IndexComponentOutcome`
+retains the checkpoint returned by `GraphDispatchResult` as internal metadata;
+its public dictionary remains component, outcome and code only. Both the batch
+handoff check and full-upsert completion check use that dispatch identity,
+never a later global checkpoint. Completed work requires acknowledgement
+covering that identity. A registered outcome requires its exact registration
+or covering acknowledgement; a durable queue alone cannot excuse a missing
+flight. Deferred coverage retains its existing claiming-code, affected-path
+and generation checks, measured against the dispatch generation.
+
+Registered or deferred results without an identity fail closed and leave
+durable batch repair demand; they do not install a failure handle for another
+writer's checkpoint. Legacy completed/failed dispatches without a checkpoint
+retain their no-checkpoint behavior. This does not weaken graph read admission:
+availability still requires proof for the exact current canonical checkpoint.
+The repair follows the frozen release separately, alongside the independently
+verified background-hold test clock correction; neither changes 0.102 source.
