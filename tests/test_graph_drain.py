@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -75,6 +77,98 @@ def _published_vault(root: Path) -> Path:
     )
     EpistemicGraphIndex(vault).rebuild_all()
     return vault
+
+
+def test_a_slow_availability_proof_does_not_block_a_canonical_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A whole-corpus proof must not make an unrelated writer time out."""
+    root = _published_vault(tmp_path)
+    index = EpistemicGraphIndex(root)
+    index.withdraw_availability()
+    entered = threading.Event()
+    release = threading.Event()
+    outcomes: list[bool] = []
+    real_proof = EpistemicGraphIndex._snapshot_sources_match_disk
+
+    def slow_proof(self, conn, **kwargs):
+        entered.set()
+        assert release.wait(5), "proof was never released"
+        return real_proof(self, conn, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_snapshot_sources_match_disk", slow_proof)
+    worker = threading.Thread(
+        target=lambda: outcomes.append(index.republish_availability_if_current())
+    )
+    worker.start()
+    assert entered.wait(5), "availability proof never started"
+    path = root / "Knowledge Base/Notes/Insights/a.md"
+    coordinator = index._mutation_coordinator
+    coordinator.timeout_seconds = 0.1
+    try:
+        with coordinator.hold(operation="test_canonical_write", holder_kind="writer"):
+            vault_module.batch_atomic_write(
+                [vault_module.PlannedWrite(path=path, content=_page("A", "Changed."))],
+                vault_root=root,
+            )
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert path.read_text(encoding="utf-8") == _page("A", "Changed.")
+    assert outcomes == [False], "a proof racing a write published old graph rows"
+    # The concurrent writer's own fan-out may already have repaired the graph.
+    # The availability proof must decline rather than overwrite that repair.
+    conn = index._connect_existing(readonly=True)
+    try:
+        assert conn.execute(
+            "SELECT source_hash FROM graph_nodes WHERE kind = 'file' AND path = ?",
+            (path.relative_to(root).as_posix(),),
+        ).fetchone() == (vault_module.content_hash(_page("A", "Changed.")),)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("change", ["source", "policy", "registry", "sidecar"])
+def test_availability_rejects_changes_after_its_source_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    """A prepared byte proof must not authorize publication after its inputs move."""
+    root = _published_vault(tmp_path)
+    index = EpistemicGraphIndex(root)
+    index.withdraw_availability()
+    real_proof = EpistemicGraphIndex._snapshot_sources_match_disk
+
+    def changed_after_proof(self, conn, **kwargs):
+        result = real_proof(self, conn, **kwargs)
+        assert result
+        if change == "source":
+            path = root / "Knowledge Base/Notes/Insights/b.md"
+            before = path.stat()
+            path.write_text(path.read_text().replace("present", "changed"), encoding="utf-8")
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        elif change == "policy":
+            (root / "Knowledge Base/_access.yaml").write_text("default_tier: public\n")
+        elif change == "registry":
+            from exomem.relation_registry import extension_registry_path
+
+            path = extension_registry_path(root)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("version: 1\n")
+        else:
+            with sqlite3.connect(index.path) as writer:
+                writer.execute("UPDATE graph_nodes SET source_hash = ? WHERE kind = 'file'", ("0" * 64,))
+        return result
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_snapshot_sources_match_disk", changed_after_proof)
+    assert index.republish_availability_if_current() is False
+    conn = index._connect_existing(readonly=True)
+    try:
+        assert conn.execute(
+            "SELECT value FROM graph_meta WHERE key = 'recall_projection_identity'"
+        ).fetchone() is None
+    finally:
+        conn.close()
 
 
 def test_a_queued_write_is_drained_without_waiting_for_the_reconcile_tick(

@@ -187,3 +187,19 @@
       `edit_memory`, `observe_memory` or `remember`, and `full_upserts` stops
       growing with ordinary writes.
 
+
+## 9. Availability republication without full parsing under authority
+
+This urgent availability repair ships independently of the memory-storage
+batch: it addresses interactive write refusals while preserving graph proof
+authority and can be rolled back independently.
+
+- [ ] 9.1 Prepare the source/topology proof outside the boundary and replay its
+      exact byte/membership seal under authority; retain epoch, recall, policy,
+      registry and live-sidecar binding and unchanged acknowledgement semantics.
+- [ ] 9.2 Verify an unrelated writer progresses during a slow proof and that
+      intervening source, policy, registry or sidecar changes refuse publication.
+- [ ] 9.3 Measure remaining final-seal hold, run affected graph suites, independent
+      review, privacy and strict specification checks and completion CI.
+- [ ] 9.4 Deliver through the normal release process and verify the live personal
+      service's write and graph outcomes before claiming the incident resolved.
