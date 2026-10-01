@@ -414,6 +414,7 @@ def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, A
         "confirmation_set_digest": "confirmation",
         "boundary_set_digest": "command",
     }
+    dimension_fields = {source: target for target, source in set_dimensions.items()}
     result: list[dict[str, Any]] = []
     optional_identity: list[tuple[int, str, Any]] = []
     for key, members in sorted(buckets.items()):
@@ -458,7 +459,10 @@ def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, A
             if (
                 present
                 and len(present) == len(members)
-                and _digest(present, unique=True) == _digest([present[0]], unique=True)
+                and (
+                    summary[dimension_fields[identity_key]]
+                    if identity_key in dimension_fields else _digest(present, unique=True)
+                ) == _digest([present[0]], unique=True)
             ):
                 optional_identity.append((result_index, identity_key, present[0]))
     if len(result) > receipts.MAX_OUTCOMES:  # defensive if decision schema expands
