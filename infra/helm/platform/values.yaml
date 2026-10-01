@@ -64,7 +64,7 @@ scheduler:
   secretKey: secret
   jobs:
     exomem-access-delivery:
-      servesCloud: false
+      servesCloud: true
     exomem-reconcile:
       servesCloud: true
     exomem-export-gc:

@@ -4390,9 +4390,15 @@ def dispatch_event(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--client", choices=("claude", "codex"), required=True)
-    parser.add_argument("--hook-home")
+    home = parser.add_mutually_exclusive_group()
+    home.add_argument("--hook-home")
+    home.add_argument("--hook-home-env")
     try:
         args = parser.parse_args(argv)
+        if args.hook_home_env is not None:
+            args.hook_home = os.environ.get(args.hook_home_env)
+            if not args.hook_home or not args.hook_home.strip():
+                return 0  # Never use an inherited profile when the platform home is absent.
         raw = sys.stdin.buffer.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             return 0

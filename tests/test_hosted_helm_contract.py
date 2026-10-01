@@ -2469,7 +2469,7 @@ def test_scheduler_suspension_follows_cloud_and_legacy_modes(
     legacy_suspended = cellctl_enabled or cloud_gateway_enabled or legacy_paused
 
     assert suspension == {
-        "exomem-access-delivery": legacy_suspended,
+        "exomem-access-delivery": expected_reconcile,
         "exomem-reconcile": expected_reconcile,
         "exomem-export-gc": legacy_suspended,
     }
