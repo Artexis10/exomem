@@ -34,7 +34,6 @@ from typing import Any, NamedTuple
 from . import (
     activation_conventions,
     context_roles,
-    kbdir,
     request_budget,
     source_taxonomy,
     working_set_heat,
@@ -2109,7 +2108,7 @@ def compile_packet(
         # including unmentioned Planning item refs. Reuse that same view for
         # recent reservations instead of deciding its page paths a second time.
         recent: tuple[dict[str, Any], ...] = _recent_context(
-            root, rows=recent_rows, profile=heat, attribution=attribution, marks=marks
+            root, rows=rows, profile=heat, attribution=attribution, marks=marks
         )
 
     # Design D3, and ONLY here: the turn reached no anchor at all. An
