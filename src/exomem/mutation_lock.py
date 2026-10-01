@@ -280,6 +280,25 @@ def _register_hold_summary_flush() -> None:
 _register_hold_summary_flush()
 
 
+# True while a capture write is being retried on the server: a refusal in that
+# window is absorbed, so no client saw it and it must not count or shout as one.
+_ABSORBING_BUSY: ContextVar[bool] = ContextVar("exomem_absorbing_busy", default=False)
+
+
+@contextmanager
+def absorbing_busy() -> Iterator[None]:
+    token = _ABSORBING_BUSY.set(True)
+    try:
+        yield
+    finally:
+        _ABSORBING_BUSY.reset(token)
+
+
+def record_client_visible_busy() -> None:
+    """Count one MUTATION_BUSY that actually reached a client."""
+    _bump_boundary_metric("exomem_mutation_busy_total", {"code": "MUTATION_BUSY"})
+
+
 def _bump_boundary_metric(name: str, labels: dict[str, str] | None = None) -> None:
     try:
         from . import metrics
@@ -2311,7 +2330,7 @@ class VaultMutationCoordinator:
         holder = details.get("holder") or {}
         _log_mutation_lock_event(
             "mutation_lock_refused",
-            level=logging.WARNING,
+            level=logging.DEBUG if _ABSORBING_BUSY.get() else logging.WARNING,
             operation=holder.get("operation"),
             holder_kind=holder.get("holder_kind"),
             age_seconds=holder.get("age_seconds"),
@@ -2792,7 +2811,8 @@ def _mutation_busy(
         last_holder = contention.get("last_holder")
         if last_holder is not None:
             details["last_holder"] = last_holder
-    _bump_boundary_metric("exomem_mutation_busy_total", {"code": "MUTATION_BUSY"})
+    if not _ABSORBING_BUSY.get():
+        record_client_visible_busy()
     return OpError(
         "MUTATION_BUSY",
         "vault mutation boundary is busy",

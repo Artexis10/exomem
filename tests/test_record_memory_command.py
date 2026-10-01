@@ -35,7 +35,7 @@ def _activity_log(vault: Path) -> None:
     log.write_text("# Activity\n", encoding="utf-8")
 
 
-def test_record_memory_exposes_the_ten_declared_actions() -> None:
+def test_record_memory_exposes_the_eleven_declared_actions() -> None:
     from exomem import record_memory
 
     assert record_memory.ACTIONS == frozenset(
@@ -46,6 +46,7 @@ def test_record_memory_exposes_the_ten_declared_actions() -> None:
             "create",
             "query",
             "append",
+            "bulk_upsert",
             "update",
             "revise",
             "rebaseline",

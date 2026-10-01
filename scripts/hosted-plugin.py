@@ -41,7 +41,9 @@ def main() -> int:
     parser.add_argument(
         "--candidate",
         choices=tuple(hosted_plugins.CANDIDATE_PROFILES),
-        default=hosted_plugins.DEFAULT_CANDIDATE,
+        default=None,
+        help="default: the default candidate; `check` with neither --candidate nor "
+        "--platform checks every candidate on every platform it renders",
     )
     parser.add_argument("--platform", choices=(*hosted_plugins.PLATFORMS, "all"))
     parser.add_argument("--channel", choices=(*hosted_plugins.DIRECTORY_CHANNELS, "all"))
@@ -62,6 +64,14 @@ def main() -> int:
     )
     parser.add_argument("--expected-record-sha256")
     args = parser.parse_args()
+    check_everything = (
+        args.command == "check"
+        and args.candidate is None
+        and args.platform is None
+        and args.openai_app_id is None
+    )
+    if args.candidate is None:
+        args.candidate = hosted_plugins.DEFAULT_CANDIDATE
     try:
         if args.command == "directory-check":
             packets = hosted_plugins.directory_check(
@@ -171,6 +181,10 @@ def main() -> int:
             if args.platform not in (None, "claude"):
                 parser.error("regenerate supports only the committed Claude candidate")
             print(hosted_plugins.regenerate_claude(REPO_ROOT))
+        elif args.command == "check" and check_everything:
+            for candidate, platform in hosted_plugins.check_all(REPO_ROOT):
+                print(f"current: {candidate} on {platform}")
+            print("Hosted generated artifacts are current")
         elif args.command == "check":
             hosted_plugins.check(
                 REPO_ROOT,

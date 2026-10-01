@@ -126,6 +126,10 @@ class Encoder(Protocol):
         max_tokens: int | None = None,
     ) -> np.ndarray: ...
 
+    def texts_fit(self, texts: list[str]) -> bool:
+        """Whether every text fits without dropping tokens, including specials."""
+        ...
+
     def release(self) -> None:
         """Drop runtime-held memory. Called after the singleton is dropped."""
 
@@ -462,6 +466,14 @@ class _TorchEncoder:
         finally:
             self._model.max_seq_length = limit
 
+    def texts_fit(self, texts: list[str]) -> bool:
+        # Count with the selected runtime's tokenizer, never its truncated rows.
+        rows = self._model.tokenizer(
+            texts, add_special_tokens=True, truncation=False, padding=False,
+        )["input_ids"]
+        limit = min(self.profile.max_seq, self._model.max_seq_length)
+        return all(len(row) <= limit for row in rows)
+
     def release(self) -> None:
         self._model = None
         accel.empty_cache()
@@ -559,6 +571,18 @@ class _OnnxEncoder:
         for start in range(0, len(texts), step):
             out.append(self._encode_batch(texts[start : start + step], normalize_embeddings, max_tokens))
         return np.vstack(out)
+
+    def texts_fit(self, texts: list[str]) -> bool:
+        from tokenizers import Tokenizer
+
+        # A private copy avoids changing truncation/padding while another ONNX
+        # thread is encoding. It retains this tokenizer's normalizer and specials.
+        tokenizer = Tokenizer.from_str(self._tokenizer.to_str())
+        tokenizer.no_truncation()
+        tokenizer.no_padding()
+        if self.profile.collapse_whitespace:
+            texts = [" ".join(text.split()) for text in texts]
+        return all(len(row.ids) <= self.profile.max_seq for row in tokenizer.encode_batch(texts))
 
     def _encode_batch(self, batch: list[str], normalize: bool, max_tokens: int | None = None) -> np.ndarray:
         # Collapse whitespace first where the profile declares it. A sentencepiece

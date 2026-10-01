@@ -1,0 +1,7 @@
+{"timestamp": "2026-09-20T10:00:00Z", "type": "session_meta", "payload": {"id": "rollout-1", "cwd": "/work/estuary"}}
+{"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Which budget line covers the Harbor Lantern Budget glass work?"}]}}
+{"type": "response_item", "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "CODEX-REASONING-SENTINEL"}]}}
+{"type": "response_item", "payload": {"type": "function_call", "name": "read_memory", "namespace": "mcp__exomem__", "arguments": "{\"path\": \"Knowledge Base/Notes/Insights/harbor-lantern-budget-hub.md\"}", "call_id": "call_1"}}
+{"type": "response_item", "payload": {"type": "function_call_output", "call_id": "call_1", "output": "CODEX-TOOL-RESULT-SENTINEL"}}
+{"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "The glass work sits in the second budget line."}]}}
+{"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Then who signs it off?"}]}}

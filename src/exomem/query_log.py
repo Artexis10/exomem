@@ -390,6 +390,7 @@ def log_activation_call(
     outcome: str | None = None,
     error_code: str | None = None,
     duration_ms: float | None = None,
+    conversation: Mapping[str, Any] | None = None,
 ) -> None:
     """Append one host-local row for an activate_context call. Best-effort.
 
@@ -399,7 +400,9 @@ def log_activation_call(
     `owner-local`, `principal` or `unresolved`), the outcome and abstention reason, how the packet was carried, the
     resolved anchor refs (omitted in content-private hosted mode), the recent
     entries counted per reason, continuity, and whether `episode_due` rode
-    along. Never recorded: the turn or any hash of it, unit, statement or
+    along, and the conversation's presence: its `generation.conversation` state
+    and the counts of its surviving `recent` entries and refs. Never recorded:
+    the turn or any hash of it, any conversation text or hash of it, unit, statement or
     title text, the continuity token, the raw session, or any identity beyond
     a hash. Nothing in `usage` reads this file.
     """
@@ -445,6 +448,11 @@ def log_activation_call(
             "recent": recent,
             "continuity": generation.get("continuity"),
             "episode_due": "episode_due" in body,
+            "conversation": {
+                "state": str((conversation or {}).get("state") or "absent"),
+                "recent": int((conversation or {}).get("recent") or 0),
+                "refs": int((conversation or {}).get("refs") or 0),
+            },
         }
         if not privacy_log.content_private_logging_enabled():
             record["anchors"] = [

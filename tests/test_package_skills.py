@@ -202,7 +202,10 @@ def test_builds_and_unpacks_every_public_contract_distribution(
     archive_dir = tmp_path / "skills"
     package_module.package_skills(archive_dir)
     with zipfile.ZipFile(archive_dir / "exomem.zip") as archive:
-        _assert_contract(archive.read("SKILL.md").decode("utf-8"))
+        _assert_contract(
+            archive.read("SKILL.md").decode("utf-8")
+            + archive.read("references/semantic-authoring.md").decode("utf-8")
+        )
         assert "references/page-types.md" in archive.namelist()
         assert "project-keys.yaml" in archive.namelist()
     for name in skills:
@@ -212,7 +215,10 @@ def test_builds_and_unpacks_every_public_contract_distribution(
     # Generated plugin output.
     plugin = tmp_path / "plugin"
     package_module.sync_plugin(plugin)
-    _assert_contract((plugin / "skills" / "exomem" / "SKILL.md").read_text("utf-8"))
+    _assert_contract(
+        (plugin / "skills" / "exomem" / "SKILL.md").read_text("utf-8")
+        + (plugin / "skills" / "exomem" / "references" / "semantic-authoring.md").read_text("utf-8")
+    )
     assert (plugin / "skills" / "exomem" / "references" / "page-types.md").is_file()
     for name in skills:
         _assert_contract((plugin / "skills" / name / "SKILL.md").read_text("utf-8"))
@@ -257,7 +263,10 @@ def test_builds_and_unpacks_every_public_contract_distribution(
             "exomem/_sample_vault/Knowledge Base/.refs.sqlite",
             "exomem/_sample_vault/Knowledge Base/.embeddings.sqlite-wal",
         } & set(built.namelist())
-        _assert_contract(built.read(core_path).decode("utf-8"))
+        _assert_contract(
+            built.read(core_path).decode("utf-8")
+            + built.read("exomem/_scaffold/_Schema/references/semantic-authoring.md").decode("utf-8")
+        )
         assert "exomem/_scaffold/_Schema/references/page-types.md" in built.namelist()
         assert "exomem/semantic_authoring.py" in built.namelist()
         for name in skills:
@@ -276,7 +285,11 @@ def test_builds_and_unpacks_every_public_contract_distribution(
         core_path = f"{prefix}/src/exomem/_scaffold/_Schema/SKILL.md"
         core = built.extractfile(core_path)
         assert core is not None
-        _assert_contract(core.read().decode("utf-8"))
+        reference = built.extractfile(
+            f"{prefix}/src/exomem/_scaffold/_Schema/references/semantic-authoring.md"
+        )
+        assert reference is not None
+        _assert_contract(core.read().decode("utf-8") + reference.read().decode("utf-8"))
         assert f"{prefix}/src/exomem/semantic_authoring.py" in names
         assert (
             f"{prefix}/src/exomem/_scaffold/_Schema/references/page-types.md" in names

@@ -20,6 +20,7 @@ ACTIONS = frozenset(
         "create",
         "query",
         "append",
+        "bulk_upsert",
         "update",
         "revise",
         "rebaseline",
@@ -78,6 +79,9 @@ _ACTION_FIELDS = {
             "hold",
         }
     ),
+    "bulk_upsert": frozenset(
+        {"collection", "rows", "why", "expected_container_hash", "source", "on_reject"}
+    ),
     "discard": frozenset({"collection", "held", "why"}),
     "revise": frozenset(
         {"collection", "manifest_text", "expected_manifest_hash", "expected_container_hash", "why"}
@@ -96,6 +100,7 @@ _REQUIRED_FIELDS = {
     # which the argument rules below say in as many words.
     "append": frozenset({"collection", "why"}),
     "discard": frozenset({"collection", "held", "why"}),
+    "bulk_upsert": frozenset({"collection", "rows", "why", "expected_container_hash"}),
     "update": frozenset(
         {
             "collection",
@@ -138,6 +143,7 @@ def record_memory(
         "create",
         "query",
         "append",
+        "bulk_upsert",
         "update",
         "revise",
         "rebaseline",
@@ -175,16 +181,19 @@ def record_memory(
     refresh_presentation: bool | None = None,
     held: str | None = None,
     hold: bool | None = None,
+    rows: list[dict[str, Any]] | None = None,
+    source: str | None = None,
+    on_reject: Literal["abort", "skip"] | None = None,
 ) -> dict[str, Any]:
-    """Describe, validate, inspect, create, query, append, update, revise, rebaseline, or discard Records.
+    """Describe, validate, inspect, create, query, append, bulk_upsert, update, revise, rebaseline, or discard Records.
 
     Records are human-owned event and state histories.  This command keeps the
     complete workflow on one product surface while routing mutations to guarded
     writers and reads through governance-aware projections.
 
     Args:
-        action: describe, validate, inspect, create, query, append, update, revise,
-            rebaseline, or discard.
+        action: describe, validate, inspect, create, query, append, bulk_upsert, update,
+            revise, rebaseline, or discard.
         collection: Optional for inventory inspect; required for targeted reads/writes.
         manifest_path: Proposed manifest path for validate or create.
         manifest_text: Complete proposed manifest text for validate or create.
@@ -222,6 +231,12 @@ def record_memory(
         hold: Set false to refuse an invalid candidate without holding it. A refused
             append or update otherwise preserves the complete candidate as a held
             file under the collection and returns its reference beside the refusal.
+        rows: bulk_upsert only: 1 to 50 objects of `item`, optional `body` and
+            optional `source`, committed under ONE `expected_container_hash`.
+        source: bulk_upsert only: default provenance, the path of a preserved
+            Sources or Evidence page, for rows that name none.
+        on_reject: bulk_upsert only: `abort` (default) writes nothing when any row
+            is rejected and reports every would-be outcome; `skip` commits the rest.
     """
     values = {
         "collection": collection,
@@ -256,6 +271,9 @@ def record_memory(
         "refresh_presentation": refresh_presentation,
         "held": held,
         "hold": hold,
+        "rows": rows,
+        "source": source,
+        "on_reject": on_reject,
     }
     _validate_arguments(action, values)
     try:
@@ -350,6 +368,23 @@ def record_memory(
             if delivery is not None:
                 append_kwargs["delivery"] = delivery
             return records.append_record(vault_root, manifest, **append_kwargs)
+        if action == "bulk_upsert":
+            assert collection is not None
+            assert why is not None
+            assert rows is not None
+            assert expected_container_hash is not None
+            manifest = record_governance.require_records_profile(
+                record_governance.resolve_collection_for_mutation(vault_root, collection)
+            )
+            return records.bulk_upsert_records(
+                vault_root,
+                manifest,
+                rows=rows,
+                why=why,
+                expected_container_hash=expected_container_hash,
+                source=source,
+                on_reject="abort" if on_reject is None else on_reject,
+            )
         if action == "discard":
             assert collection is not None
             assert held is not None
@@ -419,7 +454,114 @@ def parse_manifest_contract() -> dict[str, Any]:
     """Project the parser-owned collection contract without vault content."""
     from .structured_collections import manifest_authoring_contract
 
-    return manifest_authoring_contract()
+    return {**manifest_authoring_contract(), "bulk_upsert": _bulk_upsert_contract()}
+
+
+def _bulk_upsert_contract() -> dict[str, Any]:
+    """The `bulk_upsert` action's contract, from the writer's own constants."""
+    return {
+        "why": (
+            "load many already-normalised rows under ONE container-hash guard instead of "
+            "one guarded append per row, whose changing hash forces serial writes"
+        ),
+        "arguments": {
+            "collection": "the Records collection",
+            "rows": (
+                f"1 to {records.BULK_UPSERT_MAX_ROWS} objects of item, optional body and "
+                "optional source per call; send a larger import as repeated calls, each "
+                "chained from the previous response's after_container_hash"
+            ),
+            "expected_container_hash": "required; compared once for the whole batch",
+            "why": "one audit reason for the batch",
+            "source": (
+                "optional default provenance: the vault path of a preserved Sources or "
+                "Evidence page; a row's own source overrides it"
+            ),
+            "on_reject": "abort (default) or skip",
+        },
+        "outcomes": {
+            "inserted": "no item holds the row's identity",
+            "updated": (
+                "an item holds the identity with different values; its values are replaced "
+                "wholesale and its body only when the row supplies one. Unlike append, a "
+                "changed payload for a held identity is not a conflict"
+            ),
+            "unchanged": "an item holds the identity with identical values; nothing is written",
+            "rejected": "code and field paths; the row is never written",
+        },
+        "identity": (
+            "a row with a complete declared natural key derives its identity from it, so a "
+            "re-stated row is unchanged or updated. A row without one gets a generated "
+            "identity and can only be inserted or rejected: re-running the same rows "
+            "duplicates them. A repeated natural key inside one request is rejected "
+            "DUPLICATE_ROW_KEY"
+        ),
+        "abort_and_skip": (
+            "abort writes nothing when any row is rejected and still reports every row's "
+            "would-be outcome; skip publishes the accepted rows in one atomic write. "
+            "`committed` says which happened"
+        ),
+        "provenance": (
+            "every row must resolve to a preserved Sources or Evidence page the caller may "
+            "read; a missing, non-preserved or withheld page is rejected identically "
+            "(SOURCE_NOT_FOUND). A declared array-of-link `sources` field receives the "
+            "verified reference; otherwise it rides each event's audit rationale. For a "
+            "collection with a `sources` field, a row that omits `sources` gets the call's "
+            "source link, so re-importing unchanged values from a new source reports every "
+            "row `updated` and replaces the link"
+        ),
+        "audit": (
+            "the audit protocol is unchanged: each written row gets an ordinary chained "
+            "append or update event, published in one atomic write with one combined log "
+            "write. The response carries one batch receipt (batch_id, counts, per-row "
+            "outcomes with transition ids). Events and the receipt never carry row values"
+        ),
+        "limits": {
+            "max_rows": records.BULK_UPSERT_MAX_ROWS,
+            "max_rows_why": (
+                "one call holds the single writer lease for its whole publish, and that hold "
+                "grows faster than the row count, so the cap keeps one call near 5 seconds "
+                "and never blocks every other write for a minute"
+            ),
+            "target_rows": records.BULK_UPSERT_TARGET_ROWS,
+            "target_rows_note": (
+                "the intended per-call size once collections are SQLite-authoritative; "
+                "until then a client imports in repeated calls of at most max_rows"
+            ),
+            "audit_chain_depth_budget": records._MAX_AUDIT_CHAIN_DEPTH,
+            "depth_rule": (
+                f"each written row consumes one of the collection's {records._MAX_AUDIT_CHAIN_DEPTH} "
+                "audit-chain events; a batch that would cross the budget refuses up front "
+                "with BULK_UPSERT_AUDIT_DEPTH and writes nothing; when the log history cannot "
+                "be fully read the count is unknown, the call proceeds, and the result carries "
+                'depth_check "unknown" with depth_check_reason "history_incomplete"'
+            ),
+            "refusals": [
+                "STALE_RECORD",
+                "BULK_UPSERT_TOO_MANY_ROWS",
+                "BULK_UPSERT_EMPTY",
+                "BULK_UPSERT_AUDIT_DEPTH",
+                "COLLECTION_ITEM_LIMIT",
+            ],
+        },
+        "retry": (
+            "a retry under the same transport idempotency identity returns the recorded "
+            "result. On a natural-keyed row a retry without one is safe: committed rows are "
+            "unchanged. Generated-identity rows have no content replay, so rely on the "
+            "transport identity there"
+        ),
+        "example": {
+            "action": "bulk_upsert",
+            "collection": "Knowledge Base/Records/Publications/_collection.md",
+            "why": "import a normalised export",
+            "expected_container_hash": "<hash from inspect or the previous response>",
+            "source": "Knowledge Base/Evidence/export-2026-09.md",
+            "rows": [
+                {"item": {"published_on": "2026-09-01", "slug": "entry-one"}},
+                {"item": {"published_on": "2026-09-02", "slug": "entry-two"}, "body": "Notes."},
+            ],
+        },
+    }
 
 
 def _json_safe_details(value: object) -> dict[str, Any] | None:

@@ -63,3 +63,21 @@ def test_capture_guidance_adds_a_native_script_alias_for_a_name_written_in_anoth
     section = writing.split("## Entity resolution", 1)[1].split("\n## ", 1)[0]
     assert 'connect_memory(operation="create-entity", aliases=' in section
     assert '"field": "aliases"' in section or "field: aliases" in section
+
+
+def test_capture_workflow_puts_contact_details_in_a_contact_section_of_the_entity() -> None:
+    text = " ".join(
+        (SCHEMA / "workflow-skills" / "exomem-capture" / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+
+    assert "vault owner" in text and "proactive_capture" in text
+    # A fact used in the reply is not yet captured: it is written when learned.
+    assert "not just in the reply" in text
+    assert "dedicated `## Contact` section" in text
+    assert "`- [contact] ...` unit" in text
+    assert "only when the turn asks" in text
+    # No separate page and no invented page type for it.
+    assert "Do not create a separate contact page" in text
+    assert "personal-details" not in text

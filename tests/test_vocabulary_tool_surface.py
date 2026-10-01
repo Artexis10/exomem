@@ -333,7 +333,7 @@ def test_public_vocabulary_contract_teaches_and_accepts_entity_instance_proposal
     )
     VocabularyState(tmp_path).observe(item)
 
-    bootstrap = commands.op_bootstrap(tmp_path)["vocabulary_workflow"]
+    bootstrap = commands.op_bootstrap(tmp_path, section="all")["vocabulary_workflow"]
     contract = bootstrap["decision"]["choice_contracts"]["entity-instance/v1"]
     definition = contract["propose-new"]["definition"]
     assert definition["required"] == ["entity_type", "name", "summary"]

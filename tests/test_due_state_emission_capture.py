@@ -116,7 +116,7 @@ def test_the_projection_records_no_emission_counts_and_has_no_batch_scope(
     """RED-FIRST. Nothing a projector could read, and nothing to wrap a batch in."""
     overdue_prediction(vault)
     scratch_page(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     due_state_module.reset_emission_state()
     _observe(vault, "Reader saturation reproduces on the replica too.")
 
@@ -138,7 +138,7 @@ def test_the_projection_records_no_emission_counts_and_has_no_batch_scope(
 def test_a_governed_write_increments_the_write_count(vault: Path) -> None:
     overdue_prediction(vault)
     scratch_page(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     before = due_state_module.emission_ledger(vault)["writes"]
 
     _observe(vault, "Reader saturation reproduces on the replica too.")
@@ -149,7 +149,7 @@ def test_a_governed_write_increments_the_write_count(vault: Path) -> None:
 def test_an_emitted_block_increments_the_emission_count(vault: Path) -> None:
     overdue_prediction(vault)
     scratch_page(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     due_state_module.reset_emission_state()
     before = due_state_module.emission_ledger(vault)["emissions"]
 
@@ -165,7 +165,7 @@ def test_a_block_that_is_not_delivered_does_not_count(vault: Path) -> None:
     """Production is not delivery — the ledger records what the caller received."""
     overdue_prediction(vault)
     scratch_page(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     due_state_module.reset_emission_state()
     _observe(vault, "First observation.")
     after_first = due_state_module.emission_ledger(vault)["emissions"]
@@ -193,7 +193,7 @@ def test_a_twelve_write_batch_emits_at_most_once(vault: Path) -> None:
     """
     overdue_prediction(vault)
     scratch_page(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     due_state_module.reset_emission_state()
     before = due_state_module.emission_ledger(vault)
 
@@ -219,7 +219,7 @@ def test_removing_the_batch_scope_emits_once_per_write(vault: Path) -> None:
     """The mechanism-removal pair: without the scope, twelve writes, twelve blocks."""
     overdue_prediction(vault)
     scratch_page(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     due_state_module.reset_emission_state()
 
     pages = _bulk_pages(vault, 12)
@@ -236,7 +236,7 @@ def test_removing_the_batch_scope_emits_once_per_write(vault: Path) -> None:
 def test_separate_calls_stay_separate_batches(vault: Path) -> None:
     overdue_prediction(vault)
     scratch_page(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     due_state_module.reset_emission_state()
 
     pages = _bulk_pages(vault, 2)
@@ -285,7 +285,7 @@ def test_a_multi_write_command_carries_one_block(vault: Path) -> None:
     """
     overdue_prediction(vault)
     scratch_page(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     due_state_module.reset_emission_state()
     before = due_state_module.emission_ledger(vault)
 
@@ -328,7 +328,7 @@ def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> N
     """
     overdue_prediction(vault)
     scratch_page(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     due_state_module.reset_emission_state()
 
     carried: list[str] = []
@@ -448,7 +448,7 @@ def test_the_projector_declares_the_counters_available_and_reads_them(
 
     overdue_prediction(vault)
     scratch_page(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     due_state_module.reset_emission_state()
     _observe(vault, "Reader saturation reproduces on the replica too.")
 

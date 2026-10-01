@@ -406,3 +406,46 @@ def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> 
         content for name, content in contents(first).items() if not name.endswith(".zip")
     ).decode("utf-8")
     assert "uvx" not in text_payload
+
+
+def _copy_with_v5_inputs(destination: Path) -> Path:
+    """The hosted tree plus the fixtures the v5 candidate's contribution inputs live in."""
+    root = copy_hosted_tree(destination)
+    shutil.copytree(
+        REPO_ROOT / "tests" / "fixtures" / "hosted_v5_contributions",
+        root / "tests" / "fixtures" / "hosted_v5_contributions",
+    )
+    return root
+
+
+def test_check_all_covers_every_candidate_on_every_platform_it_renders(tmp_path: Path) -> None:
+    """`check` defaults to one candidate and one platform, so a stale lock on any other went
+    unnoticed until a test failed. `check_all` is the gate that walks every generated
+    candidate directory and every platform directory in it."""
+    root = _copy_with_v5_inputs(tmp_path / "repo")
+    generated = root / "plugins" / "hosted" / "generated"
+    expected = set()
+    for candidate in hosted_plugins.CANDIDATE_PROFILES:
+        directory = (
+            generated
+            if candidate == hosted_plugins.DEFAULT_CANDIDATE
+            else generated / "candidates" / candidate
+        )
+        for platform in hosted_plugins.PLATFORMS:
+            if (directory / platform).is_dir():
+                expected.add((candidate, platform))
+    assert ("hosted-alpha-agent-v5", "openai") in expected
+
+    assert set(hosted_plugins.check_all(root)) == expected
+
+
+def test_check_all_catches_a_stale_lock_the_default_check_does_not(tmp_path: Path) -> None:
+    root = _copy_with_v5_inputs(tmp_path / "repo")
+    lock = (
+        root / "plugins/hosted/generated/candidates/hosted-alpha-agent-v5/openai.lock.json"
+    )
+    lock.write_bytes(lock.read_bytes() + b"\n")
+
+    hosted_plugins.check(root, platform="claude")  # what `check` alone runs: still green
+    with pytest.raises(ValueError, match="hosted-alpha-agent-v5.*openai"):
+        hosted_plugins.check_all(root)

@@ -983,7 +983,7 @@ def test_editing_a_filed_note_at_balanced_does_not_ask_again(
 def test_bootstrap_teaches_dispositions_command_free(tmp_path: Path) -> None:
     from exomem import commands
 
-    post_write = commands.op_bootstrap(tmp_path, profile="compact")["authoring_contract"][
+    post_write = commands.op_bootstrap(tmp_path, profile="compact", section="all")["authoring_contract"][
         "post_write"
     ]
     routing = post_write["records_routing"]
@@ -1195,7 +1195,7 @@ def test_backfill_is_asked_once_at_every_prominence(tmp_path: Path) -> None:
     )
     assert finding is not None
     assert "once" in finding.proposed_fix and "capture disposition" not in finding.proposed_fix
-    handling = commands.op_bootstrap(tmp_path, profile="compact")["authoring_contract"][
+    handling = commands.op_bootstrap(tmp_path, profile="compact", section="all")["authoring_contract"][
         "post_write"
     ]["records_routing_handling"]
     assert "grouped backfill" in handling and "any prominence" in handling

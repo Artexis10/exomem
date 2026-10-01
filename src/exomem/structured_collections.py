@@ -1088,6 +1088,14 @@ def parse_manifest_bytes(
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest is not UTF-8") from error
+    digest = hashlib.sha256(data).hexdigest()
+    # Same reasoning as `load_manifest`: a pure function of (vault, path, bytes,
+    # reader version) returning an immutable value. One Records append re-resolves
+    # its manifest a dozen times from the same held bytes.
+    key = (str(root), rel, f"{digest}:{records_reader_version}")
+    cached = _MANIFEST_PARSE_CACHE.get(key)
+    if cached is not None:
+        return cached
     audit_name = _profile_owned_audit_name(text)
     if audit_name is not None:
         _validate_audit_source(text, audit_name)
@@ -1097,14 +1105,18 @@ def parse_manifest_bytes(
         raise CollectionError(error.code, error.reason) from error
     if marker is None:
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires YAML frontmatter")
-    return _manifest_from_frontmatter(
+    manifest = _manifest_from_frontmatter(
         root,
         rel,
         frontmatter,
-        SourceVersion(path=rel, hash=hashlib.sha256(data).hexdigest()),
+        SourceVersion(path=rel, hash=digest),
         manifest_stable_hash=_manifest_stable_hash(text),
         records_reader_version=records_reader_version,
     )
+    if len(_MANIFEST_PARSE_CACHE) >= _MANIFEST_PARSE_CACHE_CAP:
+        _MANIFEST_PARSE_CACHE.pop(next(iter(_MANIFEST_PARSE_CACHE)), None)
+    _MANIFEST_PARSE_CACHE[key] = manifest
+    return manifest
 
 
 def discover_collections(

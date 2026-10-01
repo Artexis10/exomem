@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import command_surface, commands, latency_watch
+from exomem import command_surface, commands, latency_watch, workflow_skills
 
 T0 = 1_800_000_000.0
 AFTER_GRACE = T0 + latency_watch.STARTUP_GRACE_SECONDS + 1.0
@@ -46,7 +46,7 @@ def test_a_breaching_client_is_told_what_is_slow(
 ) -> None:
     _identity(monkeypatch, "openai-mcp/1.0.0")
     _breach(watch, "openai-mcp/1.0.0")
-    out = commands.op_bootstrap(vault)
+    out = commands.op_bootstrap(vault, section="all")
     [row] = out["latency"]
     assert row["tool"] == "ask_memory" and row["deep"] is False
     assert row["samples"] == 25 and row["p90_ms"] == 3000 and row["ceiling_ms"] == 1000
@@ -59,7 +59,7 @@ def test_another_clients_breach_is_not_this_clients(
 ) -> None:
     _identity(monkeypatch, "claude-code")
     _breach(watch, "openai-mcp/1.0.0")
-    assert "latency" not in commands.op_bootstrap(vault)
+    assert "latency" not in commands.op_bootstrap(vault, section="all")
 
 
 def test_the_block_survives_the_session_projection(
@@ -67,6 +67,23 @@ def test_the_block_survives_the_session_projection(
 ) -> None:
     _identity(monkeypatch, "openai-mcp/1.0.0")
     _breach(watch, "openai-mcp/1.0.0")
-    out = commands.op_bootstrap(vault, profile="session")
-    assert out.get("profile") in ("session", "compact")
-    assert "latency" in out
+    out = commands.op_bootstrap(
+        vault, profile="session", skill_contract=workflow_skills.skill_contract()
+    )
+    assert out["profile"] == "session"
+    assert out["latency"][0]["tool"] == "ask_memory"
+
+
+def test_the_core_carries_only_a_pointer_while_breaching_and_its_section_the_block(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, watch
+) -> None:
+    """The figures are bounded only by how many tools breach and no turn needs them:
+    the always-served core says a breach is active and where to look (0 bytes while
+    healthy), `diagnostics_reading` serves the block."""
+    _identity(monkeypatch, "openai-mcp/1.0.0")
+    assert "latency" not in commands.op_bootstrap(vault)
+    _breach(watch, "openai-mcp/1.0.0")
+    assert commands.op_bootstrap(vault)["latency"] == "breach; section=diagnostics_reading"
+    assert "latency" not in commands.op_bootstrap(vault, section="authoring")
+    served = commands.op_bootstrap(vault, section="diagnostics_reading")
+    assert served["latency"][0]["tool"] == "ask_memory"
