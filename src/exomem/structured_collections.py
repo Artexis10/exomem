@@ -1467,18 +1467,31 @@ def render_item_path(
         _portable_path_key(path) for path in occupied_paths
     }
 
-    def candidate(candidate_stem: str) -> str:
-        relative = f"{manifest.storage.source.rstrip('/')}/{candidate_stem}.md"
-        if len(relative.encode("utf-8")) > _MAX_PATH_BYTES:
-            raise CollectionError(
-                "UNRENDERABLE_ITEM_FILENAME", "rendered item path exceeds the path byte limit"
-            )
-        return relative
+    initial = _item_path_candidate(manifest, stem)
+    return disambiguate_item_path(manifest, initial, item_key, occupied_path_keys=occupied)
 
-    initial = candidate(stem)
-    if _portable_path_key(initial) not in occupied:
+
+def _item_path_candidate(manifest: CollectionManifest, stem: str) -> str:
+    relative = f"{manifest.storage.source.rstrip('/')}/{stem}.md"
+    if len(relative.encode("utf-8")) > _MAX_PATH_BYTES:
+        raise CollectionError(
+            "UNRENDERABLE_ITEM_FILENAME", "rendered item path exceeds the path byte limit"
+        )
+    return relative
+
+
+def disambiguate_item_path(
+    manifest: CollectionManifest,
+    initial: str,
+    item_key: str,
+    *,
+    occupied_path_keys: Container[str],
+) -> str:
+    """Disambiguate an already-rendered path against trusted normalized occupancy."""
+    if _portable_path_key(initial) not in occupied_path_keys:
         return initial
 
+    stem = initial.rsplit("/", 1)[-1].removesuffix(".md")
     normalized_id = memory_refs.normalize_id(item_key)
     identity = (
         normalized_id.replace("-", "")
@@ -1493,8 +1506,8 @@ def render_item_path(
         )
         if not bounded:
             break
-        rendered = candidate(f"{bounded} — {suffix}")
-        if _portable_path_key(rendered) not in occupied:
+        rendered = _item_path_candidate(manifest, f"{bounded} — {suffix}")
+        if _portable_path_key(rendered) not in occupied_path_keys:
             return rendered
     raise CollectionError(
         "ITEM_FILENAME_COLLISION", "item_filename cannot be disambiguated portably"

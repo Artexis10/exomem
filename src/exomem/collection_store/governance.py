@@ -180,6 +180,8 @@ def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, ident
 
 
 def _bound(subject: CanonicalSubject, logical_vault_id: str) -> CanonicalSubject:
+    if subject.basis.logical_vault_id == logical_vault_id:
+        return subject
     return replace(subject, basis=replace(subject.basis, logical_vault_id=logical_vault_id))
 
 
@@ -195,7 +197,10 @@ class ReleaseCache:
     """Handle-owned pure state; proposed identities belong to the transaction."""
 
     def __init__(self, conn):
+        from .inspection import InspectionCache
+
         self.conn = conn
+        self.inspections = InspectionCache()
         self.states = OrderedDict()
         self.contracts = OrderedDict()
         self.memberships = OrderedDict()
@@ -225,6 +230,7 @@ class ReleaseCache:
                 self.clear()
 
     def clear(self):
+        self.inspections.clear()
         self.states.clear()
         self.contracts.clear()
         self.memberships.clear()
@@ -264,6 +270,7 @@ class ReleaseCache:
                 if state is None:
                     continue
                 if None in identities:
+                    self.inspections.discard(cid)
                     self.states.pop(cid, None)
                     if cid in self.replacements:
                         self._remember_state(cid, state)
@@ -284,8 +291,10 @@ class ReleaseCache:
                         for _denied, dirty in state.summaries.values():
                             dirty.add(identity)
             while self.states and sum(len(state.subjects) for state in self.states.values()) > 65536:
-                self.states.popitem(last=False)
+                cid, _ = self.states.popitem(last=False)
+                self.inspections.discard(cid)
         elif changed or self.unmanaged:
+            self.inspections.clear()
             self.states.clear()
             self.contracts.clear()
             self.memberships.clear()
@@ -305,9 +314,11 @@ class ReleaseCache:
         return value
 
     def _remember_state(self, cid, state):
-        self._remember(self.states, cid, state, 8)
-        while self.states and sum(len(value.subjects) for value in self.states.values()) > 65536:
-            self.states.popitem(last=False)
+        self.states[cid] = state
+        self.states.move_to_end(cid)
+        while self.states and (len(self.states) > 8 or sum(len(value.subjects) for value in self.states.values()) > 65536):
+            evicted, _ = self.states.popitem(last=False)
+            self.inspections.discard(evicted)
 
     def epoch(self, cid):
         row = self.conn.execute(
@@ -328,6 +339,7 @@ class ReleaseCache:
         current = self.replacements.get(cid) or self.states.get(cid)
         unexplained = self.pending is not None and self.unmanaged
         if current is None or current.epoch != epoch or unexplained:
+            self.inspections.discard(cid)
             entries = {s.basis.identity: s for s in subjects(self.conn, cid, "unbound")}
             occupied = Counter(collections._portable_path_key(subject.basis.subject.path)
                                for subject in entries.values() if isinstance(subject.row_id, int))
@@ -360,7 +372,7 @@ class ReleaseCache:
         return next(iter(subjects(self.conn, found[0], "unbound", identity=identity)), None)
 
     def scopes(self, subject, candidate):
-        key = (candidate.fingerprint, replace(subject.basis, logical_vault_id="unbound"))
+        key = (candidate.fingerprint, _bound(subject, "unbound").basis)
         if key not in self.memberships:
             self._remember(self.memberships, key, tuple(sorted(membership.evaluate_metadata(subject.basis.subject, candidate))), 65536)
         return self.memberships[key]
@@ -418,20 +430,29 @@ class OperationAuthorization:
     def catalog(self, cid: str, *, refresh=False) -> tuple[CanonicalSubject, ...]:
         try:
             if refresh or cid not in self.catalogs:
-                state = self.cache.state(cid)
-                current = dict(state.subjects)
-                for identity, subject in self.cache.overlay(cid).items():
-                    if subject is None:
-                        current.pop(identity, None)
-                    else:
-                        current[identity] = subject
-                self.catalogs[cid] = tuple(_bound(subject, self.logical_vault_id) for subject in current.values())
+                self.catalogs[cid] = tuple(_bound(subject, self.logical_vault_id)
+                                           for subject in self.canonical_subjects(cid))
             catalog = self.catalogs[cid]
             self._load_grants()
             return catalog
         except (ValueError, TypeError, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             self.refuse()
+
+    def canonical_subjects(self, cid: str) -> tuple[CanonicalSubject, ...]:
+        """Immutable unbound bases; only named grants need a session binding."""
+        state = self.cache.state(cid)
+        overlay = self.cache.overlay(cid)
+        current = state.subjects
+        if overlay:
+            current = dict(current)
+            for identity, subject in overlay.items():
+                if subject is None:
+                    current.pop(identity, None)
+                else:
+                    current[identity] = subject
+        self._load_grants()
+        return tuple(current.values())
 
     def _resolve(self, identity):
         if identity not in self.points:
@@ -476,13 +497,15 @@ class OperationAuthorization:
         if self.mutation and (access._matches(self.access["readonly"], relative)
                               or relative.split("/", 1)[0].casefold() in {value.casefold() for value in access._APPEND_ONLY}):
             return Decision(0)
-        key = (replace(basis, logical_vault_id="unbound"), self.policy.fingerprint,
+        key = (_bound(subject, "unbound").basis, self.policy.fingerprint,
                self.who.audience_id, self.purpose)
         active = self.grants.get(basis.identity, ()) if session else ()
         if not active and key in self.cache.decisions:
             return self.cache.decisions[key]
         scope_ids = self.cache.scopes(subject, self.policy)
         grants = list(self.policy.grants)
+        if active:
+            basis = _bound(subject, self.logical_vault_id).basis
         for grant in active:
             if authority.SessionMembership(basis.identity, basis.fingerprint, scope_ids) in grant.membership:
                 grants.append(policy.StandingGrant(grant.grant_id, "authorization-session", grant.scope_ids,
@@ -501,30 +524,37 @@ class OperationAuthorization:
             self.cache._remember(self.cache.decisions, key, decision, 65536)
         return decision
 
+    def _release_dependency(self):
+        return (self.policy.fingerprint, self.who.audience_id, self.who.resolved, self.purpose,
+                self.access_fingerprint, self.access_blocked, tuple(sorted(self.tombstones)), self.mutation)
+
+    def _release_selection(self, cid: str):
+        """Reuse base policy work, then overlay this operation's fresh grants."""
+        state = self.cache.state(cid)
+        self._load_grants()
+        manifest = _bound(state.subjects[state.epoch[0]], self.logical_vault_id)
+        if self.decision(manifest).level < 6:
+            self.refuse()
+        dependency = self._release_dependency()
+        if dependency not in state.summaries:
+            denied = {identity for identity, subject in state.subjects.items() if subject.row_id is not None
+                      and self.decision(subject, session=False).level < 6}
+            self.cache._remember(state.summaries, dependency, (denied, set()), 16)
+        denied, dirty = state.summaries[dependency]
+        for identity in dirty:
+            subject = state.subjects.get(identity)
+            if subject is not None and self.decision(subject, session=False).level < 6:
+                denied.add(identity)
+            else:
+                denied.discard(identity)
+        dirty.clear()
+        return state, denied, self.cache.overlay(cid)
+
     def require_collection(self, cid: str, *, complete: bool = True, refresh=False) -> tuple[CanonicalSubject, ...]:
         if complete:
             try:
-                state = self.cache.state(cid)
-                self._load_grants()
-                manifest = _bound(state.subjects[state.epoch[0]], self.logical_vault_id)
-                if self.decision(manifest).level < 6:
-                    self.refuse()
-                dependency = (self.policy.fingerprint, self.who.audience_id, self.who.resolved, self.purpose,
-                              self.access_fingerprint, self.access_blocked, tuple(sorted(self.tombstones)), self.mutation)
-                if dependency not in state.summaries:
-                    denied = {identity for identity, subject in state.subjects.items() if subject.row_id is not None
-                              and self.decision(subject, session=False).level < 6}
-                    self.cache._remember(state.summaries, dependency, (denied, set()), 16)
-                denied, dirty = state.summaries[dependency]
-                for identity in dirty:
-                    subject = state.subjects.get(identity)
-                    if subject is not None and self.decision(subject, session=False).level < 6:
-                        denied.add(identity)
-                    else:
-                        denied.discard(identity)
-                dirty.clear()
+                state, denied, overlay = self._release_selection(cid)
                 count = len(denied)
-                overlay = self.cache.overlay(cid)
                 for identity, subject in overlay.items():
                     count -= identity in denied
                     if subject is not None and self.decision(subject, session=False).level < 6:
@@ -548,6 +578,68 @@ class OperationAuthorization:
         if any(self.decision(subject).level < 6 for subject in required):
             self.refuse()
         return catalog
+
+    def released_subjects(self, cid: str) -> tuple[CanonicalSubject, ...]:
+        """Current released identities, without loading payloads or rebinding every row."""
+        try:
+            state, base_denied, overlay = self._release_selection(cid)
+            denied = base_denied
+            if overlay or self.grants:
+                denied = set(base_denied)
+                for identity, subject in overlay.items():
+                    if subject is not None and self.decision(subject, session=False).level < 6:
+                        denied.add(identity)
+                    else:
+                        denied.discard(identity)
+                for identity in self.grants:
+                    subject = overlay.get(identity, state.subjects.get(identity))
+                    if subject is not None and subject.row_id is not None:
+                        if self.decision(subject).level < 6:
+                            denied.add(identity)
+                        else:
+                            denied.discard(identity)
+            current = state.subjects
+            if overlay:
+                current = dict(current)
+                for identity, subject in overlay.items():
+                    if subject is None:
+                        current.pop(identity, None)
+                    else:
+                        current[identity] = subject
+            return tuple(subject for identity, subject in current.items()
+                         if subject.row_id is not None and identity not in denied)
+        except (ValueError, TypeError, sqlite3.Error,
+                authorization_session_lifecycle.AuthorizationSessionUnavailable):
+            self.refuse()
+
+    def inspection_basis(self, cid: str):
+        """Pure base-profile inputs, never this operation's grant overlay."""
+        state, denied, overlay = self._release_selection(cid)
+        # Inspection reuse is deliberately disabled while proposed SQL is live.
+        if overlay or self.cache.pending is not None or self.cache.unmanaged:
+            return None
+        return state.epoch, self._release_dependency(), tuple(
+            subject for identity, subject in state.subjects.items()
+            if subject.row_id is not None and identity not in denied
+        )
+
+    def visible_snapshot(self, cid: str, allowed: tuple[CanonicalSubject, ...]) -> str:
+        state = self.cache.state(cid)
+        manifest = _bound(state.subjects[state.epoch[0]], self.logical_vault_id)
+        current_count = len(state.subjects) - 1
+        for identity, subject in self.cache.overlay(cid).items():
+            current_count += (subject is not None) - (identity in state.subjects)
+        if self.policy.empty and len(allowed) == current_count:
+            from . import tokens
+
+            generation, audit_head = self.conn.execute(
+                "SELECT generation,audit_head FROM collections WHERE collection_id=?", (cid,),
+            ).fetchone()
+            return tokens.container_hash(cid, generation, audit_head)
+        return hashlib.sha256(b"exomem.collection-visible.v1\0" + _json([
+            manifest.basis.fingerprint,
+            [(subject.row_id, subject.basis.version) for subject in allowed if isinstance(subject.row_id, int)],
+        ]).encode()).hexdigest()
 
     def allows_file(self, path: str) -> bool:
         """Gate ancillary reads without reopening policy or session authority."""
@@ -635,8 +727,7 @@ class OperationAuthorization:
 
     def authorized_rows(self, cid: str) -> tuple[list[dict[str, Any]], str, set[str]]:
         """Decode only released rows; the manifest is an independent L6 gate."""
-        catalog = self.require_collection(cid, complete=False)
-        allowed = [subject for subject in catalog[1:] if self.decision(subject).level >= 6]
+        allowed = self.released_subjects(cid)
         rows = []
         row_ids = [subject.row_id for subject in allowed if isinstance(subject.row_id, int)]
         for offset in range(0, len(row_ids), 512):
@@ -645,18 +736,9 @@ class OperationAuthorization:
             names = [column[0] for column in cursor.description]
             rows.extend(dict(zip(names, row, strict=True)) for row in cursor)
         rows.sort(key=lambda row: row["view_path"])
-        snapshot = hashlib.sha256(b"exomem.collection-visible.v1\0" + _json([
-            catalog[0].basis.fingerprint,
-            [(subject.row_id, subject.basis.version) for subject in allowed if isinstance(subject.row_id, int)],
-        ]).encode()).hexdigest()
-        if self.policy.empty and len(allowed) == len(catalog) - 1:
-            from . import tokens
-
-            generation, audit_head = self.conn.execute(
-                "SELECT generation,audit_head FROM collections WHERE collection_id=?", (cid,),
-            ).fetchone()
-            snapshot = tokens.container_hash(cid, generation, audit_head)
-        return rows, snapshot, {subject.row_id for subject in allowed if isinstance(subject.row_id, str)}
+        return rows, self.visible_snapshot(cid, allowed), {
+            subject.row_id for subject in allowed if isinstance(subject.row_id, str)
+        }
 
 
 def resolve_bound_membership(root: Path, identity: str, candidate: policy.Policy,

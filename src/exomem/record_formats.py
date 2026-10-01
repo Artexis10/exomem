@@ -112,6 +112,15 @@ class Record:
 
 
 @dataclass(frozen=True, slots=True)
+class InspectionContribution:
+    identity: collections.ItemIdentity
+    source: collections.SourceVersion
+    observed: tuple[tuple[str, str], ...]
+    desired_filename: str | None
+    filename_unrenderable: bool
+
+
+@dataclass(frozen=True, slots=True)
 class AdapterSnapshot:
     records: tuple[Record, ...]
     snapshot: str
@@ -1725,52 +1734,109 @@ def inspect_collection(
             source_hashes={version.path: version.hash for version in versions},
             diagnostics=(collections.CollectionDiagnostic(error.code, error.reason),),
         )
-    diagnostics = list((*manifest.view_diagnostics, *parsed.diagnostics)[:64])
+    contributions = tuple(inspection_contribution(manifest, record) for record in parsed.records)
     presentation = _inspect_presentation(
         vault_root,
         manifest,
         parsed,
+        contributions=contributions,
         authorize_path=authorize_path,
     )
+    diagnostics = inspection_diagnostics(manifest, parsed.data_snapshot, parsed.diagnostics)
+    return CollectionInspection(
+        collection_id=manifest.collection_id,
+        snapshot=parsed.snapshot,
+        source_versions=parsed.source_versions,
+        source_hashes={version.path: version.hash for version in parsed.source_versions},
+        diagnostics=diagnostics,
+        record_count=len(parsed.records),
+        presentation=presentation,
+        observed_values=_observed_field_values(manifest, contributions),
+    )
+
+
+def inspection_diagnostics(
+    manifest: collections.CollectionManifest,
+    data_snapshot: str,
+    diagnostics: Sequence[collections.CollectionDiagnostic] = (),
+) -> tuple[collections.CollectionDiagnostic, ...]:
+    """Compose bounded parse and saved-view diagnostics for the current snapshot."""
+    findings = list((*manifest.view_diagnostics, *diagnostics)[:64])
     for name in manifest.views:
-        if len(diagnostics) >= 64:
+        if len(findings) >= 64:
             break
         if any(diagnostic.location == f"views.{name}" for diagnostic in manifest.view_diagnostics):
             continue
         try:
             view = collections.resolve_saved_view(manifest, name)
         except collections.CollectionError as error:
-            diagnostics.append(collections.CollectionDiagnostic(error.code, error.reason))
+            findings.append(collections.CollectionDiagnostic(error.code, error.reason))
             continue
         expected = view.definition.get("source_snapshot")
-        if expected is not None and expected != parsed.data_snapshot:
-            diagnostics.append(
+        if expected is not None and expected != data_snapshot:
+            findings.append(
                 collections.CollectionDiagnostic(
                     "STALE_SAVED_VIEW",
                     "saved view source snapshot no longer matches canonical data",
                 )
             )
-    return CollectionInspection(
-        collection_id=manifest.collection_id,
-        snapshot=parsed.snapshot,
-        source_versions=parsed.source_versions,
-        source_hashes={version.path: version.hash for version in parsed.source_versions},
-        diagnostics=tuple(diagnostics),
-        record_count=len(parsed.records),
-        presentation=presentation,
-        observed_values=_observed_field_values(manifest, parsed.records),
+    return tuple(findings)
+
+
+def inspection_contribution(
+    manifest: collections.CollectionManifest,
+    record: Record,
+) -> InspectionContribution:
+    """Extract inspection inputs without retaining the item payload or body."""
+    observed: list[tuple[str, str]] = []
+    for name, spec in manifest.schema.fields.items():
+        if spec.type != "string" or spec.enum:
+            continue
+        value = record.values.get(name)
+        if type(value) is str and (text := value.strip()):
+            observed.append((name, text))
+    desired = None
+    unrenderable = False
+    if manifest.item_filename is not None:
+        try:
+            desired = collections.render_item_path(manifest, record.values, record.identity.key)
+        except collections.CollectionError:
+            unrenderable = True
+    return InspectionContribution(
+        identity=record.identity,
+        source=record.source,
+        observed=tuple(observed),
+        desired_filename=desired,
+        filename_unrenderable=unrenderable,
     )
 
 
 def _observed_field_values(
     manifest: collections.CollectionManifest,
-    records: Sequence[Record],
+    contributions: Sequence[InspectionContribution],
 ) -> dict[str, dict[str, Any]]:
     """Summarize the vocabulary free-string fields already carry.
 
     A declared `enum` IS the vocabulary, so those fields are left alone. The pass
     reads only the records the adapter already authorized and parsed; a value that
     reached no released item cannot reach this summary.
+    """
+    counts: dict[str, dict[str, int]] = {
+        name: {}
+        for name, spec in manifest.schema.fields.items()
+        if spec.type == "string" and not spec.enum
+    }
+    for contribution in contributions:
+        for name, value in contribution.observed:
+            observed = counts[name]
+            observed[value] = observed.get(value, 0) + 1
+    return observed_values_from_counts(counts)
+
+
+def observed_values_from_counts(
+    counts: Mapping[str, Mapping[str, int]],
+) -> dict[str, dict[str, Any]]:
+    """Finalize full-value frequencies into bounded inspection vocabulary.
 
     Two decisions are load-bearing and easy to get subtly wrong:
 
@@ -1781,29 +1847,11 @@ def _observed_field_values(
       therefore emit the same display string; `value_truncated` is what says so.
     * Selection is by frequency, decided AFTER the whole pass, because the payload
       presents the values in frequency order and a first-seen cap would silently
-      drop the collection's most common term. The intermediate counter holds
-      references into records the adapter already materialized, so it adds no state
-      the read did not already carry.
+      drop the collection's most common term.
     """
-    names = [
-        name
-        for name, spec in manifest.schema.fields.items()
-        if spec.type == "string" and not spec.enum
-    ]
-    counts: dict[str, dict[str, int]] = {name: {} for name in names}
-    for record in records:
-        for name in names:
-            value = record.values.get(name)
-            if type(value) is not str:
-                continue
-            text = value.strip()
-            if not text:
-                continue
-            observed = counts[name]
-            observed[text] = observed.get(text, 0) + 1
     summary: dict[str, dict[str, Any]] = {}
-    for name in names:
-        ranked = sorted(counts[name].items(), key=lambda entry: (-entry[1], entry[0]))
+    for name, observed in counts.items():
+        ranked = sorted(observed.items(), key=lambda entry: (-entry[1], entry[0]))
         summary[name] = {
             "values": [
                 {
@@ -1823,12 +1871,13 @@ def _inspect_presentation(
     manifest: collections.CollectionManifest,
     parsed: AdapterSnapshot,
     *,
+    contributions: Sequence[InspectionContribution],
     authorize_path: Callable[[str], bool] | None,
 ) -> tuple[dict[str, Any], ...]:
     """Compare item paths and recognized managed bytes without mutating them."""
     source_bytes = dict(parsed.source_bytes)
     findings: list[dict[str, Any]] = []
-    findings.extend(_inspect_item_filenames(manifest, parsed))
+    findings.extend(_inspect_item_filenames(manifest, contributions))
     resolve_relationship = presentation_relationship_resolver(
         vault_root,
         manifest,
@@ -1857,47 +1906,65 @@ def _inspect_presentation(
 
 def _inspect_item_filenames(
     manifest: collections.CollectionManifest,
-    parsed: AdapterSnapshot,
+    contributions: Sequence[InspectionContribution],
 ) -> list[dict[str, Any]]:
-    if manifest.item_filename is None:
-        return []
-    projected: dict[str, list[tuple[Record, str]]] = {}
+    projected: dict[str, list[InspectionContribution]] = {}
     findings: list[dict[str, Any]] = []
-    for record in parsed.records:
-        try:
-            desired = collections.render_item_path(manifest, record.values, record.identity.key)
-        except collections.CollectionError:
-            findings.append(_representation_finding(record, "unrenderable", "guarded_value_update"))
-            continue
-        projected.setdefault(desired.casefold(), []).append((record, desired))
+    for contribution in contributions:
+        if contribution.filename_unrenderable:
+            findings.extend(inspect_filename_group(manifest, (contribution,)))
+        elif contribution.desired_filename is not None:
+            projected.setdefault(contribution.desired_filename.casefold(), []).append(contribution)
     for group in projected.values():
-        desired = group[0][1]
-        exact = [
-            record for record, _path in group if record.source.path.casefold() == desired.casefold()
+        findings.extend(inspect_filename_group(manifest, group))
+    return findings
+
+
+def inspect_filename_group(
+    manifest: collections.CollectionManifest,
+    group: Sequence[InspectionContribution],
+) -> list[dict[str, Any]]:
+    """Finalize one casefolded filename group or an unrenderable item group."""
+    if not group:
+        return []
+    if group[0].filename_unrenderable:
+        return [
+            _representation_finding(contribution, "unrenderable", "guarded_value_update")
+            for contribution in group
         ]
-        if len(group) > 1 and len(exact) != 1:
-            findings.extend(
-                _representation_finding(record, "filename_collision", "structured_files_preview")
-                for record, _path in group
-            )
-        for record, _path in group:
-            if record in exact:
-                continue
-            accepted = desired
-            if len(group) > 1 and len(exact) == 1:
-                try:
-                    accepted = collections.render_item_path(
-                        manifest,
-                        record.values,
-                        record.identity.key,
-                        occupied_paths=(desired,),
-                    )
-                except collections.CollectionError:
-                    pass
-            if record.source.path.casefold() != accepted.casefold():
-                findings.append(
-                    _representation_finding(record, "filename_drift", "structured_files_preview")
+    desired = group[0].desired_filename
+    if desired is None:
+        return []
+    exact = [
+        contribution
+        for contribution in group
+        if contribution.source.path.casefold() == desired.casefold()
+    ]
+    findings: list[dict[str, Any]] = []
+    if len(group) > 1 and len(exact) != 1:
+        findings.extend(
+            _representation_finding(contribution, "filename_collision", "structured_files_preview")
+            for contribution in group
+        )
+    occupied = {collections._portable_path_key(desired)} if len(group) > 1 and len(exact) == 1 else ()
+    for contribution in group:
+        if contribution in exact:
+            continue
+        accepted = desired
+        if len(group) > 1 and len(exact) == 1:
+            try:
+                accepted = collections.disambiguate_item_path(
+                    manifest,
+                    contribution.desired_filename or desired,
+                    contribution.identity.key,
+                    occupied_path_keys=occupied,
                 )
+            except collections.CollectionError:
+                pass
+        if contribution.source.path.casefold() != accepted.casefold():
+            findings.append(
+                _representation_finding(contribution, "filename_drift", "structured_files_preview")
+            )
     return findings
 
 
@@ -2058,7 +2125,9 @@ def _inspect_legacy_record_presentation(
     return [finding]
 
 
-def _representation_finding(record: Record, state: str, remedy: str) -> dict[str, Any]:
+def _representation_finding(
+    record: Record | InspectionContribution, state: str, remedy: str
+) -> dict[str, Any]:
     return {
         "item_key": record.identity.key,
         "path": record.source.path,

@@ -281,6 +281,75 @@ def _create_filename_collection(store):
     store.create_collection(manifest_path(), text, why="create")
 
 
+def test_warm_inspection_refreshes_frequencies_and_unchanged_collision_siblings(store):
+    """A changed row must update counts and the unchanged sibling's filename finding."""
+    _create_filename_collection(store)
+    first = store.append_record(CID, item={"title": "Straße", "count": 1}, item_key=KEY, why="seed")
+    latest = store.append_record(CID, item={"title": "STRASSE", "count": 2}, item_key=OTHER, why="seed")
+    before = store.inspect_collection(CID)
+    assert before["presentation"]["counts"]["filename_drift"] == 0
+    store.update_record(CID, item_key=KEY, changes={"title": "Elsewhere"}, why="correct",
+                        expected_container_hash=latest["after_container_hash"],
+                        expected_item_version=first["after_item_hash"])
+    current = store.inspect_collection(CID)
+    assert {entry["value"] for entry in current["observed_values"]["title"]["values"]} == {"Elsewhere", "STRASSE"}
+    sibling = [finding for finding in current["presentation"]["items"] if finding["item_key"] == OTHER]
+    assert any(finding["state"] == "filename_drift" for finding in sibling)
+    assert all(finding["version"] == latest["after_item_hash"] for finding in sibling)
+    store.handle.release_cache.clear()
+    assert store.inspect_collection(CID) == current
+
+
+def test_inspection_overflow_and_unreported_sql_keep_full_public_data(store):
+    """A bounded cache must neither truncate data nor hide a same-version trusted change."""
+    create(store)
+    store.append_record(CID, item={"title": "Initial"}, item_key=KEY, why="seed")
+    before = store.inspect_collection(CID)
+    before["observed_values"]["title"]["values"][0]["value"] = "Caller mutation"
+    assert store.inspect_collection(CID)["observed_values"]["title"]["values"][0]["value"] == "Initial"
+    # Trusted SQL is deliberately unexplained, even though its version/hash did not move.
+    store.connection.execute("UPDATE items SET values_json=? WHERE item_key=?", ('{"title":"Changed"}', KEY))
+    current = store.inspect_collection(CID)
+    assert current["observed_values"]["title"]["values"][0]["value"] == "Changed"
+    cache = store.handle.release_cache.inspections
+    cache.clear()
+    cache.maximum_bytes = 1
+    assert store.inspect_collection(CID) == current
+
+
+def test_grant_only_release_change_refreshes_a_warm_filename_group(store, monkeypatch):
+    """Revoking one row changes an unchanged, still-granted sibling's collision suffix."""
+    from test_collection_store_governance import inspection_token, redeem, session
+
+    from exomem.governance import store as authority_store
+
+    _create_filename_collection(store)
+    store.append_record(CID, item={"title": "Straße", "count": 1}, item_key=KEY, why="seed")
+    sibling = store.append_record(CID, item={"title": "STRASSE", "count": 2}, item_key=OTHER, why="seed")
+    who = session(store, monkeypatch)
+    with preview_store(store.root, store.handle):
+        redeem(store, who, inspection_token(store, who))
+        redeem(store, who, inspection_token(store, who))
+        with request_scope(who):
+            before = store.inspect_collection(CID)
+        assert before["coverage"]["committed"] == 2
+        assert before["presentation"]["counts"]["filename_drift"] == 0
+        conn = authority_store.open_authorization_session_connection(store.root)
+        try:
+            conn.execute("UPDATE governance_session_grants SET status='revoked' WHERE json_extract(paths,'$[0]')=?",
+                         (collections.record_ref(CID, KEY),))
+            conn.commit()
+        finally:
+            conn.close()
+        with request_scope(who):
+            after = store.inspect_collection(CID)
+        assert after["coverage"]["committed"] == 1
+        assert after["presentation"]["items"] == [{
+            "item_key": OTHER, "path": sibling["affected_paths"][0], "version": sibling["after_item_hash"],
+            "state": "filename_drift", "remedy": "structured_files_preview",
+        }]
+
+
 def test_portable_filename_collisions_survive_fresh_bindings_and_bulk_planning(store):
     """Cached occupancy and batch-local choices must preserve renderer allocation."""
     from test_collection_store_bulk import _evidence, bulk

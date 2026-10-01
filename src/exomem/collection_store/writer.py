@@ -279,13 +279,16 @@ class CollectionWriter:
         Production reader routing belongs to later slices.
         """
         self._require_operation_context()
+        self.handle.release_cache.check()
         self.connection.execute("BEGIN")
         try:
             with self._authorization(mutation=False):
                 result = self._inspect_collection(collection, facade_profile=facade_profile)
                 operation = self._operation
-                catalog = operation.catalog(result["contract"]["collection_id"])
-                entries = [(subject.basis.identity, lambda basis=subject.basis: basis.fingerprint,
+                catalog = operation.canonical_subjects(result["contract"]["collection_id"])
+                entries = [(subject.basis.identity,
+                            lambda subject=subject, vault_id=operation.logical_vault_id:
+                            governance._bound(subject, vault_id).basis.fingerprint,
                             subject.basis.payload_hash, operation.decision(subject)) for subject in catalog]
         finally:
             self.connection.execute("ROLLBACK")
@@ -301,25 +304,36 @@ class CollectionWriter:
         from .. import due_state, record_governance
 
         row, manifest, declared = self._collection(collection, facade_profile=facade_profile or self._facade_profile)
-        items, visible_snapshot, held_ids = self._operation.authorized_rows(manifest.collection_id)
-        source_versions = [manifest.manifest_version]
-        parsed = []
-        for item in items:
-            version = collections.SourceVersion(
-                manifest.storage.source if manifest.storage.strategy == "markdown-log" else item["view_path"],
-                self._version(item),
+        allowed = self._operation.released_subjects(manifest.collection_id)
+        basis = self._operation.inspection_basis(manifest.collection_id)
+        cached = None
+        if basis is not None:
+            epoch, profile, base_subjects = basis
+            cached = self.handle.release_cache.inspections.inspect(
+                manifest, epoch, profile, base_subjects, allowed,
+                lambda subject: self._inspection_record(manifest, subject),
             )
-            source_versions.append(version)
-            parsed.append(record_formats.Record(
-                collections.ItemIdentity(manifest.collection_id, item["item_key"]),
-                json.loads(item["values_json"]), version, record_formats.SourceSpan(0, 0),
-                body=item["body"],
+        if cached is None:
+            inspection = self._uncached_inspection(manifest)
+        else:
+            contributions, observed, presentation = cached
+            contributions = sorted(contributions, key=lambda contribution: (
+                contribution.identity.key if manifest.storage.strategy == "markdown-log"
+                else contribution.source.path
             ))
-        snapshot = record_formats.AdapterSnapshot(
-            records=tuple(parsed), snapshot=visible_snapshot, data_snapshot=visible_snapshot,
-            source_versions=tuple(source_versions),
-        )
-        inspection = record_formats.inspect_collection(self.root, manifest, snapshot=snapshot)
+            visible_snapshot = self._operation.visible_snapshot(manifest.collection_id, allowed)
+            source_versions = (manifest.manifest_version, *(contribution.source for contribution in contributions))
+            inspection = record_formats.CollectionInspection(
+                collection_id=manifest.collection_id, snapshot=visible_snapshot,
+                source_versions=source_versions,
+                source_hashes={version.path: version.hash for version in source_versions},
+                diagnostics=record_formats.inspection_diagnostics(manifest, visible_snapshot),
+                record_count=len(contributions), presentation=presentation, observed_values=observed,
+            )
+        visible_snapshot = inspection.snapshot
+        source_versions = inspection.source_versions
+        allowed_rows = {subject.row_id for subject in allowed if isinstance(subject.row_id, int)}
+        held_ids = {subject.row_id for subject in allowed if isinstance(subject.row_id, str)}
         diagnostics = record_governance._inspection_diagnostics(inspection.diagnostics)
         record_governance._inspection_templates(
             self.root, manifest, diagnostics, policy=self._operation.policy,
@@ -330,9 +344,8 @@ class CollectionWriter:
             authorize_path=self._operation.allows_file,
         )
         saved_views = record_governance._inspection_saved_views(self.root, manifest, links, diagnostics)
-        allowed_rows = {item["row_id"] for item in items}
-        catalog = self._operation.catalog(manifest.collection_id)
-        complete = len(items) == sum(isinstance(subject.row_id, int) for subject in catalog)
+        catalog = self._operation.canonical_subjects(manifest.collection_id)
+        complete = len(allowed_rows) == sum(isinstance(subject.row_id, int) for subject in catalog)
         held_paths = {subject.basis.subject.path for subject in catalog if subject.row_id in held_ids}
         pending = sum(
             kind == "manifest" or row_id in allowed_rows or (kind == "log" and complete)
@@ -377,7 +390,7 @@ class CollectionWriter:
             "legacy": None,
             "observed_values": dict(inspection.observed_values or {}),
             "coverage": {
-                "committed": len(items), "held": len(held), "unreadable": 0,
+                "committed": len(allowed_rows), "held": len(held), "unreadable": 0,
                 "held_refs": [
                     {"held_id": candidate[0], "held_at": candidate[1],
                      "attempted_action": json.loads(candidate[2]).get("action", "update"),
@@ -393,6 +406,44 @@ class CollectionWriter:
             "projection": {"pending_views": pending, "held_view_corrections": len(corrections)},
         })
         return payload
+
+    def _inspection_record(self, manifest, subject):
+        cursor = self.connection.execute(
+            "SELECT collection_id,item_key,row_version,payload_hash,view_path,values_json "
+            "FROM items WHERE collection_id=? AND row_id=?", (manifest.collection_id, subject.row_id),
+        )
+        item = _row(cursor)
+        if item is None:
+            governance.OperationAuthorization.refuse()
+        version = collections.SourceVersion(
+            manifest.storage.source if manifest.storage.strategy == "markdown-log" else item["view_path"],
+            self._version(item),
+        )
+        return record_formats.Record(
+            collections.ItemIdentity(manifest.collection_id, item["item_key"]),
+            json.loads(item["values_json"]), version, record_formats.SourceSpan(0, 0),
+        )
+
+    def _uncached_inspection(self, manifest):
+        items, visible_snapshot, _ = self._operation.authorized_rows(manifest.collection_id)
+        versions = [manifest.manifest_version]
+        parsed = []
+        for item in items:
+            version = collections.SourceVersion(
+                manifest.storage.source if manifest.storage.strategy == "markdown-log" else item["view_path"],
+                self._version(item),
+            )
+            versions.append(version)
+            parsed.append(record_formats.Record(
+                collections.ItemIdentity(manifest.collection_id, item["item_key"]),
+                json.loads(item["values_json"]), version, record_formats.SourceSpan(0, 0),
+                body=item["body"],
+            ))
+        snapshot = record_formats.AdapterSnapshot(
+            records=tuple(parsed), snapshot=visible_snapshot, data_snapshot=visible_snapshot,
+            source_versions=tuple(versions),
+        )
+        return record_formats.inspect_collection(self.root, manifest, snapshot=snapshot)
 
     def _version(self, row: Mapping[str, Any]) -> str:
         return tokens.item_version(
