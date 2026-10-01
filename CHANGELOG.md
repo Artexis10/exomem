@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.102.1](https://github.com/Artexis10/exomem/compare/v0.102.0...v0.102.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* **graph:** keep committed receipts bound to dispatch checkpoints ([#1504](https://github.com/Artexis10/exomem/issues/1504)) ([b987008](https://github.com/Artexis10/exomem/commit/b9870081c1fbd2d0ad781afcae48def3c101f6b7))
+
 ## [0.102.0](https://github.com/Artexis10/exomem/compare/v0.101.0...v0.102.0) (2026-10-01)
 
 
