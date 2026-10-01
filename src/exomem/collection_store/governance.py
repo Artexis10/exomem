@@ -10,7 +10,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -188,6 +188,7 @@ class _CollectionState:
     epoch: tuple
     subjects: dict[str, CanonicalSubject]
     summaries: OrderedDict
+    occupied_path_keys: Counter[str]
 
 
 class ReleaseCache:
@@ -268,8 +269,16 @@ class ReleaseCache:
                         self._remember_state(cid, state)
                 else:
                     for identity, current in self.prepared.get(cid, {}).items():
+                        previous = state.subjects.get(identity)
+                        if previous is not None and isinstance(previous.row_id, int):
+                            key = collections._portable_path_key(previous.basis.subject.path)
+                            state.occupied_path_keys[key] -= 1
+                            if not state.occupied_path_keys[key]:
+                                del state.occupied_path_keys[key]
                         if current is not None:
                             state.subjects[identity] = current
+                            if isinstance(current.row_id, int):
+                                state.occupied_path_keys[collections._portable_path_key(current.basis.subject.path)] += 1
                         else:
                             state.subjects.pop(identity, None)
                         for _denied, dirty in state.summaries.values():
@@ -319,7 +328,10 @@ class ReleaseCache:
         current = self.replacements.get(cid) or self.states.get(cid)
         unexplained = self.pending is not None and self.unmanaged
         if current is None or current.epoch != epoch or unexplained:
-            current = _CollectionState(epoch, {s.basis.identity: s for s in subjects(self.conn, cid, "unbound")}, OrderedDict())
+            entries = {s.basis.identity: s for s in subjects(self.conn, cid, "unbound")}
+            occupied = Counter(collections._portable_path_key(subject.basis.subject.path)
+                               for subject in entries.values() if isinstance(subject.row_id, int))
+            current = _CollectionState(epoch, entries, OrderedDict(), occupied)
             if self.pending is not None and (self.pending or self.unmanaged
                                             or self.conn.total_changes != self.observed[0]):
                 self.replacements[cid] = current

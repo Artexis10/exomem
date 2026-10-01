@@ -11,7 +11,7 @@ import re
 import stat
 import unicodedata
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Container, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -1436,8 +1436,9 @@ def render_item_path(
     item_key: str,
     *,
     occupied_paths: Iterable[str] = (),
+    occupied_path_keys: Container[str] | None = None,
 ) -> str:
-    """Render one deterministic human path without changing item identity."""
+    """Render one human path, optionally using trusted normalized occupancy."""
     recipe = manifest.item_filename
     if recipe is None:
         raise CollectionError("ITEM_FILENAME_NOT_CONFIGURED", "item_filename is not configured")
@@ -1462,7 +1463,9 @@ def render_item_path(
             "item_filename values do not form a portable human filename",
         )
 
-    occupied = {_portable_path_key(path) for path in occupied_paths}
+    occupied = occupied_path_keys if occupied_path_keys is not None else {
+        _portable_path_key(path) for path in occupied_paths
+    }
 
     def candidate(candidate_stem: str) -> str:
         relative = f"{manifest.storage.source.rstrip('/')}/{candidate_stem}.md"

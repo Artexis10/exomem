@@ -2315,6 +2315,10 @@ def block_for_structured_write(
     carry the block, and recording delivery here would burn the session's one
     emission on a response that never showed it.
     """
+    # No projection means no advisory read. Check before the canonical delta
+    # opens its authorization snapshot; populated projections still use it.
+    if not state_path(vault_root).exists():
+        return None
     profile = str(getattr(manifest, "semantic_profile", "") or "")
     delta = apply_plan_write_delta if profile == "planning" else apply_record_write_delta
     if (

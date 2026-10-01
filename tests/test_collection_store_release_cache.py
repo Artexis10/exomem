@@ -273,3 +273,77 @@ def test_warm_canonical_release_never_reuses_session_authority(store, monkeypatc
                 conn.close()
             with request_scope(who):
                 assert store.inspect_collection(CID)["coverage"]["committed"] == 0
+
+
+def _create_filename_collection(store):
+    text = manifest_text().replace("natural_key: [title]", "natural_key: [title, count]")
+    text = text.replace("storage:\n", "item_filename:\n  version: 1\n  fields: [title]\nstorage:\n")
+    store.create_collection(manifest_path(), text, why="create")
+
+
+def test_portable_filename_collisions_survive_fresh_bindings_and_bulk_planning(store):
+    """Cached occupancy and batch-local choices must preserve renderer allocation."""
+    from test_collection_store_bulk import _evidence, bulk
+
+    _create_filename_collection(store)
+    for key, item in ((KEY, {"title": "Straße", "count": 1}),
+                      (OTHER, {"title": "STRASSE", "count": 2})):
+        with preview_store(store.root, store.handle):
+            record_memory(store.root, "append", collection=CID, item=item, item_key=key, why="capture")
+    _evidence(store.root)
+    result = bulk(store, [{"item": {"title": "ＳＴＲＡＳＳＥ", "count": 3}},
+                          {"item": {"title": "Strasse", "count": 4}}])
+    assert result["counts"]["inserted"] == 2
+    with preview_store(store.root, store.handle):
+        manifest = collections.load_manifest(store.root, manifest_path())
+    occupied = []
+    for key, encoded, path in store.connection.execute("SELECT item_key,values_json,view_path FROM items ORDER BY row_id"):
+        assert path == collections.render_item_path(manifest, json.loads(encoded), key, occupied_paths=occupied)
+        occupied.append(path)
+    assert len({collections._portable_path_key(path) for path in occupied}) == 4
+
+
+def test_failed_filename_commit_does_not_reserve_the_candidate_path(store, monkeypatch):
+    """A rolled-back allocation must not force the next distinct row to a suffix."""
+    _create_filename_collection(store)
+    store.append_record(CID, item={"title": "Seed", "count": 0}, why="seed")
+    before = tuple(store.connection.iterdump())
+    precommit = store._precommit
+
+    def fail_commit(manifest):
+        precommit(manifest)
+        store.connection.execute("PRAGMA defer_foreign_keys=ON")
+        store.connection.execute("INSERT INTO item_sources VALUES(-1,1,0,'missing')")
+
+    monkeypatch.setattr(store, "_precommit", fail_commit)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.append_record(CID, item={"title": "Reserved", "count": 1}, item_key=KEY, why="capture")
+    assert tuple(store.connection.iterdump()) == before
+    monkeypatch.setattr(store, "_precommit", precommit)
+    with preview_store(store.root, store.handle):
+        result = record_memory(store.root, "append", collection=CID, item={"title": "Reserved", "count": 2},
+                               item_key=OTHER, why="capture")
+    assert result["affected_paths"] == ["Knowledge Base/Records/Work/Items/Reserved.md"]
+
+
+def test_unknown_sql_rebuilds_portable_filename_occupancy_with_duplicate_keys(store):
+    """External path changes must neither lose a sibling occupant nor reserve a freed path."""
+    _create_filename_collection(store)
+    first = store.append_record(CID, item={"title": "Straße", "count": 1}, item_key=KEY, why="capture")
+    store.append_record(CID, item={"title": "STRASSE", "count": 2}, item_key=OTHER, why="capture")
+    source = "Knowledge Base/Records/Work/Items"
+    with store.handle.transaction() as conn:
+        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/ＳＴＲＡＳＳＥ.md", OTHER))
+    # Updating one unchanged path must retain the other portable-equivalent occupant.
+    guards = store.inspect_collection(CID)["lifecycle_guards"]
+    store.update_record(CID, item_key=KEY, changes={"count": 10},
+                        expected_container_hash=guards["expected_container_hash"],
+                        expected_item_version=first["after_item_hash"], why="correct")
+    with store.handle.transaction() as conn:
+        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/Moved.md", KEY))
+    remaining = store.append_record(CID, item={"title": "Strasse", "count": 3}, why="capture")
+    assert remaining["affected_paths"][0] != f"{source}/Strasse.md"
+    with store.handle.transaction() as conn:
+        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/Moved again.md", OTHER))
+    freed = store.append_record(CID, item={"title": "Strasse", "count": 4}, why="capture")
+    assert freed["affected_paths"] == [f"{source}/Strasse.md"]

@@ -13,6 +13,7 @@ import json
 import os
 import sqlite3
 import uuid
+from collections import ChainMap
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
@@ -972,9 +973,7 @@ class CollectionWriter:
             is_log = manifest.storage.strategy == "markdown-log"
             cache, source_guards, seen = {}, {}, {}
             outcomes, plans = [], []
-            occupied = [item[0] for item in self.connection.execute(
-                "SELECT view_path FROM items WHERE collection_id=?", (manifest.collection_id,),
-            )]
+            occupied = ChainMap({}, self.handle.release_cache.state(manifest.collection_id).occupied_path_keys)
             for index, raw in enumerate(rows):
                 if (not isinstance(raw, Mapping) or set(raw) - records._BULK_ROW_KEYS
                         or not isinstance(raw.get("item"), Mapping)):
@@ -1047,8 +1046,8 @@ class CollectionWriter:
                 elif is_log:
                     path = f"{manifest.storage.source}#{key}"
                 else:
-                    path = collections.render_item_path(manifest, values, key, occupied_paths=occupied) if manifest.item_filename else f"{manifest.storage.source}/{key}.md"
-                occupied.append(path)
+                    path = collections.render_item_path(manifest, values, key, occupied_path_keys=occupied) if manifest.item_filename else f"{manifest.storage.source}/{key}.md"
+                occupied[collections._portable_path_key(path)] = 1
                 source_guards[source_rel] = guard
                 plans.append((key, values, effective_body, path, before, source_rel))
                 outcomes.append({"index": index, **base, "outcome": "updated" if before else "inserted"})
@@ -1225,15 +1224,9 @@ class CollectionWriter:
                     if manifest.storage.strategy == "markdown-log":
                         path = f"{manifest.storage.source}#{key}"
                     elif manifest.item_filename:
-                        occupied = [
-                            r[0]
-                            for r in self.connection.execute(
-                                "SELECT view_path FROM items WHERE collection_id = ?",
-                                (manifest.collection_id,),
-                            )
-                        ]
                         path = collections.render_item_path(
-                            manifest, values, key, occupied_paths=occupied
+                            manifest, values, key,
+                            occupied_path_keys=self.handle.release_cache.state(manifest.collection_id).occupied_path_keys,
                         )
                     else:
                         path = f"{manifest.storage.source}/{key}.md"
