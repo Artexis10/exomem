@@ -117,7 +117,7 @@
               "type": "object",
               "additionalProperties": false,
               "required": ["servesCloud"],
-              "properties": {"servesCloud": {"const": false}}
+              "properties": {"servesCloud": {"const": true}}
             },
             "exomem-reconcile": {
               "type": "object",
