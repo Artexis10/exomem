@@ -269,7 +269,10 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                                 "subscription initiation or upgrade promotion in the plugin."
                             ),
                         },
-                        "publication": {"countries": []},
+                        "publication": {
+                            "countries": [],
+                            "release_notes": definition["release_notes"],
+                        },
                     }
                 },
             }

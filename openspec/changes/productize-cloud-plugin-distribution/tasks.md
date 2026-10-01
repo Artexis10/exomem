@@ -70,5 +70,16 @@ acceptance, dedicated reviewer access and a real demo recording remain open.
 Neither provider has been submitted. Final submission and publication remain
 operator review steps.
 
+After PR #1499 merged as `e8baf6a6f528d38174909462354829f3cea183d3`,
+Claude validated that exact `main` source: seven checks, ten skills, five hooks,
+one MCP server and all six listing links. Five directory-only metadata warnings
+and sixteen credential/script policy holds remain; validation is not approval.
+The restored bundle is now a persistent draft,
+`a59d117c-7115-4ed0-a505-dc7bd022cbee`, saved and reopened through the portal.
+OpenAI's retained draft still contains package 0.100.0. Its supporting-content
+form confirmed missing release notes and a demo recording. The canonical
+definition and generator now include release notes; the actual demo URL and
+immediately usable reviewer credentials remain absent. No submission occurred.
+
 - [x] 4.1 Resolve author-independent review findings, run scoped tests plus completion-boundary full CI and privacy checks, and merge the cohesive verified batch.
 - [ ] 4.2 Verify released packages and production outcome, reconcile prior acceptance debt, sync/archive only completed OpenSpec scope and retire the clean task worktree.

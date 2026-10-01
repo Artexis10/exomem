@@ -171,7 +171,7 @@
     "openai/assets/icon.png": "2b7283995ef5bb2e65ba11a20c4c0872cf970a93d5e430be28b71607d2b9b820",
     "openai/assets/icon.svg": "9eef30cfe92ee021218bc9076f0a107e8adf84664c70eb61f7b9790d4afc27bb",
     "openai/mcp.json": "cc1cee8db3dbc22e90a1acc860a35b8f9d1a3a6e24046a1052f49dc544abdb8b",
-    "openai/plugin.json": "012219a4f6edfcff528bffabdd74d8b4c001bf6a72e810a9a0340a8ef0000ef5",
+    "openai/plugin.json": "48aedc9c431e519955add82b7fc7b47928ede217c7666499ccf47a830c0b65ac",
     "openai/skills/exomem/SKILL.md": "5308eacf2043262a858712660407aa162ced35e1537d119593daf790942cbe7c",
     "openai/skills/exomem/project-keys.yaml": "fcec970087d5f431fd22c20fc2024dcff49b6ce1281f1fceb27b61ee79127841",
     "openai/skills/exomem/references/audit-checks.md": "43b3b4105ae6ad71d280ce62d21c11cdcd8d178117615680e0456137c855eef2",
@@ -323,6 +323,6 @@
     "openai/skills/exomem-review/references/vault-care.md": "a9bf830edbbd9a839d56037c21e68a2e6dfcf3bfc71b0d8d6a348feef6f99cba",
     "openai/skills/exomem-review/references/write-scope.md": "b207999efb7afccf0c355bb322b41f3b8ec33a4f77efd69949d2c49a0d960a8d",
     "openai/skills/exomem-review/references/writing.md": "a23ad5b5dc798bcbb00b2f42f5bb675e6271c6963f25f1d2aaaf9be7746879e9",
-    "openai.zip": "42579c60f72bfb6352ceca998bbcca9ce5b680ea16596b9b72d38f1a9871d035"
+    "openai.zip": "f8f34df57f234667bf5b31f34b56f5c94a79c440a72c967f1200c09d540c0a27"
   }
 }
