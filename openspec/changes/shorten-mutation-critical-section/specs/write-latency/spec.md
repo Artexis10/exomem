@@ -242,3 +242,26 @@ immediate refusal.
 - **WHEN** a capture retries on the server and then commits
 - **THEN** `exomem_mutation_busy_total` does not increase
 - **AND** the one refusal that does reach a client increases it once
+
+### Requirement: Availability Republication Prepares Outside Canonical Authority
+
+A graph availability repair SHALL run full source parsing and resolver topology
+proof outside the canonical mutation boundary. Under authority it SHALL replay
+exact source-byte and membership seals and validate its captured graph epoch,
+recall publication, configuration, live database/WAL identity and metadata.
+An invalidated or unreadable preparation SHALL decline without publishing or
+advancing graph-sync acknowledgement. The final seal MAY read source bytes and
+enumerate memberships, but MUST NOT reparse pages or reconstruct topology.
+
+#### Scenario: Slow availability preparation admits a canonical writer
+
+- **WHEN** the source/topology proof is paused before acquiring authority
+- **THEN** an unrelated canonical writer can acquire the mutation boundary
+- **AND** its commit invalidates the older prepared availability publication
+
+#### Scenario: A direct edit or derived-store change invalidates the seal
+
+- **WHEN** source bytes, policy, registry configuration or the live database/WAL
+  changes after source proof and before publication
+- **THEN** the availability repair declines without publishing its prepared marker
+- **AND** same-sized source edits with restored timestamps are checked by bytes
