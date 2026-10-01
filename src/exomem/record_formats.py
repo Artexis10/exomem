@@ -115,7 +115,7 @@ class Record:
 class InspectionContribution:
     identity: collections.ItemIdentity
     source: collections.SourceVersion
-    observed: tuple[tuple[str, str], ...]
+    observed: tuple[str | None, ...]
     desired_filename: str | None
     filename_unrenderable: bool
 
@@ -1734,7 +1734,10 @@ def inspect_collection(
             source_hashes={version.path: version.hash for version in versions},
             diagnostics=(collections.CollectionDiagnostic(error.code, error.reason),),
         )
-    contributions = tuple(inspection_contribution(manifest, record) for record in parsed.records)
+    fields = inspection_fields(manifest)
+    contributions = tuple(
+        inspection_contribution(manifest, record, fields) for record in parsed.records
+    )
     presentation = _inspect_presentation(
         vault_root,
         manifest,
@@ -1783,18 +1786,27 @@ def inspection_diagnostics(
     return tuple(findings)
 
 
+def inspection_fields(manifest: collections.CollectionManifest) -> tuple[str, ...]:
+    """Return free-string field names in their manifest order."""
+    return tuple(
+        name
+        for name, spec in manifest.schema.fields.items()
+        if spec.type == "string" and not spec.enum
+    )
+
+
 def inspection_contribution(
     manifest: collections.CollectionManifest,
     record: Record,
+    fields: tuple[str, ...] | None = None,
 ) -> InspectionContribution:
     """Extract inspection inputs without retaining the item payload or body."""
-    observed: list[tuple[str, str]] = []
-    for name, spec in manifest.schema.fields.items():
-        if spec.type != "string" or spec.enum:
-            continue
+    if fields is None:
+        fields = inspection_fields(manifest)
+    observed: list[str | None] = []
+    for name in fields:
         value = record.values.get(name)
-        if type(value) is str and (text := value.strip()):
-            observed.append((name, text))
+        observed.append((value.strip() or None) if type(value) is str else None)
     desired = None
     unrenderable = False
     if manifest.item_filename is not None:
@@ -1802,6 +1814,8 @@ def inspection_contribution(
             desired = collections.render_item_path(manifest, record.values, record.identity.key)
         except collections.CollectionError:
             unrenderable = True
+    if desired == record.source.path:
+        desired = record.source.path
     return InspectionContribution(
         identity=record.identity,
         source=record.source,
@@ -1821,13 +1835,12 @@ def _observed_field_values(
     reads only the records the adapter already authorized and parsed; a value that
     reached no released item cannot reach this summary.
     """
-    counts: dict[str, dict[str, int]] = {
-        name: {}
-        for name, spec in manifest.schema.fields.items()
-        if spec.type == "string" and not spec.enum
-    }
+    fields = inspection_fields(manifest)
+    counts: dict[str, dict[str, int]] = {name: {} for name in fields}
     for contribution in contributions:
-        for name, value in contribution.observed:
+        for name, value in zip(fields, contribution.observed, strict=True):
+            if value is None:
+                continue
             observed = counts[name]
             observed[value] = observed.get(value, 0) + 1
     return observed_values_from_counts(counts)

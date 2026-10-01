@@ -308,9 +308,9 @@ class CollectionWriter:
         basis = self._operation.inspection_basis(manifest.collection_id)
         cached = None
         if basis is not None:
-            epoch, profile, base_subjects = basis
+            epoch, profile = basis
             cached = self.handle.release_cache.inspections.inspect(
-                manifest, epoch, profile, base_subjects, allowed,
+                manifest, epoch, profile, allowed,
                 lambda subject: self._inspection_record(manifest, subject),
             )
         if cached is None:

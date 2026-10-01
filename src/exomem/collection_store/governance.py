@@ -614,14 +614,11 @@ class OperationAuthorization:
 
     def inspection_basis(self, cid: str):
         """Pure base-profile inputs, never this operation's grant overlay."""
-        state, denied, overlay = self._release_selection(cid)
+        state, _denied, overlay = self._release_selection(cid)
         # Inspection reuse is deliberately disabled while proposed SQL is live.
         if overlay or self.cache.pending is not None or self.cache.unmanaged:
             return None
-        return state.epoch, self._release_dependency(), tuple(
-            subject for identity, subject in state.subjects.items()
-            if subject.row_id is not None and identity not in denied
-        )
+        return state.epoch, self._release_dependency()
 
     def visible_snapshot(self, cid: str, allowed: tuple[CanonicalSubject, ...]) -> str:
         state = self.cache.state(cid)
