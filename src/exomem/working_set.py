@@ -34,6 +34,7 @@ from typing import Any, NamedTuple
 from . import (
     activation_conventions,
     context_roles,
+    kbdir,
     request_budget,
     source_taxonomy,
     working_set_heat,
@@ -2109,8 +2110,29 @@ def compile_packet(
     # cached pages for statements — and an exhausted budget raises at
     # `working_set.roles` immediately below.
     with _span(timings, "working_set.recent"):
+        # Resolution decides only rows the turn reached. Recent context also
+        # selects unmentioned plans and derives collection exclusions, so its
+        # whole catalogue must be visible before reservations and caps.
+        # A Planning item's canonical page ref is governed independently of
+        # its collection home; opaque anchor refs are not page paths.
+        recent_rows = (
+            rows
+            if visible is None
+            else tuple(
+                row for row in rows
+                if not row.path or (
+                    visible(row.path)
+                    and (
+                        row.kind != "plan"
+                        or (ref := working_set_resolve.anchor_ref(row)) == row.path
+                        or not ref.startswith(kbdir.kb_prefix())
+                        or visible(ref)
+                    )
+                )
+            )
+        )
         recent: tuple[dict[str, Any], ...] = _recent_context(
-            root, rows=rows, profile=heat, attribution=attribution, marks=marks
+            root, rows=recent_rows, profile=heat, attribution=attribution, marks=marks
         )
 
     # Design D3, and ONLY here: the turn reached no anchor at all. An
