@@ -10,15 +10,24 @@ import hashlib
 import json
 import sqlite3
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from .. import access, find_corpus, records, structured_collections as collections, vault
+from .. import access, find_corpus, records, vault
+from .. import structured_collections as collections
 from ..find_types import ParsedPage
 from ..governance import authorization_session_authority as authority
-from ..governance import authorization_session_lifecycle, egress, lifecycle, membership, policy, store
+from ..governance import (
+    authorization_session_lifecycle,
+    egress,
+    lifecycle,
+    membership,
+    policy,
+    store,
+)
 from ..governance.decisions import Decision, decide
 from ..governance.principal import effective_principal
 from . import types
@@ -116,7 +125,7 @@ class CanonicalSubject:
     basis: CanonicalGrantBasis
 
 
-def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str) -> tuple[CanonicalSubject, ...]:
+def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None) -> tuple[CanonicalSubject, ...]:
     row = conn.execute(
         "SELECT c.manifest_path,c.source_path,c.layout,c.manifest_version,m.manifest_hash,m.governance_json,"
         "c.type_name,c.type_version,t.declaration_hash,t.declaration_json,ct.builtin "
@@ -125,8 +134,8 @@ def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str) -> tuple
         "JOIN collection_type_versions t ON t.name=c.type_name AND t.version=c.type_version "
         "JOIN collection_types ct ON ct.name=c.type_name WHERE c.collection_id=?", (cid,),
     ).fetchone()
-    identity = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()
-    if row is None or identity is None or not identity[0]:
+    store_identity = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()
+    if row is None or store_identity is None or not store_identity[0]:
         raise ValueError("canonical subject is unavailable")
     path, source_path, layout, version, content_hash, metadata, name, type_version, declaration_hash, declaration, builtin = row
     declared = types.parse_declaration(json.loads(declaration), builtin=bool(builtin))
@@ -140,15 +149,18 @@ def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str) -> tuple
             policy_path, (ref,), tuple(meta["projects"]), tuple(meta["tags"]),
             (item_type.lower(),), tuple(meta["classes"]),
         )
-        basis = CanonicalGrantBasis(logical_vault_id, identity[0], ref, row_version, payload,
+        basis = CanonicalGrantBasis(logical_vault_id, store_identity[0], ref, row_version, payload,
                                     subject, declared.default_audience, version, content_hash,
                                     name, type_version, declaration_hash, domain)
         return CanonicalSubject(cid, row_id, basis)
 
-    result = [make(path, None, path, "collection", metadata, version, content_hash, "manifest")]
+    result = [make(path, None, path, "collection", metadata, version, content_hash, "manifest")] if identity in (None, path) else []
+    item_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://{declared.item_type}/{cid}/") else None
+    held_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://collection-held/{cid}/") else None
     for row_id, key, row_version, payload, view_path, raw_metadata in conn.execute(
         "SELECT row_id,item_key,row_version,payload_hash,view_path,governance_json "
-        "FROM items WHERE collection_id=? ORDER BY row_id", (cid,),
+        "FROM items WHERE collection_id=?" + (" AND item_key=?" if identity else "") + " ORDER BY row_id",
+        (cid, item_key) if identity else (cid,),
     ):
         # Projects are inherited from the exact current manifest contract.
         meta = _metadata(raw_metadata)
@@ -159,30 +171,208 @@ def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str) -> tuple
                            declared.item_type, raw_metadata, row_version, payload, "row"))
     for held_id, path, raw_metadata, payload in conn.execute(
         "SELECT held_id,view_path,governance_json,governance_hash FROM held_candidates "
-        "WHERE collection_id=? ORDER BY held_id", (cid,),
+        "WHERE collection_id=?" + (" AND held_id=?" if identity else "") + " ORDER BY held_id",
+        (cid, held_key) if identity else (cid,),
     ):
         result.append(make(f"exomem://collection-held/{cid}/{held_id}", held_id, path,
                            "held-record", raw_metadata, 1, payload, "held"))
     return tuple(result)
 
 
+def _bound(subject: CanonicalSubject, logical_vault_id: str) -> CanonicalSubject:
+    return replace(subject, basis=replace(subject.basis, logical_vault_id=logical_vault_id))
+
+
+@dataclass(slots=True)
+class _CollectionState:
+    epoch: tuple
+    subjects: dict[str, CanonicalSubject]
+    summaries: OrderedDict
+
+
+class ReleaseCache:
+    """Handle-owned pure state; proposed identities belong to the transaction."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.states = OrderedDict()
+        self.contracts = OrderedDict()
+        self.memberships = OrderedDict()
+        self.decisions = OrderedDict()
+        self.pending = None
+        self.replacements = {}
+        self.observed = self._stamp()
+        self.accounted = conn.total_changes
+        self.unmanaged = False
+
+    def _stamp(self):
+        return (self.conn.total_changes, self.conn.execute("PRAGMA data_version").fetchone()[0],
+                self.conn.execute("PRAGMA schema_version").fetchone()[0])
+
+    def check(self):
+        if self.pending is not None:
+            stamp = self._stamp()
+            if stamp[0] != self.accounted or stamp[1:] != self.observed[1:] or self.unmanaged:
+                self.unmanaged = True
+                self.clear()
+        else:
+            changed = self._stamp() != self.observed
+            if changed or self.unmanaged:
+                # total_changes does not rewind on ROLLBACK. An unknown transaction
+                # stays non-reusable until its owner leaves that transaction.
+                self.unmanaged = self.conn.in_transaction and (changed or self.unmanaged)
+                self.clear()
+
+    def clear(self):
+        self.states.clear()
+        self.contracts.clear()
+        self.memberships.clear()
+        self.decisions.clear()
+        self.replacements.clear()
+        self.observed = self._stamp()
+
+    def begin(self):
+        self.check()
+        self.pending = {}
+        self.unmanaged = False
+        self.replacements = {}
+        self.accounted = self.conn.total_changes
+        self.prepared = {}
+
+    def account(self, changes):
+        if self.pending is not None:
+            self.accounted += changes
+
+    def touch(self, cid, identity=None):
+        if self.pending is not None:
+            self.pending.setdefault(cid, set()).add(identity)
+
+    def prepare(self):
+        self.check()
+        if not self.unmanaged and self.conn.total_changes == self.accounted:
+            self.prepared = {cid: {identity: next(iter(subjects(self.conn, cid, "unbound", identity=identity)), None)
+                                  for identity in identities if identity is not None}
+                             for cid, identities in self.pending.items() if None not in identities}
+        self.prepared_stamp = self._stamp()
+
+    def finish(self, committed):
+        changed = self.conn.total_changes != self.observed[0]
+        if committed and not self.unmanaged and self.conn.total_changes == self.accounted:
+            for cid, identities in self.pending.items():
+                state = self.replacements.get(cid) or self.states.get(cid)
+                if state is None:
+                    continue
+                if None in identities:
+                    self.states.pop(cid, None)
+                    if cid in self.replacements:
+                        self._remember_state(cid, state)
+                else:
+                    for identity, current in self.prepared.get(cid, {}).items():
+                        if current is not None:
+                            state.subjects[identity] = current
+                        else:
+                            state.subjects.pop(identity, None)
+                        for _denied, dirty in state.summaries.values():
+                            dirty.add(identity)
+            while self.states and sum(len(state.subjects) for state in self.states.values()) > 65536:
+                self.states.popitem(last=False)
+        elif changed or self.unmanaged:
+            self.states.clear()
+            self.contracts.clear()
+            self.memberships.clear()
+            self.decisions.clear()
+        self.pending = None
+        self.replacements = {}
+        self.prepared = {}
+        self.observed = self.prepared_stamp if committed else self._stamp()
+        self.unmanaged = False
+
+    @staticmethod
+    def _remember(cache, key, value, maximum):
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > maximum:
+            cache.popitem(last=False)
+        return value
+
+    def _remember_state(self, cid, state):
+        self._remember(self.states, cid, state, 8)
+        while self.states and sum(len(value.subjects) for value in self.states.values()) > 65536:
+            self.states.popitem(last=False)
+
+    def epoch(self, cid):
+        row = self.conn.execute(
+            "SELECT c.manifest_path,c.source_path,c.layout,c.manifest_version,c.type_name,c.type_version,"
+            "m.manifest_hash,m.governance_json,t.declaration_hash,t.declaration_json,ct.builtin "
+            "FROM collections c JOIN collection_manifests m ON m.collection_id=c.collection_id "
+            "AND m.manifest_version=c.manifest_version JOIN collection_type_versions t "
+            "ON t.name=c.type_name AND t.version=c.type_version JOIN collection_types ct ON ct.name=c.type_name "
+            "WHERE c.collection_id=?", (cid,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("canonical subject is unavailable")
+        return row
+
+    def state(self, cid):
+        self.check()
+        epoch = self.epoch(cid)
+        current = self.replacements.get(cid) or self.states.get(cid)
+        unexplained = self.pending is not None and self.unmanaged
+        if current is None or current.epoch != epoch or unexplained:
+            current = _CollectionState(epoch, {s.basis.identity: s for s in subjects(self.conn, cid, "unbound")}, OrderedDict())
+            if self.pending is not None and (self.pending or self.unmanaged
+                                            or self.conn.total_changes != self.observed[0]):
+                self.replacements[cid] = current
+            else:
+                self._remember_state(cid, current)
+        return current
+
+    def overlay(self, cid):
+        if self.pending is None or cid in self.replacements:
+            return {}
+        return {identity: next(iter(subjects(self.conn, cid, "unbound", identity=identity)), None)
+                for identity in self.pending.get(cid, ()) if identity is not None}
+
+    def point(self, identity):
+        if identity.startswith("exomem://"):
+            pieces = identity[len("exomem://"):].split("/")
+            if len(pieces) != 3:
+                return None
+            cid = pieces[1]
+            found = self.conn.execute("SELECT collection_id FROM collections WHERE collection_id=?", (cid,)).fetchone()
+        else:
+            found = self.conn.execute("SELECT collection_id FROM collections WHERE manifest_path=?", (identity,)).fetchone()
+        if found is None:
+            return None
+        # Resolve current identity, including proposed content, never a previous grant basis.
+        return next(iter(subjects(self.conn, found[0], "unbound", identity=identity)), None)
+
+    def scopes(self, subject, candidate):
+        key = (candidate.fingerprint, replace(subject.basis, logical_vault_id="unbound"))
+        if key not in self.memberships:
+            self._remember(self.memberships, key, tuple(sorted(membership.evaluate_metadata(subject.basis.subject, candidate))), 65536)
+        return self.memberships[key]
+
+
 class OperationAuthorization:
     """One policy/time/access/authority snapshot, with grants grouped by subject."""
 
-    def __init__(self, root: Path, conn: sqlite3.Connection, *, mutation: bool) -> None:
+    def __init__(self, root: Path, conn: sqlite3.Connection, *, mutation: bool, cache=None) -> None:
         self.root, self.conn, self.mutation = root, conn, mutation
+        self.cache = cache or ReleaseCache(conn)
         self.policy = policy.load(root)
         self.who = effective_principal()
         self.now = int(time.time())
         self.tombstones = lifecycle.tombstoned_paths(root)
-        _, self.access, self.access_blocked = access._policy_state(root)
+        self.access_fingerprint, self.access, self.access_blocked = access._policy_state(root)
         self.context = self.who.verified_authorization_session
         self.purpose = self.who.purpose
         self.authority = None
         self.grants = {}
         self.catalogs = {}
         self.file_decisions = {}
-        self.loaded = set()
+        self.points = {}
+        self.grants_loaded = False
         self.failed = self.context is not None and not isinstance(
             self.context, authorization_session_lifecycle.AuthorizationSessionContext
         )
@@ -216,30 +406,52 @@ class OperationAuthorization:
     def catalog(self, cid: str, *, refresh=False) -> tuple[CanonicalSubject, ...]:
         try:
             if refresh or cid not in self.catalogs:
-                self.catalogs[cid] = subjects(self.conn, cid, self.logical_vault_id)
+                state = self.cache.state(cid)
+                current = dict(state.subjects)
+                for identity, subject in self.cache.overlay(cid).items():
+                    if subject is None:
+                        current.pop(identity, None)
+                    else:
+                        current[identity] = subject
+                self.catalogs[cid] = tuple(_bound(subject, self.logical_vault_id) for subject in current.values())
             catalog = self.catalogs[cid]
-            if cid not in self.loaded:
-                self.loaded.add(cid)
-                if self.authority is not None and not self.failed and not self.policy.empty and not self.policy.blocked:
-                    for offset in range(0, len(catalog), 16384):
-                        entries = tuple(self.membership(subject) for subject in catalog[offset:offset + 16384])
-                        matched = authority.active_session_grants_for_projection_catalog(
-                            self.authority, context=self.context, audience=self.who.audience_id,
-                            purpose=self.purpose, catalog=entries,
-                            policy_fingerprint=self.policy.fingerprint, now=self.now,
-                        )
-                        for identity, grant in matched:
-                            self.grants.setdefault(identity, []).append(grant)
+            self._load_grants()
             return catalog
         except (ValueError, TypeError, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             self.refuse()
 
+    def _resolve(self, identity):
+        if identity not in self.points:
+            subject = self.cache.point(identity)
+            self.points[identity] = _bound(subject, self.logical_vault_id) if subject else None
+        subject = self.points[identity]
+        return self.membership(subject) if subject else None
+
+    def _load_grants(self):
+        if self.grants_loaded:
+            return
+        self.grants_loaded = True
+        if self.authority is not None and not self.failed:
+            try:
+                matched = authority.active_session_grants_for_projection_resolver(
+                    self.authority, context=self.context, audience=self.who.audience_id,
+                    purpose=self.purpose, resolve=self._resolve,
+                    policy_fingerprint=self.policy.fingerprint, now=self.now,
+                )
+                for identity, grant in matched:
+                    self.grants.setdefault(identity, []).append(grant)
+            except (ValueError, TypeError, sqlite3.Error,
+                    authorization_session_lifecycle.AuthorizationSessionUnavailable):
+                self.failed = True
+        if self.failed:
+            self.refuse()
+
     def membership(self, subject: CanonicalSubject) -> authority.SessionMembership:
         return authority.SessionMembership(subject.basis.identity, subject.basis.fingerprint,
-                                           tuple(sorted(membership.evaluate_metadata(subject.basis.subject, self.policy))))
+                                           self.cache.scopes(subject, self.policy))
 
-    def decision(self, subject: CanonicalSubject) -> Decision:
+    def decision(self, subject: CanonicalSubject, *, session=True) -> Decision:
         basis = subject.basis
         path = basis.subject.path
         if self.failed or self.policy.blocked or (not self.who.resolved and not self.policy.empty) or self.access_blocked:
@@ -252,14 +464,18 @@ class OperationAuthorization:
         if self.mutation and (access._matches(self.access["readonly"], relative)
                               or relative.split("/", 1)[0].casefold() in {value.casefold() for value in access._APPEND_ONLY}):
             return Decision(0)
-        current = self.membership(subject)
+        key = (replace(basis, logical_vault_id="unbound"), self.policy.fingerprint,
+               self.who.audience_id, self.purpose)
+        active = self.grants.get(basis.identity, ()) if session else ()
+        if not active and key in self.cache.decisions:
+            return self.cache.decisions[key]
+        scope_ids = self.cache.scopes(subject, self.policy)
         grants = list(self.policy.grants)
-        for grant in self.grants.get(basis.identity, ()):
-            if current in grant.membership:
+        for grant in active:
+            if authority.SessionMembership(basis.identity, basis.fingerprint, scope_ids) in grant.membership:
                 grants.append(policy.StandingGrant(grant.grant_id, "authorization-session", grant.scope_ids,
                                                    grant.audience, grant.ceiling))
         effective = self.policy
-        scope_ids = current.scope_ids
         if basis.default_audience == "owner":
             scopes = {key: replace(scope, default_deny=True) for key, scope in effective.scopes.items()}
             if not scope_ids:
@@ -267,10 +483,54 @@ class OperationAuthorization:
                 scopes[default] = policy.Scope(id=default, source="collection-type", default_deny=True)
                 scope_ids = (default,)
             effective = replace(effective, scopes=scopes)
-        return decide(scope_ids, audience=self.who.audience_id, purpose=self.purpose,
-                      policy=effective, active_grants=grants)
+        decision = decide(scope_ids, audience=self.who.audience_id, purpose=self.purpose,
+                          policy=effective, active_grants=grants)
+        if not active:
+            self.cache._remember(self.cache.decisions, key, decision, 65536)
+        return decision
 
     def require_collection(self, cid: str, *, complete: bool = True, refresh=False) -> tuple[CanonicalSubject, ...]:
+        if complete:
+            try:
+                state = self.cache.state(cid)
+                self._load_grants()
+                manifest = _bound(state.subjects[state.epoch[0]], self.logical_vault_id)
+                if self.decision(manifest).level < 6:
+                    self.refuse()
+                dependency = (self.policy.fingerprint, self.who.audience_id, self.who.resolved, self.purpose,
+                              self.access_fingerprint, self.access_blocked, tuple(sorted(self.tombstones)), self.mutation)
+                if dependency not in state.summaries:
+                    denied = {identity for identity, subject in state.subjects.items() if subject.row_id is not None
+                              and self.decision(subject, session=False).level < 6}
+                    self.cache._remember(state.summaries, dependency, (denied, set()), 16)
+                denied, dirty = state.summaries[dependency]
+                for identity in dirty:
+                    subject = state.subjects.get(identity)
+                    if subject is not None and self.decision(subject, session=False).level < 6:
+                        denied.add(identity)
+                    else:
+                        denied.discard(identity)
+                dirty.clear()
+                count = len(denied)
+                overlay = self.cache.overlay(cid)
+                for identity, subject in overlay.items():
+                    count -= identity in denied
+                    if subject is not None and self.decision(subject, session=False).level < 6:
+                        count += 1
+                # Session authority is fresh and can alter only its named subjects.
+                for identity in self.grants:
+                    subject = overlay.get(identity, state.subjects.get(identity))
+                    if subject is None or subject.row_id is None:
+                        continue
+                    subject = _bound(subject, self.logical_vault_id)
+                    count += ((self.decision(subject).level < 6)
+                              - (self.decision(subject, session=False).level < 6))
+                if count:
+                    self.refuse()
+                return ()
+            except (ValueError, TypeError, sqlite3.Error,
+                    authorization_session_lifecycle.AuthorizationSessionUnavailable):
+                self.refuse()
         catalog = self.catalog(cid, refresh=refresh)
         required = catalog if complete else catalog[:1]
         if any(self.decision(subject).level < 6 for subject in required):
@@ -394,11 +654,14 @@ def resolve_bound_membership(root: Path, identity: str, candidate: policy.Policy
 
     writer = bound_writer(root)
     if writer is not None:
-        for (cid,) in writer.connection.execute("SELECT collection_id FROM collections"):
-            for subject in subjects(writer.connection, cid, logical_vault_id):
-                if subject.basis.identity == identity:
-                    return authority.SessionMembership(identity, subject.basis.fingerprint,
-                        tuple(sorted(membership.evaluate_metadata(subject.basis.subject, candidate))))
+        writer._require_operation_context()
+        cache = writer.handle.release_cache
+        cache.check()
+        subject = cache.point(identity)
+        if subject is not None:
+            subject = _bound(subject, logical_vault_id)
+            return authority.SessionMembership(identity, subject.basis.fingerprint,
+                                                cache.scopes(subject, candidate))
     if identity.startswith("exomem://"):
         raise authorization_session_lifecycle.AuthorizationSessionUnavailable
     return None

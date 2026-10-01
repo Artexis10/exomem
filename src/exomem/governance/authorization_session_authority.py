@@ -12,6 +12,7 @@ import hmac
 import json
 import secrets
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -820,17 +821,17 @@ def active_session_grants(
     return tuple(active), identity
 
 
-def active_session_grants_for_projection_catalog(
+def active_session_grants_for_projection_resolver(
     connection: sqlite3.Connection,
     *,
     context: AuthorizationSessionContext,
     audience: str,
     purpose: str | None,
-    catalog: tuple[SessionMembership, ...],
+    resolve: Callable[[str], SessionMembership | None],
     policy_fingerprint: str,
     now: int,
 ) -> tuple[tuple[str, SessionGrant], ...]:
-    """Verify all catalog-bound session grants with one authority snapshot."""
+    """Verify session grants, resolving only identities named by active grants."""
 
     current = _active_context(connection, context, now=now)
     canonical_audience = _text(audience)
@@ -838,20 +839,6 @@ def active_session_grants_for_projection_catalog(
     current_policy = _digest(policy_fingerprint)
     if canonical_audience != current.principal_id:
         raise _unavailable()
-    if not isinstance(catalog, tuple) or len(catalog) > _MAX_PROJECTION_CATALOG_ITEMS:
-        raise _unavailable()
-    catalog_by_path: dict[str, SessionMembership] = {}
-    for item in catalog:
-        if not isinstance(item, SessionMembership):
-            raise _unavailable()
-        canonical = SessionMembership(
-            path=_text(item.path),
-            fingerprint=_digest(item.fingerprint),
-            scope_ids=_sequence(item.scope_ids, allow_empty=True),
-        )
-        if canonical.path in catalog_by_path:
-            raise _unavailable()
-        catalog_by_path[canonical.path] = canonical
     try:
         active_policy = connection.execute(
             "SELECT policy_fingerprint FROM active_governance_tuple WHERE singleton=1"
@@ -906,7 +893,9 @@ def active_session_grants_for_projection_catalog(
             )
             fingerprints_by_path = dict(zip(paths, fingerprints, strict=True))
             for reviewed_item in reviewed:
-                current_item = catalog_by_path.get(reviewed_item.path)
+                current_item = resolve(reviewed_item.path)
+                if current_item is not None:
+                    current_item = _projection_membership(current_item)
                 if (
                     current_item is not None
                     and reviewed_item == current_item
@@ -922,6 +911,38 @@ def active_session_grants_for_projection_catalog(
         ):
             raise _unavailable() from None
     return tuple(sorted(matched, key=lambda item: (item[0], item[1].grant_id)))
+
+
+def _projection_membership(item: SessionMembership) -> SessionMembership:
+    if not isinstance(item, SessionMembership):
+        raise _unavailable()
+    return SessionMembership(path=_text(item.path), fingerprint=_digest(item.fingerprint),
+                             scope_ids=_sequence(item.scope_ids, allow_empty=True))
+
+
+def active_session_grants_for_projection_catalog(
+    connection: sqlite3.Connection,
+    *,
+    context: AuthorizationSessionContext,
+    audience: str,
+    purpose: str | None,
+    catalog: tuple[SessionMembership, ...],
+    policy_fingerprint: str,
+    now: int,
+) -> tuple[tuple[str, SessionGrant], ...]:
+    """Compatibility catalog facade over the same lazy grant validation core."""
+    if not isinstance(catalog, tuple) or len(catalog) > _MAX_PROJECTION_CATALOG_ITEMS:
+        raise _unavailable()
+    by_path = {}
+    for item in catalog:
+        canonical = _projection_membership(item)
+        if canonical.path in by_path:
+            raise _unavailable()
+        by_path[canonical.path] = canonical
+    return active_session_grants_for_projection_resolver(
+        connection, context=context, audience=audience, purpose=purpose,
+        resolve=by_path.get, policy_fingerprint=policy_fingerprint, now=now,
+    )
 
 
 def declare_purpose(

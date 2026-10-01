@@ -138,6 +138,16 @@ class WriterConnection:
         self._lease_check = lease_check
         self._owner_thread = threading.get_ident()
         self._closed = False
+        self._release_cache = None
+
+    @property
+    def release_cache(self):
+        self.require_owner_thread()
+        if self._release_cache is None:
+            from .governance import ReleaseCache
+
+            self._release_cache = ReleaseCache(self.connection)
+        return self._release_cache
 
     def require_owner_thread(self) -> None:
         if threading.get_ident() != self._owner_thread:
@@ -150,17 +160,24 @@ class WriterConnection:
         """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
         self.require_owner_thread()
         _require_lease(self._lease_check)
+        cache = self.release_cache
+        cache.check()
         self.connection.execute("BEGIN IMMEDIATE")
+        cache.begin()
         try:
             yield self.connection
+            cache.prepare()
             self.connection.execute("COMMIT")
+            cache.finish(True)
         except BaseException:
             if self.connection.in_transaction:
                 self.connection.execute("ROLLBACK")
+            cache.finish(False)
             raise
 
     def close(self) -> None:
         if not self._closed:
+            self._release_cache = None
             self.connection.close()
             self._closed = True
             with _WRITERS_GUARD:

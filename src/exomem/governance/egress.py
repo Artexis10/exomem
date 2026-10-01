@@ -261,7 +261,7 @@ def _outcome_for_decision(
         value["purpose"] = declared_purpose
     if decision is not None:
         value["level"] = decision.level
-        if policy.fingerprint != "blocked":
+        if re.fullmatch(r"[0-9a-f]{64}", policy.fingerprint):
             value["policy_fingerprint"] = policy.fingerprint
         if decision.scope_ids:
             value["scope_ids"] = list(decision.scope_ids)

@@ -4,16 +4,17 @@ import json
 from dataclasses import replace
 
 import pytest
+from test_authorization_session_authority import NOW, _custody, _open, _seed
+from test_collection_store_writer import CID, KEY, OTHER, create, manifest_path, manifest_text
+from test_collection_store_writer import store as store
+from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import structured_collections as collections
-from exomem.record_memory import record_memory
 from exomem.collection_store.preview import preview_store
-from exomem.governance import authorization_custody, policy, schema_v4
-from exomem.governance import store as authority_store, tool
+from exomem.governance import authorization_custody, policy, schema_v4, tool
+from exomem.governance import store as authority_store
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
-from test_authorization_session_authority import NOW, _custody, _open, _seed
-from test_collection_store_writer import CID, KEY, OTHER, create, manifest_path, manifest_text, store as store
-from test_governance_egress import _external, write_rule, write_scope
+from exomem.record_memory import record_memory
 
 
 def withhold(store):
@@ -150,6 +151,7 @@ def test_copied_context_cannot_read_on_another_connection_thread(store):
     """Copying the request and preview binding cannot transfer SQLite ownership."""
     from concurrent.futures import ThreadPoolExecutor
     from contextvars import copy_context
+
     from exomem import record_formats
     from exomem.collection_store.connection import CollectionStoreError
 
@@ -415,7 +417,7 @@ def session(store, monkeypatch, *, paths="Records/**/Items/**"):
     finally:
         conn.close()
     monkeypatch.setattr("time.time", lambda: NOW + 2)
-    monkeypatch.setattr(authorization_custody, "load_authorization_custody", lambda *a, **k: custody)
+    monkeypatch.setattr(authorization_custody, "_load_authorization_custody_once", lambda *a, **k: custody)
     context = opened.context
     return RequestPrincipal(context.principal_id, surface="mcp", issuer_family=context.issuer_family,
                             verified_authorization_session=context)
@@ -521,6 +523,7 @@ def redeem(store, who, token):
 def test_preserved_source_grant_keeps_its_file_hash_basis(store, monkeypatch):
     """A real file grant admits provenance only while its reviewed bytes survive."""
     import hashlib
+
     from exomem.governance import egress, membership
     from exomem.governance.decisions import decide
 
@@ -628,7 +631,7 @@ def test_another_session_cannot_redeem_or_consume_the_grant(store, monkeypatch):
     who = session(store, monkeypatch)
     conn = authority_store.open_authorization_session_connection(store.root)
     try:
-        sibling = _open(conn, authorization_custody.load_authorization_custody(store.root))
+        sibling = _open(conn, authorization_custody.load_authorization_custody(store.root, now=NOW + 2))
     finally:
         conn.close()
     other = replace(who, verified_authorization_session=sibling.context)
@@ -674,6 +677,7 @@ def test_nested_query_rechecks_the_complete_principal(store, monkeypatch, change
 def test_ten_thousand_subjects_use_one_real_authority_catalog_read(store, monkeypatch):
     """An identity-only catalog cannot issue a grant lookup or decode payloads per row."""
     import uuid
+
     from exomem.collection_store import tokens
 
     create(store)
@@ -816,6 +820,7 @@ def test_create_at_another_path_does_not_disclose_a_withheld_identity_conflict(s
 def test_v1_migration_backfills_canonical_metadata_and_restores_manifest_protection(tmp_path):
     """A shipped V1 store must acquire metadata from its own immutable manifest and row."""
     import sqlite3
+
     from exomem import vault
     from exomem.collection_store import schema, tokens, types
 

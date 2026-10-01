@@ -62,6 +62,14 @@ def canonical_read(function):
     return read
 
 
+def _mutate(vault_root, method, *args, **kwargs):
+    """Own the leaf boundary when the dispatcher holds only its writer fence."""
+    from ..writer_lease import active_manager
+
+    with active_manager().mutation_guard(vault_root, operation=method.__name__):
+        return method(*args, **kwargs)
+
+
 def dispatch(
     vault_root: Path, profile: str, action: str, values: Mapping[str, Any]
 ) -> tuple[bool, Any]:
@@ -107,25 +115,25 @@ def dispatch(
                 result, manifest, output_format=args.get("output_format", "json"),
             )
     if action == "create":
-        return True, writer.create_collection(**args)
+        return True, _mutate(vault_root, writer.create_collection, **args)
     collection = args.pop("collection")
     if profile == "planning" and "plan_id" in args:
         args["item_key"] = args.pop("plan_id")
     if action in {"append", "add"}:
-        return True, writer.append_record(collection, **args)
+        return True, _mutate(vault_root, writer.append_record, collection, **args)
     if action == "bulk_upsert" and profile == "records":
-        return True, writer.bulk_upsert_records(collection, **args)
+        return True, _mutate(vault_root, writer.bulk_upsert_records, collection, **args)
     if action == "triage":
         args["changes"] = args.pop("transition")
         args["operation"] = "triage"
     if action in {"update", "triage"}:
         args.setdefault("changes", {})
         args["refresh_presentation"] = args.get("refresh_presentation") is True
-        return True, writer.update_record(collection, **args)
+        return True, _mutate(vault_root, writer.update_record, collection, **args)
     if action == "revise":
-        return True, writer.revise_collection(collection, **args)
+        return True, _mutate(vault_root, writer.revise_collection, collection, **args)
     if action == "discard":
-        return True, writer.discard_held(collection, **args)
+        return True, _mutate(vault_root, writer.discard_held, collection, **args)
     raise collections.CollectionError(
         "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "this operation belongs to a later store slice"
     )

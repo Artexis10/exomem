@@ -19,9 +19,17 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .. import memory_refs, mutation_terminal, planning, record_formats, records, vault, writer_lease
-from ..governance.principal import effective_principal
+from .. import (
+    memory_refs,
+    mutation_terminal,
+    planning,
+    record_formats,
+    records,
+    vault,
+    writer_lease,
+)
 from .. import structured_collections as collections
+from ..governance.principal import effective_principal
 from . import chain, connection, governance, tokens, types
 
 BULK_UPSERT_MAX_ROWS = 500
@@ -77,7 +85,8 @@ class CollectionWriter:
         if previous is not None:
             yield previous
             return
-        operation = governance.OperationAuthorization(self.root, self.connection, mutation=mutation)
+        operation = governance.OperationAuthorization(self.root, self.connection, mutation=mutation,
+                                                       cache=self.handle.release_cache)
         self._operation = operation
         try:
             yield operation
@@ -87,6 +96,15 @@ class CollectionWriter:
 
     def _precommit(self, manifest):
         self._operation.require_collection(manifest.collection_id, refresh=True)
+
+    def _execute(self, statement, parameters=(), *, many=False):
+        """Account only this writer statement, never intervening trusted SQL."""
+        before = self.connection.total_changes
+        execute = self.connection.executemany if many else self.connection.execute
+        try:
+            return execute(statement, parameters)
+        finally:
+            self.handle.release_cache.account(self.connection.total_changes - before)
 
     def _collection_row(
         self, selector: str | Path | collections.CollectionManifest, *, facade_profile: str | None = None
@@ -139,6 +157,14 @@ class CollectionWriter:
         return row, manifest, declared
 
     def _collection_manifest(self, row):
+        self._require_operation_context()
+        cache = self.handle.release_cache
+        cache.check()
+        epoch = cache.epoch(row["collection_id"])
+        key = (str(self.root), row["collection_id"], row["manifest_version"], epoch)
+        if key in cache.contracts:
+            manifest, declared = cache.contracts[key]
+            return replace(manifest, audit_head=row["audit_head"]), declared
         text = self.connection.execute(
             "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
             (row["collection_id"], row["manifest_version"]),
@@ -146,11 +172,14 @@ class CollectionWriter:
         manifest = collections.parse_manifest_bytes(
             self.root, row["manifest_path"], text.encode()
         )
+        if manifest.collection_id != row["collection_id"] or manifest.manifest_version.hash != epoch[6]:
+            governance.OperationAuthorization.refuse()
         declared = types.type_for_manifest(manifest)
         if (declared.name, declared.version) != (row["type_name"], row["type_version"]):
             raise types.CollectionTypeError(
                 "COLLECTION_TYPE_VERSION_MISMATCH", "collection type differs from release"
             )
+        cache._remember(cache.contracts, key, (manifest, declared), 64)
         return replace(manifest, audit_head=row["audit_head"]), declared
 
     def _item(self, cid: str, key: str) -> dict[str, Any] | None:
@@ -167,6 +196,7 @@ class CollectionWriter:
     def read_snapshot(self):
         """Join canonical reads under one SQLite and policy snapshot."""
         self._require_operation_context()
+        self.handle.release_cache.check()
         if self.connection.in_transaction:
             with self._authorization(mutation=False):
                 yield
@@ -490,13 +520,13 @@ class CollectionWriter:
             raise RuntimeError("writer constructed an invalid collection receipt")
         data = {**txn, "receipt_json": _json(receipt)}
         names = list(data)
-        self.connection.execute(
+        self._execute(
             f"INSERT INTO txns ({', '.join(names)}) VALUES ({', '.join('?' for _ in names)})",
             tuple(data.values()),
         )
 
     def _advance(self, txn: Mapping[str, Any]) -> str:
-        self.connection.execute(
+        self._execute(
             "UPDATE collections SET generation = ?, audit_head = ?, updated_txn = ? WHERE collection_id = ?",
             (txn["generation_after"], txn["event_hash"], txn["txn_id"], txn["collection_id"]),
         )
@@ -507,7 +537,7 @@ class CollectionWriter:
     def _pending(
         self, path: str, cid: str, kind: str, version: int, text: str, row_id: int | None = None
     ) -> None:
-        self.connection.execute(
+        self._execute(
             "INSERT INTO projection_state (path, collection_id, row_id, kind, pending_row_version, pending_sha256, state) "
             "VALUES (?, ?, ?, ?, ?, ?, 'pending') ON CONFLICT(path) DO UPDATE SET "
             "pending_row_version = excluded.pending_row_version, pending_sha256 = excluded.pending_sha256, state = 'pending'",
@@ -518,7 +548,7 @@ class CollectionWriter:
         self, manifest: collections.CollectionManifest, text: str, version: int, txn_id: int
     ):
         data, _, _ = vault.parse_frontmatter(text, strict=True)
-        self.connection.execute(
+        self._execute(
             "INSERT INTO collection_manifests(collection_id,manifest_version,manifest_text,manifest_hash,"
             "schema_json,natural_key_json,txn_id,governance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -533,6 +563,7 @@ class CollectionWriter:
             ),
         )
         self._pending(manifest.path, manifest.collection_id, "manifest", version, text)
+        self.handle.release_cache.touch(manifest.collection_id)
 
     def create_collection(
         self,
@@ -591,7 +622,7 @@ class CollectionWriter:
             records._assert_portable_absent(self.root, self.root / manifest.storage.source)
             txn = self._txn(None, manifest, "create", why, identity, digest)
             types.register_builtins(self.connection, txn_id=txn["txn_id"])
-            self.connection.execute(
+            self._execute(
                 "INSERT INTO collections (collection_id, type_name, type_version, manifest_path, source_path, layout, "
                 "manifest_version, generation, audit_head, audit_reader_version, created_txn, updated_txn) "
                 "VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 1, ?, ?)",
@@ -613,7 +644,7 @@ class CollectionWriter:
             if scaffold and manifest.storage.strategy == "markdown-log":
                 section = manifest.storage.descriptor["section"]
                 log_text = f"{'#' * section['level']} {section['title']}\n"
-                self.connection.execute(
+                self._execute(
                     "UPDATE collections SET log_frame_json = ? WHERE collection_id = ?",
                     (_json({"text": log_text}), manifest.collection_id),
                 )
@@ -741,7 +772,7 @@ class CollectionWriter:
         ).fetchone()[0]
         before = json.loads(self._item(manifest.collection_id, key)["values_json"]) if candidate["action"] == "update" else None
         held_metadata = governance.held_metadata(manifest.schema, candidate, metadata, before)
-        self.connection.execute(
+        self._execute(
             "INSERT INTO held_candidates (held_id, collection_id, kind, code, candidate_json, diagnostics_json, view_path, updated_at, held_bytes,governance_json,governance_hash) "
             "VALUES (?, ?, 'write-refusal', ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(held_id) DO UPDATE SET "
             "code = excluded.code, candidate_json = excluded.candidate_json, diagnostics_json = excluded.diagnostics_json, updated_at = excluded.updated_at, held_bytes = excluded.held_bytes, governance_json=excluded.governance_json, governance_hash=excluded.governance_hash",
@@ -759,6 +790,8 @@ class CollectionWriter:
             ),
         )
         self._pending(path, manifest.collection_id, "held", 1, text)
+        self.handle.release_cache.touch(manifest.collection_id,
+                                       f"exomem://collection-held/{manifest.collection_id}/{reference}")
         self._precommit(manifest)
         return collections.CollectionError(
             error.code,
@@ -771,13 +804,15 @@ class CollectionWriter:
 
     def _release(self, held):
         if held:
-            self.connection.execute(
+            self._execute(
                 "DELETE FROM projection_state WHERE path = ? AND kind = 'held'",
                 (held["view_path"],),
             )
-            self.connection.execute(
+            self._execute(
                 "DELETE FROM held_candidates WHERE held_id = ?", (held["held_id"],)
             )
+            self.handle.release_cache.touch(held["collection_id"],
+                                           f"exomem://collection-held/{held['collection_id']}/{held['held_id']}")
 
     def _twins(self, cid, key, natural_key):
         if natural_key is not None:
@@ -821,7 +856,7 @@ class CollectionWriter:
         ).fetchone()[0]
         metadata = governance.row_metadata(manifest.schema, values, manifest_metadata)
         if before is None:
-            cursor = self.connection.execute(
+            cursor = self._execute(
                 "INSERT INTO items (collection_id, item_key, natural_key, row_version, schema_version, values_json, body, payload_hash, view_path, created_txn, updated_txn,governance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     manifest.collection_id,
@@ -841,19 +876,19 @@ class CollectionWriter:
             row_id = cursor.lastrowid
         else:
             row_id = before["row_id"]
-            self.connection.execute(
+            self._execute(
                 "UPDATE items SET natural_key = ?, row_version = ?, values_json = ?, body = ?, payload_hash = ?, updated_txn = ?,governance_json=? WHERE row_id = ?",
                 (natural_key, version, _json(values), body, payload, txn["txn_id"], metadata, row_id),
             )
-        self.connection.execute(
+        self._execute(
             "INSERT INTO item_versions VALUES (?, ?, ?, ?, ?, ?)",
             (row_id, version, _json(values), body, payload, txn["txn_id"]),
         )
         for source_ordinal, source in enumerate(sources):
-            self.connection.execute(
+            self._execute(
                 "INSERT INTO item_sources VALUES (?, ?, ?, ?)", (row_id, version, source_ordinal, source)
             )
-        self.connection.execute(
+        self._execute(
             "INSERT INTO audit_effects (txn_id, ordinal, row_id, item_key, effect, effect_label, version_before, version_after, hash_before, hash_after) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 txn["txn_id"],
@@ -878,6 +913,8 @@ class CollectionWriter:
         elif queue_log:
             self._pending_log(manifest, txn)
         self._release(resumed)
+        self.handle.release_cache.touch(manifest.collection_id,
+                                       f"exomem://{types.type_for_manifest(manifest).item_type}/{manifest.collection_id}/{key}")
         return tokens.item_version(manifest.collection_id, key, version, payload)
 
     def _pending_log(self, manifest, txn):
@@ -1502,20 +1539,20 @@ class CollectionWriter:
                 types.named_validator(name).validate(proposed, plans)
             txn = self._txn(row, proposed, "revise", why, identity, digest)
             self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
-            self.connection.execute(
+            self._execute(
                 "UPDATE collections SET manifest_version = ?, audit_reader_version = 2 WHERE collection_id = ?",
                 (txn["manifest_version_after"], current.collection_id),
             )
             metadata = governance.manifest_metadata(manifest_text)
-            self.connection.executemany("UPDATE items SET governance_json=? WHERE collection_id=? AND item_key=?",
+            self._execute("UPDATE items SET governance_json=? WHERE collection_id=? AND item_key=?",
                 ((governance.row_metadata(proposed.schema, values, metadata), current.collection_id, key)
-                 for key, values in plans.items()))
+                 for key, values in plans.items()), many=True)
             for held_id, encoded in self.connection.execute(
                 "SELECT held_id,candidate_json FROM held_candidates WHERE collection_id=?", (current.collection_id,),
             ).fetchall():
                 candidate = records._decode_held_value(json.loads(encoded))
                 before = plans.get(candidate.get("item_key"))
-                self.connection.execute("UPDATE held_candidates SET governance_json=? WHERE held_id=?",
+                self._execute("UPDATE held_candidates SET governance_json=? WHERE held_id=?",
                     (governance.held_metadata(proposed.schema, candidate, metadata, before), held_id))
             after_container = self._advance(txn)
             payload = records.lifecycle_request_hash(

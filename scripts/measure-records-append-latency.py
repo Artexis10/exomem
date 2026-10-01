@@ -14,6 +14,11 @@ the product's own ``call_spans`` are collected alongside them.
 Nothing here touches a live service or a real state root: the child process
 points ``EXOMEM_STATE_ROOT``, ``XDG_STATE_HOME`` and the writer-lease directory
 at a temp tree and disables embedding models and background watchers.
+
+``--storage store-preview`` exercises the dark store through the same public
+commands and vault-scoped lease. It does not lift file-mode caps. Its pending
+view queue is not synchronous publication, so these diagnostic numbers cannot
+retire the store's phase-acceptance gate.
 """
 
 from __future__ import annotations
@@ -192,6 +197,8 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     vault = tmp / "vault"
     (vault / "Knowledge Base").mkdir(parents=True)
     os.environ["EXOMEM_VAULT_PATH"] = str(vault)
+    if args.storage == "store-preview":
+        os.environ["EXOMEM_COLLECTION_STORE_PREVIEW"] = "1"
     sys.path.insert(0, str(REPO / "src"))
 
     from exomem import (
@@ -211,7 +218,7 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     from exomem import vault as vault_module
     from exomem.governance import egress
 
-    if args.lift_caps:
+    if args.lift_caps and args.storage == "files":
         # Measurement only: the product refuses a collection above 2,000 items. This
         # lifts every cap so the cost curve can be read past it.
         from exomem import record_governance
@@ -227,24 +234,42 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
 
     (vault / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
     manifest_file = vault / COLLECTION
-    manifest_file.parent.mkdir(parents=True)
-    manifest_file.write_text(MANIFEST, encoding="utf-8")
-    (manifest_file.parent / "Items").mkdir()
-    manifest = collections.load_manifest(vault, manifest_file)
-
-    # Seed `size` items rendered exactly as the writer renders them. Going through
-    # append_record for each would be O(size^2) and is the thing being measured.
-    occupied: set[str] = set()
     started = time.perf_counter()
-    for index in range(size):
-        values = _item(index)
-        key = collections.derived_item_key(manifest, values) or str(uuid.uuid4())
-        text = record_formats.render_markdown_item(
-            manifest, values, key, "", uuid.uuid4().hex[:24], resolve_relationship=None
-        )
-        relative = collections.render_item_path(manifest, values, key, occupied_paths=occupied)
-        occupied.add(relative)
-        (vault / relative).write_text(text, encoding="utf-8")
+    handle = None
+    if args.storage == "store-preview":
+        from exomem.collection_store import connection as store_connection
+        from exomem.collection_store.preview import preview_store
+
+        evidence = "Knowledge Base/Evidence/latency-seed.md"
+        (vault / evidence).parent.mkdir(parents=True)
+        (vault / evidence).write_text("# Invented latency seed\n", encoding="utf-8")
+        with writer_lease.get_manager().mutation_guard(vault, operation="latency-seed"):
+            handle = store_connection.open_writer(store_connection.store_path(vault), vault_root=vault)
+            with preview_store(vault, handle) as writer:
+                created = writer.create_collection(COLLECTION, MANIFEST, why="synthetic seed", scaffold=False)
+                guard = created["after_container_hash"]
+                for start in range(0, size, 500):
+                    seeded = writer.bulk_upsert_records(
+                        COLLECTION, rows=[{"item": _item(index)} for index in range(start, min(size, start + 500))],
+                        why="synthetic seed", source=evidence, expected_container_hash=guard,
+                    )
+                    guard = seeded["after_container_hash"]
+    else:
+        manifest_file.parent.mkdir(parents=True)
+        manifest_file.write_text(MANIFEST, encoding="utf-8")
+        (manifest_file.parent / "Items").mkdir()
+        manifest = collections.load_manifest(vault, manifest_file)
+        # File seeding is outside the measured command path, avoiding O(size^2).
+        occupied: set[str] = set()
+        for index in range(size):
+            values = _item(index)
+            key = collections.derived_item_key(manifest, values) or str(uuid.uuid4())
+            text = record_formats.render_markdown_item(
+                manifest, values, key, "", uuid.uuid4().hex[:24], resolve_relationship=None
+            )
+            relative = collections.render_item_path(manifest, values, key, occupied_paths=occupied)
+            occupied.add(relative)
+            (vault / relative).write_text(text, encoding="utf-8")
     seed_seconds = time.perf_counter() - started
 
     command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "record_memory")
@@ -285,6 +310,17 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     stages.wrap(reserved_paths, "reserved_preflight", "request.reserved_preflight")
     stages.wrap(graph_sync, "status", "graph.status")
     stages.wrap(graph_sync, "join_registered_if_settled", "graph.join_registered")
+    if handle is not None:
+        from exomem.collection_store import governance as store_governance
+        from exomem.collection_store.writer import CollectionWriter
+
+        stages.wrap_cm(store_connection.WriterConnection, "transaction", "store.transaction")
+        stages.wrap(CollectionWriter, "_collection", "store.collection_resolve")
+        stages.wrap(CollectionWriter, "_collection_manifest", "store.manifest_contract")
+        stages.wrap(CollectionWriter, "_write_item", "store.item_write")
+        stages.wrap(CollectionWriter, "_insert_txn", "store.audit_write")
+        stages.wrap(CollectionWriter, "_pending", "store.pending_projection")
+        stages.wrap(store_governance.OperationAuthorization, "require_collection", "store.authorize_collection")
 
     leaf_time = {"leaf": 0.0}
     original_leaf = command.leaf
@@ -315,7 +351,11 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
         token = f"harness-{uuid.uuid4().hex}"
         call_spans.MCP_CALL_TOKEN.set(token)
         start = time.perf_counter()
-        result = writer_lease.invoke_command(timed_command, vault, **kwargs)
+        if handle is None:
+            result = writer_lease.invoke_command(timed_command, vault, **kwargs)
+        else:
+            with preview_store(vault, handle):
+                result = writer_lease.invoke_command(timed_command, vault, **kwargs)
         wall = time.perf_counter() - start
         return wall, result, call_spans.pop_call_spans(token)
 
@@ -362,7 +402,12 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
         }
 
     n = args.appends
-    out: dict[str, object] = {"size": size, "appends": n, "seed_seconds": round(seed_seconds, 2)}
+    out: dict[str, object] = {
+        "size": size, "appends": n, "seed_seconds": round(seed_seconds, 2),
+        "storage_mode": args.storage, "phase_acceptance": False,
+        "command_path": {"lease": "vault-scoped", "inspect": "full public",
+                         "projection": "pending-only" if handle is not None else "file publication"},
+    }
 
     # A: guarded append; the client pays a container-version read before every append.
     guarded_rows: list[dict[str, float]] = []
@@ -425,6 +470,10 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     pstats.Stats(profile, stream=buffer).sort_stats("cumulative").print_stats(r"exomem", 40)
     out["profile_refresh_cumulative"] = buffer.getvalue()
 
+    _, final_inspect, _ = invoke(action="inspect", collection=COLLECTION)
+    out["final_inspect"] = final_inspect
+    if handle is not None:
+        handle.close()
     shutil.rmtree(tmp, ignore_errors=True)
     return out
 
@@ -462,6 +511,8 @@ def _parent(args: argparse.Namespace) -> int:
                 str(size),
                 "--appends",
                 str(args.appends),
+                "--storage",
+                args.storage,
                 *(["--lift-caps"] if args.lift_caps else []),
             ],
             capture_output=True,
@@ -488,6 +539,7 @@ def main() -> int:
     parser.add_argument("--sizes", default="10,100,1000")
     parser.add_argument("--appends", type=int, default=30)
     parser.add_argument("--out", default="records-append-latency.json")
+    parser.add_argument("--storage", choices=("files", "store-preview"), default="files")
     parser.add_argument(
         "--lift-caps",
         action="store_true",
