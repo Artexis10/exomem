@@ -34,6 +34,7 @@ from typing import Any, NamedTuple
 from . import (
     activation_conventions,
     context_roles,
+    kbdir,
     request_budget,
     source_taxonomy,
     working_set_heat,
