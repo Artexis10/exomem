@@ -38,6 +38,7 @@ from . import (
     context_roles,
     request_budget,
     source_taxonomy,
+    working_set_conversation,
     working_set_heat,
     working_set_currency,
     working_set_index,
@@ -66,6 +67,9 @@ ENTITY_CONCLUSION_PAGES = 6
 MAX_STANDING_PAGES = 2
 MAX_STANDING_UNITS = 2
 PRECEDENTS_ROLE = "precedents"
+#: Material promoted only by the earlier conversation gets at most this share
+#: (a third) of the packet budget when the turn resolved something itself.
+PROMOTED_SHARE_DIVISOR = 3
 #: Units the unit lane reads before neighbourhood filtering. Generous because the
 #: catalogue query is filtered by category and the path filter runs after it.
 UNIT_LANE_LIMIT = 200
@@ -301,6 +305,9 @@ class LaneItem:
     #: Why this lane admitted the item, in words. Carried onto a pointer so a
     #: ref the budget could not afford still says what it would have answered.
     why: str = ""
+    #: Reached only because the earlier conversation named its anchor: served
+    #: after the turn's own material and within a third of the budget.
+    promoted: bool = False
 
 
 class LaneResult(NamedTuple):
@@ -427,14 +434,19 @@ def build_packet(
     generation: Mapping[str, Any],
     status: str,
     recent_context: Sequence[Mapping[str, Any]] = (),
+    conversation_inferred: bool = False,
+    promoted_paths: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Order, cap and budget the lane output into the packet the caller sees."""
     limit = clamp_budget(max_chars)
+    promoted_share = limit // PROMOTED_SHARE_DIVISOR
+    promoted_used = 0
     order = _role_order(roles)
     present_paths = {item.path for item in items if item.path}
 
     def _sort_key(item: LaneItem) -> tuple:
         return (
+            1 if item.promoted else 0,
             0 if item.level == "unit" else 1,
             order.get(item.role, len(order)),
             1 if item.provenance.get("carried") else 0,
@@ -472,67 +484,23 @@ def build_packet(
     # fresh session opens with, and a turn that resolved a lot must not spend
     # the whole ceiling before saying what was recently worked on.
     recent_entries, used = _budgeted_recent(recent_context, limit)
+    # Conversation inference gets only its promoted share. Working continuity
+    # retains the unresolved turn's ordinary budget, outside that share.
+    conversation_inferred = conversation_inferred or generation.get("carried_by") == "conversation"
+    material_limit = (
+        min(limit, used + limit // PROMOTED_SHARE_DIVISOR)
+        if conversation_inferred
+        else limit
+    )
+    listed_anchors = [dict(anchor) for anchor in anchors]
+    listed_ambiguity = [dict(entry) for entry in ambiguity]
+    role_ids = frozenset(str(role["id"]) for role in roles) if conversation_inferred else frozenset()
+    if conversation_inferred:
+        used += working_set_conversation.budget_headers(
+            (*listed_anchors, *listed_ambiguity), material_limit - used, role_ids=role_ids,
+        )
 
-    # Current state is the highest-value prose about the RESOLVED anchors — it
-    # is the answer to "what is true right now" — so it is budgeted next and the
-    # rest of the packet spends what is left. An entry that cannot fit is
-    # dropped whole: a half-sentence about an observed status is worse than
-    # silence.
     state_entries: list[dict[str, Any]] = []
-    for entry in current_state:
-        entry = dict(entry)
-        page_updated = str(entry.get("page_updated") or "")
-        try:
-            page_updated = date.fromisoformat(page_updated[:10]).isoformat()
-        except ValueError:
-            page_updated = ""
-        statement = str(entry.get("statement") or "")
-        # Page time labels an undated claim; it never becomes the claim's own
-        # time or a published compiler input. Charge the visible label too.
-        if not entry.get("as_of") and page_updated:
-            label = f" (page updated {page_updated})"
-            statement = statement[: working_set_state.STATEMENT_MAX_CHARS - len(label)] + label
-            entry["statement"] = statement
-        for key in working_set_currency.INTERNAL_PROVENANCE:
-            entry.pop(key, None)
-        if used + len(statement) > limit:
-            continue
-        state_entries.append(dict(entry))
-        used += len(statement)
-
-    for item in ordered:
-        if _redundant_superseded(item, present_paths):
-            continue
-        text = bounded_text(item.text)
-        standing = bool(item.provenance.get("standing"))
-        # A standing unit leads the packet on every turn that resolves its
-        # project, relevant or not, so it gets no allowance past the size a
-        # unit is designed to fit.
-        if len(text) > (MAX_UNIT_CHARS if standing else MAX_UNIT_HARD_CHARS):
-            deferred.append((item, "unit_too_long"))
-            continue
-        role_count = per_role.get(item.role, 0)
-        # No class is exempt: a standing unit takes one of its role's slots.
-        if role_count >= MAX_ITEMS_PER_ROLE:
-            deferred.append((item, "role_cap"))
-            continue
-        if used + len(text) > limit or not text:
-            deferred.append((item, "budget"))
-            continue
-        unit = {
-            "ref": item.ref,
-            "role": item.role,
-            "text": text,
-            "lifecycle": item.lifecycle,
-            "updated": item.updated,
-            "provenance": _provenance(item),
-        }
-        if item.lifecycle in working_set_currency.HISTORY_LIFECYCLES:
-            unit["history"] = True
-        units.append(unit)
-        used += len(text)
-        per_role[item.role] = role_count + 1
-
     # A pointer is cheap but not free: its title and `why` are prose the caller
     # pays for, so the same ceiling bounds them. Once the budget is spent the
     # overflow is not reported at all rather than silently breaking the bound.
@@ -542,21 +510,103 @@ def build_packet(
     # silently drops six of eight candidates reads exactly like one where the
     # material did not exist.
     starved: dict[str, None] = {}
-    for item, reason in deferred:
-        if len(pointers) >= MAX_POINTERS:
-            starved.setdefault(item.role, None)
-            continue
-        pointer = _pointer(item, reason)
-        cost = len(pointer["title"]) + len(pointer["why"])
-        if used + cost > limit:
-            starved.setdefault(item.role, None)
-            continue
-        pointers.append(pointer)
-        used += cost
+    # Own material spends first. All promoted blocks share one allowance;
+    # overflow cannot return prose a unit or state could not afford.
+    for promoted in (False, True):
+        # State leads each ownership tier and is dropped whole if it cannot fit.
+        for entry in current_state:
+            if (entry.get("path") in promoted_paths) != promoted:
+                continue
+            entry = dict(entry)
+            page_updated = str(entry.get("page_updated") or "")
+            try:
+                page_updated = date.fromisoformat(page_updated[:10]).isoformat()
+            except ValueError:
+                page_updated = ""
+            statement = str(entry.get("statement") or "")
+            # Page time labels an undated claim; it never becomes the claim's own
+            # time or a published compiler input. Charge the visible label too.
+            if not entry.get("as_of") and page_updated:
+                label = f" (page updated {page_updated})"
+                statement = statement[: working_set_state.STATEMENT_MAX_CHARS - len(label)] + label
+                entry["statement"] = statement
+            for key in working_set_currency.INTERNAL_PROVENANCE:
+                entry.pop(key, None)
+            cost = (
+                working_set_conversation.prose_chars(entry, role_ids=role_ids)
+                if conversation_inferred else len(statement)
+            )
+            if used + cost > material_limit or promoted and promoted_used + cost > promoted_share:
+                continue
+            state_entries.append(entry)
+            used += cost
+            if promoted:
+                promoted_used += cost
+
+        for item in ordered:
+            if item.promoted != promoted or _redundant_superseded(item, present_paths):
+                continue
+            text = bounded_text(item.text)
+            standing = bool(item.provenance.get("standing"))
+            # A standing unit leads the packet on every turn that resolves its
+            # project, relevant or not, so it gets no allowance past the size a
+            # unit is designed to fit.
+            if len(text) > (MAX_UNIT_CHARS if standing else MAX_UNIT_HARD_CHARS):
+                deferred.append((item, "unit_too_long"))
+                continue
+            unit = {
+                "ref": item.ref,
+                "role": item.role,
+                "text": text,
+                "lifecycle": item.lifecycle,
+                "updated": item.updated,
+                "provenance": _provenance(item),
+            }
+            cost = (
+                working_set_conversation.prose_chars(unit, role_ids=role_ids)
+                if conversation_inferred else len(text)
+            )
+            role_count = per_role.get(item.role, 0)
+            # No class is exempt: a standing unit takes one of its role's slots.
+            if role_count >= MAX_ITEMS_PER_ROLE:
+                deferred.append((item, "role_cap"))
+                continue
+            if used + cost > material_limit or not text:
+                deferred.append((item, "budget"))
+                continue
+            if item.lifecycle in working_set_currency.HISTORY_LIFECYCLES:
+                unit["history"] = True
+            if promoted and promoted_used + cost > promoted_share:
+                deferred.append((item, "budget"))
+                continue
+            if promoted:
+                promoted_used += cost
+            units.append(unit)
+            used += cost
+            per_role[item.role] = role_count + 1
+
+        for item, reason in deferred:
+            if item.promoted != promoted:
+                continue
+            if len(pointers) >= MAX_POINTERS:
+                starved.setdefault(item.role, None)
+                continue
+            pointer = _pointer(item, reason)
+            cost = (
+                working_set_conversation.prose_chars(pointer, role_ids=role_ids)
+                if conversation_inferred else len(pointer["title"]) + len(pointer["why"])
+            )
+            if used + cost > material_limit or promoted and promoted_used + cost > promoted_share:
+                starved.setdefault(item.role, None)
+                continue
+            pointers.append(pointer)
+            used += cost
+            if promoted:
+                promoted_used += cost
 
     packet: dict[str, Any] = {
         "recent_context": recent_entries,
-        "anchors": [dict(anchor) for anchor in anchors],
+        "anchors": listed_anchors,
         "roles": [dict(role) for role in roles],
         "units": units,
         "pointers": pointers,
@@ -565,14 +615,14 @@ def build_packet(
             *(dict(entry) for entry in missing),
             *({"role": role, "reason": "budget"} for role in starved),
         ],
-        "ambiguity": [dict(entry) for entry in ambiguity],
+        "ambiguity": listed_ambiguity,
         "budget": {"limit_chars": limit, "used_chars": used},
         "generation": dict(generation),
         "abstained": status != "resolved",
     }
     if packet["abstained"]:
         packet["abstention"] = {"reason": status}
-    return packet
+    return working_set_conversation.InferredPacket(packet) if conversation_inferred else packet
 
 
 def abstained_packet(
@@ -584,6 +634,7 @@ def abstained_packet(
     ambiguity: Sequence[Mapping[str, Any]] = (),
     missing: Sequence[Mapping[str, Any]] = (),
     recent_context: Sequence[Mapping[str, Any]] = (),
+    conversation_inferred: bool = False,
 ) -> dict[str, Any]:
     """The packet with no ANSWER in it — but still with working continuity.
 
@@ -595,6 +646,12 @@ def abstained_packet(
     thing a fresh session opening on "ok continue" has to be told.
     """
     limit = clamp_budget(max_chars)
+    if conversation_inferred or generation.get("carried_by") == "conversation":
+        return build_packet(
+            items=(), anchors=anchors, roles=(), current_state=(), ambiguity=ambiguity,
+            missing=missing, max_chars=limit, generation=generation, status=reason,
+            recent_context=recent_context, conversation_inferred=True,
+        )
     recent_entries, used = _budgeted_recent(recent_context, limit)
     return {
         "recent_context": recent_entries,
@@ -716,6 +773,7 @@ def run_lanes(
     neighbourhood: frozenset[str] | None = None,
     precedent_reach: Callable[[], tuple[frozenset[str], frozenset[str]]] | None = None,
     visible: Callable[[str], bool] | None = None,
+    reached: dict[str, set[str]] | None = None,
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
     """Run one bounded lane per selected role. Every lane soft-fails alone.
 
@@ -732,6 +790,9 @@ def run_lanes(
     `visible` removes withheld pages before lane reads and caps; the release
     guard remains the final check on the assembled packet.
 
+    `reached` records page ownership during these reads for promoted budgeting;
+    it is request-local and never enters the packet.
+
     `neighbourhood` is normally derived from the anchors' own typed graph.
     A retrieval-carried packet passes its own — the single page recall
     dominated on, and nothing else — because a carried page is not an anchor:
@@ -742,7 +803,7 @@ def run_lanes(
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
     if neighbourhood is None:
-        neighbourhood = _neighbourhood_paths(root, anchors)
+        neighbourhood = _neighbourhood_paths(root, anchors, reached=reached)
     if visible is not None:
         neighbourhood = frozenset(path for path in neighbourhood if visible(path))
     for role in roles:
@@ -845,6 +906,7 @@ def reach_precedents(
     registry: context_roles.RoleRegistry,
     index: working_set_index.WorkingSetIndex | None,
     visible: Callable[[str], bool] | None = None,
+    reached: dict[str, set[str]] | None = None,
 ) -> tuple[frozenset[str], frozenset[str]]:
     """`(precedent_pages, standing_pages)` the `precedents` lane also reads.
 
@@ -869,6 +931,7 @@ def reach_precedents(
     root = Path(vault_root)
     precedent: set[str] = set()
     standing: list[str] = []
+    standing_owners: dict[str, set[str]] = {}
     for anchor in resolved:
         # An anchor no NAMING kind reached was not named by the turn: a prior
         # (recency) supplied it and a tie-break or qualifier (usage_prior,
@@ -884,6 +947,7 @@ def reach_precedents(
         if anchor_id.startswith("project:"):
             keys.append(anchor_id.split(":", 1)[1])
         path = str(getattr(anchor, "path", "") or "")
+        owner = working_set_state._anchor_ref(anchor)
         if path.endswith(".md"):
             page = find_corpus.CACHE.get(root / path, root)
             frontmatter = getattr(page, "frontmatter", None)
@@ -891,26 +955,35 @@ def reach_precedents(
                 keys.extend(sorted(find_corpus.all_projects(frontmatter)))
         if row is not None and getattr(anchor, "kind", "") == "entity":
             already = frozenset(getattr(anchor, "neighbourhood", ()) or ())
-            precedent.update(
-                _conclusion_pages(
-                    root,
-                    (path for path in row.linked_by - already if visible is None or visible(path)),
-                    categories=frozenset(definition.categories),
-                )
+            conclusions = _conclusion_pages(
+                root,
+                (path for path in row.linked_by - already if visible is None or visible(path)),
+                categories=frozenset(definition.categories),
             )
+            precedent.update(conclusions)
+            if reached is not None:
+                reached.setdefault(owner, set()).update(conclusions)
         for key in keys:
             project = rows.get(f"project:{key}")
             if (
                 project is not None
                 and project.standing
-                and project.standing not in standing
                 and (visible is None or visible(project.standing))
             ):
-                standing.append(project.standing)
-    return frozenset(precedent), frozenset(standing[:MAX_STANDING_PAGES])
+                if project.standing not in standing:
+                    standing.append(project.standing)
+                standing_owners.setdefault(project.standing, set()).add(owner)
+    selected_standing = frozenset(standing[:MAX_STANDING_PAGES])
+    if reached is not None:
+        for path in selected_standing:
+            for owner in standing_owners[path]:
+                reached.setdefault(owner, set()).add(path)
+    return frozenset(precedent), selected_standing
 
 
-def _neighbourhood_paths(vault_root: Path, anchors: Sequence[Any]) -> frozenset[str]:
+def _neighbourhood_paths(
+    vault_root: Path, anchors: Sequence[Any], *, reached: dict[str, set[str]] | None = None
+) -> frozenset[str]:
     """Anchor paths plus their typed neighbours, at the depth each status allows."""
     paths: set[str] = set()
     for anchor in anchors:
@@ -918,11 +991,13 @@ def _neighbourhood_paths(vault_root: Path, anchors: Sequence[Any]) -> frozenset[
         if depth <= 0:
             continue
         path = str(getattr(anchor, "path", "") or "")
-        if path:
-            paths.add(path)
-        paths.update(str(item) for item in getattr(anchor, "neighbourhood", ()) or ())
+        mine = {path} if path else set()
+        mine.update(str(item) for item in getattr(anchor, "neighbourhood", ()) or ())
         if depth >= 2:
-            paths.update(_graph_neighbours(vault_root, path, depth=depth))
+            mine.update(_graph_neighbours(vault_root, path, depth=depth))
+        paths.update(mine)
+        if reached is not None:
+            reached.setdefault(working_set_state._anchor_ref(anchor), set()).update(mine)
     return frozenset(paths)
 
 
@@ -2170,16 +2245,21 @@ def _follow_up_packet(
     index: working_set_index.WorkingSetIndex | None,
     recent_context: Sequence[Mapping[str, Any]],
     visible: Callable[[str], bool] | None = None,
+    row: Any = None,
+    carried_by: str = "follow_up",
 ) -> dict[str, Any]:
-    """The packet for a follow-up carried from the caller's own thread.
+    """The packet for a follow-up carried from the caller's own thread, or (with
+    `carried_by="conversation"`) from the newest earlier user turn that named
+    a subject.
 
     Its one anchor is reported `partial` on `evidence` and the packet is
-    marked `generation.carried_by = "follow_up"`. An anchor row is read
+    marked `generation.carried_by`. An anchor row is read
     through its own kind's role lanes, exactly as a resolved anchor of that
     kind; an ordinary page through the page carry (`_carried_packet`). Where
     neither reads anything, the turn abstains `unresolved` with that anchor
     listed, so the agent still learns which page the conversation was on."""
-    row = next((item for item in rows if item.path == page), None)
+    if row is None:
+        row = next((item for item in rows if item.path == page), None)
     if row is None:
         packet = _carried_packet(
             vault_root,
@@ -2196,7 +2276,7 @@ def _follow_up_packet(
             recent_context=recent_context,
             status="partial",
             evidence=evidence,
-            carried_by="follow_up",
+            carried_by=carried_by,
             visible=visible,
         )
         listed = {
@@ -2268,7 +2348,7 @@ def _follow_up_packet(
                     ambiguity=(),
                     missing=missing,
                     max_chars=limit,
-                    generation={**generation, "carried_by": "follow_up"},
+                    generation={**generation, "carried_by": carried_by},
                     # `build_packet`'s "material was produced" flag, as in
                     # `_carried_packet`: the anchor's own status says partial.
                     status="resolved",
@@ -2282,6 +2362,7 @@ def _follow_up_packet(
         generation=generation,
         anchors=(listed,),
         recent_context=recent_context,
+        conversation_inferred=carried_by == "conversation",
     )
 
 
@@ -2292,9 +2373,91 @@ def _reader_view(root: Path, purpose: str | None):
     return egress.visible_page_filter(root, purpose=purpose)
 
 
-def compile_packet(
+def _conversation_affordable() -> bool:
+    """Can the request start the conversation stage? Reads the budget without
+    recording a skip: a stage dropped here is reported by the packet itself
+    (`generation.conversation = "absent"`), not as a failed request."""
+    budget = request_budget.current()
+    return budget is None or budget.can_afford(request_budget.CONVERSATION_STAGE_RESERVE_SECONDS)
+
+
+def _promoted_by_conversation(anchors: Sequence[Any]) -> tuple[list[Any], list[Any]]:
+    """Split resolved anchors into `(own, promoted)`: promoted ones resolved only
+    because the earlier conversation named them. A tie-break winner already
+    resolved without it, so it is the turn's own."""
+    own: list[Any] = []
+    promoted: list[Any] = []
+    for anchor in anchors:
+        evidence = frozenset(anchor.evidence)
+        alone = evidence - {"conversation"}
+        if "conversation" in evidence and (
+            working_set_resolve._status_for_evidence(alone) != "resolved"
+        ):
+            promoted.append(anchor)
+        else:
+            own.append(anchor)
+    return own, promoted
+
+
+def _mark_promoted(
+    items: Sequence[LaneItem], anchors: Sequence[Any], reached: Mapping[str, set[str]]
+) -> tuple[tuple[LaneItem, ...], frozenset[str]]:
+    """Flag the lane items only a conversation-promoted anchor reached, so the
+    budget serves them after the turn's own material and within a third of it.
+    Applies only when the turn resolved something itself."""
+    own, promoted = _promoted_by_conversation(anchors)
+    if not promoted or not own:
+        return tuple(items), frozenset()
+    promoted_refs = {working_set_state._anchor_ref(anchor) for anchor in promoted}
+    own_paths = {path for owner, paths in reached.items() if owner not in promoted_refs for path in paths}
+    promoted_paths = frozenset(
+        path for owner, paths in reached.items() if owner in promoted_refs for path in paths
+    ) - own_paths
+    return tuple(
+        replace(item, promoted=True) if item.path in promoted_paths else item for item in items
+    ), promoted_paths
+
+
+def compile_packet(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    """Resolve, select, retrieve and budget: the whole compiler in one call.
+
+    `_compile_packet` below documents every argument. This wrapper only adds
+    the `origin` label every served anchor carries, which whichever branch
+    built the packet, the turn's own words are by default.
+    """
+    origins: dict[str, str] = {}
+    packet = _compile_packet(vault_root, _origins=origins, **kwargs)
+    _label_origins(packet, origins)
+    return packet
+
+
+#: `origin` labels a packet's anchors: whose words reached them.
+_DEFAULT_ORIGIN = working_set_conversation.ORIGIN_TURN
+
+
+def _label_origins(packet: dict[str, Any], origins: Mapping[str, str]) -> None:
+    """Stamp `origin` on every anchor and ambiguity entry of a compiled packet.
+
+    An entry keeps the origin an earlier stage gave it (a carried anchor), then
+    takes the one the conversation stage recorded for its ref or path, and is
+    otherwise `turn`. Never adds an entry, never touches any other field.
+    """
+    for block in ("anchors", "ambiguity"):
+        for entry in packet.get(block) or ():
+            if not isinstance(entry, dict) or "origin" in entry:
+                continue
+            entry["origin"] = (
+                origins.get(str(entry.get("ref") or ""))
+                or origins.get(str(entry.get("path") or ""))
+                or _DEFAULT_ORIGIN
+            )
+
+
+def _compile_packet(
     vault_root: Path,
     *,
+    _origins: dict[str, str] | None = None,
+    conversation: working_set_conversation.Conversation | None = None,
     turn: str,
     max_chars: int | None = None,
     purpose: str | None = None,
@@ -2369,6 +2532,23 @@ def compile_packet(
         "session_start": _recent_as_of(heat.session_start_ns),
     }
 
+    # The earlier conversation, analysed once and only when there is one to
+    # read and the request can afford it. An agent's own `anchor` replaces
+    # resolution outright, so it never reads the conversation. A stage the
+    # budget cannot start is skipped, never raised: the packet is then exactly
+    # the packet without a conversation, and says so.
+    segments = None
+    entry_candidates: Any = tuple
+    if conversation is not None and conversation.present and not anchor:
+        if _conversation_affordable():
+            with _span(timings, "working_set.conversation"):
+                segments = working_set_conversation.analyze(
+                    conversation, vocabulary=conventions.referential
+                )
+            generation["conversation"] = conversation.state
+        else:
+            generation["conversation"] = working_set_conversation.ABSENT
+
     if budget_exhausted("working_set.semantic"):
         raise BudgetExhausted("working_set.semantic")
     with _span(timings, "working_set.semantic"):
@@ -2419,8 +2599,13 @@ def compile_packet(
             # it may see: the ones the turn's words can reach are decided, and
             # name-term counts and derived short names follow its view.
             if visible is not None:
-                rows, term_counts, _ = working_set_resolve.audience_view(
-                    analysis, rows, term_counts, visible
+                # The caller's view is decided over every segment's words, so
+                # an anchor withheld from it is reached by none of them.
+                rows, term_counts, decided_ids = working_set_resolve.audience_view(
+                    segments.union(analysis) if segments is not None else analysis,
+                    rows,
+                    term_counts,
+                    visible,
                 )
                 # Non-worded evidence can reach any catalogue row. Decide its
                 # canonical page before hot-tier selection and candidate caps;
@@ -2478,9 +2663,38 @@ def compile_packet(
                 candidates, retrieval_paths=retrieval_paths
             )
             candidates = working_set_resolve.apply_continuity(candidates, continuity_refs)
+
+    if segments is not None:
+        # At the top level, beside the resolve stage: a stage name must mean one
+        # depth. `focus` joins the turn as a second segment; the earlier entries
+        # and refs only qualify anchors the turn or `focus` reached.
+        with _span(timings, "working_set.conversation"):
+            candidates, focus_origins, entry_candidates = working_set_conversation.apply(
+                candidates,
+                segments,
+                conversation,
+                rows=rows,
+                routing_targets=routing_targets,
+                term_anchor_counts=term_counts,
+                stopwords=conventions.stopwords,
+                rare_term_max_anchors=conventions.rare_term_max_anchors,
+            )
+        if _origins is not None:
+            by_id = {row.anchor_id: row for row in rows}
+            for anchor_id, origin in focus_origins.items():
+                row = by_id.get(anchor_id)
+                if row is not None:
+                    for key in (working_set_resolve.anchor_ref(row), row.path):
+                        if key:
+                            _origins[key] = origin
+
+    with _span(timings, "working_set.resolve"):
+        if not anchor:
             resolution = working_set_resolve.resolve(
                 candidates,
-                turn_tokens=analysis.tokens,
+                turn_tokens=(
+                    segments.turn_tokens(analysis) if segments is not None else analysis.tokens
+                ),
                 referential=analysis.referential,
             )
         if passed:
@@ -2697,6 +2911,81 @@ def compile_packet(
             if packet is not None:
                 return packet
 
+    # The conversation carry, fifth on the ladder: after the recency and
+    # follow-up carries above (each returned if it decided), before the
+    # retrieval carry below. A turn whose own words reached nothing, that
+    # points back, is considered against the newest earlier USER turn that
+    # named a subject. Only that subject's own title/name or frozen task words
+    # license its content (`may_carry`); shared turn vocabulary never does.
+    # Unlicensed content falls through without seeking an older subject.
+    # Two subjects in that turn abstain `ambiguous` and stop the ladder;
+    # nothing named falls through.
+    if (
+        not anchor
+        and segments is not None
+        and analysis.points_back
+        and not analysis.local_material
+        and resolution.status == "unresolved"
+        and not any(
+            set(item.evidence) & working_set_resolve.WORDED_CONTACT_KINDS
+            for item in resolution.anchors
+        )
+    ):
+        # The carry's whole-catalogue scan is part of the conversation stage.
+        with _span(timings, "working_set.conversation"):
+            carried_entries = entry_candidates()
+        verdict = working_set_conversation.carry(carried_entries)
+        licensed = bool(verdict.anchors) and all(
+            working_set_conversation.may_carry(analysis, subject_title=item.title)
+            for item in verdict.anchors
+        )
+        if verdict.status == "one" and licensed:
+            (found,) = verdict.anchors
+            source = next(item for item in rows if item.anchor_id == found.anchor_id)
+            if _origins is not None:
+                for key in (working_set_resolve.anchor_ref(source), source.path):
+                    if key:
+                        _origins[key] = working_set_conversation.ORIGIN_CONVERSATION
+            return _follow_up_packet(
+                root,
+                page=source.path,
+                row=source,
+                rows=rows,
+                evidence=("conversation",),
+                analysis=analysis,
+                registry=registry,
+                conventions=conventions,
+                limit=limit,
+                purpose=purpose,
+                timings=timings,
+                generation=generation,
+                index_token=index_token,
+                freshness_snapshot=freshness_snapshot,
+                index=index,
+                recent_context=recent,
+                visible=visible,
+                carried_by="conversation",
+            )
+        if verdict.status == "ambiguous" and licensed:
+            return abstained_packet(
+                reason="ambiguous",
+                max_chars=limit,
+                generation=generation,
+                anchors=(),
+                ambiguity=tuple(
+                    {
+                        "ref": working_set_resolve.anchor_ref(item),
+                        "title": item.title,
+                        "kind": item.kind,
+                        "neighbourhood_size": len(item.neighbourhood),
+                        "origin": working_set_conversation.ORIGIN_CONVERSATION,
+                    }
+                    for item in verdict.anchors
+                ),
+                recent_context=recent,
+                conversation_inferred=True,
+            )
+
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
         groups = _carry_groups_by_retrieval(
             root,
@@ -2872,6 +3161,9 @@ def compile_packet(
             recent_context=recent,
         )
 
+    if resolution.disambiguated_by:
+        generation["disambiguated_by"] = resolution.disambiguated_by
+
     if budget_exhausted("working_set.roles"):
         raise BudgetExhausted("working_set.roles")
     with _span(timings, "working_set.roles"):
@@ -2912,6 +3204,10 @@ def compile_packet(
             state_fields=conventions.state_fields,
             date_fields=conventions.date_fields,
         )
+    reached: dict[str, set[str]] = {}
+    for entry in current_state:
+        if entry.get("path"):
+            reached.setdefault(str(entry.get("anchor") or ""), set()).add(str(entry["path"]))
     items, missing = run_lanes(
         root,
         anchors=lane_anchors,
@@ -2922,9 +3218,10 @@ def compile_packet(
         freshness_snapshot=freshness_snapshot,
         precedent_reach=lambda: reach_precedents(
             root, resolved=lane_anchors, roles=roles, registry=registry, index=index,
-            visible=visible,
+            visible=visible, reached=reached,
         ),
         visible=visible,
+        reached=reached,
     )
     # Concurrent contexts: pages the turn named beside what it resolved. An
     # additive read that soft-fails; the resolved anchors' own packet is
@@ -2947,8 +3244,13 @@ def compile_packet(
         )
         if beside_anchors:
             items = (*items, *beside_items)
+            for beside_anchor in beside_anchors:
+                path = str(beside_anchor.get("path") or "")
+                if path:
+                    reached.setdefault(path, set()).add(path)
             missing = (*missing, *(gap for gap in beside_missing if gap not in missing))
             generation = {**generation, "also_carried": "retrieval"}
+    items, promoted_paths = _mark_promoted(items, lane_anchors, reached)
 
     if budget_exhausted("working_set.budget"):
         raise BudgetExhausted("working_set.budget")
@@ -2964,6 +3266,7 @@ def compile_packet(
             generation=generation,
             status=resolution.status,
             recent_context=recent,
+            promoted_paths=promoted_paths,
         )
     return packet
 

@@ -51,6 +51,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,7 @@ from . import (
     context_roles,
     sidecar_store,
     working_set,
+    working_set_conversation,
     working_set_heat,
     working_set_index,
     working_set_resolve,
@@ -561,6 +563,22 @@ MINTED_STATUSES = frozenset({"resolved", working_set_resolve.RETRIEVAL_CARRIED_S
 _MINTED_STATUSES = MINTED_STATUSES
 
 
+def _conversation_only(item: Mapping[str, Any]) -> bool:
+    """An anchor that resolved only because the earlier conversation named it.
+
+    The token never encodes one, or a carried anchor: a conversation that
+    dropped its signal then degrades to today's behaviour, and nothing is
+    laundered into durable client state. An anchor that also resolves without
+    `conversation` is the turn's own and is minted as ever.
+    """
+    if item.get("origin") == "conversation":
+        return True
+    evidence = frozenset(str(kind) for kind in item.get("evidence") or ())
+    if "conversation" not in evidence:
+        return False
+    return working_set_resolve._status_for_evidence(evidence - {"conversation"}) != "resolved"
+
+
 def mint_continuity(
     packet: Mapping[str, Any],
     *,
@@ -601,7 +619,9 @@ def mint_continuity(
     anchors = [
         item
         for item in (() if packet.get("abstained") else packet.get("anchors") or ())
-        if isinstance(item, Mapping) and item.get("status") in _MINTED_STATUSES
+        if isinstance(item, Mapping)
+        and item.get("status") in _MINTED_STATUSES
+        and not _conversation_only(item)
     ]
     refs = [str(item.get("ref") or "") for item in anchors]
     refs = [ref for ref in refs if ref]
@@ -1583,8 +1603,15 @@ def serve(
     freshness_snapshot: Any = None,
     lexical_seconds: float = 0.0,
     attribution: working_set_heat.Attribution | None = None,
+    conversation: working_set_conversation.Conversation | None = None,
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
+
+    `conversation` is the caller's bounded conversation (request-scoped). A
+    request carrying one is compiled afresh and its packet is never stored:
+    keying the cache on it would keep a digest of the text in process memory
+    and almost never hit. Refs the audience may not see are dropped here, before
+    the compile, exactly as an unknown ref is.
 
     `lexical_seconds` is what this request's own lexical pass measured,
     passed through to the carry so it can ask the budget for a reserve its
@@ -1705,6 +1732,19 @@ def serve(
         ).referential:
             heat_digest = hashlib.sha256(f"{heat_digest}:stranger".encode()).hexdigest()[:16]
 
+    if conversation is not None and conversation.present and conversation.refs:
+        try:
+            seen = visible_continuity_refs(
+                root, index.anchors(), frozenset(conversation.refs), purpose=purpose
+            )
+        except Exception:  # noqa: BLE001 - a ref that cannot be decided is not disclosed
+            log.warning("conversation ref visibility check failed; dropping the refs", exc_info=True)
+            seen = frozenset()
+        conversation = replace(
+            conversation, refs=tuple(ref for ref in conversation.refs if ref in seen)
+        )
+    with_conversation = conversation is not None and conversation.present
+
     key = cache_key(
         freshness_key=freshness_key,
         index_generation=index.generation(),
@@ -1735,7 +1775,9 @@ def serve(
     # The owner's identity and hits are exactly what they were.
     from .governance import egress
 
-    cacheable = egress.restricted_release_filter(root, purpose=purpose) is None
+    cacheable = (
+        egress.restricted_release_filter(root, purpose=purpose) is None and not with_conversation
+    )
     with _CACHE_LOCK:
         cached = _PACKET_CACHE.get(cache_identity) if cacheable else None
         if cached is not None:
@@ -1777,6 +1819,7 @@ def serve(
             heat_profile=heat_profile,
             attribution=attribution,
             marks=marks,
+            conversation=conversation if with_conversation else None,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The

@@ -7,6 +7,9 @@ tests/test_capture_sweep_journey.py
 tests/test_cjk_readiness.py
 tests/test_context_activation_audit.py
 tests/test_context_activation_continuity.py
+tests/test_context_activation_conversation_acceptance.py
+tests/test_context_activation_conversation_baseline.py
+tests/test_context_activation_conversation_fixtures.py
 tests/test_context_activation_fixtures.py
 tests/test_context_activation_multilingual_embeddings.py
 tests/test_context_activation_multilingual_fixtures.py
@@ -155,6 +158,7 @@ tests/test_recall_multilingual_lexical.py
 tests/test_recall_multilingual_twins_fixture.py
 tests/test_records_recall_reconcile.py
 tests/test_report_offline.py
+tests/test_retrieve_nudge_conversation.py
 tests/test_retrieve_nudge_journey.py
 tests/test_retrieve_nudge_working_set.py
 tests/test_reviewer_bootstrap_cli.py

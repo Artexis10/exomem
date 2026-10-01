@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: f9cc30b5a355522705f7c793a85b48e2867acc9a235a6d2f1692433f28ea5416
+  skill_contract: d6ea38bdb3184eb8dfec44ff6ace214036223901c44f6173849b34ebf16fdd32
   version: "0.32.0"
 ---
 
@@ -117,6 +117,8 @@ conversation's decision or stopping point, record one bounded recap with
 At `balanced` or `maximal`:
 
 Before a substantive turn with no prior context, call `activate_context` with the turn verbatim; on `ambiguous`, call again with `anchor`.
+
+In a long thread or when the turn leans on attachments, also pass `conversation`: `focus` (one line naming the subjects, including names you read from attachments) and `refs`; never rewrite the turn.
 
 When the user corrects which page they meant, call again with `anchor` set to it;
 a `learning` advisory on that packet is handled in [engagement](references/engagement.md).
