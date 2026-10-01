@@ -91,8 +91,8 @@ def test_claude_cloud_hooks_use_canonical_bytes_and_native_mcp_binding(tmp_path:
                     assert args[1:5] == [
                         "--client",
                         "claude",
-                        "--hook-home",
-                        "${CLAUDE_PLUGIN_DATA}",
+                        "--hook-home-env",
+                        "CLAUDE_PLUGIN_DATA",
                     ]
                     if event in {"Stop", "UserPromptSubmit"}:
                         assert args[5:] == ["--activation-mode", "mcp"]
