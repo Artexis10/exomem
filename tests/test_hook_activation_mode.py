@@ -107,6 +107,41 @@ def test_named_codex_profile_binds_nudge_state(monkeypatch, tmp_path, module):
     assert module._hook_home() == profile
 
 
+@pytest.mark.parametrize("module", [retrieve, capture, continuation])
+@pytest.mark.parametrize("available", [True, False])
+def test_platform_home_binding_never_falls_back_to_an_inherited_home(
+    monkeypatch, tmp_path, module, available
+):
+    """A directory-compatible command must still isolate every hook's state."""
+    inherited = tmp_path / "other-profile"
+    platform = tmp_path / "plugin state"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(inherited))
+    if available:
+        monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(platform))
+    payload = {"prompt": "continue", "session_id": "platform-binding"}
+    observed = []
+    if module is continuation:
+        monkeypatch.setattr(module.sys, "stdin", io.TextIOWrapper(io.BytesIO(b"{}")))
+        monkeypatch.setattr(
+            module, "dispatch_event", lambda client, data, *, environ: observed.append(environ)
+        )
+    else:
+        monkeypatch.setattr(module.sys, "stdin", io.StringIO(json.dumps(payload)))
+    args = ["--client", "claude", "--hook-home-env", "CLAUDE_PLUGIN_DATA"]
+    if module is not continuation:
+        args += ["--activation-mode", "mcp"]
+    assert module.main(args) == 0
+    assert not inherited.exists()
+    if available:
+        if module is continuation:
+            assert observed, "The bound continuation event was not dispatched"
+        env = observed[0] if module is continuation else os.environ
+        assert env["EXOMEM_HOOK_HOME"] == str(platform)
+    else:
+        assert not observed
+        assert os.environ["EXOMEM_HOOK_HOME"] == str(inherited)
+
+
 @pytest.mark.parametrize("client", ["claude", "codex"])
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell quoting and filename bytes")
 def test_installed_mcp_commands_bind_shared_scripts_to_each_profile(tmp_path, client):

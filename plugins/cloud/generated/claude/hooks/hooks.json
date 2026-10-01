@@ -11,8 +11,8 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/exomem_retrieve_nudge.py",
               "--client",
               "claude",
-              "--hook-home",
-              "${CLAUDE_PLUGIN_DATA}",
+              "--hook-home-env",
+              "CLAUDE_PLUGIN_DATA",
               "--activation-mode",
               "mcp"
             ],
@@ -31,8 +31,8 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/exomem_capture_nudge.py",
               "--client",
               "claude",
-              "--hook-home",
-              "${CLAUDE_PLUGIN_DATA}",
+              "--hook-home-env",
+              "CLAUDE_PLUGIN_DATA",
               "--activation-mode",
               "mcp"
             ],
@@ -51,8 +51,8 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/exomem_continuation_checkpoint.py",
               "--client",
               "claude",
-              "--hook-home",
-              "${CLAUDE_PLUGIN_DATA}"
+              "--hook-home-env",
+              "CLAUDE_PLUGIN_DATA"
             ],
             "timeout": 5
           }
@@ -70,8 +70,8 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/exomem_continuation_checkpoint.py",
               "--client",
               "claude",
-              "--hook-home",
-              "${CLAUDE_PLUGIN_DATA}"
+              "--hook-home-env",
+              "CLAUDE_PLUGIN_DATA"
             ],
             "timeout": 5
           }
@@ -88,8 +88,8 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/exomem_continuation_checkpoint.py",
               "--client",
               "claude",
-              "--hook-home",
-              "${CLAUDE_PLUGIN_DATA}"
+              "--hook-home-env",
+              "CLAUDE_PLUGIN_DATA"
             ],
             "timeout": 5
           }

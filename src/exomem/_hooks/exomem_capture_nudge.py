@@ -981,12 +981,18 @@ def _capture_reason(reason: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--client", choices=("claude", "codex"))
-    parser.add_argument("--hook-home")
+    home = parser.add_mutually_exclusive_group()
+    home.add_argument("--hook-home")
+    home.add_argument("--hook-home-env")
     parser.add_argument("--activation-mode", choices=("mcp", "working-set"))
     try:
         args = parser.parse_args(argv or [])
     except SystemExit:
         return 0
+    if args.hook_home_env is not None:
+        args.hook_home = os.environ.get(args.hook_home_env)
+        if not args.hook_home or not args.hook_home.strip():
+            return 0  # An unavailable platform home must not fall back to a local profile.
     for name, value in (
         ("EXOMEM_HOOK_CLIENT", args.client),
         ("EXOMEM_HOOK_HOME", args.hook_home),
