@@ -29,15 +29,17 @@ exact-main full release evidence and release verification. Tasks 3.1–3.4 and
 4.2 stay open until their actual runtime and directory outcomes are recorded.
 
 Directory preparation on 1 October: Claude revalidated `main @ b1df5b6`,
-finding 10 skills, 5 hooks, one MCP server and all six listing links. Removing
-unused shell launchers did not clear `COMMAND_PATH_COMPUTED`; the remaining
-state-directory placeholder is being replaced with an explicit canonical
-environment binding. Credential/script policy holds still require review.
+finding 10 skills, 5 hooks, one MCP server and all six listing links. The real
+portal subsequently passed `fix/directory-hook-paths @ 74f024b` after the
+canonical environment binding removed `COMMAND_PATH_COMPUTED`. Its seven
+checks passed with five warnings and sixteen credential/script policy holds;
+those holds still require review. The draft was restored to `main` afterward
+and awaits integration and revalidation; it does not track the correction branch.
 The bundle draft survived reload. The connector form reuses the installed
 personal connection by URL and refuses a duplicate QA connector; its draft
 association was cleared without disconnecting the personal connector. The
-operator prefers Codex core testing instead of reauthorizing Personal; Claude
-Chat acceptance remains open for a separate test organization/account. The
+operator authorized a separate `claude-ai2` Code smoke instead of reauthorizing
+Personal; Claude Chat acceptance remains open for a separate test organization/account. The
 owning generator also refreshes self-hosted hook copies and their manifest
 version from 0.96.0 to 0.100.0, retaining their separate identity and endpoint.
 
