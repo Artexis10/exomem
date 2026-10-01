@@ -19,6 +19,10 @@ Deliver generated native packages, one shared behavioural evaluator, native acce
 
    Claude Cloud hooks use exec-form `python3` plus the canonical `.py` path and literal arguments, not a shell-wrapper executable. On native Windows, an unqualified `bash` can resolve to WSL and fail to open the plugin's Windows path; native Python and explicit Git Bash both passed disposable standalone tests, while default Bash returned exit 127. Keep self-hosted wrappers unchanged and require a real Python 3 executable on Cloud hook hosts. Source: [Claude exec-form contract](https://code.claude.com/docs/en/hooks#exec-form-and-shell-form), audited 2026-09-30. This standalone execution is not fresh-client/MCP acceptance.
 
+   The remaining computed state-directory argument is a candidate cause of the directory's command-path blocker. Bind it with the canonical `--hook-home-env CLAUDE_PLUGIN_DATA` option instead of putting that placeholder in the command. The host exports the persistent directory to the process. This option is mutually exclusive with a literal `--hook-home`; an absent or blank selected environment value stops the hook, never falling back to another profile. Existing literal-home installations remain unchanged. Only `${CLAUDE_PLUGIN_ROOT}` appears as a command path placeholder. The actual directory scan must confirm acceptance; local tests do not establish that result.
+
+9. Keep server-wide MCP instructions scoped to an enabled Exomem connection and explicitly identify the named operations as this server's own tools. Retain the shared activation, continuity, duplicate-suppression and episode semantics; do not add provider-specific metadata overrides to satisfy a scanner.
+
 ## Risks / Trade-offs
 
 ### Profile-aware canonical hook activation

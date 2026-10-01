@@ -92,7 +92,7 @@ def test_cloud_gateway_route_does_not_strip_x_real_ip() -> None:
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_cloud_mode_leaves_only_the_lifecycle_scheduler_running() -> None:
+def test_cloud_mode_keeps_lifecycle_and_sign_in_delivery_running() -> None:
     documents = _helm_template()
     suspension = {
         doc["metadata"]["labels"]["app.kubernetes.io/name"]: doc["spec"]["suspend"]
@@ -103,7 +103,7 @@ def test_cloud_mode_leaves_only_the_lifecycle_scheduler_running() -> None:
     }
 
     assert suspension == {
-        "exomem-access-delivery": True,
+        "exomem-access-delivery": False,
         "exomem-reconcile": False,
         "exomem-export-gc": True,
     }

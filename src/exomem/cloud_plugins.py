@@ -110,8 +110,8 @@ def _claude_hooks(root: Path, target: Path) -> None:
             f"${{CLAUDE_PLUGIN_ROOT}}/hooks/exomem_{stem.replace('-', '_')}.py",
             "--client",
             "claude",
-            "--hook-home",
-            "${CLAUDE_PLUGIN_DATA}",
+            "--hook-home-env",
+            "CLAUDE_PLUGIN_DATA",
         ]
         if stem != "continuation-checkpoint":
             args.extend(("--activation-mode", "mcp"))
