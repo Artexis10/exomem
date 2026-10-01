@@ -69,6 +69,20 @@ hook = _load_hook_module()
 
 
 @pytest.fixture(autouse=True)
+def _trusted_fixture_umask():
+    """Fixture-created homes/tokens must not inherit writable host defaults.
+
+    Tests using `_under_loose_umask` still exercise hook creation under 0002;
+    this only makes setup deterministic, without weakening runtime guards.
+    """
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+@pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A host-set tunable or a real REST key must never reach these tests."""
     for var in (

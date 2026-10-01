@@ -2523,15 +2523,16 @@ def test_the_metrics_snapshotter_flushes_a_due_hold_summary(
     a window that is due."""
     from exomem import metrics
 
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
     monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 3600.0)
     mutation_lock_module._reset_hold_summary()
     with caplog.at_level(logging.INFO, logger="exomem.mutation_lock"):
+        # This test owns the periodic flush, not filesystem latency. A real
+        # slow hold correctly emits its own INFO row and is not summarized;
+        # seed three real quiet samples so runner load cannot change the count.
         for _ in range(3):
-            with _background_hold(coordinator):
-                pass
+            mutation_lock_module._note_quiet_hold(
+                "epistemic_graph_drain_paths", "graph", wait_ms=0.0, hold_ms=1.0
+            )
         assert _events(caplog, "mutation_lock_hold_summary") == []
         # The window is now due, and no further hold will arrive.
         monkeypatch.setattr(mutation_lock_module, "_HOLD_SUMMARY_INTERVAL_SECONDS", 0.0)

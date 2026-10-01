@@ -456,6 +456,76 @@ def test_a_fresh_session_takes_its_workspaces_thread() -> None:
     assert top(profile, attribution=elsewhere) == top(profile)
 
 
+def test_visible_workspace_marks_count_only_bounded_released_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import working_set_runtime as runtime
+    from exomem.governance import egress
+
+    hidden = f"{KB}/Notes/hidden-thread.md"
+    beyond = f"{KB}/Notes/beyond-thread-bound.md"
+    own = _mark("s-own", "w", (hidden,), T0)
+    mixed = _mark("s-mixed", "w", (hidden, SLED, NOTE), T0 + H)
+    marks = [own, mixed]
+    marks.extend(
+        _mark(f"s-hidden-{n}", "w", (hidden,), T0 + (100 + n) * S)
+        for n in range(runtime.VISIBLE_WORKSPACE_MARKS + 1)
+    )
+    marks.append(_mark(
+        "s-bounded", "w", (hidden,) * runtime.CONTINUITY_MAX_REFS + (beyond,), T0 + 90 * S,
+    ))
+    public = [
+        _mark(f"s-public-{n:02d}", "w", (DEPOT,), T0 + 80 * S)
+        for n in range(runtime.VISIBLE_WORKSPACE_MARKS + 1)
+    ]
+    profile = profile_of(sessions=(*marks, *reversed(public)))
+    checked: list[str] = []
+
+    def released(path: str) -> bool:
+        checked.append(path)
+        return path != hidden
+
+    def reload(*_args, **_kwargs):
+        raise AssertionError("the supplied request decision must be reused")
+
+    monkeypatch.setattr(egress, "page_release_filter", reload)
+    visible = runtime.visible_marks(
+        tmp_path, profile, heat.Attribution(session=own.session, workspace="w"), released=released,
+    )
+    assert tuple(visible) == (
+        own.session, mixed.session,
+        *(mark.session for mark in public[:runtime.VISIBLE_WORKSPACE_MARKS - 1]),
+    )
+    assert visible[own.session].paths == ()
+    assert visible[mixed.session].paths == (SLED, NOTE)
+    assert beyond not in checked
+    assert profile.sessions[mixed.session] == mixed
+    assert profile.sessions["s-bounded"].paths[-1] == beyond
+
+
+@pytest.mark.parametrize("released", [None, lambda _path: True], ids=["no-policy", "owner"])
+def test_unrestricted_workspace_mark_caps_and_order_are_unchanged(
+    tmp_path: Path, released
+) -> None:
+    from exomem import working_set_runtime as runtime
+
+    paths = tuple(f"{KB}/Notes/mark-{n}.md" for n in range(runtime.CONTINUITY_MAX_REFS + 1))
+    own = _mark("s-own", "w", paths, T0)
+    workspace = [
+        _mark(f"s-{n:02d}", "w", paths, T0 + H)
+        for n in range(runtime.VISIBLE_WORKSPACE_MARKS + 2)
+    ]
+    unrelated = _mark("s-elsewhere", "other", (SLED,), T0 + 2 * H)
+    empty = _mark("s-empty", "w", (), T0 + 2 * H)
+    profile = profile_of(sessions=(own, *reversed(workspace), unrelated, empty))
+    visible = runtime.visible_marks(
+        tmp_path, profile, heat.Attribution(session=own.session, workspace="w"), released=released,
+    )
+    assert tuple(visible) == (own.session, *(mark.session for mark in workspace[:runtime.VISIBLE_WORKSPACE_MARKS]))
+    assert all(mark.paths == paths[:runtime.CONTINUITY_MAX_REFS] for mark in visible.values())
+    assert runtime.visible_marks(tmp_path, profile, heat.Attribution(), released=released) == {}
+
+
 def test_selection_never_lifts_a_tier_over_a_deliberate_act_below_it() -> None:
     profile = profile_of(
         ev(T0, SLED, "work"),

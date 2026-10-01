@@ -1548,7 +1548,7 @@ def audience_view(
     def seen(row: AnchorFacts) -> bool:
         verdict = decided.get(row.anchor_id)
         if verdict is None:
-            verdict = not row.path or bool(visible(row.path))
+            verdict = anchor_visible(row, visible)
             decided[row.anchor_id] = verdict
         return verdict
 
@@ -1783,6 +1783,28 @@ def anchor_ref(row: Any) -> str:
     """
     return str(
         getattr(row, "ref", None) or getattr(row, "path", "") or getattr(row, "anchor_id", "")
+    )
+
+
+def anchor_visible(row: AnchorFacts, visible: Callable[[str], bool]) -> bool:
+    """Decide both a Planning item's collection home and its canonical page.
+
+    Its visible manifest is not authority to name a withheld item. Opaque
+    anchor identifiers are not page paths and must not be checked as pages.
+    Resolution and recent-context reservation share this boundary.
+    """
+    from .kbdir import kb_prefix
+
+    if not row.path:
+        return True
+    if not visible(row.path):
+        return False
+    ref = anchor_ref(row)
+    return (
+        row.kind != "plan"
+        or ref == row.path
+        or not ref.startswith(kb_prefix())
+        or bool(visible(ref))
     )
 
 

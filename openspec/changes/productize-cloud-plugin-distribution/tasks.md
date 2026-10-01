@@ -1,15 +1,15 @@
 ## 1. Canonical distribution
 
-- [ ] 1.1 Expose one generic skill-payload helper and teach capability restrictions only in the canonical scaffold; verify full resource closure, skill contract and existing self-hosted parity tests.
-- [ ] 1.2 Generate current Claude/OpenAI Cloud packages, manifests, public metadata and deterministic archives; verify schema, byte parity, archive safety, privacy and legacy artifact preservation.
+- [x] 1.1 Expose one generic skill-payload helper and teach capability restrictions only in the canonical scaffold; verify full resource closure, skill contract and existing self-hosted parity tests.
+- [x] 1.2 Generate current Claude/OpenAI Cloud packages, manifests, public metadata and deterministic archives; verify schema, byte parity, archive safety, privacy and legacy artifact preservation.
 
-- [ ] 1.3 Add release-owned profile-aware activation modes and canonical runtime arguments; red-first verify native-MCP mode has no external transport, working-set fallback requests real activation, current capture/continuation stay profile-local, default installs remain compatible and exact health checks validate the generated commands.
+- [x] 1.3 Add release-owned profile-aware activation modes and canonical runtime arguments; red-first verify native-MCP mode has no external transport, working-set fallback requests real activation, current capture/continuation stay profile-local, default installs remain compatible and exact health checks validate the generated commands.
 
 ## 2. Behavioural evaluation
 
-- [ ] 2.1 Add the shared synthetic corpus and observable trace evaluator with red-first tests for missing calls, wrong arguments, fabricated success, denied writes, absent independent readbacks and drift.
-- [ ] 2.2 Add cross-surface readiness and directory material generation; verify incomplete, stale and mismatched evidence exits nonzero; reject unit traces relabelled native, missing or changed source exports, reused conversations, answer-bearing fresh-chat prompts and unbound readbacks.
-- [ ] 2.3 Wire reproducibility/corpus checks into CI and document native trace capture and release/submission use; verify the shipped command on generated package bytes.
+- [x] 2.1 Add the shared synthetic corpus and observable trace evaluator with red-first tests for missing calls, wrong arguments, fabricated success, denied writes, absent independent readbacks and drift.
+- [x] 2.2 Add cross-surface readiness and directory material generation; verify incomplete, stale and mismatched evidence exits nonzero; reject unit traces relabelled native, missing or changed source exports, reused conversations, answer-bearing fresh-chat prompts and unbound readbacks.
+- [x] 2.3 Wire reproducibility/corpus checks into CI and document native trace capture and release/submission use; verify the shipped command on generated package bytes.
 
 ## 3. Native acceptance and submissions
 
@@ -20,5 +20,13 @@
 
 ## 4. Delivery
 
-- [ ] 4.1 Resolve author-independent review findings, run scoped tests plus completion-boundary full CI and privacy checks, and merge the cohesive verified batch.
+Source delivery: PR #1480 merged as `0398d86d544744d02a955b1a0a462789164500cb`
+after author-independent review and exact-head CI `36796194999` passed.
+The generated-package `check` also passed on the integrated source. These
+checks complete implementation, not native acceptance or submission.
+Release PR #1493 remains held for the context-disclosure repair (#1486),
+exact-main full release evidence and release verification. Tasks 3.1–3.4 and
+4.2 stay open until their actual runtime and directory outcomes are recorded.
+
+- [x] 4.1 Resolve author-independent review findings, run scoped tests plus completion-boundary full CI and privacy checks, and merge the cohesive verified batch.
 - [ ] 4.2 Verify released packages and production outcome, reconcile prior acceptance debt, sync/archive only completed OpenSpec scope and retire the clean task worktree.
