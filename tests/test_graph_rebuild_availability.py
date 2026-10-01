@@ -3072,6 +3072,125 @@ def test_wal_publication_keeps_an_open_reader_on_the_previous_snapshot(
         reader.close()
 
 
+@pytest.mark.parametrize("backup_refused", [False, True])
+def test_first_publication_handles_a_live_graph_appearing_before_the_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backup_refused: bool
+) -> None:
+    """A competing opener must not abort publication or lose its WAL snapshot.
+
+    A refusal after that race must retain both databases for later recovery.
+    """
+    live = epistemic_graph.sidecar_path(tmp_path)
+    live.parent.mkdir(parents=True)
+    temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
+    with closing(sqlite3.connect(temporary)) as connection:
+        connection.execute("CREATE TABLE value (item TEXT)")
+        connection.execute("INSERT INTO value VALUES ('new')")
+        connection.commit()
+    epistemic_graph._seal_graph_rebuild_as_wal(tmp_path, temporary)
+
+    move = epistemic_graph._move_graph_rebuild_into_store
+    backup = epistemic_graph._backup_graph_rebuild_into_store
+    readers: list[sqlite3.Connection] = []
+
+    def competing_open(root: Path, source: Path, destination: Path) -> None:
+        reader = sqlite3.connect(destination)
+        readers.append(reader)
+        assert reader.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        reader.execute("CREATE TABLE value (item TEXT)")
+        reader.execute("INSERT INTO value VALUES ('old')")
+        reader.commit()
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT item FROM value").fetchone() == ("old",)
+        move(root, source, destination)
+
+    def publish(root: Path, source: Path, destination: Path, *, timeout: float) -> None:
+        if backup_refused and readers:
+            raise PermissionError("competing graph cannot accept publication")
+        backup(root, source, destination, timeout=timeout)
+
+    monkeypatch.setattr(epistemic_graph, "_move_graph_rebuild_into_store", competing_open)
+    monkeypatch.setattr(epistemic_graph, "_backup_graph_rebuild_into_store", publish)
+    try:
+        if backup_refused:
+            with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable) as refused:
+                graph_sync.replace_sidecar(temporary, live, vault_root=tmp_path)
+            assert "PermissionError" in str(refused.value)
+            with closing(sqlite3.connect(temporary)) as candidate:
+                assert candidate.execute("SELECT item FROM value").fetchone() == ("new",)
+        else:
+            graph_sync.replace_sidecar(temporary, live, vault_root=tmp_path)
+            assert not temporary.exists()
+        assert len(readers) == 1
+        assert readers[0].execute("SELECT item FROM value").fetchone() == ("old",)
+        with closing(sqlite3.connect(live)) as current:
+            expected = "old" if backup_refused else "new"
+            assert current.execute("SELECT item FROM value").fetchone() == (expected,)
+            assert current.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        for reader in readers:
+            reader.close()
+
+
+def test_first_publication_refuses_a_competing_writer_without_waiting_for_its_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SQLite backup retries must not hold publication until a writer releases."""
+    live = epistemic_graph.sidecar_path(tmp_path)
+    live.parent.mkdir(parents=True)
+    temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
+    with closing(sqlite3.connect(temporary)) as candidate:
+        candidate.execute("CREATE TABLE value (item TEXT)")
+        candidate.execute("INSERT INTO value VALUES ('new')")
+        candidate.commit()
+    epistemic_graph._seal_graph_rebuild_as_wal(tmp_path, temporary)
+    move = epistemic_graph._move_graph_rebuild_into_store
+    writers: list[sqlite3.Connection] = []
+    appeared = threading.Event()
+    outcomes: list[Exception | None] = []
+
+    def competing_writer(root: Path, source: Path, destination: Path) -> None:
+        writer = sqlite3.connect(destination, check_same_thread=False)
+        writers.append(writer)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE value (item TEXT)")
+        writer.execute("INSERT INTO value VALUES ('old')")
+        writer.commit()
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("INSERT INTO value VALUES ('uncommitted')")
+        appeared.set()
+        move(root, source, destination)
+
+    def publish() -> None:
+        try:
+            graph_sync.replace_sidecar(temporary, live, vault_root=tmp_path)
+        except graph_sync.GraphSidecarReplaceUnavailable as error:
+            outcomes.append(error)
+        else:
+            outcomes.append(None)
+
+    monkeypatch.setattr(epistemic_graph, "_move_graph_rebuild_into_store", competing_writer)
+    monkeypatch.setattr(graph_sync, "PUBLISH_IN_PLACE_ATTEMPTS", 1)
+    monkeypatch.setattr(graph_sync, "PUBLISH_IN_PLACE_BUSY_TIMEOUT_SECONDS", 0.02)
+    publication = threading.Thread(target=publish)
+    publication.start()
+    try:
+        assert appeared.wait(_OBSERVE_SECONDS)
+        publication.join(_ADMIT_SECONDS)
+        assert not publication.is_alive(), "publication waited for the live writer"
+        assert isinstance(outcomes[0], graph_sync.GraphSidecarReplaceUnavailable)
+        assert writers[0].in_transaction
+        with closing(sqlite3.connect(live)) as current:
+            assert current.execute("SELECT item FROM value").fetchall() == [("old",)]
+        with closing(sqlite3.connect(temporary)) as candidate:
+            assert candidate.execute("SELECT item FROM value").fetchall() == [("new",)]
+    finally:
+        for writer in writers:
+            writer.rollback()
+            writer.close()
+        publication.join(_HOLD_SECONDS)
+
+
 def test_live_wal_publication_does_not_replay_the_predecessor_wal(
     tmp_path: Path,
 ) -> None:

@@ -795,7 +795,24 @@ def _backup_graph_rebuild_into_store(
                     source,
                 )
             _set_sqlite_busy_timeout(destination, timeout)
-            source.backup(destination)
+            deadline = time.monotonic() + max(0.0, timeout)
+
+            def refuse_expired_lock_wait(status: int, _remaining: int, _total: int) -> None:
+                # Connection.backup retries BUSY/LOCKED indefinitely; the
+                # connection's busy timeout limits each step, not that loop.
+                # Raising here finishes the incomplete backup transaction and
+                # leaves the previous live graph intact. DONE is already
+                # committed and must never be reported as a refusal.
+                if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) and (
+                    time.monotonic() >= deadline
+                ):
+                    raise sqlite3.OperationalError("graph publication lock wait expired")
+
+            source.backup(
+                destination,
+                progress=refuse_expired_lock_wait,
+                sleep=min(0.25, max(0.0, timeout)),
+            )
 
 
 def _remove_graph_rebuild_artifact(

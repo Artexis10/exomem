@@ -3544,7 +3544,7 @@ def test_graph_rebuild_backup_releases_identity_lock_after_complete_publication(
         def __getattr__(self, name: str):  # noqa: ANN204
             return getattr(self.connection, name)
 
-        def backup(self, destination: ObservedConnection) -> None:
+        def backup(self, destination: ObservedConnection, **options: object) -> None:
             family = tuple(
                 graph.path.with_name(f"{graph.path.name}{suffix}")
                 for suffix in ("", "-wal", "-shm")
@@ -3572,7 +3572,7 @@ def test_graph_rebuild_backup_releases_identity_lock_after_complete_publication(
                     frozenset(retained),
                 )
             )
-            self.connection.backup(destination.connection)
+            self.connection.backup(destination.connection, **options)
 
     def observe_connect(*args: object, **kwargs: object) -> ObservedConnection:
         return ObservedConnection(real_connect(*args, **kwargs))
