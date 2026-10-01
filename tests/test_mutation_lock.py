@@ -2484,6 +2484,13 @@ def test_routine_background_holds_fold_into_one_info_summary(
 def test_a_slow_background_hold_still_reports_itself(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Isolate slow-hold escalation from a runner delay during acquisition.
+    clock = [100.0]
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=time.sleep),
+    )
     vault = tmp_path / "vault"
     vault.mkdir()
     coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
@@ -2491,7 +2498,7 @@ def test_a_slow_background_hold_still_reports_itself(
 
     with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
         with _background_hold(coordinator):
-            time.sleep(0.05)
+            clock[0] += 0.05
 
     [acquired] = _events(caplog, "mutation_lock_acquired")
     [released] = _events(caplog, "mutation_lock_released")
