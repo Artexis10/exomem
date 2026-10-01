@@ -278,9 +278,10 @@
     "cloudGateway": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "image", "replicas", "hostname", "publicBaseUrl", "mcpPath", "cellProtocolVersion", "databaseSecretName", "databaseSecretKey", "controlPlaneKeySecretName", "controlPlaneKeySecretKey", "cellTokenKeySecretName", "trustedIngressSourceHeader", "trustedIngressSourceValue", "databaseEgressCidrs"],
+      "required": ["enabled", "marketplaceReviewerAccessEnabled", "image", "replicas", "hostname", "publicBaseUrl", "mcpPath", "cellProtocolVersion", "databaseSecretName", "databaseSecretKey", "controlPlaneKeySecretName", "controlPlaneKeySecretKey", "cellTokenKeySecretName", "trustedIngressSourceHeader", "trustedIngressSourceValue", "databaseEgressCidrs"],
       "properties": {
         "enabled": {"type": "boolean"},
+        "marketplaceReviewerAccessEnabled": {"type": "boolean"},
         "image": {"type": "string"},
         "replicas": {"type": "integer", "minimum": 1, "maximum": 2},
         "hostname": {"type": "string"},
