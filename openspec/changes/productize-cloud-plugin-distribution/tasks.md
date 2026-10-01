@@ -28,5 +28,16 @@ Release PR #1493 remains held for the context-disclosure repair (#1486),
 exact-main full release evidence and release verification. Tasks 3.1–3.4 and
 4.2 stay open until their actual runtime and directory outcomes are recorded.
 
+Directory preparation on 1 October: the signed-in Claude portal validated
+`main @ 080be407`, finding 10 skills, 5 hooks, one MCP server and all six
+listing links. It also blocked unused shell launchers with computed paths;
+the generator now omits those unregistered files without changing canonical
+Python hook bytes or self-hosted support. The real portal must revalidate the
+merged correction. Credential/script policy holds still require review.
+Claude's source and data-handling draft survived reload; legal attestations
+and submission remain operator review steps. OpenAI's existing company-owned
+draft passes all ten skill checks but is not submitted: domain verification,
+OAuth discovery, reviewer access and a real demo recording remain launch gates.
+
 - [x] 4.1 Resolve author-independent review findings, run scoped tests plus completion-boundary full CI and privacy checks, and merge the cohesive verified batch.
 - [ ] 4.2 Verify released packages and production outcome, reconcile prior acceptance debt, sync/archive only completed OpenSpec scope and retire the clean task worktree.
