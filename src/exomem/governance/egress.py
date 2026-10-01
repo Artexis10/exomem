@@ -386,30 +386,11 @@ def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, A
         key = json.dumps(typed, sort_keys=True, separators=(",", ":"))
         buckets.setdefault(key, []).append(value)
 
-    encodings: OrderedDict[tuple, str] = OrderedDict()
-
-    def _encode(item: Any) -> str:
-        # Reuse repeated receipt dimensions, not authority or token state.
-        if isinstance(item, dict):
-            key = (dict, tuple(sorted((name, _encode(value)) for name, value in item.items())))
-        elif isinstance(item, list) and all(isinstance(value, str) for value in item):
-            key = (list, tuple(item))
-        elif isinstance(item, str) or item is None:
-            key = (type(item), item)
-        else:
-            return json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        encoded = encodings.get(key)
-        if encoded is None:
-            encoded = json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            encodings[key] = encoded
-            if len(encodings) > receipts.MAX_OUTCOMES:
-                encodings.popitem(last=False)
-        else:
-            encodings.move_to_end(key)
-        return encoded
-
     def _digest(items: Iterable[Any], *, unique: bool = False) -> str:
-        encoded = [_encode(item) for item in items]
+        encoded = [
+            json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            for item in items
+        ]
         manifest = sorted(set(encoded) if unique else encoded)
         return hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode()).hexdigest()
 
