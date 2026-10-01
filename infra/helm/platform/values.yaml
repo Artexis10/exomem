@@ -316,6 +316,10 @@ cells:
 
 cloudGateway:
   enabled: false
+  # Enable only after the matched web/gateway release, reviewer schema/grants,
+  # and dedicated complimentary sample account are verified. Ordinary Cloud
+  # accounts do not require this separate reviewer authority.
+  marketplaceReviewerAccessEnabled: false
   # Supplied by the reviewed Substrate gateway image release; never a mutable tag.
   image: ""
   replicas: 1

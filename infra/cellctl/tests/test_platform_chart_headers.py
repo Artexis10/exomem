@@ -34,18 +34,23 @@ EDGE_NAMESPACE = "exomem-edge"
 TRAEFIK = "platform-header-test-traefik"
 
 
-def _helm_template() -> list[dict[str, Any]]:
-    result = subprocess.run(
+def _helm_render(*extra_args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [
             HELM, "template", "platform-header-test", str(PLATFORM_CHART),
             "--namespace", "exomem-platform",
             "--values", str(PLATFORM_CHART / "values.validation.yaml"),
+            *extra_args,
         ],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _helm_template(*extra_args: str) -> list[dict[str, Any]]:
+    result = _helm_render(*extra_args)
     assert result.returncode == 0, result.stderr
     return [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
 
@@ -602,6 +607,8 @@ GATEWAY_ENV = {
     "EXOMEM_CLOUD_MCP_URL",
     "EXOMEM_CLOUD_MCP_PATH",
     "EXOMEM_CLOUD_CELL_TOKEN_KEY",
+    "EXOMEM_CLOUD_ENABLED",
+    "EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED",
     "DATABASE_URL",
     "EXOMEM_GATEWAY_PORT",
 }
@@ -634,6 +641,14 @@ def test_the_cloud_gateway_renders_exactly_the_substrate_gateway_env_contract() 
         "http://exomem-cloud-gateway.exomem-cloud.svc.cluster.local:8080"
     )
     assert env["EXOMEM_GATEWAY_PORT"]["value"] == "8080"
+    assert env["EXOMEM_CLOUD_ENABLED"] == {
+        "name": "EXOMEM_CLOUD_ENABLED", "value": "true",
+    }
+    # Ordinary Cloud accounts remain enabled; the separate reviewer authority
+    # requires an explicit opt-in after the matched service/schema rollout.
+    assert env["EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED"] == {
+        "name": "EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED", "value": "false",
+    }
     # Secrets come from Secrets. The cell token key is the same Secret entry
     # cellctl reads as its current key (64 hex characters).
     assert env["EXOMEM_CLOUD_CELL_TOKEN_KEY"]["valueFrom"]["secretKeyRef"] == {
@@ -648,6 +663,55 @@ def test_the_cloud_gateway_renders_exactly_the_substrate_gateway_env_contract() 
     )
     assert "secretKeyRef" in env["EXOMEM_CONTROL_PLANE_KEY"]["valueFrom"]
     assert "secretKeyRef" in env["DATABASE_URL"]["valueFrom"]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("enabled", ["true", "false"])
+def test_cloud_reviewer_access_requires_an_explicit_boolean_switch(enabled: str) -> None:
+    env = _gateway_env(_helm_template(
+        "--set", f"cloudGateway.marketplaceReviewerAccessEnabled={enabled}",
+    ))
+    assert set(env) == GATEWAY_ENV
+    assert env["EXOMEM_CLOUD_ENABLED"]["value"] == "true"
+    assert env["EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED"]["value"] == enabled
+    baseline = _gateway_env(_helm_template())
+    assert {key: value for key, value in env.items() if key != "EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED"} == {
+        key: value for key, value in baseline.items() if key != "EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED"
+    }
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("value", ["false", "true", "1", ""])
+def test_cloud_reviewer_access_rejects_string_flags(value: str) -> None:
+    result = _helm_render(
+        "--set-string", f"cloudGateway.marketplaceReviewerAccessEnabled={value}",
+    )
+    assert result.returncode != 0
+    assert "marketplaceReviewerAccessEnabled" in result.stderr
+    assert "want boolean" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("value", ["0", "1", "null"])
+def test_cloud_reviewer_access_rejects_non_boolean_flags(value: str) -> None:
+    result = _helm_render(
+        "--set", f"cloudGateway.marketplaceReviewerAccessEnabled={value}",
+    )
+    assert result.returncode != 0
+    assert "marketplaceReviewerAccessEnabled" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_reviewer_opt_in_does_not_enable_a_disabled_cloud_gateway() -> None:
+    documents = _helm_template(
+        "--set", "cloudGateway.enabled=false",
+        "--set", "cloudGateway.marketplaceReviewerAccessEnabled=true",
+    )
+    assert not any(
+        doc.get("kind") == "Deployment"
+        and doc.get("metadata", {}).get("name") == "exomem-cloud-gateway"
+        for doc in documents
+    )
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
