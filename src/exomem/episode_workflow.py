@@ -61,7 +61,7 @@ from .episode_recovery import EpisodeInputOwner
 from .episode_store import EpisodeStore
 from .governance import egress
 from .governance.principal import effective_principal
-from .vault import content_hash
+from .vault import content_hash, parse_frontmatter
 
 ENABLE_ENV = "EXOMEM_EPISODE_WORKFLOW"
 DISABLED_CODE = "episode_workflow_disabled"
@@ -289,6 +289,63 @@ def _written_path(vault_root: Path, binding: Mapping[str, Any]) -> str | None:
     return path if isinstance(path, str) else None
 
 
+#: Distinct candidates landing on one page before the pass reports it.
+SINK_CLUSTERS = 3
+#: A page of these kinds legitimately gathers many candidates: an entity, a
+#: production log, or a page tagged as a hub.
+SINK_EXEMPT_TYPES = frozenset({"entity", "production-log"})
+SINK_EXEMPT_TAGS = frozenset({"hub"})
+SINK_GUIDANCE = (
+    "Each page in `sink` received effects from the distinct candidates listed "
+    "with it. Keep them here when this is their canonical page. Otherwise give "
+    "each candidate a disposition: route it to an existing canonical page, "
+    "entity, Planning or Records item, or to a justified new page, or mark it "
+    "no_capture when nothing durable remains. Guidance, not a block."
+)
+
+
+def _page_kind(vault_root: Path, path: str) -> tuple[str | None, bool]:
+    """The page's `type` and whether it is exempt from sink flagging."""
+    try:
+        text = (vault_root / path).read_text(encoding="utf-8")
+        frontmatter, _body, _raw = parse_frontmatter(text)
+    except (OSError, UnicodeError, ValueError):
+        return None, False
+    page_type = frontmatter.get("type")
+    page_type = page_type if isinstance(page_type, str) else None
+    tags = frontmatter.get("tags")
+    tagged = isinstance(tags, list) and any(t in SINK_EXEMPT_TAGS for t in tags)
+    return page_type, page_type in SINK_EXEMPT_TYPES or tagged
+
+
+def _sinks(vault_root: Path, receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pages that several distinct candidates' committed effects landed on.
+
+    Structural only: it counts distinct candidates per page and names the page
+    type; it never judges topics. Entity, production-log and hub pages, which
+    are meant to gather many candidates, are not reported.
+    """
+    by_path: dict[str, set[str]] = {}
+    for item in receipts:
+        if item["path"] is not None:
+            by_path.setdefault(item["path"], set()).add(item["candidate_key"])
+    sinks = []
+    for path, keys in sorted(by_path.items()):
+        if len(keys) < SINK_CLUSTERS:
+            continue
+        page_type, exempt = _page_kind(vault_root, path)
+        if not exempt:
+            sinks.append(
+                {
+                    "path": path,
+                    "type": page_type,
+                    "distinct_candidates": len(keys),
+                    "candidates": sorted(keys),
+                }
+            )
+    return sinks
+
+
 def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     """The evidence for the agent's final coverage pass. Read-only.
 
@@ -299,7 +356,9 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     reverified now against the live page. It attests with `resume`
     `postcommit=true`. A page the caller may no longer read reads back
     `unavailable`, exactly like a page that is gone. Nothing here judges
-    whether the candidates exhaust the input.
+    whether the candidates exhaust the input. `sink` names any page that
+    several distinct candidates landed on, with guidance to disposition each
+    candidate; it never blocks attestation.
     """
     session = _Session(vault_root, episode)
     state = session.state
@@ -338,6 +397,7 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
                         "readback": readback,
                     }
                 )
+    sink = _sinks(session.vault_root, receipts)
     return {
         **_projection(session),
         "action": "coverage",
@@ -350,6 +410,8 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
         "coverage_current": (
             "verified" if all(item["readback"] == "verified" for item in receipts) else "changed"
         ),
+        "sink": sink,
+        **({"sink_guidance": SINK_GUIDANCE} if sink else {}),
     }
 
 

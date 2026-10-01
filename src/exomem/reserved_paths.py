@@ -2188,6 +2188,10 @@ _BASELINE_IDENTITY_FLIGHTS: dict[str, _BaselineFlight] = {}
 #: reconcile-class MCP tools have no bound budget and can wait up to this
 #: ceiling.
 _FLIGHT_WAIT_SECONDS = 120.0
+#: What a follower leaves of the caller's budget for the write that follows:
+#: the guard's own acquire timeout. The delivery reserve is subtracted as well,
+#: so a follower never hands the write a budget that is already spent.
+_FOLLOWER_GUARD_RESERVE_SECONDS = 5.0
 
 
 def _flight_wait_seconds() -> float:
@@ -2201,7 +2205,15 @@ def _flight_wait_seconds() -> float:
     budget = request_budget.current()
     if budget is None:
         return _FLIGHT_WAIT_SECONDS
-    return min(_FLIGHT_WAIT_SECONDS, budget.remaining())
+    return min(
+        _FLIGHT_WAIT_SECONDS,
+        max(
+            0.0,
+            budget.remaining()
+            - request_budget.DELIVERY_RESERVE_SECONDS
+            - _FOLLOWER_GUARD_RESERVE_SECONDS,
+        ),
+    )
 
 
 def _await_baseline_flight(
@@ -2330,6 +2342,29 @@ def identity_catalogue_refusal(vault_root: Path) -> str | None:
         if _BASELINE_IDENTITY_CATALOGUES.get(vault_key) is cached:
             del _BASELINE_IDENTITY_CATALOGUES[vault_key]
     return cause
+
+
+def warm_identity_catalogue_before_boundary(vault_root: Path) -> None:
+    """Build a cold inventory now, on the caller's thread, before it takes the
+    mutation boundary.
+
+    The walk is whole-vault ("tens of seconds on a mature vault"). A write that
+    met it cold inside its boundary built it inline and held every other writer
+    stopped for that long, so a capture write calls this first: single-flighted,
+    a no-op when warm, and never refusing a write on an ordinary error -- a
+    failure here only means the write pays for the walk where it always did.
+    """
+
+    if identity_catalogue_ready(vault_root) or _identity_coordination_active(vault_root):
+        return
+    try:
+        _baseline_identity_catalogue(vault_root)
+    except AssertionError:
+        raise
+    except Exception as error:  # noqa: BLE001 - a best-effort warm never refuses a write
+        log.warning(
+            "identity catalogue pre-boundary warm failed: %s", type(error).__name__
+        )
 
 
 def schedule_identity_catalogue_warm(vault_root: Path) -> None:

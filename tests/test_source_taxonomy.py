@@ -952,7 +952,7 @@ def test_bootstrap_teaches_the_open_vocabulary_contract(vault: Path) -> None:
     set is not the permitted one — so an agent that only ever sees the compact
     profile still has everything it needs to classify correctly.
     """
-    block = commands.op_bootstrap(vault, profile="compact")["source_taxonomy"]
+    block = commands.op_bootstrap(vault, profile="compact", section="all")["source_taxonomy"]
     for axis in ("source_kind", "domain", "projects"):
         assert axis in block["contract"]
     assert "open" in block["contract"].lower()
@@ -975,7 +975,7 @@ def test_bootstrap_no_longer_publishes_the_fallback_as_the_capture_default(
     vault: Path,
 ) -> None:
     """The contract used to hand every agent `source_type: "other"` as the route."""
-    payload = commands.op_bootstrap(vault, profile="compact")
+    payload = commands.op_bootstrap(vault, profile="compact", section="all")
     capture = payload["simple_actions"]["capture"]
     assert capture["route"]["tool"] == "capture_source"
     assert capture["route"]["args"] == {}
@@ -991,9 +991,8 @@ def test_bootstrap_no_longer_publishes_the_fallback_as_the_capture_default(
 
 
 def test_bootstrap_registers_the_classification_suggestion_kind(vault: Path) -> None:
-    post_write = commands.op_bootstrap(vault, profile="compact")["authoring_contract"][
-        "post_write"
-    ]
+    reference = commands.op_bootstrap(vault, profile="compact", section="all")
+    post_write = reference["authoring_contract"]["post_write"]
     assert "source_classification_debt" in post_write["structure_suggestion"]
     assert "source_classification_debt" in post_write["structure_suggestion_handling"]
 

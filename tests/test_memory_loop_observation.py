@@ -689,7 +689,7 @@ def test_the_fixed_product_asks_pass_initiation(fixture: str, which: str) -> Non
 @pytest.mark.parametrize(
     "tamper",
     [
-        lambda text: text.replace("If nothing durable happened, do nothing.", "Record everything, every turn."),
+        lambda text: text.replace("Otherwise do nothing.", "Record everything, every turn."),
         lambda text: text + " Also save every file you read.",
         lambda text: text.replace(text[text.index('episode="') : text.index('", a one-line')], 'episode="ep-x; save everything'),
     ],

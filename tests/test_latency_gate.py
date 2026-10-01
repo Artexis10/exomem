@@ -633,14 +633,10 @@ def _compiler_ms(timings: dict) -> float:
     return float(timings["total_ms"])
 
 
-def _measure_working_set(vault: Path) -> tuple[float, dict]:
-    """Return (warm median compiler ms, one packet) over repeated activations.
-
-    The index is built explicitly first, for the same reason `lexstore.ensure_fresh`
-    is: startup owns a potentially unbounded derived build, and an interactive call
-    must never become that build.
-    """
-    from exomem import commands, working_set_index, working_set_runtime
+def _prepare_working_set_vault(vault: Path) -> None:
+    """Give the generated entities a unique alias, then warm the catalogue, the
+    lexical store and the activation index, as startup would."""
+    from exomem import working_set_index, working_set_runtime
 
     # The generated entities otherwise all share the words "Synthetic Person",
     # which can trigger disambiguation before any role work runs.
@@ -657,6 +653,18 @@ def _measure_working_set(vault: Path) -> tuple[float, dict]:
     lexstore.ensure_fresh(vault)
     working_set_runtime.reset_caches_for_tests()
     working_set_index.WorkingSetIndex(vault).rebuild()
+
+
+def _measure_working_set(vault: Path) -> tuple[float, dict]:
+    """Return (warm median compiler ms, one packet) over repeated activations.
+
+    The index is built explicitly first, for the same reason `lexstore.ensure_fresh`
+    is: startup owns a potentially unbounded derived build, and an interactive call
+    must never become that build.
+    """
+    from exomem import commands, working_set_runtime
+
+    _prepare_working_set_vault(vault)
 
     def call() -> dict:
         # The packet cache is keyed on the turn, so vary it to measure the
@@ -691,6 +699,102 @@ def test_working_set_compiler_stays_bounded_at_scale(tmp_path: Path, model_free)
     # shows up as a gate failure rather than as a context-window surprise.
     assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
     assert len(json.dumps(packet)) < 24_000
+
+
+# --- Conversation stage (add-thread-aware-compilation, tasks 5.2) ------------
+# A request with a maximum-size `conversation` pays one bounded stage, and warm
+# activation stays under a second at p95 with it. Live-cell latency is owned by
+# its own lane and is not claimed here: a request WITHOUT a conversation does no
+# conversation work and records no `working_set.conversation` span.
+CEIL_CONVERSATION_STAGE_P95_MS = 60.0
+CEIL_WARM_ACTIVATION_P95_MS = 1000.0
+CONVERSATION_GATE_SAMPLES = 20
+
+_GATE_WORDS = (
+    "synthetic person topic prose paragraph related context note about dense graph "
+    "insight pattern estuary survey lantern budget rota grant"
+).split()
+
+
+def _max_size_conversation() -> dict:
+    """The largest conversation the bounds admit: 240-character focus, six
+    entries at their role caps (2,400 in all) and twelve refs."""
+
+    def text(seed: int, limit: int) -> str:
+        words = [_GATE_WORDS[(seed + step * 7) % len(_GATE_WORDS)] for step in range(200)]
+        words[40] = "Activation Scale Contact"
+        return " ".join(words)[:limit].rsplit(" ", 1)[0]
+
+    return {
+        "focus": text(1, 240),
+        "recent": [
+            {"role": "user" if index % 2 == 0 else "assistant", "text": text(index, 600 if index % 2 == 0 else 300)}
+            for index in range(6)
+        ],
+        "refs": [f"Knowledge Base/Notes/synthetic-note-{index:05d}.md" for index in range(12)],
+    }
+
+
+def _p95(samples: list[float]) -> float:
+    """Nearest-rank 95th percentile."""
+    ordered = sorted(samples)
+    return ordered[max(0, -(-len(ordered) * 95 // 100) - 1)]
+
+
+def measure_conversation_gate(vault: Path) -> dict:
+    """Warm p95s with and without a maximum-size conversation, over one vault."""
+    from exomem import commands, working_set_runtime
+
+    _prepare_working_set_vault(vault)
+    conversation = _max_size_conversation()
+
+    def call(with_conversation: bool) -> dict:
+        working_set_runtime.reset_caches_for_tests()
+        extra = {"conversation": conversation} if with_conversation else {}
+        return commands.op_activate_context(
+            vault, turn=WORKING_SET_TURN, include_timings=True, **extra
+        )
+
+    call(True)
+    call(False)
+    total_with: list[float] = []
+    stage_with: list[float] = []
+    total_without: list[float] = []
+    stages_without: set[str] = set()
+    for _ in range(CONVERSATION_GATE_SAMPLES):
+        served = call(True)
+        assert served["generation"]["conversation"] in {"applied", "truncated"}
+        total_with.append(_compiler_ms(served["timings"]))
+        stage_with.append(served["timings"]["stages"]["working_set.conversation"]["ms"])
+        plain = call(False)
+        total_without.append(_compiler_ms(plain["timings"]))
+        stages_without |= set(plain["timings"]["stages"])
+    return {
+        "samples": CONVERSATION_GATE_SAMPLES,
+        "corpus": f"{N_NOTES} dense notes + 500 entities (model-free synthetic reference corpus)",
+        "conversation_stage_p95_ms": round(_p95(stage_with), 2),
+        "warm_activation_with_conversation_p95_ms": round(_p95(total_with), 2),
+        "warm_activation_without_conversation_p95_ms": round(_p95(total_without), 2),
+        "stage_recorded_without_conversation": "working_set.conversation" in stages_without,
+    }
+
+
+@pytest.mark.timeout(600)
+def test_a_maximum_size_conversation_stays_within_the_stage_and_warm_p95_budgets(
+    tmp_path: Path, model_free
+) -> None:
+    from synth_vault import gen_entity_overlay
+
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+    measured = measure_conversation_gate(vault)
+
+    assert measured["stage_recorded_without_conversation"] is False
+    assert measured["conversation_stage_p95_ms"] <= CEIL_CONVERSATION_STAGE_P95_MS, measured
+    assert measured["warm_activation_with_conversation_p95_ms"] <= CEIL_WARM_ACTIVATION_P95_MS, measured
 
 
 @pytest.mark.timeout(300)

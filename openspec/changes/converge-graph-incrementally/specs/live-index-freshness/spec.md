@@ -58,14 +58,26 @@ that the registry is behind the disk (Class C, #508 §1 as amended here):
 
 Movement the registry accounts for — a governed write the service committed, or an
 external event the watcher recorded or marked — SHALL NOT mark the registry externally
-pending or invalidate it. A pass that cannot stabilize under it is a publication
+pending or invalidate it. A governed write still in flight is accounted for while an
+outstanding publication intent names the path. Until its canonical rename (snapshot
+taken, installation possibly begun), that holds when the file is byte-for-byte the
+content the write snapshotted and only its ctime moved from what the registry
+recorded. From installation until its registry publication, it holds when the file is
+byte-for-byte the content the write staged, whether the sample saw those bytes or saw
+the pre-rename shape and the write renamed before the proof. Any other bytes on that
+path, including a same-size foreign edit landing mid-write, remain unexplained. A pass that cannot stabilize under it is a publication
 failure (Class B): the graph's own recovery state and retry memo, as for any other
 publication failure. A comparison that cannot complete, because the registry is not
 live or its history is incomplete, proves nothing and is Class B too.
 
 A Class C mark SHALL name the unexplained paths when the proof can enumerate them and
-SHALL be unscoped only when it cannot. It is allocated once per proof, and its clearers
-are unchanged.
+SHALL be unscoped only when it cannot. It is allocated once per proof. Before its
+Class C refusal propagates, the whole-vault rebuild that allocated it SHALL attempt to
+retire it by reconciling the registry against the disk, clearing only through the epoch
+it sampled. The mark is retired when that reconciliation publishes; when it does not
+(or fails), the mark is left for the watcher's recovery or the next whole-vault
+publication. The other clearers are unchanged, and the stale live graph is still not
+served as current.
 
 The recall corpus SHALL read each page it walked by the spelling the walk found, as the
 freshness identity names it, so a page whose name is not in NFKC form -- a macOS-origin
@@ -85,6 +97,16 @@ NFD name on a byte-exact file system -- is in the resolver, and is never evidenc
 - **WHEN** a page's bytes change during a whole-vault pass without any recorder
   observing it
 - **THEN** the pass raises Class C and the external-pending mark names exactly that page
+- **AND** when its reconciliation publishes, the rebuild retires that mark before the
+  refusal propagates, leaving the edit recorded in the registry and the stale graph
+  unavailable to public reads
+
+#### Scenario: A governed write sampled before its registry publication
+
+- **WHEN** a whole-vault pass samples a page a narrow-boundary governed write has
+  snapshotted, or renamed into place but not yet published to the registry
+- **THEN** the page is not unexplained movement and no external-pending epoch is allocated
+- **AND** a foreign edit replacing those bytes before the publication is still unexplained
 
 #### Scenario: A page with a decomposed name does not block a whole-vault rebuild
 

@@ -185,11 +185,24 @@ def _candidates_for(
     caller can commit the once-only first-surfaced ledger after -- and only
     after -- the store accepts the result they belong to.
     """
+    from . import embeddings
+
+    corpus_aware._require_complete_advisory_body(generation.body, title=generation.title)
+    index = embeddings.get_embedding_index(vault_root)
+    corpus_aware._require_advisory_vectors(
+        generation.vectors, expected_count=len(generation.chunks)
+    )
+    corpus_aware.recall_space.require_same_space(index, generation.space, generation.vectors[0])
+    with corpus_aware.recall_space.encoding_for(index):
+        if not embeddings.advisory_passages_fit(list(generation.chunks)):
+            raise corpus_aware.OverlapAdvisorySkipped("text_truncated")
     scores = corpus_aware.best_cosine_per_file_for_vectors(
         vault_root,
         generation.vectors,
         self_path=generation.rel_path,
         k=max(DUPLICATE_TOP_N, OVERLAP_TOP_N) * 5,
+        strict=True,
+        encoded_for=generation.space,
     )
     duplicates = corpus_aware.detect_duplicates(
         vault_root,
@@ -241,6 +254,8 @@ def _candidates_for_route(
     changes no warning of this result.
     """
     emitted = corpus_aware.write_advisory_for(vault_root, inputs, record_surfacing=False)
+    if any(isinstance(item, corpus_aware.SkippedWriteAdvisory) for item in emitted):
+        raise corpus_aware.OverlapAdvisorySkipped("embedding_unavailable")
     return _candidates_from_emitted(vault_root, emitted, result_ref=result_ref), emitted
 
 
@@ -321,6 +336,8 @@ def _publish(
         now=now,
     )
     accepted = publication.outcome in {"published", "already_published"}
+    if publication.outcome in {"published", "already_published", "superseded"}:
+        advisory_handoff.forget_route_inputs(vault_root, claimed_status.batch_id)
     return AdvisoryExecution(
         batch_id=claimed_status.batch_id,
         outcome=publication.outcome,
@@ -374,6 +391,7 @@ def execute_write_advisory(
         )
 
     if stored.state != "pending":
+        advisory_handoff.forget_route_inputs(vault_root, batch_id)
         # A crash after publication reuses the stored result and completes the
         # component without recomputation (Design Decision 6). Recomputing here
         # could not converge: ordinary corpus drift between the crash and this
@@ -430,6 +448,15 @@ def execute_write_advisory(
             candidates, emitted = _candidates_for_route(
                 vault_root, route_inputs, result_ref=ref
             )
+        except corpus_aware.OverlapAdvisorySkipped:
+            return _publish(
+                vault_root,
+                claimed_status,
+                state="failed",
+                failure_code="embedding_unavailable",
+                observed=observed,
+                now=now,
+            )
         except Exception as error:  # noqa: BLE001 - optional advisory fails closed and soft
             if not isinstance(error, _UnaddressableAdvisory):
                 # The sweep runs over the draft's own title and body, which an
@@ -461,8 +488,6 @@ def execute_write_advisory(
             vault_root, emitted
         ):
             _arm_published_quiet_offer(vault_root, ref, candidates, emitted)
-        if execution.outcome in {"published", "already_published", "superseded"}:
-            advisory_handoff.forget_route_inputs(vault_root, batch_id)
         return execution
 
     from . import embeddings  # numpy-backed; loaded only when a claim is executed
@@ -482,6 +507,16 @@ def execute_write_advisory(
 
     try:
         candidates, emitted = _candidates_for(vault_root, generation, result_ref=ref)
+    except corpus_aware.OverlapAdvisorySkipped:
+        return _publish(
+            vault_root,
+            claimed_status,
+            state="failed",
+            failure_code="embedding_unavailable",
+            observed=observed,
+            now=now,
+            reused_vectors=generation.reused,
+        )
     except _UnaddressableAdvisory:
         log.debug("advisory batch=%s surfaced an unaddressable advisory", batch_id)
         return _publish(
@@ -493,8 +528,8 @@ def execute_write_advisory(
             now=now,
             reused_vectors=generation.reused,
         )
-    except Exception:  # noqa: BLE001 - optional advisory work fails closed and soft
-        log.warning("advisory computation failed batch=%s", batch_id, exc_info=True)
+    except Exception as error:  # noqa: BLE001 - optional advisory work fails closed and soft
+        log.warning("advisory computation failed stage=generation_advisory (%s)", type(error).__name__)
         return _publish(
             vault_root,
             claimed_status,

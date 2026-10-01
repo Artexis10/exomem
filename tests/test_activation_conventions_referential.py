@@ -168,6 +168,23 @@ def test_no_referential_word_list_remains_in_product_code(module: str) -> None:
     assert offending == []
 
 
+def test_the_shipped_anaphor_grammar_lists_no_referential_cue() -> None:
+    """`working_set_anaphora` is the spec's closed, shipped anaphor set: parts
+    of speech (pronouns, prepositions, auxiliaries, temporal nouns), so it
+    necessarily spells English function words that also sit in the filler
+    seed. What it must never hold is a referential CUE, which is vault data."""
+    source = Path(working_set_resolve.__file__).with_name("working_set_anaphora.py").read_text(
+        encoding="utf-8"
+    )
+    cues = set(PREVIOUS_CUES) | set(JAPANESE_CUES)
+    offending = [
+        (line, sorted(set(strings) & cues))
+        for line, strings in _string_collections(ast.parse(source))
+        if set(strings) & cues
+    ]
+    assert offending == []
+
+
 # --------------------------------------------------------------------------- #
 # The override grammar
 # --------------------------------------------------------------------------- #

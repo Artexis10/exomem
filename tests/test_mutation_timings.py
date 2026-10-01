@@ -830,6 +830,8 @@ def test_a_governed_edit_records_the_advisory_sweep_with_what_it_encoded(
     The encoder itself is stubbed: this asserts the instrumentation, and
     loading bge-base to do it would make a measurement test a model test.
     """
+    from types import SimpleNamespace
+
     import numpy as np
 
     from exomem import call_spans, corpus_aware, embeddings
@@ -838,8 +840,13 @@ def test_a_governed_edit_records_the_advisory_sweep_with_what_it_encoded(
     monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
 
     encoded: list[list[str]] = []
+    model = SimpleNamespace(texts_fit=lambda _texts: True)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(embeddings, "get_model", lambda: model)
 
     class _Index:
+        dim = 4
+
         def search(self, _vector, *, k=15, allowed_paths=None):
             return []
 
@@ -854,7 +861,7 @@ def test_a_governed_edit_records_the_advisory_sweep_with_what_it_encoded(
         "embed_texts",
         lambda texts, **_kw: (
             encoded.append(list(texts)),
-            np.zeros((len(texts), 4), dtype=np.float32),
+            np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (len(texts), 1)),
         )[1],
         raising=True,
     )

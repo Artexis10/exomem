@@ -766,7 +766,7 @@ def test_a_bare_reason_needs_no_free_text(vault: Path, capsys) -> None:
 
 
 def _post_write(vault: Path) -> dict:
-    payload = commands.op_bootstrap(vault, profile="compact")
+    payload = commands.op_bootstrap(vault, profile="compact", section="all")
     return payload["authoring_contract"]["post_write"]
 
 

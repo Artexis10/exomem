@@ -283,7 +283,7 @@ def test_off_is_byte_identical(vault: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
         monkeypatch.setattr(target, name, spy)
     due_state.reset_emission_state()
-    bootstrap = commands.op_bootstrap(vault)
+    bootstrap = commands.op_bootstrap(vault, section="all")
     first = _reads(vault)
     # A second session start in the same process: nothing the dreamer might
     # remember between calls may change what the read surfaces answer.

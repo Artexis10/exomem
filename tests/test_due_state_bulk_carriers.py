@@ -52,7 +52,7 @@ def _seed(vault: Path) -> None:
     """One overdue prediction the projection owes, and a warm projection file."""
     overdue_prediction(vault)
     scratch_page(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     due_state_module.reset_emission_state()
 
 
@@ -445,7 +445,7 @@ def test_a_clean_vault_fix_carries_nothing(tmp_path: Path, monkeypatch) -> None:
     the commit count is asserted rather than assumed.
     """
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
-    commands.op_bootstrap(tmp_path)
+    commands.op_bootstrap(tmp_path, section="all")
     overdue_prediction(tmp_path, "clean-vault-overdue")
     due_state_module.reconcile(tmp_path)
     due_state_module.reset_emission_state()

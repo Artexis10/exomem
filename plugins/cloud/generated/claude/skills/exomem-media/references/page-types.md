@@ -517,10 +517,18 @@ One paragraph.
 
 What this person is relevant to in your work.
 
+## Contact
+
+- [contact] A phone, address, email or identifier, one per unit.
+
 ## Relations
 
 - relates_to [[...]]
 ```
+
+`## Contact` is optional. Keep contact details in `[contact]` units there, never in
+the summary or in `fact` units: activation serves them only when the turn asks to reach
+the person.
 
 On a topic page, prefer `about_entity [[Entities/People/...]]` for the canonical
 topic-to-person edge. Entity-side `relates_to` remains valid connective tissue.

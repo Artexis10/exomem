@@ -164,3 +164,21 @@ class FindEnvelope(TypedDict):
     warming: NotRequired[dict[str, Any]]
     degraded: NotRequired[list[str]]
     retrieval_profile: NotRequired[RetrievalProfile]
+
+
+class ToolFailureEnvelope(TypedDict):
+    """A refusal or operation error returned as a normal tool result.
+
+    `cli_ops.envelope(False, ...)` is what the MCP command wrapper returns for a
+    structured `OpError` or semantic refusal, so a recall call can legitimately
+    answer with this instead of hits. It is declared so a schema-validating MCP
+    client accepts it rather than rejecting the whole response.
+    """
+
+    success: Literal[False]
+    error: dict[str, Any]
+    validation_state: NotRequired[Any]
+    mutated: NotRequired[Any]
+
+
+RecallResult: TypeAlias = list[RetrievalHit] | FindEnvelope | ToolFailureEnvelope

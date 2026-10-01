@@ -25,7 +25,8 @@ from pathlib import Path
 import pytest
 
 from exomem import commands, hosted_gateway, semantic_blocks, semantic_units, workflow_skills
-from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
+from exomem.capabilities import ActiveSurfaceDescriptor, active_surface, current_active_surface
+from exomem.hosted_legacy_schemas import LEGACY_PROFILE_CONTRACTS
 
 #: Every commitment the portable contract has to carry, keyed by payload key.
 _COMMITMENTS = (
@@ -36,9 +37,22 @@ _COMMITMENTS = (
     "keep_the_negative_result",
 )
 
+def _op(vault, **kwargs):
+    """`op_bootstrap`, with the complete reference payload where compact is asked for.
+
+    Since `shrink-bootstrap` compact is the always-served core; these tests pin the
+    reference blocks, which the `all` section returns byte-identically.
+    """
+    active = current_active_surface()
+    frozen = active is not None and active.profile in LEGACY_PROFILE_CONTRACTS
+    if kwargs.get("profile", "compact") == "compact" and "section" not in kwargs and not frozen:
+        kwargs["section"] = "all"
+    return commands.op_bootstrap(vault, **kwargs)
+
+
 
 def _contract(vault: Path, profile: str = "compact") -> dict:
-    return commands.op_bootstrap(vault, profile=profile)["epistemic_contract"]
+    return _op(vault, profile=profile)["epistemic_contract"]
 
 
 # ------------------------------------------------------------------- commitments
@@ -94,7 +108,7 @@ def test_commitments_name_no_tool(vault: Path) -> None:
 
 def test_compact_bootstrap_teaches_the_v1_vocabulary_consideration_loop(vault: Path) -> None:
     """A hookless client needs routes, abstention, and the v1 authority limit."""
-    workflow = commands.op_bootstrap(vault, profile="compact")["vocabulary_workflow"]
+    workflow = _op(vault, profile="compact")["vocabulary_workflow"]
 
     assert workflow["version"] == "v1"
     assert workflow["families"] == [
@@ -173,7 +187,7 @@ def test_reduced_bootstrap_reports_missing_vocabulary_routes(vault: Path) -> Non
     )
 
     with active_surface(descriptor):
-        workflow = commands.op_bootstrap(vault, profile="compact")["vocabulary_workflow"]
+        workflow = _op(vault, profile="compact")["vocabulary_workflow"]
 
     for operation in (
         "review_route",
@@ -187,7 +201,7 @@ def test_reduced_bootstrap_reports_missing_vocabulary_routes(vault: Path) -> Non
 
 
 def test_compact_operating_instructions_and_simple_actions_precede_large_catalogs(vault: Path) -> None:
-    payload = commands.op_bootstrap(vault, profile="compact")
+    payload = _op(vault, profile="compact")
     keys = list(payload)
     assert keys.index("workflow") < keys.index("simple_actions")
     for doctrine in ("simple_actions", "workflow", "vocabulary_workflow", "epistemic_contract"):
@@ -226,7 +240,7 @@ def test_vocabulary_bootstrap_marks_each_operation_available_or_limited(
         arguments["skill_contract"] = workflow_skills.skill_contract()
 
     with active_surface(descriptor):
-        payload = commands.op_bootstrap(vault, **arguments)
+        payload = _op(vault, **arguments)
 
     workflow = payload["vocabulary_workflow"]
     for operation in ("review_route", "context", "decision"):
@@ -312,7 +326,7 @@ def test_capture_nudge_routes_expectations_to_predictions(vault: Path) -> None:
 def test_intent_boundary_separates_prediction_from_records_and_planning(
     vault: Path,
 ) -> None:
-    boundary = commands.op_bootstrap(vault)["records"]["intent_boundary"]
+    boundary = _op(vault)["records"]["intent_boundary"]
 
     assert set(boundary) == {
         "records",
@@ -333,7 +347,7 @@ def test_intent_boundary_routes_the_two_lifecycle_classes(vault: Path) -> None:
     "let's do the next one" is a Planning write and "Kim posted it" is a Records
     one. Asserted with the ROUTE, because a class without one is a label.
     """
-    boundary = commands.op_bootstrap(vault)["records"]["intent_boundary"]
+    boundary = _op(vault)["records"]["intent_boundary"]
 
     assert "plan_memory" in boundary["stated_intent"]
     assert "record_memory" in boundary["observed_outcome"]
@@ -350,7 +364,7 @@ def test_intent_boundary_routes_the_two_lifecycle_classes(vault: Path) -> None:
 
 def test_capture_examples_require_explicit_intent_for_a_planning_transition(vault: Path) -> None:
     """Records capture may propose a transition but cannot perform one by itself."""
-    examples = commands.op_bootstrap(vault)["records"]["capture_examples"].lower()
+    examples = _op(vault)["records"]["capture_examples"].lower()
 
     assert "plan" in examples
     assert "never closes planning automatically" in examples
@@ -359,7 +373,7 @@ def test_capture_examples_require_explicit_intent_for_a_planning_transition(vaul
 
 def test_plan_is_a_simple_front_door_action(vault: Path) -> None:
     """`SKILL.md` has taught a `plan` simple action; the payload had not."""
-    payload = commands.op_bootstrap(vault)
+    payload = _op(vault)
 
     assert "plan" in commands.simple_action_names()
     assert "plan" in payload["simple_actions"]
@@ -371,7 +385,7 @@ def test_bootstrap_teaches_the_planning_inventory_and_the_resolving_query(
     vault: Path,
 ) -> None:
     """A fresh session with no collection named must not have to ask which one."""
-    planning = json.dumps(commands.op_bootstrap(vault)["planning"]).lower()
+    planning = json.dumps(_op(vault)["planning"]).lower()
 
     assert "inventory" in planning
     assert "without a collection" in planning
@@ -385,7 +399,7 @@ def test_bootstrap_teaches_the_planning_inventory_and_the_resolving_query(
 
 
 def test_recipes_cover_question_hypothesis_and_prediction(vault: Path) -> None:
-    recipes = commands.op_bootstrap(vault)["authoring_contract"]["note_type_recipes"]
+    recipes = _op(vault)["authoring_contract"]["note_type_recipes"]
 
     for name in ("question", "hypothesis", "prediction"):
         assert name in recipes, name
@@ -393,7 +407,7 @@ def test_recipes_cover_question_hypothesis_and_prediction(vault: Path) -> None:
 
 
 def test_prediction_recipe_names_the_governed_metadata(vault: Path) -> None:
-    recipes = commands.op_bootstrap(vault)["authoring_contract"]["note_type_recipes"]
+    recipes = _op(vault)["authoring_contract"]["note_type_recipes"]
     prediction = recipes["prediction"]
 
     assert "check_by" in prediction
@@ -413,7 +427,7 @@ def test_every_profile_carries_the_contract(vault: Path) -> None:
 
 def _assert_doctrine_intact(descriptor: ActiveSurfaceDescriptor, vault: Path) -> None:
     with active_surface(descriptor):
-        payload = commands.op_bootstrap(vault)
+        payload = _op(vault)
 
     contract = payload["epistemic_contract"]
     assert tuple(contract["commitments"]) == _COMMITMENTS, descriptor.profile
@@ -457,7 +471,7 @@ def test_every_shipped_hosted_profile_keeps_the_doctrine(
 
 
 def test_contract_version_moved_for_the_new_section(vault: Path) -> None:
-    assert commands.op_bootstrap(vault)["contract_version"] > "2026-08-11.1"
+    assert _op(vault)["contract_version"] > "2026-08-11.1"
 
 
 # --------------------------------------------------- the original audit defect
@@ -482,7 +496,7 @@ def test_payload_no_longer_omits_the_doctrine(vault: Path) -> None:
     still zero, so the payload teaches append-only provenance in other words and
     this test must not imply otherwise.
     """
-    serialized = json.dumps(commands.op_bootstrap(vault)).lower()
+    serialized = json.dumps(_op(vault)).lower()
 
     for term, baseline in _BASELINE_OCCURRENCES.items():
         assert serialized.count(term) > baseline, (
@@ -575,7 +589,7 @@ def test_levels_that_never_self_capture_are_untouched(vault: Path) -> None:
 
 
 def _post_write(vault: Path, profile: str) -> dict:
-    return commands.op_bootstrap(vault, profile=profile)["authoring_contract"]["post_write"]
+    return _op(vault, profile=profile)["authoring_contract"]["post_write"]
 
 
 def test_full_contract_teaches_pre_write_destination_choice(vault: Path) -> None:

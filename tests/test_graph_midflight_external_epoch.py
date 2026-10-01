@@ -377,14 +377,21 @@ def test_a_genuinely_doomed_publication_is_not_swallowed_by_the_retry(
 def test_a_moved_projection_still_escapes_the_off_boundary_loop_as_class_c(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Class C regression: `GraphProjectionMoved` is not caught or retried."""
+    """Class C regression: `GraphProjectionMoved` is not caught or retried.
+
+    It still marks exactly once, and the off-boundary loop retires that mark
+    before re-raising: an external-pending epoch the graph mints, the graph
+    retires, rather than fencing reads until the watcher's recovery.
+    """
     _move_the_resolver_identity(monkeypatch)
+    marks = _count_marks(monkeypatch)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved) as raised:
         EpistemicGraphIndex(vault)._rebuild_all_off_boundary()
 
     assert type(raised.value) is epistemic_graph.GraphProjectionMoved
-    assert freshness.external_pending(vault) is True
+    assert len(marks) == 1
+    assert freshness.external_pending(vault) is False
 
 
 def test_a_class_c_attempt_followed_by_a_supersession_stays_class_c(
@@ -410,6 +417,20 @@ def test_a_class_c_attempt_followed_by_a_supersession_stays_class_c(
     assert "resolver bytes" in message, "the Class C label must quote the Class C cause"
     assert epistemic_graph.may_mark_external_pending(error) is False
     assert freshness.external_pending(vault) is True
+
+def _count_marks(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record every external-pending epoch minted while the test runs."""
+    marks: list[int] = []
+    original = freshness.mark_external_pending
+
+    def counting(vault_root: Path, **kwargs: object) -> int:
+        epoch = original(vault_root, **kwargs)  # type: ignore[arg-type]
+        marks.append(epoch)
+        return epoch
+
+    monkeypatch.setattr(freshness, "mark_external_pending", counting)
+    return marks
+
 
 def _registry_behind_the_disk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Report the simulated movement as unrecorded: positive Class C evidence.
@@ -489,13 +510,18 @@ def test_the_retry_does_not_mask_a_class_c_that_lands_after_it(
         lambda *_args, **_kwargs: locked_calls < 2,
     )
     _registry_behind_the_disk(monkeypatch)
+    marks = _count_marks(monkeypatch)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved) as raised:
         EpistemicGraphIndex(vault)._rebuild_all_off_boundary()
 
     assert type(raised.value) is epistemic_graph.GraphProjectionMoved
     assert locked_calls == 2, "the supersession must have been retried exactly once"
-    assert freshness.external_pending(vault) is True
+    # Exactly two epochs: the superseding event on attempt 1, and attempt 2's
+    # own Class C mark. The retry did not absorb the Class C, and the loop
+    # retired its mark before handing the verdict through.
+    assert len(marks) == 2, marks
+    assert freshness.external_pending(vault) is False
 
 
 # --- #479: every refusal this diff can reach names a runnable surface --------
