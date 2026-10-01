@@ -1017,6 +1017,7 @@ class _LinkProjector:
     candidate_index_complete: bool | None
     verdicts: dict[str, bool]
     policy: Any | None
+    authorize_path: Callable[[str], bool] | None = None
 
     @classmethod
     def create(
@@ -1026,6 +1027,7 @@ class _LinkProjector:
         *,
         policy: Any | None = None,
         allow_cold_index: bool = True,
+        authorize_path: Callable[[str], bool] | None = None,
     ) -> _LinkProjector:
         # Keep the common numeric/event query path independent of vault-wide
         # link lookup. Even link-bearing collections defer that lookup until a
@@ -1039,7 +1041,8 @@ class _LinkProjector:
         # and `vault.walk_vault_md` is never called. Path-shaped links never
         # needed the index and keep resolving and being authorized as today.
         empty = vault.WikilinkResolver.from_entries(root, ())
-        return cls(root, manifest, empty, {}, {}, None if allow_cold_index else False, {}, policy)
+        return cls(root, manifest, empty, {}, {}, None if allow_cold_index else False, {}, policy,
+                   authorize_path)
 
     def _candidate_index_available(self) -> bool:
         if self.candidate_index_complete is not None:
@@ -1068,7 +1071,8 @@ class _LinkProjector:
             # The resolver's title and identity indexes must not learn from a
             # path that this principal cannot read. Otherwise a hidden name or
             # duplicate identity can change an otherwise public link result.
-            allowed = _authorize(self.root, relative, policy=self.policy)
+            allowed = (self.authorize_path(relative) if self.authorize_path is not None
+                       else _authorize(self.root, relative, policy=self.policy))
             admitted[relative] = allowed
             if not allowed:
                 continue
@@ -1205,7 +1209,8 @@ class _LinkProjector:
         if relative in self.admitted and not self.admitted[relative]:
             return self._remember(relative, False)
         return self._remember(
-            relative, _authorize(self.root, relative, receipt=True, policy=self.policy)
+            relative, (self.authorize_path(relative) if self.authorize_path is not None
+                       else _authorize(self.root, relative, receipt=True, policy=self.policy))
         )
 
     def _remember(self, target: str, allowed: bool) -> bool:
@@ -1903,11 +1908,13 @@ def _inspection_saved_views(
 
 
 def _inspection_templates(
-    root: Path, manifest: collections.CollectionManifest, diagnostics: list[dict[str, str]]
+    root: Path, manifest: collections.CollectionManifest, diagnostics: list[dict[str, str]],
+    *, policy: Any | None = None, authorize_path: Callable[[str], bool] | None = None,
 ) -> None:
     """Check declared template availability only after its own L6 decision."""
     for template in manifest.templates[:32]:
-        unavailable = not _authorize(root, template.path, receipt=True)
+        unavailable = not (authorize_path(template.path) if authorize_path is not None
+                           else _authorize(root, template.path, receipt=True, policy=policy))
         if not unavailable:
             try:
                 vault.PathGuard.capture(root, template.path, leaf_policy="stable")

@@ -2,7 +2,7 @@
 
 The caller owns and closes the lease-bound WriterConnection. This slice queues
 projection hashes but publishes no vault files; P2 owns staging and installation.
-Governance precommit is an explicitly dark seam for P1a.9, not authorization.
+Canonical authorization precedes decoding current state and commits proposed state.
 """
 
 from __future__ import annotations
@@ -14,16 +14,15 @@ import os
 import sqlite3
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from .. import mutation_terminal, planning, record_formats, records, vault, writer_lease
+from .. import memory_refs, mutation_terminal, planning, record_formats, records, vault, writer_lease
 from ..governance.principal import effective_principal
 from .. import structured_collections as collections
-from . import chain, connection, tokens, types
+from . import chain, connection, governance, tokens, types
 
 
 def _json(value: Any) -> str:
@@ -50,16 +49,6 @@ def _natural_key(manifest: collections.CollectionManifest, values: Mapping[str, 
         return None
 
 
-def governance_precommit_pending(
-    conn: sqlite3.Connection, manifest: collections.CollectionManifest, paths: Sequence[str]
-) -> None:
-    """P1a.9 seam: replace with authorization inside this same transaction.
-
-    This no-op is reachable only in the explicit dark preview. It must never
-    become the production authorization boundary.
-    """
-
-
 class CollectionWriter:
     """Generic store writer parameterized by the persisted built-in declaration."""
 
@@ -71,30 +60,77 @@ class CollectionWriter:
         self.root = Path(vault_root)
         self.handle = handle
         self.connection = handle.connection
+        self._operation = None
+        self._facade_profile = None
 
-    def _collection(self, selector: str | Path | collections.CollectionManifest):
-        key = (
+    @contextmanager
+    def _authorization(self, *, mutation=True):
+        previous = self._operation
+        if previous is not None:
+            yield previous
+            return
+        operation = governance.OperationAuthorization(self.root, self.connection, mutation=mutation)
+        self._operation = operation
+        try:
+            yield operation
+        finally:
+            operation.close()
+            self._operation = None
+
+    def _precommit(self, manifest):
+        self._operation.require_collection(manifest.collection_id, refresh=True)
+
+    def _collection(
+        self, selector: str | Path | collections.CollectionManifest, *, facade_profile: str | None = None
+    ):
+        raw = (
             selector.collection_id
             if isinstance(selector, collections.CollectionManifest)
             else str(selector)
-        )
+        ).strip()
+        if not raw:
+            raise collections.CollectionError(
+                "INVALID_COLLECTION_REFERENCE", "collection selector is required"
+            )
+        identity = memory_refs.parse_memory_ref(raw) or memory_refs.normalize_id(raw)
+        field = "collection_id" if identity is not None else "manifest_path"
+        key = identity if identity is not None else collections._reference_key(self.root, raw)
+        if key is None:
+            raise collections._spelling_reference_error(raw)
         row = _row(
             self.connection.execute(
-                "SELECT c.*, m.manifest_text FROM collections c JOIN collection_manifests m "
-                "ON m.collection_id = c.collection_id AND m.manifest_version = c.manifest_version "
-                "WHERE c.collection_id = ? OR c.manifest_path = ?",
-                (key, key),
+                "SELECT c.* FROM collections c "
+                f"WHERE c.{field} = ?",
+                (key,),
             )
         )
         if row is None:
+            from ..record_memory import _is_direct_legacy_tracker_selector
+
+            if identity is None and not (
+                facade_profile == "records" and _is_direct_legacy_tracker_selector(raw)
+            ):
+                raise collections._unresolvable_reference_error(key)
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+        with self._authorization() as operation:
+            operation.require_collection(row["collection_id"], complete=operation.mutation)
+        text = self.connection.execute(
+            "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+            (row["collection_id"], row["manifest_version"]),
+        ).fetchone()[0]
         manifest = collections.parse_manifest_bytes(
-            self.root, row["manifest_path"], row["manifest_text"].encode()
+            self.root, row["manifest_path"], text.encode()
         )
         declared = types.type_for_manifest(manifest)
         if (declared.name, declared.version) != (row["type_name"], row["type_version"]):
             raise types.CollectionTypeError(
                 "COLLECTION_TYPE_VERSION_MISMATCH", "collection type differs from release"
+            )
+        profile = facade_profile or self._facade_profile
+        if profile is not None and not (profile == "records" and not operation.mutation) and manifest.semantic_profile != profile:
+            raise collections.CollectionError(
+                "PLANNING_PROFILE_REQUIRED" if profile == "planning" else "RECORDS_PROFILE_REQUIRED",
+                f"{profile.title()} collection is required",
             )
         return row, replace(manifest, audit_head=row["audit_head"]), declared
 
@@ -108,35 +144,41 @@ class CollectionWriter:
     def _container(self, row: Mapping[str, Any]) -> str:
         return tokens.container_hash(row["collection_id"], row["generation"], row["audit_head"])
 
-    def inspect_collection(self, collection) -> dict[str, Any]:
+    def inspect_collection(self, collection, *, facade_profile: str | None = None) -> dict[str, Any]:
         """Report the dark writer's canonical state without publishing or repairing.
 
         This preview contract supports guard refresh and writer wire goldens.
-        Production reader routing and row authorization belong to later slices.
+        Production reader routing belongs to later slices.
         """
         self.connection.execute("BEGIN")
         try:
-            return self._inspect_collection(collection)
+            with self._authorization(mutation=False):
+                result = self._inspect_collection(collection, facade_profile=facade_profile)
+                operation = self._operation
+                catalog = operation.catalog(result["contract"]["collection_id"])
+                entries = [(subject.basis.identity, subject.basis.fingerprint,
+                            subject.basis.payload_hash, operation.decision(subject)) for subject in catalog]
         finally:
             self.connection.execute("ROLLBACK")
+        from ..governance import egress
 
-    def _inspect_collection(self, collection) -> dict[str, Any]:
+        notices = egress.canonical_subject_notices(self.root, entries, policy=operation.policy,
+                                                  principal=operation.who, purpose=operation.purpose)
+        if notices:
+            result["governance"] = {"notices": notices}
+        return result
+
+    def _inspect_collection(self, collection, *, facade_profile: str | None = None) -> dict[str, Any]:
         from .. import due_state, record_governance
 
-        row, manifest, declared = self._collection(collection)
-        items = [
-            dict(zip((column[0] for column in cursor.description), item, strict=True))
-            for cursor in [self.connection.execute(
-                "SELECT * FROM items WHERE collection_id = ? ORDER BY view_path",
-                (manifest.collection_id,),
-            )]
-            for item in cursor
-        ]
+        row, manifest, declared = self._collection(collection, facade_profile=facade_profile or self._facade_profile)
+        items, visible_snapshot, held_ids = self._operation.authorized_rows(manifest.collection_id)
         source_versions = [manifest.manifest_version]
         parsed = []
         for item in items:
             version = collections.SourceVersion(
-                item["view_path"].split("#")[0], self._version(item)
+                manifest.storage.source if manifest.storage.strategy == "markdown-log" else item["view_path"],
+                self._version(item),
             )
             source_versions.append(version)
             parsed.append(record_formats.Record(
@@ -145,22 +187,36 @@ class CollectionWriter:
                 body=item["body"],
             ))
         snapshot = record_formats.AdapterSnapshot(
-            records=tuple(parsed), snapshot=self._container(row), data_snapshot=self._container(row),
+            records=tuple(parsed), snapshot=visible_snapshot, data_snapshot=visible_snapshot,
             source_versions=tuple(source_versions),
         )
         inspection = record_formats.inspect_collection(self.root, manifest, snapshot=snapshot)
         diagnostics = record_governance._inspection_diagnostics(inspection.diagnostics)
-        record_governance._inspection_templates(self.root, manifest, diagnostics)
-        links = record_governance._LinkProjector.create(self.root, manifest)
+        record_governance._inspection_templates(
+            self.root, manifest, diagnostics, policy=self._operation.policy,
+            authorize_path=self._operation.allows_file,
+        )
+        links = record_governance._LinkProjector.create(
+            self.root, manifest, policy=self._operation.policy,
+            authorize_path=self._operation.allows_file,
+        )
         saved_views = record_governance._inspection_saved_views(self.root, manifest, links, diagnostics)
-        pending = self.connection.execute(
-            "SELECT COUNT(*) FROM projection_state WHERE collection_id = ? AND state = 'pending'",
-            (manifest.collection_id,),
-        ).fetchone()[0]
+        allowed_rows = {item["row_id"] for item in items}
+        catalog = self._operation.catalog(manifest.collection_id)
+        complete = len(items) == sum(isinstance(subject.row_id, int) for subject in catalog)
+        held_paths = {subject.basis.subject.path for subject in catalog if subject.row_id in held_ids}
+        pending = sum(
+            kind == "manifest" or row_id in allowed_rows or (kind == "log" and complete)
+            or (kind == "held" and path in held_paths)
+            for path, row_id, kind in self.connection.execute(
+                "SELECT path,row_id,kind FROM projection_state WHERE collection_id=? AND state='pending'",
+                (manifest.collection_id,),
+            )
+        )
         held = self.connection.execute(
             "SELECT held_id, updated_at, candidate_json, diagnostics_json, kind, code "
-            "FROM held_candidates WHERE collection_id = ? ORDER BY held_id",
-            (manifest.collection_id,),
+            f"FROM held_candidates WHERE collection_id = ? AND held_id IN ({','.join('?' for _ in held_ids)}) ORDER BY held_id",
+            (manifest.collection_id, *sorted(held_ids)),
         ).fetchall()
         corrections = [candidate for candidate in held if candidate[4] != "write-refusal"]
         if pending:
@@ -168,11 +224,11 @@ class CollectionWriter:
         for code in sorted({candidate[5] for candidate in corrections}):
             diagnostics.append({"code": code, "reason": "held collection view correction"})
         guards = {"expected_manifest_hash": manifest.manifest_version.hash,
-                  "expected_container_hash": self._container(row)}
+                  "expected_container_hash": self._container(row) if complete else visible_snapshot}
         payload = {
             "kind": "collection", "report_only": True,
             "contract": record_governance._inspection_contract(manifest),
-            "snapshot": self._container(row),
+            "snapshot": visible_snapshot,
             "source_versions": [{"path": v.path, "hash": v.hash} for v in source_versions[:record_governance._MAX_ITEM_ENTRIES]],
             "diagnostics": diagnostics[:64],
             "audit": {"status": "ok" if row["audit_head"] else "baseline", "gaps": []},
@@ -180,12 +236,13 @@ class CollectionWriter:
         }
         if manifest.item_presentation or manifest.record_presentation or manifest.item_filename:
             payload["presentation"] = record_governance._presentation_inspection(inspection.presentation, manifest)
-        if declared.kind == "intended":
+        if declared.kind == "intended" and facade_profile != "records":
             payload["contract"].pop("plans")
             payload["contract"].pop("claims", None)
             return planning._project_inspection(payload, manifest)
         observations = due_state.collection_observation_coverage(
-            self.root, manifest.path, authorize_path=lambda path: True
+            self.root, manifest.path, authorize_path=self._operation.allows_file,
+            now=dt.datetime.fromtimestamp(self._operation.now, dt.UTC),
         )
         payload.update({
             "legacy": None,
@@ -216,6 +273,13 @@ class CollectionWriter:
     def _identity(
         self, action: str, selector: Any, args: Mapping[str, Any], request_id: str | None
     ):
+        if action != "create":
+            self._collection(selector)
+        else:
+            existing = self.connection.execute("SELECT collection_id FROM collections WHERE manifest_path=?",
+                                               (collections._reference_key(self.root, str(selector)),)).fetchone()
+            if existing is not None:
+                self._collection(existing[0])
         identity = (
             request_id if request_id is not None else writer_lease.active_mutation_request_id()
         )
@@ -240,9 +304,10 @@ class CollectionWriter:
                     "INVALID_REQUEST_ID", "request identity must be non-empty"
                 )
             stored = self.connection.execute(
-                "SELECT request_hash, receipt_json FROM txns WHERE request_id = ?", (identity,)
+                "SELECT request_hash, receipt_json, collection_id FROM txns WHERE request_id = ?", (identity,)
             ).fetchone()
             if stored is not None:
+                self._operation.require_collection(stored[2])
                 if stored[0] != digest:
                     raise collections.CollectionError(
                         "IDEMPOTENCY_KEY_REUSED",
@@ -345,9 +410,10 @@ class CollectionWriter:
     def _manifest(
         self, manifest: collections.CollectionManifest, text: str, version: int, txn_id: int
     ):
-        data = yaml.safe_load(text.split("---", 2)[1])
+        data, _, _ = vault.parse_frontmatter(text, strict=True)
         self.connection.execute(
-            "INSERT INTO collection_manifests VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO collection_manifests(collection_id,manifest_version,manifest_text,manifest_hash,"
+            "schema_json,natural_key_json,txn_id,governance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 manifest.collection_id,
                 version,
@@ -356,6 +422,7 @@ class CollectionWriter:
                 _json(data["item_schema"]),
                 _json(list(manifest.schema.natural_key)),
                 txn_id,
+                governance.manifest_metadata(text),
             ),
         )
         self._pending(manifest.path, manifest.collection_id, "manifest", version, text)
@@ -370,7 +437,7 @@ class CollectionWriter:
         request_id: str | None = None,
     ) -> dict[str, Any]:
         records._validate_why(why)
-        with self.handle.transaction():
+        with self.handle.transaction(), self._authorization():
             identity, digest, replay = self._identity(
                 "create",
                 manifest_path,
@@ -383,6 +450,14 @@ class CollectionWriter:
                 self.root, manifest_path, manifest_text.encode()
             )
             declared = types.type_for_manifest(manifest)
+            if self._facade_profile is not None and manifest.semantic_profile != self._facade_profile:
+                raise collections.CollectionError(
+                    "PLANNING_PROFILE_REQUIRED" if self._facade_profile == "planning" else "RECORDS_PROFILE_REQUIRED",
+                    f"{self._facade_profile.title()} collection is required",
+                )
+            if self._facade_profile == "planning" and scaffold:
+                manifest_text = planning._with_default_scaffold(manifest_text, manifest)
+                manifest = collections.parse_manifest_bytes(self.root, manifest_path, manifest_text.encode())
             if declared.kind == "intended":
                 planning.require_planning_profile(manifest)
             records._refuse_excluded_manifest_fields(manifest)
@@ -394,10 +469,13 @@ class CollectionWriter:
             if manifest.view_diagnostics:
                 diagnostic = manifest.view_diagnostics[0]
                 raise collections.CollectionError(diagnostic.code, diagnostic.reason)
-            if self.connection.execute(
-                "SELECT 1 FROM collections WHERE collection_id = ? OR manifest_path = ? OR source_path = ?",
+            conflicts = self.connection.execute(
+                "SELECT collection_id FROM collections WHERE collection_id = ? OR manifest_path = ? OR source_path = ?",
                 (manifest.collection_id, manifest.path, manifest.storage.source),
-            ).fetchone():
+            ).fetchall()
+            if conflicts:
+                for (cid,) in conflicts:
+                    self._operation.require_collection(cid)
                 raise collections.CollectionError(
                     "CREATE_ONLY_CONFLICT", "collection manifest already exists"
                 )
@@ -448,11 +526,14 @@ class CollectionWriter:
                 outcome="committed",
                 audit_correlation=txn["transition_id"],
             )
-            governance_precommit_pending(self.connection, manifest, affected)
+            self._precommit(manifest)
             self._insert_txn(txn, receipt)
         return receipt
 
-    def _validate(self, manifest, declared, key, values, *, before=None, operation="append"):
+    def _validate(
+        self, manifest, declared, key, values, *, before=None, operation="append",
+        validate_graph=True,
+    ):
         if declared.kind == "intended":
             planning.require_planning_profile(manifest)
             values = planning.normalize_item(
@@ -464,7 +545,7 @@ class CollectionWriter:
             if before is not None:
                 planning._require_same_area_side(before, values)
         values = records._validate_values(manifest, values)
-        if declared.validators:
+        if declared.validators and validate_graph:
             plans = {
                 k: json.loads(v)
                 for k, v in self.connection.execute(
@@ -545,10 +626,17 @@ class CollectionWriter:
             + candidate_body
             + "\n```\n"
         )
+        metadata = self.connection.execute(
+            "SELECT m.governance_json FROM collection_manifests m JOIN collections c "
+            "ON c.collection_id=m.collection_id AND c.manifest_version=m.manifest_version WHERE c.collection_id=?",
+            (manifest.collection_id,),
+        ).fetchone()[0]
+        before = json.loads(self._item(manifest.collection_id, key)["values_json"]) if candidate["action"] == "update" else None
+        held_metadata = governance.held_metadata(manifest.schema, candidate, metadata, before)
         self.connection.execute(
-            "INSERT INTO held_candidates (held_id, collection_id, kind, code, candidate_json, diagnostics_json, view_path, updated_at, held_bytes) "
-            "VALUES (?, ?, 'write-refusal', ?, ?, ?, ?, ?, ?) ON CONFLICT(held_id) DO UPDATE SET "
-            "code = excluded.code, candidate_json = excluded.candidate_json, diagnostics_json = excluded.diagnostics_json, updated_at = excluded.updated_at, held_bytes = excluded.held_bytes",
+            "INSERT INTO held_candidates (held_id, collection_id, kind, code, candidate_json, diagnostics_json, view_path, updated_at, held_bytes,governance_json,governance_hash) "
+            "VALUES (?, ?, 'write-refusal', ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(held_id) DO UPDATE SET "
+            "code = excluded.code, candidate_json = excluded.candidate_json, diagnostics_json = excluded.diagnostics_json, updated_at = excluded.updated_at, held_bytes = excluded.held_bytes, governance_json=excluded.governance_json, governance_hash=excluded.governance_hash",
             (
                 reference,
                 manifest.collection_id,
@@ -558,10 +646,12 @@ class CollectionWriter:
                 path,
                 now,
                 text.encode(),
+                held_metadata,
+                hashlib.sha256(text.encode()).hexdigest(),
             ),
         )
         self._pending(path, manifest.collection_id, "held", 1, text)
-        governance_precommit_pending(self.connection, manifest, [path])
+        self._precommit(manifest)
         return collections.CollectionError(
             error.code,
             error.reason,
@@ -601,7 +691,7 @@ class CollectionWriter:
         validated, guards = [], []
         cache = {}
         for source in sources:
-            resolved = records._resolve_bulk_source(self.root, source, lambda path: True, cache)
+            resolved = records._resolve_bulk_source(self.root, source, self._operation.allows_file, cache)
             if resolved is None:
                 raise collections.CollectionError(
                     "INVALID_RECORD_SOURCE", "source must be a preserved Sources or Evidence page"
@@ -615,9 +705,15 @@ class CollectionWriter:
         natural_key = _natural_key(manifest, values)
         payload = tokens.payload_hash(manifest.schema.version, key, values, body)
         version = 1 if before is None else before["row_version"] + 1
+        manifest_metadata = self.connection.execute(
+            "SELECT m.governance_json FROM collection_manifests m JOIN collections c "
+            "ON c.collection_id=m.collection_id AND c.manifest_version=m.manifest_version WHERE c.collection_id=?",
+            (manifest.collection_id,),
+        ).fetchone()[0]
+        metadata = governance.row_metadata(manifest.schema, values, manifest_metadata)
         if before is None:
             cursor = self.connection.execute(
-                "INSERT INTO items (collection_id, item_key, natural_key, row_version, schema_version, values_json, body, payload_hash, view_path, created_txn, updated_txn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO items (collection_id, item_key, natural_key, row_version, schema_version, values_json, body, payload_hash, view_path, created_txn, updated_txn,governance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     manifest.collection_id,
                     key,
@@ -630,14 +726,15 @@ class CollectionWriter:
                     path,
                     txn["txn_id"],
                     txn["txn_id"],
+                    metadata,
                 ),
             )
             row_id = cursor.lastrowid
         else:
             row_id = before["row_id"]
             self.connection.execute(
-                "UPDATE items SET natural_key = ?, row_version = ?, values_json = ?, body = ?, payload_hash = ?, updated_txn = ? WHERE row_id = ?",
-                (natural_key, version, _json(values), body, payload, txn["txn_id"], row_id),
+                "UPDATE items SET natural_key = ?, row_version = ?, values_json = ?, body = ?, payload_hash = ?, updated_txn = ?,governance_json=? WHERE row_id = ?",
+                (natural_key, version, _json(values), body, payload, txn["txn_id"], metadata, row_id),
             )
         self.connection.execute(
             "INSERT INTO item_versions VALUES (?, ?, ?, ?, ?, ?)",
@@ -728,30 +825,39 @@ class CollectionWriter:
             held=held,
             sources=list(sources),
         )
-        with self.handle.transaction():
+        with self.handle.transaction(), self._authorization():
             identity, digest, replay = self._identity("append", collection, arguments, request_id)
             if replay is not None:
                 return replay
             row, manifest, declared = self._collection(collection)
             resumed = self._held(manifest.collection_id, held)
-            if item is None and resumed is None:
+            if (item is None and resumed is None) or (
+                item is not None and not isinstance(item, Mapping)
+            ):
                 raise collections.CollectionError("INVALID_ITEM", "item must be an object")
             values = (
-                records._apply_held_overrides(resumed["candidate"].get("item", {}), item or {})
+                records._apply_held_overrides(
+                    resumed["candidate"].get("item", {}), {} if item is None else item
+                )
                 if resumed
                 else item
             )
             if resumed and resumed["candidate"]["action"] != "append":
                 raise records._held_not_found()
-            body = (
-                (resumed["candidate"].get("body") or "") if body is None and resumed else body or ""
-            )
+            if body is None and resumed:
+                body = resumed["candidate"].get("body")
+            if body is None:
+                body = ""
             records._validate_body(body)
             records._refuse_excluded_authored_names(values)
             if manifest.storage.strategy == "markdown-log" and body:
                 raise collections.CollectionError(
                     "UNREPRESENTABLE_RECORD_BODY",
                     "markdown-log storage cannot represent item bodies",
+                )
+            if declared.kind == "intended":
+                values = planning.normalize_item(
+                    values, validate_motivation=planning.motivation_is_governed(manifest)
                 )
             key = (
                 records._validate_item_key(item_key, manifest=manifest, candidate=values)
@@ -804,14 +910,13 @@ class CollectionWriter:
                         after_item_hash=self._version(existing),
                         before_container_hash=before_container,
                         after_container_hash=before_container,
-                        affected_paths=[existing["view_path"].split("#")[0]],
+                        affected_paths=[manifest.storage.source if manifest.storage.strategy == "markdown-log"
+                                        else existing["view_path"]],
                         payload_hash=payload,
                         outcome="replayed",
                         audit_correlation=insert[0],
                     )
-                    governance_precommit_pending(
-                        self.connection, manifest, result["affected_paths"]
-                    )
+                    self._precommit(manifest)
                     if delivery_guard:
                         delivery_guard.recheck(self.root)
                     self._release(resumed)
@@ -853,14 +958,12 @@ class CollectionWriter:
                         after_item_hash=item_hash,
                         before_container_hash=before_container,
                         after_container_hash=after_container,
-                        affected_paths=[path.split("#")[0]],
+                        affected_paths=[manifest.storage.source if manifest.storage.strategy == "markdown-log" else path],
                         payload_hash=payload,
                         outcome="committed",
                         audit_correlation=txn["transition_id"],
                     )
-                    governance_precommit_pending(
-                        self.connection, manifest, result["affected_paths"]
-                    )
+                    self._precommit(manifest)
                     if delivery_guard:
                         delivery_guard.recheck(self.root)
                     for guard in source_guards:
@@ -904,7 +1007,7 @@ class CollectionWriter:
             held=held,
             sources=list(sources),
         )
-        with self.handle.transaction():
+        with self.handle.transaction(), self._authorization():
             identity, digest, replay = self._identity(operation, collection, arguments, request_id)
             if replay is not None:
                 return replay
@@ -918,7 +1021,13 @@ class CollectionWriter:
                 candidate = resumed["candidate"]
                 if candidate["action"] != "update" or candidate["item_key"] != key:
                     raise records._held_not_found()
-                changes = records._apply_held_overrides(candidate.get("changes", {}), changes or {})
+                if changes is not None and not isinstance(changes, Mapping):
+                    raise collections.CollectionError(
+                        "INVALID_RECORD_CHANGES", "changes must be a non-empty object"
+                    )
+                changes = records._apply_held_overrides(
+                    candidate.get("changes", {}), {} if changes is None else changes
+                )
                 delete_fields = delete_fields or tuple(candidate.get("delete_fields", ()))
                 body = candidate.get("body") if body is None else body
             if not isinstance(changes, Mapping) or (
@@ -926,6 +1035,12 @@ class CollectionWriter:
             ):
                 raise collections.CollectionError(
                     "INVALID_RECORD_CHANGES", "changes must be a non-empty object"
+                )
+            if refresh_presentation and (
+                manifest.record_presentation is None and manifest.item_presentation is None
+            ):
+                raise collections.CollectionError(
+                    "INVALID_RECORD_PRESENTATION", "collection has no presentation recipe"
                 )
             records._refuse_excluded_authored_names(changes)
             old_values = json.loads(before["values_json"])
@@ -993,6 +1108,16 @@ class CollectionWriter:
                     key,
                 )
             else:
+                if refresh_presentation and not changes and not delete_fields and body is None:
+                    projection = self.connection.execute(
+                        "SELECT COALESCE(pending_sha256, published_sha256) FROM projection_state WHERE path = ?",
+                        (before["view_path"],),
+                    ).fetchone()
+                    rendered = record_formats.render_markdown_item(manifest, final, key, final_body)
+                    if projection and projection[0] == hashlib.sha256(rendered.encode()).hexdigest():
+                        raise collections.CollectionError(
+                            "NOOP_RECORD_PRESENTATION", "managed presentation is already current"
+                        )
                 self._twins(manifest.collection_id, key, _natural_key(manifest, final))
                 verified, source_guards = self._sources(sources)
                 txn = self._txn(
@@ -1030,12 +1155,13 @@ class CollectionWriter:
                     after_item_hash=item_hash,
                     before_container_hash=self._container(row),
                     after_container_hash=after_container,
-                    affected_paths=[before["view_path"].split("#")[0]],
+                    affected_paths=[manifest.storage.source if manifest.storage.strategy == "markdown-log"
+                                    else before["view_path"]],
                     payload_hash=None,
                     outcome="committed",
                     audit_correlation=txn["transition_id"],
                 )
-                governance_precommit_pending(self.connection, manifest, result["affected_paths"])
+                self._precommit(manifest)
                 for guard in source_guards:
                     guard.recheck(self.root)
                 self._insert_txn(txn, result)
@@ -1054,7 +1180,7 @@ class CollectionWriter:
         request_id=None,
     ):
         records._validate_why(why)
-        with self.handle.transaction():
+        with self.handle.transaction(), self._authorization():
             identity, digest, replay = self._identity(
                 "revise",
                 collection,
@@ -1092,20 +1218,39 @@ class CollectionWriter:
                     "revision cannot migrate collection representation",
                 )
             records._refuse_excluded_manifest_fields(proposed)
+            if proposed.view_diagnostics:
+                diagnostic = proposed.view_diagnostics[0]
+                raise collections.CollectionError(diagnostic.code, diagnostic.reason)
             record_formats.validate_storage_contract(proposed)
             if declared.kind == "intended":
                 planning.require_planning_profile(proposed)
-            for key, values in self.connection.execute(
-                "SELECT item_key, values_json FROM items WHERE collection_id = ?",
-                (current.collection_id,),
-            ).fetchall():
-                self._validate(proposed, declared, key, json.loads(values), operation="revise")
+            plans = {
+                key: self._validate(proposed, declared, key, json.loads(values),
+                                    operation="revise", validate_graph=False)
+                for key, values in self.connection.execute(
+                    "SELECT item_key, values_json FROM items WHERE collection_id = ?",
+                    (current.collection_id,),
+                )
+            }
+            for name in declared.validators:
+                types.named_validator(name).validate(proposed, plans)
             txn = self._txn(row, proposed, "revise", why, identity, digest)
             self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
             self.connection.execute(
                 "UPDATE collections SET manifest_version = ?, audit_reader_version = 2 WHERE collection_id = ?",
                 (txn["manifest_version_after"], current.collection_id),
             )
+            metadata = governance.manifest_metadata(manifest_text)
+            self.connection.executemany("UPDATE items SET governance_json=? WHERE collection_id=? AND item_key=?",
+                ((governance.row_metadata(proposed.schema, values, metadata), current.collection_id, key)
+                 for key, values in plans.items()))
+            for held_id, encoded in self.connection.execute(
+                "SELECT held_id,candidate_json FROM held_candidates WHERE collection_id=?", (current.collection_id,),
+            ).fetchall():
+                candidate = records._decode_held_value(json.loads(encoded))
+                before = plans.get(candidate.get("item_key"))
+                self.connection.execute("UPDATE held_candidates SET governance_json=? WHERE held_id=?",
+                    (governance.held_metadata(proposed.schema, candidate, metadata, before), held_id))
             after_container = self._advance(txn)
             payload = records.lifecycle_request_hash(
                 action="revise",
@@ -1131,18 +1276,18 @@ class CollectionWriter:
                 checkpoint_snapshot_hash=None,
                 affected_paths=(current.path,),
             )
-            governance_precommit_pending(self.connection, proposed, [current.path])
+            self._precommit(proposed)
             self._insert_txn(txn, receipt)
         return receipt
 
     def discard_held(self, collection, *, held, why):
         records._validate_why(why)
-        with self.handle.transaction():
+        with self.handle.transaction(), self._authorization():
             _, manifest, _ = self._collection(collection)
             candidate = self._held(manifest.collection_id, held)
             if candidate is None:
                 raise records._held_not_found()
-            governance_precommit_pending(self.connection, manifest, [candidate["view_path"]])
+            self._precommit(manifest)
             self._release(candidate)
             receipt = {
                 "_record_receipt": "exomem.records-mutation",

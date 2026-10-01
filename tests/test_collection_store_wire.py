@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from copy import deepcopy
 
 import pytest
 
@@ -14,28 +15,34 @@ from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifes
 
 
 def normalized(value):
-    hashes = {
-        "before_item_hash", "after_item_hash", "before_container_hash", "after_container_hash",
-        "snapshot", "expected_container_hash", "expected_manifest_hash",
-        "before_manifest_hash", "after_manifest_hash",
-    }
-    identities = {"audit_correlation", "transition_id", "held_at", "committed_at"}
-    if isinstance(value, dict):
-        lifecycle = value.get("operation") == "revise"
-        source_version = set(value) == {"path", "hash"}
-        # A saved view's identity hashes its manifest hash, so it is mode-local (tasks.md P1a.5).
-        saved_view = set(value) == {"name", "definition", "identity"}
-        return {
-            k: "<hash>" if v is not None and (
-                k in hashes or (k == "payload_hash" and lifecycle) or (k == "hash" and source_version)
-            ) else "<identity>" if v is not None and (
-                k in identities or (k == "identity" and saved_view)
-            ) else normalized(v)
-            for k, v in value.items()
-        }
-    if isinstance(value, list):
-        return [normalized(v) for v in value]
-    return value
+    result = deepcopy(value)
+    if not isinstance(result, dict):
+        return result
+
+    def mask(mapping, names, placeholder):
+        for name in names:
+            if name in mapping and mapping[name] is not None:
+                mapping[name] = placeholder
+
+    receipt = (result.get("_record_receipt") == "exomem.records-mutation"
+               or result.get("_plan_receipt") == "exomem.planning-mutation")
+    if receipt:
+        mask(result, ("before_item_hash", "after_item_hash", "before_container_hash",
+                      "after_container_hash", "before_manifest_hash", "after_manifest_hash"), "<hash>")
+        mask(result, ("audit_correlation",), "<identity>")
+        if result.get("receipt_version") == 2 and result.get("operation") in {"revise", "rebaseline"}:
+            mask(result, ("payload_hash",), "<hash>")
+    if result.get("kind") == "collection" and result.get("report_only") is True:
+        mask(result, ("snapshot",), "<hash>")
+        mask(result.get("lifecycle_guards", {}),
+             ("expected_container_hash", "expected_manifest_hash"), "<hash>")
+        for version in result.get("source_versions", []):
+            mask(version, ("hash",), "<hash>")
+        for view in result.get("saved_views", []):
+            mask(view, ("identity",), "<identity>")
+        for held in result.get("coverage", {}).get("held_refs", []):
+            mask(held, ("held_at",), "<identity>")
+    return result
 
 
 def same_wire(left, right):
@@ -255,3 +262,68 @@ def test_planning_triage_and_hierarchy_refusal_wire(paired):
         errors.append(caught.value)
     assert errors[0].code == errors[1].code == "INVALID_PLAN"
     assert handle.connection.execute("SELECT COUNT(*) FROM txns").fetchone()[0] == 3
+
+
+@pytest.mark.parametrize("field,value", [
+    ("snapshot", "A"), ("identity", "A"), ("payload_hash", "A"),
+    ("nested", {"path": "authored", "hash": "A"}),
+    ("nested", {"name": "authored", "definition": {}, "identity": "A"}),
+    ("nested", {"operation": "revise", "payload_hash": "A"}),
+])
+def test_normalizer_preserves_authored_observed_values(paired, field, value):
+    invoke, _, _ = paired
+    field_type = "object" if isinstance(value, dict) else "string"
+    text = manifest_text().replace("    count: {type: integer}", f"    {field}: {{type: {field_type}}}")
+    invoke(1, "records", "create", manifest_path=manifest_path(), manifest_text=text, why="create")
+    invoke(1, "records", "append", collection=CID, item_key=KEY,
+           item={"title": "One", field: value}, why="capture")
+    inspection = invoke(1, "records", "inspect", collection=CID)
+    changed = deepcopy(inspection)
+    changed["observed_values"][field] = {"values": [{"value": "B", "count": 1}]}
+    assert normalized(inspection) != normalized(changed)
+    assert normalized(inspection)["observed_values"] == inspection["observed_values"]
+
+
+@pytest.mark.parametrize("authored", [
+    {"snapshot": "A"}, {"identity": "A"}, {"payload_hash": "A"},
+    {"path": "authored", "hash": "A"},
+    {"name": "authored", "definition": {}, "identity": "A"},
+    {"operation": "revise", "payload_hash": "A"},
+])
+def test_normalizer_preserves_saved_view_definitions_and_nested_lookalikes(authored):
+    payload = {"kind": "collection", "report_only": True, "snapshot": "mode-local",
+               "saved_views": [{"name": "one", "definition": authored, "identity": "mode-local"}],
+               "observed_values": {"nested": authored}, "other": authored}
+    result = normalized(payload)
+    assert result["saved_views"][0]["definition"] == authored
+    assert result["observed_values"]["nested"] == authored
+    assert result["other"] == authored
+
+
+def test_normalizer_requires_receipt_kind_for_lifecycle_payload_hash():
+    authored = {"operation": "revise", "payload_hash": "authored"}
+    assert normalized(authored) == authored
+
+
+def test_records_nonempty_saved_views_match_definitions_and_mode_local_identity(paired):
+    invoke, roots, handle = paired
+    text = manifest_text().removesuffix("---\n") + (
+        "views:\n  one:\n    query:\n      filters: [{column: title, op: eq, value: One}]\n---\n"
+    )
+    for mode in (0, 1):
+        invoke(mode, "records", "create", manifest_path=manifest_path(), manifest_text=text, why="create")
+    inspections = [invoke(mode, "records", "inspect", collection=CID) for mode in (0, 1)]
+    stored_text = handle.connection.execute("SELECT manifest_text FROM collection_manifests").fetchone()[0]
+    manifests = [collections.load_manifest(roots[0], manifest_path()),
+                 collections.parse_manifest_bytes(roots[1], manifest_path(), stored_text.encode())]
+    for manifest, inspection in zip(manifests, inspections):
+        assert len(inspection["saved_views"]) == 1
+        view = inspection["saved_views"][0]
+        assert set(view) == {"name", "definition", "identity"}
+        assert view["name"] == "one"
+        assert view["identity"] == collections.resolve_saved_view(manifest, "one").identity
+    same_wire(inspections[0]["saved_views"][0]["definition"], inspections[1]["saved_views"][0]["definition"])
+    for inspection in inspections:
+        inspection.pop("projection", None)
+        inspection["diagnostics"] = []
+    same_wire(*inspections)

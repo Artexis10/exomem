@@ -418,17 +418,19 @@ def test_hold_pending_hash_matches_rendered_held_bytes(store):
 
 def test_provenance_is_rechecked_at_precommit(store, monkeypatch):
     from exomem import vault
-    from exomem.collection_store import writer as writer_module
 
     create(store)
     source = "Knowledge Base/Sources/sample.md"
     (store.root / source).parent.mkdir(parents=True)
     (store.root / source).write_text("Sample\n")
 
+    original_precommit = store._precommit
+
     def change_source(*args):
+        original_precommit(*args)
         (store.root / source).write_text("Changed\n")
 
-    monkeypatch.setattr(writer_module, "governance_precommit_pending", change_source)
+    monkeypatch.setattr(store, "_precommit", change_source)
     with pytest.raises(vault.PathGuardError):
         store.append_record(CID, item={"title": "One"}, why="capture", sources=(source,))
     assert store.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0

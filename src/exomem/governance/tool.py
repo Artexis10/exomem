@@ -2166,20 +2166,19 @@ def _grant_v4(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         bound_policy = policy_module.load(vault_root)
         if bound_policy.empty or bound_policy.blocked:
             raise GovernanceError("GOVERNANCE_BLOCKED", "current policy cannot be evaluated")
-        membership_rows = _resolved_membership_manifest(
-            vault_root,
-            bound_policy,
-            review.paths,
-        )
+        from ..collection_store.governance import resolve_bound_membership
+
         fingerprints = dict(zip(review.paths, review.fingerprints, strict=True))
-        current_membership = tuple(
-            authorization_session_authority.SessionMembership(
-                path=str(row["path"]),
-                fingerprint=_content_hash(vault_root / str(row["path"])),
-                scope_ids=tuple(str(scope) for scope in row["scope_ids"]),
-            )
-            for row in membership_rows
-        )
+        current_membership = []
+        for path in review.paths:
+            canonical = resolve_bound_membership(vault_root, path, bound_policy, context.logical_vault_id)
+            if canonical is None:
+                canonical = authorization_session_authority.SessionMembership(
+                    path=path, fingerprint=_content_hash(vault_root / path),
+                    scope_ids=tuple(_resolved_membership_manifest(vault_root, bound_policy, (path,))[0]["scope_ids"]),
+                )
+            current_membership.append(canonical)
+        current_membership = tuple(current_membership)
         if any(
             row.fingerprint != fingerprints.get(row.path)
             for row in current_membership

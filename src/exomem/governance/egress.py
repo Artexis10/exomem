@@ -1586,6 +1586,41 @@ def _active_grants_for_snapshot(
     return active_grants, session_identity
 
 
+def canonical_subject_notices(
+    vault_root: Path, entries: Iterable[tuple[str, str, str, Decision]], *,
+    policy: Policy, principal: RequestPrincipal, purpose: str | None,
+) -> list[dict[str, Any]]:
+    """Finalize a committed canonical inspection after its read snapshots close."""
+    from ..collection_store.preview import bound_writer
+
+    writer = bound_writer(vault_root)
+    verified = isinstance(principal.verified_authorization_session,
+                          authorization_session_lifecycle.AuthorizationSessionContext)
+    notices = []
+    for identity, fingerprint, payload_hash, decision in entries:
+        _outcome_for_decision(
+            vault_root, identity, decision=decision, policy=policy,
+            audience=principal.audience_id,
+            outcome="release_authorized" if decision.level >= LEVEL_FULL else "withheld",
+            purpose=purpose, content_hash=payload_hash, purpose_is_bound=True,
+        )
+        if not 0 < decision.level < LEVEL_FULL:
+            continue
+        notice = _notice(decision.level, rule_ids=decision.rule_ids,
+                         scope_label=_scope_label(policy, decision), options=decision.options,
+                         bridge_abstraction=None)
+        if verified and writer is not None and not writer.connection.in_transaction:
+            token = _mint_escalation_quietly(
+                vault_root, rel_path=identity, who=principal, purpose=purpose, decision=decision,
+                requested_level=LEVEL_FULL, org_ceiling=_applicable_org_ceiling(policy, decision),
+                expected_content_hash=fingerprint,
+            )
+            if token is not None:
+                notice["escalation_token"] = token
+        notices.append(notice)
+    return notices
+
+
 def _is_markdown_path(rel_path: str) -> bool:
     """The ONE markdown-suffix predicate, case-insensitive.
 

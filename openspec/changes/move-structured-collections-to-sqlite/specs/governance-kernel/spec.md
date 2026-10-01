@@ -38,6 +38,8 @@ Collection manifest, view and template paths SHALL be governed vault-relative pa
 
 The query layer SHALL authorize each candidate item at L6 from identity-only columns before any value is decoded or can affect counts, caps, ordering, diagnostics, identity ambiguity, source versions, continuation snapshots, or reductions. It SHALL then compute filters, sort, pagination, totals and aggregates only over the authorized set. When the resolved policy cannot distinguish a collection's items for the audience, one collection-level decision MAY stand for every item. Authorized-only snapshots SHALL mean a hidden-only change does not invalidate a caller's continuation. A dataset file SHALL remain the governance boundary for all of its rows. Egress of a view file SHALL follow its items: an item view is released as its item, and a log view only when every item it renders is released to the caller.
 
+In store mode, a content-bound authorization-session grant SHALL bind to one canonical item's vault/store identity, stable reference, row version, canonical content hash and governance subject metadata, under its current manifest/type contracts and the existing audience, purpose, policy, expiry, revocation and organization-cap checks. Issuance, redemption and consumption SHALL use the same canonical basis, not projected-file bytes, collection generation or a sibling's content. Manifest authorization SHALL remain separate. A grant for an earlier item version SHALL NOT authorize changed content, including the proposed state of a mutation. File-mode grants SHALL remain unchanged, and migration SHALL NOT promote a file grant into a store grant.
+
 #### Scenario: Row-level policy withholds one item
 - **WHEN** a scope selects one item's stable reference and a rule withholds it from an audience
 - **THEN** queries for that audience return every other item, and counts, aggregates, pagination and continuations are identical to that item being absent
@@ -61,6 +63,14 @@ The query layer SHALL authorize each candidate item at L6 from identity-only col
 #### Scenario: Mixed-release collection mutation refuses
 - **WHEN** a caller can read only a subset of a collection's items and requests append, update or bulk upsert
 - **THEN** mutation refuses as if the collection were absent, because a uniqueness conflict or generation change could otherwise reveal a hidden item
+
+#### Scenario: Hidden sibling edit does not invalidate a row grant
+- **WHEN** a store-mode caller has a current grant for one released item in a log-layout collection and only a withheld sibling changes
+- **THEN** the unchanged item's grant remains valid and its released-only continuation reveals no sibling change
+
+#### Scenario: Changed content cannot inherit a row grant
+- **WHEN** a store-mode caller presents a grant for an item's earlier content against a changed or proposed new version
+- **THEN** the old grant contributes no authorization for the new content, and release or commit requires current authorization for the new basis
 
 ### Requirement: Planning item granularity and mutation require complete authorized state
 Planning items SHALL be governance subjects exactly as Records items are. Each candidate SHALL be authorized at L6 from identity-only columns before it can affect public caps, ordering, diagnostics, identity ambiguity, relationship validation, source versions, continuation snapshots, or reductions. Authorized-only snapshots SHALL mean a hidden-only change does not invalidate another caller's continuation. Planning mutation, including an applied view edit made by a non-owner principal, SHALL refuse when the caller cannot receive the complete collection state required for safe hierarchy and guard validation.

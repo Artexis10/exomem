@@ -450,6 +450,11 @@ The substrate SHALL make exact append retries idempotent where a stable item ide
 - **WHEN** a client appends the same observation twice without supplying an item identity and the payloads are identical
 - **THEN** the second append returns the committed item as a replay and the collection holds one item
 
+#### Scenario: Store Planning corrects an exact explicit-identity retry
+- **WHEN** store-mode public Planning `add` repeats an explicit existing `plan_id` with an identical normalized payload and a proven original insert, with collection scaffolding either enabled or disabled
+- **THEN** it returns a valid Planning `replayed` receipt without adding an item, generation or transition
+- **AND** the compatibility golden preserves legacy file mode's measured `PLAN_ID_CONFLICT` as the narrow declared behavior difference, without changing file mode or relaxing changed-content conflicts
+
 #### Scenario: Reused identity with different content refuses
 - **WHEN** an append supplies an existing item identity with materially different content, or omits the identity and the derived identity already exists with different content
 - **THEN** it refuses with a record identity conflict and preserves the existing item

@@ -226,6 +226,10 @@ There are three layers, and the first two already exist:
 2. **Content replay** is unchanged in meaning. An append whose identity already holds an identical `payload_hash` returns `outcome: "replayed"` and writes nothing. It no longer needs an audit-chain correlation walk (`_replay_audit_correlation` is deleted): the store proves the row exists with that payload and was created by an `insert` effect.
 3. **Store request identity (new, internal).** `txns.request_id` is `UNIQUE`, and `receipt_json` commits in the same transaction as the write. A retry that reaches the store with the same identity returns the recorded receipt. The same identity with a different `request_hash` refuses. That closes the one crash window the transport store cannot: a commit that happens before the transport ledger records it.
 
+**Planning compatibility ruling (2026-09-30, F10; clarified 2026-10-01).** Store-mode public Planning `add` with an explicit existing `plan_id` or the same identity derived from a complete natural key, an identical normalized payload and a proven original insert returns the ordinary valid Planning receipt with `outcome: "replayed"`, without a new item, generation or transition. Derived-identity replay already follows the canonical structured-collections idempotency requirement; it is not a new capability. Root independently reproduced both `[title]` and `[title, kind]` retries: legacy file mode returns `PLAN_ID_CONFLICT`, while store mode replays without changing its complete dump. The store corrects that legacy refusal with scaffolding either enabled or disabled. File mode is unchanged. This is the only error-parity exception for those exact retries; changed content, a natural-key twin with a different identity, invalid arguments and stale guards retain their ruled refusals. The public golden records each mode's exact outcome rather than normalizing a refusal into a receipt.
+
+**Inspection compatibility ruling (2026-10-01).** Records targeted inspection remains a generic collection inspection: it can inspect an existing Planning collection. Planning inspection still requires the Planning profile. Store preview must preserve that existing asymmetry, including successful UUID and manifest-path selectors and unchanged refusal codes for invalid or missing selectors. Inspection never mutates the store.
+
 View edits use a deterministic identity, `sha256(view_path, base_row_version, sha256(file bytes))`, so a watcher replay after a crash is a no-op (§6).
 
 ### 5. Markdown projection
@@ -298,6 +302,7 @@ The watcher is the human's write path, not a bypass. It uses the same leaf funct
 - `ref`: `exomem://<item_type>/<cid>/<key>` (`record`, `plan`, or a declared type's `item_type`, such as `recipe`);
 - `type`: the type's `item_type`;
 - `tags`: the values of a schema-declared `tags` field, if any;
+- `classes`: author-declared values of a schema-declared `classes` field, if any, using the existing class selector's list and normalization semantics; manifest classes classify the manifest and do not silently classify its rows;
 - `project`: the project of the manifest;
 - `default_deny`: the subject-level default from its type's `default_audience` (§14.6).
 
@@ -306,6 +311,12 @@ The existing pure evaluator, scopes (`paths`, `refs`, `tags`, `types`, `projects
 No per-row audience column is added. Governance stays in one authored place, and a data write can never widen or narrow its own release (ruled R3).
 
 **Resolved once per operation.** The policy, tombstones and state paths are resolved once per call, which is #1457 fix 1. Every row then evaluates against that resolved policy in memory.
+
+**Store-mode content grants (owner ruling, 2026-10-01).** Content-bound authorization-session grants for structured store results bind to an individual canonical row, not its rendered item file or the shared log view. The basis includes the vault/store identity, stable item reference, row version, canonical content hash and governance subject metadata; current manifest/type contracts and the existing audience, purpose, policy, expiry, revocation and organization-cap checks still apply. It excludes sibling rows, collection generation and rendered-file hashes. The same canonical basis is used when issuing, redeeming and consuming a store grant, before decoding the row's values or body. A manifest has its own authorization basis and is checked separately.
+
+A hidden sibling's edit therefore cannot invalidate an unchanged released row's grant or continuation. A changed row requires authorization against its new basis: a grant for the old content is never carried into a proposed or committed new version. Mutation checks the complete current state and the proposed state inside the transaction; a content grant valid for the former does not authorize changed content in the latter. Whole-view egress still requires authorization for the manifest and every rendered row, rather than widening one row's grant to the log.
+
+File-mode grant issuance, redemption and consumption remain unchanged. Migration does not promote a file grant into a store grant, and missing or stale views never supply store authority. Authored scope selectors and standing-policy semantics remain the existing evaluator's; this ruling introduces neither a new policy language nor a per-row audience setting.
 
 **Uniform-release fast path.** A collection is uniform for an audience when no scope in the resolved policy can distinguish its rows. That means no path selector matches strictly below the projection root, no ref selector names one of its rows, and no tag or class selector can match a row-declared value. Then one decision covers the manifest and every row:
 - L6: the whole collection is visible, and filters, sort, limit and aggregates may push down into SQL.
@@ -321,7 +332,9 @@ The same set feeds `snapshot` (§3). Withheld rows are indistinguishable from ab
 
 **Composition with existing governance**
 - **Mutation** still requires the complete authorized state. If any row of the collection is withheld from the caller, append, update, bulk upsert, revise and rebaseline refuse `COLLECTION_NOT_FOUND`, as they do today. Relaxing this would let a uniqueness conflict or a generation bump reveal a hidden row. It is now a cheap check: the uniform-release decision, or one identity-only pass.
-- The precommit governance hook (`precommit_authorize_mutation`) runs inside the store transaction before `COMMIT`. A refusal rolls the transaction back, so no row, transition or receipt exists.
+- The precommit governance hook (`precommit_authorize_mutation`) runs inside the store transaction before `COMMIT`. A refusal rolls the transaction back, so no changed row, mutation transition or mutation receipt survives. The separate governance disclosure receipt may record authorization before publication; it claims no mutation commit, including when a later commit fails.
+- Idempotent replay rechecks the caller's current authorization before decoding or returning the stored mutation receipt. Request identity grants no access, and a changed policy, audience or authorization-session basis can make a previously valid replay refuse.
+- A uniform-row release proof does not authorize the manifest. Manifest visibility is checked separately because a type/ref/tag selector may treat all rows alike while treating their manifest differently.
 - The envelope projectors (`project_query_result`, `project_mutation_receipt`, `_LinkProjector`) are unchanged. They run over the store results.
 - **Egress of view files** through `get_page`, `find` and other tools resolves the file to its rows. An item view is released exactly as its row. A log view is released only when every row it renders is released to the caller; otherwise the whole file is withheld, so withheld stays absent. Filesystem readers are the owner, who is not subject to scope defaults.
 - **Held candidates** keep their rule: they are filtered like items before being disclosed or counted.
@@ -355,6 +368,7 @@ The same set feeds `snapshot` (§3). Withheld rows are indistinguishable from ab
 | C21 | refusal and hold codes | `COLLECTION_STORE_SYNC_PENDING` (retryable), `COLLECTION_STORE_DIVERGED`, `COLLECTION_VIEW_PATH`; held `VIEW_FOREIGN`, `VIEW_MOVED`; the `view_move` effect label (§16) | additive |
 | C22 | views | every item and manifest view gains the reserved `exomem_view` stamp, and every log block gains a stamp comment replacing the audit marker (§16 A2) | the stamp is refused in `item` / `changes` and ignored by the payload hash |
 | C23 | CLI | `exomem collections migrate`, `adopt-local`, `backup --to/--stdout` | additive |
+| C24 | Planning stable-identity content replay | identical normalized `add` with an explicit or natural-key-derived identity and the original insert proven returns `outcome: replayed` in store mode (§4), where legacy file mode refuses | canonical idempotency; narrow compatibility correction, no wire-shape or file-mode change |
 | C14 | receipts | `receipt_version: 1` shapes unchanged. `audit_correlation` is the 24-hex `transition_id` of the one transaction | unchanged |
 
 **Frozen hosted candidates** are unchanged. `hosted_legacy_profile_schemas.json` pins v1–v4 and `test_hosted_legacy_profile_pin.py` re-derives the pin. `minimum_records_reader_version` stays 2: `audit_reader_version` (1 or 2) is kept per collection and reported as today, and the store has its own `schema_version` that the wire does not expose. The local surface, the v5 candidate, the command binding and the derived artifacts are regenerated only for C11 and C12.

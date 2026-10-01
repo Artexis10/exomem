@@ -13,7 +13,6 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
-from .. import planning
 from .. import structured_collections as collections
 from .connection import CollectionStoreError, WriterConnection
 from .writer import CollectionWriter
@@ -35,6 +34,11 @@ def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[Collec
         _BOUND.reset(token)
 
 
+def bound_writer(vault_root: Path) -> CollectionWriter | None:
+    binding = _BOUND.get()
+    return binding[1] if binding is not None and binding[0] == Path(vault_root).resolve() else None
+
+
 def dispatch(
     vault_root: Path, profile: str, action: str, values: Mapping[str, Any]
 ) -> tuple[bool, Any]:
@@ -50,22 +54,14 @@ def dispatch(
     args = {name: value for name, value in values.items() if value is not None}
     if action == "describe":
         return False, None
-    if action == "create":
-        proposed = collections.parse_manifest_bytes(
-            writer.root, args["manifest_path"], args["manifest_text"].encode()
-        )
-    else:
-        _, proposed, _ = writer._collection(args["collection"])
-    if proposed.semantic_profile != profile:
-        raise collections.CollectionError(
-            "PLANNING_PROFILE_REQUIRED" if profile == "planning" else "RECORDS_PROFILE_REQUIRED",
-            f"{profile.title()} collection is required",
-        )
+    writer._facade_profile = profile
+    # Records inspection is generic in file mode; only its mutations require
+    # the Records profile. Planning inspection retains its profile guard.
+    if action == "inspect" and profile == "records":
+        return True, writer.inspect_collection(args["collection"], facade_profile=profile)
     if action == "inspect":
         return True, writer.inspect_collection(args["collection"])
     if action == "create":
-        if profile == "planning" and args.get("scaffold", True):
-            args["manifest_text"] = planning._with_default_scaffold(args["manifest_text"], proposed)
         return True, writer.create_collection(**args)
     collection = args.pop("collection")
     if profile == "planning" and "plan_id" in args:
@@ -76,6 +72,8 @@ def dispatch(
         args["changes"] = args.pop("transition")
         args["operation"] = "triage"
     if action in {"update", "triage"}:
+        args.setdefault("changes", {})
+        args["refresh_presentation"] = args.get("refresh_presentation") is True
         return True, writer.update_record(collection, **args)
     if action == "revise":
         return True, writer.revise_collection(collection, **args)

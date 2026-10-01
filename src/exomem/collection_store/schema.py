@@ -28,12 +28,13 @@ the effect-to-transaction reference is checked at ``COMMIT``.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import sqlite3
 import uuid
 from collections.abc import Callable
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -359,8 +360,53 @@ def _migrate_to_1(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_2(conn: sqlite3.Connection) -> None:
+    """Persist canonical authorization metadata without changing the shipped V1 DDL."""
+    from .. import structured_collections as collections, vault
+    from . import governance
+
+    conn.execute("ALTER TABLE collection_manifests ADD COLUMN governance_json TEXT")
+    conn.execute("ALTER TABLE items ADD COLUMN governance_json TEXT")
+    conn.execute("ALTER TABLE held_candidates ADD COLUMN governance_json TEXT")
+    conn.execute("ALTER TABLE held_candidates ADD COLUMN governance_hash TEXT")
+    conn.execute("DROP TRIGGER IF EXISTS collection_manifests_append_only_update")
+    manifests = {}
+    for cid, version, text, schema_json in conn.execute(
+        "SELECT collection_id,manifest_version,manifest_text,schema_json FROM collection_manifests"
+    ).fetchall():
+        metadata = governance.manifest_metadata(text)
+        data, _, _ = vault.parse_frontmatter(text, strict=True)
+        item_schema = collections._parse_schema(data["schema_version"], json.loads(schema_json))
+        manifests[cid, version] = (metadata, item_schema)
+        conn.execute("UPDATE collection_manifests SET governance_json=? "
+                     "WHERE collection_id=? AND manifest_version=?", (metadata, cid, version))
+    for row_id, cid, version, values in conn.execute(
+        "SELECT i.row_id,i.collection_id,c.manifest_version,i.values_json FROM items i "
+        "JOIN collections c ON c.collection_id=i.collection_id"
+    ).fetchall():
+        metadata, item_schema = manifests[cid, version]
+        conn.execute("UPDATE items SET governance_json=? WHERE row_id=?",
+                     (governance.row_metadata(item_schema, json.loads(values), metadata), row_id))
+    for held_id, cid, version, raw, candidate in conn.execute(
+        "SELECT h.held_id,h.collection_id,c.manifest_version,h.held_bytes,h.candidate_json "
+        "FROM held_candidates h JOIN collections c ON c.collection_id=h.collection_id"
+    ).fetchall():
+        metadata, item_schema = manifests[cid, version]
+        candidate = json.loads(candidate)
+        before = None
+        if candidate.get("action") == "update":
+            current = conn.execute("SELECT values_json FROM items WHERE collection_id=? AND item_key=?",
+                                   (cid, candidate.get("item_key"))).fetchone()
+            before = json.loads(current[0]) if current is not None else None
+        conn.execute("UPDATE held_candidates SET governance_json=?,governance_hash=? WHERE held_id=?",
+                     (governance.held_metadata(item_schema, candidate, metadata, before),
+                      hashlib.sha256(raw).hexdigest(), held_id))
+    for statement in _append_only_triggers("collection_manifests"):
+        conn.execute(statement)
+
+
 #: Forward migrations: ``MIGRATIONS[n]`` takes a store at version ``n - 1`` to ``n``.
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {1: _migrate_to_1}
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {1: _migrate_to_1, 2: _migrate_to_2}
 
 
 class SchemaVersionError(RuntimeError):

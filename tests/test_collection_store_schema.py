@@ -348,10 +348,10 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] > 0
 
 
-def test_a_new_store_is_schema_version_1_with_identity(store: connection.WriterConnection) -> None:
+def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
-    assert meta["schema_version"] == "1"
-    assert schema.SCHEMA_VERSION == 1
+    assert meta["schema_version"] == "2"
+    assert schema.SCHEMA_VERSION == 2
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4
@@ -406,12 +406,12 @@ def test_forward_migrations_run_in_order_from_the_recorded_version(
 
     applied: list[int] = []
 
-    def migrate_to_2(conn: sqlite3.Connection) -> None:
-        applied.append(2)
+    def migrate_to_3(conn: sqlite3.Connection) -> None:
+        applied.append(3)
         conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT")
 
-    monkeypatch.setattr(schema, "SCHEMA_VERSION", 2)
-    monkeypatch.setitem(schema.MIGRATIONS, 2, migrate_to_2)
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", 3)
+    monkeypatch.setitem(schema.MIGRATIONS, 3, migrate_to_3)
     writer = connection.open_writer(target, lease_check=_allow)
     try:
         version = writer.connection.execute(
@@ -419,8 +419,8 @@ def test_forward_migrations_run_in_order_from_the_recorded_version(
         ).fetchone()[0]
     finally:
         writer.close()
-    assert applied == [2], "only the missing step runs; version 1 is not re-applied"
-    assert version == "2"
+    assert applied == [3], "only the missing step runs; earlier versions are not re-applied"
+    assert version == "3"
 
 
 def test_writes_require_the_writer_lease(tmp_path: Path) -> None:
@@ -900,16 +900,16 @@ def test_schema_deferred_commit_failure_rolls_back_and_connection_can_be_reused(
         conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT")
         conn.execute("INSERT INTO audit_effects(txn_id, ordinal, effect) VALUES (999, 0, 'insert')")
 
-    monkeypatch.setattr(schema, "SCHEMA_VERSION", 2)
-    monkeypatch.setitem(schema.MIGRATIONS, 2, failed_migration)
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", 3)
+    monkeypatch.setitem(schema.MIGRATIONS, 3, failed_migration)
     with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
         schema.ensure_schema(store.connection)
     assert not store.connection.in_transaction
-    assert schema.schema_version(store.connection) == 1
+    assert schema.schema_version(store.connection) == 2
     assert store.connection.execute("SELECT count(*) FROM audit_effects").fetchone() == (0,)
     assert store.connection.execute("SELECT name FROM sqlite_master WHERE name='migration_probe'").fetchone() is None
-    monkeypatch.setitem(schema.MIGRATIONS, 2, lambda conn: conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT"))
-    assert schema.ensure_schema(store.connection) == 2
+    monkeypatch.setitem(schema.MIGRATIONS, 3, lambda conn: conn.execute("CREATE TABLE migration_probe(x INTEGER) STRICT"))
+    assert schema.ensure_schema(store.connection) == 3
     with store.transaction() as tx:
         tx.execute("INSERT INTO migration_probe VALUES (1)")
     assert store.connection.execute("SELECT x FROM migration_probe").fetchone() == (1,)
