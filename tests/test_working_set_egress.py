@@ -3343,7 +3343,17 @@ def _stable_recent_packet(packet: dict) -> dict:
     return packet
 
 
-def test_real_planning_item_cannot_reserve_a_recent_slot(vault: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("turn", "manifest_heat", "item_count"),
+    [
+        ("ok continue", False, 1),
+        ("Unmentioned commitment", False, 1),
+        ("ok continue", True, 49),
+    ],
+)
+def test_real_planning_item_cannot_reserve_a_recent_slot(
+    vault: Path, tmp_path: Path, turn: str, manifest_heat: bool, item_count: int
+) -> None:
     import shutil
     from uuid import UUID
 
@@ -3352,28 +3362,48 @@ def test_real_planning_item_cannot_reserve_a_recent_slot(vault: Path, tmp_path: 
     from test_working_set_hot_projection import _one_old_tick
     from test_working_set_index import _seed_structure, _write
 
-    from exomem import commands, lexstore, planning, working_set, working_set_heat, working_set_index
+    from exomem import (
+        commands,
+        lexstore,
+        planning,
+        working_set,
+        working_set_heat,
+        working_set_index,
+    )
 
     _seed_structure(vault)
     manifest = "Knowledge Base/Planning/Recent Work/_collection.md"
     planning.create_collection(vault, manifest, _manifest(), why="recent planning fixture")
-    planning.add(
-        vault, manifest, plan_id=str(UUID(int=901)),
-        item={"title": "Unmentioned commitment", "kind": "outcome"},
-        why="recent planning fixture",
+    for item_number in range(item_count):
+        planning.add(
+            vault, manifest, plan_id=str(UUID(int=901 + item_number)),
+            item={
+                "title": (
+                    "Unmentioned commitment" if item_count == 1
+                    else f"Unmentioned commitment {item_number:02d}"
+                ),
+                "kind": "outcome",
+            },
+            why="recent planning fixture",
+        )
+    hidden_paths = tuple(
+        path.relative_to(vault).as_posix()
+        for path in sorted((vault / Path(manifest).parent / "Items").glob("*.md"))
     )
-    hidden = next((vault / Path(manifest).parent / "Items").glob("*.md")).relative_to(vault).as_posix()
+    assert len(hidden_paths) == item_count
+    hidden = hidden_paths[0]
     visible = [
         f"Knowledge Base/Notes/Insights/recent-public-{n}.md"
         for n in range(working_set.RECENT_CONTEXT_MAX_ENTRIES)
     ]
     for path in visible:
         _write(vault / path, "---\nstatus: active\n---\n\n# Recent public work\n")
-    write_scope(vault, paths=hidden, name="Withheld Planning item")
+    write_scope(vault, paths=str(Path(manifest).parent / "Items") + "/**", name="Withheld Planning items")
     write_rule(vault, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n")
     absent = tmp_path / "absent-planning-item"
     shutil.copytree(vault, absent)
-    (absent / hidden).unlink()
+    for hidden_path in hidden_paths:
+        (absent / hidden_path).unlink()
     initialize_vault_state_offline(absent, source="recent planning twin fixture")
     stamp = 1_790_000_000_000_000_000
     for root in (vault, absent):
@@ -3383,31 +3413,46 @@ def test_real_planning_item_cannot_reserve_a_recent_slot(vault: Path, tmp_path: 
             _indexed(root)
             commands.op_activate_context(root, turn="ok continue")
         assert working_set_heat.append(root, [
-            working_set_heat.HeatEvent(stamp + n, path, "work", origin="edit_memory")
-            for n, path in enumerate(visible)
+            *([working_set_heat.HeatEvent(
+                stamp + 100, manifest, "work", origin="edit_memory"
+            )] if manifest_heat else []),
+            *[
+                working_set_heat.HeatEvent(stamp + n, path, "work", origin="edit_memory")
+                for n, path in enumerate(visible)
+            ],
         ])
 
     plans = [row for row in working_set_index.WorkingSetIndex(vault).anchors() if row.kind == "plan"]
-    assert [(row.path, row.ref) for row in plans] == [(manifest, hidden)]
+    assert len(plans) == item_count
+    assert {row.path for row in plans} == {manifest}
+    assert {row.ref for row in plans} == set(hidden_paths)
     with request_scope(_external()):
         without_hidden = _stable_recent_packet(
-            commands.op_activate_context(absent, turn="ok continue", purpose="marketing")
+            commands.op_activate_context(
+                absent, turn=turn, purpose="marketing", session="public-probe-session"
+            )
         )
         with_hidden = _stable_recent_packet(
-            commands.op_activate_context(vault, turn="ok continue", purpose="marketing")
+            commands.op_activate_context(
+                vault, turn=turn, purpose="marketing", session="public-probe-session"
+            )
         )
-        audit = commands.op_activate_context(vault, turn="ok continue", purpose="audit")
+        audit = commands.op_activate_context(vault, turn=turn, purpose="audit")
     with request_scope(owner_principal(surface="mcp")):
-        owner = commands.op_activate_context(vault, turn="ok continue", purpose="marketing")
+        owner = commands.op_activate_context(vault, turn=turn, purpose="marketing")
     for packet in (owner, audit):
         assert len(packet["recent_context"]) == working_set.RECENT_CONTEXT_MAX_ENTRIES
-        assert [entry["ref"] for entry in packet["recent_context"] if entry["why"] == "planning"] == [hidden]
+        if not manifest_heat:
+            assert [entry["ref"] for entry in packet["recent_context"] if entry["why"] == "planning"] == [hidden]
     assert without_hidden["generation"]["lexical_evidence"] == "available"
     assert with_hidden["generation"]["lexical_evidence"] == "available"
-    assert [entry["path"] for entry in without_hidden["recent_context"]] == visible[::-1]
+    if not manifest_heat:
+        assert [entry["path"] for entry in without_hidden["recent_context"]] == visible[::-1]
     assert with_hidden == without_hidden
     with request_scope(_external()):
-        repeated = commands.op_activate_context(vault, turn="ok continue", purpose="marketing")
+        repeated = commands.op_activate_context(
+            vault, turn=turn, purpose="marketing", session="public-probe-session"
+        )
     assert _stable_recent_packet(repeated) == without_hidden
 
 

@@ -66,6 +66,10 @@ def test_claude_cloud_hooks_use_canonical_bytes_and_native_mcp_binding(tmp_path:
         # Default hooks/hooks.json is loaded once, never also declared inline.
         assert "hooks" not in manifest
         hooks = json.loads(archive.read("hooks/hooks.json"))["hooks"]
+        # Unused shell launchers contain computed paths that block directory validation.
+        assert not any(
+            name.startswith("hooks/") and name.endswith(".sh") for name in archive.namelist()
+        )
         assert set(hooks) == {
             "UserPromptSubmit",
             "Stop",
