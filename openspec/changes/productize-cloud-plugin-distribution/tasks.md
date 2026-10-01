@@ -28,16 +28,28 @@ Release PR #1493 remains held for the context-disclosure repair (#1486),
 exact-main full release evidence and release verification. Tasks 3.1–3.4 and
 4.2 stay open until their actual runtime and directory outcomes are recorded.
 
-Directory preparation on 1 October: the signed-in Claude portal validated
-`main @ 080be407`, finding 10 skills, 5 hooks, one MCP server and all six
-listing links. It also blocked unused shell launchers with computed paths;
-the generator now omits those unregistered files without changing canonical
-Python hook bytes or self-hosted support. The real portal must revalidate the
-merged correction. Credential/script policy holds still require review.
-Claude's source and data-handling draft survived reload; legal attestations
-and submission remain operator review steps. OpenAI's existing company-owned
-draft passes all ten skill checks but is not submitted: domain verification,
-OAuth discovery, reviewer access and a real demo recording remain launch gates.
+Directory preparation on 1 October: Claude revalidated `main @ b1df5b6`,
+finding 10 skills, 5 hooks, one MCP server and all six listing links. Removing
+unused shell launchers did not clear `COMMAND_PATH_COMPUTED`; the remaining
+state-directory placeholder is being replaced with an explicit canonical
+environment binding. Credential/script policy holds still require review.
+The bundle draft survived reload. The connector form reuses the installed
+personal connection by URL and refuses a duplicate QA connector; its draft
+association was cleared without disconnecting the personal connector. The
+operator prefers Codex core testing instead of reauthorizing Personal; Claude
+Chat acceptance remains open for a separate test organization/account. The
+owning generator also refreshes self-hosted hook copies and their manifest
+version from 0.96.0 to 0.100.0, retaining their separate identity and endpoint.
+
+OpenAI's existing company-owned draft passes all ten skill checks. Domain
+verification and QA OAuth succeeded, and Configured/Authorized/Domain verified
+persisted after reload; 28 tools were discovered. Its scanner flags server
+instructions as referencing another connector. The shared source now makes
+the own-tool and enabled-connection scope explicit; rescan requires release
+and QA rollout. Tool updates still require platform review. Native behavioral
+acceptance, dedicated reviewer access and a real demo recording remain open.
+Neither provider has been submitted. Final submission and publication remain
+operator review steps.
 
 - [x] 4.1 Resolve author-independent review findings, run scoped tests plus completion-boundary full CI and privacy checks, and merge the cohesive verified batch.
 - [ ] 4.2 Verify released packages and production outcome, reconcile prior acceptance debt, sync/archive only completed OpenSpec scope and retire the clean task worktree.
