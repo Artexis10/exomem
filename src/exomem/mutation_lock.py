@@ -2634,7 +2634,8 @@ def _atomic_write_holder_metadata(path: Path, holder: dict[str, object]) -> None
         with temporary.open("x", encoding="utf-8", newline="\n") as stream:
             stream.write(payload)
             stream.flush()
-            os.fsync(stream.fileno())
+            # OS locks own authority; the current-holder record need not
+            # survive power loss. Close and replace still publish whole bytes.
         os.replace(temporary, path)
     finally:
         try:
