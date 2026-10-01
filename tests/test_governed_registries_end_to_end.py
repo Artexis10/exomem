@@ -170,11 +170,41 @@ def _recall_outputs(root: Path) -> list[str]:
             commands.op_find(root, query=query),
             commands.op_ask_memory(root, query=query),
         ):
-            payload = dict(result) if isinstance(result, dict) else {"result": result}
+            # The advisory's emission cadence can wrap a list in a hits
+            # envelope. Compare recall content, not that presentation change.
+            payload = dict(result) if isinstance(result, dict) else {"hits": result}
             payload.pop("timings", None)
             payload.pop("due_state", None)
             outputs.append(json.dumps(payload, sort_keys=True, default=str))
     return outputs
+
+
+def test_recall_comparison_ignores_advisory_envelope_cadence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hits = [{"path": "Knowledge Base/Notes/Example.md", "signals": {"bm25_rank": 1}}]
+    responses = iter(
+        [{"hits": hits, "due_state": {"total": 1}}] * len(_RECALL_INPUTS)
+        + [hits] * len(_RECALL_INPUTS)
+    )
+    monkeypatch.setattr(commands, "op_find", lambda *_args, **_kwargs: hits)
+    monkeypatch.setattr(commands, "op_ask_memory", lambda *_args, **_kwargs: next(responses))
+    assert _recall_outputs(tmp_path) == _recall_outputs(tmp_path)
+
+
+@pytest.mark.parametrize("changed", [
+    {"hits": [{"path": "Knowledge Base/Notes/Example.md", "signals": {"bm25_rank": 2}}]},
+    {"hits": [{"path": "Knowledge Base/Notes/Example.md", "signals": {"bm25_rank": 1}}],
+     "warming": {"components": ["graph"]}},
+])
+def test_recall_comparison_preserves_retrieval_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: dict,
+) -> None:
+    hits = [{"path": "Knowledge Base/Notes/Example.md", "signals": {"bm25_rank": 1}}]
+    responses = iter([hits] * len(_RECALL_INPUTS) + [changed] * len(_RECALL_INPUTS))
+    monkeypatch.setattr(commands, "op_find", lambda *_args, **_kwargs: hits)
+    monkeypatch.setattr(commands, "op_ask_memory", lambda *_args, **_kwargs: next(responses))
+    assert _recall_outputs(tmp_path) != _recall_outputs(tmp_path)
 
 
 def test_find_and_ask_memory_are_unchanged_by_the_activation_registries(vault: Path) -> None:

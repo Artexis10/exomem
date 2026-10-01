@@ -50,11 +50,10 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  # The descriptor no longer embeds the Exomem release, so an ordinary version
-  # bump leaves the hosted artifacts untouched and this job is a no-op. It stays
-  # because a release that DOES change the contract surface (a command, schema,
-  # capability, skill, or endpoint) still needs the generated descriptors and
-  # their sha256 locks rebuilt, and no `extra-files` updater can recompute a hash.
+  # Cloud packages bind the current version, skill contract and corpus digest;
+  # rebuild them on every release update. Legacy hosted descriptors need a
+  # rebuild only when their contract changes. No `extra-files` updater can
+  # recompute these archive bytes and hash locks.
   #
   # Without the GitHub App token this push uses GITHUB_TOKEN, which does not
   # retrigger the PR's checks -- the amended branch is correct but shows the
@@ -117,6 +116,9 @@ jobs:
           uv run --frozen python scripts/hosted-plugin.py render --candidate "$parity_candidate" --platform all --openai-app-id "$openai_app_id"
           uv run --frozen python scripts/hosted-plugin.py render --candidate "$baseline_candidate" --platform all --openai-app-id "$openai_app_id"
 
+      - name: Regenerate current Cloud packages for the source release
+        run: uv run --frozen python scripts/cloud-plugin.py build
+
       - name: Verify the regenerated artifacts are current
         run: |
           uv run --frozen python scripts/hosted-plugin.py check --platform claude
@@ -156,7 +158,7 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add plugins/hosted
+          git add plugins/hosted plugins/cloud/generated
           git commit -m "chore(hosted): regenerate plugin artifacts for the release"
           git push
 
@@ -203,6 +205,13 @@ jobs:
 
       - name: Build package artifacts
         run: uv build
+
+      - name: Verify and stage current Cloud distribution archives
+        run: |
+          uv run --frozen python scripts/cloud-plugin.py check
+          cp plugins/cloud/generated/claude.zip dist/exomem-cloud-claude.zip
+          cp plugins/cloud/generated/openai.zip dist/exomem-cloud-openai.zip
+          cp plugins/cloud/generated/release.json dist/exomem-cloud-release.json
 
       - name: Smoke packaged connector fingerprint
         run: |
