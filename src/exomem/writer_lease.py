@@ -47,6 +47,7 @@ from .mutation_lock import (
 from .mutation_lock import _release_os_lock as _release_owner_lock
 from .mutation_lock import _try_os_lock as _try_owner_lock
 from .mutation_terminal import (
+    _CanonicalRequestReplay,
     _DERIVED_COMPONENT_NAMES,
     ResponseDetail,
     committed_terminal,
@@ -4528,7 +4529,7 @@ class LeaseManager:
                             ),
                             gate_context,
                         )
-                    if (
+                    if isinstance(leaf_result, _CanonicalRequestReplay) or ((
                         command.name in {"record_memory", "plan_memory"}
                         and valid_collection_receipt(leaf_result)
                         or command.name == "maintain_memory"
@@ -4537,7 +4538,7 @@ class LeaseManager:
                         or command.name == "maintain_memory"
                         and kwargs.get("mode") == "curation"
                         and curation_module.valid_replay_result(leaf_result)
-                    ) and leaf_result.get("outcome") == "replayed":
+                    ) and leaf_result.get("outcome") == "replayed"):
                         return attach_evidence(
                             replayed_terminal(
                                 leaf_result,

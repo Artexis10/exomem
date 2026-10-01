@@ -950,6 +950,13 @@ def bulk_upsert_records(
     still reports every row's would-be outcome; `skip` commits the accepted rows.
     """
     root = Path(vault_root)
+    from .collection_store.preview import bound_writer
+
+    writer = bound_writer(root)
+    if writer is not None:
+        return writer.bulk_upsert_records(collection, rows=rows, why=why,
+                                          expected_container_hash=expected_container_hash,
+                                          source=source, on_reject=on_reject)
     _validate_why(why)
     if on_reject not in {"abort", "skip"}:
         raise collections.CollectionError(

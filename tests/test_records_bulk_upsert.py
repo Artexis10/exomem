@@ -35,6 +35,11 @@ def _manifest(vault_root: Path) -> collections.CollectionManifest:
 
 
 def _hash(vault_root: Path) -> str:
+    from exomem.collection_store.preview import bound_writer
+
+    writer = bound_writer(vault_root)
+    if writer is not None:
+        return writer.inspect_collection(LEDGER_COLLECTION_PATH)["lifecycle_guards"]["expected_container_hash"]
     manifest = _manifest(vault_root)
     return record_formats.load_adapter(vault_root, manifest).read().snapshot
 
@@ -54,33 +59,61 @@ def _bulk(vault_root: Path, rows: list[dict[str, Any]], **kwargs: Any) -> dict[s
 
 
 def _state(vault_root: Path) -> dict[str, bytes]:
-    return {
+    state = {
         path.relative_to(vault_root).as_posix(): path.read_bytes()
         for path in sorted(vault_root.rglob("*"))
         if path.is_file()
     }
+    from exomem.collection_store.preview import bound_writer
+
+    writer = bound_writer(vault_root)
+    if writer is not None:
+        state["canonical-store"] = "\n".join(writer.connection.iterdump()).encode()
+    return state
 
 
 def _with_sources_field(vault_root: Path) -> None:
-    path = vault_root / LEDGER_COLLECTION_PATH
-    path.write_text(
-        LEDGER_MANIFEST_TEXT.replace(
-            _METRICS_TAIL,
-            _METRICS_TAIL + "    sources:\n      type: array\n      items:\n        type: link\n",
-        ),
-        encoding="utf-8",
+    text = LEDGER_MANIFEST_TEXT.replace(
+        _METRICS_TAIL,
+        _METRICS_TAIL + "    sources:\n      type: array\n      items:\n        type: link\n",
     )
+    from exomem.collection_store.preview import bound_writer
+
+    writer = bound_writer(vault_root)
+    if writer is not None:
+        writer.revise_collection(LEDGER_COLLECTION_PATH, manifest_text=text, why="declare provenance",
+                                 **writer.inspect_collection(LEDGER_COLLECTION_PATH)["lifecycle_guards"])
+        return
+    path = vault_root / LEDGER_COLLECTION_PATH
+    path.write_text(text, encoding="utf-8")
 
 
 @pytest.fixture
-def vault_root(tmp_path: Path) -> Path:
-    setup_ledger_collection(tmp_path)
+def vault_root(tmp_path: Path, request, monkeypatch):
     _evidence(tmp_path, EVIDENCE, EVIDENCE_B)
-    return tmp_path
+    if getattr(request, "param", "files") == "files":
+        setup_ledger_collection(tmp_path)
+        yield tmp_path
+    else:
+        from exomem.collection_store import connection
+        from exomem.collection_store.preview import preview_store
+
+        monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
+        with connection.open_writer(tmp_path.with_suffix(".sqlite"), lease_check=lambda: True) as handle:
+            with preview_store(tmp_path, handle) as writer:
+                writer.create_collection(LEDGER_COLLECTION_PATH, LEDGER_MANIFEST_TEXT, why="capture")
+                yield tmp_path
 
 
 def _outcomes(result: dict[str, Any]) -> list[str]:
     return [row["outcome"] for row in result["rows"]]
+
+
+def _audit_gap(vault_root, manifest):
+    from exomem.collection_store.preview import bound_writer
+
+    writer = bound_writer(vault_root)
+    return writer.inspect_collection(manifest)["audit"] if writer else records.inspect_audit_gap(vault_root, manifest)
 
 
 def test_twenty_four_rows_commit_under_one_guard_as_one_verified_chain(vault_root: Path) -> None:
@@ -107,15 +140,17 @@ def test_twenty_four_rows_commit_under_one_guard_as_one_verified_chain(vault_roo
         assert row["transition_id"] in log
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_the_response_hash_chains_the_next_guarded_call(vault_root: Path) -> None:
     first = _bulk(vault_root, _rows(3))
     second = _bulk(
         vault_root, _rows(3, start=3), expected_container_hash=first["after_container_hash"]
     )
     assert second["committed"] is True
-    assert records.inspect_audit_gap(vault_root, _manifest(vault_root))["status"] == "ok"
+    assert _audit_gap(vault_root, _manifest(vault_root))["status"] == "ok"
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_a_stale_guard_refuses_the_whole_batch(vault_root: Path) -> None:
     before = _state(vault_root)
     with pytest.raises(collections.CollectionError, match="STALE_RECORD"):
@@ -123,6 +158,7 @@ def test_a_stale_guard_refuses_the_whole_batch(vault_root: Path) -> None:
     assert _state(vault_root) == before
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_resubmitting_committed_rows_is_all_unchanged_and_writes_nothing(
     vault_root: Path,
 ) -> None:
@@ -136,6 +172,7 @@ def test_resubmitting_committed_rows_is_all_unchanged_and_writes_nothing(
     assert _state(vault_root) == before
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_a_changed_row_is_updated_without_the_single_append_conflict(vault_root: Path) -> None:
     first = _bulk(vault_root, _rows(3))
     rows = _rows(3)
@@ -152,9 +189,10 @@ def test_a_changed_row_is_updated_without_the_single_append_conflict(vault_root:
     }
     assert stored["entry-001"].values["word_count"] == 999
     assert stored["entry-000"].values["word_count"] == 42
-    assert records.inspect_audit_gap(vault_root, manifest)["status"] == "ok"
+    assert _audit_gap(vault_root, manifest)["status"] == "ok"
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_an_update_replaces_values_and_keeps_the_body_unless_one_is_supplied(
     vault_root: Path,
 ) -> None:
@@ -181,6 +219,7 @@ def test_an_update_replaces_values_and_keeps_the_body_unless_one_is_supplied(
     assert "New body." in record.body and "Original body." not in record.body
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_a_repeated_natural_key_in_one_request_rejects_the_later_row(vault_root: Path) -> None:
     rows = _rows(2) + _rows(1)
     result = _bulk(vault_root, rows, on_reject="skip")
@@ -189,6 +228,7 @@ def test_a_repeated_natural_key_in_one_request_rejects_the_later_row(vault_root:
     assert result["rows"][2]["duplicate_of"] == 0
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_abort_writes_nothing_and_reports_every_would_be_outcome(vault_root: Path) -> None:
     rows = _rows(4)
     rows[2]["item"]["bogus"] = "undeclared"
@@ -203,6 +243,7 @@ def test_abort_writes_nothing_and_reports_every_would_be_outcome(vault_root: Pat
     assert _state(vault_root) == before
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_skip_commits_the_accepted_rows_once_and_reports_the_rejected(vault_root: Path) -> None:
     rows = _rows(4)
     rows[2]["item"]["bogus"] = "undeclared"
@@ -213,7 +254,7 @@ def test_skip_commits_the_accepted_rows_once_and_reports_the_rejected(vault_root
     assert result["rows"][2]["outcome"] == "rejected"
     manifest = _manifest(vault_root)
     assert len(record_formats.load_adapter(vault_root, manifest).read().records) == 3
-    assert records.inspect_audit_gap(vault_root, manifest)["status"] == "ok"
+    assert _audit_gap(vault_root, manifest)["status"] == "ok"
 
 
 def test_a_batch_that_would_change_nothing_leaves_the_audit_head_alone(vault_root: Path) -> None:
@@ -243,12 +284,14 @@ def test_a_publication_failure_leaves_nothing_and_the_retry_succeeds(
     assert _bulk(vault_root, _rows(3))["committed"] is True
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_a_row_without_provenance_is_rejected(vault_root: Path) -> None:
     result = _bulk(vault_root, _rows(2), source=None, on_reject="skip")
     assert _outcomes(result) == ["rejected", "rejected"]
     assert {row["code"] for row in result["rows"]} == {"SOURCE_REQUIRED"}
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_a_row_source_overrides_the_batch_source(vault_root: Path) -> None:
     rows = _rows(2)
     rows[1]["source"] = EVIDENCE_B
@@ -257,6 +300,7 @@ def test_a_row_source_overrides_the_batch_source(vault_root: Path) -> None:
     assert result["rows"][1]["source"] == EVIDENCE_B
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_missing_and_non_preserved_sources_reject_identically(vault_root: Path) -> None:
     (vault_root / "Notes").mkdir()
     (vault_root / "Notes/plain.md").write_text("# plain\n", encoding="utf-8")
@@ -272,6 +316,7 @@ def test_missing_and_non_preserved_sources_reject_identically(vault_root: Path) 
     }
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_a_declared_sources_field_receives_the_verified_reference(vault_root: Path) -> None:
     _with_sources_field(vault_root)
     result = _bulk(vault_root, _rows(2))
@@ -400,6 +445,7 @@ def test_the_item_ceiling_refuses_whole(vault_root: Path, monkeypatch: pytest.Mo
     assert _state(vault_root) == before
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_an_overlong_rationale_rejects_only_that_row(vault_root: Path) -> None:
     rows = _rows(2)
     rows[1]["source"] = "Knowledge Base/Evidence/" + "x" * 200 + ".md"
@@ -409,6 +455,7 @@ def test_an_overlong_rationale_rejects_only_that_row(vault_root: Path) -> None:
     assert result["rows"][1]["code"] == "AUDIT_RATIONALE_TOO_LONG"
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_the_command_action_runs_a_bulk_upsert(vault_root: Path) -> None:
     result = record_memory(
         vault_root,
@@ -526,6 +573,7 @@ def _write_rule(vault_root: Path, name: str, scope_id: str, rule_id: str, paths:
     )
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_a_withheld_item_makes_the_whole_collection_read_as_absent(vault_root: Path) -> None:
     from exomem.governance.principal import RequestPrincipal, request_scope
 
@@ -547,6 +595,7 @@ def test_a_withheld_item_makes_the_whole_collection_read_as_absent(vault_root: P
     assert _state(vault_root) == before
 
 
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_a_withheld_source_reads_exactly_like_an_absent_one(vault_root: Path) -> None:
     from exomem.governance.principal import RequestPrincipal, request_scope
 

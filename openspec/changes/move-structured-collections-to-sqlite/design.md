@@ -389,10 +389,11 @@ The option-B "bulk audit event" that #1452 deferred is simply the native shape h
 **Sequencing (ruled R2).**
 1. **#1457 lands now as the interim.** It brings per-operation authorization, the stat-generation item cache, batched guard rechecks, and the manifest parse cache. File-mode collections keep those until the legacy window closes (R7). The store reuses #1457's once-per-operation policy resolution.
 2. **#1452 ships now on files**, with its per-call row cap enforced so a single bulk call holds the writer lease for no more than about 5 s. Its per-item chained events and `BULK_UPSERT_AUDIT_DEPTH` apply to file mode only.
-3. **The store implementation adopts #1452's API unchanged.** That covers the action name, `rows`, `on_reject`, `source`, the guard, per-row outcomes and codes, and the batch receipt. Only three things differ on the store:
+3. **The store implementation adopts #1452's API unchanged.** That covers the action name, `rows`, `on_reject`, `source`, the guard, per-row outcomes and codes, and the batch receipt. These storage-mode differences apply:
    - it drops `BULK_UPSERT_AUDIT_DEPTH` and the chain-depth budget, because a batch is one transition;
    - it raises the per-call cap to 500 (`BULK_UPSERT_MAX_ROWS`, reported by `describe`), since the store takes 20 ms at 500 rows;
    - `first_transition` equals `last_transition`.
+   - file-only directory census bounds, including the 2,000-file `COLLECTION_ITEM_LIMIT`, do not limit canonical store rows. Store `describe` omits that filesystem refusal; the 10,000-row store acceptance fixture remains valid.
 
    A collection's cap follows its storage mode, so a client written against the file cap keeps working after migration.
 4. When #1452's change is archived into the canonical `records` spec before this one, this change gains a `records` MODIFIED delta for #1452's bulk requirements carrying exactly those differences (task 0.4). Until then, #1452's requirements are not canonical and cannot be modified here.
@@ -463,7 +464,7 @@ Blockers are duplicate or ambiguous identities, schema violations, unsupported v
 | query, filter + sort + limit 50, N=10,000 | same results as the file path; p95 ≤ 50 ms per-row governed, ≤ 5 ms uniform | 7.6 s refresh read at N=1,000 | 44 ms per-row path, 0.4 ms uniform fast path |
 | snapshot, N=10,000 | < 250 ms, off the ack path | n/a | 77 ms |
 | item view render + staging fsync + publish | on the ack path, < 4 ms p95 | inside the write | 0.6 ms p95 (spike); 2.6–3.8 ms p50/p95 for the whole sync-projection storage layer (#1457 prototype) |
-| guard refresh as a command (inspect-lite) | p95 < 15 ms | 416 / 546 ms at N=1,000 after #1457's fixes | 0.02–0.04 ms storage (#1457 prototype) |
+| guard refresh through full public `inspect` | p95 < 15 ms | 416 / 546 ms at N=1,000 after #1457's fixes | 0.02–0.04 ms guard extraction only (#1457 prototype) |
 
 The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and `synchronous=FULL` (`benchmarks/collections_sqlite_spike/results-*.json`). They exclude the dispatcher, the idempotency ledger, governance resolution and receipt projection.
 
@@ -486,7 +487,7 @@ Each stage gets its own timer in the acceptance harness, and a stage over budget
 
 The guard refresh a client performs between writes is also a command, so it pays the dispatcher. #1457 estimates 15–25 ms, against a storage cost of 0.04 ms. Two things make it rare and cheap:
 - every mutation receipt already returns `after_container_hash` and `item_version`, so chained writes need no refresh;
-- `record_memory(action="inspect")` gains no work, but its guard fields come from the `collections` row, not a snapshot (target p95 < 15 ms).
+- `record_memory(action="inspect")` retains its full public response and is measured as that command (target p95 < 15 ms). Its guard fields come from the `collections` row, but that lookup alone does not satisfy acceptance: current counts, observed-value frequencies, presentation and coverage remain part of inspection. Remaining scans must be optimized if full inspection misses the budget.
 
 Removed from the acknowledgement path:
 - the full collection read (≈ 4.3 ms per item);
@@ -495,7 +496,7 @@ Removed from the acknowledgement path:
 - `log.md` read-rewrite;
 - synchronous view index sync (≈ 50–133 ms), which moves to the derived drain.
 
-**Non-uniform collections and fsyncs.** The release-decision cache and the in-transaction `pending_sha256` (§16 A7) keep the budget for non-uniform collections and avoid a second fsync. The P1a.15 gate includes a 10% ref-withheld 10,000-row collection and a Windows/NTFS run.
+**Non-uniform collections and fsyncs.** The release-decision cache and the in-transaction `pending_sha256` (§16 A7) keep the budget for non-uniform collections and avoid a second fsync. The P1a.15 gate includes a 10% ref-withheld 10,000-row collection and a Windows/NTFS run. Measure that audience's `COLLECTION_NOT_FOUND` refusal separately from successful appends by an audience authorized for the complete collection; both paths retain the stage and p95 budgets. Partial visibility never authorizes a mutation (§7).
 
 **Query parity.** The parity path runs `query_data.evaluate_rows` over the rows the store returns, so filter operators, NFC normalization, type coercion and aggregates are the same code as today. SQL push-down is used only on the uniform-release fast path, and only for operators with a passing parity test against the file adapter on a generated parity corpus. The fast path covers eq, ne, lt/lte/gt/gte on declared scalar fields, sort, limit and count/min/max/sum/avg. Any other operator falls back to the parity path. Declared-field expression indexes are created per collection for the fields its saved views filter or sort on.
 
@@ -859,6 +860,7 @@ Schema and rows therefore change together, atomically, under one audit chain. Th
 **7. Everything else that reads items as pages; read-your-writes.**
 - **Item views are published before the acknowledgement** (§5). Any file reader, including `get_page` and the next agent turn, sees the acknowledged write. That costs about 3 ms, as #1457 measured. Only aggregate views (log layout, history and type pages) and index sync are asynchronous.
 - **Structured readers move to the store** (task P1a.12): due-state, plan progress, capture sweeps, the working set and current-state resolution, `audit` outcome bindings, and evidence bundles built from items. They are read-your-writes by construction and no longer parse Markdown.
+- **Internal delta truth is not disclosure (P1a.12 preservation ruling, 2026-10-01).** Due-state's existing write-delta projection remains audience-independent. In dark preview its private snapshot comes from the already trusted lease-owned writer binding, with opening-thread and operation-context integrity checks; it is not a public adapter option or a substitute principal. Public readers continue authorizing canonical row identities before decoding values. At serve, joined canonical rows are released under the reading principal and withheld rows are indistinguishable from absent rows; missing or stale Markdown views and whole-log file grants supply no store authority. Reuse the ordinary snapshot materialization without introducing another evaluator, privilege-switching context or publisher.
 - **`find` and recall** already exclude Records and Planning descendants except manifests (`recall_policy`). Declared types join that exclusion (§14.5). Lexical, resolver and graph indexing of views therefore lagging the drain does not change any recall answer about item values.
 - **Plan links, supersession and pinned references** resolve through the store (§14.3), not through view files.
 
@@ -990,9 +992,11 @@ Today `_audit_events` returns empty past its source-byte, event and archive boun
 #### A7. Budget holds for non-uniform collections; no second fsync
 
 Earlier, §12 assumed uniformly released collections. Two changes fix that:
-- **Release-decision cache.** Decisions are cached per `(audience, policy fingerprint, collection_id)`. The cache holds an "all rows visible" flag and per-row decisions keyed by `(row_id, row_version)` of the row's governance subject. A policy change invalidates by fingerprint, and a row change re-evaluates only that row. A non-uniform 10,000-row collection then pays per-row evaluation once per policy fingerprint, not per call.
+- **Release-decision cache.** The existing writer connection owns bounded canonical metadata, pure scope membership and base-policy results. `(audience, policy fingerprint, collection_id)` is a namespace, not the whole validity key. Reuse additionally binds resolved purpose, manifest/type/default-audience/path/layout identity, current item `(row_id, row_version)` or held governance identity, freshly loaded access fingerprint/blocked state, exact tombstones, and read/mutation mode. Manifest authority is checked separately from row-release summaries. While this complete dependency tuple is unchanged, a committed row change re-evaluates only changed subjects and adjusts the complete-release summary. Policy, purpose, access, lifecycle or contract changes may require a broader identity-only pass; cold fill and eviction may do the same.
+- **Fresh operation authority.** Each operation still verifies the complete principal and opening thread before SQL, and refreshes session status, credential generation, audience, purpose, clock, active grants and authority failure state. Final grant-bearing decisions are never reused across operations. The existing authority-validation core resolves grant-named canonical identities lazily; its catalog entry point remains a compatibility wrapper, and issue, redeem and consume share the current canonical basis. No second evaluator or manual ceiling composition is introduced.
+- **Committed cache deltas.** Proposed subjects remain transaction-local until COMMIT succeeds; operation close is not that boundary. Item and held changes report their exact committed identities, manifest/type changes invalidate the subject epoch, and unexpected connection changes invalidate reuse. A rollback must not leave a cached proposed row version that can be reused for different content. Closing or replacing the store handle discards its cache. Internal cache epochs and hidden-only collection changes never become partial-release continuation identity.
 - **No second transaction.** `projection_state.pending_sha256` (the staged bytes' hash) and `pending_row_version` are written inside the main transaction, because the bytes are rendered before commit. After a successful install the pair is promoted to `published_*` lazily, by the next transaction that touches the view or by the reconcile. There is no extra commit or fsync on the acknowledgement path. A1 step 4 accepts either `published_sha256` or `pending_sha256` as expected on disk.
-- **The P1a.15 gate adds** a non-uniform 10,000-row collection (a ref-scoped rule withholding 10% of rows) and a Windows/NTFS run.
+- **The P1a.15 gate adds** a non-uniform 10,000-row collection (a ref-scoped rule withholding 10% of rows) and a Windows/NTFS run. A partially authorized audience must refuse a write; measure that refusal and successful fully authorized appends separately. Full public `inspect`, not a reduced internal guard lookup, remains the guard-refresh acceptance path.
 
 #### A8. Withheld-as-absent: the remaining leak surfaces
 

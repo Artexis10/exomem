@@ -16,6 +16,15 @@ log = logging.getLogger(__name__)
 
 ResponseDetail = Literal["compact", "full", "legacy"]
 
+
+class _CanonicalRequestReplay(dict[str, Any]):
+    """Internal tag for an authorized receipt recovered from a committed store txn.
+
+    Only the canonical writer constructs this after current authorization and
+    exact request matching. Public JSON remains an ordinary dict, not this tag.
+    """
+
+
 _TERMINAL_MARKER = "exomem.mutation-terminal"
 _TERMINAL_VERSION = 1
 _RESPONSE_DETAILS = frozenset({"compact", "full", "legacy"})
@@ -1659,11 +1668,12 @@ def replayed_terminal(
         and leaf_result.get("receipt_version") == _LIFECYCLE_RECEIPT_VERSION
         and leaf_result.get("outcome") == "committed"
     )
-    if not (
+    recorded_replay = isinstance(leaf_result, _CanonicalRequestReplay)
+    if not recorded_replay and (not (
         valid_collection_receipt(leaf_result)
         or valid_structured_files_receipt(leaf_result)
         or curation_module.valid_replay_result(leaf_result)
-    ) or (leaf_result.get("outcome") != "replayed" and not lifecycle_replay):
+    ) or (leaf_result.get("outcome") != "replayed" and not lifecycle_replay)):
         raise ValueError("replayed terminal requires a valid governed mutation receipt")
 
     terminal: dict[str, Any] = {
@@ -1673,12 +1683,14 @@ def replayed_terminal(
         "status": "replayed",
         "mutated": False,
     }
+    if recorded_replay:
+        terminal.update(state="settled", terminal=True)
     terminal.update(_path_projection(leaf_result))
     terminal.update(
         request_id=request_id,
         receipt_id=receipt_id,
         warnings_count=_warning_count(leaf_result),
-        leaf_result=leaf_result,
+        leaf_result=dict(leaf_result) if recorded_replay else leaf_result,
     )
     if idempotency_key is not None:
         terminal["idempotency_key"] = idempotency_key

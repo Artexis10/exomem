@@ -29,6 +29,9 @@ class StoreAdapter:
 
     def _read(self, manifest: collections.CollectionManifest) -> record_formats.AdapterSnapshot:
         items, snapshot, _ = self.writer._operation.authorized_rows(manifest.collection_id)
+        return self._snapshot(manifest, items, snapshot)
+
+    def _snapshot(self, manifest, items, snapshot):
         versions = [manifest.manifest_version]
         if manifest.storage.strategy == "markdown-log":
             items.sort(key=lambda item: (item["created_txn"], item["row_id"]),

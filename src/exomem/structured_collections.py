@@ -1002,6 +1002,12 @@ class SavedView:
 def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
     """Parse one explicit collection contract without touching canonical items."""
     root = Path(vault_root)
+    from .collection_store.preview import bound_writer
+
+    writer = bound_writer(root)
+    if writer is not None:
+        with writer.read_collection(path) as manifest:
+            return manifest
     manifest_path, rel = _safe_existing_path(root, path)
     if manifest_path.name != "_collection.md":
         raise CollectionError(
@@ -1177,6 +1183,14 @@ def discover_collections_with_errors(
             "INVALID_DISCOVERY_LIMIT", "discovery limit is outside supported bounds"
         )
     root = Path(vault_root)
+    from .collection_store.preview import bound_writer
+
+    writer = bound_writer(root)
+    if writer is not None:
+        return writer.discover_collections(
+            authorize_path=authorize_path, max_candidates=max_candidates,
+            max_raw_candidates=max_raw_candidates,
+        )
     kb = vault.kb_root(root)
     if not kb.is_dir():
         return (), ()
@@ -1264,6 +1278,14 @@ def resolve_collection(
     raw = str(selector).strip()
     if not raw:
         raise CollectionError("INVALID_COLLECTION_REFERENCE", "collection selector is required")
+    from .collection_store.preview import bound_writer
+
+    writer = bound_writer(vault_root)
+    if writer is not None:
+        with writer.read_collection(selector) as manifest:
+            if authorize_path is not None and not authorize_path(manifest.path):
+                raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+            return manifest
     authorize = authorize_path or (lambda _path: True)
     identity = memory_refs.parse_memory_ref(raw) or memory_refs.normalize_id(raw)
     if identity is not None:

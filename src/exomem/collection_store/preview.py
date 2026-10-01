@@ -10,12 +10,15 @@ import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .. import structured_collections as collections
 from .connection import CollectionStoreError, WriterConnection
-from .writer import CollectionWriter
+
+if TYPE_CHECKING:
+    from .writer import CollectionWriter
 
 _BOUND: ContextVar[tuple[Path, CollectionWriter] | None] = ContextVar(
     "collection_store_preview", default=None
@@ -25,6 +28,8 @@ _BOUND: ContextVar[tuple[Path, CollectionWriter] | None] = ContextVar(
 @contextmanager
 def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[CollectionWriter]:
     """Bind a dark writer for this call context; ownership remains with the caller."""
+    from .writer import CollectionWriter
+
     root = Path(vault_root).resolve()
     writer = CollectionWriter(root, handle)
     token = _BOUND.set((root, writer))
@@ -37,6 +42,24 @@ def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[Collec
 def bound_writer(vault_root: Path) -> CollectionWriter | None:
     binding = _BOUND.get()
     return binding[1] if binding is not None and binding[0] == Path(vault_root).resolve() else None
+
+
+def canonical_read(function):
+    """Keep a structured consumer's canonical reads under one request snapshot."""
+    @wraps(function)
+    def read(vault_root, *args, **kwargs):
+        writer = bound_writer(vault_root)
+        if writer is None:
+            return function(vault_root, *args, **kwargs)
+        with writer.read_snapshot():
+            principal = kwargs.get("principal")
+            purpose = kwargs.get("purpose")
+            if principal is not None and principal != writer._operation.who:
+                writer._operation.refuse()
+            if purpose is not None and purpose != writer._operation.purpose:
+                writer._operation.refuse()
+            return function(vault_root, *args, **kwargs)
+    return read
 
 
 def dispatch(
@@ -53,6 +76,12 @@ def dispatch(
     writer = binding[1]
     args = {name: value for name, value in values.items() if value is not None}
     if action == "describe":
+        if profile == "records":
+            from ..record_memory import _bulk_upsert_contract
+
+            writer._require_operation_context()
+            return True, {**collections.manifest_authoring_contract(),
+                          "bulk_upsert": _bulk_upsert_contract(store_mode=True)}
         return False, None
     writer._require_operation_context()
     writer._facade_profile = profile
@@ -84,6 +113,8 @@ def dispatch(
         args["item_key"] = args.pop("plan_id")
     if action in {"append", "add"}:
         return True, writer.append_record(collection, **args)
+    if action == "bulk_upsert" and profile == "records":
+        return True, writer.bulk_upsert_records(collection, **args)
     if action == "triage":
         args["changes"] = args.pop("transition")
         args["operation"] = "triage"

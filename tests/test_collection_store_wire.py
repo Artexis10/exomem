@@ -12,7 +12,7 @@ from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.plan_memory import plan_memory
 from exomem.record_memory import record_memory
-from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
+from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text, store as store
 
 
 def normalized(value):
@@ -80,6 +80,35 @@ def paired_create(paired, profile, *, scaffold=True):
     if not scaffold:
         (roots[0] / manifest_path(profile)).parent.joinpath("Items").mkdir()
     return receipts
+
+
+def test_dispatcher_reports_committed_collection_and_held_lifecycle(store):
+    """Canonical lifecycle writes must report their durable result, not mid-flight."""
+    from exomem import writer_lease
+    from exomem.collection_store.preview import preview_store
+    from test_due_state_bulk_carriers import _command
+
+    def invoke(action, **kwargs):
+        with preview_store(store.root, store.handle):
+            result = writer_lease.invoke_command(
+                _command("record_memory"), store.root, action=action,
+                response_detail="full", **kwargs,
+            )
+        assert result["status"] == "committed"
+        return result["diagnostics"]
+
+    invoke("create", manifest_path=manifest_path(), manifest_text=manifest_text(),
+           why="create", scaffold=False)
+    state = store.inspect_collection(CID)
+    invoke("revise", collection=CID, manifest_text=manifest_text().replace("title: Work", "title: Revised Work"),
+           expected_manifest_hash=state["lifecycle_guards"]["expected_manifest_hash"],
+           expected_container_hash=state["snapshot"], why="revise")
+    with pytest.raises(collections.CollectionError, match="SCHEMA_FIELD_TYPE"):
+        store.append_record(CID, item={"title": "Held", "count": "invalid"},
+                            item_key=KEY, why="capture", hold=True)
+    held = store.inspect_collection(CID)["coverage"]["held_refs"][0]["held_id"]
+    invoke("discard", collection=CID, held=held, why="discard invalid candidate")
+    assert store.inspect_collection(CID)["coverage"]["held"] == 0
 
 
 @pytest.mark.parametrize("profile", ["records", "planning"])

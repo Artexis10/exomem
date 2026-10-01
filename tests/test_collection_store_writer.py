@@ -228,13 +228,16 @@ def test_commit_survives_lost_transport_ledger_and_retry_after_reopen(store):
     stored = store.connection.execute(
         "SELECT receipt_json FROM txns WHERE request_id = ?", ("lost-ledger",)
     ).fetchone()[0]
-    assert json.loads(stored) == receipt
+    # Session-local advisories accompany the first response, not durable replay.
+    canonical_receipt = {key: value for key, value in receipt.items()
+                         if key not in {"due_state", "capture_sweep"}}
+    assert json.loads(stored) == canonical_receipt
     store.handle.close()
     from exomem.collection_store.writer import CollectionWriter
 
     with connection.open_writer(path, lease_check=lambda: True) as handle:
         reopened = CollectionWriter(root, handle)
-        assert reopened.append_record(CID, **args) == receipt
+        assert reopened.append_record(CID, **args) == canonical_receipt
         assert reopened.connection.execute("SELECT COUNT(*) FROM txns").fetchone()[0] == 2
         with pytest.raises(collections.CollectionError, match="IDEMPOTENCY_KEY_REUSED"):
             reopened.append_record(CID, **{**args, "item": {"title": "Different"}})

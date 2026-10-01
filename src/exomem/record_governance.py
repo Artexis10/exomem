@@ -24,6 +24,7 @@ from . import (
     vault,
 )
 from . import structured_collections as collections
+from .collection_store.preview import bound_writer, canonical_read
 from .governance import egress
 from .governance.principal import OWNER_AUDIENCE, effective_principal
 
@@ -928,6 +929,12 @@ def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
     loaded for itself.
     """
     root = Path(vault_root)
+    writer = bound_writer(root)
+    if writer is not None:
+        def canonical_allowed(relative: str) -> bool:
+            with writer.read_snapshot():
+                return writer._operation.allows_file(relative)
+        return canonical_allowed
     policy = egress.policy_module.load(root)
     tombstones = egress.lifecycle.tombstoned_paths(root)
 
@@ -987,6 +994,10 @@ def authorization_pass(vault_root: Path) -> Iterator[None]:
 def _authorize(
     root: Path, relative: str, *, receipt: bool = False, policy: Any | None = None
 ) -> bool:
+    writer = bound_writer(root)
+    if writer is not None:
+        with writer.read_snapshot():
+            return writer._operation.allows_file(relative)
     if _access_refused(root, relative):
         return False
     tombstones: frozenset[str] | None = None
@@ -1248,6 +1259,7 @@ def require_records_profile(
     return manifest
 
 
+@canonical_read
 def resolve_collection(
     vault_root: Path, selector: str | Path | collections.CollectionManifest
 ) -> collections.CollectionManifest:
@@ -1704,6 +1716,16 @@ def _inventory_coverage(
     would claim one. Absent is not an option here because every row carries the
     same keys, so the hole is named rather than filled.
     """
+    from . import due_state
+
+    writer = bound_writer(root)
+    if writer is not None:
+        items, _, held = writer._operation.authorized_rows(manifest.collection_id)
+        observations = due_state.collection_observation_coverage(
+            root, str(manifest.path), authorize_path=authorize
+        )
+        return {"committed": len(items), "held": len(held),
+                "unreflected": len(observations["unreflected"])}
     try:
         snapshot = record_formats.load_adapter(root, manifest, authorize_path=authorize).read()
         committed: int | None = len(snapshot.records)
@@ -1745,6 +1767,7 @@ def _presentation_inspection(
     }
 
 
+@canonical_read
 def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
     """Return a bounded authorized inventory with a per-collection census.
 
@@ -1770,7 +1793,8 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
         manifests = [
             manifest
             for manifest in discovered
-            if manifest.semantic_profile == semantic_profile and authorize(manifest.storage.source)
+            if manifest.semantic_profile == semantic_profile
+            and (bound_writer(root) is not None or authorize(manifest.storage.source))
         ]
         legacy: tuple[collections.LegacyCollection, ...] = ()
         legacy_truncated = False
