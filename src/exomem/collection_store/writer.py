@@ -63,8 +63,14 @@ class CollectionWriter:
         self._operation = None
         self._facade_profile = None
 
+    def _require_operation_context(self) -> None:
+        self.handle.require_owner_thread()
+        if self._operation is not None and self._operation.who != effective_principal():
+            self._operation.refuse()
+
     @contextmanager
     def _authorization(self, *, mutation=True):
+        self._require_operation_context()
         previous = self._operation
         if previous is not None:
             yield previous
@@ -83,6 +89,7 @@ class CollectionWriter:
     def _collection(
         self, selector: str | Path | collections.CollectionManifest, *, facade_profile: str | None = None
     ):
+        self._require_operation_context()
         raw = (
             selector.collection_id
             if isinstance(selector, collections.CollectionManifest)
@@ -144,12 +151,30 @@ class CollectionWriter:
     def _container(self, row: Mapping[str, Any]) -> str:
         return tokens.container_hash(row["collection_id"], row["generation"], row["audit_head"])
 
+    @contextmanager
+    def read_collection(self, selector, *, facade_profile: str | None = None):
+        """Resolve and read one collection under one SQLite and policy snapshot."""
+        self._require_operation_context()
+        if facade_profile is None and isinstance(selector, collections.CollectionManifest):
+            facade_profile = selector.semantic_profile
+        if self.connection.in_transaction:
+            with self._authorization(mutation=False):
+                yield self._collection(selector, facade_profile=facade_profile)[1]
+            return
+        self.connection.execute("BEGIN")
+        try:
+            with self._authorization(mutation=False):
+                yield self._collection(selector, facade_profile=facade_profile)[1]
+        finally:
+            self.connection.execute("ROLLBACK")
+
     def inspect_collection(self, collection, *, facade_profile: str | None = None) -> dict[str, Any]:
         """Report the dark writer's canonical state without publishing or repairing.
 
         This preview contract supports guard refresh and writer wire goldens.
         Production reader routing belongs to later slices.
         """
+        self._require_operation_context()
         self.connection.execute("BEGIN")
         try:
             with self._authorization(mutation=False):

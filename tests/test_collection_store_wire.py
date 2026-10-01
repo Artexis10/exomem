@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 
 import pytest
@@ -79,6 +80,289 @@ def paired_create(paired, profile, *, scaffold=True):
     if not scaffold:
         (roots[0] / manifest_path(profile)).parent.joinpath("Items").mkdir()
     return receipts
+
+
+@pytest.mark.parametrize("profile", ["records", "planning"])
+def test_public_query_reads_committed_store_rows_without_rendered_files(paired, profile):
+    invoke, roots, _ = paired
+    paired_create(paired, profile, scaffold=False)
+    action = "append" if profile == "records" else "add"
+    key_arg = "item_key" if profile == "records" else "plan_id"
+    for mode in (0, 1):
+        invoke(mode, profile, action, collection=manifest_path(profile),
+               item={"title": "One"}, **{key_arg: KEY}, why="capture")
+    assert not (roots[1] / manifest_path(profile)).exists()
+    results = [invoke(mode, profile, "query", collection=manifest_path(profile))
+               for mode in (0, 1)]
+    for result in results:
+        assert result["total_matched"] == result["returned"] == 1
+        assert result["rows"][0]["title"] == "One"
+        assert result["rows"][0]["record_id" if profile == "records" else "plan_id"] == KEY
+
+
+def test_bound_direct_record_query_uses_the_store_without_file_authority(paired):
+    from exomem import record_governance
+    from exomem.collection_store.preview import preview_store
+
+    invoke, roots, handle = paired
+    paired_create(paired, "records", scaffold=False)
+    invoke(1, "records", "append", collection=CID, item={"title": "One"},
+           item_key=KEY, why="capture")
+    with preview_store(roots[1], handle):
+        result = record_governance.query_collection(roots[1], CID)
+    assert result.total_matched == 1
+    assert result.rows[0]["title"] == "One"
+
+
+@pytest.mark.parametrize("profile", ["records", "planning"])
+def test_store_query_refuses_file_audit_history_until_canonical_reader_exists(paired, profile):
+    invoke, _, _ = paired
+    paired_create(paired, profile, scaffold=False)
+    with pytest.raises(OpError) as caught:
+        invoke(1, profile, "query", collection=CID, include_agent_history=True)
+    assert caught.value.code == "COLLECTION_STORE_PREVIEW_UNSUPPORTED"
+
+
+def test_direct_planning_query_refuses_file_audit_history(paired):
+    from exomem import planning
+    from exomem.collection_store.preview import preview_store
+
+    invoke, roots, handle = paired
+    paired_create(paired, "planning", scaffold=False)
+    with preview_store(roots[1], handle):
+        with pytest.raises(collections.CollectionError, match="COLLECTION_STORE_PREVIEW_UNSUPPORTED"):
+            planning.query(roots[1], CID, include_agent_history=True)
+
+
+def _query_parity_projection(result):
+    projected = deepcopy(result)
+    for key in ("snapshot", "continuation", "generated_at", "source_versions", "source_hashes"):
+        projected.pop(key, None)
+    for row in projected.get("rows", []):
+        row.pop("item_version", None)
+    if isinstance(projected.get("aggregate"), dict):
+        latest = projected["aggregate"].get("row")
+        if isinstance(latest, dict):
+            latest.pop("item_version", None)
+        profile = projected["aggregate"].get("profile")
+        if isinstance(profile, dict):
+            for column in profile["columns"]:
+                if column["name"] == "item_version":
+                    column.clear()
+                    column["name"] = "item_version"
+            projected["aggregate"]["dataset_card"] = re.sub(
+                r"(?m)^- \*\*item_version\*\*.*\n?", "", projected["aggregate"]["dataset_card"]
+            )
+    if isinstance(projected.get("view"), dict):
+        projected["view"].pop("identity", None)
+    if isinstance(projected.get("view_provenance"), dict):
+        projected["view_provenance"].pop("identity", None)
+    if isinstance(projected.get("query"), dict) and isinstance(projected["query"].get("view"), dict):
+        projected["query"]["view"].pop("identity", None)
+    if isinstance(projected.get("rendered"), str):
+        projected["rendered"] = _query_parity_projection(json.loads(projected["rendered"]))
+    return projected
+
+
+@pytest.mark.parametrize("profile", ["records", "planning"])
+def test_file_and_store_queries_share_operator_and_aggregate_results(paired, profile):
+    invoke, _, _ = paired
+    paired_create(paired, profile, scaffold=False)
+    action = "append" if profile == "records" else "add"
+    key_arg = "item_key" if profile == "records" else "plan_id"
+    for mode in (0, 1):
+        for title, key in (("One", KEY), ("Two", OTHER)):
+            invoke(mode, profile, action, collection=manifest_path(profile),
+                   item={"title": title}, **{key_arg: key}, why="capture")
+    queries = [
+        {"filters": [{"column": "title", "op": op, "value": value}]}
+        for op, value in (
+            ("eq", "Two"), ("ne", "Two"), ("gt", "One"), ("gte", "Two"),
+            ("lt", "Two"), ("lte", "Two"), ("contains", "w"),
+            ("icontains", "W"), ("startswith", "T"), ("in", ["One", "Two"]),
+            ("nin", ["Two"]), ("exists", None), ("missing", None),
+        )
+    ] + [{"aggregate": aggregate} for aggregate in (
+        "count", "min:title", "max:title", "sum:title", "avg:title",
+        "latest:title", "distinct:title", "group:title", "profile",
+    )]
+    for query in queries:
+        results = [invoke(mode, profile, "query", collection=manifest_path(profile), **query)
+                   for mode in (0, 1)]
+        assert _query_parity_projection(results[0]) == _query_parity_projection(results[1]), query
+
+
+@pytest.mark.parametrize("profile", ["records", "planning"])
+def test_saved_query_view_uses_canonical_store_definition(paired, profile):
+    invoke, _, _ = paired
+    text = manifest_text(profile).replace(
+        "lifecycle: active\n", "lifecycle: active\nviews:\n  two:\n    query:\n"
+        "      filters:\n        - {column: title, op: eq, value: Two}\n",
+    )
+    for mode in (0, 1):
+        invoke(mode, profile, "create", manifest_path=manifest_path(profile),
+               manifest_text=text, why="create", scaffold=False)
+        if mode == 0:
+            (paired[1][0] / manifest_path(profile)).parent.joinpath("Items").mkdir()
+        action = "append" if profile == "records" else "add"
+        key_arg = "item_key" if profile == "records" else "plan_id"
+        for title, key in (("One", KEY), ("Two", OTHER)):
+            invoke(mode, profile, action, collection=CID, item={"title": title},
+                   **{key_arg: key}, why="capture")
+    results = [invoke(mode, profile, "query", collection=CID, view="two") for mode in (0, 1)]
+    assert _query_parity_projection(results[0]) == _query_parity_projection(results[1])
+    assert [row["title"] for row in results[1]["rows"]] == ["Two"]
+
+
+def test_records_child_expansion_matches_file_query(paired):
+    invoke, roots, _ = paired
+    text = manifest_text().replace(
+        "    count: {type: integer}\n", "    count: {type: integer}\n"
+        "    measurements:\n      type: array\n      items: {type: object}\n",
+    )
+    text = text.removesuffix("---\n") + (
+        "record_presentation:\n  version: 1\n  summary: [title]\n"
+        "  tables:\n    - field: measurements\n      label: Measurements\n"
+        "      columns:\n        - {field: name, type: string}\n---\n"
+    )
+    for mode in (0, 1):
+        invoke(mode, "records", "create", manifest_path=manifest_path(),
+               manifest_text=text, why="create", scaffold=False)
+        if mode == 0:
+            (roots[0] / manifest_path()).parent.joinpath("Items").mkdir()
+        invoke(mode, "records", "append", collection=CID,
+               item={"title": "One", "measurements": [{"name": "First"}, {"name": "Second"}]},
+               item_key=KEY, why="capture")
+    results = [invoke(mode, "records", "query", collection=CID, expand_children=True)
+               for mode in (0, 1)]
+    assert _query_parity_projection(results[0]) == _query_parity_projection(results[1])
+    assert [row["name"] for row in results[1]["rows"]] == ["First", "Second"]
+
+
+@pytest.mark.parametrize("insertion", ["newest-first", "oldest-first"])
+def test_markdown_log_query_preserves_declared_order_and_notes(paired, insertion):
+    """Bounded pages preserve log order and notes declared outside item_schema."""
+    from exomem import record_governance
+    from exomem.collection_store.preview import preview_store
+
+    invoke, roots, handle = paired
+    text = (manifest_text()
+            .replace("strategy: markdown-items\n  source: Items", "strategy: markdown-log\n  source: Log.md")
+            .replace("  format_version: 1\n", "  format_version: 1\n"
+                     "  section: {level: 2, title: Entries}\n"
+                     "  item_heading:\n    level: 3\n"
+                     "    fields: [{name: title, type: string}]\n"
+                     '    separator: " · "\n'
+                     '    note: {field: note, open: " (", close: ")"}\n'
+                     "  child_rows:\n    prefix: \"- \"\n    delimiter: \"|\"\n"
+                     "    fields: [field, value]\n    container_field: details\n"
+                     f"  insertion: {insertion}\n")
+            .replace("    count: {type: integer}",
+                     "    details: {type: array, items: {type: object}}"))
+    for mode in (0, 1):
+        invoke(mode, "records", "create", manifest_path=manifest_path(),
+               manifest_text=text, why="create")
+        for title, key in (("One", KEY), ("Two", OTHER)):
+            invoke(mode, "records", "append", collection=CID,
+                   item={"title": title, "details": [], "note": "Authored note"},
+                   item_key=key, why="capture")
+    with handle.transaction() as conn:
+        conn.execute("UPDATE items SET values_json=json_set(values_json, '$.undeclared', 'Private metadata')")
+    pages = []
+    for mode in (0, 1):
+        first = invoke(mode, "records", "query", collection=CID, limit=1)
+        second = invoke(mode, "records", "query", collection=CID, limit=1,
+                        continuation=first["continuation"])
+        pages.append([first, second])
+    expected = ["Two", "One"] if insertion == "newest-first" else ["One", "Two"]
+    for mode_pages in pages:
+        assert [page["rows"][0]["title"] for page in mode_pages] == expected
+        assert [page["rows"][0].get("note") for page in mode_pages] == ["Authored note"] * 2
+        assert all(page["total_matched"] == 2 and page["returned"] == 1 for page in mode_pages)
+        assert mode_pages[1]["continuation"] is None
+        assert "Private metadata" not in str(mode_pages)
+    for file_page, store_page in zip(*pages):
+        assert _query_parity_projection(file_page) == _query_parity_projection(store_page)
+    with preview_store(roots[1], handle):
+        direct = record_governance.query_collection(roots[1], CID)
+    assert [row["title"] for row in direct.rows] == expected
+    assert [row.get("note") for row in direct.rows] == ["Authored note"] * 2
+    assert "Private metadata" not in str(direct.rows)
+
+
+def test_numeric_date_and_list_queries_match_file_mode(paired):
+    invoke, roots, _ = paired
+    text = manifest_text().replace(
+        "    count: {type: integer}\n", "    count: {type: integer}\n"
+        "    occurred_on: {type: date}\n"
+        "    tags: {type: array, items: {type: string}}\n"
+        "    flag: {type: boolean}\n"
+        "    related: {type: link}\n",
+    )
+    for mode in (0, 1):
+        target = roots[mode] / "Knowledge Base/Notes/Target.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# Target\n")
+        invoke(mode, "records", "create", manifest_path=manifest_path(),
+               manifest_text=text, why="create", scaffold=False)
+        if mode == 0:
+            (roots[0] / manifest_path()).parent.joinpath("Items").mkdir()
+        for title, key, count, date, tags, flag in (
+            ("One", KEY, 2, "2026-01-01", ["first"], False),
+            ("Two", OTHER, 4, "2026-02-01", ["second"], True),
+        ):
+            invoke(mode, "records", "append", collection=CID,
+                   item={"title": title, "count": count, "occurred_on": date,
+                         "tags": tags, "flag": flag, "related": "[[Notes/Target]]"},
+                   item_key=key, why="capture")
+    for query in (
+        {"filters": [{"column": "count", "op": "gte", "value": 3}]},
+        {"date_from": "2026-02-01", "date_column": "occurred_on"},
+        {"filters": [{"column": "tags", "op": "contains", "value": "second"}]},
+        {"filters": [{"column": "flag", "op": "eq", "value": True}]},
+        {"filters": [{"column": "related", "op": "eq", "value": "[[Notes/Target]]"}]},
+        {"aggregate": "sum:count"},
+        {"aggregate": "latest:occurred_on"},
+    ):
+        results = [invoke(mode, "records", "query", collection=CID, **query)
+                   for mode in (0, 1)]
+        assert _query_parity_projection(results[0]) == _query_parity_projection(results[1])
+        if query.get("filters", [{}])[0].get("column") == "related":
+            assert results[1]["total_matched"] == 2
+        if query.get("filters", [{}])[0].get("column") == "flag":
+            assert [row["title"] for row in results[1]["rows"]] == ["Two"]
+
+
+@pytest.mark.parametrize("output_format", ["markdown", "csv"])
+def test_rendered_query_formats_match_file_mode(paired, output_format):
+    invoke, _, _ = paired
+    paired_create(paired, "records", scaffold=False)
+    for mode in (0, 1):
+        invoke(mode, "records", "append", collection=CID, item={"title": "One"},
+               item_key=KEY, why="capture")
+    rendered = [invoke(mode, "records", "query", collection=CID,
+                       output_format=output_format)["rendered"] for mode in (0, 1)]
+    normalized = [re.sub(r"[0-9a-f]{64}|(?<=generated_at: )[^\n]+", "<mode-local>",
+                         value) for value in rendered]
+    assert normalized[0] == normalized[1]
+
+
+@pytest.mark.parametrize("hierarchy_mode", ["ancestors", "descendants"])
+def test_planning_hierarchy_matches_file_query(paired, hierarchy_mode):
+    invoke, _, _ = paired
+    paired_create(paired, "planning", scaffold=False)
+    for mode in (0, 1):
+        invoke(mode, "planning", "add", collection=CID,
+               item={"title": "Parent", "kind": "outcome"}, plan_id=KEY, why="capture")
+        invoke(mode, "planning", "add", collection=CID,
+               item={"title": "Child", "kind": "initiative", "parent": f"exomem://plan/{CID}/{KEY}"},
+               plan_id=OTHER, why="capture")
+    root = OTHER if hierarchy_mode == "ancestors" else KEY
+    results = [invoke(mode, "planning", "query", collection=CID,
+                      filters=[{"column": "plan_id", "op": "eq", "value": root}],
+                      hierarchy_mode=hierarchy_mode) for mode in (0, 1)]
+    assert _query_parity_projection(results[0]) == _query_parity_projection(results[1])
+    assert results[1]["hierarchy"]["edges"] == [{"parent": KEY, "child": OTHER}]
 
 
 @pytest.mark.parametrize("profile", ["records", "planning"])

@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from exomem import structured_collections as collections
+from exomem.record_memory import record_memory
 from exomem.collection_store.preview import preview_store
 from exomem.governance import authorization_custody, policy, schema_v4
 from exomem.governance import store as authority_store, tool
@@ -114,6 +115,121 @@ def test_inspection_omits_withheld_rows_before_decoding_payloads(store):
     assert after["snapshot"] == before["snapshot"]
     assert after["projection"]["pending_views"] == before["projection"]["pending_views"]
     assert "Hidden" not in str(after)
+
+
+@pytest.mark.parametrize("route", ["facade", "records", "planning", "adapter"])
+def test_nested_query_cannot_reuse_another_principals_release(store, route):
+    """A lower principal cannot inherit an owner's in-flight visible rows."""
+    from exomem import planning, record_formats, record_governance
+    from exomem.cli_ops import OpError
+
+    profile = "planning" if route == "planning" else "records"
+    create(store, profile)
+    store.append_record(CID, item={"title": "Public"}, item_key=KEY, why="capture")
+    store.append_record(CID, item={"title": "Owner secret"}, item_key=OTHER, why="capture")
+    write_scope(store.root, paths=f"{profile.title()}/**/{OTHER}.md")
+    write_rule(store.root, ceiling=0)
+    before = tuple(store.connection.iterdump())
+    with request_scope(owner_principal()), preview_store(store.root, store.handle) as writer, writer.read_collection(CID) as manifest:
+        queries = {
+            "facade": lambda: record_memory(store.root, "query", collection=CID),
+            "records": lambda: record_governance.query_collection(store.root, manifest),
+            "planning": lambda: planning.query(store.root, manifest),
+            "adapter": record_formats.load_adapter(store.root, manifest).read,
+        }
+        query = queries[route]
+        assert "Owner secret" in str(query())
+        with request_scope(_external()):
+            with pytest.raises((collections.CollectionError, OpError), match="COLLECTION_NOT_FOUND"):
+                query()
+        assert "Owner secret" in str(query())
+    assert tuple(store.connection.iterdump()) == before
+
+
+def test_copied_context_cannot_read_on_another_connection_thread(store):
+    """Copying the request and preview binding cannot transfer SQLite ownership."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import copy_context
+    from exomem import record_formats
+    from exomem.collection_store.connection import CollectionStoreError
+
+    create(store)
+    store.append_record(CID, item={"title": "Owner secret"}, item_key=KEY, why="capture")
+    before = tuple(store.connection.iterdump())
+    with request_scope(owner_principal()), preview_store(store.root, store.handle) as writer, writer.read_collection(CID) as manifest:
+        adapter = record_formats.load_adapter(store.root, manifest)
+        statements = []
+        store.connection.set_trace_callback(statements.append)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(copy_context().run, adapter.read)
+                with pytest.raises(CollectionStoreError, match="COLLECTION_STORE_WRITER_THREAD"):
+                    future.result()
+        finally:
+            store.connection.set_trace_callback(None)
+        assert statements == []
+        assert adapter.read().records[0].values["title"] == "Owner secret"
+    assert tuple(store.connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("selector", ["path", "ref", "tag"])
+def test_query_excludes_hidden_rows_from_counts_and_preserves_continuation(store, selector):
+    third = "33333333-3333-4333-8333-333333333333"
+    text = manifest_text().replace(
+        "    count: {type: integer}\n",
+        "    count: {type: integer}\n    tags: {type: array, items: {type: string}}\n",
+    )
+    store.create_collection(manifest_path(), text, why="create", scaffold=False)
+    store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
+    hidden = store.append_record(CID, item={"title": "Hidden", "tags": ["secret"]},
+                                 item_key=OTHER, why="capture")
+    final = store.append_record(CID, item={"title": "Three"}, item_key=third, why="capture")
+    write_scope(store.root, paths=f"Records/**/{OTHER}.md" if selector == "path" else "Unrelated/**")
+    scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    if selector == "ref":
+        scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{OTHER}]\n")
+    elif selector == "tag":
+        scope.write_text(scope.read_text() + "tags: [secret]\n")
+    write_rule(store.root, ceiling=0)
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        first = record_memory(store.root, "query", collection=CID, limit=1, sort_by="title")
+    assert first["total_matched"] == 2
+    assert first["returned"] == 1
+    assert first["continuation"]
+    assert "Hidden" not in str(first)
+    with request_scope(owner_principal()):
+        store.update_record(CID, item_key=OTHER, changes={"title": "Still hidden"},
+                            expected_container_hash=final["after_container_hash"],
+                            expected_item_version=hidden["after_item_hash"], why="correct")
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        second = record_memory(store.root, "query", collection=CID, limit=1,
+                               sort_by="title", continuation=first["continuation"])
+    assert second["snapshot"] == first["snapshot"]
+    assert second["total_matched"] == 2
+    assert second["rows"][0]["title"] == "Three"
+    assert "hidden" not in str(second).lower()
+
+
+def test_planning_hierarchy_omits_withheld_ancestor(store):
+    from exomem.plan_memory import plan_memory
+
+    create(store, "planning")
+    store.append_record(CID, item={"title": "Parent", "kind": "outcome"},
+                        item_key=KEY, why="capture")
+    store.append_record(
+        CID, item={"title": "Child", "kind": "initiative", "parent": f"exomem://plan/{CID}/{KEY}"},
+        item_key=OTHER, why="capture",
+    )
+    write_scope(store.root, paths=f"Planning/**/{KEY}.md")
+    write_rule(store.root, ceiling=0)
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        result = plan_memory(
+            store.root, "query", collection=CID, hierarchy_mode="ancestors",
+            filters=[{"column": "plan_id", "op": "eq", "value": OTHER}],
+        )
+    assert result["total_matched"] == 1
+    assert result["hierarchy"]["edges"] == []
+    assert [node["plan_id"] for node in result["hierarchy"]["nodes"]] == [OTHER]
 
 
 def test_saved_view_cannot_reveal_hidden_canonical_target_via_stale_projection(store):
@@ -523,6 +639,36 @@ def test_another_session_cannot_redeem_or_consume_the_grant(store, monkeypatch):
         redeem(store, who, token)
         with request_scope(other):
             assert store.inspect_collection(CID)["coverage"]["committed"] == 0
+
+
+@pytest.mark.parametrize("changed", ["purpose", "verified-session"])
+def test_nested_query_rechecks_the_complete_principal(store, monkeypatch, changed):
+    """The same audience cannot borrow a different purpose or verified session's grant."""
+    from exomem import record_governance
+
+    create(store)
+    store.append_record(CID, item={"title": "Granted"}, item_key=KEY, why="capture")
+    who = session(store, monkeypatch)
+    other = (replace(who, purpose="different") if changed == "purpose"
+             else replace(who, verified_authorization_session=None))
+    with preview_store(store.root, store.handle) as writer:
+        redeem(store, who, inspection_token(store, who))
+        load = policy.load
+        loads = []
+
+        def counted_load(root):
+            loads.append(root)
+            return load(root)
+
+        monkeypatch.setattr(policy, "load", counted_load)
+        with request_scope(who), writer.read_collection(CID) as manifest:
+            with request_scope(replace(who)):
+                assert record_governance.query_collection(store.root, manifest).total_matched == 1
+            with request_scope(other):
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    record_governance.query_collection(store.root, manifest)
+            assert record_governance.query_collection(store.root, manifest).total_matched == 1
+        assert loads == [store.root]
 
 
 def test_ten_thousand_subjects_use_one_real_authority_catalog_read(store, monkeypatch):

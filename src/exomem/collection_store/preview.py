@@ -54,6 +54,7 @@ def dispatch(
     args = {name: value for name, value in values.items() if value is not None}
     if action == "describe":
         return False, None
+    writer._require_operation_context()
     writer._facade_profile = profile
     # Records inspection is generic in file mode; only its mutations require
     # the Records profile. Planning inspection retains its profile guard.
@@ -61,6 +62,21 @@ def dispatch(
         return True, writer.inspect_collection(args["collection"], facade_profile=profile)
     if action == "inspect":
         return True, writer.inspect_collection(args["collection"])
+    if action == "query":
+        from .. import planning, record_governance
+
+        collection = args.pop("collection")
+        if args.pop("include_agent_history", False):
+            raise collections.CollectionError(
+                "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "store audit history belongs to a later slice"
+            )
+        with writer.read_collection(collection, facade_profile=profile) as manifest:
+            if profile == "planning":
+                return True, planning.query(vault_root, manifest, **args)
+            result = record_governance.query_collection(vault_root, manifest, **args)
+            return True, record_governance.project_query_result(
+                result, manifest, output_format=args.get("output_format", "json"),
+            )
     if action == "create":
         return True, writer.create_collection(**args)
     collection = args.pop("collection")

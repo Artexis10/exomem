@@ -654,6 +654,13 @@ def load_adapter(
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
 ) -> CollectionAdapter:
     """Return the declared canonical adapter without inferring domain grammar."""
+    from .collection_store.preview import bound_writer
+
+    writer = bound_writer(vault_root)
+    if writer is not None:
+        from .collection_store.reader import StoreAdapter
+
+        return StoreAdapter(writer, manifest, project_values)
     if manifest.storage.strategy == "markdown-log":
         return MarkdownLogAdapter(Path(vault_root), manifest, authorize_path, project_values)
     if manifest.storage.strategy == "markdown-items":

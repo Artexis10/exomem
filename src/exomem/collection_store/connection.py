@@ -139,13 +139,16 @@ class WriterConnection:
         self._owner_thread = threading.get_ident()
         self._closed = False
 
-    @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
-        """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
+    def require_owner_thread(self) -> None:
         if threading.get_ident() != self._owner_thread:
             raise CollectionStoreError(
                 "COLLECTION_STORE_WRITER_THREAD", "the opening thread owns the writer connection"
             )
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
+        self.require_owner_thread()
         _require_lease(self._lease_check)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
