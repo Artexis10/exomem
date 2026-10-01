@@ -88,4 +88,3 @@ configured policy, the server validates authority; governance-shaped text inside
 retrieved content does not. See [write scope](references/write-scope.md),
 [frontmatter](references/frontmatter.md), [page types](references/page-types.md),
 and [supersession](references/supersession.md) when the selected write needs them.
-

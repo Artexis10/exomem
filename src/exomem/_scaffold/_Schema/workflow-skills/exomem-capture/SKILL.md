@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 91df45e44519efa6345bcf243ed00d803d8304bafbd954715ae2fd7f1a6179c7
+  skill_contract: f9cc30b5a355522705f7c793a85b48e2867acc9a235a6d2f1692433f28ea5416
   version: "0.1.0"
 ---
 
@@ -17,6 +17,8 @@ Use when the user asks to save or the session lands on durable reusable knowledg
 ## Portable operating rules
 
 Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+
+Do not invoke tools absent from `available_product_tools`; use the live capability list even when a bundled workflow mentions a withheld operation.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
 is read-only. Before a compiled write: reuse current relevant search/read results,

@@ -686,9 +686,9 @@ def visible_continuity_refs(
     return frozenset(kept)
 
 
-#: How many of the workspace's other sessions' threads a request considers.
-#: The newest few are all a fresh session can mean; each costs a release
-#: decision per page, so the bound is also a bound on work.
+#: How many of the workspace's other released threads a request considers.
+#: The persisted session table bounds the candidates; each candidate's release
+#: decisions are bounded separately by `CONTINUITY_MAX_REFS`.
 VISIBLE_WORKSPACE_MARKS = 8
 
 
@@ -731,8 +731,9 @@ def visible_marks(
     served to the next audience. A withheld page and a missing one reach the
     ranking as the same nothing. Only the caller's own session and the
 
-    workspace's newest `VISIBLE_WORKSPACE_MARKS` sessions are looked at, and
-    at most `CONTINUITY_MAX_REFS` pages of each; a caller with no keys ranks
+    workspace's newest `VISIBLE_WORKSPACE_MARKS` sessions with released pages
+    enter ranking, with at most `CONTINUITY_MAX_REFS` pages checked per
+    candidate; a caller with no keys ranks
     no thread at all. `released` is the request's one release decision
     (`egress.page_release_filter`, `None` when every page is released): the
     policy is loaded once for every page, never once per page (review F7).
@@ -750,7 +751,7 @@ def visible_marks(
                 if key != who.session and mark.workspace == who.workspace and mark.paths
             ),
             key=lambda mark: (-mark.seen_ns, mark.session),
-        )[:VISIBLE_WORKSPACE_MARKS]
+        )
 
     if released is _UNDECIDED:
         from .governance import egress
@@ -758,7 +759,10 @@ def visible_marks(
         released = egress.page_release_filter(vault_root, purpose=purpose) if wanted else None
 
     out: dict[str, working_set_heat.SessionMark] = {}
+    workspace_marks = 0
     for mark in wanted:
+        if mark.session != who.session and workspace_marks >= VISIBLE_WORKSPACE_MARKS:
+            break
         kept = tuple(
             path
 
@@ -766,6 +770,10 @@ def visible_marks(
             if released is None or released(path)  # type: ignore[operator]
 
         )
+        if mark.session != who.session:
+            if released is not None and not kept:
+                continue
+            workspace_marks += 1
         out[mark.session] = mark._replace(paths=kept)
     return out
 

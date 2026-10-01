@@ -7,6 +7,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -365,3 +366,20 @@ def test_chart_seeds_scheduler_state_once_and_never_re_renders_it() -> None:
     assert "$persistedState" not in template
     assert "$persistedAlertState" not in template
     assert template.count("helm.sh/resource-policy: keep") >= 2
+
+
+def test_chart_classifies_every_scheduler_job_by_cloud_service() -> None:
+    contract = json.loads(
+        (ROOT / "infra/contracts/exomem-hosted-schedules-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    values = yaml.safe_load(
+        (ROOT / "infra/helm/platform/values.yaml").read_text(encoding="utf-8")
+    )
+
+    job_policies = values["scheduler"]["jobs"]
+    assert set(job_policies) == {job["name"] for job in contract["jobs"]}
+    assert {
+        name for name, policy in job_policies.items() if policy["servesCloud"]
+    } == {"exomem-reconcile"}

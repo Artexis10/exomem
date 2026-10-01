@@ -159,6 +159,13 @@ class SqliteVecStore:
         non-vec-aware writers. Pure SQL — never re-embeds. The caller must have
         loaded the extension on `conn`.
         """
+        with conn:
+            self.ensure_synced_in_transaction(conn, quant=quant)
+
+    def ensure_synced_in_transaction(
+        self, conn: sqlite3.Connection, *, quant: bool = False
+    ) -> None:
+        """Sync vec0 without committing the caller's publication transaction."""
         declared = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name = ?", (self.vec_table,)
         ).fetchone()
@@ -166,8 +173,7 @@ class SqliteVecStore:
             # The blobs moved to another vector width (a new model): the old
             # column cannot hold them, so it is redeclared and refilled below.
             log.info("vec sync: redeclaring %s at %d dimensions", self.vec_table, self.dim)
-            with conn:
-                self.drop(conn)
+            self.drop(conn)
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS {self.vec_table} "
             f"USING vec0(embedding float[{self.dim}] distance_metric=cosine)"
@@ -188,9 +194,8 @@ class SqliteVecStore:
                 "vec sync: rebuilding %s from %s blobs (%d vec rows vs %d source rows)",
                 table, self.source_table, n_vec, n_src,
             )
-            with conn:
-                conn.execute(f"DELETE FROM {table}")
-                conn.execute(self._insert_select(table, quantize, where=None))
+            conn.execute(f"DELETE FROM {table}")
+            conn.execute(self._insert_select(table, quantize, where=None))
 
     def _insert_select(self, table: str, quantize: bool, where: str | None) -> str:
         expr = (

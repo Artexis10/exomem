@@ -42,6 +42,31 @@ A background job SHALL build a sidecar for the recall encoder's space beside the
 - **WHEN** a cloud cell's sidecar holds English vectors and the cell starts on bge-m3
 - **THEN** the English encoder is never loaded, the vector lane is `unavailable` with `vector_space_mismatch` while lexical recall answers, doctor warns that dense recall is off until the cutover, a page written meanwhile is in the bge-m3 sidecar after the cutover, and dense recall answers from the bge-m3 sidecar after the cutover
 
+#### Scenario: A vault present before the first start is embedded without an operator
+
+- **WHEN** a personal server or cloud cell starts over pages and semantic units already present in its vault, with no embedding sidecar or an empty one and no write receipts
+- **THEN** its background job builds every eligible chunk and semantic unit in the recall encoder's space using committed batches, resumes without re-encoding committed work after interruption, catches up and atomically publishes the active pointer, and dense recall participates after cutover without an operator or a second encoder; lexical recall serves during the build and doctor reports the pending build or its progress rather than recommending CLI reconcile
+
+#### Scenario: A live write does not orphan an interrupted initial build
+
+- **WHEN** an initial build is interrupted, including before its first batch commits, and a live write has given the legacy sidecar the recall encoder's identity, with incomplete corpus coverage, no published active pointer and a separate target-space shadow sidecar beside the active one
+- **THEN** the next start resumes the initial shadow build without re-encoding committed batches, covers every eligible page and semantic unit, and reports current only after atomic cutover
+
+#### Scenario: A matching serving sidecar needs no startup coverage scan
+
+- **WHEN** the serving sidecar accepts the recall encoder's identity and either an active pointer is published or no separate target-space shadow sidecar exists
+- **THEN** planning enumerates no pages and performs no per-page semantic coverage checks, and ordinary drift in a legacy sidecar does not trigger a full shadow build
+
+#### Scenario: Disabled or unavailable embeddings do not start a build
+
+- **WHEN** embeddings are disabled or the optional serving stack is unavailable
+- **THEN** the job reports a non-failure disabled or unavailable state with the existing serving-space details without loading an encoder or fetching its artifact; a served artifact requires ONNX Runtime and tokenizers even when Torch is the preferred backend
+
+#### Scenario: An empty embedding corpus needs no encoder
+
+- **WHEN** a vault contains no eligible chunk-bearing pages
+- **THEN** the job is current without loading an encoder, repeated starts plan no build, and doctor emits no initial-build warning
+
 #### Scenario: A failed cutover changes nothing
 
 - **WHEN** writing the active pointer fails

@@ -277,6 +277,26 @@ For each node, cellctl SHALL publish `cell_slots`, equal to the provider's per-s
 - **WHEN** non-deleted cell rows equal the published `cell_slots`
 - **THEN** no further cell is admitted until a node is added or a cell is deleted
 
+### Requirement: The Cloud lifecycle sweep remains scheduled
+
+The platform chart SHALL classify every hosted scheduler job by whether it serves Cloud. While either cellctl or the Cloud gateway is enabled, it SHALL keep Cloud-serving scheduler jobs active and suspend legacy-only scheduler jobs. With Cloud disabled, `legacyHosted.paused` SHALL retain its existing all-jobs pause, and with every pause input disabled no scheduler job SHALL be suspended.
+
+#### Scenario: The lifecycle sweep runs while Cloud is on
+
+- **WHEN** cellctl or the Cloud gateway is enabled
+- **THEN** the `exomem-reconcile` CronJob is not suspended
+- **AND** every legacy-only scheduler CronJob is suspended
+
+#### Scenario: Only the explicit legacy pause is on
+
+- **WHEN** Cloud is disabled and `legacyHosted.paused` is true
+- **THEN** every scheduler CronJob is suspended
+
+#### Scenario: No platform pause is on
+
+- **WHEN** Cloud is disabled and `legacyHosted.paused` is false
+- **THEN** no scheduler CronJob is suspended
+
 ### Requirement: Vault traffic is TLS-terminated only on our own servers
 
 The cloud MCP hostname SHALL be served by the platform ingress, exposed only through its TLS entrypoint. Its certificate SHALL be obtained through ACME, and its DNS record SHALL NOT be proxied by a third party. Only the gateway route SHALL be public. Cells, cellctl, the plaintext entrypoint and the cluster API MUST NOT be reachable from the internet.

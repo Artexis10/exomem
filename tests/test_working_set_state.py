@@ -136,6 +136,19 @@ def test_current_state_never_scans_the_vault_for_an_unrelated_link_field(
     assert "exomem://memory" not in entry["statement"]
 
 
+def test_profile_state_carries_its_source_path(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    path = "Knowledge Base/Products/Cargo Sled.md"
+    _write_item(tmp_path / path, type="note", state="in storage", updated="2026-09-10")
+    entries = working_set_state.current_state_for(
+        tmp_path, anchors=(SimpleNamespace(kind="resource", path=path, ref=path),),
+    )
+
+    assert entries[0]["source"] == "profile"
+    assert entries[0]["path"] == path
+
+
 def test_current_state_governs_exactly_the_returned_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -296,16 +309,3 @@ def test_current_state_reports_an_all_link_schema_when_its_link_resolves(tmp_pat
 
     assert entries and entries[0]["source"] == "records"
     assert entries[0]["statement"] == "asset: [[Assets/Vehicle]]"
-
-
-def test_profile_state_carries_its_source_path(tmp_path: Path) -> None:
-    from types import SimpleNamespace
-
-    path = "Knowledge Base/Products/Cargo Sled.md"
-    _write_item(tmp_path / path, type="note", state="in storage", updated="2026-09-10")
-    entries = working_set_state.current_state_for(
-        tmp_path, anchors=(SimpleNamespace(kind="resource", path=path, ref=path),),
-    )
-
-    assert entries[0]["source"] == "profile"
-    assert entries[0]["path"] == path

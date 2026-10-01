@@ -585,6 +585,8 @@ jobs:
         run: uv build
       - name: Build generic standalone skill archives
         run: uv run --frozen exomem package-skills --out dist/skills
+      - name: Check canonical Cloud packages and shared evaluation corpus
+        run: uv run --frozen python scripts/cloud-plugin.py check
       - name: Validate unpacked build artifacts
         run: python scripts/validate-public-artifacts.py dist
 

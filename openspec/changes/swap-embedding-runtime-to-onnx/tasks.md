@@ -76,16 +76,44 @@
   its byte-identical chart copy together with the limits the provisioner hardcodes, and
   correct the provisioner README, which still claims six cells against a contract of four.
 
-- [ ] 5.4 Measure whether cells on one node can share the model weights' memory
-  without sharing a process. Map one read-only weight file into several cell
-  containers on the node, then compare the node's total resident and shared pages
-  against the same cells with private copies. Tenant text must never leave its own
-  cell: a shared inference process stays rejected (proposal, alternatives). If ONNX
-  Runtime copies the initializers into private memory, record that and close the
-  task without a change.
+- [x] 5.4 Measure whether cells on one node can share the model weights' memory
+  without sharing a process. Use separate processes on one host to map one
+  read-only weight file, then compare their total resident and shared pages
+  against the same processes with private copies. Tenant text must never leave
+  its own cell: a shared inference process stays rejected (proposal,
+  alternatives). If ONNX Runtime copies the initializers into private memory,
+  record that and close the task without a change.
   - Found on 2026-09-28: the owner cell's first index build over a 3.6 GB vault
     peaked above 1.2 GiB against a 1536 MiB limit. The peak was the build's working
     set, not the model, so this is a density measure, not the fix for that peak.
+  - Measured on 2026-09-30 with bge-m3 int8, ORT 1.27.0, and 1/2/3 independent
+    laptop processes: product-path total PSS 643/1265/1886 MiB (additional
+    processes 622/621 MiB). Offline-optimized ORT loaded by path with
+    `session.use_memory_mapped_ort_model=1`,
+    `session.use_ort_model_bytes_for_initializers=1`, and
+    `session.disable_prepacking=1`, with load-time optimization disabled,
+    used 637/966/1295 MiB (additional processes 329/328 MiB), sharing 310 MiB
+    of resident read-only model pages; private anonymous memory remained
+    327 MiB per process. All successful variants were bit-identical on the
+    probe's three short texts (max absolute difference 0, minimum cosine
+    0.9999999999999998). External ONNX data without prepacking also shared
+    pages (additional processes 332/331 MiB); Python mmap-buffer input was
+    rejected. See `scripts/shared_weights_probe.py` for the repeatable probe.
+    Container/cgroup confirmation remains part of 5.1/5.2 limit sizing: Linux
+    charges page cache to the first cgroup that faults it, so do not assume a
+    uniform ~331 MiB per cell until the behavior is measured on the node.
+  - Latency measured on 2026-09-30 after warming each session, with three
+    repetitions over 20 query texts (9-13 tokens) and 20 synthetic prose chunks
+    (458-477 tokens). On the product `_OnnxEncoder` path, default prepacking took
+    24.2 ms/query and 514.5 ms/chunk at the median; disabling prepacking took
+    27.1 ms/query and 524.7 ms/chunk: about +12% per query text and +2% per chunk.
+    The direct probe pair measured 23.5/493.4 ms with prepacking and 27.0/502.9
+    ms without it (query/chunk respectively).
+
+- [ ] 5.5 Disable ONNX prepacking for served artifacts in Exomem Cloud cells so
+  independent cell processes share file-backed weights; keep personal and hosted
+  servers on the default prepacked path, with an explicit `EXOMEM_ONNX_SHARE_WEIGHTS`
+  binary override.
 
 ## 6. Verify
 

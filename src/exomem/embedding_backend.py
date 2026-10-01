@@ -40,6 +40,7 @@ from typing import Protocol
 import numpy as np
 
 from . import accel, model_cache, runtime_resources
+from .log_events import log_event
 
 log = logging.getLogger(__name__)
 
@@ -522,13 +523,31 @@ class _OnnxEncoder:
 
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self.share_weights = False
         if served is None:
             runtime_resources.configure_onnx_session_options(options)
         else:
             runtime_resources.configure_onnx_session_options(options, default_threads=SERVED_DEFAULT_THREADS)
+            self.share_weights = runtime_resources.onnx_share_weights_enabled()
+            if self.share_weights:
+                options.add_session_config_entry("session.disable_prepacking", "1")
         self._session = ort.InferenceSession(onnx_path, sess_options=options, providers=providers)
         self._inputs = {spec.name for spec in self._session.get_inputs()}
         self.device = device
+        # The hosted privacy boundary retains only catalogued content-free events.
+        # Never put a caller-supplied device string or model/artifact path in fields.
+        device_kind = device.lower().split(":", 1)[0]
+        log_event(
+            log,
+            logging.INFO,
+            "onnx_runtime_shape",
+            fields={
+                "device": device_kind if device_kind in {"cpu", "cuda", "mps"} else "other",
+                "intra_op_threads": options.intra_op_num_threads,
+                "inter_op_threads": options.inter_op_num_threads,
+                "share_weights": self.share_weights,
+            },
+        )
 
     def encode(
         self,

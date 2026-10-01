@@ -412,6 +412,30 @@ def test_budget_is_clamped_to_the_declared_range() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_records_lane_state_unit_carries_its_source_path(vault: Path) -> None:
+    from exomem import context_roles
+
+    anchor = "Knowledge Base/Products/Cargo Sled.md"
+    source = "Knowledge Base/Notes/sled-maintenance.md"
+    entry = {
+        "anchor": anchor,
+        "path": source,
+        "source": "note",
+        "as_of": "2026-08-01",
+        "statement": "latest active note: Sled maintenance",
+    }
+    registry = context_roles.load_roles(vault)
+    role = registry.roles["current_state"]
+    items = working_set._records_lane(role, current_state=(entry,))
+    packet = working_set.build_packet(
+        items=items, anchors=(), roles=(), current_state=(entry,), ambiguity=(),
+        missing=(), max_chars=4000, generation=_generation(), status="resolved",
+    )
+
+    assert packet["units"][0]["provenance"]["path"] == source
+    assert packet["units"][0]["provenance"]["anchor"] == anchor
+
+
 @pytest.fixture
 def stateful_vault(vault: Path) -> Path:
     from test_working_set_index import _seed_planning, _seed_structure

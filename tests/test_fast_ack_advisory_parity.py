@@ -87,7 +87,9 @@ def bag_of_words_encoder(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
-    monkeypatch.setattr(embeddings, "get_model", lambda: object())
+    model = SimpleNamespace(texts_fit=lambda _texts: True)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(embeddings, "get_model", lambda: model)
     monkeypatch.setattr(readiness, "should_defer", lambda *_a, **_k: False)
     calls: list[int] = []
 

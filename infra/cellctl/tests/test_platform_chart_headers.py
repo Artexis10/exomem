@@ -87,6 +87,24 @@ def test_cloud_gateway_route_does_not_strip_x_real_ip() -> None:
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cloud_mode_leaves_only_the_lifecycle_scheduler_running() -> None:
+    documents = _helm_template()
+    suspension = {
+        doc["metadata"]["labels"]["app.kubernetes.io/name"]: doc["spec"]["suspend"]
+        for doc in documents
+        if doc.get("kind") == "CronJob"
+        and doc.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/part-of")
+        == "exomem-hosted-scheduler"
+    }
+
+    assert suspension == {
+        "exomem-access-delivery": True,
+        "exomem-reconcile": False,
+        "exomem-export-gc": True,
+    }
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_cellctl_admission_policy_covers_subresources_with_a_lone_wildcard() -> None:
     """D4: the policy confining cellctl must match every resource and every
     subresource. Kubernetes rejects `"*/*"` listed alongside any other

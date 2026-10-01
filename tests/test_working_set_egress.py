@@ -29,7 +29,69 @@ from test_governance_egress import (
 
 from exomem import context_refs
 from exomem.governance import egress
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import owner_principal, request_scope
+
+
+@pytest.mark.parametrize("cue", ["", "right now", "currently", "how much"])
+def test_neighbourhood_state_never_names_a_withheld_page(tmp_path: Path, cue: str) -> None:
+    from exomem import working_set, working_set_index
+
+    anchor = "Knowledge Base/Products/Cargo Sled.md"
+    permitted = "Knowledge Base/Notes/sled-maintenance.md"
+    withheld = "Knowledge Base/Notes/Patterns/sled-buyout-terms.md"
+
+    def seed(root: Path, *, with_withheld: bool) -> Path:
+        _write_page(
+            root / anchor,
+            "---\ntype: note\nupdated: 2026-09-02\n---\n\n# Cargo Sled\n\n"
+            "## Constraints\n\nNever exceed 400 kg.\n\n"
+            "Related: [[sled-maintenance]] [[sled-buyout-terms]]\n",
+        )
+        _write_page(
+            root / permitted,
+            "---\ntype: note\ntitle: Sled maintenance\nstatus: active\n"
+            "updated: 2026-08-01\n---\n\n# Sled maintenance\n\nGrease the runners.\n",
+        )
+        if with_withheld:
+            _write_page(
+                root / withheld,
+                "---\ntype: note\ntitle: SECRETTITLE Sled buyout\nstatus: active\n"
+                "updated: 2026-09-25\n---\n\n# SECRETTITLE Sled buyout\n\nNothing here.\n",
+            )
+        write_scope(root)
+        write_rule(root, ceiling=0)
+        working_set_index.WorkingSetIndex(root).rebuild()
+        return root
+
+    present = seed(tmp_path / "present", with_withheld=True)
+    absent = seed(tmp_path / "absent", with_withheld=False)
+    turn = f"what are the constraints on the cargo sled {cue}".strip()
+
+    def packet(root: Path) -> dict:
+        compiled = working_set.compile_packet(root, turn=turn, freshness_key="k")
+        guarded = egress.guard_working_set(
+            root, compiled,
+            egress.AnnotatedHits(hits=[], withheld_paths=frozenset(), active=True),
+        )
+        assert guarded is not None
+        return guarded
+
+    with request_scope(_external()):
+        external_present = packet(present)
+        external_absent = packet(absent)
+
+    assert external_present == external_absent
+    assert external_present["current_state"][0]["statement"] == "latest active note: Sled maintenance"
+    assert external_present["current_state"][0]["as_of"] == "2026-08-01"
+    assert external_present["current_state"][0]["path"] == permitted
+    assert "SECRETTITLE" not in json.dumps(external_present)
+    assert "2026-09-25" not in json.dumps(external_present)
+
+    with request_scope(owner_principal()):
+        owner = packet(present)
+    assert owner["current_state"][0]["statement"] == "latest active note: SECRETTITLE Sled buyout"
+    assert owner["current_state"][0]["as_of"] == "2026-09-25"
+    assert owner["current_state"][0]["path"] == withheld
 
 
 def _release(*, withheld=(RESTRICTED_PATH,), blocked: bool = False) -> egress.AnnotatedHits:
@@ -3142,6 +3204,289 @@ def _recent_packet(entries: list[dict]) -> dict:
     packet = _packet()
     packet["recent_context"] = entries
     return packet
+
+
+@pytest.mark.parametrize("hidden_contact", [False, True])
+def test_recent_context_is_identical_without_a_withheld_page(
+    vault: Path, tmp_path: Path, hidden_contact: bool
+) -> None:
+    """A withheld manifest cannot suppress its visible recent siblings."""
+    import shutil
+
+    from conftest import initialize_vault_state_offline
+    from test_working_set_hot_projection import _one_old_tick
+    from test_working_set_index import _seed_structure, _write
+
+    from exomem import commands, working_set_heat, working_set_runtime
+    from exomem.governance.principal import owner_principal
+
+    _seed_structure(vault)
+    hidden = "Knowledge Base/Records/Depot Stock/_collection.md"
+    visible_paths = [
+        "Knowledge Base/Records/Depot Stock/first.md",
+        "Knowledge Base/Records/Depot Stock/second.md",
+    ]
+    for n, path in enumerate(visible_paths):
+        _write(vault / path, f"---\nstatus: active\n---\n\n# Recent work {n}\n")
+    write_scope(vault, paths=hidden, name="Withheld recent page")
+    write_rule(vault, ceiling=0)
+
+    # The twins differ by exactly one content page, with independent temp state.
+    absent = tmp_path / "absent"
+    shutil.copytree(vault, absent)
+    (absent / hidden).unlink()
+    initialize_vault_state_offline(absent, source="recent context twin fixture")
+    stamp = 1_790_000_000_000_000_000
+    for root in (absent, vault):
+        _one_old_tick(root)
+        _indexed(root)
+        working_set_heat.profile(root)  # seed the old, single-burst pages
+        events = [
+            working_set_heat.HeatEvent(stamp + n, path, "work", origin="edit_memory")
+            for n, path in enumerate(visible_paths)
+        ]
+        if root == vault and hidden_contact:
+            events.append(
+                working_set_heat.HeatEvent(
+                    stamp + len(events), hidden, "work", origin="edit_memory"
+                )
+            )
+        assert working_set_heat.append(root, events)
+
+    def activate(root: Path, *, external: bool) -> dict:
+        working_set_runtime.reset_caches_for_tests()
+        with request_scope(_external() if external else owner_principal(surface="mcp")):
+            packet = commands.op_activate_context(root, turn="ok continue")
+        # These describe the request/index instance, not released content.
+        packet.pop("timings", None)
+        packet.pop("continuity", None)
+        packet["generation"].pop("freshness_key", None)
+        return packet
+
+    without_hidden = activate(absent, external=True)
+    with_hidden = activate(vault, external=True)
+    assert [entry["path"] for entry in without_hidden["recent_context"]] == visible_paths[::-1]
+    assert with_hidden["recent_context"] == without_hidden["recent_context"]
+    assert with_hidden["budget"]["used_chars"] == without_hidden["budget"]["used_chars"]
+    assert with_hidden == without_hidden
+
+    if hidden_contact:
+        owner = activate(vault, external=False)
+        assert [entry["path"] for entry in owner["recent_context"]] == [hidden]
+
+
+def test_recent_planning_reserves_only_visible_rows(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unmentioned plan must not spend one of the visible pages' slots."""
+    from dataclasses import replace
+
+    from test_working_set_index import _seed_structure, _write
+
+    from exomem import working_set, working_set_heat, working_set_index
+
+    _seed_structure(vault)
+    hidden = "Knowledge Base/Planning/hidden-commitment.md"
+    _write(vault / hidden, "---\nstatus: active\n---\n\n# Unmentioned commitment\n")
+    visible_paths = [
+        f"Knowledge Base/Notes/Insights/recent-work-{n}.md"
+        for n in range(working_set.RECENT_CONTEXT_MAX_ENTRIES)
+    ]
+    for path in visible_paths:
+        _write(vault / path, "---\nstatus: active\n---\n\n# Recent work\n")
+    write_scope(vault, paths=hidden, name="Withheld plan")
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+    index = working_set_index.WorkingSetIndex(vault)
+    rows = index.anchors()
+    # Supply the typed plan row at the index boundary, independently of
+    # collection discovery; the compiler must decide every such row itself.
+    plan = replace(
+        rows[0],
+        anchor_id=hidden,
+        path=hidden,
+        ref=hidden,
+        title="Unmentioned commitment",
+        kind="plan",
+        lifecycle="active",
+        aliases=(),
+        terms=(),
+        categories=("action",),
+        links=(),
+        anchor_neighbourhood=frozenset(),
+    )
+    heat = working_set_heat.build_profile(
+        working_set_heat.HeatEvent(1_790_000_000_000_000_000 + n, path, "work")
+        for n, path in enumerate(visible_paths)
+    )
+    monkeypatch.setattr(index, "anchors", lambda: rows)
+    with request_scope(_external()):
+        absent = working_set.compile_packet(vault, turn="ok continue", index=index, heat_profile=heat)
+    monkeypatch.setattr(index, "anchors", lambda: (*rows, plan))
+    with request_scope(_external()):
+        withheld = working_set.compile_packet(vault, turn="ok continue", index=index, heat_profile=heat)
+    assert len(absent["recent_context"]) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+    assert withheld["recent_context"] == absent["recent_context"]
+    assert withheld["budget"]["used_chars"] == absent["budget"]["used_chars"]
+    assert withheld == absent
+
+    owner = working_set.compile_packet(vault, turn="ok continue", index=index, heat_profile=heat)
+    plans = {entry["path"] for entry in owner["recent_context"] if entry["why"] == "planning"}
+    assert plans == {hidden}
+
+
+def _stable_recent_packet(packet: dict) -> dict:
+    packet = json.loads(json.dumps(packet))
+    packet.pop("timings", None)
+    packet.pop("continuity", None)
+    packet["generation"].pop("freshness_key", None)
+    return packet
+
+
+def test_real_planning_item_cannot_reserve_a_recent_slot(vault: Path, tmp_path: Path) -> None:
+    import shutil
+    from uuid import UUID
+
+    from conftest import initialize_vault_state_offline
+    from test_planning_mutation import _manifest
+    from test_working_set_hot_projection import _one_old_tick
+    from test_working_set_index import _seed_structure, _write
+
+    from exomem import commands, lexstore, planning, working_set, working_set_heat, working_set_index
+
+    _seed_structure(vault)
+    manifest = "Knowledge Base/Planning/Recent Work/_collection.md"
+    planning.create_collection(vault, manifest, _manifest(), why="recent planning fixture")
+    planning.add(
+        vault, manifest, plan_id=str(UUID(int=901)),
+        item={"title": "Unmentioned commitment", "kind": "outcome"},
+        why="recent planning fixture",
+    )
+    hidden = next((vault / Path(manifest).parent / "Items").glob("*.md")).relative_to(vault).as_posix()
+    visible = [
+        f"Knowledge Base/Notes/Insights/recent-public-{n}.md"
+        for n in range(working_set.RECENT_CONTEXT_MAX_ENTRIES)
+    ]
+    for path in visible:
+        _write(vault / path, "---\nstatus: active\n---\n\n# Recent public work\n")
+    write_scope(vault, paths=hidden, name="Withheld Planning item")
+    write_rule(vault, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n")
+    absent = tmp_path / "absent-planning-item"
+    shutil.copytree(vault, absent)
+    (absent / hidden).unlink()
+    initialize_vault_state_offline(absent, source="recent planning twin fixture")
+    stamp = 1_790_000_000_000_000_000
+    for root in (vault, absent):
+        _one_old_tick(root)
+        with request_scope(owner_principal(surface="mcp")):
+            lexstore.ensure_fresh(root)
+            _indexed(root)
+            commands.op_activate_context(root, turn="ok continue")
+        assert working_set_heat.append(root, [
+            working_set_heat.HeatEvent(stamp + n, path, "work", origin="edit_memory")
+            for n, path in enumerate(visible)
+        ])
+
+    plans = [row for row in working_set_index.WorkingSetIndex(vault).anchors() if row.kind == "plan"]
+    assert [(row.path, row.ref) for row in plans] == [(manifest, hidden)]
+    with request_scope(_external()):
+        without_hidden = _stable_recent_packet(
+            commands.op_activate_context(absent, turn="ok continue", purpose="marketing")
+        )
+        with_hidden = _stable_recent_packet(
+            commands.op_activate_context(vault, turn="ok continue", purpose="marketing")
+        )
+        audit = commands.op_activate_context(vault, turn="ok continue", purpose="audit")
+    with request_scope(owner_principal(surface="mcp")):
+        owner = commands.op_activate_context(vault, turn="ok continue", purpose="marketing")
+    for packet in (owner, audit):
+        assert len(packet["recent_context"]) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+        assert [entry["ref"] for entry in packet["recent_context"] if entry["why"] == "planning"] == [hidden]
+    assert without_hidden["generation"]["lexical_evidence"] == "available"
+    assert with_hidden["generation"]["lexical_evidence"] == "available"
+    assert [entry["path"] for entry in without_hidden["recent_context"]] == visible[::-1]
+    assert with_hidden == without_hidden
+    with request_scope(_external()):
+        repeated = commands.op_activate_context(vault, turn="ok continue", purpose="marketing")
+    assert _stable_recent_packet(repeated) == without_hidden
+
+
+@pytest.mark.parametrize("public_heat", [False, True])
+@pytest.mark.parametrize("mixed_mark", [False, True])
+def test_hidden_workspace_threads_cannot_evict_a_recent_public_thread(
+    vault: Path, tmp_path: Path, public_heat: bool, mixed_mark: bool
+) -> None:
+    import shutil
+
+    from conftest import initialize_vault_state_offline
+    from test_working_set_hot_projection import _one_old_tick
+    from test_working_set_index import _seed_structure, _write
+
+    from exomem import commands, lexstore, working_set, working_set_heat, working_set_runtime
+
+    _seed_structure(vault)
+    hidden = "Knowledge Base/Notes/Patterns/recent-hidden-thread.md"
+    visible = "Knowledge Base/Notes/Insights/recent-public-thread.md"
+    other_visible = "Knowledge Base/Notes/Insights/recent-other-public-thread.md"
+    edits = [
+        f"Knowledge Base/Notes/Insights/recent-thread-work-{n}.md"
+        for n in range(working_set.RECENT_CONTEXT_MAX_ENTRIES)
+    ]
+    for path in (hidden, visible, other_visible, *edits):
+        _write(vault / path, "---\nstatus: active\n---\n\n# Recent thread page\n")
+    write_scope(vault, paths=hidden)
+    write_rule(vault, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n")
+    absent = tmp_path / "absent-workspace-threads"
+    shutil.copytree(vault, absent)
+    (absent / hidden).unlink()
+    initialize_vault_state_offline(absent, source="recent workspace twin fixture")
+    stamp = 1_790_000_000_000_000_000
+    for root in (vault, absent):
+        _one_old_tick(root)
+        with request_scope(owner_principal(surface="mcp")):
+            lexstore.ensure_fresh(root)
+            _indexed(root)
+            commands.op_activate_context(root, turn="ok continue")
+        if public_heat:
+            assert working_set_heat.append(root, [
+                working_set_heat.HeatEvent(stamp - 10, visible, "read", origin="fetch"),
+                working_set_heat.HeatEvent(stamp - 9, other_visible, "read", origin="fetch"),
+                *(working_set_heat.HeatEvent(stamp + 100 + n, path, "work", origin="edit_memory") for n, path in enumerate(edits)),
+            ])
+        with request_scope(_external()):
+            known = working_set_heat.attribution_for(root, session="public-session", workspace="recent-workspace")
+            assert working_set_heat.note_session(root, working_set_heat.SessionMark(
+                known.session, known.workspace,
+                paths=(hidden, visible) if root == vault and mixed_mark else (visible,),
+                minted_ns=stamp, seen_ns=stamp,
+            ))
+            if root == vault:
+                for n in range(working_set_runtime.VISIBLE_WORKSPACE_MARKS + 1):
+                    extra = working_set_heat.attribution_for(root, session=f"hidden-session-{n}", workspace="recent-workspace")
+                    assert working_set_heat.note_session(root, working_set_heat.SessionMark(
+                        extra.session, extra.workspace, paths=(hidden,), minted_ns=stamp + n + 1,
+                        seen_ns=stamp + n + 1,
+                    ))
+
+    with request_scope(_external()):
+        without_hidden = _stable_recent_packet(commands.op_activate_context(
+            absent, turn="ok continue", workspace="recent-workspace", purpose="marketing",
+        ))
+        with_hidden = _stable_recent_packet(commands.op_activate_context(
+            vault, turn="ok continue", workspace="recent-workspace", purpose="marketing",
+        ))
+        audit = commands.op_activate_context(
+            vault, turn="ok continue", workspace="recent-workspace", purpose="audit",
+        )
+    assert hidden in [entry["path"] for entry in audit["recent_context"]]
+    assert visible in [entry["path"] for entry in without_hidden["recent_context"]]
+    assert other_visible not in [entry["path"] for entry in without_hidden["recent_context"]]
+    assert with_hidden == without_hidden
+    with request_scope(_external()):
+        repeated = commands.op_activate_context(
+            vault, turn="ok continue", workspace="recent-workspace", purpose="marketing",
+        )
+    assert _stable_recent_packet(repeated) == without_hidden
 
 
 def test_a_withheld_recent_page_leaves_the_block_and_the_others_serve(vault: Path) -> None:

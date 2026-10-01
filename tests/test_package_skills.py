@@ -71,6 +71,35 @@ def test_core_archive_carries_its_references(tmp_path: Path) -> None:
     assert "project-keys.yaml" in names
 
 
+def test_capture_archive_carries_its_linked_writing_reference(tmp_path: Path) -> None:
+    package_module.package_skills(tmp_path)
+
+    with zipfile.ZipFile(tmp_path / "exomem-capture.zip") as archive:
+        assert "references/writing.md" in archive.namelist()
+        assert archive.read("references/writing.md") == (
+            Path(package_module.__file__).parent
+            / "_scaffold" / "_Schema" / "references" / "writing.md"
+        ).read_bytes()
+
+
+def test_capture_archive_closes_writing_reference_dependencies(tmp_path: Path) -> None:
+    package_module.package_skills(tmp_path)
+
+    with zipfile.ZipFile(tmp_path / "exomem-capture.zip") as archive:
+        writing = archive.read("references/writing.md").decode("utf-8")
+        for name in ("frontmatter.md", "supersession.md", "write-scope.md", "page-types.md"):
+            assert f"`{name}`" in writing
+            assert f"references/{name}" in archive.namelist()
+
+
+def test_every_packaged_skill_respects_live_capability_exclusions(tmp_path: Path) -> None:
+    report = package_module.package_skills(tmp_path)
+    for item in report["archives"]:
+        with zipfile.ZipFile(item["path"]) as archive:
+            skill = archive.read("SKILL.md").decode("utf-8")
+        assert "Do not invoke tools absent from `available_product_tools`" in skill
+
+
 def test_generic_build_ships_the_scaffold_keys(tmp_path: Path) -> None:
     """Without a vault the archive must stay shareable - no personal registry."""
     package_module.package_skills(tmp_path)
