@@ -88,7 +88,8 @@
         "commerce_description": "Connects an existing account. No sales, checkout, subscription initiation or upgrade promotion in the plugin."
       },
       "publication": {
-        "countries": []
+        "countries": [],
+        "release_notes": "Introduces the unified Exomem Cloud plugin with shared memory workflows, OAuth account connection, context activation and grounded recall. Claude Code includes profile-local lifecycle hooks; ChatGPT uses the same Skill and MCP operating contract without hooks."
       }
     }
   }
