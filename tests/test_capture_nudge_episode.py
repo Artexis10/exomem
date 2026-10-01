@@ -1059,3 +1059,17 @@ def test_the_checkpoint_reads_the_real_ledger_through_the_rest_door(
             journal_digest=executed["journal_digest"],
         )
     assert _stop(monkeypatch, capsys, _prepared(tmp_path, "after.jsonl")) is None
+
+
+def test_the_stop_ask_bytes_are_unchanged_from_the_base() -> None:
+    """Sink guidance arrives through the coverage response, never the per-turn
+    Stop ask, so the injected bytes must not grow."""
+    import hashlib
+
+    ask = hook.COVERAGE_ASK
+    assert len(ask) == 381
+    assert (
+        hashlib.sha256(ask.encode("utf-8")).hexdigest()
+        == "939a5fcb7ede0e278f5feb70d054862ba8b32470664cc6058c7f93b68fb9424d"
+    )
+    assert "sink" not in ask and "cluster" not in ask

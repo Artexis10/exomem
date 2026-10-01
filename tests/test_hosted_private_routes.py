@@ -60,6 +60,7 @@ DEFAULT_REQUEST_ID = "11111111-1111-4111-8111-111111111111"
 _ACTION_VOCABULARY_MAPS = {
     "agent_protocol",
     "builtin_fallback",
+    "by_intent",
     "contract",
     "front_door_actions",
     "simple_actions",

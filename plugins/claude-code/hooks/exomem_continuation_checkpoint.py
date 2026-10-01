@@ -27,7 +27,7 @@ SCHEMA_VERSION = 1
 EVENT_CONTRACT_VERSION = 1
 OUTPUT_CONTRACT_VERSION = 1
 MAX_CHECKPOINT_BYTES = 64 * 1024
-MAX_CONTEXT_BYTES = 4096
+MAX_CONTEXT_BYTES = 2048
 MAX_PATH_BYTES = 512
 MAX_IDENTIFIER_BYTES = 512
 MAX_DIRTY_PATHS = 128
@@ -390,6 +390,29 @@ def activation_token_path(home: Path, client: str, session_id: str) -> Path:
         / ".activation"
         / f"{(safe or 'session')[:48]}-{digest}.token"
     )
+
+
+def _rearm_nudges(home: Path, session_id: str) -> None:
+    """Re-arm the once-per-session full nudge texts after a lifecycle event.
+
+    The capture and retrieve hooks send their full text once per session and a short
+    line afterwards, tracked by a stamp file each. A compaction rewrites the context
+    that text lived in, so the next fire must be the full one again. The names mirror
+    `_cooldown_ok` in `exomem_capture_nudge.py` and `exomem_retrieve_nudge.py`
+    (`tests/test_nudge_diet.py` asserts the derivations agree). Never raises.
+    """
+    state_dir = Path(home) / ".cache" / "exomem-nudge"
+    for name in (
+        re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:128],
+        "retrieve_" + re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:120],
+        # The client-wide stamp too: it only dedupes a FRESH session, and a session
+        # that just compacted is one again.
+        "retrieve_global",
+    ):
+        try:
+            (state_dir / name).unlink()
+        except OSError:
+            pass
 
 
 def _clear_activation_token(home: Path, client: str, session_id: str) -> None:
@@ -1052,11 +1075,10 @@ def render_continuation(checkpoint: Mapping[str, Any], *, status: str) -> str:
     workspace = structural.get("workspace", {})
     transcript = structural.get("transcript", {})
     advisory = (
-        "Reconcile these structural pointers with the client's compacted context. "
-        "Reopen cited artifacts and continue from evidence; do not invent missing semantics. "
-        "If this work reached a genuine durable stepping-stone, use normal Exomem governance "
-        "to capture it; otherwise continue without a memory write. This checkpoint is advisory "
-        "and does not prove capture completion."
+        "Reconcile these structural pointers with the compacted context: reopen cited "
+        "artifacts and continue from evidence, inventing nothing. Capture a genuine durable "
+        "stepping-stone through normal Exomem governance; otherwise no memory write. "
+        "Advisory only; it does not prove capture completion."
     )
     content_budget = MAX_CONTEXT_BYTES - len(("\n" + advisory).encode("utf-8"))
     maximum_footer = (
@@ -4288,6 +4310,7 @@ def _dispatch_core(
     # Before anything else, and for every event: the retrieve hook's continuity
     # token describes a run of turns this event ends.
     _clear_activation_token(home, client, str(event["session_id"]))
+    _rearm_nudges(home, str(event["session_id"]))
     if event["event"] in {"PreCompact", "SessionEnd"}:
         try:
             outcome = write_checkpoint(event, home)

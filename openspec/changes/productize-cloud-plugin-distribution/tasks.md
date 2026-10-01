@@ -76,10 +76,17 @@ one MCP server and all six listing links. Five directory-only metadata warnings
 and sixteen credential/script policy holds remain; validation is not approval.
 The restored bundle is now a persistent draft,
 `a59d117c-7115-4ed0-a505-dc7bd022cbee`, saved and reopened through the portal.
-OpenAI's retained draft still contains package 0.100.0. Its supporting-content
-form confirmed missing release notes and a demo recording. The canonical
-definition and generator now include release notes; the actual demo URL and
-immediately usable reviewer credentials remain absent. No submission occurred.
+OpenAI's retained draft was subsequently reuploaded and read back as package
+0.101.0; its metadata and ten skills passed. The canonical definition and
+generator include release notes. The dedicated reviewer sample is now Ready
+on Cloud 0.101.0, but its invite-only session correctly cannot authorize a
+reviewer-purpose OAuth grant: provider-bound credentials and the reviewed
+gateway/web flag rollout remain prerequisites. A real demo recording and
+native behavioural acceptance remain open. No submission occurred.
+
+The metadata branch integrates graph repair #1503 (`fac6ee24a`) and regenerates
+conflicting archives/manifests from the current canonical core. This is source
+integration, not evidence that the new core or package has been deployed.
 
 - [x] 4.1 Resolve author-independent review findings, run scoped tests plus completion-boundary full CI and privacy checks, and merge the cohesive verified batch.
 - [ ] 4.2 Verify released packages and production outcome, reconcile prior acceptance debt, sync/archive only completed OpenSpec scope and retire the clean task worktree.

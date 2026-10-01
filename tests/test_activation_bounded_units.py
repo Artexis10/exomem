@@ -99,5 +99,8 @@ def test_bounded_hydration_preserves_supersession_and_parent_metadata(tmp_path):
     item = lane.items[0]
     assert item.lifecycle == "superseded"
     assert item.title == "Previous rule"
-    assert item.updated == "2026-08-15"
+    # A unit authors no time here: it is served undated, and the page's time is
+    # labelled apart (temporal currency, rule 1).
+    assert item.updated == ""
+    assert item.provenance["page_updated"] == "2026-08-15"
     assert item.provenance["superseded_by"] == ["Knowledge Base/Notes/current.md"]

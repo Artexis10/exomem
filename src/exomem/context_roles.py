@@ -26,7 +26,7 @@ from typing import Any
 
 import yaml
 
-from . import semantic_language_registry
+from . import context_intents, semantic_language_registry
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -103,6 +103,7 @@ _NEW_ROLE_FIELDS = frozenset(
         "cues",
         "evidence_cues",
         "evidence_categories",
+        "intent",
     }
 )
 
@@ -126,6 +127,10 @@ class ContextRole:
     #: (design.md decision 1).
     evidence_cues: tuple[str, ...] = ()
     evidence_categories: frozenset[str] = frozenset()
+    #: A declared intent shape (`context_intents`) replaces raw cue substrings:
+    #: the role is selected only when the turn's tokens have that shape, never
+    #: as an anchor default and never merely by rank.
+    intent: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +142,7 @@ class ContextRole:
             "cues": list(self.cues),
             "evidence_cues": list(self.evidence_cues),
             "evidence_categories": sorted(self.evidence_categories),
+            "intent": self.intent,
             "shipped": self.shipped,
         }
 
@@ -382,6 +388,16 @@ def _shipped_evidence_categories(
     return frozenset(accepted)
 
 
+def _intent(value: object, *, role_name: str, findings: list[dict[str, str]]) -> str:
+    """A declared intent shape, or none. An unknown one selects nothing, so it is a finding."""
+    if value in (None, ""):
+        return ""
+    if value in context_intents.INTENTS:
+        return str(value)
+    findings.append(_finding("invalid_intent", f"{role_name}.intent", f"unknown intent {value!r}"))
+    return ""
+
+
 def _parse_shipped(
     data: Any, resolver: Any
 ) -> tuple[dict[str, ContextRole], tuple[dict[str, str], ...]]:
@@ -424,6 +440,7 @@ def _parse_shipped(
             evidence_categories=_shipped_evidence_categories(
                 raw.get("evidence_categories"), role_name=name, resolver=resolver, findings=findings
             ),
+            intent=_intent(raw.get("intent"), role_name=name, findings=findings),
         )
     return roles, tuple(findings)
 
@@ -622,6 +639,7 @@ def _new_role(
             shipped=False,
             evidence_cues=evidence_cues,
             evidence_categories=frozenset(evidence_categories),
+            intent=_intent(raw.get("intent"), role_name=name, findings=findings),
         ),
         findings,
     )
@@ -726,12 +744,25 @@ def _narrowed(
 # --------------------------------------------------------------------------- #
 
 
+#: Anchor kinds whose defaults are honoured only when the turn's own words
+#: reached an anchor of that kind. An entity or a project is the subject of
+#: many pages, so reading every conclusion linked to it answers a turn that
+#: names it; a referent supplied by recency alone ("where were we") names
+#: nothing, and serving all of those pages would buy recall with precision.
+NAMED_ONLY_DEFAULT_KINDS: frozenset[str] = frozenset({"entity", "project"})
+
+#: The unit categories that are a page's settled conclusions.
+CONCLUSION_CATEGORIES: frozenset[str] = frozenset({"decision", "insight", "finding"})
+
+
 def select_roles(
     registry: RoleRegistry,
     *,
     anchor_kinds: Sequence[str],
     analysis: Any,
     limit: int = MAX_SELECTED_ROLES,
+    anchor_names: frozenset[str] = frozenset(),
+    prior_only_kinds: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, str], ...]:
     """Defaults for each resolved anchor kind, plus cue matches, in registry order.
 
@@ -743,9 +774,19 @@ def select_roles(
         return ()
     kinds = frozenset(anchor_kinds)
     text = str(getattr(analysis, "text", "") or "")
+    #: `prior_only_kinds` are the kinds reached by a prior (recency) alone.
+    withheld = NAMED_ONLY_DEFAULT_KINDS & prior_only_kinds
     selected: list[dict[str, str]] = []
     for role in sorted(registry.roles.values(), key=lambda item: item.priority):
-        if role.anchor_defaults & kinds:
+        if role.intent:
+            # An intent role is never an anchor default: only its shape selects it.
+            if context_intents.intent_matches(role.intent, analysis, anchor_names):
+                selected.append({"id": role.id, "source": "turn_cue", "lane": role.lane})
+            continue
+        # Only a role that reads settled conclusions is withheld; the anchor's
+        # own identity and facets are still served for a recency referent.
+        concludes = role.lane == "units" and bool(role.categories & CONCLUSION_CATEGORIES)
+        if role.anchor_defaults & (kinds - withheld if concludes else kinds):
             source = "anchor_default"
         else:
             # Role selection matches EVERY cue, `cues` and `evidence_cues`

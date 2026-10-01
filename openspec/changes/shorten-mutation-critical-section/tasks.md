@@ -187,3 +187,33 @@
       `edit_memory`, `observe_memory` or `remember`, and `full_upserts` stops
       growing with ordinary writes.
 
+
+## 9. Availability republication without full parsing under authority
+
+This urgent availability repair ships independently of the memory-storage
+batch: it addresses interactive write refusals while preserving graph proof
+authority and can be rolled back independently.
+
+- [ ] 9.1 Prepare the source/topology proof outside the boundary and replay its
+      exact byte/membership seal under authority; retain epoch, recall, policy,
+      registry and live-sidecar binding and unchanged acknowledgement semantics.
+- [ ] 9.2 Verify an unrelated writer progresses during a slow proof and that
+      intervening source, policy, registry or sidecar changes refuse publication.
+- [ ] 9.3 Measure remaining final-seal hold, run affected graph suites, independent
+      review, privacy and strict specification checks and completion CI.
+- [ ] 9.4 Deliver through the normal release process and verify the live personal
+      service's write and graph outcomes before claiming the incident resolved.
+
+## 10. Capture survives contention
+
+- [x] 10.1 Red-first `tests/test_capture_boundary_hold.py`: a cold identity
+      inventory is built while the boundary is free for `episode_memory` and a
+      `record_memory` update; `reserved_paths.warm_identity_catalogue_before_boundary`
+      called from `LeaseManager.invoke`; index page counts use one scandir pass.
+- [x] 10.2 Red-first `tests/test_capture_contention_absorbed.py`: concurrent
+      `remember`, `episode_memory` and `record_memory` append writes meeting a
+      held boundary all commit once with no `MUTATION_BUSY`; an overdue holder
+      and an exhausted wait refuse with a `cause`. `LeaseManager` waits in
+      arrival order (`_FairCaptureQueue`) around `idempotency.run`.
+- [ ] 10.3 Live: after deploy, `exomem_mutation_busy_total` stays flat under
+      maximal capture and `contention_absorbed` log rows show the waits.

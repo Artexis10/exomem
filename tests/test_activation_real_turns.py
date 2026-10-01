@@ -250,14 +250,15 @@ def test_run_turn_is_unjudged_with_neither_expectation(tmp_path: Path) -> None:
 
 
 def _seed_ambiguous_vault(vault: Path) -> None:
-    """Two hub anchors, named exactly by one turn, with disjoint
-    neighbourhoods -- a packet that must come back `ambiguous`, never
-    `unresolved`.
+    """Two hub anchors, both named exactly by one turn through a word their
+    names share, with disjoint neighbourhoods -- a packet that must come back
+    `ambiguous`, never `unresolved`. (Two hubs the turn spells apart are two
+    topics and are served together, not ambiguous.)
     """
     kb = vault / "Knowledge Base"
     (kb / "Notes" / "Insights").mkdir(parents=True, exist_ok=True)
     (kb / "Notes" / "Insights" / "north-hub.md").write_text(
-        "---\ntitle: Northern Programme\nstatus: active\ntags: [hub]\nupdated: 2026-09-01\n---\n\n"
+        "---\ntitle: Northern Programme\naliases: [Harbour]\nstatus: active\ntags: [hub]\nupdated: 2026-09-01\n---\n\n"
         "# Northern Programme\n\nA coordination hub. See [[Notes/Insights/north-note]].\n",
         encoding="utf-8",
     )
@@ -266,7 +267,7 @@ def _seed_ambiguous_vault(vault: Path) -> None:
         encoding="utf-8",
     )
     (kb / "Notes" / "Insights" / "south-hub.md").write_text(
-        "---\ntitle: Southern Venture\nstatus: active\ntags: [hub]\nupdated: 2026-09-01\n---\n\n"
+        "---\ntitle: Southern Venture\naliases: [Harbour]\nstatus: active\ntags: [hub]\nupdated: 2026-09-01\n---\n\n"
         "# Southern Venture\n\nA coordination hub. See [[Notes/Insights/south-note]].\n",
         encoding="utf-8",
     )
@@ -287,7 +288,7 @@ def test_run_turn_labels_an_ambiguous_packet_ambiguous_not_unresolved(tmp_path: 
     module.prepare_environment(vault, state_dir=str(tmp_path / "state"))
 
     result = module.run_turn(
-        vault, {"turn": "compare the Northern Programme and the Southern Venture"}
+        vault, {"turn": "tell me about Harbour"}
     )
 
     assert result["status"] == "ambiguous"

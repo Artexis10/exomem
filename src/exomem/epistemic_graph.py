@@ -795,7 +795,24 @@ def _backup_graph_rebuild_into_store(
                     source,
                 )
             _set_sqlite_busy_timeout(destination, timeout)
-            source.backup(destination)
+            deadline = time.monotonic() + max(0.0, timeout)
+
+            def refuse_expired_lock_wait(status: int, _remaining: int, _total: int) -> None:
+                # Connection.backup retries BUSY/LOCKED indefinitely; the
+                # connection's busy timeout limits each step, not that loop.
+                # Raising here finishes the incomplete backup transaction and
+                # leaves the previous live graph intact. DONE is already
+                # committed and must never be reported as a refusal.
+                if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) and (
+                    time.monotonic() >= deadline
+                ):
+                    raise sqlite3.OperationalError("graph publication lock wait expired")
+
+            source.backup(
+                destination,
+                progress=refuse_expired_lock_wait,
+                sleep=min(0.25, max(0.0, timeout)),
+            )
 
 
 def _remove_graph_rebuild_artifact(
@@ -1751,6 +1768,16 @@ GraphSourceSignature = tuple[int, int, int, str]
 
 
 @dataclass(frozen=True)
+class _SnapshotSourceSeal:
+    """Exact source checks retained after the expensive topology proof."""
+
+    guards: tuple[vault_module.PathGuard, ...]
+    resolver_membership: frozenset[str]
+    indexed_membership: frozenset[str]
+    policy_identity: tuple[str, str]
+
+
+@dataclass(frozen=True)
 class _GraphPublicationTicket:
     """Private work proven before the short canonical replacement hold."""
 
@@ -2197,8 +2224,13 @@ class EpistemicGraphIndex:
         require_current_projection: bool = True,
         prove: bool | str | None = None,
         outcome_out: list[str] | None = None,
+        refusal_out: list[str] | None = None,
     ) -> sqlite3.Connection | None:
         """Open one validated read transaction without creating or migrating schema.
+
+        ``refusal_out`` receives the name of a refusal taken before the sidecar
+        is opened (``graph_disabled``, ``external_pending``, ``sidecar_missing``)
+        so a reporter can say which one it hit.
 
         Public readers require the stored graph projection to match the current
         event-maintained (or cold-walk) projection. Incremental maintenance may
@@ -2251,11 +2283,17 @@ class EpistemicGraphIndex:
         """
         if prove is None:
             prove = self._prove_cold_snapshots
-        if (
-            not graph_enabled()
-            or (require_current_projection and freshness.external_pending(self.vault_root))
-            or not self.path.exists()
-        ):
+        if not graph_enabled():
+            if refusal_out is not None:
+                refusal_out.append("graph_disabled")
+            return None
+        if require_current_projection and freshness.external_pending(self.vault_root):
+            if refusal_out is not None:
+                refusal_out.append("external_pending")
+            return None
+        if not self.path.exists():
+            if refusal_out is not None:
+                refusal_out.append("sidecar_missing")
             return None
         sidecar_identity = _sidecar_file_identity(self.path)
         # Sampled before any proving starts. Everything below -- the marker
@@ -2555,35 +2593,132 @@ class EpistemicGraphIndex:
             return False
         if not self._republish_attempt_due():
             return False
-        with self._mutation_coordinator.hold(
-            operation="epistemic_graph_republish_availability", holder_kind="graph"
-        ):
+        from .entity_types import extension_registry_path as entity_registry_path
+
+        # Parse and reconstruct topology without excluding canonical writers.
+        # The final seal still rechecks exact bytes, not a size/mtime census.
+        recall = freshness.prepare_recall_publication(self.vault_root, "vault")
+        policy_snapshot = access.publication_policy_snapshot(self.vault_root)
+        if recall is None or policy_snapshot is None:
+            return False
+        try:
+            epoch = graph_sync.canonical_publication_epoch(self.vault_root)
+            sidecar_identity = self._availability_sidecar_identity()
+            registry_guards: list[tuple[Path, vault_module.PathGuard | None]] = []
+            for path in (
+                relation_registry.extension_registry_path(self.vault_root),
+                semantic_language_registry.registry_path(self.vault_root),
+                entity_registry_path(self.vault_root),
+            ):
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    registry_guards.append((path, None))
+                else:
+                    _, guard = vault_module.read_bounded_guarded_bytes(
+                        self.vault_root,
+                        path.relative_to(self.vault_root).as_posix(),
+                        limit=1024 * 1024,
+                    )
+                    registry_guards.append((path, guard))
             snapshot = self._open_read_snapshot(require_current_projection=False)
             if snapshot is None:
                 return False
             residue: set[str] = set()
+            seals: list[_SnapshotSourceSeal] = []
             try:
                 stored_checkpoint = self._stored_recall_checkpoint(snapshot)
-                row = snapshot.execute(
-                    "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
-                ).fetchone()
+                metadata = self._availability_metadata(snapshot)
+                if _AVAILABILITY_FRESHNESS_KEY in metadata:
+                    return False
                 proven = self._snapshot_sources_match_disk(
                     snapshot,
-                    resolver_fingerprint=str(row[0]) if row is not None else None,
+                    resolver_fingerprint=metadata.get(_RESOLVER_TOPOLOGY_KEY),
                     residue_out=residue,
+                    seal_out=seals,
                 )
             finally:
                 snapshot.close()
-            if not proven or residue or stored_checkpoint is None:
+            if not proven or residue or stored_checkpoint is None or not seals:
                 self._note_republish_refused()
                 return False
-            self._publish_available_marker(
-                _incremental_projection_identity(self.vault_root),
-                checkpoint=stored_checkpoint,
-            )
+
+            def still_current() -> bool:
+                for path, guard in registry_guards:
+                    if guard is None:
+                        if os.path.lexists(path):
+                            return False
+                    else:
+                        guard.recheck(self.vault_root)
+                return (
+                    graph_sync.canonical_publication_epoch(self.vault_root) == epoch
+                    and freshness.peek_recall_publication(self.vault_root, "vault", ticket=recall)
+                    == recall
+                    and access.publication_policy_snapshot(self.vault_root) == policy_snapshot
+                    and self._availability_sidecar_identity() == sidecar_identity
+                )
+
+            if not still_current():
+                return False
+            with self._mutation_coordinator.hold(
+                operation="epistemic_graph_republish_availability", holder_kind="graph"
+            ):
+                if not still_current():
+                    return False
+                current = self._open_read_snapshot(require_current_projection=False)
+                if current is None:
+                    return False
+                try:
+                    if self._availability_metadata(current) != metadata:
+                        return False
+                finally:
+                    current.close()
+                if not self._snapshot_source_seal_matches_disk(seals[0]) or not still_current():
+                    return False
+                self._publish_available_marker(
+                    (recall.triple, recall.policy_version, recall.access_policy_fingerprint),
+                    checkpoint=stored_checkpoint,
+                )
+        except (
+            OSError,
+            ValueError,
+            sqlite3.Error,
+            graph_sync.GraphEpochIncoherent,
+            graph_sync.GraphEpochUnreadable,
+        ):
+            self._note_republish_refused()
+            return False
         self._clear_republish_backoff()
         log.info("graph availability republished; the repair queue owes nothing")
         return True
+
+    def _availability_sidecar_identity(self) -> tuple[object, ...]:
+        """Bind the mutable live database and WAL, refusing filesystem aliases."""
+        identities: list[object] = []
+        for path in (self.path, self.path.with_name(self.path.name + "-wal")):
+            try:
+                identity = mutation_lock.nofollow_regular_file_identity(path)
+            except FileNotFoundError:
+                if path == self.path:
+                    raise
+                identities.append(None)
+            else:
+                identities.append((identity, path.lstat().st_ctime_ns) if identity[3] else None)
+        return tuple(identities)
+
+    @staticmethod
+    def _availability_metadata(conn: sqlite3.Connection) -> dict[str, str]:
+        graph_sync.limit_graph_metadata_read(conn)
+        return dict(
+            conn.execute(
+                "SELECT key, value FROM graph_meta WHERE key IN "
+                "('schema_version', 'core_registry_version', 'extension_registry_hash', "
+                "'recall_policy_version', 'recall_access_fingerprint', "
+                "'recall_projection_identity', 'recall_projection_checkpoint', "
+                "'recall_resolver_topology', 'read_barrier', 'graph_sync_generation', "
+                "'graph_sync_digest', 'graph_sync_checkpoint')"
+            )
+        )
 
     def _republish_backoff_key(self) -> str:
         """The canonical vault path, so two spellings are one entry.
@@ -2729,6 +2864,7 @@ class EpistemicGraphIndex:
         resolver_fingerprint: str | None,
         residue_out: set[str] | None = None,
         reason_out: list[str] | None = None,
+        seal_out: list[_SnapshotSourceSeal] | None = None,
     ) -> bool:
         """Prove a cold/foreign sidecar against human-owned Markdown bytes.
 
@@ -2747,6 +2883,7 @@ class EpistemicGraphIndex:
         well.  Any incomplete read fails closed; this is deliberately the cold
         path and never runs for a live reader at the exact stored checkpoint.
         """
+
         def declined(reason: str) -> bool:
             # `reason_out` is the same shape as `residue_out` above and for the
             # same reason: a caller that reports this decline to an operator
@@ -2849,18 +2986,34 @@ class EpistemicGraphIndex:
             # each captured source, then repeat both path censuses and the
             # policy identity so a mid-proof edit cannot bless the older graph
             # snapshot merely because its first pass was internally coherent.
-            for source_guard in captured_guards.values():
-                source_guard.recheck(self.vault_root)
-            if not (
-                self._recall_membership() == resolver_membership
-                and self._indexed_recall_membership() == indexed_membership
-                and recall_policy.recall_policy_identity(self.vault_root) == policy_identity
-            ):
+            seal = _SnapshotSourceSeal(
+                tuple(captured_guards.values()),
+                frozenset(resolver_membership),
+                frozenset(indexed_membership),
+                policy_identity,
+            )
+            if not self._snapshot_source_seal_matches_disk(seal):
                 return declined("projection_moved_during_proof")
+            if seal_out is not None:
+                seal_out.append(seal)
             return True
         except Exception:  # noqa: BLE001 - an incomplete cold proof fails closed
             log.debug("cold snapshot proof raised", exc_info=True)
             return declined("proof_raised")
+
+    def _snapshot_source_seal_matches_disk(self, seal: _SnapshotSourceSeal) -> bool:
+        """Replay byte/membership checks without page parsing or topology work.
+
+        This is O(source bytes + paths); it preserves the direct-edit proof,
+        including same-sized content changes with restored timestamps.
+        """
+        for guard in seal.guards:
+            guard.recheck(self.vault_root)
+        return (
+            self._recall_membership() == seal.resolver_membership
+            and self._indexed_recall_membership() == seal.indexed_membership
+            and recall_policy.recall_policy_identity(self.vault_root) == seal.policy_identity
+        )
 
     def _drain_owns_topology(
         self,
@@ -3286,6 +3439,24 @@ class EpistemicGraphIndex:
                     superseded_retries += 1
                     self._reconcile_recall_publication()
                     continue
+                except GraphProjectionMoved:
+                    # Class C already marked the paths it proved stale, in the
+                    # pass's own `finally`. Retire that mark here, as the
+                    # superseded branch above does: reconciling the registry
+                    # against the disk records exactly the movement the mark
+                    # stood for, and clears only through the epoch it sampled,
+                    # so a newer event stays fenced. Left alone, the mark
+                    # fenced every public graph read until the watcher's
+                    # five-minute recovery or the next whole-vault publication.
+                    # The live sidecar is not made current by this: its
+                    # availability marker still names the old projection.
+                    # Best effort: the classified refusal is the outcome the
+                    # caller must see either way.
+                    try:
+                        self._reconcile_recall_publication()
+                    except Exception:  # noqa: BLE001 - the refusal is the outcome
+                        log.debug("graph Class C mark reconcile failed", exc_info=True)
+                    raise
                 ticket = self._prepare_publication_ticket(
                     temporary,
                     epoch=graph_sync.GraphPublicationEpoch(
@@ -4180,13 +4351,31 @@ class EpistemicGraphIndex:
         return relative
 
     def _recorded_since(
-        self, lineage: freshness.RecallFreshnessCheckpoint
+        self,
+        lineage: freshness.RecallFreshnessCheckpoint,
+        *,
+        inflight_candidates: dict[
+            str, tuple[freshness.FileSignature | None, freshness.FileSignature | None]
+        ]
+        | None = None,
     ) -> set[str] | None:
         """Paths the registry accounts for since `lineage`, or None if it cannot say.
 
         Its complete history from the checkpoint, plus every standing
         path-scoped watcher mark: an event observed before its debounce is
         recorded, just not yet published.
+
+        Plus, of `inflight_candidates` (path -> the disk signature the caller
+        sampled and the one the registry recorded), every path whose sampled
+        difference is an outstanding governed write's own doing. A
+        narrow-boundary writer (`remember`) snapshots, renames and publishes
+        to the registry under no lock a rebuild waits on, so the registry is
+        legitimately behind the disk while it runs: its snapshot restores the
+        file's timestamps (moving the ctime), and its rename lands before the
+        publication. Neither is evidence the registry missed anything; the
+        write registered its exact before and after bytes first. Anything
+        else on the path -- a foreign edit landing mid-write -- is still
+        unexplained (`file_watcher.inflight_publications_explain`).
         """
         delta = freshness.recall_delta_since(self.vault_root, "vault", lineage)
         if not delta.complete:
@@ -4201,6 +4390,21 @@ class EpistemicGraphIndex:
             for raw in freshness.external_pending_paths(self.vault_root)
             if (rel := _vault_rel(self.vault_root, raw)) is not None
         )
+        if inflight_candidates:
+            from . import file_watcher
+
+            def stat_pair(signature: freshness.FileSignature | None) -> tuple[int, int] | None:
+                return (signature[0], signature[2]) if signature is not None else None
+
+            unaccounted = {
+                rel: (stat_pair(sampled), stat_pair(registered))
+                for rel, (sampled, registered) in inflight_candidates.items()
+                if rel not in recorded
+            }
+            if unaccounted:
+                recorded.update(
+                    file_watcher.inflight_publications_explain(self.vault_root, unaccounted)
+                )
         return recorded
 
     def _unexplained_differences(
@@ -4219,7 +4423,8 @@ class EpistemicGraphIndex:
         Returns the registry checkpoint `c1` the comparison was taken against,
         the disk stat map keyed by relative path, the paths on which registry
         and disk differ, and those of them the registry's complete history from
-        `c1` (plus standing path-scoped watcher marks) does not explain.
+        `c1` (plus standing path-scoped watcher marks, plus an in-flight
+        governed write's own exact bytes) does not explain.
         """
         try:
             lineage, registry = freshness.recall_projection_snapshot(
@@ -4236,14 +4441,24 @@ class EpistemicGraphIndex:
         }
         unexplained: set[str] = set()
         if differing:
-            explained = self._recorded_since(lineage)
+            explained = self._recorded_since(
+                lineage,
+                inflight_candidates={
+                    rel: (disk.get(rel), recorded_map.get(rel)) for rel in differing
+                },
+            )
             if explained is None:
                 return None
             unexplained = differing - explained
             if unexplained:
                 with _sampling_boundary(self._canonical_mutation_coordinator()):
                     pass
-                explained = self._recorded_since(lineage)
+                explained = self._recorded_since(
+                    lineage,
+                    inflight_candidates={
+                        rel: (disk.get(rel), recorded_map.get(rel)) for rel in unexplained
+                    },
+                )
                 if explained is None:
                     return None
                 unexplained -= explained
@@ -9662,20 +9877,42 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> Graph
         return GraphDispatchResult("failed", "graph_dispatch_failed")
 
 
+_DRIFT_REFUSAL_REASONS: dict[str, str] = {
+    "graph_disabled": "graph reads refused: graph_disabled",
+    "external_pending": (
+        "graph reads refused: external_pending (an unreconciled vault change "
+        "fences every public graph read until the registry catches up)"
+    ),
+    "sidecar_missing": "graph reads refused: sidecar_missing",
+    "unproven": (
+        "graph reads refused: unproven (the sidecar's source-bytes proof has not run "
+        "for the current projection)"
+    ),
+    "not_current": (
+        "graph reads refused: not_current (schema-mismatched, relation-registry hash "
+        "drift, or a stored projection that is not the current one)"
+    ),
+}
+
+
 def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     if not graph_enabled():
         return []
     idx = EpistemicGraphIndex(vault_root)
-    conn = idx._open_read_snapshot()
+    refusal: list[str] = []
+    outcome: list[str] = []
+    conn = idx._open_read_snapshot(outcome_out=outcome, refusal_out=refusal)
     if conn is None:
-        return [
-            {
-                "path": kb_prefix(),
-                "reason": (
-                    "graph sidecar missing, schema-mismatched, or relation-registry hash drift"
-                ),
-            }
-        ]
+        # Name the refusal actually hit. The catch-all used to be reported for
+        # an external-pending fence too, which sent a reader looking for a
+        # missing or mismatched sidecar that was in fact correct.
+        if refusal:
+            code = refusal[0]
+        elif outcome:
+            code = "unproven"
+        else:
+            code = "not_current"
+        return [{"path": kb_prefix(), "refusal": code, "reason": _DRIFT_REFUSAL_REASONS[code]}]
     try:
         by_path = {
             node["path"]: node for node in idx._nodes_from_snapshot(conn) if node["kind"] == "file"

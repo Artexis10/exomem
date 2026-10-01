@@ -22,7 +22,7 @@
     "surfaceProfile": "hosted-alpha-agent-v4",
     "release": "0.73.1",
     "commandFingerprint": "4b4b71280fec7915042483207b1ab0e15e916148ac1b88ef965e03671de80968",
-    "contractDigest": "60b5aec6f872874234a214e778e26ce57fa5805af8ce744bdd68efe8ca0fcb26"
+    "contractDigest": "2620c1bdc52ff9783771f327edca6b4c48fa030fc860f9a06f21c217263ac517"
   },
   "contractDigest": {
     "algorithm": "sha256",

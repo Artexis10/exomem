@@ -67,6 +67,11 @@ ACTIVATION_DOOR_BUDGET_SECONDS = 6.0
 #: one. One constant covers every activation boundary, including the guard;
 #: there is no per-stage tuning.
 ACTIVATION_STAGE_RESERVE_SECONDS = 1.0
+#: The conversation stage is optional enrichment: it starts only with the flat
+#: stage reserve AND its own worst-case cost (its p95 budget, 60 ms) to spare,
+#: so a request running short gives it up first and is compiled exactly as
+#: without a conversation, never failed over it.
+CONVERSATION_STAGE_RESERVE_SECONDS = ACTIVATION_STAGE_RESERVE_SECONDS + 0.06
 
 #: Operators may lengthen or shorten the origin budget. Clients may not: the
 #: client that most needs the bound is the one that cannot be trusted to set

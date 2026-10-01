@@ -152,7 +152,7 @@ def _payload_lines(block: object, prefix: str = "") -> list[str]:
 
 
 def _bootstrap_envelope(vault: Path) -> dict:
-    return commands.op_bootstrap(vault, profile="compact")["engagement"]["envelope"]
+    return commands.op_bootstrap(vault, profile="compact", section="all")["engagement"]["envelope"]
 
 
 def _carriers(vault: Path) -> dict[str, list[str]]:
@@ -296,7 +296,7 @@ def test_the_family_vocabulary_is_discoverable_rather_than_hardcoded(
     A carrier that shipped its own family table would go stale the day a queue
     is added or retired, and a hookless client has nothing else to correct it.
     """
-    bootstrap = commands.op_bootstrap(vault, profile="compact")
+    bootstrap = commands.op_bootstrap(vault, profile="compact", section="all")
     post_write = bootstrap["authoring_contract"]["post_write"]
     taught = " ".join(str(value) for value in post_write.values()).lower()
     pasted = "\n".join(_markdown_section(HOOKLESS_DOC, TEACHING_HEADING)).lower()
