@@ -15,7 +15,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from test_working_set_carry import _write, seed_ordinary_notes
 from test_working_set_index import _seed_planning, _seed_structure
 
@@ -271,7 +270,7 @@ def test_filtered_counts_follow_an_exact_row_purge(vault: Path, second_process: 
     assert _filtered_counts(vault) == ({"brask": 0}, before[1] - 1)
 
 
-def test_stale_reader_cannot_install_counts_after_a_rebuild(
+def test_an_old_snapshot_finishes_but_cannot_serve_counts_after_a_rebuild(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(vault, retired=0)
@@ -287,15 +286,81 @@ def test_stale_reader_cannot_install_counts_after_a_rebuild(
                 store._rebuild(writer)
             finally:
                 writer.close()
-        assert store._filtered_term_frequency_cache is None
         return result
 
     with monkeypatch.context() as patch:
         patch.setattr(store, "_document_frequency_query", rebuild_after_compute)
         before = _filtered_counts(vault)
     assert before[0] == {"brask": 0}
-    assert store._filtered_term_frequency_cache is None, "stale reader republished its old counts"
     assert _filtered_counts(vault) == ({"brask": 1}, before[1] + 1)
+
+
+def test_frequency_cache_miss_does_not_block_a_committing_writer(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One blocked read can escape the burst probe's p95 when it has many samples."""
+    import sqlite3
+    import threading
+    import time
+
+    _seed(vault, retired=0)
+    store = lexstore.get_store(vault)
+    connection = store._connect()
+    try:
+        assert connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+    finally:
+        connection.close()
+    commit_started = threading.Event()
+    writer_done = threading.Event()
+    errors: list[sqlite3.Error] = []
+    resumed_at: list[float] = []
+
+    def write() -> None:
+        connection = sqlite3.connect(store.path, timeout=5)
+        try:
+            rowid = connection.execute("SELECT rowid FROM pages WHERE path = ?", (CURRENT,)).fetchone()[0]
+            connection.execute("UPDATE fts SET stemmed = 'unseenword' WHERE rowid = ?", (rowid,))
+            connection.set_trace_callback(lambda sql: commit_started.set() if sql == "COMMIT" else None)
+            connection.commit()
+        except sqlite3.Error as error:
+            errors.append(error)
+        finally:
+            connection.close()
+            writer_done.set()
+
+    writer = threading.Thread(target=write)
+    count = store._document_frequency_query
+
+    def count_then_commit(connection, *args, **kwargs):
+        result = count(connection, *args, **kwargs)
+        writer.start()
+        assert commit_started.wait(1)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and not writer_done.is_set():
+            observer = sqlite3.connect(store.path, timeout=0)
+            try:
+                observer.execute("SELECT value FROM meta LIMIT 1").fetchone()
+            except sqlite3.OperationalError as error:
+                assert "locked" in str(error)
+                resumed_at.append(time.monotonic())
+                return result
+            finally:
+                observer.close()
+            writer_done.wait(0.001)
+        pytest.fail("the writer never reached commit while the count snapshot was held")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "_document_frequency_query", count_then_commit)
+            before = _filtered_counts(vault)
+        assert time.monotonic() - resumed_at[0] < 2
+    finally:
+        if writer.ident is not None:
+            writer.join(timeout=6)
+    assert not writer.is_alive() and writer_done.is_set()
+    assert not errors
+    assert before[0] == {"brask": 1}
+    assert _filtered_counts(vault) == ({"brask": 0}, before[1])
 
 
 @pytest.mark.parametrize("filtered", [False, True])

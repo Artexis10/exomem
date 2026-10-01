@@ -6992,13 +6992,13 @@ class LexicalStore:
                 if len(known) + len(missing) > _TERM_FREQUENCY_CACHE_MAX:
                     retained = {
                         token: response[token]
-                        for _, token in zip(range(_TERM_FREQUENCY_CACHE_MAX), response)
+                        for _, token in zip(range(_TERM_FREQUENCY_CACHE_MAX), response, strict=False)
                     }
                 else:
                     retained = dict(known)
                     retained.update(found)
                 self._install_term_frequency_cache(
-                    revision, (generation, MappingProxyType(retained), pages), filtered=filtered
+                    (generation, MappingProxyType(retained), pages), filtered=filtered
                 )
                 return response, pages
             return {token: int(known[token]) for token in tokens}, pages
@@ -7014,27 +7014,20 @@ class LexicalStore:
         return str(row[0])
 
     def _install_term_frequency_cache(
-        self, revision: str, entry: tuple[tuple, Mapping[str, int], int], *, filtered: bool
+        self, entry: tuple[tuple, Mapping[str, int], int], *, filtered: bool
     ) -> None:
-        """Compare-and-set against a fresh live snapshot, serializing installers.
+        """Retain counts under their pinned snapshot's revision, without SQL.
 
-        The computing reader may still hold a pre-publication snapshot. A fresh
-        connection sees a repair/purge/rebuild that committed since computation.
-        A write after this comparison still cannot use this entry: every lookup
-        compares the entry's revision with its own pinned counts snapshot.
+        Every lookup compares the full key with its own snapshot. A late old
+        installer can cause a recount, never stale served counts. Opening another
+        connection here can deadlock the held read snapshot with a pending commit
+        on the supported DELETE-journal catalogue.
         """
         with self._term_frequency_cache_lock:
-            current = self._connect()
-            try:
-                current.execute("BEGIN")
-                if self._frequency_revision(current) != revision:
-                    return
-                if filtered:
-                    self._filtered_term_frequency_cache = entry
-                else:
-                    self._term_frequency_cache = entry
-            finally:
-                current.close()
+            if filtered:
+                self._filtered_term_frequency_cache = entry
+            else:
+                self._term_frequency_cache = entry
 
     def _bm25_query(
         self,
