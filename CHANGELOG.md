@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.101.0](https://github.com/Artexis10/exomem/compare/v0.100.0...v0.101.0) (2026-10-01)
+
+
+### Features
+
+* **plugins:** distribute Exomem Cloud from one canonical skill core ([#1480](https://github.com/Artexis10/exomem/issues/1480)) ([0398d86](https://github.com/Artexis10/exomem/commit/0398d86d544744d02a955b1a0a462789164500cb))
+
+
+### Bug Fixes
+
+* **activation:** prevent hidden pages from changing recent context ([#1497](https://github.com/Artexis10/exomem/issues/1497)) ([080be40](https://github.com/Artexis10/exomem/commit/080be407c0d9d5ea51f163eca53525041d3c0032))
+* **helm:** keep Cloud lifecycle scheduler active ([#1490](https://github.com/Artexis10/exomem/issues/1490)) ([9cdcea4](https://github.com/Artexis10/exomem/commit/9cdcea434f38380c6de79f5033b0430f20762d4a))
+* **onnx:** preserve runtime shape through hosted log redaction ([#1494](https://github.com/Artexis10/exomem/issues/1494)) ([c603525](https://github.com/Artexis10/exomem/commit/c60352507004fac34b45165c92f325b8a4f2aeca))
+* **plugins:** clear Cloud launch privacy and packaging gates ([#1498](https://github.com/Artexis10/exomem/issues/1498)) ([b1df5b6](https://github.com/Artexis10/exomem/commit/b1df5b608bb68bd6fdf9da47ff97bb2c441d2c5a))
+* **scripts:** close stdin for codex exec in codex_task.sh ([#1488](https://github.com/Artexis10/exomem/issues/1488)) ([b0e1cfa](https://github.com/Artexis10/exomem/commit/b0e1cfad5064fb07cb6a9f0da7d9852481165410))
+
+
+### Performance
+
+* **cloud:** share served ONNX weights between cells on a node ([#1489](https://github.com/Artexis10/exomem/issues/1489)) ([dd34fb2](https://github.com/Artexis10/exomem/commit/dd34fb27b8b4d1d005bace4a38fc525b3609a1e7))
+* **index:** bound embedding build and publication memory ([#1495](https://github.com/Artexis10/exomem/issues/1495)) ([3a28695](https://github.com/Artexis10/exomem/commit/3a286951a70e307ff717d36d8f5871bbb51b9be7))
+
 ## [0.100.0](https://github.com/Artexis10/exomem/compare/v0.99.0...v0.100.0) (2026-09-30)
 
 

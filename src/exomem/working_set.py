@@ -36,7 +36,6 @@ from . import (
     activation_conventions,
     context_intents,
     context_roles,
-    kbdir,
     request_budget,
     source_taxonomy,
     working_set_heat,
@@ -2403,6 +2402,10 @@ def compile_packet(
         passed = bool(continuity_refs) if continuity_passed is None else bool(continuity_passed)
         hot = HotSet()
         if anchor:
+            if visible is not None:
+                rows = tuple(
+                    row for row in rows if working_set_resolve.anchor_visible(row, visible)
+                )
             chosen = working_set_resolve.override_candidates(rows, anchor)
             # A ref that names no anchor is not a packet with nothing in it: the
             # caller asked about a sense that does not exist here. It abstains,
@@ -2415,10 +2418,15 @@ def compile_packet(
             # A reader other than the owner resolves the turn over the anchors
             # it may see: the ones the turn's words can reach are decided, and
             # name-term counts and derived short names follow its view.
-            decided_ids: frozenset[str] = frozenset()
             if visible is not None:
-                rows, term_counts, decided_ids = working_set_resolve.audience_view(
+                rows, term_counts, _ = working_set_resolve.audience_view(
                     analysis, rows, term_counts, visible
+                )
+                # Non-worded evidence can reach any catalogue row. Decide its
+                # canonical page before hot-tier selection and candidate caps;
+                # filtering a capped batch leaves hidden rows behind the cap.
+                rows = tuple(
+                    row for row in rows if working_set_resolve.anchor_visible(row, visible)
                 )
             routing_targets = _routing_targets(
                 root, index_token[1], index_token=index_token, visible=visible
@@ -2465,20 +2473,6 @@ def compile_packet(
                 )
 
             candidates = _candidates(rows)
-            if visible is not None:
-                # An anchor reached only by evidence other than its words
-                # (recall, claims, recency, similarity) is decided here, and the
-                # candidates are drawn again without it.
-                unseen = {
-                    candidate.anchor_id
-                    for candidate in candidates
-                    if candidate.anchor_id not in decided_ids
-                    and candidate.path
-                    and not visible(candidate.path)
-                }
-                if unseen:
-                    rows = tuple(row for row in rows if row.anchor_id not in unseen)
-                    candidates = _candidates(rows)
 
             candidates = working_set_resolve.add_graph_corroboration(
                 candidates, retrieval_paths=retrieval_paths
@@ -2525,29 +2519,11 @@ def compile_packet(
     # cached pages for statements — and an exhausted budget raises at
     # `working_set.roles` immediately below.
     with _span(timings, "working_set.recent"):
-        # Resolution decides only rows the turn reached. Recent context also
-        # selects unmentioned plans and derives collection exclusions, so its
-        # whole catalogue must be visible before reservations and caps.
-        # A Planning item's canonical page ref is governed independently of
-        # its collection home; opaque anchor refs are not page paths.
-        recent_rows = (
-            rows
-            if visible is None
-            else tuple(
-                row for row in rows
-                if not row.path or (
-                    visible(row.path)
-                    and (
-                        row.kind != "plan"
-                        or (ref := working_set_resolve.anchor_ref(row)) == row.path
-                        or not ref.startswith(kbdir.kb_prefix())
-                        or visible(ref)
-                    )
-                )
-            )
-        )
+        # The catalogue was released before resolution and candidate caps,
+        # including unmentioned Planning item refs. Reuse that same view for
+        # recent reservations instead of deciding its page paths a second time.
         recent: tuple[dict[str, Any], ...] = _recent_context(
-            root, rows=recent_rows, profile=heat, attribution=attribution, marks=marks
+            root, rows=rows, profile=heat, attribution=attribution, marks=marks
         )
 
     # Design D3, and ONLY here: the turn reached no anchor at all. An

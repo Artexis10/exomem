@@ -93,8 +93,10 @@ def _claude_hooks(root: Path, target: Path) -> None:
     hooks = target / "hooks"
     hooks.mkdir()
     for stem in ("retrieve-nudge", "capture-nudge", "continuation-checkpoint"):
-        for filename in (f"exomem-{stem}.sh", f"exomem_{stem.replace('-', '_')}.py"):
-            shutil.copyfile(root / "src/exomem/_hooks" / filename, hooks / filename)
+        # The registrations use Python exec form; local-install shell launchers
+        # are unused here and their computed paths block directory validation.
+        filename = f"exomem_{stem.replace('-', '_')}.py"
+        shutil.copyfile(root / "src/exomem/_hooks" / filename, hooks / filename)
     events = (
         ("UserPromptSubmit", "retrieve-nudge", None),
         ("Stop", "capture-nudge", None),
