@@ -165,15 +165,20 @@ When none or two or more competitors carry `conversation`, the turn SHALL stay `
 
 ### Requirement: An anaphoric turn is carried from the newest conversation subject
 
-A turn SHALL be carried from the conversation only when all three of these hold:
+A turn SHALL be carried from the conversation only when all four of these hold:
 
 1. **It resolves nothing of its own.** Its turn segment reaches no anchor by any worded contact kind.
 2. **It points back.** It speaks a cue from the effective referential vocabulary, or one of a closed, shipped set: third-person pronouns and possessives; "that", "this", "those", "these", "it"; the follow-up markers already shipped, except the bare pointers "one", "ones" and "other"; an ordinal followed by "one" or "option"; "the former" and "the latter"; an elliptical "what about …" or "how about …" opener. A bare pointer counts only when a determiner ("the", "a", "an"), a demonstrative, an ordinal or "which" governs it ("that one", "the other one", "which one"); a numeral use ("for one day", "no one") does not. Contractions are split first ("it's" is "it is"). A demonstrative that places a time ("this week", "these days") does not point back.
 3. **Its content is licensed by the subject.** Every content word SHALL belong to the selected subject's own name/title or the frozen generic task vocabulary, compared through the same `forms()` normalisation. A word merely appearing in an earlier user or assistant turn SHALL NOT license a carry. Function words, light verbs, pointers, numbers and the vault's referential vocabulary retain their existing neutral treatment. Time words SHALL neither license nor block the content gate. An unlicensed content word SHALL prevent the conversation carry.
+4. **It supplies no turn-local material.** Before neutral-word removal or title licensing, the compiler SHALL veto the conversation carry when the current turn structurally introduces a nominal/value, quotes an explicitly delimited expression, or supplies an alternative set that a selecting pointer addresses. Task, time, numeric and neutral words SHALL remain eligible heads for this check. A pointer-headed historical expression or temporal adjunct SHALL NOT alone establish an introduction; coordination alone SHALL NOT establish a local choice. A detected local-material class SHALL veto the entire conversation-carry opportunity, including mixed local/historical turns, without attempting general coreference.
+
+The local-material check SHALL retain surface clause/list and quotation boundaries before apostrophe normalization. It SHALL distinguish contraction/possessive apostrophes from quotation delimiters. A quoted expression SHALL be opaque local material, and its internal pointing words SHALL NOT contribute pointing evidence. Empty lexical content SHALL NOT bypass the local-material veto. Shipped referential and follow-up rules and the newest-subject selection SHALL remain unchanged.
+
+A quantified information-request phrase directly modified by a historical-subject complement SHALL NOT alone establish a local introduction. The relation SHALL be scoped to the requested nominal, not inferred from question syntax or a nearby preposition and pointer. An independently evaluated, created, possessed or presented nominal SHALL remain local material even when modified by a historical pointer. Other local material anywhere in the turn SHALL retain the whole-opportunity veto; the exemption SHALL NOT bypass title/content licensing.
 
 A copular "it" whose complement is a bare time, date, clock, weather or distance expression SHALL be treated as dummy and SHALL NOT carry. A temporal phrase headed by `on`, `in`, `at`, `after`, `before`, `by`, `for`, `from`, `until` or `during` is an adjunct of a real referent and MAY carry when the content licence permits it. Closing idioms retain their exclusions, including "drop it"; losing a real keep-or-drop instruction is a disclosed recall trade.
 
-Function words, pointers and clock numbers SHALL be tested by surface spelling after contraction splitting, including when they also appear in vault referential filler. Inflectional forms SHALL still apply to subject titles, frozen task vocabulary, the remaining referential vocabulary and neutral time words. A word whose stem merely matches a function word SHALL remain content. Each backtick-delimited inline or fenced code span SHALL count as one unlicensed content word; a pointer inside it SHALL NOT point back.
+Function words, pointers and clock numbers SHALL be tested by surface spelling after contraction splitting, including when they also appear in vault referential filler. Inflectional forms SHALL still apply to subject titles, frozen task vocabulary, the remaining referential vocabulary and neutral time words. A word whose stem merely matches a function word SHALL remain content. Each inline or fenced code span SHALL count as one unlicensed content word; a pointer inside it SHALL NOT point back. Inline backticks SHALL match exact delimiter runs. Markdown fenced blocks SHALL close with the same delimiter kind and a run at least as long as the opening run, including longer valid closing fences.
 
 A content-free pointing turn MAY carry the newest subject within the one-third footprint. Its carry rate SHALL be reported separately from topic-switch false carries, which remain gated at at most five percent on sets not used for tuning. Recall losses SHALL be disclosed without gating. This round-seven ruling supersedes the round-four all-false-carry bar.
 
@@ -204,20 +209,66 @@ The compiler SHALL check the content licence against each selected anchor's own 
 
 - **Exactly one anchor.** That anchor SHALL be carried as the packet's single anchor:
   - at status `partial`, with evidence `[conversation]` and `origin = "conversation"`;
-  - its material served under the ordinary lanes, with subject prose (units, current state and pointers together) capped at one third of `max_chars`;
+  - its material served under the ordinary lanes, with all emitted conversation-inferred subject prose capped at `clamp_budget(max_chars) // 3`;
   - `generation.carried_by = "conversation"`.
 - **Two or more.** The turn SHALL abstain `ambiguous` listing them, and SHALL NOT choose.
 - **No entry resolves an anchor.** The turn SHALL abstain exactly as without `conversation`.
 
 A refs-only conversation SHALL NOT carry: a ref says what was read, not what "it" refers to. A carried anchor, being `partial`, SHALL NOT enter the continuity token.
 
+The inclusive subject charge SHALL count anchor and ambiguity titles, current-state statements, unit text, pointer titles/why and associated free authored strings such as provenance categories and unvalidated date/lifecycle strings, once per emitted occurrence under the existing character convention. References/paths and validated closed structural metadata MAY be exempt; arbitrary authored strings SHALL NOT be exempt solely because their field is labelled metadata. The same charge SHALL bound conversation-derived ambiguity and the no-material fallback. Ordinary carry and current-turn contact accounting SHALL remain unchanged.
+
+The compiler SHALL budget `recent_context` exactly as for an unresolved turn, then full anchor/ambiguity titles in existing order, state entries, ordered units and overflow pointers. An unaffordable title SHALL become empty while its identity and evidence remain; the compiler SHALL NOT truncate it, drop an ambiguity candidate or choose a cheaper candidate. Complete prepared state/unit/pointer payloads SHALL fit their charged allowance or follow existing deferral/drop behavior. `budget.used_chars` SHALL equal the retained recent-context charge plus the retained inclusive subject charge and SHALL NOT exceed the effective request ceiling. Egress filtering SHALL reconcile the same charge after removal without refilling from withheld material.
+
 #### Scenario: A conversation carry keeps within a third of the budget
 
 - **WHEN** an unresolved pointing turn carries a conversation subject with more material than the request's `max_chars`
-- **THEN** its units, current-state statements and pointer prose together use at most `max_chars // 3` characters
+- **THEN** all emitted subject prose, including anchor titles and free authored metadata, uses at most `clamp_budget(max_chars) // 3` characters
 - **AND** the anchor remains `partial` with evidence `[conversation]`
 - **AND** `recent_context` retains the budget it receives for an unresolved turn
 - **AND** the same subject reached by the turn's own words retains the ordinary budget
+
+#### Scenario: A local task object is not the historical subject
+
+- **WHEN** an earlier user entry resolved a subject and the current turn is "i have a new plan; can you review it"
+- **THEN** the locally introduced plan vetoes the conversation carry even though every word has neutral or frozen-task treatment
+- **AND** the compiler does not search an older entry for another subject
+
+#### Scenario: A quantified request asks about the historical subject
+- **GIVEN** a licensed historical subject
+- **WHEN** the current turn is an elliptical request such as "any update on them"
+- **THEN** its directly modified information-request nominal alone SHALL NOT establish local material
+- **AND** the ordinary title/content licence SHALL still apply
+
+#### Scenario: A historical modifier does not erase an independently evaluated object
+- **GIVEN** a licensed historical subject
+- **WHEN** the current turn asks "can you review a plan for it" or "is a plan with it ready"
+- **THEN** the independently evaluated plan SHALL establish local material and veto the conversation carry
+- **AND** an eligible historical-information request elsewhere in the turn SHALL NOT bypass a separate possession or presentation assertion
+
+#### Scenario: A quoted task expression is local material
+
+- **WHEN** the current turn asks whether an explicitly quoted task expression such as "they are ready" is correct
+- **THEN** the quoted expression is local material and the conversation SHALL NOT carry
+- **AND** the quoted pronoun supplies no backward-pointing evidence
+
+#### Scenario: A locally supplied value choice stays local
+
+- **WHEN** the current turn supplies two numeric or temporal alternatives and asks which of those is right
+- **THEN** the local choice vetoes the conversation carry even though the alternatives are neutral vocabulary
+- **AND** a historical pointer such as "the next one" or a temporal adjunct such as "on Tuesday" alone does not establish that local choice
+
+#### Scenario: Long titles cannot escape the inferred subject allowance
+
+- **WHEN** a real indexed subject's title exceeds the conversation allowance, including a no-material fallback or conversation-derived ambiguity
+- **THEN** its returned title is empty, its identity remains available and the inclusive subject charge stays within the allowance
+- **AND** ambiguity candidates remain present without selecting a cheaper candidate
+
+#### Scenario: Post-egress accounting matches the retained inferred material
+
+- **WHEN** egress removes charged conversation-inferred material
+- **THEN** the reported charge accounts only for the remaining recent context and inclusive subject material
+- **AND** the compiler does not refill from withheld material
 
 #### Scenario: A new content word prevents the conversation carry
 

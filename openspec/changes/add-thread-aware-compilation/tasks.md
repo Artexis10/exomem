@@ -186,3 +186,13 @@ The orchestrator ruled on the design on 2026-09-29; the rulings are recorded in 
   Record separately that live-cell latency is owned by its own lane and was not regressed: a request without `conversation` records no conversation stage.
 - [ ] 5.3 In the delivery that completes 5.1 and 5.2, sync the deltas into the canonical specs and archive with `openspec archive`. Run `openspec validate --all --strict` before and after.
   Status: not done: it needs 5.1 to pass. Do not archive yet.
+
+## 6. Round-eight correction and independent acceptance
+
+- [ ] 6.1 Red-first regression evidence for locally introduced task/time/numeric/neutral referents, quoted expressions, local value choices and valid longer closing fences; retain the permitted content-free and historical-reference controls without widening the frozen task vocabulary.
+- [ ] 6.2 Implement the deterministic local-material veto before lexical erasure/title licensing and the distinct inline/fenced code treatment; preserve shipped carry precedence and never search an older subject after failed eligibility.
+- [ ] 6.3 Red-first inclusive footprint checks using real indexed long titles, no-material fallback, ambiguity menus, authored metadata, recent context and post-egress removal; compare ordinary packets unchanged.
+- [ ] 6.4 Implement one conversation-only prose ledger for all inferred packet paths and post-egress reconciliation; preserve identities and ordinary accounting.
+- [x] 6.5 Obtain author-independent recheck with a genuinely new frozen private set at both public compiler and command leaf: topic-switch false carries ≤5%, content-free carry/recall disclosed, every inclusive subject footprint within its third. Disclosed sets are regression evidence, not a new gate.
+  Evidence: 2026-10-01 independent R12 review approved the frozen construction-scanner replacement. Each guarded public path had 2/48 false carries (4.17%) on the fixed unseen material corpus, with no exclusions or denominator changes; content-free carry was12/12 and historical subject recall10/12. All13 disclosed R11 failures were repaired.194 public calls each observed one active egress guard; inclusive subject prose64<=400 and total packet144/1200. Focused existing suite360 passed;8192-delimiter calls took0.0307/0.0383 CPU seconds. Two P3 precision residuals remain counted. Integration and delivery are still required by6.6.
+- [ ] 6.6 Verify corrected scoped suites, privacy, surfaces and strict OpenSpec; at delivery run completion-boundary checks, refresh main after the release hold, and close/archive only with actual integration evidence.

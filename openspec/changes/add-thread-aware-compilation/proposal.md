@@ -29,7 +29,7 @@ Hooked clients (Claude Code, Codex) can read a local transcript. Remote clients 
   - Conversation-promoted material is capped at a third of the packet budget whenever the current turn resolved anything itself.
   - Earlier turns are matched by alias and lexical kinds only, per entry, newest three user and two assistant entries only: no embedding, no recall query, no model. `focus` gets worded kinds only (no second recall or embedding).
 - **Ephemeral by default.** Conversation content is request-scoped:
-  - It is never written to the activation log, heat projection, episode ledger, packet cache or any state file. The activation log records only presence, counts and `generation.conversation`. The call ledger keeps its existing shape-and-hash record of every argument, which covers `conversation` exactly as it already covers `turn`.
+  - It is never written to the activation log, heat projection, episode ledger, packet cache or any state file. The activation log records only presence, counts and `generation.conversation`. The call ledger records `conversation` by name and byte length only, never a hash, under this change's corrected `call-ledger` contract.
   - A request carrying a conversation is neither served from nor stored in the packet cache.
   - A conversation ref to a withheld page is dropped before evidence exactly as an unknown ref is: no marker, and no difference in any `generation` field.
   - The continuity token never encodes a carried or conversation-only anchor.
@@ -74,6 +74,6 @@ Hooked clients (Claude Code, Codex) can read a local transcript. Remote clients 
   - `_hooks/exomem_retrieve_nudge.py` and its plugin mirror;
   - `benchmarks/membench/utility/context_activation*`.
 - **Tool surface:** one optional object argument on one tool. The schema fidelity fixture, the tool-surface digests, the plugin and hosted trees, the ChatGPT plugin contract, `docs/capabilities.md` and the README table regenerate in S4. Remote connectors need an owner-side schema refresh, and until it happens they keep today's behaviour, because the argument is optional.
-- **State:** none new. Nothing from the conversation persists beyond the call ledger's existing argument hash.
+- **State:** none new. Only the call ledger's presence and byte-length record persists; no conversation text or hash does.
 - **Pure substrate:** no model runs on conversation text. Resolution stays categorical and deterministic. The only model-authored input is the calling agent's own `focus` line, and the agent is the reasoner the constitution already names.
 - **Default-off / soft-fail:** the capability is inert until a caller sends `conversation`, and hooks send it only in `working_set` mode. A malformed `conversation` is ignored and reported `absent`, never an error.

@@ -418,6 +418,7 @@ def build_packet(
     generation: Mapping[str, Any],
     status: str,
     recent_context: Sequence[Mapping[str, Any]] = (),
+    conversation_inferred: bool = False,
 ) -> dict[str, Any]:
     """Order, cap and budget the lane output into the packet the caller sees."""
     limit = clamp_budget(max_chars)
@@ -460,11 +461,19 @@ def build_packet(
     recent_entries, used = _budgeted_recent(recent_context, limit)
     # Conversation inference gets only its promoted share. Working continuity
     # retains the unresolved turn's ordinary budget, outside that share.
+    conversation_inferred = conversation_inferred or generation.get("carried_by") == "conversation"
     material_limit = (
         min(limit, used + limit // PROMOTED_SHARE_DIVISOR)
-        if generation.get("carried_by") == "conversation"
+        if conversation_inferred
         else limit
     )
+    listed_anchors = [dict(anchor) for anchor in anchors]
+    listed_ambiguity = [dict(entry) for entry in ambiguity]
+    role_ids = frozenset(str(role["id"]) for role in roles) if conversation_inferred else frozenset()
+    if conversation_inferred:
+        used += working_set_conversation.budget_headers(
+            (*listed_anchors, *listed_ambiguity), material_limit - used, role_ids=role_ids,
+        )
 
     # Current state is the highest-value prose about the RESOLVED anchors — it
     # is the answer to "what is true right now" — so it is budgeted next and the
@@ -474,20 +483,36 @@ def build_packet(
     state_entries: list[dict[str, Any]] = []
     for entry in current_state:
         statement = str(entry.get("statement") or "")
-        if used + len(statement) > material_limit:
+        cost = (
+            working_set_conversation.prose_chars(entry, role_ids=role_ids)
+            if conversation_inferred else len(statement)
+        )
+        if used + cost > material_limit:
             continue
         state_entries.append(dict(entry))
-        used += len(statement)
+        used += cost
 
     for item in ordered:
         if _redundant_superseded(item, present_paths):
             continue
         text = bounded_text(item.text)
+        unit = {
+            "ref": item.ref,
+            "role": item.role,
+            "text": text,
+            "lifecycle": item.lifecycle,
+            "updated": item.updated,
+            "provenance": _provenance(item),
+        }
+        cost = (
+            working_set_conversation.prose_chars(unit, role_ids=role_ids)
+            if conversation_inferred else len(text)
+        )
         role_count = per_role.get(item.role, 0)
         if role_count >= MAX_ITEMS_PER_ROLE:
             deferred.append((item, "role_cap"))
             continue
-        if used + len(text) > material_limit or not text:
+        if used + cost > material_limit or not text:
             deferred.append((item, "budget"))
             continue
         if item.promoted and promoted_used + len(text) > promoted_share:
@@ -495,17 +520,8 @@ def build_packet(
             continue
         if item.promoted:
             promoted_used += len(text)
-        units.append(
-            {
-                "ref": item.ref,
-                "role": item.role,
-                "text": text,
-                "lifecycle": item.lifecycle,
-                "updated": item.updated,
-                "provenance": _provenance(item),
-            }
-        )
-        used += len(text)
+        units.append(unit)
+        used += cost
         per_role[item.role] = role_count + 1
 
     # A pointer is cheap but not free: its title and `why` are prose the caller
@@ -522,7 +538,10 @@ def build_packet(
             starved.setdefault(item.role, None)
             continue
         pointer = _pointer(item, reason)
-        cost = len(pointer["title"]) + len(pointer["why"])
+        cost = (
+            working_set_conversation.prose_chars(pointer, role_ids=role_ids)
+            if conversation_inferred else len(pointer["title"]) + len(pointer["why"])
+        )
         if used + cost > material_limit:
             starved.setdefault(item.role, None)
             continue
@@ -531,7 +550,7 @@ def build_packet(
 
     packet: dict[str, Any] = {
         "recent_context": recent_entries,
-        "anchors": [dict(anchor) for anchor in anchors],
+        "anchors": listed_anchors,
         "roles": [dict(role) for role in roles],
         "units": units,
         "pointers": pointers,
@@ -540,14 +559,14 @@ def build_packet(
             *(dict(entry) for entry in missing),
             *({"role": role, "reason": "budget"} for role in starved),
         ],
-        "ambiguity": [dict(entry) for entry in ambiguity],
+        "ambiguity": listed_ambiguity,
         "budget": {"limit_chars": limit, "used_chars": used},
         "generation": dict(generation),
         "abstained": status != "resolved",
     }
     if packet["abstained"]:
         packet["abstention"] = {"reason": status}
-    return packet
+    return working_set_conversation.InferredPacket(packet) if conversation_inferred else packet
 
 
 def abstained_packet(
@@ -559,6 +578,7 @@ def abstained_packet(
     ambiguity: Sequence[Mapping[str, Any]] = (),
     missing: Sequence[Mapping[str, Any]] = (),
     recent_context: Sequence[Mapping[str, Any]] = (),
+    conversation_inferred: bool = False,
 ) -> dict[str, Any]:
     """The packet with no ANSWER in it — but still with working continuity.
 
@@ -570,6 +590,12 @@ def abstained_packet(
     thing a fresh session opening on "ok continue" has to be told.
     """
     limit = clamp_budget(max_chars)
+    if conversation_inferred or generation.get("carried_by") == "conversation":
+        return build_packet(
+            items=(), anchors=anchors, roles=(), current_state=(), ambiguity=ambiguity,
+            missing=missing, max_chars=limit, generation=generation, status=reason,
+            recent_context=recent_context, conversation_inferred=True,
+        )
     recent_entries, used = _budgeted_recent(recent_context, limit)
     return {
         "recent_context": recent_entries,
@@ -1889,6 +1915,7 @@ def _follow_up_packet(
         generation=generation,
         anchors=(listed,),
         recent_context=recent_context,
+        conversation_inferred=carried_by == "conversation",
     )
 
 
@@ -2401,6 +2428,7 @@ def _compile_packet(
         not anchor
         and segments is not None
         and analysis.points_back
+        and not analysis.local_material
         and resolution.status == "unresolved"
         and not any(
             set(item.evidence) & working_set_resolve.WORDED_CONTACT_KINDS
@@ -2458,6 +2486,7 @@ def _compile_packet(
                     for item in verdict.anchors
                 ),
                 recent_context=recent,
+                conversation_inferred=True,
             )
 
     if not anchor and resolution.status == "unresolved" and not analysis.referential:

@@ -327,7 +327,8 @@ def test_the_compiler_classifies_all_disclosed_fifth_cases(fifth_disclosures_vau
         packet = _activate(fifth_disclosures_vault, turn, max_chars=1200,
                            conversation={"recent": repeated_earlier(title, turn)},
                            session=f"round7-negative-{case_id}")
-        if case_id in CONTENT_FREE_FIFTH_IDS:
+        # Round 8 local quotations supersede N50/N52/N53's task-only labels.
+        if case_id in CONTENT_FREE_FIFTH_IDS - {"N50", "N52", "N53"}:
             _assert_bounded_conversation(packet, title, 1200)
         else:
             assert packet["generation"].get("carried_by") != "conversation", case_id

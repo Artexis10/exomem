@@ -189,7 +189,8 @@ def test_licensed_acceptance_positives_keep_their_subject(turn, earlier, subject
 
 @pytest.mark.parametrize("case_id,turn,subject", FIFTH_NEGATIVES)
 def test_each_disclosed_fifth_case_follows_the_round7_classification(case_id, turn, subject) -> None:
-    expected = [turn] if case_id in CONTENT_FREE_FIFTH_IDS else []
+    # Round 8 local quotations supersede the three quoted-task exceptions.
+    expected = [turn] if case_id in CONTENT_FREE_FIFTH_IDS - {"N50", "N52", "N53"} else []
     assert _carried([turn], repeated_earlier(subject, turn), subject_title=subject) == expected, case_id
 
 

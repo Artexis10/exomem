@@ -316,6 +316,9 @@ class TurnAnalysis:
     #: `points_back` with no content word at all: the verdict without a
     #: conversation to compare against.
     anaphoric: bool = False
+    #: Turn-local nominal/value, quotation or supplied alternatives: only the
+    #: conversation carry reads this veto, never ordinary resolution/carries.
+    local_material: str = ""
 
 
 #: A follow-up is short: at most this many tokens. "what about the second
@@ -1009,7 +1012,7 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
     # say what it is about.
     referential_cue = any(f" {phrase} " in token_text for phrase in vocabulary.phrases)
     referential = referential_cue and not _referential_residue(token_text, vocabulary)
-    anaphora_tokens = working_set_anaphora.anaphora_tokens(text)
+    anaphora_tokens, local_material = working_set_anaphora.surface_analysis(turn)
     anaphora_text = f" {' '.join(_spell_out_cues(anaphora_tokens, vocabulary))} "
     anaphora_cue = any(f" {phrase} " in anaphora_text for phrase in vocabulary.phrases)
     pointing = working_set_anaphora.points_back(
@@ -1034,6 +1037,7 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         points_back=pointing,
         content_words=content,
         anaphoric=pointing and not content,
+        local_material=local_material,
     )
 
 

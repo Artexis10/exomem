@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, datetime
+import re
 from typing import Any
 
 FOCUS_MAX_CHARS = 240
@@ -89,6 +91,92 @@ class Conversation:
 
 
 NONE = Conversation()
+
+
+class InferredPacket(dict[str, Any]):
+    """Request-local inference marker, preserved by deepcopy but not serialized."""
+
+
+_REFERENCE_FIELDS = frozenset({
+    "ref", "path", "anchor", "neighbourhood", "anchor_neighbourhood",
+    "superseded_by", "parent_superseded_by",
+})
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?")
+
+
+def prose_chars(value: Any, *, field: str = "", role_ids: frozenset[str] = frozenset()) -> int:
+    """Inclusive inferred prose; only references and validated categories/dates are free."""
+    if field in _REFERENCE_FIELDS:
+        return 0
+    if isinstance(value, Mapping):
+        return sum(prose_chars(item, field=key, role_ids=role_ids) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return sum(prose_chars(item, field=field, role_ids=role_ids) for item in value)
+    if not isinstance(value, str):
+        return 0
+    from . import context_roles, working_set_resolve
+
+    closed = {
+        "kind": frozenset(context_roles.ANCHOR_KINDS) | {"page"},
+        "status": frozenset(working_set_resolve.ANCHOR_STATUSES),
+        "evidence": frozenset(working_set_resolve.EVIDENCE_KINDS),
+        "origin": {ORIGIN_TURN, ORIGIN_FOCUS, ORIGIN_BOTH, ORIGIN_CONVERSATION},
+        "lifecycle": {"active", "archived", "draft", "dropped", "planned", "superseded"},
+        "level": {"unit", "page"},
+        "source": {"profile", "records", "planning", "graph", "evidence"},
+        "reason": {"budget", "role_cap"},
+        "role": role_ids,
+    }
+    if value in closed.get(field, ()):
+        return 0
+    if field in {"updated", "as_of"} and _DATE.fullmatch(value):
+        try:
+            if len(value) == 10:
+                date.fromisoformat(value)
+            else:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            return 0
+    return len(value)
+
+
+def subject_chars(packet: Mapping[str, Any]) -> int:
+    """Each retained occurrence charged by the conversation-only packet ledger."""
+    role_ids = frozenset(
+        role["id"] for role in packet.get("roles", ())
+        if isinstance(role, Mapping) and isinstance(role.get("id"), str)
+    )
+    return sum(prose_chars(packet.get(section, ()), role_ids=role_ids) for section in (
+        "anchors", "ambiguity", "current_state", "units", "pointers",
+    ))
+
+
+def budget_headers(entries: Sequence[dict[str, Any]], allowance: int, *, role_ids: frozenset[str]) -> int:
+    """Titles first, then whole authored header values; identities remain."""
+    used = 0
+
+    def admit(value: Any, field: str) -> Any:
+        nonlocal used
+        cost = prose_chars(value, field=field, role_ids=role_ids)
+        if used + cost <= allowance:
+            used += cost
+            return value
+        if isinstance(value, Mapping):
+            return {key: admit(item, key) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [admit(item, field) for item in value]
+        return ""
+
+    for entry in entries:
+        if "title" in entry:
+            entry["title"] = admit(entry["title"], "title")
+    for entry in entries:
+        for key, value in entry.items():
+            if key != "title":
+                entry[key] = admit(value, key)
+    return used
 
 
 def _cut(text: str, limit: int) -> tuple[str, bool]:
@@ -357,7 +445,7 @@ def may_carry(analysis: Any, *, subject_title: str = "") -> bool:
     """Ruling C1 on #1463, round 6: pointing plus a narrow content licence.
     Only the subject's own title/name or frozen task forms license content.
     Words merely shared with earlier turns are never evidence of reference."""
-    if not analysis.points_back:
+    if analysis.local_material or not analysis.points_back:
         return False
     if not analysis.content_words:
         return True
