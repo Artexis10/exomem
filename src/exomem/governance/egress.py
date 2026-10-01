@@ -364,16 +364,17 @@ def emit_boundary_receipt(collector: DisclosureCollector) -> None:
 def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, Any]]:
     """Keep receipt schemas bounded without making a large reduction fail closed."""
     values = [outcome.value for outcome in outcomes]
-    raw_size = len(
-        json.dumps(
-            {"outcomes": values},
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-    )
-    if len(values) <= receipts.MAX_OUTCOMES and raw_size <= receipts.MAX_RECORD_BYTES // 2:
-        return values
+    if len(values) <= receipts.MAX_OUTCOMES:
+        raw_size = len(
+            json.dumps(
+                {"outcomes": values},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        if raw_size <= receipts.MAX_RECORD_BYTES // 2:
+            return values
 
     # At most 4 decisions x 7 disclosure levels (including a missing level).
     # Higher-cardinality typed identities become deterministic set/manifest
@@ -385,11 +386,30 @@ def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, A
         key = json.dumps(typed, sort_keys=True, separators=(",", ":"))
         buckets.setdefault(key, []).append(value)
 
+    encodings: OrderedDict[tuple, str] = OrderedDict()
+
+    def _encode(item: Any) -> str:
+        # Reuse repeated receipt dimensions, not authority or token state.
+        if isinstance(item, dict):
+            key = (dict, tuple(sorted((name, _encode(value)) for name, value in item.items())))
+        elif isinstance(item, list) and all(isinstance(value, str) for value in item):
+            key = (list, tuple(item))
+        elif isinstance(item, str) or item is None:
+            key = (type(item), item)
+        else:
+            return json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        encoded = encodings.get(key)
+        if encoded is None:
+            encoded = json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            encodings[key] = encoded
+            if len(encodings) > receipts.MAX_OUTCOMES:
+                encodings.popitem(last=False)
+        else:
+            encodings.move_to_end(key)
+        return encoded
+
     def _digest(items: Iterable[Any], *, unique: bool = False) -> str:
-        encoded = [
-            json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            for item in items
-        ]
+        encoded = [_encode(item) for item in items]
         manifest = sorted(set(encoded) if unique else encoded)
         return hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode()).hexdigest()
 
@@ -1587,7 +1607,7 @@ def _active_grants_for_snapshot(
 
 
 def canonical_subject_notices(
-    vault_root: Path, entries: Iterable[tuple[str, str, str, Decision]], *,
+    vault_root: Path, entries: Iterable[tuple[str, str | Callable[[], str], str, Decision]], *,
     policy: Policy, principal: RequestPrincipal, purpose: str | None,
 ) -> list[dict[str, Any]]:
     """Finalize a committed canonical inspection after its read snapshots close."""
@@ -1613,7 +1633,7 @@ def canonical_subject_notices(
             token = _mint_escalation_quietly(
                 vault_root, rel_path=identity, who=principal, purpose=purpose, decision=decision,
                 requested_level=LEVEL_FULL, org_ceiling=_applicable_org_ceiling(policy, decision),
-                expected_content_hash=fingerprint,
+                expected_content_hash=fingerprint() if callable(fingerprint) else fingerprint,
             )
             if token is not None:
                 notice["escalation_token"] = token

@@ -285,7 +285,7 @@ class CollectionWriter:
                 result = self._inspect_collection(collection, facade_profile=facade_profile)
                 operation = self._operation
                 catalog = operation.catalog(result["contract"]["collection_id"])
-                entries = [(subject.basis.identity, subject.basis.fingerprint,
+                entries = [(subject.basis.identity, lambda basis=subject.basis: basis.fingerprint,
                             subject.basis.payload_hash, operation.decision(subject)) for subject in catalog]
         finally:
             self.connection.execute("ROLLBACK")

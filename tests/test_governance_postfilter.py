@@ -352,6 +352,23 @@ def test_allowlisted_field_still_scrubs_an_actual_private_key() -> None:
     assert "BEGIN RSA PRIVATE KEY" not in json.dumps(cleaned)
 
 
+def test_repeated_string_classification_keeps_structural_and_prose_modes_distinct() -> None:
+    payload = {
+        "content_hash": HIGH_ENTROPY,
+        "notes": [HIGH_ENTROPY, HIGH_ENTROPY],
+        "nested": {HIGH_ENTROPY: "safe", "fingerprint": HIGH_ENTROPY},
+    }
+
+    cleaned, blocked = scrubber.scrub_value(payload)
+
+    assert blocked
+    assert cleaned == {
+        "content_hash": HIGH_ENTROPY,
+        "notes": [scrubber.NOTICE, scrubber.NOTICE],
+        "nested": {scrubber.NOTICE: "safe", "fingerprint": HIGH_ENTROPY},
+    }
+
+
 def test_vault_paths_are_never_scrubbed() -> None:
     """Regression: including `/` in the entropy token class made whole vault
     path segments read as base64, and the scrubber rewrote real paths — which

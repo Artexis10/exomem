@@ -12,6 +12,7 @@ path.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -2718,6 +2719,46 @@ def test_bounded_outcomes_summarize_129_distinct_typed_identities(vault: Path) -
     persisted = _receipt_records(vault)[0]["outcomes"]
     assert persisted == reduced
     assert len(persisted) <= receipts.MAX_OUTCOMES
+
+
+def test_bounded_outcomes_preserve_repeated_members_and_missing_dimensions() -> None:
+    """Encoding reuse must preserve multiset evidence and missing-versus-null retention."""
+    common = {
+        "decision": "released", "level": 5, "command": "réduction",
+        "audience": "reader", "purpose": None, "policy_fingerprint": "f" * 64,
+        "confirmation": "none", "scope_ids": ["a", "a", "β"],
+        "scope_label_digests": ["e" * 64],
+    }
+    first = {**common, "principal": None, "release_grant_id": "grant", "content_hash": "a" * 64}
+    second = {**common, "ref": "exomem://record/collection/item"}
+    members = [first] * 130 + [second] * 10
+
+    def digest(values, *, unique=False):
+        encoded = [json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                   for value in values]
+        manifest = sorted(set(encoded) if unique else encoded)
+        return hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode()).hexdigest()
+
+    identity_keys = (
+        "command", "principal", "audience", "purpose", "policy_fingerprint", "confirmation",
+        "scope_ids", "scope_label_digests", "release_grant_id", "release_dependency_digest",
+    )
+    expected = {
+        **common, "count": 140,
+        "membership_digest": digest(["a" * 64] * 130 + [second["ref"]] * 10),
+        "identity_manifest_digest": digest([
+            {key: member.get(key) for key in identity_keys} for member in members
+        ]),
+        "scope_set_digest": digest([{
+            "scope_ids": common["scope_ids"], "scope_label_digests": common["scope_label_digests"],
+        }], unique=True),
+        **{target: digest([members[0].get(source)], unique=True) for target, source in (
+            ("principal_set_digest", "principal"), ("audience_set_digest", "audience"),
+            ("purpose_set_digest", "purpose"), ("policy_set_digest", "policy_fingerprint"),
+            ("confirmation_set_digest", "confirmation"), ("boundary_set_digest", "command"),
+        )},
+    }
+    assert egress._bounded_outcomes([egress.DisclosureOutcome(member) for member in members]) == [expected]
 
 
 @pytest.mark.parametrize("outcome_count", [64, 140])
