@@ -2877,20 +2877,34 @@ def _build_corpus_context_uncached(
     relation_definitions: relation_registry.RelationRegistry,
     language: semantic_language_registry.SemanticLanguageRegistry,
 ) -> SemanticCorpusContext:
-    identity_census, census_sources = _build_identity_census(root)
     states: dict[str, SemanticPageState] = {}
     candidate_path = candidate.path if candidate is not None else None
+    eligible: dict[str, Path] = {}
     for disk_path in sorted(vault.walk_vault_md(root), key=lambda item: item.as_posix()):
         try:
             rel_path = disk_path.resolve().relative_to(root.resolve()).as_posix()
         except ValueError:
             continue
-        if rel_path == candidate_path:
+        if rel_path != candidate_path:
+            eligible[rel_path] = disk_path
+
+    def consume(rel_path: str, source: str) -> None:
+        if rel_path in eligible:
+            states[rel_path] = build_page_state(
+                root,
+                rel_path,
+                source,
+                relation_registry=relation_definitions,
+                language_registry=language,
+            )
+
+    identity_census, _ = _build_identity_census(root, consume=consume)
+    kb_prefix = vault.kb_root(root).relative_to(root).as_posix() + "/"
+    for rel_path, disk_path in eligible.items():
+        if rel_path.startswith(kb_prefix):
             continue
         try:
-            source = census_sources.get(rel_path)
-            if source is None:
-                source = disk_path.read_text(encoding="utf-8")
+            source = disk_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as error:
             if (
                 activation.is_managed_governed_path(root, disk_path)
@@ -2901,13 +2915,7 @@ def _build_corpus_context_uncached(
                     f"could not read governed semantic page {disk_path}: {error}",
                 ) from error
             continue
-        states[rel_path] = build_page_state(
-            root,
-            rel_path,
-            source,
-            relation_registry=relation_definitions,
-            language_registry=language,
-        )
+        consume(rel_path, source)
     if candidate is not None:
         states[candidate.path] = candidate
         identity_census = identity_census.with_page(
@@ -2923,11 +2931,12 @@ def _build_corpus_context_uncached(
 
 def _build_identity_census(
     root: Path,
+    *,
+    consume: Callable[[str, str], None] | None = None,
 ) -> tuple[StableIdentityCensus, Mapping[str, str]]:
-    """Read every canonical Markdown file below KB without following aliases."""
+    """Validate canonical KB pages and immediately consume each page's raw text."""
     kb = vault.kb_root(root)
     entries: list[StableIdentityEntry] = []
-    sources: dict[str, str] = {}
 
     def walk(directory: Path) -> None:
         try:
@@ -3038,7 +3047,8 @@ def _build_identity_census(
             if raw_identity is not None:
                 identity = normalize_id(raw_identity)
             entries.append(StableIdentityEntry(rel, identity))
-            sources[rel] = source
+            if consume is not None:
+                consume(rel, source)
 
     try:
         root_info = kb.lstat()
@@ -3059,7 +3069,7 @@ def _build_identity_census(
             "Knowledge Base root is unsafe for identity census",
         )
     walk(kb)
-    return StableIdentityCensus(tuple(entries)), MappingProxyType(dict(sources))
+    return StableIdentityCensus(tuple(entries)), MappingProxyType({})
 
 
 def build_stable_identity_census(vault_root: Path) -> StableIdentityCensus:

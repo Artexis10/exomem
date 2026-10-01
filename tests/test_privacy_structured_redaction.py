@@ -162,19 +162,20 @@ def test_hosted_uvicorn_access_record_formats_through_the_real_access_formatter(
     from uvicorn.logging import AccessFormatter
 
     access_logger = logging.getLogger("uvicorn.access")
-    # `logging_config._silence_uvicorn_access()` disables this logger
-    # process-wide, so an earlier server-logging test would otherwise leave
-    # nothing for caplog to capture.
+    # Earlier server tests can disable this logger, set ERROR, or stop
+    # propagation at its parent. Capture directly without relying on that state.
     monkeypatch.setattr(access_logger, "disabled", False)
-    monkeypatch.setattr(access_logger, "propagate", True)
-    access_logger.warning(
-        '%s - "%s %s HTTP/%s" %d',
-        "203.0.113.7",
-        "GET",
-        "/mcp?token=sensitive-bearer-value",
-        "1.1",
-        200,
-    )
+    monkeypatch.setattr(access_logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(access_logger, "propagate", False)
+    with caplog.at_level(logging.WARNING, logger="uvicorn.access"):
+        access_logger.warning(
+            '%s - "%s %s HTTP/%s" %d',
+            "203.0.113.7",
+            "GET",
+            "/mcp?token=sensitive-bearer-value",
+            "1.1",
+            200,
+        )
     record = caplog.records[-1]
 
     formatted = AccessFormatter(use_colors=False).format(record)

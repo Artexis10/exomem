@@ -399,6 +399,12 @@ def test_real_model_run_attributes_native_memory_to_the_model(tmp_path: Path) ->
     pytest.importorskip("tokenizers")
     pytest.importorskip("huggingface_hub")
 
+    from exomem import embedding_backend
+
+    # The child intentionally runs offline like the image. Prepare its pinned
+    # files here, before it starts, including on a cold CI model cache.
+    embedding_backend.ensure_served_artifact("BAAI/bge-m3")
+
     _proc, report = _run_harness(
         tmp_path, "--notes", "8", "--links-per-note", "3", "--encoder", "onnx", "--top", "5"
     )
@@ -408,3 +414,31 @@ def test_real_model_run_attributes_native_memory_to_the_model(tmp_path: Path) ->
     assert cell["model_load"]["derived"]["model_native_bytes"] > 100 * MIB
     assert cell["reaper_tick"]["derived"]["model_native_bytes"] == 0
     _assert_content_free(report, tmp_path, notes=8, links=3)
+
+
+def test_real_model_harness_prepares_its_cache_before_starting_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import embedding_backend
+
+    cached = tmp_path / "model-ready"
+
+    def prepare(model: str) -> None:
+        assert model == "BAAI/bge-m3"
+        cached.touch()
+
+    def offline_harness(*_args, **_kwargs):
+        assert cached.exists(), "the offline child needs a populated model cache"
+        return None, {
+            "cell": {"points": [
+                {"name": "model_load", "derived": {"model_native_bytes": 101 * MIB}},
+                {"name": "reaper_tick", "derived": {"model_native_bytes": 0}},
+            ]},
+        }
+
+    monkeypatch.setattr(embedding_backend, "ensure_served_artifact", prepare)
+    monkeypatch.setattr(pytest, "importorskip", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys.modules[__name__], "_run_harness", offline_harness)
+    monkeypatch.setattr(sys.modules[__name__], "_assert_content_free", lambda *_args, **_kwargs: None)
+
+    test_real_model_run_attributes_native_memory_to_the_model(tmp_path)

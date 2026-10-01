@@ -16,7 +16,7 @@ one reading authored values only.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -51,12 +51,17 @@ def current_state_for(
     *,
     anchors: Sequence[Any],
     purpose: str | None = None,
+    visible: Callable[[str], bool] | None = None,
     index_generation: int | None = None,
     index_token: tuple[int, int, int] | None = None,
     state_fields: Sequence[str] | None = None,
     date_fields: Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Resolve each stateful anchor's current state, Records first.
+
+    `visible` filters neighbourhood pages before choosing the newest note;
+    `None` retains the owner's unrestricted view. Each entry carries its
+    source page's path for the release guard.
 
     `index_generation` names the activation index generation whose published
     manifests this lookup may route with, and `index_token` the sidecar that
@@ -92,7 +97,7 @@ def current_state_for(
                 root, anchor, manifests, purpose=purpose, state_fields=state_fields, date_fields=date_fields
             )
             or _from_profile(root, anchor, state_fields=state_fields)
-            or _from_neighbourhood(root, anchor)
+            or _from_neighbourhood(root, anchor, visible=visible)
         )
         if entry is not None:
             out.append(entry)
@@ -264,6 +269,7 @@ def _from_records(
     return {
         "anchor": _anchor_ref(anchor),
         "source": RECORDS,
+        "path": str(manifest.path),
         "as_of": str(row.get(date_column) or "") if date_column else "",
         "statement": statement,
     }
@@ -305,18 +311,21 @@ def _from_profile(
             return {
                 "anchor": _anchor_ref(anchor),
                 "source": PROFILE,
+                "path": rel,
                 "as_of": str(frontmatter.get("updated") or ""),
                 "statement": f"{name}: {str(value).strip()}"[:STATEMENT_MAX_CHARS],
             }
     return None
 
 
-def _from_neighbourhood(vault_root: Path, anchor: Any) -> dict[str, Any] | None:
+def _from_neighbourhood(
+    vault_root: Path, anchor: Any, *, visible: Callable[[str], bool] | None = None
+) -> dict[str, Any] | None:
     from . import find_corpus
 
-    best: tuple[str, str] | None = None
+    best: tuple[str, str, str] | None = None
     for rel in sorted(getattr(anchor, "neighbourhood", ()) or ()):
-        if not rel.endswith(".md"):
+        if not rel.endswith(".md") or (visible is not None and not visible(rel)):
             continue
         page = find_corpus.CACHE.get(vault_root / rel, vault_root)
         if page is None:
@@ -329,12 +338,13 @@ def _from_neighbourhood(vault_root: Path, anchor: Any) -> dict[str, Any] | None:
         if not title:
             continue
         if best is None or updated > best[0]:
-            best = (updated, f"latest active note: {title}")
+            best = (updated, f"latest active note: {title}", rel)
     if best is None:
         return None
     return {
         "anchor": _anchor_ref(anchor),
         "source": NOTE,
+        "path": best[2],
         "as_of": best[0],
         "statement": best[1][:STATEMENT_MAX_CHARS],
     }
