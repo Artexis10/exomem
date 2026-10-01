@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.102.0](https://github.com/Artexis10/exomem/compare/v0.101.0...v0.102.0) (2026-10-01)
+
+
+### Features
+
+* **core:** deliver thread-aware context and write reliability ([#1477](https://github.com/Artexis10/exomem/issues/1477)) ([7fd5429](https://github.com/Artexis10/exomem/commit/7fd5429aa57a7ff4cd7f937f2e8825cf79ad7388))
+
+
+### Bug Fixes
+
+* **cloud:** correct provider hooks, metadata and sign-in delivery ([#1499](https://github.com/Artexis10/exomem/issues/1499)) ([e8baf6a](https://github.com/Artexis10/exomem/commit/e8baf6a6f528d38174909462354829f3cea183d3))
+* **cloud:** include directory release notes ([#1502](https://github.com/Artexis10/exomem/issues/1502)) ([8f2cdfc](https://github.com/Artexis10/exomem/commit/8f2cdfc44d07d98e0d7cd5a371fcfbdb3c89e9d1))
+* **graph:** prepare availability proofs outside the write boundary ([#1501](https://github.com/Artexis10/exomem/issues/1501)) ([6e00cc4](https://github.com/Artexis10/exomem/commit/6e00cc472bf062407b5f7092998e0b4a676e3be2))
+* **graph:** recover first-publication races with bounded backup waits ([#1503](https://github.com/Artexis10/exomem/issues/1503)) ([fac6ee2](https://github.com/Artexis10/exomem/commit/fac6ee24ab3be5071291863f61c8e4b397d8f18d))
+
 ## [0.101.0](https://github.com/Artexis10/exomem/compare/v0.100.0...v0.101.0) (2026-10-01)
 
 
