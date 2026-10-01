@@ -3231,6 +3231,8 @@ def repair_is_provisioned(
     each outcome asserts a *different* mechanism, and the check has to test the
     one that was claimed:
 
+    * `completed` claims acknowledgement covering this dispatch. No pending
+      registration or queue can stand in for completion.
     * `registered` claims an in-process rebuild flight for this exact
       checkpoint. Only a registration proves that.
     * `deferred` claims the durable queue owns the repair, which is what a write
@@ -3256,6 +3258,8 @@ def repair_is_provisioned(
     acknowledged = acknowledged_checkpoint(vault_root)
     if acknowledged is not None and acknowledged.covers(required):
         return True
+    if outcome == "completed":
+        return False
     if registered_checkpoint(vault_root, state_root=state_root) == required:
         return True
     if outcome == "registered":

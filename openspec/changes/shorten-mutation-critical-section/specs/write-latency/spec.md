@@ -265,3 +265,28 @@ enumerate memberships, but MUST NOT reparse pages or reconstruct topology.
   changes after source proof and before publication
 - **THEN** the availability repair declines without publishing its prepared marker
 - **AND** same-sized source edits with restored timestamps are checked by bytes
+
+### Requirement: Post-Commit Graph Receipts Use Their Dispatch Identity
+
+Graph handoff and index-completion checks SHALL validate the checkpoint named
+by their own dispatch result rather than rereading a later canonical checkpoint.
+Completed outcomes require covering acknowledgement; registered outcomes require
+their exact flight or covering acknowledgement. Deferred acceptance SHALL retain
+its durable claiming-code, affected-path and dispatch-generation coverage checks.
+A missing registered/deferred identity MUST fail closed without attributing its
+failure to a different writer. Public report fields remain unchanged, and graph
+read availability MUST still require proof for the current canonical checkpoint.
+
+#### Scenario: A later writer advances the epoch before receipt assembly
+
+- **WHEN** writer A's graph result is complete, registered or durably deferred
+- **AND** writer B advances the canonical graph checkpoint before A's final check
+- **THEN** A's receipt is validated against A's dispatch checkpoint
+- **AND** B's outstanding work does not falsely turn A into a missing handoff
+
+#### Scenario: A claimed flight or durable receipt is absent
+
+- **WHEN** the dispatch identity or its claimed flight is missing, or a deferred
+  batch lacks generation-current receipts covering every affected graph path
+- **THEN** the index report remains incomplete and durable batch repair is kept
+- **AND** a newer global checkpoint cannot substitute for the missing evidence

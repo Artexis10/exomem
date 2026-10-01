@@ -30,10 +30,13 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from . import call_spans, deferred_index, semantic_index
 from .derived_receipts import DerivedComponent, DerivedComponentStatus
+
+if TYPE_CHECKING:
+    from .graph_sync import GraphSyncCheckpoint
 
 log = logging.getLogger(__name__)
 
@@ -328,6 +331,7 @@ class IndexComponentOutcome:
     component: str
     outcome: str
     code: str
+    graph_checkpoint: GraphSyncCheckpoint | None = None
 
     def __post_init__(self) -> None:
         if type(self.component) is not str or self.component not in {
@@ -594,7 +598,9 @@ def _graph_component(callback, *, items: int | None = None) -> IndexComponentOut
     if not isinstance(result, GraphDispatchResult):
         log.warning("epistemic graph dispatch returned no exact outcome")
         return IndexComponentOutcome("epistemic_graph", "failed", "graph_outcome_missing")
-    return IndexComponentOutcome("epistemic_graph", result.outcome, result.code)
+    return IndexComponentOutcome(
+        "epistemic_graph", result.outcome, result.code, graph_checkpoint=result.checkpoint
+    )
 
 
 def _resolver_component(callback, *, items: int | None = None) -> IndexComponentOutcome:
@@ -798,6 +804,11 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
         if rel.endswith(".md"):
             replaced_rels.add(rel)
     for component in report.components:
+        if component.component == "epistemic_graph" and component.outcome == "completed":
+            if component.graph_checkpoint is not None and not graph_sync.repair_is_provisioned(
+                vault_root, component.graph_checkpoint, outcome="completed"
+            ):
+                return False
         if component.outcome in {"completed", "not_required"}:
             continue
         if (
@@ -810,11 +821,10 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
             "registered",
             "deferred",
         }:
-            checkpoint = graph_sync.read_checkpoint(vault_root)
-            if (
-                checkpoint is not None
-                and graph_sync.registered_checkpoint(vault_root) == checkpoint
-            ):
+            checkpoint = component.graph_checkpoint
+            if checkpoint is None:
+                return False
+            if graph_sync.repair_is_provisioned(vault_root, checkpoint, outcome="registered"):
                 continue
             if component.outcome == "deferred" and component.code in _GRAPH_COVERAGE_CODES:
                 # Mirror of the embeddings warm-up carve-out above: per-path
@@ -842,18 +852,11 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
                         # changed. An unknown generation cannot clear that bar
                         # either: a receipt that cannot say what it owes proves
                         # nothing about this checkpoint.
-                        # With no checkpoint there is no lineage to be stale
-                        # against, and every receipt is equally uninformative;
-                        # the older, weaker claim -- "these paths are queued" --
-                        # is still true and still the honest answer.
-                        required_generation = (
-                            int(checkpoint.generation) if checkpoint is not None else None
-                        )
+                        required_generation = checkpoint.generation
                         graph_receipt_rels = {
                             receipt.rel_path
                             for receipt in deferred_index.snapshot_graph(vault_root)
-                            if required_generation is None
-                            or (
+                            if (
                                 receipt.graph_generation is not None
                                 and receipt.graph_generation >= required_generation
                             )
