@@ -403,6 +403,16 @@ def test_explicit_binary_provenance_is_narrow_and_auditable(tmp_path: Path) -> N
     assert findings == ()
 
 
+def test_cloud_icon_png_provenance_does_not_allow_unrelated_images(tmp_path: Path) -> None:
+    icon = REPO_ROOT / "plugins/cloud/assets/icon.png"
+    assert scan_artifact(icon, label="plugins/cloud/assets/icon.png") == ()
+    assert scan_artifact(icon, label="plugins/cloud/generated/openai/assets/icon.png") == ()
+    assert any(
+        finding.rule == "format_provenance_missing"
+        for finding in scan_artifact(icon, label="private/photo.png")
+    )
+
+
 def test_archive_members_are_scanned_by_name_and_supported_text(tmp_path: Path) -> None:
     archive_path = tmp_path / "generic-skill.zip"
     canary = "C:" + "\\Users\\" + "SyntheticOperator\\Confidential-Notes"

@@ -135,7 +135,15 @@ def _core_payload(vault: Path | None) -> dict[str, str]:
 def _workflow_payload(name: str) -> dict[str, str]:
     source = workflow_skills.source_dir(name)
     workflow_skills.validate_contract_projection(name, source)
-    return {"SKILL.md": (source / "SKILL.md").read_text(encoding="utf-8")}
+    payload = {"SKILL.md": (source / "SKILL.md").read_text(encoding="utf-8")}
+    for reference in sorted((_SKILL_SRC / "references").glob("*.md")):
+        payload[f"references/{reference.name}"] = reference.read_text(encoding="utf-8")
+    return payload
+
+
+def skill_payload(name: str, *, vault: Path | None = None) -> dict[str, str]:
+    """Return the complete canonical payload for a core or workflow skill."""
+    return _core_payload(vault) if name == "exomem" else _workflow_payload(name)
 
 
 def _write_zip(path: Path, payload: dict[str, str]) -> int:
@@ -298,7 +306,12 @@ def sync_plugin(plugin_root: Path) -> dict:
     names = ["exomem"]
     for skill in workflow_skills.list_skills():
         name = str(skill["name"])
-        shutil.copytree(workflow_skills.source_dir(name), skills_dir / name)
+        target = skills_dir / name
+        target.mkdir()
+        for relative, content in skill_payload(name).items():
+            destination = target / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(content, encoding="utf-8", newline="\n")
         names.append(name)
 
     hooks_dir.mkdir(parents=True, exist_ok=True)
@@ -351,10 +364,10 @@ def package_skills(out_dir: Path | None = None, *, vault: Path | None = None) ->
     if vault is not None:
         out_dir = ensure_personalized_output(out_dir, vault=vault)
 
-    builds: list[tuple[str, dict[str, str]]] = [("exomem", _core_payload(vault))]
+    builds: list[tuple[str, dict[str, str]]] = [("exomem", skill_payload("exomem", vault=vault))]
     for skill in workflow_skills.list_skills():
         name = str(skill["name"])
-        builds.append((name, _workflow_payload(name)))
+        builds.append((name, skill_payload(name)))
 
     archives = []
     for name, payload in builds:
