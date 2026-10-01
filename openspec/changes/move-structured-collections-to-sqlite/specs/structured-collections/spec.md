@@ -239,6 +239,18 @@ With the store canonical, the release acceptance harness SHALL measure, and the 
 - **WHEN** an append resolves its collection
 - **THEN** the contract comes from the store row and a cache keyed by manifest version, and no manifest file is read or parsed
 
+#### Scenario: Inspection reuse preserves full public semantics
+- **WHEN** the full public inspection uses cached row contributions after a committed item or release-set change
+- **THEN** counts, complete frequency keys and ranking, presentation findings and visible snapshot equal uncached inspection, affected filename groups include unchanged siblings, and current grants, coverage, templates, held candidates and projection progress are composed freshly
+
+#### Scenario: Inspection cache admission exceeds its byte budget
+- **WHEN** contribution state and its derived counters/indexes would exceed the finite retained-allocation budget shared by the writer handle
+- **THEN** inspection uses the exact uncached path without truncating frequency inputs, reducing the public response or relaxing existing Planning limits, and retained contribution state remains within its budget
+
+#### Scenario: Pure egress computation is reused within an invocation
+- **WHEN** inspection reuses canonical encodings or exact-string classification within its bounded operation-local computation
+- **THEN** receipt sorted-multiset digests, structural/prose credential handling, escalation identity and synchronous disclosure receipts remain unchanged, and no final authorization or issuance exception is borrowed from another operation
+
 #### Scenario: Bulk upsert of 500 rows
 - **WHEN** 500 valid rows are submitted in one bulk upsert against a 10,000-item collection
 - **THEN** the call completes in under 1 s
