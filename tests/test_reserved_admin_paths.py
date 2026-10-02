@@ -3666,7 +3666,14 @@ def test_contending_graph_writer_does_not_hold_global_identity_coordination(
         worker.join(timeout=2.0)
 
     assert not worker.is_alive()
-    assert errors == []
+    # Identity coordination may finish after the backup's short lock deadline,
+    # especially on NTFS. A bounded publication refusal is valid here; this
+    # regression checks that SQLite contention does not retain the global lock.
+    assert errors == [] or (
+        len(errors) == 1
+        and isinstance(errors[0], sqlite3.OperationalError)
+        and str(errors[0]) == "graph publication lock wait expired"
+    )
     assert identity_wait < 1.0
 
 
