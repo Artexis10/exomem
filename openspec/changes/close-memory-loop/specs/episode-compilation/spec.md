@@ -189,6 +189,21 @@ The episode ledger SHALL distinguish attempted work, pending continuation and co
 
 Source/episode/span origin identity SHALL propagate through every compiled destination, recurrence detector, write-time carrier and relevant relation/hydration evidence. Compilation SHALL NOT increase the number of independently established input origins. Conversation-only fan-out SHALL inherit one episode origin; independently established original sources discussed in that episode SHALL retain their distinct identities. Copy-equivalent projections SHALL add no independent origin. If independence cannot be determined, evidence SHALL be labelled unassessed rather than treated as independent page mentions. Supported important first mentions SHALL remain independently eligible for semantic promotion.
 
+An explicit attributed active-agent assessment bound to exact retained inputs,
+their versions and relevant spans MAY establish independence for recurrence
+advice. The server SHALL validate those bindings and SHALL NOT represent the
+assessment as server-certified semantic independence. Distinct identifiers,
+URLs, hashes, sessions or pages alone SHALL NOT establish independence. Invalid,
+stale or unavailable input bindings SHALL NOT contribute assessed independent
+support. Assessments SHALL NOT grant capture, promotion or disclosure authority.
+
+Managed origin metadata SHALL pass the existing disclosure boundary for every
+retained input before it is exposed in a permitted parent's body, raw content,
+unit context or projections. An unavailable or insufficiently released input
+SHALL withhold the whole payload, including attribution and free-text reasons.
+Redaction SHALL NOT rewrite canonical bytes or claim an exact raw representation.
+Existing drift guards and exact-read refusal rules SHALL remain unchanged.
+
 #### Scenario: One turn becomes four pages
 
 - **WHEN** a single episode is preserved as a Source, entity facet, focused note and Records item
@@ -199,6 +214,37 @@ Source/episode/span origin identity SHALL propagate through every compiled desti
 - **WHEN** an episode uses two sources whose independence is established by provenance
 - **THEN** their compiled outputs retain those two source origins
 - **AND** copying either source into additional destinations contributes no further independent origin
+
+#### Scenario: Agent-assessed independence remains attributed
+
+- **WHEN** the agent explicitly assesses two retained original inputs as independent and supplies their exact input/version/span bindings
+- **THEN** recurrence advice identifies the assessment as agent-attributed after validating the bindings
+- **AND** the server neither certifies the semantic judgment nor changes any capture or disclosure permission
+
+#### Scenario: A synthesis preserves origins without linking their independence
+
+- **WHEN** a synthesis combines two assessed independent original inputs and later pages copy that synthesis
+- **THEN** the supporting claim retains two origins, not one merged origin or an extra synthesis origin
+- **AND** unrelated claims on those pages do not inherit that support
+- **AND** separate assessments do not establish an additional independence claim that was not assessed
+
+#### Scenario: Unassessed or stale inputs do not inflate recurrence
+
+- **WHEN** legacy provenance lists distinct sources without an adequate independence assessment, or an assessment's exact retained-input binding is stale or unavailable
+- **THEN** that evidence is explicitly unassessed and cannot add assessed independent recurrence
+- **AND** supported important first mentions remain eligible through the existing governed path without requiring a recurrence quota
+
+#### Scenario: A permitted parent does not disclose a withheld origin
+
+- **WHEN** a reader may read a compiled page but cannot fully read one of the retained inputs named by its managed origin block
+- **THEN** public page, raw, unit-context and projection output do not disclose that block's input references, versions, counts, attribution or reasons
+- **AND** the canonical page and its drift guard remain unchanged, while a redacted response does not claim exact raw content
+
+#### Scenario: Normalized Records provenance survives interrupted commitment
+
+- **WHEN** preparation fills an omitted origin target fingerprint for a Records append and commitment is interrupted before episode reconciliation
+- **THEN** preparation, commitment and receipt lookup bind the same normalized payload
+- **AND** resumption reuses the original committed receipt without another append or origin
 
 ### Requirement: Bounded partial work resumes honestly
 

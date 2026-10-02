@@ -125,6 +125,134 @@ Version any changed draft encoding. Legacy experiment drafts without a canonical
 
 Every fan-out destination retains its originating episode/source/span identity. Compilation cannot increase the number of independently established input origins: conversation-only fan-out inherits one episode origin, while independently established original sources discussed together retain their distinct identities. Copying either source into more pages adds no independent evidence. The write-time carrier and background detector must agree; where independence cannot be established, report it as unassessed rather than count pages as independent mentions.
 
+Independence may be supported by an explicit, attributed active-agent assessment
+bound to the exact retained inputs, their versions and relevant spans. Report
+this as an agent assessment, never as server-certified semantic independence.
+The server validates the retained-input and target bindings and existing
+authority; it does not infer independence from distinct URLs, IDs, hashes,
+sessions or page counts. Missing, stale or unsupported bindings cannot establish
+independent recurrence. This assessment is advice evidence only: capture,
+promotion and disclosure permissions remain unchanged.
+
+Preserve the original input identities through synthesis and copying. A synthesis
+supported by two independently assessed originals retains both origins rather
+than collapsing them because they share a destination or discussion. Attribute
+support to the relevant claim/span, not every statement on the containing page.
+Separate assessments cannot be composed into an additional independence claim
+that the agent did not assess. Legacy provenance without an adequate assessment
+remains explicitly unassessed; migration must not manufacture independence.
+
+##### Origin accounting implementation boundary
+
+Use one versioned `exomem-origin:v1` JSON comment in canonical managed content,
+outside authored semantic units. Existing `content`, entity `summary` and
+file-Records item `body` inputs carry it; Source capture remains raw and never
+interprets a provenance-looking comment as an assessment. Keep three distinct
+collections: retained `inputs`, explicit `assessments` over those inputs, and
+`bindings` from selected inputs to output scopes. A claim supported only by A
+may retain an assessment of A and B without falsely attributing B to that claim.
+Limit an assessment to eight inputs, a page to 32 bindings, and total origin
+metadata to 16 KiB. New authoring beyond the limits is a typed refusal, not
+silent truncation; unsupported legacy metadata remains unassessed.
+
+Inputs use existing canonical Source/Evidence references, optional exact unit
+references/fingerprints and exact version-bound spans. Assessments name their
+input set, `basis: agent_assessment`, authored attribution and a bounded reason.
+Authored attribution is not authenticated identity or a permission credential.
+Bindings use existing local unit anchors/fingerprints; mixed claims require an
+exact subspan. Relation scopes bind the resolved directed tuple and its authored
+occurrence. Entity/Records field scopes bind selected top-level values; Records
+add their existing collection/item identity. No whole-page fallback assigns
+sources to unrelated claims. Derive original roots from retained original
+identity, using the verified episode identity for episode recap inputs; changing
+a version, unit selector or destination cannot mint an additional root.
+
+Compute `evidence_version` once in the shared provenance code from the retained
+body and canonical parsed frontmatter, excluding only `ingested_into`. All other
+metadata, including episode status, update time, successor, original identity,
+capture metadata and governance fields, stays bound. Episode supersession is a
+meaningful revision, not an ignored bookkeeping change. Keep this material
+version separate from the freshly checked whole-page `content_hash` and existing
+write guards. Expose it only after a complete Source/Evidence read passes the
+existing full-release and truncation checks, including exact-unit parent release;
+withheld, partial or frontmatter-only output provides no binding value.
+
+Treat the reserved origin block as structured provenance at the existing
+disclosure boundary, not as ordinary authored prose. Before returning body/raw
+content, nearby unit context or projected metadata, gate the whole block under
+the current reader's policy for every retained input. An unavailable or
+insufficiently released input removes the entire payload, including attribution
+and free-text reasons; no hidden reference, version or input count escapes.
+Canonical bytes are not rewritten. A redacted projection is not exact raw
+content: omit the raw representation and retain existing exact-read refusal
+rules and canonical drift guards. Source capture text is still raw evidence,
+not a designated managed origin block.
+
+New retained Source/Evidence episode inputs use the material version through the
+existing input-model/journal compatibility path. Historical digests, attempted
+leaf identities and receipts remain unchanged. A legacy binding that cannot be
+verified stays stale until an ordinary new input revision is supplied; it is
+never silently rebound. Normalize/validate new attribution during existing
+writer preparation before its prepared effect is sealed. Existing normalized
+leaf arguments and receipts cover the canonical bytes; no new mutation argument,
+leaf kind, episode transition or attribution event store is needed.
+
+Writer adapters must extract the reserved block from unit content or entity
+summary before ordinary rendering, place it outside semantic units, and retain
+the existing content validation. In particular, compact observations remain
+single-line semantic content; metadata cannot become their text or alter a unit
+fingerprint by embedding its own fingerprint. Initial authoring may omit the
+target fingerprint for preparation to compute from the exact submitted effect.
+Persisted bindings require it. Unchanged existing metadata is never rebound to
+changed content: an unrelated unit/field edit preserves valid scopes, while a
+changed bound claim/relation/field makes that binding stale.
+
+The shared validator resolves exact inputs under current release policy and
+returns fresh source guards to the existing commit owners. Shared semantic
+preflight covers notes, entities, observations, edits and relation-bearing page
+mutations; file-Records needs its own thin adapter before payload hashing and the
+existing preparation callback. Its item body and selected fields, not a manifest
+or neighbouring item, own the attribution. Preserve raw Source/Evidence capture
+and current permission checks throughout.
+
+The file-Records preparation callback must receive the writer's normalized
+body/payload rather than recomputing a hash from the originally supplied body.
+Preparation, commit and receipt reconciliation must therefore bind identical
+canonical bytes, including a target fingerprint filled during preparation.
+This is an internal adapter change, not another argument or persistence layer.
+
+One scoped resolver selects actual contributing units, field values or relation
+occurrences before aggregation. Do not use a first-link-only or page-wide
+contribution as evidence for every unit/pair. Rebuildable node/edge metadata
+carries this same parsed attribution for graph-only consumers. Recurrence,
+capture advice, hydration and vocabulary relation advice share its summary.
+URL/hash/import aliases remain descriptive copy clues, never independence proof.
+The largest applicable valid explicit assessed set intersecting the contributing
+roots supplies a conservative lower bound: AB and BC never become an assessed
+ABC, even when all three pairs were assessed separately. No clique search or
+independence graph is introduced.
+
+Write-time advice compares the same scoped summary before and after the current
+write, including an already-linked identity gaining a second original and one
+synthesis carrying two originals. Keep page counts descriptive. Existing
+bounded discovery, incomplete/unavailable states and the ordinary-text lane's
+additional eligibility rules remain; only the two-origin wikilink gate changes
+with task 4.5. No canonical database, SQLite migration, receipt rebinding or
+historical independence backfill belongs to this implementation.
+
+Acceptance is five public-writer journeys in a temporary vault: one conversation
+fanning into Source/facet/note/file-Record remains one origin after publication
+and restart; two assessed originals plus synthesis/copies remain two and agree
+across write/background/vocabulary advice despite backlinks; mixed scopes and
+AB/BC do not inflate support; invalid/missing/withheld/stale bindings abstain and
+relevant/unrelated edits invalidate/preserve the right scopes; interrupted
+committed leaves reuse the original receipt without another effect or origin.
+The withheld-input case reads an otherwise permitted parent page through the
+public surface and verifies that its metadata cannot disclose the input. The
+interrupted Records case starts with an omitted target fingerprint and verifies
+that normalization cannot strand a committed append as uncertain.
+These checks prove writer/accounting plumbing, not ordinary-agent initiation.
+
 #### Identity, roles and supplier provenance
 
 Represent independently meaningful referents separately: an operator organization and its physical farm/site have different identities when evidence establishes both. Whether one can change while the other remains is a useful separation test, not sufficient evidence to create a node. Reuse existing entities first, hydrate their supported facets, and promote only referents with durable use. A trading name alone does not require a brand entity. Create an independently addressable brand only when the evidence and retrieval need justify it.
@@ -221,6 +349,12 @@ Lexical contact reads the words a turn shares with an anchor. A German or Russia
 Acceptance runs on the multilingual fixture set (`context-activation-multilingual-v1`): its hard gates on both arms in the core tier with planted vectors, and the usefulness bars and latency with the served encoder in the embeddings job.
 
 ### 8. Adaptation, hot profile, priors and dreamer are committed milestones
+
+The union-find origin accounting described below records the shipped legacy
+detector, not the task 4.3 contract. Task 4.3 replaces it with the scoped,
+agent-attributed accounting in §4 for every recurrence, hydration and vocabulary
+consumer; unrelated support stays unassessed and synthesis does not merge its
+originals. The worker lifecycle and proposal-delivery guarantees remain unchanged.
 
 User corrections and observed misses create bounded review candidates tied to evidence. The active agent can propose revisions to registered context roles, cues, aliases or vault conventions; application follows each family's applicable authority, with versions and reversible history. The current `context-roles` owner-authored override gate remains in force: agent proposals do not independently grant role-edit authority. A fresh session must consume the accepted result. Do not encode one user's equipment, suppliers or language into product source. Hard identity, provenance, authority and abstention invariants remain stable.
 
