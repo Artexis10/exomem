@@ -32,7 +32,7 @@ resource "hcloud_firewall" "alpha" {
 # for the PgBouncer port and never protects it.) SSH itself is separately
 # covered by fail2ban's sshd jail, same as every other host.
 resource "hcloud_firewall" "control" {
-  name   = "exomem-control-db"
+  name   = var.control_db_server_name
   labels = local.common_labels
 
   rule {

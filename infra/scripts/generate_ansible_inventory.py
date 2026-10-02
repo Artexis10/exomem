@@ -115,7 +115,7 @@ def main() -> int:
     if control_public_ip is not None and control_private_ip is not None:
         children["control_nodes"] = {
             "hosts": {
-                "exomem-control-db": {
+                "substrate-control-01": {
                     "ansible_host": control_public_ip,
                     "ansible_user": args.user,
                     "postgres_private_ip": control_private_ip,
