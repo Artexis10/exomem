@@ -738,6 +738,8 @@ def op_configure_memory(
 ) -> dict:
     """Inspect, set or clear your saved Exomem engagement level for this vault.
 
+    Use set or clear only for an explicit user request to change saved engagement.
+    Recall, capture, installation and missing hooks are not setting-change requests.
     Inspect first, then set off, light, balanced or maximal with the returned
     revision as expected_revision. The choice follows this authenticated identity
     on later requests without a restart. It changes recall/capture eagerness, never
@@ -746,7 +748,7 @@ def op_configure_memory(
     alone, leaving the identity-wide value untouched, and use clear with that
     context and expected_revision to remove it again. The context that applies to
     a request is detected from the calling client, never chosen by an argument.
-    Adopt the returned engagement contract in the current conversation.
+    The response reports the effective engagement for the current conversation.
 
     Args:
         action: "inspect" reads the saved state, "set" writes a level, and
@@ -6287,7 +6289,9 @@ def op_activate_context(
     Get or reuse `bootstrap` live engagement and capabilities first. Call this
     ONCE when that policy warrants recall, before deciding what to search for.
     Pass the user's current turn verbatim — this is not a search query and
-    must not be rewritten into one. It returns a bounded working-memory packet:
+    must not be rewritten into one. Do not send full conversation history;
+    optional context is limited to relevant earlier excerpts. It returns a bounded
+    working-memory packet:
     which durable anchors the turn is about (entities, resources, hubs, Records
     collections, active plans, projects), the context roles it filled, short
     provenance-bearing units, pointers to what did not fit the budget, and the
@@ -6433,8 +6437,10 @@ def op_activate_context(
             that names nothing is answered from this conversation's
             `continuity` thread alone, never from other conversations' work.
         conversation: Optional: `{focus?: str, recent?: [{role:
-            "user"|"assistant", text: str}], refs?: [str]}`. Anything else is
-            ignored, never an error.
+            "user"|"assistant", text: str}], refs?: [str]}`. Send only relevant
+            earlier excerpts, never full history: at most six entries and
+            2,400 characters total. Focus is capped at 240 characters, refs at
+            twelve. Omit when the current turn suffices. Unknown fields are ignored.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,

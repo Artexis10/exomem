@@ -89,6 +89,9 @@ def test_engagement_reference_preserves_the_live_user_preference() -> None:
     ).read_text()
     assert "`maximal` is the shipped default on clients without hooks" not in reference
     assert "Only an explicit user request to change the setting" in reference
+    core = (workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md").read_text()
+    portable = core.split("## Portable operating rules\n", 1)[1].split("\n## ", 1)[0]
+    assert "explicit user request to change saved engagement" in portable
 
 
 def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> None:
