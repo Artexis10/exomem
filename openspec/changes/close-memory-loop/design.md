@@ -492,9 +492,11 @@ the window counts only rows that can be candidates. Counting corroboration over 
 turn's stems asks whether several of its words occurred on a page, which is
 co-occurrence: a two-line stub titled "Meeting notes" whose one unit read
 "Decision pending" passed that test for an ordinary turn about a meeting and
-a pending decision, and was served as durable memory. A turn with fewer than
-two distinctive stems cannot carry anything, so the ranking query is not run
-at all.
+a pending decision, and was served as durable memory. The strict phrase path
+requires two distinctive stems. When that path names no page, the existing
+title fallback may pair one distinctive word with an ordinary title word;
+ordinary words alone never qualify. Both paths retain the same corpus floor,
+raw-word proximity, sentence boundaries and current-page eligibility.
 
 Rarity says a word is name-shaped; it cannot say the turn used it to NAME
 this page. A page qualifies on a PHRASE and on nothing else: two of its
@@ -602,6 +604,24 @@ crosses `guard_working_set` like any other reference; it is the packet's only
 anchor, so an audience that may not see it gets the abstention the existing
 every-anchor-withheld rule already produces, never the runner-up. Cost falls only
 on turns that would have returned an empty packet.
+
+Within that existing title fallback, a complete current title stated in one
+sentence qualifies only its own occurrence, provided it contains an already
+admissible distinctive-word pair. Retain token positions through the shared
+tokenizer; do not reconstruct mentions from deduplicated stem sets. A candidate
+must support the whole qualifying title phrase, not merely a shared suffix.
+Equal namesakes and longer titles containing that phrase remain contested.
+Consume nested matches and loose pairs touching that occurrence only:
+independent titles and a shorter phrase stated elsewhere remain separate
+domains, non-contained overlaps stay contested, and unmatched occurrences keep
+the partial-title fallback. Words a resolved anchor consumed cannot qualify a
+new domain. This is not a global best-match ranking.
+
+Use only bounded maintained-catalogue candidates and cached title reads;
+incomplete or truncated evidence cannot prove a unique qualified page. Keep
+the strict path, rarity, request budgets, page eligibility, packet statuses,
+egress, continuity and release gates unchanged. Task 6.17 owns the refinement;
+the interrupted capture journey retains its full-title turn.
 
 The agent may also name that same page itself: `anchor` no longer requires a
 row of the activation index. Where the ref names no such row, activation
