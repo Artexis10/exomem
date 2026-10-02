@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.102.4](https://github.com/Artexis10/exomem/compare/v0.102.3...v0.102.4) (2026-10-02)
+
+
+### Bug Fixes
+
+* **skill:** preserve saved engagement settings during recall ([#1511](https://github.com/Artexis10/exomem/issues/1511)) ([9637187](https://github.com/Artexis10/exomem/commit/9637187392da7856321e408b1b229aa12aab387f))
+
 ## [0.102.3](https://github.com/Artexis10/exomem/compare/v0.102.2...v0.102.3) (2026-10-02)
 
 
