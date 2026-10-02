@@ -257,9 +257,15 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
         "configure_memory",
         "record_memory",
         "plan_memory",
+        "episode_memory",
+        "adoption_studio",
         *({"govern_memory"} if governance_tool_is_destructive() else set()),
     }
 )
+
+# These operations fetch caller-supplied temporary HTTPS artifact handles.
+# A URL recorded only as source provenance does not make a tool open-world.
+OPEN_WORLD_OPS: frozenset[str] = frozenset({"capture_source", "preserve_artifacts"})
 
 
 def mcp_tool_annotations(
@@ -311,6 +317,9 @@ class Command:
     mcp_meta: Mapping[str, tuple[str, ...]] = field(
         default_factory=lambda: types.MappingProxyType({}), hash=False
     )
+    mcp_annotation_pin: Mapping[str, object] | None = field(
+        default=None, compare=False, hash=False
+    )
 
     @property
     def doc(self) -> str:
@@ -330,7 +339,11 @@ class Command:
     @property
     def mcp_annotations(self) -> ToolAnnotations:
         """MCP behaviour hints for this command's generated tool."""
-        return mcp_tool_annotations(self.name, read_only=self.read_only)
+        if self.mcp_annotation_pin is not None:
+            return ToolAnnotations(**dict(self.mcp_annotation_pin))
+        return mcp_tool_annotations(
+            self.name, read_only=self.read_only, open_world=self.name in OPEN_WORLD_OPS
+        )
 
 
 def bind_vault(

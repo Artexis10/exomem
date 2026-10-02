@@ -5,6 +5,8 @@
 
 - [x] 1.3 Add release-owned profile-aware activation modes and canonical runtime arguments; red-first verify native-MCP mode has no external transport, working-set fallback requests real activation, current capture/continuation stay profile-local, default installs remain compatible and exact health checks validate the generated commands.
 
+- [ ] 1.4 Release the shared engagement and annotation correction, refresh actual provider discovery, and verify live bootstrap policy gates activation and episode capture. Preserve verbatim warranted turns, relevant bounded conversation input and immutable historical profile annotations. Source verification does not close the post-release portal acceptance.
+
 ## 2. Behavioural evaluation
 
 - [x] 2.1 Add the shared synthetic corpus and observable trace evaluator with red-first tests for missing calls, wrong arguments, fabricated success, denied writes, absent independent readbacks and drift.

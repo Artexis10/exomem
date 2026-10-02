@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: d6ea38bdb3184eb8dfec44ff6ace214036223901c44f6173849b34ebf16fdd32
+  skill_contract: cc19ebff18f2ee6915bb81bb8063a40f1cb6d0aeddd1e24da8597ba8ccbdfe0a
   version: "0.32.0"
 ---
 
@@ -110,15 +110,20 @@ Capture unambiguous landings under the current disposition and existing scope
 approval, then report the write; ask only for missing decisions or confirmation
 required by the envelope. Raw capture is not automatic compilation. At a
 conversation's decision or stopping point, record one bounded recap with
-`episode_memory`; it is what the next session on any client sees first.
+`episode_memory` only when requested or permitted by the live proactive-capture
+disposition; it is what the next session on any client sees first.
 
 ## Recall loop
 
 At `balanced` or `maximal`:
 
+Follow the live recall policy: at `balanced`, skip unrelated fresh tasks; at
+`maximal`, recall before every substantive turn. Connection alone does not
+authorize sending context or saving it.
+
 Before a substantive turn with no prior context, call `activate_context` with the turn verbatim; on `ambiguous`, call again with `anchor`.
 
-In a long thread or when the turn leans on attachments, also pass `conversation`: `focus` (one line naming the subjects, including names you read from attachments) and `refs`; never rewrite the turn.
+Only when needed to resolve the current subject in a long thread or attachments, also pass `conversation`: relevant `focus` (including attachment names) and `refs`; never rewrite the turn or send full history.
 
 When the user corrects which page they meant, call again with `anchor` set to it;
 a `learning` advisory on that packet is handled in [engagement](references/engagement.md).

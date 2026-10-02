@@ -38,6 +38,22 @@ def test_the_instructions_still_say_what_the_server_is() -> None:
     assert len(text) <= 900, len(text)
 
 
+def test_remote_activation_guidance_requires_live_policy_before_sending_context() -> None:
+    """Connection alone must not override an explicit-only engagement setting."""
+    for text in (server.SERVER_INSTRUCTIONS, commands.op_activate_context.__doc__ or ""):
+        assert "bootstrap" in text and "live" in text
+        assert "policy" in text
+    assert "proactive_capture" in server.SERVER_INSTRUCTIONS
+    assert "requested" in server.SERVER_INSTRUCTIONS
+
+
+def test_optional_conversation_is_relevant_context_not_full_history() -> None:
+    """The compiler's input bounds are not consent to send unrelated earlier turns."""
+    doc = commands.op_activate_context.__doc__ or ""
+    assert "only relevant" in doc
+    assert "never full history" in doc
+
+
 ENGAGEMENT = SCAFFOLD_SKILL.parent / "references" / "engagement.md"
 #: Ruling BYTES on #1463: the conversation guidance in the tool description is
 #: a short pointer; the full guidance lives in the engagement reference.

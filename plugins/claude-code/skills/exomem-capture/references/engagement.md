@@ -171,9 +171,10 @@ statements worth keeping. It is raw material about the conversation, not a
 compiled conclusion, and it is what the next session on any client sees first in
 `recent_context`. Reuse the `episode` key a hook named or an earlier record
 returned; an identical retry writes nothing. A Stop hook's episode check or an
-`episode_due` block in an activation packet asks for one; skip it when nothing
-durable happened. At `off`, record only when the user asks; at `light`, also
-when a hook's episode check asks.
+`episode_due` block in an activation packet is a reminder, not permission;
+skip it when nothing durable happened. Record only when the user asks or the
+live `proactive_capture` disposition permits it. At `off` and `light`, an
+unrequested hook reminder does not authorize capture.
 
 **Episode candidates, where the service runs them.** When
 `episode_memory(action="candidates")` reports `execution: enabled`, the same
@@ -195,7 +196,9 @@ the input.
 
 In a longer conversation, or when the user's words lean on attachments, pass
 `conversation` to `activate_context` beside the verbatim `turn` (never
-rewrite the turn). Every field is optional:
+rewrite the turn), only when live engagement warrants recall and that context
+is needed to resolve the current subject. Do not send full history or unrelated
+earlier turns. Every field is optional:
 
 - `focus`: one line, at most 240 characters, naming the subjects now in play,
   including names or objects you read from the user's attachments.

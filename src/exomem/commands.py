@@ -6284,8 +6284,9 @@ def op_activate_context(
 ) -> dict:
     """Compile durable context for a raw conversational turn, without a query.
 
-    Call this ONCE at the start of a substantive turn, before deciding what to
-    search for. Pass the user's words verbatim — this is not a search query and
+    Get or reuse `bootstrap` live engagement and capabilities first. Call this
+    ONCE when that policy warrants recall, before deciding what to search for.
+    Pass the user's current turn verbatim — this is not a search query and
     must not be rewritten into one. It returns a bounded working-memory packet:
     which durable anchors the turn is about (entities, resources, hubs, Records
     collections, active plans, projects), the context roles it filled, short
@@ -6326,10 +6327,10 @@ def op_activate_context(
     as a single `partial` anchor with `generation.carried_by: "follow_up"`;
     where two are close, both are listed under `ambiguity` for `anchor`.
 
-    In a long thread or with attachments, also pass `conversation` (optional,
-    server-bounded): `focus`, one line naming the subjects in play, attachment
-    names included; `refs`, pages you read; `recent`, earlier `{role, text}`
-    turns. Anchors report `origin`. Details: the skill's engagement reference.
+    When needed, also pass `conversation` (optional): `focus` names subjects
+    and attachments; `refs` names read pages; `recent` includes only relevant
+    earlier `{role, text}` turns, never full history. Anchors report `origin`.
+    Bounds: the skill's engagement reference.
 
     Call again with `focus` for a subject the hook missed.
 
@@ -8076,8 +8077,9 @@ def op_episode_memory(
 ) -> dict:
     """Record what a conversation worked on, decided and left open, for the next session on any client.
 
-    Call `record` once when a conversation reaches a decision or a stopping
-    point, and skip it when nothing durable happened. You write the recap:
+    Get or reuse `bootstrap` live policy first. Call `record` only when requested
+    or the live proactive_capture disposition permits it, once at a decision
+    or stopping point. Skip it when nothing durable happened. You write the recap:
     short one-line items, never a transcript. It is kept as a bounded Source
     under `Sources/Episodes/`, and the newest recap of each conversation leads
     the `recent_context` block `activate_context` serves on every client.
@@ -13867,15 +13869,10 @@ def apply_legacy_profile_pin(
     if contract is None and current == names:
         return command
     if contract is not None:
-        expected_annotations = {
-            "title": command.name.replace("_", " ").title(),
-            "readOnlyHint": command.read_only,
-            "destructiveHint": False if command.read_only else command.name in DESTRUCTIVE_OPS,
-            "idempotentHint": command.read_only,
-            "openWorldHint": True,
-        }
-        if dict(contract.annotations) != expected_annotations:
-            raise RuntimeError(f"{command.name}: pinned MCP annotations changed")
+        # Historical metadata is fixed by its published descriptor, not today's
+        # hint classification. A changed write capability still breaks the pin.
+        if contract.annotations.get("readOnlyHint") is not command.read_only:
+            raise RuntimeError(f"{command.name}: pinned read-only classification changed")
         published = {str(param["name"]): param for param in contract.params}
         properties = contract.input_schema.get("properties")
         if not isinstance(properties, Mapping):
@@ -13892,6 +13889,7 @@ def apply_legacy_profile_pin(
         leaf=_pinned_legacy_leaf(command, keep, contract),
         params=params,
         description=contract.description if contract is not None else command.description,
+        mcp_annotation_pin=contract.annotations if contract is not None else command.mcp_annotation_pin,
     )
 
 
