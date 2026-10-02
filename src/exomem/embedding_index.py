@@ -26,6 +26,7 @@ import numpy as np
 from . import (
     call_spans,
     cloud_cell,
+    foreground_priority,
     index_paths,
     recall_space,
     reserved_paths,
@@ -1310,10 +1311,14 @@ class EmbeddingIndex:
         count, so `argpartition` provably cannot reach a masked row.
         """
         if cloud_cell.resource_policy() == "service-v1":
-            return self._disk_score(
-                [query_vec], k, admits=lambda path: allowed_paths is None or path in allowed_paths,
-                encoded_for=encoded_for, hydrate=True,
-            )[0]
+            # SQLite row fetches release the GIL; cooperative bulk graph work
+            # must yield during this read-only scan, which never waits on it.
+            # Leave background advisory search_many outside foreground scope.
+            with foreground_priority.foreground():
+                return self._disk_score(
+                    [query_vec], k, admits=lambda path: allowed_paths is None or path in allowed_paths,
+                    encoded_for=encoded_for, hydrate=True,
+                )[0]
         if allowed_paths is None:
             vec_hits = self._vec_search(query_vec, k)
             if vec_hits is not None:

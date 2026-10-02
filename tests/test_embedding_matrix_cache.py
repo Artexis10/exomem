@@ -971,6 +971,30 @@ def test_service_scoring_binds_producer_space_to_read_snapshot(tmp_path, monkeyp
         idx.search(_pad([1, 0]), 1, encoded_for=encoded_for)
 
 
+def test_service_recall_signals_foreground_without_promoting_advisory_scans(tmp_path, monkeypatch):
+    """Missing recall admission lets bulk graph work delay every SQLite fetch."""
+    from exomem import foreground_priority
+
+    idx = embeddings.get_embedding_index(_fresh_vault(tmp_path))
+    idx.upsert_file('a.md', ['a'], _mat([1, 0]), 1.0)
+    monkeypatch.setenv('EXOMEM_CLOUD_CELL', '1')
+    monkeypatch.setenv('EXOMEM_CLOUD_RESOURCE_POLICY', 'service-v1')
+    seen = []
+
+    class Allowed(set):
+        def __contains__(self, path):
+            seen.append(foreground_priority.in_flight())
+            return super().__contains__(path)
+
+    allowed = Allowed({'a.md'})
+    assert idx.search(_pad([1, 0]), 1, allowed_paths=allowed)[0][:3] == ('a.md', 0, 'a')
+    assert seen and all(count > 0 for count in seen)
+    assert foreground_priority.in_flight() == 0
+    seen.clear()
+    assert idx.search_many(_mat([1, 0]), 1, admits=lambda path: path in allowed)[0][0][:2] == ('a.md', 0)
+    assert seen and all(count == 0 for count in seen)
+
+
 def test_service_scoring_hydrates_winners_from_the_scored_snapshot(tmp_path, monkeypatch):
     """A concurrent replacement cannot attach new text to an old score."""
     idx = embeddings.get_embedding_index(_fresh_vault(tmp_path))
