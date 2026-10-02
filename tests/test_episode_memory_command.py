@@ -506,7 +506,7 @@ def test_episode_without_durable_demand_or_fanout_reports_committed_uncertainty(
     from exomem.writer_lease import LeaseConfig, LeaseManager
 
     monkeypatch.setattr(
-        deferred_index, "add_full", lambda *_args: (_ for _ in ()).throw(OSError("queue down"))
+        deferred_index, "add_full_receipts", lambda *_args: (_ for _ in ()).throw(OSError("queue down"))
     )
     monkeypatch.setattr(
         vault_module, "post_commit_batch_fanout",
@@ -623,6 +623,110 @@ def test_episode_derived_work_has_one_owner_in_both_ack_modes(
     else:
         assert len(calls) == 1
         assert result["source"]["path"] in deferred_index.full_status(vault)["paths"]
+
+
+@pytest.mark.parametrize("managed", [False, True], ids=["direct", "terminal"])
+def test_episode_cold_graph_repair_respects_the_callers_acknowledgement_contract(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, managed: bool
+) -> None:
+    """A committed recap must not rebuild the vault on its return path."""
+    from exomem import deferred_index, epistemic_graph, graph_sync
+    from exomem.writer_lease import get_manager
+
+    monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
+    rebuilds = []
+    blocked_return = []
+    release = threading.Event()
+    real_rebuild = epistemic_graph.EpistemicGraphIndex._rebuild_all_off_boundary
+
+    def observe_rebuild(self, *args, **kwargs):
+        rebuilds.append(threading.get_ident())
+        if managed and not release.wait(timeout=10):
+            blocked_return.append(True)
+            raise TimeoutError("capture waited for its derived rebuild")
+        return real_rebuild(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex, "_rebuild_all_off_boundary", observe_rebuild
+    )
+    manager = get_manager()
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    schema = schema_module.load_source_schema(vault)
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            arguments = {
+                "action": "record", "episode": KEY,
+                "subject": "Harbor Lamp purchase",
+                "summary": "Chose the brass lamp; delivery date still open.",
+                "worked_on": ["Compared two lamps for Project Alpha"],
+            }
+            result = (
+                manager.invoke(command, (vault, schema), arguments)
+                if managed else commands.op_episode_memory(vault, schema, **arguments)
+            )
+    finally:
+        release.set()
+        graph_sync.await_active_rebuild(vault, state_root=manager.config.state_dir, timeout=10)
+    assert (vault / result["source"]["path"]).exists()
+    assert result["source"]["path"] in deferred_index.full_status(vault)["paths"]
+    if managed:
+        assert result["state"] == "committed"
+        assert not blocked_return
+        assert threading.get_ident() not in rebuilds
+        assert result.get("derived_sync") != "failed"
+        assert result["graph_sync"] in {"pending", "completed"}
+        checkpoint = graph_sync.read_checkpoint(vault)
+        assert checkpoint is not None
+        assert graph_sync.repair_is_provisioned(
+            vault, checkpoint,
+            outcome="deferred" if result["graph_sync"] == "pending" else "completed",
+        )
+    else:
+        assert rebuilds
+        assert epistemic_graph.EpistemicGraphIndex(vault).available()
+
+
+def test_episode_terminal_fanout_starts_repair_on_the_invoking_manager(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-default manager must start the repair its terminal calls pending."""
+    from exomem import epistemic_graph, graph_sync
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "available", lambda self: False)
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex, "_graph_sync_predecessor_state",
+        lambda self, required: "graph_sync_predecessor_mismatch",
+    )
+    started, release = threading.Event(), threading.Event()
+
+    def rebuild(_index, required):
+        started.set()
+        assert release.wait(timeout=10)
+        return graph_sync.GraphBuildOutcome.covering(required)
+
+    monkeypatch.setattr(epistemic_graph, "_rebuild_outcome", rebuild)
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "lease"))
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    schema = schema_module.load_source_schema(vault)
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            result = manager.invoke(
+                command, (vault, schema),
+                {
+                    "action": "record", "episode": KEY,
+                    "subject": "Harbor Lamp purchase",
+                    "summary": "Chose the brass lamp; delivery date still open.",
+                    "worked_on": ["Compared two lamps for Project Alpha"],
+                },
+            )
+        assert result["state"] == "committed"
+        assert result["graph_sync"] == "pending"
+        assert started.wait(timeout=2)
+    finally:
+        release.set()
+        graph_sync.await_active_rebuild(vault, state_root=manager.config.state_dir, timeout=10)
 
 
 def test_direct_heat_failure_does_not_turn_committed_episode_into_retryable_error(
