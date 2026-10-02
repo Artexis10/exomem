@@ -218,11 +218,15 @@ def test_service_claims_need_their_own_publication_after_being_enabled(live, mon
     assert proof is not None and proof.current(vault)
     monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
     assert not proof.current(vault, claims_required=True)
+    cold = embeddings.reconstruct_publication(vault, target)
+    assert cold is not None and not cold.current(vault, claims_required=True)
     proof = embeddings.upsert_after_write_status(vault, [target]).publication
     assert proof is not None and proof.current(vault, claims_required=True)
     with sqlite3.connect(claims.sidecar_path(vault)) as connection:
         connection.execute("DELETE FROM claims")
     assert not proof.current(vault, claims_required=True)
+    cold = embeddings.reconstruct_publication(vault, target)
+    assert cold is not None and not cold.current(vault, claims_required=True)
 
 
 def test_a_stored_vector_of_another_width_is_not_reused(live, monkeypatch) -> None:
@@ -811,3 +815,68 @@ def test_the_stamp_names_the_resident_encoder_s_own_identity(lifecycle) -> None:
     embeddings._MODEL.profile = dataclasses.replace(profile, artifact_digest="fedcba9876543210")
 
     assert embeddings.recall_passage_vectors(["alpha"], stamp=embeddings.passage_memo_stamp()) == {}
+
+
+def test_small_multiline_parent_uses_actual_projection_reservation(live, monkeypatch) -> None:
+    """Line-count estimates must not refuse an ordinary sub-KiB, few-chunk save."""
+    from exomem import semantic_drain
+
+    vault, target, _encoder = live
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    source = _source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"])
+    source = source.replace("# Reuse\n\n", "").replace("Existing prose.", "x\n" * 60)
+    assert len(source.encode("utf-8")) <= 1024
+    target.write_text(source, encoding="utf-8")
+    assert semantic_drain._small_parent(vault, target)
+    result = embeddings.upsert_after_write_status(vault, [target])
+    assert result.status == "completed"
+    assert result.publication is not None and result.publication.current(vault)
+    assert runtime_resources.semantic_preparation_status()["reserved_bytes"] == 0
+
+
+def test_derived_batch_larger_than_proof_cache_finishes_without_reencoding(live, monkeypatch) -> None:
+    """A governed multi-path change must not loop when its first proof is evicted."""
+    from exomem import deferred_index, index_sync, semantic_drain
+    from exomem import vault as vault_module
+    from exomem.derived_receipts import DerivedComponent
+
+    vault, target, encoder = live
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.delenv("EXOMEM_CLAIM_LEVEL", raising=False)
+    owner = semantic_drain.SemanticDrain(vault)
+    monkeypatch.setitem(semantic_drain._ACTIVE, str(vault.resolve()), owner)
+    paths = []
+    for number in range(semantic_drain.PROOF_LIMIT + 1):
+        path = target.with_name(f"batch-{number}.md")
+        source = _source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"])
+        source = source.replace(PAGE_ID, f"00000000-0000-4000-8000-{number + 1:012d}")
+        path.write_text(source, encoding="utf-8")
+        rel = path.relative_to(vault).as_posix()
+        [receipt] = deferred_index.add_receipts(vault, [rel])
+        owner._execute(receipt, "foreground", "signature", "policy")
+        paths.append(SimpleNamespace(rel_path=rel, before_hash=None, after_hash=vault_module.content_hash(source)))
+    assert not deferred_index.snapshot(vault)
+    assert len(owner._proofs) == semantic_drain.PROOF_LIMIT
+    encoder.calls.clear()
+    batch = SimpleNamespace(batch_id="multi-path", canonical_generation="exact-after", paths=paths)
+    assert index_sync.converge_derived_component(vault, batch, DerivedComponent.EMBEDDINGS) is True
+    assert encoder.calls == []
+    assert not deferred_index.snapshot(vault)
+
+    # Cold proof still refuses changed text or a missing projection with the
+    # same row count elsewhere; no queue or cached acknowledgement substitutes.
+    first = vault / paths[0].rel_path
+    owner._proofs.clear()
+    index = embeddings.get_embedding_index(vault)
+    with sqlite3.connect(index.path) as connection:
+        connection.execute("UPDATE chunks SET chunk_text = 'stale' WHERE file_path = ?", (paths[0].rel_path,))
+    assert not owner.publication_ready(paths[0].rel_path, expected_hash=paths[0].after_hash)
+    assert embeddings.upsert_after_write_status(vault, [first]).status == "completed"
+    with sqlite3.connect(index.path) as connection:
+        connection.execute("DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (paths[0].rel_path,))
+    assert not owner.publication_ready(paths[0].rel_path, expected_hash=paths[0].after_hash)
+    assert embeddings.upsert_after_write_status(vault, [first]).status == "completed"
+    first.write_text(_source([]), encoding="utf-8")
+    assert not owner.publication_ready(paths[0].rel_path, expected_hash=paths[0].after_hash)

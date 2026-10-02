@@ -127,3 +127,26 @@ def test_service_derived_custody_waits_for_exact_publication(vault: Path, monkey
     assert deferred_index.snapshot(vault) == [original]
     monkeypatch.setattr(semantic_drain, "publication_ready", lambda *a, **kw: kw.get("expected_hash") == "after")
     assert index_sync.converge_derived_component(vault, receipt, DerivedComponent.EMBEDDINGS) is True
+
+
+def test_occupied_bulk_receipts_do_not_consume_small_execution_slots(vault: Path, monkeypatch) -> None:
+    """A lost/coalesced hint must not leave small debt behind skipped imports."""
+    from exomem import semantic_drain
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    paths = []
+    for number in range(semantic_drain.TURN_LIMIT + 2):
+        path = vault / f"Knowledge Base/import-{number:02d}.md"
+        path.write_text("# Import\n\n" + "bulk text\n" * 200, encoding="utf-8")
+        paths.append(path.relative_to(vault).as_posix())
+    small = vault / "Knowledge Base/z-small.md"
+    small.write_text("# Small\n\nCurrent fact.\n", encoding="utf-8")
+    paths.append(small.relative_to(vault).as_posix())
+    deferred_index.add_receipts(vault, paths)
+    owner = semantic_drain.SemanticDrain(vault)
+    owner._bulk_path = paths[0]
+    executed = []
+    monkeypatch.setattr(owner, "_execute", lambda receipt, *_args: executed.append(receipt.rel_path))
+    owner._turn()
+    assert executed == [paths[-1]]

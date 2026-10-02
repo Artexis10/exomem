@@ -499,6 +499,17 @@ class SemanticPreparation:
             + self.reuse_allowance
         )
 
+    def check_projections(self, chunks: list[str], units: list[Any], *, vector_dim: int) -> None:
+        """Charge the bounded, actual shape before reuse, encoding or blobs."""
+        count = len(chunks) + len(units)
+        text_bytes = sum(len(text.encode("utf-8")) for text in chunks)
+        text_bytes += sum(len(unit.content.encode("utf-8")) for unit in units)
+        self.reserve(
+            self.parser_bytes + 4 * text_bytes
+            + count * (4096 + 8 * max(1, vector_dim) * 4)
+            + self.reuse_allowance
+        )
+
     def release(self) -> None:
         global _preparation_bytes
         with _preparation_lock:

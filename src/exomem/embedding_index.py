@@ -796,6 +796,56 @@ class EmbeddingIndex:
         finally:
             conn.close()
 
+    def parent_publication_from_source(
+        self, chunks: list[str], state: semantic_index.SemanticParentIndexState,
+        *, identity: recall_space.SpaceIdentity,
+    ) -> tuple[int, int, int, int] | None:
+        """Recover publication authority from exact rows in one read snapshot.
+
+        Read only this bounded parent's text and metadata, never vector blobs.
+        Counts and text sizes are checked before hydrating stored text, so a
+        corrupt/older large projection cannot defeat the preparation allowance.
+        """
+        if not self.path.exists() or self.path != index_paths.sidecar_path(self.vault_root):
+            return None
+        units = {unit.unit_ref: unit.content for unit in state.document.units if unit.unit_ref is not None}
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            stored = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            if stored != identity and (chunks or units or stored is not None):
+                return None
+            chunk_size = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(length(CAST(chunk_text AS BLOB))), 0) "
+                "FROM chunks WHERE file_path = ?", (state.path,),
+            ).fetchone()
+            if chunk_size != (len(chunks), sum(len(text.encode("utf-8")) for text in chunks)):
+                return None
+            width = identity.dim * 4
+            for number, row in enumerate(conn.execute(
+                "SELECT chunk_idx, chunk_text, length(vector) FROM chunks "
+                "WHERE file_path = ? ORDER BY chunk_idx", (state.path,),
+            )):
+                if row != (number, chunks[number], width):
+                    return None
+            unit_size = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(length(CAST(unit_key AS BLOB)) + "
+                "length(CAST(content AS BLOB))), 0) FROM semantic_unit_vectors WHERE parent_path = ?",
+                (state.path,),
+            ).fetchone()
+            if unit_size != (len(units), sum(len(key.encode("utf-8")) + len(text.encode("utf-8")) for key, text in units.items())):
+                return None
+            for key, text, current, vector_width in conn.execute(
+                "SELECT unit_key, content, parent_generation = ? AND parent_source_hash = ? "
+                "AND parser_version = ?, length(vector) FROM semantic_unit_vectors WHERE parent_path = ?",
+                (state.parent_generation, state.parent_source_hash, state.parser_version, state.path),
+            ):
+                if not current or units.get(key) != text or vector_width != width:
+                    return None
+            return self._build_token(conn)
+        finally:
+            conn.close()
+
     def delete_file(self, rel_path: str) -> None:
         """Remove one parent's page and semantic-unit rows if the sidecar exists."""
         self.purge_paths_if_present([rel_path])

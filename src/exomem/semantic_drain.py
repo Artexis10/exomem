@@ -182,10 +182,14 @@ class SemanticDrain:
     def publication_ready(self, rel: str, *, expected_hash: str | None = None, claims_required: bool = False) -> bool:
         with self._lock:
             proof = self._proofs.get(rel)
+        if proof is None:
+            from . import embeddings
+
+            proof = embeddings.reconstruct_publication(self.root, self.root / rel)
         return (
             proof is not None
             and (expected_hash is None or proof.guard.expected_content_hash == expected_hash)
-            and (proof.current(self.root, claims_required=True) if claims_required else proof.current(self.root))
+            and proof.current(self.root, claims_required=claims_required)
         )
 
     def _run(self) -> None:
@@ -236,10 +240,10 @@ class SemanticDrain:
             ):
                 overhead += time.monotonic() - began
                 continue
-            attempted += 1
             small = _small_parent(self.root, path)
             overhead += time.monotonic() - began
             if small:
+                attempted += 1
                 with self._lock:
                     self._small_active = True
                 try:
@@ -252,6 +256,7 @@ class SemanticDrain:
                 with self._lock:
                     if self._bulk_path is not None:
                         continue
+                    attempted += 1
                     self._bulk_path = receipt.rel_path
                     thread = threading.Thread(
                         target=self._bulk, args=(receipt, signature, policy),
