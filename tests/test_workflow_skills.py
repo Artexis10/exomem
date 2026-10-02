@@ -79,6 +79,18 @@ def test_workflow_skill_index_lists_first_pass_skills() -> None:
         assert skill["triggers"]
 
 
+def test_engagement_reference_preserves_the_live_user_preference() -> None:
+    # Native recall silently escalated balanced to maximal after reading the
+    # obsolete hookless-client default. The shipped reference must not override
+    # live policy or turn an ordinary lookup into a saved configuration change.
+    reference = (
+        Path(__file__).resolve().parents[1]
+        / "src/exomem/_scaffold/_Schema/references/engagement.md"
+    ).read_text()
+    assert "`maximal` is the shipped default on clients without hooks" not in reference
+    assert "Only an explicit user request to change the setting" in reference
+
+
 def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> None:
     concise = semantic_authoring.render_concise()
     identity = semantic_authoring.contract_identity()

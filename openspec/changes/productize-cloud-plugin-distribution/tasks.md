@@ -90,5 +90,23 @@ The metadata branch integrates graph repair #1503 (`fac6ee24a`) and regenerates
 conflicting archives/manifests from the current canonical core. This is source
 integration, not evidence that the new core or package has been deployed.
 
+Native preparation on 2 October: the existing private ChatGPT test plugin was
+updated to released 0.102.2 without changing its app binding or audience. Fresh
+reviewer OAuth and raw MCP bootstrap independently matched the dedicated sample
+cell and published tool fingerprint. A synthetic source committed and survived
+a fresh read. ChatGPT's explicit capture created a compiled conclusion with a
+source citation, independently verified by raw MCP readback. These prove those
+bounded workflows, not complete cross-surface acceptance.
+
+The natural grounded-recall case failed its no-mutation requirement: the answer
+was grounded, but ChatGPT also saved maximal prominence without a setting-change
+request. Raw before/after preference revisions confirmed the change. The stale
+canonical engagement reference claimed a hookless maximal default contrary to
+live bootstrap policy; the focused repair removes that claim and states that
+only an explicit setting-change request authorizes configuration writes. The
+sample's effective setting was restored to balanced. Corrected-package native
+retesting, the remaining cases, Claude acceptance, fresh portal scans and the
+real demo remain open. Neither provider draft has been submitted or published.
+
 - [x] 4.1 Resolve author-independent review findings, run scoped tests plus completion-boundary full CI and privacy checks, and merge the cohesive verified batch.
 - [ ] 4.2 Verify released packages and production outcome, reconcile prior acceptance debt, sync/archive only completed OpenSpec scope and retire the clean task worktree.

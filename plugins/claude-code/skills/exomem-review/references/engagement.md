@@ -9,13 +9,15 @@ nudge re-arms that judgment each turn; on clients without hooks this text is the
 only prompt to check, so read it as standing instruction rather than advice.)
 
 **Prominence level.** How strongly the two behaviours below apply is tunable.
-`bootstrap()` reports the active level under `engagement`; the user changes it with
-`exomem prominence <level>`, or by editing the level block in their assistant's
-custom instructions. When `engagement` carries a `hook_cadence` block, this client
-runs nudge hooks that read only its own machine, so after setting a level tell the
-user that the nudge cadence changes separately, with `exomem prominence <level>` run
-on their machine. The section below describes **balanced**, the default where
-hooks exist. The other levels shift it:
+`bootstrap()` reports the effective level under `engagement` for every client.
+Use that live value; the table below describes levels, not a request to change one.
+Only an explicit user request to change the setting authorizes
+`configure_memory(action="set"|"clear")`; inspect first and use its revision.
+Ordinary recall, capture, bootstrap, installation, and missing hooks do not
+authorize a saved preference change. Hook cadence is separate: when `engagement`
+carries `hook_cadence`, `exomem prominence <level>` on that client changes its
+local reminders, not the saved preference. The section below describes
+**balanced**. The other levels shift it:
 
 | Level | Shift from the baseline below |
 |---|---|
@@ -23,11 +25,6 @@ hooks exist. The other levels shift it:
 | `light` | Retrieve only on an outright recall question or an unmistakably on-topic turn; capture only when asked; never narrate. |
 | `balanced` | As written below. |
 | `maximal` | Retrieve before **every** substantive turn, not only ones that reference prior work; treat the bar for "durable" as low and capture whenever torn; say what you recalled and what you saved. |
-
-`maximal` is the shipped default on clients without hooks — the hosted service,
-and assistants configured through a custom-instructions block — because there is
-nothing there to re-arm the check, and passive instructions decay over a long
-conversation.
 
 **Proactive retrieval (read) — quiet, surface only hits.** When a turn
 references something the KB plausibly holds — a project, a domain, a named
