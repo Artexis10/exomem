@@ -3231,6 +3231,8 @@ def repair_is_provisioned(
     each outcome asserts a *different* mechanism, and the check has to test the
     one that was claimed:
 
+    * `completed` claims acknowledgement covering this dispatch. No pending
+      registration or queue can stand in for completion.
     * `registered` claims an in-process rebuild flight for this exact
       checkpoint. Only a registration proves that.
     * `deferred` claims the durable queue owns the repair, which is what a write
@@ -3256,6 +3258,8 @@ def repair_is_provisioned(
     acknowledged = acknowledged_checkpoint(vault_root)
     if acknowledged is not None and acknowledged.covers(required):
         return True
+    if outcome == "completed":
+        return False
     if registered_checkpoint(vault_root, state_root=state_root) == required:
         return True
     if outcome == "registered":
@@ -3312,43 +3316,65 @@ def replace_sidecar(
     root = Path(vault_root)
     started = time.monotonic()
     attempts: list[str] = []
-    if _publish_sidecar_in_place(
+    if not _publish_sidecar_in_place(
         temporary,
         live,
         vault_root=root,
         attempts_out=attempts,
     ):
-        try:
-            epistemic_graph._remove_graph_rebuild_artifact(
-                root,
-                temporary,
-                missing_ok=True,
+        if attempts == ["temporary sidecar absent"]:
+            raise FileNotFoundError(temporary)
+        if attempts != ["live sidecar absent"]:
+            raise GraphSidecarReplaceUnavailable(
+                "live graph sidecar could not accept the proven rebuild "
+                f"(in-place {len(attempts)} attempt(s) over "
+                f"{time.monotonic() - started:.1f}s: "
+                f"{'; '.join(attempts) if attempts else 'none ran'})"
             )
-        except OSError:
-            # A retained temp is inert once the live file already carries the
-            # published bytes; the reaper collects it on a later pass.
-            pass
-        return
 
-    if attempts == ["temporary sidecar absent"]:
-        raise FileNotFoundError(temporary)
-    if attempts != ["live sidecar absent"]:
-        raise GraphSidecarReplaceUnavailable(
-            "live graph sidecar could not accept the proven rebuild "
-            f"(in-place {len(attempts)} attempt(s) over "
-            f"{time.monotonic() - started:.1f}s: "
-            f"{'; '.join(attempts) if attempts else 'none ran'})"
-        )
+        try:
+            epistemic_graph._move_graph_rebuild_into_store(root, temporary, live)
+        except FileExistsError as error:
+            # Another graph opener won the absence-to-move window. Publish
+            # into its retained SQLite/WAL family rather than replacing it.
+            # One bounded backup round handles this transition; if the live
+            # file disappears again, retain the candidate for later recovery.
+            attempts.clear()
+            if not _publish_sidecar_in_place(
+                temporary,
+                live,
+                vault_root=root,
+                attempts_out=attempts,
+            ):
+                if attempts == ["temporary sidecar absent"]:
+                    raise FileNotFoundError(temporary) from error
+                raise GraphSidecarReplaceUnavailable(
+                    "live sidecar appeared before the held move; "
+                    "in-place publication failed "
+                    f"({len(attempts)} attempt(s) over "
+                    f"{time.monotonic() - started:.1f}s: "
+                    f"{'; '.join(attempts) if attempts else 'none ran'})"
+                ) from error
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise GraphSidecarReplaceUnavailable(
+                "live sidecar absent; held graph publication failed "
+                f"({error.__class__.__name__}: {error})"
+            ) from error
+        else:
+            return
 
     try:
-        epistemic_graph._move_graph_rebuild_into_store(root, temporary, live)
-    except FileNotFoundError:
-        raise
-    except OSError as error:
-        raise GraphSidecarReplaceUnavailable(
-            "live sidecar absent; held graph publication failed "
-            f"({error.__class__.__name__}: {error})"
-        ) from error
+        epistemic_graph._remove_graph_rebuild_artifact(
+            root,
+            temporary,
+            missing_ok=True,
+        )
+    except OSError:
+        # A retained temp is inert once the live file already carries the
+        # published bytes; the reaper collects it on a later pass.
+        pass
 
 
 def _publish_sidecar_in_place(

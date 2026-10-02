@@ -236,20 +236,39 @@ def test_recorded_movement_keeps_recall_live_and_the_corpus_cache_warm(
 def test_an_unrecorded_edit_is_class_c_scoped_to_its_path(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Positive evidence marks exactly what it can name, not the whole vault."""
+    """Positive evidence marks exactly what it can name, not the whole vault.
+
+    The rebuild then retires the mark it minted by reconciling the registry
+    against the disk, so the edit ends up recorded rather than fenced -- and
+    the stale live sidecar is still not served as current.
+    """
+    marks: list[tuple[str, ...]] = []
+    original_mark = freshness.mark_external_pending
+
+    def spy(vault_root: Path, *, paths: Any = ()) -> int:
+        paths = tuple(paths)
+        marks.append(tuple(str(Path(path).resolve()) for path in paths))
+        return original_mark(vault_root, paths=paths)
+
+    monkeypatch.setattr(freshness, "mark_external_pending", spy)
     _MidPassAction(monkeypatch, _edit_b_out_of_band(vault), times=EVERY_PASS)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved, match="Class C"):
         EpistemicGraphIndex(vault).rebuild_all()
 
-    assert freshness.external_pending(vault) is True
-    assert freshness.external_pending_unscoped(vault) is False, (
-        "an unexplained difference the proof could name was marked unscoped, "
-        "which makes every later lineage gap uncoverable"
+    assert marks == [(str((vault / PAGE_B).resolve()),)], (
+        "an unexplained difference the proof could name was not marked scoped to "
+        "it; an unscoped mark makes every later lineage gap uncoverable"
     )
-    assert freshness.external_pending_paths(vault) == frozenset(
-        {str((vault / PAGE_B).resolve())}
+    assert freshness.external_pending(vault) is False
+    _lineage, registry = freshness.recall_projection_snapshot(
+        vault, "vault", allow_fallback=False
     )
+    recorded = EpistemicGraphIndex(vault)._relative_signatures(registry)
+    assert recorded[PAGE_B] == freshness.stat_signature(vault / PAGE_B), (
+        "retiring the mark must record the edit in the registry, not forget it"
+    )
+    assert EpistemicGraphIndex(vault).available() is False
 
 
 def test_an_incomplete_registry_history_is_class_b_not_c(

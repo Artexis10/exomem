@@ -97,7 +97,9 @@ def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> 
         assert expected_fragment in concise
 
     core = workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md"
-    core_text = core.read_text(encoding="utf-8")
+    core_text = core.read_text(encoding="utf-8") + (
+        core.parent / "references" / "semantic-authoring.md"
+    ).read_text(encoding="utf-8")
     assert core_text.count(concise) == 1
     workflow_skills.validate_contract_projection("exomem", core.parent, core=True)
     core_text = core.read_text(encoding="utf-8")

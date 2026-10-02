@@ -1,0 +1,138 @@
+{
+ "synchronous_FULL": [
+  {
+   "size": 1000,
+   "mode": "sync",
+   "synchronous": "FULL",
+   "seed_seconds": 1.4,
+   "append": {
+    "p50_ms": 2.56,
+    "p95_ms": 3.52
+   },
+   "guard_refresh": {
+    "p50_ms": 0.02,
+    "p95_ms": 0.03
+   },
+   "projection_lag_ms": null
+  },
+  {
+   "size": 1000,
+   "mode": "async",
+   "synchronous": "FULL",
+   "seed_seconds": 1.2,
+   "append": {
+    "p50_ms": 1.23,
+    "p95_ms": 1.6
+   },
+   "guard_refresh": {
+    "p50_ms": 0.02,
+    "p95_ms": 0.42
+   },
+   "projection_lag_ms": {
+    "p50_ms": 22.44,
+    "p95_ms": 33.98
+   }
+  },
+  {
+   "size": 10000,
+   "mode": "sync",
+   "synchronous": "FULL",
+   "seed_seconds": 8.8,
+   "append": {
+    "p50_ms": 2.98,
+    "p95_ms": 3.83
+   },
+   "guard_refresh": {
+    "p50_ms": 0.03,
+    "p95_ms": 0.04
+   },
+   "projection_lag_ms": null
+  },
+  {
+   "size": 10000,
+   "mode": "async",
+   "synchronous": "FULL",
+   "seed_seconds": 9.6,
+   "append": {
+    "p50_ms": 1.61,
+    "p95_ms": 2.76
+   },
+   "guard_refresh": {
+    "p50_ms": 0.04,
+    "p95_ms": 0.11
+   },
+   "projection_lag_ms": {
+    "p50_ms": 3.71,
+    "p95_ms": 5.95
+   }
+  }
+ ],
+ "synchronous_NORMAL": [
+  {
+   "size": 1000,
+   "mode": "sync",
+   "synchronous": "NORMAL",
+   "seed_seconds": 1.0,
+   "append": {
+    "p50_ms": 2.36,
+    "p95_ms": 3.08
+   },
+   "guard_refresh": {
+    "p50_ms": 0.02,
+    "p95_ms": 0.04
+   },
+   "projection_lag_ms": null
+  },
+  {
+   "size": 1000,
+   "mode": "async",
+   "synchronous": "NORMAL",
+   "seed_seconds": 1.3,
+   "append": {
+    "p50_ms": 0.1,
+    "p95_ms": 0.77
+   },
+   "guard_refresh": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.03
+   },
+   "projection_lag_ms": {
+    "p50_ms": 31.09,
+    "p95_ms": 59.24
+   }
+  },
+  {
+   "size": 10000,
+   "mode": "sync",
+   "synchronous": "NORMAL",
+   "seed_seconds": 9.2,
+   "append": {
+    "p50_ms": 1.81,
+    "p95_ms": 2.56
+   },
+   "guard_refresh": {
+    "p50_ms": 0.02,
+    "p95_ms": 0.03
+   },
+   "projection_lag_ms": null
+  },
+  {
+   "size": 10000,
+   "mode": "async",
+   "synchronous": "NORMAL",
+   "seed_seconds": 9.5,
+   "append": {
+    "p50_ms": 0.09,
+    "p95_ms": 0.78
+   },
+   "guard_refresh": {
+    "p50_ms": 0.01,
+    "p95_ms": 0.09
+   },
+   "projection_lag_ms": {
+    "p50_ms": 37.38,
+    "p95_ms": 66.94
+   }
+  }
+ ]
+}

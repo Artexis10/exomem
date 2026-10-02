@@ -76,7 +76,7 @@ def test_maximal_prominence_with_every_override_still_marks_confirm_required(
     root = tmp_path / "served-vault"
     (root / "Knowledge Base").mkdir(parents=True)
 
-    served = commands.op_bootstrap(root, profile="compact")["engagement"]["envelope"]
+    served = commands.op_bootstrap(root, profile="compact", section="all")["engagement"]["envelope"]
 
     assert served["level"] == "maximal"
     # The permissive settings really did land, so the assertion below is about
@@ -104,7 +104,7 @@ def test_the_served_contract_states_the_server_side_gap_rather_than_implying_it_
     root = tmp_path / "served-vault"
     (root / "Knowledge Base").mkdir(parents=True)
 
-    clause = commands.op_bootstrap(root, profile="compact")["engagement"]["envelope"][
+    clause = commands.op_bootstrap(root, profile="compact", section="all")["engagement"]["envelope"][
         "confirm_required"
     ].lower()
 
@@ -130,7 +130,7 @@ def test_the_served_contract_routes_additive_entity_creation_to_proactive_captur
     root = tmp_path / "served-vault"
     (root / "Knowledge Base").mkdir(parents=True)
 
-    envelope = commands.op_bootstrap(root, profile="compact")["engagement"]["envelope"]
+    envelope = commands.op_bootstrap(root, profile="compact", section="all")["engagement"]["envelope"]
     clause = " ".join(envelope["confirm_required"].lower().split())
 
     assert "on a personal vault, additive entity creation follows proactive_capture" in clause
@@ -207,7 +207,7 @@ def test_the_serving_path_refuses_a_forbidden_override_even_if_storage_lets_one_
         lambda: ({"restructure_execution": "silent"}, []),
     )
 
-    served = commands.op_bootstrap(root, profile="compact")["engagement"]["envelope"]
+    served = commands.op_bootstrap(root, profile="compact", section="all")["engagement"]["envelope"]
 
     assert served["classes"]["restructure_execution"]["disposition"] == "confirm", (
         "the scratch mutant proves nothing: the served marker did not depend on "
@@ -280,7 +280,7 @@ def test_a_class_set_to_off_blocks_no_explicit_request(config, tmp_path: Path) -
     advisory = structural_review_on_request(tmp_path / "advisory")
 
     envelope.set_disposition("structural_suggestions", "off")
-    served = commands.op_bootstrap(tmp_path / "advisory" / "vault", profile="compact")[
+    served = commands.op_bootstrap(tmp_path / "advisory" / "vault", profile="compact", section="all")[
         "engagement"
     ]["envelope"]
     assert served["classes"]["structural_suggestions"]["disposition"] == "off"

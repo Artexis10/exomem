@@ -2835,6 +2835,15 @@ def _install_hook_main(argv: list[str]) -> int:
         help="client hook config to wire/check (default: claude for install; both for --check)",
     )
     parser.add_argument(
+        "--activation-mode",
+        choices=("mcp", "working-set"),
+        help="profile-bound native MCP activation or direct working-set injection (default: legacy reminders)",
+    )
+    parser.add_argument(
+        "--hook-home",
+        help="profile-local hook state home (with --activation-mode; default: client/config directory)",
+    )
+    parser.add_argument(
         "--hook-dir",
         help="Where to write the hook scripts (default: ~/.claude/hooks or ~/.codex/hooks).",
     )
@@ -2895,6 +2904,8 @@ def _install_hook_main(argv: list[str]) -> int:
             )
 
     if args.uninstall:
+        if args.activation_mode or args.hook_home:
+            parser.error("--activation-mode/--hook-home are install/check options")
         if args.check or args.print_only:
             parser.error("--uninstall cannot be combined with --check or --print-only")
         if args.client == "all":
@@ -2930,8 +2941,8 @@ def _install_hook_main(argv: list[str]) -> int:
         return 0 if report["success"] else 1
 
     if args.check:
-        if (args.hook_dir or args.settings) and args.client in {None, "all"}:
-            parser.error("--hook-dir/--settings with --check require one explicit client")
+        if (args.hook_dir or args.settings or args.hook_home) and args.client in {None, "all"}:
+            parser.error("--hook-dir/--settings/--hook-home with --check require one explicit client")
         try:
             report = hook_module.check_hooks(
                 clients=(
@@ -2941,6 +2952,8 @@ def _install_hook_main(argv: list[str]) -> int:
                 ),
                 hook_dir=Path(args.hook_dir) if args.hook_dir else None,
                 settings_path=Path(args.settings) if args.settings else None,
+                activation_mode=args.activation_mode,
+                hook_home=Path(args.hook_home) if args.hook_home else None,
             )
         except ValueError as e:
             print(f"exomem install-hook --check: {e}", file=sys.stderr)
@@ -2952,9 +2965,9 @@ def _install_hook_main(argv: list[str]) -> int:
         return 0 if report["success"] else 1
 
     if args.client == "all":
-        if args.hook_dir or args.settings:
-            parser.error("--client all cannot be combined with --hook-dir or --settings")
-        report = hook_module.install_all_hooks(wire=not args.print_only)
+        if args.hook_dir or args.settings or args.hook_home:
+            parser.error("--client all cannot be combined with --hook-dir, --settings or --hook-home")
+        report = hook_module.install_all_hooks(wire=not args.print_only, activation_mode=args.activation_mode)
         if args.json:
             print(json.dumps(report))
         else:
@@ -2977,6 +2990,8 @@ def _install_hook_main(argv: list[str]) -> int:
             settings_path=args.settings,
             wire=not args.print_only,
             client=args.client or "claude",
+            activation_mode=args.activation_mode,
+            hook_home=Path(args.hook_home) if args.hook_home else None,
         )
     except (FileNotFoundError, OSError, RuntimeError, ValueError) as e:
         print(f"exomem install-hook: {e}", file=sys.stderr)
@@ -2994,7 +3009,9 @@ def _install_hook_main(argv: list[str]) -> int:
         print(f"Wired into {report['settings']}.")
         print_alternates(report)
         print(f"Restart {client_label} to activate. Triggers log to:")
-        home = "~/.codex" if report["client"] == "codex" else "~/.claude"
+        home = report["hook_home"] if args.activation_mode else (
+            "~/.codex" if report["client"] == "codex" else "~/.claude"
+        )
         print(f"  {home}/exomem-capture-nudge.log   (write / capture)")
         print(f"  {home}/exomem-retrieve-nudge.log  (read / retrieval)")
     else:
@@ -3042,6 +3059,36 @@ def _activate_main(argv: list[str]) -> int:
     parser.add_argument(
         "--workspace", default=None, help="opaque project key, recorded only as a hash"
     )
+    parser.add_argument(
+        "--focus",
+        default=None,
+        help="one line (at most 240 characters) naming the subjects now in play, "
+        "including names read from attachments; never a rewrite of the turn",
+    )
+    parser.add_argument(
+        "--recent-user",
+        action=_RecentEntryAction,
+        const="user",
+        dest="recent",
+        metavar="TEXT",
+        help="an earlier user turn; repeat, oldest first (kept in the order given)",
+    )
+    parser.add_argument(
+        "--recent-assistant",
+        action=_RecentEntryAction,
+        const="assistant",
+        dest="recent",
+        metavar="TEXT",
+        help="an earlier assistant turn; repeat, oldest first (kept in the order given)",
+    )
+    parser.add_argument(
+        "--conversation-ref",
+        action="append",
+        default=None,
+        dest="conversation_refs",
+        metavar="REF",
+        help="a page ref the conversation already read; repeatable",
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
@@ -3062,7 +3109,26 @@ def _activate_main(argv: list[str]) -> int:
         core += ["--session", args.session]
     if args.workspace:
         core += ["--workspace", args.workspace]
+    conversation: dict[str, object] = {}
+    if args.focus:
+        conversation["focus"] = args.focus
+    if args.recent:
+        conversation["recent"] = list(args.recent)
+    if args.conversation_refs:
+        conversation["refs"] = list(args.conversation_refs)
+    if conversation:
+        core += ["--conversation", json.dumps(conversation)]
     return _core_op_main(_with_json(core, args.json))
+
+
+class _RecentEntryAction(argparse.Action):
+    """`--recent-user` and `--recent-assistant` share one list, so the entries
+    keep the order they were given in across both flags."""
+
+    def __call__(self, parser, namespace, values, option_string=None):  # noqa: ANN001
+        entries = list(getattr(namespace, self.dest, None) or [])
+        entries.append({"role": self.const, "text": values})
+        setattr(namespace, self.dest, entries)
 
 
 def _simple_cli_action_names() -> frozenset[str]:

@@ -62,6 +62,13 @@ scheduler:
   contractSha256: 03ec8f7ae6f1a221ef8ac73e390be029b180df08e0b55806812496ea9fca7733
   secretName: exomem-hosted-scheduler
   secretKey: secret
+  jobs:
+    exomem-access-delivery:
+      servesCloud: true
+    exomem-reconcile:
+      servesCloud: true
+    exomem-export-gc:
+      servesCloud: false
 
 observability:
   contractSha256: 30671acff9bfc15fa825fbc72292f6435cf3ce994c0de04f4649ee46ee343f63
@@ -309,6 +316,10 @@ cells:
 
 cloudGateway:
   enabled: false
+  # Enable only after the matched web/gateway release, reviewer schema/grants,
+  # and dedicated complimentary sample account are verified. Ordinary Cloud
+  # accounts do not require this separate reviewer authority.
+  marketplaceReviewerAccessEnabled: false
   # Supplied by the reviewed Substrate gateway image release; never a mutable tag.
   image: ""
   replicas: 1

@@ -1096,6 +1096,10 @@ _GRAPH_REL = "Knowledge Base/Notes/graph-accounting.md"
 
 def _graph_deferral_report(code: str = "graph_repair_queued") -> index_sync.IndexSyncReport:
     """A batch report whose graph component deferred, everything else done."""
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1, mutation_id="1" * 24,
+        paths=((_GRAPH_REL, "a" * 64),), created_paths=(_GRAPH_REL,),
+    )
     return index_sync.IndexSyncReport(
         operation="upsert",
         requested_paths=(_GRAPH_REL,),
@@ -1105,7 +1109,9 @@ def _graph_deferral_report(code: str = "graph_repair_queued") -> index_sync.Inde
             index_sync.IndexComponentOutcome("resolver", "completed", "ok"),
             index_sync.IndexComponentOutcome("semantic_purge", "completed", "ok"),
             index_sync.IndexComponentOutcome("lexstore", "completed", "ok"),
-            index_sync.IndexComponentOutcome("epistemic_graph", "deferred", code),
+            index_sync._graph_component(
+                lambda: epistemic_graph.GraphDispatchResult("deferred", code, checkpoint)
+            ),
             index_sync.IndexComponentOutcome("embeddings", "completed", "ok"),
         ),
     )
@@ -1130,7 +1136,7 @@ def test_covered_graph_deferral_during_recovery_is_batch_success(
     assert index_sync.deferral_telemetry()["uncovered_deferral_escalated"] == 1
 
     # Now the deferral durably covers the batch's graph-input paths.
-    deferred_index.add_graph(tmp_path, [_GRAPH_REL])
+    deferred_index.add_graph(tmp_path, [_GRAPH_REL], generation=1)
     assert deferred_index.snapshot_graph(tmp_path) != []
 
     index_sync.reset_deferral_telemetry()
@@ -1154,6 +1160,68 @@ def test_uncovered_graph_deferral_still_fails_closed(tmp_path: Path) -> None:
     index_sync.reset_deferral_telemetry()
     assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
     assert index_sync.deferral_telemetry()["uncovered_deferral_escalated"] == 1
+
+
+@pytest.mark.parametrize("outcome", ("registered", "deferred"))
+def test_graph_completion_checks_its_dispatch_after_a_newer_epoch(
+    tmp_path: Path, outcome: str
+) -> None:
+    """A later checkpoint must not invalidate an older exact flight or queue."""
+    report = _graph_deferral_report()
+    checkpoint = _outcome(report, "epistemic_graph").graph_checkpoint
+    assert checkpoint is not None
+    later = graph_sync.GraphSyncCheckpoint.create(
+        generation=2, mutation_id="2" * 24,
+        paths=(("Knowledge Base/Notes/later.md", "b" * 64),), created_paths=(),
+    )
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    graph_sync._write_checkpoint(tmp_path, later)
+    if outcome == "registered":
+        graph_sync.register_deferred(tmp_path, checkpoint)
+        report = index_sync.with_component(report, index_sync._graph_component(
+            lambda: epistemic_graph.GraphDispatchResult(outcome, "graph_rebuild_registered", checkpoint)
+        ))
+    else:
+        deferred_index.add_graph(tmp_path, [_GRAPH_REL], generation=checkpoint.generation)
+    assert index_sync.full_upsert_succeeded(tmp_path, [tmp_path / _GRAPH_REL], report)
+    assert set(_outcome(report, "epistemic_graph").as_dict()) == {"component", "outcome", "code"}
+
+
+@pytest.mark.parametrize("outcome", ("registered", "deferred"))
+def test_a_missing_graph_dispatch_identity_cannot_borrow_the_global_checkpoint(
+    tmp_path: Path, outcome: str
+) -> None:
+    """Even a matching global registration cannot substantiate an unnamed result."""
+    report = _graph_deferral_report()
+    checkpoint = _outcome(report, "epistemic_graph").graph_checkpoint
+    assert checkpoint is not None
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(1))
+    graph_sync._write_checkpoint(tmp_path, checkpoint)
+    graph_sync.register_deferred(tmp_path, checkpoint)
+    report = index_sync.with_component(report, index_sync.IndexComponentOutcome(
+        "epistemic_graph", outcome, "graph_repair_queued"
+    ))
+    assert index_sync.full_upsert_succeeded(tmp_path, [tmp_path / _GRAPH_REL], report) is False
+
+
+@pytest.mark.parametrize("ack,accepted", (
+    (None, False),
+    (graph_sync.GraphBuildOutcome(1, "b" * 64), False),
+    (graph_sync.GraphBuildOutcome(2, "b" * 64), True),
+))
+def test_a_completed_graph_report_requires_covering_acknowledgement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ack, accepted: bool
+) -> None:
+    """Neither a pending flight nor a same-generation foreign digest is completion."""
+    report = _graph_deferral_report()
+    checkpoint = _outcome(report, "epistemic_graph").graph_checkpoint
+    assert checkpoint is not None
+    graph_sync.register_deferred(tmp_path, checkpoint)
+    monkeypatch.setattr(graph_sync, "acknowledged_checkpoint", lambda _root: ack)
+    report = index_sync.with_component(report, index_sync._graph_component(
+        lambda: epistemic_graph.GraphDispatchResult("completed", "incremental_completed", checkpoint)
+    ))
+    assert index_sync.full_upsert_succeeded(tmp_path, [tmp_path / _GRAPH_REL], report) is accepted
 
 
 def test_graph_deferral_without_a_coverage_claiming_code_fails_closed(

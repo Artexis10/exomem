@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -71,7 +72,9 @@ def live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("EXOMEM_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
-    monkeypatch.setattr(embeddings, "get_model", lambda: object())
+    model = SimpleNamespace(texts_fit=lambda _texts: True)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(embeddings, "get_model", lambda: model)
     readiness.reset()
     encoder = _Encoder()
     monkeypatch.setattr(embeddings, "embed_texts", encoder)
@@ -263,7 +266,7 @@ def test_handed_on_vectors_are_bounded_and_released_with_the_model(live, monkeyp
 
 
 def _model_tag(name: str) -> float:
-    return float(sum(name.encode("utf-8")) % 997 + 1)
+    return float(np.float32((sum(name.encode("utf-8")) % 997 + 1) / 1000))
 
 
 class _TaggedModel:
@@ -284,8 +287,12 @@ class _TaggedModel:
         self._log.extend((self.name, text) for text in texts)
         out = np.zeros((len(texts), embeddings.VECTOR_DIM), dtype=np.float32)
         out[:, 0] = self.tag
-        out[:, 1] = [float(sum(text.encode("utf-8")) % 9973) for text in texts]
+        out[:, 1] = [float(sum(text.encode("utf-8")) % 9973) / 100000 for text in texts]
+        out[:, 2] = np.sqrt(1.0 - out[:, 0] ** 2 - out[:, 1] ** 2)
         return out
+
+    def texts_fit(self, texts) -> bool:
+        return True  # This synthetic encoder reads complete texts without a cap.
 
     def release(self) -> None:
         pass

@@ -495,7 +495,7 @@ def test_bootstrap_teaches_how_to_read_the_block(
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
     (tmp_path / "Knowledge Base").mkdir()
 
-    payload = commands.op_bootstrap(tmp_path, profile="compact")
+    payload = commands.op_bootstrap(tmp_path, profile="compact", section="all")
     handling = payload["authoring_contract"]["post_write"]["capture_sweep_handling"]
 
     assert "example" in handling.lower()
@@ -510,7 +510,11 @@ def test_the_session_projection_carries_the_handling_entry(
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
     (tmp_path / "Knowledge Base").mkdir()
 
-    session = commands.op_bootstrap(tmp_path, profile="session")
+    from exomem import workflow_skills
+
+    session = commands.op_bootstrap(
+        tmp_path, profile="session", skill_contract=workflow_skills.skill_contract()
+    )
 
     assert "capture_sweep_handling" in session["authoring_contract"]["post_write"]
 
@@ -574,7 +578,7 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
 def test_the_compact_bootstrap_budget_is_not_raised() -> None:
     from tests.test_bootstrap_compact_budget import COMPACT_BYTE_CEILING
 
-    assert COMPACT_BYTE_CEILING == 63_300
+    assert COMPACT_BYTE_CEILING == 15_000
 
 
 # ----------------------------------------------------- registry exclusion (D6)
@@ -755,3 +759,37 @@ def test_every_batch_scope_is_paired_with_the_shared_batch_carrier() -> None:
         "these commands open a batch scope without the shared batch carrier, so "
         f"their episode boundary is silently swallowed: {sorted(opens_scope - carries)}"
     )
+
+
+def test_the_sweep_rule_puts_contact_details_in_the_entity_contact_section(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock, tmp_path: Path
+) -> None:
+    """A person's role goes to their entity; contact details go in its Contact
+    section as `contact` units, which activation serves only on demand. The
+    rule is the only prose on the wire, so it says so."""
+    _caller(monkeypatch, **HTTP_PRINCIPAL)
+
+    block = capture_sweep.block(tmp_path)
+
+    assert block is not None
+    rule = block["rule"].lower()
+    assert "role" in rule and "entity" in rule
+    assert "contact details" in rule and "contact section" in rule and "contact units" in rule
+    assert "contact detail" in block["consider"]
+    # The advisory grows by the new rule and one example, nothing else.
+    assert [item for item in block["consider"] if item != "contact detail"] == [
+        "conclusion",
+        "outcome or state change",
+        "stable preference",
+        "method or parameter",
+        "entity facet",
+        "operational or vendor quirk",
+        "evidence worth preserving",
+        "relation",
+        "planning implication",
+        "record implication",
+    ]
+
+
+def test_the_sweep_rule_stays_within_its_wire_cap() -> None:
+    assert len(capture_sweep.RULE) <= 400

@@ -45,6 +45,7 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "tool_failure": EventSpec(content_fields=frozenset({"message"})),
     "rest_failure": EventSpec(content_fields=frozenset({"message"})),
     "hosted_call": EventSpec(),
+    "onnx_runtime_shape": EventSpec(),
     "log_write_error": EventSpec(content_fields=frozenset({"message"})),
     "observability_internal_error": EventSpec(content_fields=frozenset({"message"})),
     "http_request": EventSpec(content_fields=frozenset({"client_ip", "host", "path"})),

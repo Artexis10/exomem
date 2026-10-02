@@ -71,6 +71,7 @@ from . import entity_types as entity_types_module
 from . import envelope as envelope_module
 from . import episode_memory as episode_memory_module
 from . import episode_workflow as episode_workflow_module
+from . import bootstrap_core as bootstrap_core_module
 from . import episode_nudge as episode_nudge_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
@@ -136,6 +137,7 @@ from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
 from . import workflow_skills as workflow_skills_module
 from . import working_set as working_set_module
+from . import working_set_conversation as working_set_conversation_module
 from . import working_set_heat as working_set_heat_module
 from . import working_set_index as working_set_index_module
 from . import working_set_learning as working_set_learning_module
@@ -455,6 +457,7 @@ def _video_frames_module():
 FindHit = retrieval_models.PageHit
 RetrievalHit = retrieval_models.RetrievalHit
 FindEnvelope = retrieval_models.FindEnvelope
+RecallResult = retrieval_models.RecallResult
 
 
 class SearchResult(TypedDict):
@@ -821,6 +824,7 @@ def op_bootstrap(
     profile: str = "compact",
     workflow: str | None = None,
     skill_contract: str | None = None,
+    section: str | None = None,
 ) -> dict:
     """Return Exomem's versioned operating contract and live session state.
 
@@ -832,6 +836,7 @@ def op_bootstrap(
     differ from raw sources/evidence, and how Exomem differs from built-in AI
     memory. The payload is deterministic instruction plus local compute policy
     and product-surface metadata; it does not inspect or summarize vault content.
+    Compact is a core; its `sections` block lists the rest, fetched with `section`.
 
     Args:
         profile: "compact" (default), "full", "diagnostics", or "session".
@@ -842,6 +847,8 @@ def op_bootstrap(
         skill_contract: Installed skill metadata digest required for the session
             profile. An absent or stale digest returns compact in this call with
             a closed unavailable reason.
+        section: With the compact profile, one named block group of the operating
+            contract ("index" lists them). Absent, compact returns the core.
 
     Returns:
         A structured, versioned contract with workflow, search, save, upload,
@@ -852,6 +859,14 @@ def op_bootstrap(
             "bootstrap: profile must be 'compact', 'full', 'diagnostics', or 'session', "
             f"got {profile!r}"
         )
+    if section is not None:
+        if section not in bootstrap_core_module.accepted_sections():
+            raise ValueError(
+                "bootstrap: section must be one of "
+                f"{', '.join(bootstrap_core_module.accepted_sections())}, got {section!r}"
+            )
+        if profile != "compact":
+            raise ValueError("bootstrap: section requires profile='compact'")
 
     session_requested = profile == "session"
     session_unavailable: str | None = None
@@ -890,7 +905,32 @@ def op_bootstrap(
         capture_gate=engagement_policy["contract"]["effective_capture"],
     )
     active_descriptor = _active_bootstrap_descriptor()
+    # A released hosted profile is a published identity: it keeps the complete
+    # compact payload and its pinned parameter list, which has no `section`.
+    frozen_profile = (
+        active_descriptor.profile in hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS
+    )
+    if frozen_profile and section is not None:
+        raise ValueError("bootstrap: section is not available on this surface profile")
+    # Where the compact core points for the vocabulary workflow's full contract: it is
+    # served on demand in a section, and a released profile keeps its published text.
+    vocabulary_workflow_home = (
+        " (section entities)" if profile == "compact" and not frozen_profile else ""
+    )
     active_product_names = frozenset(active_descriptor.product_commands)
+    # The recall contract opens with a line that names `activate_context`. Where the
+    # surface does not export it (hosted), the filter below would drop the WHOLE recall
+    # contract; carry the same instruction through `ask_memory` instead. A released
+    # profile keeps its published payload.
+    recall = engagement_policy["contract"].get("recall")
+    if (
+        not frozen_profile
+        and isinstance(recall, str)
+        and "activate_context" not in active_descriptor.callable_commands
+    ):
+        engagement_policy["contract"]["recall"] = recall.replace(
+            prominence_module.ACTIVATION_CARRIER_LINE, prominence_module.ASK_MEMORY_CARRIER_LINE
+        )
     # `change_with` is seeded from the CLI string, which is right for a local
     # install and wrong for every served surface. Take it from what this surface
     # actually offers: the agent-accessible control when it is served, and
@@ -1655,7 +1695,7 @@ def op_bootstrap(
                 ),
                 "reason in the agent",
                 (
-                    "before saving, use vocabulary_workflow to resolve recurring identities "
+                    f"before saving, use vocabulary_workflow{vocabulary_workflow_home} to resolve recurring identities "
                     "and useful relationship meanings; enrich existing entities, and define "
                     "a missing type when existing types would distort the evidence. Keep "
                     "incidental names unpromoted; generic/no-edge/defer remain valid."
@@ -2129,20 +2169,18 @@ def op_bootstrap(
     #
     # Inside the command's own disclosure boundary: this aggregates across pages,
     # so the release plane has to decide every path before anything is counted.
+    due_block: dict | None = None
     try:
         from . import due_state as due_state_module
 
         with egress_module.disclosure_boundary(vault_root, "bootstrap"):
             due_block = due_state_module.served(vault_root)
         if due_block is not None:
-            # Attached unconditionally, then RECORDED. The attachment stays
-            # unconditional because a session opening on a reduced surface has no
-            # other way to hear about this at all, so bootstrap is not governed by
-            # emission. But it is still a delivery: without marking it, the first
-            # recall of the session repeats the identical block, which is the exact
-            # nagging the governor exists to prevent.
+            # Attached unconditionally, and RECORDED only where the full block is
+            # actually handed over (see the end of this function): the compact core
+            # serves a counts summary, and recording that as the delivery would burn
+            # the session's one emission, so the next recall would omit the list.
             payload["due_state"] = due_block
-            due_state_module.mark_emitted(due_block, vault_root=vault_root)
     except Exception:  # noqa: BLE001 — a due-state count never breaks a bootstrap
         log.debug("due-state projection unavailable for bootstrap", exc_info=True)
     compact_payload = _filter_bootstrap_payload(payload, active_descriptor)
@@ -2156,19 +2194,49 @@ def op_bootstrap(
         **{key: compact_payload[key] for key in first if key in compact_payload},
         **compact_payload,
     }
-    if session_unavailable is not None:
-        result = compact_payload | {"session_profile_unavailable": session_unavailable}
-    elif session_requested:
-        result = _session_bootstrap_projection(compact_payload)
+    if frozen_profile or profile != "compact":
+        core_payload = None
     else:
-        result = compact_payload
-    # After every projection, so the session profile's key whitelist cannot
-    # drop it: the client on a reduced surface is exactly the one with no other
-    # way to hear that its own recalls have gone slow. Absent when healthy, so a
-    # healthy bootstrap keeps today's shape on every profile.
+        core_payload = bootstrap_core_module.project_core(compact_payload)
+    # The calling client's own recall-latency breaches. The core carries only a pointer
+    # (the figures are bounded only by how many tools breach, and no turn needs them);
+    # they ride in the reference payload, so `diagnostics_reading` serves them and a session
+    # client, which has no other way to hear that its recalls went slow, gets them too.
     latency_block = _bootstrap_latency_block()
-    if latency_block is not None:
+    if latency_block is not None and core_payload is not None:
+        compact_payload = {**compact_payload, "latency": latency_block}
+        # The core carries the fact, not the figures: a client that has gone slow
+        # learns it and where the detail is, at no cost while the service is healthy.
+        core_payload["latency"] = bootstrap_core_module.LATENCY_POINTER
+    if section is not None:
+        result = bootstrap_core_module.section_payload(compact_payload, section)
+    elif session_unavailable is not None:
+        result = (core_payload or compact_payload) | {
+            "session_profile_unavailable": session_unavailable
+        }
+    elif session_requested:
+        result = (
+            bootstrap_core_module.project_session(compact_payload, core_payload)
+            if core_payload is not None
+            else _session_bootstrap_projection(compact_payload)
+        )
+    else:
+        result = core_payload if core_payload is not None else compact_payload
+    # A surface that serves no core (a released hosted profile, `full`, `diagnostics`)
+    # keeps today's shape: absent when healthy, appended after the projection so the
+    # session whitelist cannot drop it.
+    if latency_block is not None and core_payload is None:
         result["latency"] = latency_block
+    # A delivery is recording what was handed over. Without it the first recall of the
+    # session repeats the identical block, the nagging the governor exists to prevent;
+    # with it on a summary, the list is never delivered at all. So: only a response
+    # that carries the full block records it (a session, `all`, `epistemics`, `full`,
+    # `diagnostics` and the released profiles), never the core or another section.
+    if due_block is not None and result.get("due_state") == due_block:
+        try:
+            due_state_module.mark_emitted(due_block, vault_root=vault_root)
+        except Exception:  # noqa: BLE001 — a ledger write never breaks a bootstrap
+            log.debug("due-state emission not recorded for bootstrap", exc_info=True)
     return result
 
 
@@ -6021,7 +6089,7 @@ def op_ask_memory(
     include_timings: bool = False,
     explain: bool = False,
     purpose: str | None = None,
-) -> list[RetrievalHit] | FindEnvelope:
+) -> RecallResult:
     """Recall durable knowledge from Exomem with product defaults.
 
     This is the normal first read: search compiled knowledge, sources,
@@ -6212,6 +6280,7 @@ def op_activate_context(
     client: str | None = None,
     session: str | None = None,
     workspace: str | None = None,
+    conversation: dict[str, Any] | None = None,
 ) -> dict:
     """Compile durable context for a raw conversational turn, without a query.
 
@@ -6256,6 +6325,13 @@ def op_activate_context(
     where that thread holds one page clearly ahead of the rest, it is carried
     as a single `partial` anchor with `generation.carried_by: "follow_up"`;
     where two are close, both are listed under `ambiguity` for `anchor`.
+
+    In a long thread or with attachments, also pass `conversation` (optional,
+    server-bounded): `focus`, one line naming the subjects in play, attachment
+    names included; `refs`, pages you read; `recent`, earlier `{role, text}`
+    turns. Anchors report `origin`. Details: the skill's engagement reference.
+
+    Call again with `focus` for a subject the hook missed.
 
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
@@ -6355,6 +6431,9 @@ def op_activate_context(
             Only a salted hash of it is stored. Omitting both keys, a turn
             that names nothing is answered from this conversation's
             `continuity` thread alone, never from other conversations' work.
+        conversation: Optional: `{focus?: str, recent?: [{role:
+            "user"|"assistant", text: str}], refs?: [str]}`. Anything else is
+            ignored, never an error.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
@@ -6422,6 +6501,7 @@ def op_activate_context(
     # all. `session` has one other reader, the upkeep carrier below, where it
     # names the caller whose session start may carry one upkeep item.
     started = time.perf_counter()
+    bounded = working_set_conversation_module.bound(conversation)
     # A foreground request: in-process bulk passes (a whole-vault graph
     # rebuild) pause at their next unit while this runs, instead of taking the
     # GIL back after every SQLite call the request makes (5-15x per stage,
@@ -6446,6 +6526,7 @@ def op_activate_context(
                 client=client,
                 session=session,
                 workspace=workspace,
+                conversation=bounded,
             )
             # After the guard and outside the packet cache, like `continuity`:
             # at a caller's session start, at most one upkeep item, and only in
@@ -6465,6 +6546,7 @@ def op_activate_context(
                 outcome="refused" if isinstance(error, ValueError) else "error",
                 error_code=type(error).__name__,
                 duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                conversation=bounded.counts,
             )
             raise
         finally:
@@ -6472,12 +6554,17 @@ def op_activate_context(
                 request_budget_module.reset_current(bound_token)
     _carry_thread_through_abstention(packet, continuity)
     _withhold_vault_generation(vault_root, packet, purpose=purpose)
+    # Every packet reports how its conversation was bounded; the compiler has
+    # already said `absent` when it skipped the stage for the request's budget.
+    if isinstance(packet.get("generation"), dict):
+        packet["generation"].setdefault("conversation", bounded.state)
     query_log.log_activation_call(
         vault_root,
         packet=packet,
         client=client,
         session=session,
         duration_ms=round((time.perf_counter() - started) * 1000, 3),
+        conversation=bounded.counts,
     )
     return packet
 
@@ -6541,6 +6628,7 @@ def _op_activate_context_body(
     client: str | None = None,
     session: str | None = None,
     workspace: str | None = None,
+    conversation: working_set_conversation_module.Conversation | None = None,
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
@@ -6913,6 +7001,7 @@ def _op_activate_context_body(
         freshness_snapshot=snapshot,
         lexical_seconds=lexical_seconds,
         attribution=attribution,
+        conversation=conversation,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —
@@ -12017,6 +12106,7 @@ def op_record_memory(
         "query",
         "create",
         "append",
+        "bulk_upsert",
         "update",
         "revise",
         "rebaseline",
@@ -12054,6 +12144,9 @@ def op_record_memory(
     refresh_presentation: bool | None = None,
     held: str | None = None,
     hold: bool | None = None,
+    rows: list[dict[str, Any]] | None = None,
+    source: str | None = None,
+    on_reject: Literal["abort", "skip"] | None = None,
 ) -> dict[str, Any]:
     """Capture, inspect, and govern durable observed state in one Records command.
 
@@ -12063,8 +12156,8 @@ def op_record_memory(
     if none fits, describe and propose a concise collection before explicit create.
 
     Args:
-        action: Exactly one of describe, validate, inspect, query, create, append, update, revise, rebaseline, or discard.
-        collection: Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, rebaseline, and discard.
+        action: Exactly one of describe, validate, inspect, query, create, append, bulk_upsert, update, revise, rebaseline, or discard.
+        collection: Optional for inventory inspect; required for targeted inspect, query, revision validate, append, bulk_upsert, update, revise, rebaseline, and discard.
         manifest_path: Proposed manifest path for create-mode validate or create.
         manifest_text: Complete proposed manifest text for validate, create, or revise.
         why: Audit reason for create, append, update, revise, or rebaseline.
@@ -12087,7 +12180,7 @@ def op_record_memory(
         item: Values for append; shallow overrides when resuming a held candidate.
         item_key: The item's internal UUID identity, required for update. Omit it on
             append and identity derives from the collection's declared natural key.
-        expected_container_hash: Exact current container hash for append, update, revise, or rebaseline.
+        expected_container_hash: Exact current container hash for append, bulk_upsert, update, revise, or rebaseline.
         expected_manifest_hash: Exact current manifest hash for revise or rebaseline.
         acknowledged_gap_codes: Exact inspect-reported gap codes for rebaseline.
         body: Optional Markdown body for append.
@@ -12103,6 +12196,13 @@ def op_record_memory(
         hold: Set false to refuse an invalid candidate without holding it. A refused
             append or update otherwise preserves the complete candidate as a held
             file under the collection and returns its reference beside the refusal.
+        rows: bulk_upsert only: 1 to 50 objects of `item`, optional `body` and
+            optional `source`, all committed under the one expected_container_hash.
+            Each row reports inserted, updated, unchanged or rejected.
+        source: bulk_upsert only: default provenance, the path of a preserved Sources
+            or Evidence page, for rows that name none.
+        on_reject: bulk_upsert only: abort (default) writes nothing if any row is
+            rejected and reports every would-be outcome; skip commits the rest.
     """
     return record_memory_module.record_memory(
         vault_root,
@@ -12139,6 +12239,9 @@ def op_record_memory(
         refresh_presentation=refresh_presentation,
         held=held,
         hold=hold,
+        rows=rows,
+        source=source,
+        on_reject=on_reject,
     )
 
 

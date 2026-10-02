@@ -67,6 +67,12 @@ turn. A covered ledger is not read again until the session moves its workflow.
 A session that never prepared a candidate never reads it, and an unreachable
 door leaves the turn as it was.
 
+Native-MCP activation mode (`EXOMEM_RETRIEVE_INJECT=mcp`, or the explicit
+`--activation-mode mcp`) disables both external inspection paths, including
+credential resolution. Transcript-based record detection and local episode
+bookkeeping stay active. `--client` and `--hook-home` bind them to the installed
+profile rather than the shared script directory.
+
 Contract (Claude Code / Codex Stop hook): read the event JSON on stdin; print
 `{"decision":"block","reason":...}` and exit 0 to block the stop and feed the
 reminder to the agent; exit 0 with no output to allow the stop. Never raises — a
@@ -75,7 +81,9 @@ hook crash must not break the session.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -84,6 +92,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from functools import lru_cache
 from pathlib import Path
 
 # KB write tools — mixed tools include their operation selector so read-only
@@ -134,15 +143,24 @@ REMINDER = (
 )
 
 
+#: The short capture check, sent on every fire after a session's first (which carries
+#: the full `REMINDER`, once, and again after a compaction). The full doctrine is in
+#: the served core and in `REMINDER`; a fire that repeats it dozens of times in one
+#: session only spends context. Keeps the incident rules by name.
+REMINDER_SHORT = (
+    "[Exomem capture check] Capture a durable decision, outcome or stable fact per live "
+    "policy: distil, no transcripts; replace_memory supersedes a contradicted conclusion; "
+    "stated intent -> Planning/plan_memory, observed outcome -> Records/record_memory; "
+    "transient code/test/CI stays out. Nothing durable: stop."
+)
+
 #: The episode ask. Its own constant, so `REMINDER`'s bytes (and every pin on
 #: them) stay exactly as they were. `{key}` is the session's episode key.
 EPISODE_ASK = (
-    "[Exomem episode check] Several substantive turns have passed since this "
-    "session's last episode record. If the conversation reached a decision or a "
-    'stopping point, call episode_memory once with action="record", '
-    'episode="{key}", a one-line subject and summary, and short worked_on, decided '
-    "and open items; add said only for a user statement worth keeping verbatim. "
-    "Distil; no transcript. If nothing durable happened, do nothing."
+    "[Exomem episode check] If the conversation reached a decision or a stopping point, "
+    'call episode_memory once: action="record", episode="{key}", a one-line subject and '
+    "summary, short worked_on, decided and open items; said only for a user statement worth "
+    "keeping verbatim. Distil; no transcript. Otherwise do nothing."
 )
 #: The candidate-coverage ask (task 4.1), with its own prefix. `{key}` is the
 #: episode whose candidates the session prepared, `{next}` its ledger's next step.
@@ -278,10 +296,19 @@ def _hook_client() -> str:
 
 
 def _hook_home() -> Path:
-    explicit = os.environ.get("EXOMEM_HOOK_HOME")
-    if explicit:
-        return Path(explicit).expanduser()
-    return Path.home() / (".codex" if _hook_client() == "codex" else ".claude")
+    """The client's state home. Mirrors `resolve_home` in
+    `exomem_continuation_checkpoint.py` exactly (a standalone script cannot import
+    its sibling): the checkpoint hook clears this hook's stamps under that home on a
+    compaction, so the two MUST resolve alike or the re-arm misses. Pinned by
+    `tests/test_nudge_diet.py::test_every_hook_resolves_its_home_the_way_the_checkpoint_does`.
+    """
+    env = os.environ
+    shared = env.get("EXOMEM_HOOK_HOME")
+    if shared:
+        return Path(shared).expanduser()
+    if _hook_client() == "codex":
+        return Path(env.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+    return Path(env.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
 
 
 def _content_blocks(msg: dict) -> list[dict]:
@@ -572,8 +599,7 @@ def _read_episode_state(path: Path) -> dict:
 
 def _write_episode_state(path: Path, state: dict) -> None:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state), encoding="utf-8")
+        _state_core().write_nudge_file(path, json.dumps(state).encode("utf-8"))
     except Exception:  # noqa: BLE001 — the counter is strictly best-effort
         pass
 
@@ -730,6 +756,8 @@ def _episode_door(action: str, key: str) -> dict | None:
     binding it as a default parameter, so a test (or a future tuning knob)
     that reassigns the module constant actually changes the bound used here.
     """
+    if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
+        return None
     timeout = _EPISODE_DOOR_TIMEOUT_SECONDS
 
     def _call() -> dict | None:
@@ -901,6 +929,8 @@ def _exomem_tool_seen(tools: list[dict]) -> bool:
 
 def _restart_pending(tools: list[dict]) -> bool:
     """True while the MCP write tools the reminder asks for cannot exist yet."""
+    if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
+        return False
     marker = _pending_restart_marker()
     try:
         if not marker.exists():
@@ -928,10 +958,18 @@ def _cooldown_ok(session_id: str, cooldown: int) -> tuple[bool, Path]:
     return True, stamp
 
 
+@lru_cache(maxsize=1)
+def _state_core():
+    path = Path(__file__).with_name("exomem_continuation_checkpoint.py")
+    spec = importlib.util.spec_from_file_location("_exomem_nudge_state", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _touch(stamp: Path) -> None:
     try:
-        stamp.parent.mkdir(parents=True, exist_ok=True)
-        stamp.write_text(str(time.time()), encoding="utf-8")
+        _state_core().write_nudge_file(stamp, str(time.time()).encode("utf-8"))
     except Exception:  # noqa: BLE001 — the advisory marker is strictly best-effort
         pass
 
@@ -939,15 +977,45 @@ def _touch(stamp: Path) -> None:
 def _log(text: str) -> None:
     try:
         logp = _hook_home() / "exomem-capture-nudge.log"
-        logp.parent.mkdir(parents=True, exist_ok=True)
-        snippet = re.sub(r"\s+", " ", text)[-160:]
-        with open(logp, "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge fired | {snippet}\n")
+        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge fired\n"
+        _state_core().write_nudge_file(logp, row.encode("utf-8"), append=True)
     except Exception:  # noqa: BLE001 — logging must never break a stop hook
         pass
 
 
-def main() -> int:
+def _capture_reason(reason: str) -> str:
+    if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
+        return (
+            "Through the admitted Exomem native MCP, bootstrap if the live operating "
+            "contract is absent and check live capture capabilities first. "
+            "If not connected or capture is unavailable, skip this reminder; "
+            "do not assume writes are available.\n\n" + reason
+        )
+    return reason
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--client", choices=("claude", "codex"))
+    home = parser.add_mutually_exclusive_group()
+    home.add_argument("--hook-home")
+    home.add_argument("--hook-home-env")
+    parser.add_argument("--activation-mode", choices=("mcp", "working-set"))
+    try:
+        args = parser.parse_args(argv or [])
+    except SystemExit:
+        return 0
+    if args.hook_home_env is not None:
+        args.hook_home = os.environ.get(args.hook_home_env)
+        if not args.hook_home or not args.hook_home.strip():
+            return 0  # An unavailable platform home must not fall back to a local profile.
+    for name, value in (
+        ("EXOMEM_HOOK_CLIENT", args.client),
+        ("EXOMEM_HOOK_HOME", args.hook_home),
+        ("EXOMEM_RETRIEVE_INJECT", args.activation_mode),
+    ):
+        if value is not None:
+            os.environ[name] = value
     _normalize_env_aliases()
     if os.environ.get("EXOMEM_CAPTURE_NUDGE_DISABLE"):
         return 0
@@ -998,7 +1066,7 @@ def main() -> int:
     )
     if ask is not None:
         _log(assistant_text)
-        print(json.dumps({"decision": "block", "reason": ask}))
+        print(json.dumps({"decision": "block", "reason": _capture_reason(ask)}))
         return 0
     attempted = any(_successful_kb_write(tool) for tool in tools) or bool(
         re.search(r"Saved\s*(?:->|→|:)", assistant_text)
@@ -1012,11 +1080,14 @@ def main() -> int:
     if not ok:  # fired recently this session — keep cost bounded
         return 0
 
+    # The full doctrine once per session (the stamp is cleared on compaction, which
+    # rewrites the context it lived in); every later fire is the short check.
+    first_fire = not stamp.exists()
     _touch(stamp)
     _log(assistant_text)
-    print(json.dumps({"decision": "block", "reason": REMINDER}))
+    print(json.dumps({"decision": "block", "reason": _capture_reason(REMINDER if first_fire else REMINDER_SHORT)}))
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

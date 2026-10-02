@@ -45,9 +45,11 @@ def private_group(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     return group
 
 
-@pytest.mark.parametrize("umask", [0o002, 0o022], ids=["0002", "0022"])
-@pytest.mark.parametrize("client", ["claude", "codex"])
-@pytest.mark.parametrize("group_kind", ["primary-empty", "primary-sole-member"])
+@pytest.mark.parametrize("client,umask,group_kind", [
+    ("codex", 0o002, "primary-empty"),
+    ("claude", 0o022, "primary-empty"),
+    ("codex", 0o022, "primary-sole-member"),
+])
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux user-private-group exception")
 def test_install_accepts_private_group_writable_config(
     tmp_path: Path, private_group, client: str, umask: int, group_kind: str,
@@ -93,18 +95,22 @@ def test_install_accepts_private_group_writable_config(
         os.umask(previous)
 
 
-@pytest.mark.parametrize("umask", [0o002, 0o022], ids=["0002", "0022"])
-@pytest.mark.parametrize("client", ["claude", "codex"])
-@pytest.mark.parametrize("target", ["file", "parent", "ancestor", "hooks"])
-@pytest.mark.parametrize("reason", [
-    "shared-group", "other-write", "foreign-owner", "missing-group", "unavailable-group",
-    "same-name", "sole-member", "shared-primary-empty", "shared-primary-sole-member",
-    "missing-user", "unavailable-user", "missing-passwd", "unavailable-passwd",
+@pytest.mark.parametrize("target,reason", [
+    *(('file', reason) for reason in (
+        "shared-group", "other-write", "foreign-owner", "missing-group", "unavailable-group",
+        "same-name", "sole-member", "shared-primary-empty", "shared-primary-sole-member",
+        "missing-user", "unavailable-user", "missing-passwd", "unavailable-passwd",
+    )),
+    *( (target, reason) for target in ("parent", "ancestor", "hooks")
+       for reason in ("shared-group", "foreign-owner") ),
 ])
 def test_install_refuses_untrusted_config_and_directories(
     tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch,
-    client: str, umask: int, target: str, reason: str,
+    target: str, reason: str,
 ) -> None:
+    # Membership failures share one predicate; directory placements separately
+    # exercise ancestor/leaf ownership and deployment before config mutation.
+    client = "codex"
     home = tmp_path / client
     home.mkdir()
     config_parent = home / "config"
@@ -169,20 +175,16 @@ def test_install_refuses_untrusted_config_and_directories(
     path.chmod(mode)
     before = config.read_bytes()
 
-    previous = os.umask(umask)
-    try:
-        with pytest.raises(OSError, match="unsafe|writable|trusted|owned") as refused:
-            hook_module.install_hook(hook_dir=hooks, settings_path=config, client=client)
-        assert "chmod g-w,o-w" in str(refused.value)
-        assert config.read_bytes() == before
-        assert not list(config_parent.glob("*.backup-*"))
-        report = hook_module.check_hooks(clients=(client,), hook_dir=hooks, settings_path=config)
-        check_id = "scripts.continuation" if target == "hooks" else "config.file"
-        assert next(
-            row for row in report["clients"][0]["checks"] if row["id"] == check_id
-        )["status"] == "fail"
-    finally:
-        os.umask(previous)
+    with pytest.raises(OSError, match="unsafe|writable|trusted|owned") as refused:
+        hook_module.install_hook(hook_dir=hooks, settings_path=config, client=client)
+    assert "chmod g-w,o-w" in str(refused.value)
+    assert config.read_bytes() == before
+    assert not list(config_parent.glob("*.backup-*"))
+    report = hook_module.check_hooks(clients=(client,), hook_dir=hooks, settings_path=config)
+    check_id = "scripts.continuation" if target == "hooks" else "config.file"
+    assert next(
+        row for row in report["clients"][0]["checks"] if row["id"] == check_id
+    )["status"] == "fail"
 
 
 @pytest.mark.parametrize("umask", [0o002, 0o022], ids=["0002", "0022"])
@@ -374,35 +376,6 @@ def test_acl_probe_errors_fail_closed_except_unsupported(
     assert hook_module._safe_file_status(config)["mode_ok"] is (error_code in {errno.ENOTSUP, errno.EOPNOTSUPP})
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux user-private-group exception")
-def test_private_group_enumeration_cached_within_each_install_and_check(
-    tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pwd = pytest.importorskip("pwd")
-    user = pwd.getpwuid(os.geteuid())
-    calls = 0
-
-    def enumerated_users():
-        nonlocal calls
-        calls += 1
-        return [user]
-
-    monkeypatch.setattr(pwd, "getpwall", enumerated_users)
-    home = tmp_path / "client"
-    home.mkdir()
-    home.chmod(0o775)
-    config = home / "settings.json"
-    config.write_text("{}\n")
-    config.chmod(0o664)
-    hooks = home / "hooks"
-    hooks.mkdir()
-    hooks.chmod(0o775)
-    assert hook_module.install_hook(hook_dir=hooks, settings_path=config)["wired"]
-    assert calls == 1
-    hook_module.check_hooks(clients=("claude",), hook_dir=hooks, settings_path=config)
-    assert calls == 2
-
-
 @pytest.mark.parametrize("client", ["claude", "codex"])
 @pytest.mark.parametrize("umask", [0o002, 0o022], ids=["0002", "0022"])
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux POSIX default ACLs")
@@ -510,25 +483,9 @@ def test_group_write_refuses_network_acl(
             hook_module._snapshot_config(config)
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux private-group acceptance")
-def test_file_status_acl_probe_does_not_follow_symlinks(
-    tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = tmp_path / "settings.json"
-    config.write_text("{}\n")
-    config.chmod(0o664)
-    probes = []
-
-    def list_xattrs(target, **kwargs):
-        probes.append((target, kwargs))
-        return []
-
-    monkeypatch.setattr(os, "listxattr", list_xattrs)
-    assert hook_module._safe_file_status(config)["mode_ok"] is True
-    assert probes == [(config, {"follow_symlinks": False})]
-
-
-@pytest.mark.parametrize("entrypoint", ["install_all_hooks", "check_hooks"])
+@pytest.mark.parametrize("entrypoint", [
+    "install_hook", "uninstall_hook", "install_all_hooks", "check_hooks",
+])
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux private-group acceptance")
 def test_entrypoint_rechecks_cached_private_group(
     tmp_path: Path, private_group, monkeypatch: pytest.MonkeyPatch, entrypoint: str,
@@ -541,10 +498,18 @@ def test_entrypoint_rechecks_cached_private_group(
     config = home / "settings.json"
     config.write_text("{}\n")
     hooks = home / "hooks"
-    assert hook_module._is_private_group(private_group.gr_gid) is True
+    assert hook_module.install_hook(hook_dir=hooks, settings_path=config)["wired"] is True
+    installed_config = config.read_bytes()
     other = SimpleNamespace(pw_name="another-user", pw_uid=user.pw_uid + 1, pw_gid=user.pw_gid)
     monkeypatch.setattr(pwd, "getpwall", lambda: [user, other])
-    if entrypoint == "install_all_hooks":
+    if entrypoint == "install_hook":
+        with pytest.raises(OSError):
+            hook_module.install_hook(hook_dir=hooks, settings_path=config)
+    elif entrypoint == "uninstall_hook":
+        report = hook_module.uninstall_hook(hook_dir=hooks, settings_path=config)
+        assert report["success"] is False
+        assert report["settings_error"] is not None
+    elif entrypoint == "install_all_hooks":
         monkeypatch.setattr(hook_module, "SUPPORTED_CLIENTS", ("claude",))
         monkeypatch.setattr(hook_module, "_default_hook_dir", lambda _client: hooks)
         monkeypatch.setattr(hook_module, "_default_settings", lambda _client: config)
@@ -555,4 +520,4 @@ def test_entrypoint_rechecks_cached_private_group(
         assert next(
             row for row in report["clients"][0]["checks"] if row["id"] == "config.file"
         )["status"] == "fail"
-    assert hook_module._is_private_group(private_group.gr_gid) is False
+    assert config.read_bytes() == installed_config

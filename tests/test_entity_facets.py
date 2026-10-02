@@ -150,7 +150,7 @@ def test_one_identity_many_roles_no_duplicate(vault: Path) -> None:
 def test_bootstrap_names_declared_facets_only_where_declared(vault: Path) -> None:
     _write_registry(vault)
 
-    compact = commands.op_bootstrap(vault, profile="compact")
+    compact = commands.op_bootstrap(vault, profile="compact", section="all")
     types = {item["id"]: item for item in compact["entity_registry"]["types"]}
 
     assert types["organization"]["facets"] == {"roles": "multi text"}

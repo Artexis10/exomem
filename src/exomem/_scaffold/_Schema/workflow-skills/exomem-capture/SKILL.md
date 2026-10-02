@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: d7c1cfcd59a688b504a849c38119d0696342bd676692f38a2bcdcb010b8e6c02
+  skill_contract: d6ea38bdb3184eb8dfec44ff6ace214036223901c44f6173849b34ebf16fdd32
   version: "0.1.0"
 ---
 
@@ -17,6 +17,8 @@ Use when the user asks to save or the session lands on durable reusable knowledg
 ## Portable operating rules
 
 Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+
+Do not invoke tools absent from `available_product_tools`; use the live capability list even when a bundled workflow mentions a withheld operation.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
 is read-only. Before a compiled write: reuse current relevant search/read results,
@@ -70,6 +72,15 @@ carry transient progress; capture reusable decisions and verified milestones.
    then call `connect_memory(operation="resolve-entity", name=...)` before writing.
 7. When one active entity matches, use `edit_memory` for a small stable-fact
    correction or the canonical relation workflow for a new connection.
+   A stable, uniquely attributable fact about a resolved person, including the
+   vault owner's own entity (role, affiliation, relationship), is an entity-level
+   fact: route it to that entity under `proactive_capture`, not just in the reply
+   that used it. Contact details (phone, address, email, identifiers) go on the
+   same entity page, in a dedicated `## Contact` section, each as its own
+   `- [contact] ...` unit. Never put them in the summary or in `fact` units:
+   activation serves `contact` units only when the turn asks to reach the person,
+   and a restricted audience that cannot see the entity cannot see the section.
+   Do not create a separate contact page or page type.
 8. Only when no entity matches and the identity is stable, and central or
    recurring, and useful beyond this source, use `connect_memory(operation="create-entity")`.
    When the name you write is in another script than the user's own spelling

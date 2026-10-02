@@ -37,7 +37,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -60,9 +60,9 @@ _WARM_POLL_SECONDS = 1.0
 
 @dataclass(frozen=True, slots=True)
 class MigrationPlan:
-    """The serving sidecar's space, the recall encoder's, and where the new sidecar goes."""
+    """The serving space (None for an initial build), target space and new sidecar."""
 
-    serving: recall_space.SpaceIdentity
+    serving: recall_space.SpaceIdentity | None
     target: recall_space.SpaceIdentity
     shadow_path: Path
 
@@ -128,6 +128,69 @@ def _target_identity() -> recall_space.SpaceIdentity:
     return recall_space.SpaceIdentity(model, recall_space.resident_fingerprint(model), dim)
 
 
+def _embedding_skip_reason() -> str | None:
+    """Check opt-out and optional runtime availability without loading or fetching a model."""
+    from . import embedding_backend, embeddings
+
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return "disabled"
+    if embeddings._IMPORT_FAILED:
+        return "unavailable"
+    backend = (
+        embedding_backend.ONNX
+        if embedding_backend.served_artifact(recall_space.recall_model()) is not None
+        else embedding_backend.resolve_backend()
+    )
+    modules = (
+        ("onnxruntime", "tokenizers")
+        if backend == embedding_backend.ONNX
+        else ("sentence_transformers", "torch")
+    )
+    if not all(embedding_backend._importable(module) for module in modules):
+        return "unavailable"
+    return None
+
+
+def _eligible_pages(vault_root: Path) -> Iterator[tuple[Path, Any]]:
+    """The build's chunk-bearing pages, without encoding timed transcripts.
+
+    None from the chunking seam means a nonempty timed transcript needs the
+    encoder to derive its chunks, so that page also belongs in the build.
+    """
+    from . import access, embeddings
+    from . import find as find_module
+
+    for md in index_paths.iter_index_markdown(vault_root):
+        if not index_paths.is_embeddable_path(md):
+            continue
+        page = find_module._CACHE.get(md, vault_root)
+        if page is None or not access.is_indexable(vault_root, page.rel_path):
+            continue
+        if embeddings._chunks_for_page(vault_root, page, allow_encode=False) != []:
+            yield md, page
+
+
+def _coverage_incomplete(vault_root: Path, active: Any, pages: list[tuple[Path, Any]]) -> bool:
+    """A live write's model identity does not prove the preloaded corpus was built."""
+    from . import semantic_index
+
+    stored = active.file_mtimes()
+    stored_units = active.semantic_unit_parent_states()
+    for md, page in pages:
+        if stored.get(page.rel_path) != page.mtime:
+            return True
+        try:
+            state = semantic_index.build_parent_index_state(vault_root, md)
+        except (OSError, UnicodeError, ValueError):
+            state = None
+        if state is not None:
+            refs = frozenset(unit.unit_ref for unit in state.document.units if unit.unit_ref is not None)
+            have = stored_units.get(page.rel_path)
+            if (have is not None or refs) and have != (frozenset({state.parent_generation}), refs):
+                return True
+    return False
+
+
 def plan(vault_root: Path) -> MigrationPlan | None:
     """The migration the serving sidecar needs now, or None when it needs none.
 
@@ -136,16 +199,25 @@ def plan(vault_root: Path) -> MigrationPlan | None:
     """
     from . import embeddings
 
+    if _embedding_skip_reason() is not None:
+        return None
     active = embeddings.get_embedding_index(vault_root)
     serving = active.identity
-    if serving is None:
-        return None
+    published = index_paths.active_sidecar_name(vault_root) is not None
+    if serving is None and not list(_eligible_pages(vault_root)):
+        return None  # No encoder is needed until eligible content exists.
     target = _target_identity()
-    if serving.accepts(target.model, target.fingerprint):
-        return None
     key = target.fingerprint or f"{target.model}|{target.dim}"
     shadow_path = active.path.parent / index_paths.space_sidecar_name(key)
-    if shadow_path == active.path:
+    if serving is not None and serving.accepts(target.model, target.fingerprint):
+        if published or shadow_path == active.path or not shadow_path.exists():
+            return None
+        # Only a separate target-space shadow is evidence of an interrupted
+        # initial build. Ordinary legacy drift belongs to incremental reconcile.
+        if not _coverage_incomplete(vault_root, active, list(_eligible_pages(vault_root))):
+            return None
+        serving = None  # Resume the initial shadow build despite live writes to legacy.
+    if serving is not None and shadow_path == active.path:
         return None
     return MigrationPlan(serving, target, shadow_path)
 
@@ -201,7 +273,6 @@ def _pass(
         page = find_module._CACHE.get(md, vault_root)
         if page is None or not access.is_indexable(vault_root, page.rel_path):
             continue
-        total += 1
         try:
             unit_state = semantic_index.build_parent_index_state(vault_root, md)
         except (OSError, UnicodeError, ValueError):
@@ -217,6 +288,7 @@ def _pass(
         chunks = embeddings._chunks_for_page(vault_root, page)
         if not chunks:
             continue
+        total += 1
         seen.add(page.rel_path)
         if stored.get(page.rel_path) != page.mtime:
             pending.append((page.rel_path, md, chunks, page.mtime))
@@ -321,6 +393,13 @@ def build(
     should_stop: Callable[[], bool] = lambda: False,
 ) -> bool:
     """Build the new sidecar up to the vault's current state. False when stopped early."""
+    if plan_.serving is None:
+        from . import embeddings
+
+        # Persist restart evidence before the first encode can fail. Reads of
+        # a missing shadow do not create it, and a live write can meanwhile
+        # give the incomplete legacy sidecar the target identity.
+        embeddings.get_embedding_index(vault_root, path=plan_.shadow_path)._connect().close()
     _update(
         vault_root,
         state="building",
@@ -429,7 +508,16 @@ def run(vault_root: Path, stop: threading.Event) -> str:
     """Bring the serving sidecar into the recall encoder's space; the state it ends in."""
     from . import embeddings
 
+    skip = _embedding_skip_reason()
     serving_index = embeddings.get_embedding_index(vault_root)
+    if skip is not None:
+        _update(
+            vault_root,
+            state=skip,
+            serving=_space(serving_index.identity, serving_index.path),
+            target=None,
+        )
+        return skip
     if not _wait_for_warm(stop):
         return "stopped"
     # Whatever happens next, the serving sidecar keeps its own encoder (except
@@ -504,6 +592,8 @@ def disk_status(vault_root: Path) -> dict[str, Any]:
         "building": None,
         "reembed": "on" if reembed_enabled() else "off",
     }
+    if serving is None:
+        result["paths_total"] = sum(1 for _page in _eligible_pages(vault_root))
     if not active_path.parent.is_dir():
         return result
     for candidate in sorted(active_path.parent.iterdir()):
@@ -516,9 +606,7 @@ def disk_status(vault_root: Path) -> dict[str, Any]:
         described = _space(identity, candidate)
         described["paths_done"] = len(shadow.file_mtimes())
         result["building"] = described
-        result["paths_total"] = sum(
-            1 for md in paths.iter_index_markdown(vault_root) if paths.is_embeddable_path(md)
-        )
+        result["paths_total"] = sum(1 for _page in _eligible_pages(vault_root))
         break
     return result
 

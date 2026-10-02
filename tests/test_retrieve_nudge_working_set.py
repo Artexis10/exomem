@@ -69,6 +69,20 @@ hook = _load_hook_module()
 
 
 @pytest.fixture(autouse=True)
+def _trusted_fixture_umask():
+    """Fixture-created homes/tokens must not inherit writable host defaults.
+
+    Tests using `_under_loose_umask` still exercise hook creation under 0002;
+    this only makes setup deterministic, without weakening runtime guards.
+    """
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+@pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A host-set tunable or a real REST key must never reach these tests."""
     for var in (
@@ -770,7 +784,7 @@ def test_the_packet_replaces_the_reminder(
     }
 
 
-def test_a_transport_failure_falls_back_to_the_reminder(
+def test_a_transport_failure_requests_native_activation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
@@ -780,10 +794,10 @@ def test_a_transport_failure_falls_back_to_the_reminder(
 
     context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
 
-    assert context == hook.REMINDER
+    assert context == hook._MCP_ACTIVATION
 
 
-def test_a_raising_transport_still_emits_the_reminder(
+def test_a_raising_transport_requests_native_activation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
@@ -798,7 +812,7 @@ def test_a_raising_transport_still_emits_the_reminder(
 
     context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
 
-    assert context == hook.REMINDER
+    assert context == hook._MCP_ACTIVATION
 
 
 def test_a_malformed_response_is_not_usable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1203,7 +1217,7 @@ def test_a_symlink_at_the_token_path_is_never_written_through(
     _under_loose_umask(lambda: hook._write_activation_token(SESSION, "SECOND"))
 
     assert victim.read_text(encoding="utf-8") == "do not touch"
-    assert not path.is_symlink(), "the symlink itself is replaced, not followed"
+    assert path.is_symlink(), "redirected state is refused without changing the link"
 
 
 @pytest.mark.skipif(not has_no_follow_open(), reason="O_NOFOLLOW is unavailable here")
@@ -1365,9 +1379,9 @@ def test_a_reader_never_sees_a_half_written_token(
     real_replace = os.replace
     observed: list[str] = []
 
-    def _watch(src, dst):
+    def _watch(src, dst, **kwargs):
         observed.append(hook._read_activation_token(SESSION))
-        return real_replace(src, dst)
+        return real_replace(src, dst, **kwargs)
 
     monkeypatch.setattr(hook.os, "replace", _watch)
     _under_loose_umask(lambda: hook._write_activation_token(SESSION, "SECOND"))
@@ -1834,14 +1848,13 @@ def test_a_fresh_sessions_first_prompt_gets_its_packet_under_the_client_wide_coo
     assert stamp.stat().st_mtime == before
 
 
-def test_an_empty_packet_under_the_client_wide_cooldown_prints_nothing(
+def test_transport_failure_under_client_wide_cooldown_requests_native_activation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     working_set_mode: None,
 ) -> None:
-    """Fetched, found nothing to say, and says nothing: the bare reminder is
-    the one thing the client-wide cooldown still suppresses."""
+    """The reminder cooldown does not hide the transport-failure fallback."""
     home = tmp_path / "home"
     _fresh_client_wide_stamp(home)
     seen = _serve(monkeypatch, None)
@@ -1849,7 +1862,7 @@ def test_an_empty_packet_under_the_client_wide_cooldown_prints_nothing(
     output = _run(monkeypatch, capsys, _event(session_id="fresh-tab"), home)
 
     assert len(seen) == 1
-    assert output.strip() == ""
+    assert _context(output) == hook._MCP_ACTIVATION
 
 
 def test_an_unresolved_block_under_the_client_wide_cooldown_drops_the_reminder(
@@ -2332,3 +2345,25 @@ def test_status_only_block_renders_one_line() -> None:
     ]
     both = {**_packet(), "upkeep": {"status": "failed", "since": "x", "items": [_upkeep_item()]}}
     assert len(_upkeep_lines(hook._format_working_set_block(both, 4000))) == 2
+
+
+def test_a_unit_carried_beside_the_anchor_says_so_for_three_bytes() -> None:
+    def unit(carried: bool) -> dict:
+        provenance = {"path": "Knowledge Base/Notes/Research/window.md"}
+        if carried:
+            provenance["carried"] = True
+        return {
+            "ref": "Knowledge Base/Notes/Research/window.md#u1",
+            "role": "precedents",
+            "text": "The window was widened.",
+            "lifecycle": "active",
+            "updated": "2026-09-02",
+            "provenance": provenance,
+        }
+
+    plain = hook._format_working_set_block(_packet(units=[unit(False)], pointers=[]), 4000)
+    carried = hook._format_working_set_block(_packet(units=[unit(True)], pointers=[]), 4000)
+
+    assert "- carried: The window was widened." in carried
+    assert "- unit: The window was widened." in plain
+    assert len(carried.encode()) - len(plain.encode()) <= 10

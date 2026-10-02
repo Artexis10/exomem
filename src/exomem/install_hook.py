@@ -33,8 +33,11 @@ off by default — wiring the hook does not turn either mode on:
   reads `working_set` as merely truthy and runs stub mode, which is why the two
   modes share one variable rather than taking one each.
 
-Both modes honour the same prominence presets, prompt-length gate, cooldowns and
-control-prompt silence as the reminder, and fall back to it on any failure.
+Explicit `activation_mode="mcp"` or `"working-set"` binds the installed commands
+to the client/config profile home. Native-MCP activation delegates bootstrap and
+activation to the admitted client tools without hook transport or credentials;
+it bypasses reminder cooldowns. Working-set transport failure requests that same
+native activation. No-option installs retain the legacy reminder/stub behaviour.
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import subprocess
 import sys
@@ -77,6 +81,7 @@ _CONTINUATION_EVENTS = {
 }
 DEFAULT_CLIENT = "claude"
 SUPPORTED_CLIENTS = ("claude", "codex")
+SUPPORTED_ACTIVATION_MODES = ("mcp", "working-set")
 # Resolved on attribute access rather than at import. `Path.home()` raises
 # when the environment names no home -- a service account, a container
 # started without `HOME`, a child handed a minimal environment -- and these
@@ -161,12 +166,43 @@ def _windows_python_command(script: Path) -> str:
     return f'python "{script}"'
 
 
+def _quote_unix(value: str) -> str:
+    return '"' + re.sub(r'([\\"$`])', r'\\\1', value) + '"'
+
+
+def _quote_windows(value: str) -> str:
+    # cmd.exe expands percent/exclamation even inside quotes. Native Windows
+    # filenames cannot contain quotes or line breaks; never interpolate them.
+    if any(char in value for char in '\x00\r\n"%!'):
+        raise ValueError("hook path cannot be represented safely by Windows cmd.exe")
+    return '"' + re.sub(r"(\\+)$", r"\1\1", value) + '"'
+
+
+def _activation_mode(value: str | None) -> str | None:
+    if value is not None and value not in SUPPORTED_ACTIVATION_MODES:
+        raise ValueError(f"unsupported activation mode {value!r}; expected {SUPPORTED_ACTIVATION_MODES}")
+    return value
+
+
+def _profile_home(client: str, settings_path: Path | None) -> Path:
+    if settings_path is not None:
+        return Path(settings_path).expanduser().absolute().parent
+    variable, directory = (
+        ("CODEX_HOME", ".codex")
+        if client == "codex"
+        else ("CLAUDE_CONFIG_DIR", ".claude")
+    )
+    return Path(os.environ.get(variable) or (Path.home() / directory)).expanduser().absolute()
+
+
 def _command_for(
     wrapper: str,
     hook_dir: Path,
     *,
     client: str = DEFAULT_CLIENT,
     script: str | None = None,
+    hook_home: Path | None = None,
+    activation_mode: str | None = None,
 ) -> str:
     """Machine-agnostic `bash` invocation of the wrapper. For the default location
     use the `~`-relative form so the SAME settings.json works on every machine
@@ -178,14 +214,25 @@ def _command_for(
     """
     client = _normalize_client(client)
     hook_dir = Path(hook_dir).expanduser()
+    if activation_mode is not None:
+        name = script or wrapper.removesuffix(".sh").replace("-", "_") + ".py"
+        command = (
+            f"python3 {shlex.quote((hook_dir / name).absolute().as_posix())}"
+            if client == "codex"
+            else f"bash {shlex.quote((hook_dir / wrapper).absolute().as_posix())}"
+        )
+        command += f" --client {client} --hook-home {shlex.quote(str(hook_home))}"
+        if name != _CONTINUATION_SCRIPT:
+            command += f" --activation-mode {activation_mode}"
+        return command
     if client == "codex":
         py_name = script or wrapper.removesuffix(".sh").replace("-", "_") + ".py"
         if _is_conventional_hook_dir(hook_dir, "codex"):
             return f"python3 ~/.codex/hooks/{py_name}"
-        return f'python3 "{(hook_dir / py_name).as_posix()}"'
+        return f'python3 {_quote_unix((hook_dir / py_name).as_posix())}'
     if _is_conventional_hook_dir(hook_dir, "claude"):
         return f"bash ~/.claude/hooks/{wrapper}"
-    return f'bash "{(hook_dir / wrapper).as_posix()}"'
+    return f'bash {_quote_unix((hook_dir / wrapper).as_posix())}'
 
 
 def _command_windows_for(
@@ -193,9 +240,23 @@ def _command_windows_for(
     hook_dir: Path,
     *,
     client: str = DEFAULT_CLIENT,
+    hook_home: Path | None = None,
+    activation_mode: str | None = None,
 ) -> str | None:
     if _normalize_client(client) != "codex":
         return None
+    if activation_mode is not None:
+        try:
+            script_arg = _quote_windows(str((Path(hook_dir).expanduser() / script).absolute()))
+            home_arg = _quote_windows(str(hook_home))
+        except ValueError:
+            if os.name == "nt":
+                raise
+            return None
+        command = f"python {script_arg} --client {client} --hook-home {home_arg}"
+        if script != _CONTINUATION_SCRIPT:
+            command += f" --activation-mode {activation_mode}"
+        return command
     return _windows_python_command(Path(hook_dir).expanduser() / script)
 
 
@@ -483,7 +544,21 @@ def _contains_any(hook: dict, markers: tuple[str, ...]) -> bool:
 def _continuation_command(
     hook_dir: Path,
     client: str,
+    hook_home: Path | None = None,
+    activation_mode: str | None = None,
 ) -> tuple[str, str | None]:
+    if activation_mode is not None:
+        return (
+            _command_for(
+                _CONTINUATION_WRAPPER, hook_dir, client=client,
+                script=_CONTINUATION_SCRIPT, hook_home=hook_home,
+                activation_mode=activation_mode,
+            ),
+            _command_windows_for(
+                _CONTINUATION_SCRIPT, hook_dir, client=client,
+                hook_home=hook_home, activation_mode=activation_mode,
+            ),
+        )
     if client == "codex":
         command = _command_for(
             _CONTINUATION_WRAPPER,
@@ -497,8 +572,13 @@ def _continuation_command(
     return f"{command} --client claude", None
 
 
-def _continuation_items(hook_dir: Path, client: str) -> list[dict]:
-    command, command_windows = _continuation_command(hook_dir, client)
+def _continuation_items(
+    hook_dir: Path,
+    client: str,
+    hook_home: Path | None = None,
+    activation_mode: str | None = None,
+) -> list[dict]:
+    command, command_windows = _continuation_command(hook_dir, client, hook_home, activation_mode)
     return [
         {
             "kind": "continuation",
@@ -513,6 +593,33 @@ def _continuation_items(hook_dir: Path, client: str) -> list[dict]:
         }
         for event, matcher in _CONTINUATION_EVENTS[client]
     ]
+
+
+def _nudge_item(
+    script: str,
+    wrapper: str,
+    event: str,
+    hook_dir: Path,
+    client: str,
+    hook_home: Path | None,
+    activation_mode: str | None,
+    timeout: int = 10,
+) -> dict:
+    return {
+        "kind": "nudge",
+        "event": event,
+        "script": str(hook_dir / script),
+        "wrapper": str(hook_dir / wrapper),
+        "command": _command_for(
+            wrapper, hook_dir, client=client, script=script,
+            hook_home=hook_home, activation_mode=activation_mode,
+        ),
+        "commandWindows": _command_windows_for(
+            script, hook_dir, client=client,
+            hook_home=hook_home, activation_mode=activation_mode,
+        ),
+        "timeout": timeout,
+    }
 
 
 def _command_basenames(command: str) -> set[str]:
@@ -543,7 +650,7 @@ def _configured_item(data: dict | None, item: dict) -> bool:
     groups = hooks.get(item["event"])
     if not isinstance(groups, list):
         return False
-    if item.get("kind") != "continuation":
+    if item.get("kind") != "continuation" and not item.get("activation_mode"):
         return any(
             isinstance(group, dict)
             and group.get("matcher") == item.get("matcher")
@@ -614,8 +721,8 @@ def _file_mtime(path: Path) -> float | None:
         return None
 
 
-def _cache_summary(client: str) -> dict:
-    cache = _default_home(client) / ".cache" / "exomem-nudge"
+def _cache_summary(client: str, home: Path | None = None) -> dict:
+    cache = (home or _default_home(client)) / ".cache" / "exomem-nudge"
     entries: list[Path] = []
     try:
         if cache.exists():
@@ -631,8 +738,8 @@ def _cache_summary(client: str) -> dict:
     }
 
 
-def _log_summary(client: str, kind: str) -> dict:
-    home = _default_home(client)
+def _log_summary(client: str, kind: str, home: Path | None = None) -> dict:
+    home = home or _default_home(client)
     path = home / f"exomem-{kind}-nudge.log"
     mtime = _file_mtime(path)
     return {
@@ -780,10 +887,11 @@ def _metadata_log_runtime_summary(root: Path) -> dict:
     }
 
 
-def _continuation_runtime_summary(client: str) -> dict:
+def _continuation_runtime_summary(client: str, home: Path | None = None) -> dict:
     from ._hooks import exomem_continuation_checkpoint as safe
 
-    root = _continuation_root(client)
+    home = home or _default_home(client)
+    root = home / ".cache" / "exomem-continuation" / client
     sessions: list[Path] = []
     permission_violations: list[str] = []
     root_exists = root.exists() or root.is_symlink()
@@ -832,7 +940,7 @@ def _continuation_runtime_summary(client: str) -> dict:
                     state_handle, "previous.json"
                 )
                 manifest, manifest_status = safe.load_session_manifest_at(
-                    state_handle, _default_home(client), client, state_name
+                    state_handle, home, client, state_name
                 )
         except OSError:
             current = previous = None
@@ -848,7 +956,7 @@ def _continuation_runtime_summary(client: str) -> dict:
             if raw_status != "valid" or value is None:
                 return raw_status
             if not safe._prune_candidate_authorized(
-                value, _default_home(client), client, expected_name
+                value, home, client, expected_name
             ):
                 return "binding_invalid"
             observed = value.get("observed_at_ns")
@@ -943,6 +1051,8 @@ def check_hooks(
     clients: tuple[str, ...] = SUPPORTED_CLIENTS,
     hook_dir: Path | None = None,
     settings_path: Path | None = None,
+    activation_mode: str | None = None,
+    hook_home: Path | None = None,
 ) -> dict:
     """Read-only hook health report.
 
@@ -951,17 +1061,28 @@ def check_hooks(
     logs/cooldown state land. Returns a JSON-serializable report.
     """
     _private_group_for_user.cache_clear()
+    activation_mode = _activation_mode(activation_mode)
     normalized = tuple(_normalize_client(c) for c in clients)
     if len(normalized) != len(set(normalized)):
         raise ValueError(f"duplicate clients requested: {clients!r}")
-    if (hook_dir or settings_path) and len(normalized) != 1:
-        raise ValueError("hook_dir/settings_path overrides require exactly one client")
+    if (hook_dir or settings_path or hook_home) and len(normalized) != 1:
+        raise ValueError("hook_dir/settings_path/hook_home overrides require exactly one client")
+    if hook_home is not None and activation_mode is None:
+        raise ValueError("hook_home requires an explicit activation_mode")
 
     reports = []
     strict_single_client = len(normalized) == 1
     for client in normalized:
-        hd = Path(hook_dir).expanduser() if hook_dir else _default_hook_dir(client)
-        sp = Path(settings_path).expanduser() if settings_path else _default_settings(client)
+        home = _profile_home(client, settings_path) if activation_mode else _default_home(client)
+        if hook_home is not None:
+            home = Path(hook_home).expanduser().absolute()
+        hd = Path(hook_dir).expanduser() if hook_dir else (
+            home / "hooks" if activation_mode else _default_hook_dir(client)
+        )
+        sp = Path(settings_path).expanduser() if settings_path else (
+            home / ("hooks.json" if client == "codex" else "settings.json")
+            if activation_mode else _default_settings(client)
+        )
         has_client_footprint = sp.exists() or hd.exists() or sp.parent.exists()
         if not has_client_footprint and not strict_single_client:
             reports.append(
@@ -1019,6 +1140,16 @@ def check_hooks(
                 {"path": str(_path), "error": _error},
             )
 
+        if activation_mode is not None:
+            from ._hooks import exomem_continuation_checkpoint as safe
+
+            try:
+                safe.validate_nudge_home(home, client)
+            except OSError as error:
+                add("state.home", "fail", f"unsafe selected hook state home {home}: {error}")
+            else:
+                add("state.home", "pass", f"selected hook state home is safe at {home}")
+
         add(
             "config.file",
             "pass" if data is not None else "fail",
@@ -1060,7 +1191,13 @@ def check_hooks(
                 unevaluated(f"config.{event}")
             else:
                 entries = _commands_for_event(data, event)
-                configured = any(_contains_any(h, (script, wrapper)) for h in entries)
+                expected = _nudge_item(script, wrapper, event, hd, client, home, activation_mode)
+                expected["activation_mode"] = activation_mode
+                configured = (
+                    _configured_item(data, expected)
+                    if activation_mode
+                    else any(_contains_any(h, (script, wrapper)) for h in entries)
+                )
                 legacy = [h for h in entries if _contains_any(h, _LEGACY_MARKERS)]
                 add(
                     f"config.{event}",
@@ -1099,7 +1236,7 @@ def check_hooks(
                     status,
                 )
 
-        continuation_items = _continuation_items(hd, client)
+        continuation_items = _continuation_items(hd, client, home, activation_mode)
         for item in continuation_items:
             if data is None:
                 unevaluated(f"config.{item['event']}")
@@ -1154,8 +1291,8 @@ def check_hooks(
         )
 
         logs = {
-            "capture": _log_summary(client, "capture"),
-            "retrieve": _log_summary(client, "retrieve"),
+            "capture": _log_summary(client, "capture", home),
+            "retrieve": _log_summary(client, "retrieve", home),
         }
         for kind, row in logs.items():
             add(
@@ -1169,7 +1306,7 @@ def check_hooks(
                 row,
             )
 
-        cache = _cache_summary(client)
+        cache = _cache_summary(client, home)
         add(
             "cache.cooldown",
             "pass" if cache["exists"] else "warn",
@@ -1181,7 +1318,7 @@ def check_hooks(
             cache,
         )
 
-        continuation_runtime = _continuation_runtime_summary(client)
+        continuation_runtime = _continuation_runtime_summary(client, home)
         corrupt_state = any(
             row["current"] in {"corrupt", "binding_invalid", "generation_invalid"}
             or row["previous"] in {"corrupt", "binding_invalid"}
@@ -1223,6 +1360,10 @@ def check_hooks(
                 "success": not unhealthy,
                 "hook_dir": str(hd),
                 "settings_path": str(sp),
+                "hook_home": str(home),
+                "activation_mode": activation_mode or "legacy",
+                "runtime_activation": "unverified",
+                "windows_command_supported": all(item.get("commandWindows") is not None for item in continuation_items) if client == "codex" else None,
                 "scripts": scripts,
                 "logs": logs,
                 "cache": cache,
@@ -1250,6 +1391,9 @@ def render_check_human(report: dict) -> str:
             continue
         lines.append(f"- config: {client['settings_path']}")
         lines.append(f"- hooks:  {client['hook_dir']}")
+        lines.append(f"- activation: {client['activation_mode']}; runtime activation unverified")
+        if client.get("windows_command_supported") is False:
+            lines.append("- Windows command unavailable: profile paths cannot be represented safely")
         for check in client.get("checks", []):
             label = check["status"].upper()
             lines.append(f"- {label} {check['id']}: {check['message']}")
@@ -1625,8 +1769,9 @@ def _mark_restart_pending(hook_dir: Path) -> None:
     """
     marker = hook_dir.parent / ".cache" / "exomem-nudge" / "pending-restart"
     try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(time.time()), encoding="utf-8")
+        from ._hooks import exomem_continuation_checkpoint as safe
+
+        safe.write_nudge_file(marker, str(time.time()).encode("utf-8"))
     except OSError:
         pass
 
@@ -1639,13 +1784,22 @@ def install_hook(
     timeout: int = 10,
     specs: tuple = _HOOK_SPECS,
     client: str = DEFAULT_CLIENT,
+    activation_mode: str | None = None,
+    hook_home: Path | None = None,
 ) -> dict:
     """Install the bundled hook scripts + wrappers and (optionally) wire config.
 
     Returns {"installed": [{event, script, wrapper, command}], "wired", "settings",
     "client"}. Raises FileNotFoundError if a bundled hook file is missing.
     """
+    _private_group_for_user.cache_clear()
     client = _normalize_client(client)
+    activation_mode = _activation_mode(activation_mode)
+    home = _profile_home(client, settings_path) if activation_mode else _default_home(client)
+    if hook_home is not None:
+        if activation_mode is None:
+            raise ValueError("hook_home requires an explicit activation_mode")
+        home = Path(hook_home).expanduser().absolute()
     source_specs = list(specs)
     bundled = {name for py_name, sh_name, _event in source_specs for name in (py_name, sh_name)}
     if specs is _HOOK_SPECS:
@@ -1656,9 +1810,17 @@ def install_hook(
                 f"bundled hook file missing at {_HOOK_DIR_SRC / name} — "
                 "is the exomem install intact?"
             )
-    hook_dir = Path(hook_dir).expanduser() if hook_dir else _default_hook_dir(client)
+    hook_dir = Path(hook_dir).expanduser() if hook_dir else (
+        home / "hooks" if activation_mode else _default_hook_dir(client)
+    )
+    if activation_mode is not None and client == "codex" and os.name == "nt":
+        for name in bundled:
+            _quote_windows(str((hook_dir / name).absolute()))
+        _quote_windows(str(home))
     from ._hooks import exomem_continuation_checkpoint as safe
 
+    if activation_mode is not None:
+        safe.validate_nudge_home(home, client)
     hook_fd = safe._ensure_secure_dir(hook_dir)
     if hook_fd is not None:
         os.close(hook_fd)
@@ -1667,34 +1829,31 @@ def install_hook(
     for py_name, sh_name, event in source_specs:
         _deploy_file(_HOOK_DIR_SRC / py_name, hook_dir / py_name)
         _deploy_file(_HOOK_DIR_SRC / sh_name, hook_dir / sh_name)
-        installed.append(
-            {
-                "kind": "nudge",
-                "event": event,
-                "script": str(hook_dir / py_name),
-                "wrapper": str(hook_dir / sh_name),
-                "command": _command_for(sh_name, hook_dir, client=client, script=py_name),
-                "commandWindows": _command_windows_for(py_name, hook_dir, client=client),
-            }
-        )
+        installed.append(_nudge_item(py_name, sh_name, event, hook_dir, client, home, activation_mode, timeout))
     if specs is _HOOK_SPECS:
         _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_SCRIPT, hook_dir / _CONTINUATION_SCRIPT)
         _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_WRAPPER, hook_dir / _CONTINUATION_WRAPPER)
-        installed.extend(_continuation_items(hook_dir, client))
+        installed.extend(_continuation_items(hook_dir, client, home, activation_mode))
 
-    _mark_restart_pending(hook_dir)
+    if activation_mode != "mcp":
+        _mark_restart_pending(home / "hooks" if activation_mode else hook_dir)
 
     result = {
         "installed": installed,
         "wired": False,
         "settings": None,
         "client": client,
+        "hook_home": str(home),
+        "activation_mode": activation_mode or "legacy",
         "config_changed": False,
         "backup": None,
         "alternates": [],
     }
     if wire:
-        sp = Path(settings_path).expanduser() if settings_path else _default_settings(client)
+        sp = Path(settings_path).expanduser() if settings_path else (
+            home / ("hooks.json" if client == "codex" else "settings.json")
+            if activation_mode else _default_settings(client)
+        )
         migration = _merge_hooks(sp, installed, timeout)
         result["wired"] = True
         result["settings"] = str(sp)
@@ -1714,12 +1873,16 @@ def install_hook(
     return result
 
 
-def install_all_hooks(*, wire: bool = True, timeout: int = 10) -> dict:
+def install_all_hooks(
+    *, wire: bool = True, timeout: int = 10, activation_mode: str | None = None
+) -> dict:
     _private_group_for_user.cache_clear()
     reports: list[dict] = []
     for client in SUPPORTED_CLIENTS:
         try:
-            result = install_hook(client=client, wire=wire, timeout=timeout)
+            result = install_hook(
+                client=client, wire=wire, timeout=timeout, activation_mode=activation_mode
+            )
             reports.append({"client": client, "success": True, "result": result})
         except (FileNotFoundError, OSError, RuntimeError, ValueError) as error:
             reports.append(
@@ -1897,6 +2060,8 @@ def refresh_wired_profiles(
     group-writable config the installer refuses, for instance -- is reported
     and does not stop the remaining profiles or fail the upgrade that
     triggered this. Set `EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH` to opt out.
+    Owner capture-gate compositions are skipped without rewiring; explicit
+    activation/profile bindings are retained only within the discovered home.
     """
     if os.environ.get("EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH"):
         report = {
@@ -1936,8 +2101,43 @@ def refresh_wired_profiles(
             "settings_path": str(profile["settings_path"]),
             "success": False,
             "error": None,
+            "skipped": False,
+            "reason": None,
         }
         try:
+            data, _error = _read_json(profile["settings_path"])
+            gated = any(
+                name.endswith(("capture_gate.py", "capture-gate.py", "capture_gate.sh", "capture-gate.sh"))
+                for hook in _commands_for_event(data, "Stop")
+                for name in _command_basenames(f"{hook.get('command', '')} {hook.get('commandWindows', '')}")
+            )
+            if gated:
+                entry.update(success=True, skipped=True, reason="owner_managed_capture")
+                reports.append(entry)
+                continue
+            bindings: set[tuple[str, str]] = set()
+            for hook in _commands_for_event(data, "UserPromptSubmit"):
+                if not _contains_any(hook, _RETRIEVE_HOOK_MARKERS):
+                    continue
+                command = hook.get("command", "")
+                if "--activation-mode" not in command:
+                    continue
+                try:
+                    args = shlex.split(command)
+                    mode = args[args.index("--activation-mode") + 1]
+                    bound_home = args[args.index("--hook-home") + 1]
+                except (ValueError, IndexError) as error:
+                    raise ValueError("invalid installed hook activation/profile binding") from error
+                _activation_mode(mode)
+                if Path(bound_home).expanduser().absolute() != profile["hook_dir"].parent.absolute():
+                    raise ValueError("installed hook state home does not match its discovered profile")
+                bindings.add((mode, bound_home))
+            if len(bindings) > 1:
+                raise ValueError("conflicting installed hook activation/profile bindings")
+            activation_args = []
+            if bindings:
+                mode, bound_home = bindings.pop()
+                activation_args = ["--activation-mode", mode, "--hook-home", bound_home]
             result = subprocess.run(
                 [
                     python_executable,
@@ -1950,6 +2150,7 @@ def refresh_wired_profiles(
                     str(profile["hook_dir"]),
                     "--settings",
                     str(profile["settings_path"]),
+                    *activation_args,
                     "--json",
                 ],
                 capture_output=True,
@@ -1959,7 +2160,7 @@ def refresh_wired_profiles(
                 timeout=min(timeout, remaining),
                 check=False,
             )
-        except (OSError, subprocess.SubprocessError) as error:
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
             output = getattr(error, "stderr", None) or getattr(error, "stdout", None) or str(error)
             entry["error"] = _refresh_error_tail(output)
         else:
@@ -1975,6 +2176,8 @@ def refresh_wired_profiles(
         "reason": None,
         "profiles": reports,
         "success": not discovery and all(p["success"] for p in reports),
+        "refreshed_profiles": sum(p["success"] and not p["skipped"] for p in reports),
+        "skipped_profiles": sum(p["skipped"] for p in reports),
     }
     if discovery:
         report.update({"deferred": True, "deferred_reason": discovery["deferred_reason"]})
@@ -2228,6 +2431,7 @@ def uninstall_hook(
     Never raises for a config it could not read: an uninstall reports what it
     could not reach, because the user still has to go and finish it by hand.
     """
+    _private_group_for_user.cache_clear()
     client = _normalize_client(client)
     hook_dir = Path(hook_dir).expanduser() if hook_dir else _default_hook_dir(client)
     settings = Path(settings_path).expanduser() if settings_path else _default_settings(client)

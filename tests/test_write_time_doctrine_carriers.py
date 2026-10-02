@@ -71,7 +71,10 @@ def _before_writing_section(text: str) -> str:
 
 @pytest.mark.parametrize("skill", [SCAFFOLD_SKILL, PLUGIN_SKILL])
 def test_the_scaffold_teaches_linking_named_identities(skill: pathlib.Path) -> None:
-    section = _before_writing_section(skill.read_text(encoding="utf-8"))
+    # The section moved out of SKILL.md into a reference (`shrink-bootstrap`); the
+    # skill keeps a pointer to it.
+    assert "references/before-writing.md" in skill.read_text(encoding="utf-8")
+    section = (skill.parent / "references" / "before-writing.md").read_text(encoding="utf-8")
 
     assert "Wikilink" in section
     assert "whether or not a page exists yet" in section

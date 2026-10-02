@@ -37,7 +37,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPO_ROOT / "tests" / "fixtures" / "hosted_v1_v4_immutability_manifest.json"
-MANIFEST_SHA256 = "0f54900fbc09e9fd8b96dacf8ee4a593524c9f94b92ff3949dc971275f81430e"
+MANIFEST_SHA256 = "8a05e6d1d79e6047b4e87a0df6e19403464fd5c36d817b726dee4fa530f7ee3e"
 #: Prefixes the release automation owns. Named here as well as in the manifest so
 #: a test can state the policy rather than only consume it.
 RELEASE_OWNED_PREFIXES = (

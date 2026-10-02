@@ -2088,6 +2088,16 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     from . import index_paths
 
     sidecar = index_paths.sidecar_path(vault_root)
+    if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and (
+        not sidecar.exists() or _vector_stack_available(_resolved_embedding_backend())
+    ):
+        initial_build = _check_recall_reembed(vault_root)
+        if (
+            initial_build is not None
+            and initial_build.details is not None
+            and initial_build.details.get("serving") is None
+        ):
+            return None  # embeddings.reembed reports this progress once.
     if not sidecar.exists():
         return _check(
             "embeddings.sidecar",
@@ -2202,12 +2212,27 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
     except Exception as e:  # noqa: BLE001 — diagnostic boundary
         return _check("embeddings.reembed", "warn", f"Recall sidecars could not be read: {e}")
     serving = state.get("serving")
-    if serving is None:
-        return None
     building = state.get("building")
     from . import recall_space
 
     recall = recall_space.recall_model()
+    if serving is None:
+        if state.get("paths_total", 0) == 0:
+            return _check(
+                "embeddings.reembed", "pass", "No eligible pages need a dense index.", details=state,
+            )
+        if state.get("reembed") == "off":
+            return None
+        built = building["paths_done"] if building else 0
+        phase = "in progress" if building else "pending"
+        return _check(
+            "embeddings.reembed",
+            "warn",
+            f"The initial dense index build for {recall} is {phase}: "
+            f"{built}/{state.get('paths_total', 0)} pages built; lexical recall serves "
+            "until the service cuts over.",
+            details=state,
+        )
     if recall_space.cell_mode() and serving["model"] != recall:
         # A cell holds one encoder, so the sidecar another model wrote is
         # refused until the re-embed cuts over, not served.

@@ -2,7 +2,7 @@ from exomem import commands, workflow_skills
 
 
 def test_bootstrap_teaches_role_state_authority_and_coverage(vault):
-    payload = commands.op_bootstrap(vault, profile="compact")
+    payload = commands.op_bootstrap(vault, profile="compact", section="all")
     import json
 
     serialized = json.dumps(payload)

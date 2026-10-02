@@ -989,3 +989,146 @@ def test_an_uncertain_leaf_whose_page_is_withheld_resumes_like_a_deleted_one(
     assert [item["code"] for item in outcomes["withheld"]["blocked"]] == [
         "EPISODE_OUTCOME_UNCERTAIN"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Semantic sink: one page receiving several distinct topic clusters
+# --------------------------------------------------------------------------- #
+
+
+def _append_cluster(vault: Path, key: str, page: str, sentence: str) -> None:
+    hash_ = commands.op_read_memory(vault, path=page)["content_hash"]
+    reviewed = _route(
+        vault,
+        key,
+        _proposal(
+            "existing_page",
+            [
+                {
+                    "leaf_key": "home",
+                    "effect_revision": 1,
+                    "kind": "edit",
+                    "args": {
+                        "path": page,
+                        "why": "Append the cluster.",
+                        "operation": {
+                            "kind": "edit_section",
+                            "heading": "Observations",
+                            "new_string": f"- [finding] {sentence} ^{key}",
+                            "section_position": "append",
+                            "expected_hash": hash_,
+                            "relation_disposition": "reviewed_none",
+                            "relation_review_reason": "No supported relation here.",
+                        },
+                    },
+                }
+            ],
+            target=page,
+        ),
+    )
+    assert _resume(vault, reviewed)["status"] == "ok"
+
+
+def _sink_page(vault: Path, slug: str = "shed-odds-and-ends") -> str:
+    """Three distinct candidates commit to one page; return its path."""
+    _resume(
+        vault,
+        _route(
+            vault,
+            "hub",
+            _proposal("focused_note", [_note(slug, "The shed needs care.")], title="Shed"),
+        ),
+    )
+    page = f"{INSIGHTS}/{slug}.md"
+    _append_cluster(vault, "schedule", page, "Loom class runs on Tuesdays.")
+    _append_cluster(vault, "supplies", page, "Spare bulbs are ordered.")
+    return page
+
+
+def test_a_page_receiving_several_candidates_is_flagged_as_a_sink(
+    vault: Path, owner, enabled
+) -> None:
+    _record(vault)
+    page = f"{INSIGHTS}/shed-odds-and-ends.md"
+    _resume(
+        vault,
+        _route(
+            vault,
+            "hub",
+            _proposal("focused_note", [_note("shed-odds-and-ends", "The shed needs care.")], title="Shed"),
+        ),
+    )
+    # One page is not a sink; the flag is for several distinct candidates.
+    assert _episode(vault, action="coverage")["sink"] == []
+    _append_cluster(vault, "schedule", page, "Loom class runs on Tuesdays.")
+    assert _episode(vault, action="coverage")["sink"] == []
+    _append_cluster(vault, "supplies", page, "Spare bulbs are ordered.")
+
+    passed = _episode(vault, action="coverage")
+    assert passed["sink"] == [
+        {
+            "path": page,
+            "type": "insight",
+            "distinct_candidates": 3,
+            "candidates": ["hub", "schedule", "supplies"],
+        }
+    ]
+    ask = passed["sink_guidance"]
+    # Structural finding with the honest exits named, `keep here` included;
+    # guidance, not a block, and no topical claim.
+    for phrase in ("received effects", "Keep them here", "existing canonical page", "no_capture"):
+        assert phrase in ask
+    assert "topic" not in ask
+    assert passed["coverage_current"] == "verified"
+
+
+def test_distinct_pages_are_not_a_sink(vault: Path, owner, enabled) -> None:
+    _record(vault)
+    for key, slug in (("a", "lamp-one"), ("b", "lamp-two"), ("c", "lamp-three")):
+        _resume(
+            vault,
+            _route(vault, key, _proposal("focused_note", [_note(slug, f"{slug} fact.")], title=slug)),
+        )
+    passed = _episode(vault, action="coverage")
+    assert passed["sink"] == [] and "sink_guidance" not in passed
+
+
+def test_one_candidate_with_several_effects_on_a_page_is_not_a_sink(tmp_path: Path) -> None:
+    (tmp_path / "page.md").write_text("---\ntype: insight\n---\nbody\n", encoding="utf-8")
+    one = [
+        {"candidate_key": "only", "leaf_id": f"l{i}", "path": "page.md"} for i in range(3)
+    ]
+    three = [
+        {"candidate_key": key, "leaf_id": "l", "path": "page.md"} for key in ("a", "b", "c")
+    ]
+    assert episode_workflow._sinks(tmp_path, one) == []  # noqa: SLF001
+    assert [s["distinct_candidates"] for s in episode_workflow._sinks(tmp_path, three)] == [3]  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    ["type: entity\nentity_type: person", "type: production-log", "type: insight\ntags: [hub]"],
+)
+def test_entity_log_and_hub_pages_are_not_flagged_as_sinks(
+    tmp_path: Path, frontmatter: str
+) -> None:
+    (tmp_path / "page.md").write_text(f"---\n{frontmatter}\n---\nbody\n", encoding="utf-8")
+    receipts = [
+        {"candidate_key": key, "leaf_id": "l", "path": "page.md"} for key in ("a", "b", "c")
+    ]
+    assert episode_workflow._sinks(tmp_path, receipts) == []  # noqa: SLF001
+
+
+def test_a_withheld_page_among_several_candidates_is_absent_from_the_sink_report(
+    vault: Path, enabled
+) -> None:
+    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+        _record(vault)
+        _sink_page(vault, "withheld-shed-notes")
+    _withhold_notes_from(vault, "client-a")
+
+    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+        passed = _episode(vault, action="coverage")
+
+    assert passed["sink"] == [] and "sink_guidance" not in passed
+    assert "withheld-shed-notes" not in json.dumps(passed)

@@ -148,6 +148,17 @@ The values worksheet must resolve these current chart inputs:
 - the captured existing platform values, including the intentionally stopped
   legacy workers and suspended schedules.
 
+The Cloud gateway Deployment sets `EXOMEM_CLOUD_ENABLED=true`; this does not
+enable directory reviewer access. `cloudGateway.marketplaceReviewerAccessEnabled`
+defaults to `false` and renders the separate
+`EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED` flag. Enable it only after the
+matched Substrate web/gateway release, migration 0058 and role grants, and a
+dedicated immutable reviewer-purpose complimentary sample tenant are verified.
+The web deployment must opt in separately. An ordinary QA tenant is not a
+reviewer sample and must not be converted. Disable the reviewer flag on both
+surfaces to close access without disabling ordinary Cloud accounts; revoke
+issued reviewer credentials to retire their OAuth lineage.
+
 Use the pinned toolchain from `infra/tool-versions.env`. An offline render is
 safe; it is not a rollout and does not prove credentials, image pulls or live CSI.
 
@@ -173,7 +184,15 @@ back into Helm values. Set `legacyHosted.paused: true` in the migration overlay.
 Either Cloud control workload being enabled also forces the legacy pause, but
 the explicit flag preserves it when Cloud is disabled during rollback. Verify
 the rendered old gateway, provisioner API/worker and volume worker have zero
-replicas and every legacy CronJob is suspended. The existing tunnel, CSI,
+replicas and legacy-only CronJobs are suspended. Keep the shared reconciliation
+and sign-in email-delivery schedules active when Cloud is enabled: browser
+sign-in queues email in the access-delivery outbox; it does not send inline.
+For an upgrade from the earlier paused classification, explicitly set
+`scheduler.jobs.exomem-access-delivery.servesCloud=true` in the retained Helm
+values. Verify a scheduled delivery completes and the requesting account's
+token has `delivery_state=sent` and a delivery timestamp; an anonymous HTTP 202
+alone does not prove a send.
+The existing tunnel, CSI,
 ingress and monitoring stay available. Resume legacy actors only as a deliberate
 rollback step after stopping Cloud.
 

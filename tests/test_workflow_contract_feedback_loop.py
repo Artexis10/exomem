@@ -55,7 +55,7 @@ def test_agent_protocol_is_code_owned_and_shared_by_builtin_saved_ephemeral_and_
     ephemeral = workflow_contracts.resolve_contracts(
         tmp_path, {}, proposal=_proposal(key="session-feedback")
     )
-    bootstrap = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+    bootstrap = commands.op_bootstrap(tmp_path, profile="compact", section="all")["workflow_contracts"]
 
     assert protocol == {
         "version": 1,
@@ -231,7 +231,7 @@ def test_bootstrap_projects_the_active_prominence_capture_cap_without_transition
     from exomem import commands, prominence
 
     monkeypatch.setenv("EXOMEM_PROMINENCE", level)
-    payload = commands.op_bootstrap(tmp_path, profile="compact")
+    payload = commands.op_bootstrap(tmp_path, profile="compact", section="all")
     effective = payload["engagement"]["contract"]["effective_capture"]
 
     assert effective == prominence.capture_gate(level)
@@ -305,7 +305,7 @@ def test_public_resolve_and_compact_bootstrap_project_active_effective_capture(
             )
 
     assert workflow_contracts.resolve_contracts(tmp_path, {"project": "delivery"}) == core_before
-    compact = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+    compact = commands.op_bootstrap(tmp_path, profile="compact", section="all")["workflow_contracts"]
     assert compact["agent_protocol"] == {
         "version": 1,
         "outcomes": {
@@ -385,7 +385,7 @@ def test_bootstrap_keeps_capture_as_a_gate_until_workflow_resolution(
         invalid.parent.mkdir(parents=True, exist_ok=True)
         invalid.write_text("not a workflow contract\n", encoding="utf-8")
 
-    workflow = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+    workflow = commands.op_bootstrap(tmp_path, profile="compact", section="all")["workflow_contracts"]
 
     assert workflow["invariants"] == workflow_contracts.portable_projection()["invariants"]
     assert workflow["agent_protocol"] == {

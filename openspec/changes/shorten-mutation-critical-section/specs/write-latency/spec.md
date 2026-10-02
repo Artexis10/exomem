@@ -162,3 +162,131 @@ reach the command's response.
 - **THEN** the batch fans out as the namespace is released
 - **AND** the body's own error is the one the writer receives
 
+
+### Requirement: The Whole-Vault Identity Inventory Is Built Before The Boundary
+
+A command that mutates the vault SHALL build a cold private-identity inventory
+before it acquires the vault mutation boundary, single-flighted with any
+build already running, so the whole-vault walk never runs while the boundary
+is held. A failed pre-boundary build MUST NOT refuse the write; the write
+proceeds and pays for the walk where it would have before. Index count
+refreshes that run inside a commit SHALL NOT cost a filesystem `stat` per page.
+
+#### Scenario: A cold inventory is not built by a write inside its boundary
+
+- **WHEN** `episode_memory` or a `record_memory` update runs against a vault
+  whose identity inventory has not been built in this process
+- **THEN** the inventory is built while the mutation boundary is free
+- **AND** the write commits without building it under the boundary
+
+### Requirement: Idempotent Capture Writes Absorb Ordinary Boundary Contention
+
+An idempotent capture write (`observe_memory`, `remember`, `episode_memory`,
+and `record_memory` with `action="append"`) that finds the mutation boundary
+busy SHALL be waited out on the server rather than refused, for a bounded
+time (default 40 s, `EXOMEM_CAPTURE_WAIT_SECONDS`, and never past the caller's
+own request budget: the wait MUST end early enough that the last attempt,
+the delivery reserve and one guard acquire timeout still fit inside it).
+Waiting writes SHALL attempt in arrival order within one process, and a write
+arriving while others wait SHALL join behind them. Waiting parks a shared
+synchronous worker, so no more than half of the workers (at least one)
+MAY wait at once (the waiter cap; four at the default eight); a capture past
+that cap is refused at once with `cause: capture_waiters_full`. The retry MUST run
+under the same idempotency identity, so the write commits exactly once, and
+MUST NOT re-run any attempt that observed a commit. A client MUST NOT receive
+`MUTATION_BUSY` for a capture write whose holder is still inside its allowance,
+whose wait has not run out, and that arrived within the waiter cap; absorption
+holds up to the cap and no further.
+
+A refusal remains only for a holder already past its allowance, a wait that
+ran out, or a capture past the waiter cap. It SHALL keep `MUTATION_BUSY` with `committed: false` and add a
+`cause` (`holder_overdue`, `capture_wait_exhausted` or
+`capture_waiters_full`), the time waited, and a
+remediation that says the write did not commit and may be retried with the same
+idempotency key. `EXOMEM_CAPTURE_CONTENTION_ABSORB=0` restores the previous
+immediate refusal.
+
+#### Scenario: Concurrent captures during a held boundary all commit once
+
+- **WHEN** no more captures than the waiter cap allows (`remember`,
+  `episode_memory`) meet a boundary held by another write
+- **AND** the holder releases within its allowance
+- **THEN** every write commits exactly once
+- **AND** no `MUTATION_BUSY` reaches any caller
+
+#### Scenario: An overdue holder is refused at once with a cause
+
+- **WHEN** a capture write finds a holder already past its allowance
+- **THEN** it is refused without waiting further, with `cause: holder_overdue`
+- **AND** nothing was committed
+
+#### Scenario: An exhausted wait names its cause
+
+- **WHEN** the boundary stays busy for the whole bounded wait
+- **THEN** the write is refused with `cause: capture_wait_exhausted`
+- **AND** nothing was committed
+
+#### Scenario: Waiting captures leave workers free for reads
+
+- **WHEN** as many captures as the waiter cap allows are waiting on a held boundary
+- **THEN** a further capture is refused at once with `cause: capture_waiters_full`
+- **AND** a read served by the same worker pool completes without queueing
+
+#### Scenario: A wait never outlives the request budget
+
+- **WHEN** a capture waits on a busy boundary under a bound request budget
+- **THEN** it is refused, with its cause, before the delivery reserve begins
+
+#### Scenario: Only refusals a client saw are counted
+
+- **WHEN** a capture retries on the server and then commits
+- **THEN** `exomem_mutation_busy_total` does not increase
+- **AND** the one refusal that does reach a client increases it once
+
+### Requirement: Availability Republication Prepares Outside Canonical Authority
+
+A graph availability repair SHALL run full source parsing and resolver topology
+proof outside the canonical mutation boundary. Under authority it SHALL replay
+exact source-byte and membership seals and validate its captured graph epoch,
+recall publication, configuration, live database/WAL identity and metadata.
+An invalidated or unreadable preparation SHALL decline without publishing or
+advancing graph-sync acknowledgement. The final seal MAY read source bytes and
+enumerate memberships, but MUST NOT reparse pages or reconstruct topology.
+
+#### Scenario: Slow availability preparation admits a canonical writer
+
+- **WHEN** the source/topology proof is paused before acquiring authority
+- **THEN** an unrelated canonical writer can acquire the mutation boundary
+- **AND** its commit invalidates the older prepared availability publication
+
+#### Scenario: A direct edit or derived-store change invalidates the seal
+
+- **WHEN** source bytes, policy, registry configuration or the live database/WAL
+  changes after source proof and before publication
+- **THEN** the availability repair declines without publishing its prepared marker
+- **AND** same-sized source edits with restored timestamps are checked by bytes
+
+### Requirement: Post-Commit Graph Receipts Use Their Dispatch Identity
+
+Graph handoff and index-completion checks SHALL validate the checkpoint named
+by their own dispatch result rather than rereading a later canonical checkpoint.
+Completed outcomes require covering acknowledgement; registered outcomes require
+their exact flight or covering acknowledgement. Deferred acceptance SHALL retain
+its durable claiming-code, affected-path and dispatch-generation coverage checks.
+A missing registered/deferred identity MUST fail closed without attributing its
+failure to a different writer. Public report fields remain unchanged, and graph
+read availability MUST still require proof for the current canonical checkpoint.
+
+#### Scenario: A later writer advances the epoch before receipt assembly
+
+- **WHEN** writer A's graph result is complete, registered or durably deferred
+- **AND** writer B advances the canonical graph checkpoint before A's final check
+- **THEN** A's receipt is validated against A's dispatch checkpoint
+- **AND** B's outstanding work does not falsely turn A into a missing handoff
+
+#### Scenario: A claimed flight or durable receipt is absent
+
+- **WHEN** the dispatch identity or its claimed flight is missing, or a deferred
+  batch lacks generation-current receipts covering every affected graph path
+- **THEN** the index report remains incomplete and durable batch repair is kept
+- **AND** a newer global checkpoint cannot substitute for the missing evidence

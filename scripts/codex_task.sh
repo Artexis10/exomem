@@ -173,7 +173,7 @@ cmd_start() {
 
   echo "codex_task: launching codex exec (profile=$profile, sandbox=$CODEX_SANDBOX) in $wt"
   codex exec --profile "$profile" -s "$CODEX_SANDBOX" -C "$wt" \
-    --json -o "$wt/.task/codex-run.jsonl" "$WORKER_PROMPT"
+    --json -o "$wt/.task/codex-run.jsonl" "$WORKER_PROMPT" < /dev/null
   echo "codex_task: worker finished — inspect $wt/.task/RESULT.md then run: codex_task.sh verify $wt"
 }
 

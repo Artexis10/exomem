@@ -27,7 +27,7 @@ SCHEMA_VERSION = 1
 EVENT_CONTRACT_VERSION = 1
 OUTPUT_CONTRACT_VERSION = 1
 MAX_CHECKPOINT_BYTES = 64 * 1024
-MAX_CONTEXT_BYTES = 4096
+MAX_CONTEXT_BYTES = 2048
 MAX_PATH_BYTES = 512
 MAX_IDENTIFIER_BYTES = 512
 MAX_DIRTY_PATHS = 128
@@ -392,6 +392,29 @@ def activation_token_path(home: Path, client: str, session_id: str) -> Path:
     )
 
 
+def _rearm_nudges(home: Path, session_id: str) -> None:
+    """Re-arm the once-per-session full nudge texts after a lifecycle event.
+
+    The capture and retrieve hooks send their full text once per session and a short
+    line afterwards, tracked by a stamp file each. A compaction rewrites the context
+    that text lived in, so the next fire must be the full one again. The names mirror
+    `_cooldown_ok` in `exomem_capture_nudge.py` and `exomem_retrieve_nudge.py`
+    (`tests/test_nudge_diet.py` asserts the derivations agree). Never raises.
+    """
+    state_dir = Path(home) / ".cache" / "exomem-nudge"
+    for name in (
+        re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:128],
+        "retrieve_" + re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:120],
+        # The client-wide stamp too: it only dedupes a FRESH session, and a session
+        # that just compacted is one again.
+        "retrieve_global",
+    ):
+        try:
+            (state_dir / name).unlink()
+        except OSError:
+            pass
+
+
 def _clear_activation_token(home: Path, client: str, session_id: str) -> None:
     """Drop this session's continuity token. Called on EVERY lifecycle event the
     client delivers, because every one of them ends the run of turns the token
@@ -403,7 +426,7 @@ def _clear_activation_token(home: Path, client: str, session_id: str) -> None:
     costs the next turn its qualifier.
     """
     try:
-        activation_token_path(home, client, session_id).unlink()
+        unlink_nudge_file(activation_token_path(home, client, session_id))
     except (OSError, ValueError):
         pass
 
@@ -1052,11 +1075,10 @@ def render_continuation(checkpoint: Mapping[str, Any], *, status: str) -> str:
     workspace = structural.get("workspace", {})
     transcript = structural.get("transcript", {})
     advisory = (
-        "Reconcile these structural pointers with the client's compacted context. "
-        "Reopen cited artifacts and continue from evidence; do not invent missing semantics. "
-        "If this work reached a genuine durable stepping-stone, use normal Exomem governance "
-        "to capture it; otherwise continue without a memory write. This checkpoint is advisory "
-        "and does not prove capture completion."
+        "Reconcile these structural pointers with the compacted context: reopen cited "
+        "artifacts and continue from evidence, inventing nothing. Capture a genuine durable "
+        "stepping-stone through normal Exomem governance; otherwise no memory write. "
+        "Advisory only; it does not prove capture completion."
     )
     content_budget = MAX_CONTEXT_BYTES - len(("\n" + advisory).encode("utf-8"))
     maximum_footer = (
@@ -1722,6 +1744,125 @@ def _safe_replace(source: Path, destination: Path) -> None:
         raise OSError("atomic replacement must remain in one directory")
     with _open_secure_directory(source.parent, create=True) as directory:
         _replace_at(directory, source.name, destination.name)
+
+
+def _validate_nudge_parent(path: Path) -> None:
+    """Validate existing ancestors before creating any advisory state."""
+    current = Path(path).absolute()
+    while True:
+        try:
+            with _open_secure_directory(current, create=False) as directory:
+                _require_trusted_directory(directory)
+            return
+        except FileNotFoundError:
+            if current == current.parent:
+                raise
+            current = current.parent
+
+
+def _require_nudge_file(directory: _SecureDirectory, name: str, fd: int) -> os.stat_result:
+    info = os.fstat(fd)
+    if info.st_nlink != 1 or not _same_file_entry(directory, name, fd):
+        raise OSError(errno.EPERM, "redirected nudge state file")
+    if os.name != "nt" and (info.st_uid != os.geteuid() or info.st_mode & 0o022):
+        raise OSError(errno.EPERM, "unsafe writable or foreign-owned nudge state file")
+    return info
+
+
+def validate_nudge_home(home: Path, client: str | None = None) -> None:
+    """Read-only installation preflight for the selected profile's state chain."""
+    home = Path(home).absolute()
+    state = home / ".cache" / "exomem-nudge"
+    continuation = home / ".cache" / "exomem-continuation"
+    directories = [home, home / ".cache", state, continuation]
+    if client is not None:
+        directories.extend([continuation / client, continuation / client / ".activation"])
+    for directory in directories:
+        _validate_nudge_parent(directory)
+    for path in (
+        home / "exomem-retrieve-nudge.log",
+        home / "exomem-capture-nudge.log",
+        state / "pending-restart",
+    ):
+        try:
+            with _open_secure_directory(path.parent, create=False) as directory:
+                fd = _open_secure_file_at(directory, path.name, os.O_RDONLY)
+                try:
+                    _require_nudge_file(directory, path.name, fd)
+                finally:
+                    os.close(fd)
+        except FileNotFoundError:
+            pass
+
+
+def read_nudge_file(path: Path, max_bytes: int, *, private: bool = False) -> bytes:
+    with _open_secure_directory(path.parent, create=False) as directory:
+        _require_trusted_directory(directory)
+        fd = _open_secure_file_at(directory, path.name, os.O_RDONLY)
+        try:
+            info = _require_nudge_file(directory, path.name, fd)
+            if private and os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
+                raise OSError(errno.EPERM, "nudge state file is not private")
+            raw = os.read(fd, max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise OSError(errno.EFBIG, "oversized nudge state file")
+            return raw
+        finally:
+            os.close(fd)
+
+
+def unlink_nudge_file(path: Path) -> None:
+    with _open_secure_directory(path.parent, create=False) as directory:
+        _require_trusted_directory(directory)
+        fd = _open_secure_file_at(directory, path.name, os.O_RDONLY)
+        try:
+            _require_nudge_file(directory, path.name, fd)
+        finally:
+            os.close(fd)
+        _unlink_at(directory, path.name)
+
+
+def write_nudge_file(path: Path, content: bytes, *, append: bool = False) -> None:
+    """Private, no-follow advisory writes using the held-directory primitives."""
+    path = Path(path).absolute()
+    _validate_nudge_parent(path.parent)
+    with _open_secure_directory(path.parent, create=True) as directory:
+        _require_trusted_directory(directory)
+        existing = _existing_kind(directory, path.name)
+        if existing is not None:
+            fd = _open_secure_file_at(
+                directory, path.name, os.O_WRONLY | os.O_APPEND if append else os.O_RDONLY
+            )
+            try:
+                _require_nudge_file(directory, path.name, fd)
+                if append:
+                    if os.name != "nt":
+                        os.fchmod(fd, 0o600)
+                    _write_all(fd, content)
+                    return
+            finally:
+                os.close(fd)
+        if append:
+            fd = _open_secure_file_at(
+                directory, path.name, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL
+            )
+            try:
+                _write_all(fd, content)
+            finally:
+                os.close(fd)
+            return
+        temporary = f"{path.name}.tmp-{os.getpid()}-{secrets.token_hex(8)}"
+        fd = _open_secure_file_at(
+            directory, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        )
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            _replace_at(directory, temporary, path.name)
+        finally:
+            _unlink_at(directory, temporary)
 
 
 def _unlink_at(directory: _SecureDirectory, name: str) -> None:
@@ -4169,6 +4310,7 @@ def _dispatch_core(
     # Before anything else, and for every event: the retrieve hook's continuity
     # token describes a run of turns this event ends.
     _clear_activation_token(home, client, str(event["session_id"]))
+    _rearm_nudges(home, str(event["session_id"]))
     if event["event"] in {"PreCompact", "SessionEnd"}:
         try:
             outcome = write_checkpoint(event, home)
@@ -4271,15 +4413,25 @@ def dispatch_event(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--client", choices=("claude", "codex"), required=True)
+    home = parser.add_mutually_exclusive_group()
+    home.add_argument("--hook-home")
+    home.add_argument("--hook-home-env")
     try:
         args = parser.parse_args(argv)
+        if args.hook_home_env is not None:
+            args.hook_home = os.environ.get(args.hook_home_env)
+            if not args.hook_home or not args.hook_home.strip():
+                return 0  # Never use an inherited profile when the platform home is absent.
         raw = sys.stdin.buffer.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             return 0
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             return 0
-        output = dispatch_event(args.client, payload)
+        env = dict(os.environ)
+        if args.hook_home is not None:
+            env["EXOMEM_HOOK_HOME"] = args.hook_home
+        output = dispatch_event(args.client, payload, environ=env)
         if output is not None:
             sys.stdout.write(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
         return 0

@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.102.1](https://github.com/Artexis10/exomem/compare/v0.102.0...v0.102.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* **graph:** keep committed receipts bound to dispatch checkpoints ([#1504](https://github.com/Artexis10/exomem/issues/1504)) ([b987008](https://github.com/Artexis10/exomem/commit/b9870081c1fbd2d0ad781afcae48def3c101f6b7))
+
+## [0.102.0](https://github.com/Artexis10/exomem/compare/v0.101.0...v0.102.0) (2026-10-01)
+
+
+### Features
+
+* **core:** deliver thread-aware context and write reliability ([#1477](https://github.com/Artexis10/exomem/issues/1477)) ([7fd5429](https://github.com/Artexis10/exomem/commit/7fd5429aa57a7ff4cd7f937f2e8825cf79ad7388))
+
+
+### Bug Fixes
+
+* **cloud:** correct provider hooks, metadata and sign-in delivery ([#1499](https://github.com/Artexis10/exomem/issues/1499)) ([e8baf6a](https://github.com/Artexis10/exomem/commit/e8baf6a6f528d38174909462354829f3cea183d3))
+* **cloud:** include directory release notes ([#1502](https://github.com/Artexis10/exomem/issues/1502)) ([8f2cdfc](https://github.com/Artexis10/exomem/commit/8f2cdfc44d07d98e0d7cd5a371fcfbdb3c89e9d1))
+* **graph:** prepare availability proofs outside the write boundary ([#1501](https://github.com/Artexis10/exomem/issues/1501)) ([6e00cc4](https://github.com/Artexis10/exomem/commit/6e00cc472bf062407b5f7092998e0b4a676e3be2))
+* **graph:** recover first-publication races with bounded backup waits ([#1503](https://github.com/Artexis10/exomem/issues/1503)) ([fac6ee2](https://github.com/Artexis10/exomem/commit/fac6ee24ab3be5071291863f61c8e4b397d8f18d))
+
+## [0.101.0](https://github.com/Artexis10/exomem/compare/v0.100.0...v0.101.0) (2026-10-01)
+
+
+### Features
+
+* **plugins:** distribute Exomem Cloud from one canonical skill core ([#1480](https://github.com/Artexis10/exomem/issues/1480)) ([0398d86](https://github.com/Artexis10/exomem/commit/0398d86d544744d02a955b1a0a462789164500cb))
+
+
+### Bug Fixes
+
+* **activation:** prevent hidden pages from changing recent context ([#1497](https://github.com/Artexis10/exomem/issues/1497)) ([080be40](https://github.com/Artexis10/exomem/commit/080be407c0d9d5ea51f163eca53525041d3c0032))
+* **helm:** keep Cloud lifecycle scheduler active ([#1490](https://github.com/Artexis10/exomem/issues/1490)) ([9cdcea4](https://github.com/Artexis10/exomem/commit/9cdcea434f38380c6de79f5033b0430f20762d4a))
+* **onnx:** preserve runtime shape through hosted log redaction ([#1494](https://github.com/Artexis10/exomem/issues/1494)) ([c603525](https://github.com/Artexis10/exomem/commit/c60352507004fac34b45165c92f325b8a4f2aeca))
+* **plugins:** clear Cloud launch privacy and packaging gates ([#1498](https://github.com/Artexis10/exomem/issues/1498)) ([b1df5b6](https://github.com/Artexis10/exomem/commit/b1df5b608bb68bd6fdf9da47ff97bb2c441d2c5a))
+* **scripts:** close stdin for codex exec in codex_task.sh ([#1488](https://github.com/Artexis10/exomem/issues/1488)) ([b0e1cfa](https://github.com/Artexis10/exomem/commit/b0e1cfad5064fb07cb6a9f0da7d9852481165410))
+
+
+### Performance
+
+* **cloud:** share served ONNX weights between cells on a node ([#1489](https://github.com/Artexis10/exomem/issues/1489)) ([dd34fb2](https://github.com/Artexis10/exomem/commit/dd34fb27b8b4d1d005bace4a38fc525b3609a1e7))
+* **index:** bound embedding build and publication memory ([#1495](https://github.com/Artexis10/exomem/issues/1495)) ([3a28695](https://github.com/Artexis10/exomem/commit/3a286951a70e307ff717d36d8f5871bbb51b9be7))
+
+## [0.100.0](https://github.com/Artexis10/exomem/compare/v0.99.0...v0.100.0) (2026-09-30)
+
+
+### Features
+
+* **ingest:** add bounded dataset source cards and text previews ([#1163](https://github.com/Artexis10/exomem/issues/1163)) ([ef132bc](https://github.com/Artexis10/exomem/commit/ef132bc2646bda8b96cfbc14bab6984264260ebf))
+
+
+### Bug Fixes
+
+* **activation:** never let the current-state resolver name a withheld page ([#1485](https://github.com/Artexis10/exomem/issues/1485)) ([b314026](https://github.com/Artexis10/exomem/commit/b3140262dfac4934193634c95198cd376b0422b6))
+* **governance:** reject malformed UTF-8 on MCP stdio ([#1475](https://github.com/Artexis10/exomem/issues/1475)) ([92aaea8](https://github.com/Artexis10/exomem/commit/92aaea88fd56ed8a25fa62e2f9c491283374a0f1))
+* **hooks:** install into yadm alternate sources ([#1474](https://github.com/Artexis10/exomem/issues/1474)) ([2f9032f](https://github.com/Artexis10/exomem/commit/2f9032fc47446d1305cf6d4a5db4c7eb3e768c32))
+* **recall:** build the dense index for a vault that predates its first start ([#1483](https://github.com/Artexis10/exomem/issues/1483)) ([a5b86a9](https://github.com/Artexis10/exomem/commit/a5b86a9449862f682817ee1073f74eab47d840c9))
+
+
+### Performance
+
+* **cell:** measure cell memory and return freed heap after model reaps ([#1478](https://github.com/Artexis10/exomem/issues/1478)) ([db4646e](https://github.com/Artexis10/exomem/commit/db4646e9e70723c50aaeb3df637eb4703eb1479e))
+
 ## [0.99.0](https://github.com/Artexis10/exomem/compare/v0.98.0...v0.99.0) (2026-09-30)
 
 

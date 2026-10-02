@@ -26,6 +26,42 @@ def test_empty_graph_fanout_is_explicitly_not_required(tmp_path: Path) -> None:
     assert graph_sync.registered_checkpoint(tmp_path) is None
 
 
+def test_completed_batch_keeps_its_graph_receipt_when_a_sibling_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real newer epoch must not relabel an acknowledged write as failed."""
+    a = tmp_path / "Knowledge Base/Notes/Insights/a.md"
+    b = tmp_path / "Knowledge Base/Notes/Insights/b.md"
+    vault.batch_atomic_write(
+        [vault.PlannedWrite(a, "# A\n")], vault_root=tmp_path, post_commit_fanout=False
+    )
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    checkpoint = graph_sync.read_checkpoint(tmp_path)
+    assert checkpoint is not None
+    assert graph_sync.acknowledged_checkpoint(tmp_path).covers(checkpoint)
+    original = index_sync.upsert_after_write
+
+    def commit_sibling_after_dispatch(*args, **kwargs):
+        report = original(*args, **kwargs)
+        graph = next(c for c in report.components if c.component == "epistemic_graph")
+        assert graph.outcome == "completed"
+        vault.batch_atomic_write(
+            [vault.PlannedWrite(b, "# B\n")], vault_root=tmp_path, post_commit_fanout=False
+        )
+        assert graph_sync.read_checkpoint(tmp_path).generation > checkpoint.generation
+        return report
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", commit_sibling_after_dispatch)
+    reports: list[index_sync.IndexSyncReport] = []
+    try:
+        vault.post_commit_batch_fanout(tmp_path, [a], reports, None)
+        graph = next(c for c in reports[0].components if c.component == "epistemic_graph")
+        assert graph.outcome == "completed"
+        assert index_sync.full_upsert_succeeded(tmp_path, [a], reports[0])
+    finally:
+        graph_sync.await_active_rebuild(tmp_path)
+
+
 def test_registration_exception_installs_exact_failure_handle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -80,7 +116,8 @@ def test_canonical_batch_repairs_a_missing_graph_handoff_handle(
             ("Knowledge Base/Notes/example.md",),
             (
                 index_sync.IndexComponentOutcome(
-                    "epistemic_graph", "registered", "graph_rebuild_registered"
+                    "epistemic_graph", "registered", "graph_rebuild_registered",
+                    graph_checkpoint=graph_sync.read_checkpoint(_root),
                 ),
             ),
         )
