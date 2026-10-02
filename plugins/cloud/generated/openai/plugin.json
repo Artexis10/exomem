@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "exomem-cloud",
-  "version": "0.102.3",
+  "version": "0.102.4",
   "description": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through Exomem Cloud.",
   "author": {
     "name": "Substrate Systems OÜ",
