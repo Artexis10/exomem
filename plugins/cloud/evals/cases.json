@@ -6,7 +6,7 @@
       "id": "grounded-recall", "polarity": "positive", "fresh_chat": true,
       "setup": "Seed one synthetic decision: {marker}: the sample project chose compact retrieval. Balanced prominence, permitted sample scope.",
       "prompt": "What retrieval approach did the sample project choose?",
-      "expected_behavior": "Activate the user's turn, retrieve the seeded compact-retrieval decision, include review-sample and cite its authoritative memory reference. Do not write.",
+      "expected_behavior": "Activate the user's turn, retrieve the seeded compact-retrieval decision, include review-sample and attribute it to the returned note title. Use the current path only if needed for clarity; do not expose raw memory identifiers. Do not write.",
       "required": ["activate_context"], "grounded_answer": true,
       "answer_contains": ["{marker}", "compact"], "no_mutations": true
     },

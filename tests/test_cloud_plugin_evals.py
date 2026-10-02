@@ -179,6 +179,74 @@ def test_recall_accepts_citation_to_the_marker_hit():
     assert checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)["ok"]
 
 
+@pytest.mark.parametrize("title_location", ["hit", "frontmatter"])
+def test_recall_accepts_title_first_citation_bound_to_returned_page(title_location):
+    value = trace()
+    title = "Sample retrieval decision"
+    result = value["observations"][2]["result"]
+    if title_location == "hit":
+        result["title"] = title
+    else:
+        result["frontmatter"] = {"title": title}
+    value["observations"][-1]["text"] = f"From {title}: {value['marker']} chose compact."
+    assert checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)["ok"]
+
+
+def test_title_first_citation_cannot_use_unrelated_sibling_title():
+    value = trace()
+    value["observations"][2]["result"] = {
+        "hits": [
+            {
+                "ref": "exomem://memory/relevant",
+                "title": "Relevant decision",
+                "snippet": value["marker"],
+            },
+            {"ref": "exomem://memory/other", "title": "Unrelated decision", "snippet": "other"},
+        ]
+    }
+    value["observations"][-1]["text"] = f"From Unrelated decision: {value['marker']} chose compact."
+    assert not checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)["ok"]
+
+
+@pytest.mark.parametrize(
+    "other_title",
+    [
+        "Compact retrieval rollout",
+        "Old Compact retrieval",
+        "Compact retrieval: rollout",
+        "Compact retrieval",
+    ],
+)
+def test_title_citation_cannot_match_unrelated_or_ambiguous_title(other_title):
+    value = trace()
+    value["observations"][2]["result"] = {
+        "hits": [
+            {
+                "ref": "exomem://memory/relevant",
+                "title": "Compact retrieval",
+                "snippet": value["marker"],
+            },
+            {
+                "ref": "exomem://memory/other",
+                "title": other_title,
+                "snippet": "other",
+            },
+        ]
+    }
+    value["observations"][-1]["text"] = f"From {other_title}: {value['marker']} chose compact."
+    assert not checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)["ok"]
+
+
+@pytest.mark.parametrize("wrapper", ['"', "*"])
+def test_title_citation_accepts_ordinary_quotes_and_italics(wrapper):
+    value = trace()
+    value["observations"][2]["result"]["title"] = "Sample retrieval decision"
+    value["observations"][-1]["text"] = (
+        f"From {wrapper}Sample retrieval decision{wrapper}: {value['marker']} chose compact."
+    )
+    assert checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)["ok"]
+
+
 def test_readback_observed_user_cannot_supply_answer():
     value = capture_trace()
     value["readback"]["observations"].insert(
@@ -334,7 +402,9 @@ def test_denied_write_cannot_be_reported_saved():
     assert not checks.evaluate_trace(value, case("denied-write"), IDENTITY)["ok"]
     value["observations"][-1]["text"] = "Permission denied; not saved or stored."
     assert checks.evaluate_trace(value, case("denied-write"), IDENTITY)["ok"]
-    value["observations"][-1]["text"] = "Permission denied; not saved or stored. Recorded it elsewhere."
+    value["observations"][-1]["text"] = (
+        "Permission denied; not saved or stored. Recorded it elsewhere."
+    )
     assert not checks.evaluate_trace(value, case("denied-write"), IDENTITY)["ok"]
 
 
@@ -466,7 +536,9 @@ def test_unsupported_commerce_rejects_credentials_and_false_success(answer):
     value = all_case_trace("unsupported-commerce")
     value["observations"][-1]["text"] = answer
     assert not checks.evaluate_trace(value, case("unsupported-commerce"), IDENTITY)["ok"]
-    value["observations"][-1]["text"] = "Checkout is not available. Nothing was charged or purchased."
+    value["observations"][-1]["text"] = (
+        "Checkout is not available. Nothing was charged or purchased."
+    )
     assert checks.evaluate_trace(value, case("unsupported-commerce"), IDENTITY)["ok"]
 
 

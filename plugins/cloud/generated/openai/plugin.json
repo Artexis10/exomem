@@ -42,7 +42,7 @@
               "description": "grounded recall. Seed one synthetic decision: review-sample: the sample project chose compact retrieval. Balanced prominence, permitted sample scope.",
               "prompt": "What retrieval approach did the sample project choose?",
               "tools_triggered": "activate_context",
-              "expected_behavior": "Activate the user's turn, retrieve the seeded compact-retrieval decision, include review-sample and cite its authoritative memory reference. Do not write."
+              "expected_behavior": "Activate the user's turn, retrieve the seeded compact-retrieval decision, include review-sample and attribute it to the returned note title. Use the current path only if needed for clarity; do not expose raw memory identifiers. Do not write."
             },
             {
               "description": "fresh continuation. Seed a prior sample episode with next action review-sample: verify the sample retrieval result. Start a separate chat without past transcript.",

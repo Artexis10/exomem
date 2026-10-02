@@ -94,6 +94,30 @@ def _grounded_refs(value: object, marker: str) -> set[str]:
     return set()
 
 
+def _page_titles(value: object) -> dict[str, set[str]]:
+    """Index titles by page identity, including unrelated hits for disambiguation."""
+    titles: dict[str, set[str]] = {}
+    if isinstance(value, dict):
+        ref = value.get("ref") or value.get("path")
+        frontmatter = value.get("frontmatter")
+        title = value.get("title") or (
+            frontmatter.get("title") if isinstance(frontmatter, dict) else None
+        )
+        if isinstance(ref, str) and isinstance(title, str):
+            title = title.replace("*", "").replace("`", "").strip()
+            if title:
+                titles[title] = {ref}
+        children = value.values()
+    elif isinstance(value, list):
+        children = value
+    else:
+        return titles
+    for child in children:
+        for title, refs in _page_titles(child).items():
+            titles.setdefault(title, set()).update(refs)
+    return titles
+
+
 def _committed(call: dict) -> bool:
     if not _ok(call.get("result")) or call["arguments"].get("validate_only"):
         return False
@@ -310,7 +334,18 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
             if c.get("name") in {"activate_context", "ask_memory", "read_memory"}
         ]
         refs = set().union(*(_grounded_refs(c["result"], marker) for c in grounding), set())
-        if not grounding or not any(r in answer for r in refs if r):
+        titles = _page_titles([c["result"] for c in grounding])
+        # Longest titles resolve first so a sibling's title cannot cite a substring.
+        pattern = "|".join(re.escape(t) for t in sorted(titles, key=len, reverse=True))
+        mentioned = (
+            re.findall(
+                r"(?<!\w)(?:" + pattern + r")(?!\w)", answer.replace("*", "").replace("`", "")
+            )
+            if titles
+            else []
+        )
+        title_cited = any(len(titles[t]) == 1 and titles[t] <= refs for t in mentioned)
+        if not grounding or not (any(r in answer for r in refs if r) or title_cited):
             issues.append("answer_not_grounded")
     if case.get("capture"):
         writes = [
