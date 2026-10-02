@@ -14,7 +14,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from . import deferred_index, mode, runtime_resources
+from . import deferred_index, mode, process_memory, runtime_resources
 
 log = logging.getLogger(__name__)
 SCAN_LIMIT = 64
@@ -126,7 +126,8 @@ def request(root: Path, paths: list[Path], *, edited: bool, claims_required: boo
     )
     if receipts:
         hints = tuple(receipt.rel_path for receipt in receipts)
-        wake = lambda: signal(root, hints)
+        def wake():
+            signal(root, hints)
         if not writer_lease.defer_housekeeping_until_terminal_persisted(wake):
             wake()
     return len(receipts)
@@ -196,6 +197,8 @@ class SemanticDrain:
                 break
             try:
                 progressed, has_debt = self._turn()
+                if progressed:
+                    process_memory.trim_allocator()
                 interval = 0.05 if progressed else RETRY_POLL_SECONDS if has_debt else IDLE_POLL_SECONDS
             except Exception:  # noqa: BLE001 - debt is durable, no source in diagnostics
                 log.warning("service semantic recovery turn failed")
@@ -269,6 +272,7 @@ class SemanticDrain:
         finally:
             with self._lock:
                 self._bulk_path = None
+            process_memory.trim_allocator()
             self._wake.set()
 
     def _execute(self, receipt, work_class: str, signature: str, policy: str) -> None:

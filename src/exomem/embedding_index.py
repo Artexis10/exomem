@@ -18,12 +18,14 @@ from collections.abc import Callable, Iterator
 from collections.abc import Set as AbstractSet
 from itertools import chain
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 import numpy as np
 
 from . import (
     call_spans,
+    cloud_cell,
     index_paths,
     recall_space,
     reserved_paths,
@@ -246,6 +248,7 @@ SEMANTIC_UNIT_READ_BATCH = 2_000
 #: a 2-CPU quota, 5.5 s at 17 MiB peak, against 4.5 s at 225 MiB for one product
 #: and 100 s for one `search` per chunk.
 SEARCH_MANY_BLOCK = 64
+_UNSPECIFIED_SPACE = object()
 
 
 def _top_admitted(
@@ -300,6 +303,9 @@ class EmbeddingIndex:
     `(file_path, chunk_idx)` PRIMARY KEY at search time, exactly how the vec0
     path already hydrates metadata by rowid.
     """
+
+    DISK_BLOCK_ROWS = 2048
+    PAIRWISE_BLOCK_ROWS = 256
 
     def __init__(self, vault_root: Path, *, path: Path | None = None):
         self.vault_root = vault_root
@@ -1061,6 +1067,12 @@ class EmbeddingIndex:
         """
         if not self.path.exists():
             return [], np.zeros((0, self.dim), dtype=np.float32)
+        if cloud_cell.resource_policy() == "service-v1":
+            # Explicit audit consumers may read all rows transiently, but they
+            # cannot turn subsequent ordinary writes into matrix replacements.
+            self.unload_cache()
+            loaded = self._load_all_rows()
+            return loaded.metadata, loaded.matrix
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
         # reads. This fast path takes no lock — the common case.
         from . import recall_policy
@@ -1278,6 +1290,7 @@ class EmbeddingIndex:
         k: int,
         *,
         allowed_paths: set[str] | None = None,
+        encoded_for: Any = _UNSPECIFIED_SPACE,
     ) -> list[tuple[str, int, str, float]]:
         """Top-k chunk hits: list of `(file_path, chunk_idx, chunk_text, score)`.
 
@@ -1296,6 +1309,11 @@ class EmbeddingIndex:
         ineligible row scores `-inf` and `k_eff` is clamped to the eligible
         count, so `argpartition` provably cannot reach a masked row.
         """
+        if cloud_cell.resource_policy() == "service-v1":
+            return self._disk_score(
+                [query_vec], k, admits=lambda path: allowed_paths is None or path in allowed_paths,
+                encoded_for=encoded_for, hydrate=True,
+            )[0]
         if allowed_paths is None:
             vec_hits = self._vec_search(query_vec, k)
             if vec_hits is not None:
@@ -1350,6 +1368,7 @@ class EmbeddingIndex:
         k: int,
         *,
         admits: Callable[[str], bool],
+        encoded_for: Any = _UNSPECIFIED_SPACE,
     ) -> list[list[tuple[str, int, float]]]:
         """Top-k eligible chunk rows for each query row: `(file_path, chunk_idx, score)`.
 
@@ -1372,6 +1391,11 @@ class EmbeddingIndex:
         the #951 note measured, and a non-finite score sorts last exactly as
         `search`'s guarded selection leaves it.
         """
+        if cloud_cell.resource_policy() == "service-v1":
+            return [
+                [(path, chunk, score) for path, chunk, _text, score in hits]
+                for hits in self._disk_score(query_vecs, k, admits=admits, encoded_for=encoded_for)
+            ]
         metadata, matrix = self.all_vectors()
         queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, matrix.shape[1])
         if not len(queries):
@@ -1399,6 +1423,133 @@ class EmbeddingIndex:
             # Released before the next product, so two blocks are never alive at once.
             del block
         return answers
+
+    def chunk_count(self) -> int:
+        """Count stored chunk rows without warming their vectors."""
+        if not self.path.exists():
+            return 0
+        conn = self._connect()
+        try:
+            return int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+        finally:
+            conn.close()
+
+    def _disk_score(
+        self, query_vecs, k: int, *, admits: Callable[[str], bool],
+        encoded_for: Any = _UNSPECIFIED_SPACE, hydrate: bool = False,
+    ) -> list[list[tuple[str, int, str, float]]]:
+        """Exact eligible top-k with bounded vectors and one scoring snapshot."""
+        if not self.path.exists():
+            return [[] for _ in query_vecs]
+        self.unload_cache()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            token = self._build_token(conn)
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            width = identity.dim if identity is not None else recall_space.current_dim()
+            queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, width)
+            if encoded_for is not _UNSPECIFIED_SPACE and len(queries):
+                recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, queries[0])
+            self._observe_identity(identity, token)
+            answers: list[list[tuple[str, int, float]]] = [[] for _ in queries]
+            if k <= 0:
+                return [[] for _ in queries]
+            for start in range(0, len(queries), SEARCH_MANY_BLOCK):
+                cursor = conn.execute(
+                    "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
+                )
+                while rows := cursor.fetchmany(self.DISK_BLOCK_ROWS):
+                    matrix = np.empty((len(rows), width), dtype=np.float32)
+                    metadata = []
+                    for n, (path, chunk, blob) in enumerate(rows):
+                        if len(blob) != width * 4:
+                            raise ValueError("embedding row width differs from stored space")
+                        matrix[n] = np.frombuffer(blob, dtype=np.float32)
+                        metadata.append((path, chunk))
+                    block = (matrix @ queries[start:start + SEARCH_MANY_BLOCK].T).T
+                    # Only this block's candidate verdicts live across queries.
+                    verdicts: dict[str, bool] = {}
+                    def admitted(row: int, metadata=metadata, verdicts=verdicts) -> bool:
+                        path = metadata[row][0]
+                        if path not in verdicts:
+                            verdicts[path] = bool(admits(path))
+                        return verdicts[path]
+                    for n, scores in enumerate(block, start):
+                        winners = _top_admitted(scores, min(k, len(rows)), len(rows), admitted, metadata)
+                        merged = answers[n] + winners
+                        # Stable sort preserves the existing score/tie contract.
+                        merged.sort(key=lambda hit: (np.isnan(hit[2]), -hit[2]))
+                        answers[n] = merged[:k]
+                    del matrix, block, rows
+            result = []
+            for hits in answers:
+                hydrated = []
+                for path, chunk, score in hits:
+                    text = ""
+                    if hydrate:
+                        text = conn.execute(
+                            "SELECT chunk_text FROM chunks WHERE file_path=? AND chunk_idx=?",
+                            (path, chunk),
+                        ).fetchone()[0]
+                    hydrated.append((path, chunk, text, score))
+                result.append(hydrated)
+            return result
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def pairwise_current_chunks(
+        self, wanted: dict[str, list[str]],
+    ) -> tuple[dict[frozenset[str], float], set[str]]:
+        """Exact selected-parent coverage and blocked cosine maxima, no corpus cache."""
+        if not self.path.exists():
+            return {}, set()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            width = identity.dim if identity is not None else recall_space.current_dim()
+            covered: set[str] = set()
+            for path, chunks in wanted.items():
+                count = 0
+                exact = True
+                for chunk, text, size in conn.execute(
+                    "SELECT chunk_idx, chunk_text, length(vector) FROM chunks "
+                    "WHERE file_path=? ORDER BY chunk_idx", (path,),
+                ):
+                    if count >= len(chunks) or chunk != count or text != chunks[count] or size != width * 4:
+                        exact = False
+                        break
+                    count += 1
+                if exact and count == len(chunks) and count:
+                    covered.add(path)
+
+            def blocks(path: str):
+                cursor = conn.execute(
+                    "SELECT vector FROM chunks WHERE file_path=? ORDER BY chunk_idx", (path,),
+                )
+                while rows := cursor.fetchmany(self.PAIRWISE_BLOCK_ROWS):
+                    matrix = np.empty((len(rows), width), dtype=np.float32)
+                    for n, (blob,) in enumerate(rows):
+                        matrix[n] = np.frombuffer(blob, dtype=np.float32)
+                    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+                    matrix /= np.maximum(norms, 1e-12)
+                    yield matrix
+
+            best: dict[frozenset[str], float] = {}
+            names = sorted(covered)
+            for n, a in enumerate(names):
+                for b in names[n + 1:]:
+                    maximum = -np.inf
+                    for first in blocks(a):
+                        for second in blocks(b):
+                            maximum = np.maximum(maximum, (first @ second.T).max())
+                    best[frozenset((a, b))] = float(maximum)
+            return best, covered
+        finally:
+            conn.rollback()
+            conn.close()
 
     def _eligibility_mask(
         self, metadata: list[tuple[str, int]], allowed_paths: AbstractSet[str]

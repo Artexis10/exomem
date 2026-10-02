@@ -41,3 +41,18 @@ Resource status SHALL report effective Cloud profile/source, current core loaded
 - **WHEN** a semantic receipt remains unresolved across retries
 - **THEN** resource status reports age from its original unresolved creation time
 - **AND** requesting status neither warms missing resources nor represents the work as completed
+
+### Requirement: Service-policy governed chunk scoring has bounded residency
+
+Under service-v1, ordinary chunk recall and write-advisory scoring SHALL preserve the existing eligibility and exact score contracts while reading bounded vector blocks from a consistent sidecar snapshot. They SHALL NOT retain or replace a corpus-sized chunk matrix. Winner text hydration and stored space identity SHALL refer to that same snapshot. Context-pack pairwise scoring SHALL read only the selected parents' exact current stored rows, reduce pairwise maxima over bounded vector/score blocks, and SHALL NOT encode missing or drifted rows. Explicit all-vector consumers SHALL NOT populate the shared persistent matrix cache under service-v1; this does not claim their existing transient algorithm is bounded. Doctor SHALL count rows without materializing vectors. Local and legacy scoring behavior SHALL remain unchanged.
+
+#### Scenario: Governed search and write do not warm the full matrix
+- **WHEN** an eligible service-v1 query and ordinary governed write score stored chunk vectors
+- **THEN** only bounded vector blocks and top-k winners are retained
+- **AND** disallowed rows cannot enter results and the current model-space identity is preserved
+- **AND** resource acceptance still fails if actual cgroup peaks or latency exceed the declared gates
+
+#### Scenario: Concurrent publication does not mix a scoring snapshot
+- **WHEN** a parent or stored vector space is replaced during chunk scoring
+- **THEN** the result's vectors, width, row metadata and hydrated winner texts come from one consistent read snapshot
+- **AND** no result combines old scores with newly replaced text

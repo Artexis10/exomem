@@ -929,3 +929,62 @@ def test_stored_chunks_for_returns_one_pages_rows_and_their_mtime(tmp_path, monk
         conn.execute("DELETE FROM chunks WHERE file_path = 'a.md' AND chunk_idx = 1")
     conn.close()
     assert idx.stored_chunks_for("a.md") == ([], None)  # a hole is not a chunking
+
+
+def test_service_scoring_preserves_eligible_scores_without_resident_matrix(tmp_path, monkeypatch):
+    """Governed queries and advisory blocks must not retain whole-corpus vectors."""
+    idx = embeddings.get_embedding_index(_fresh_vault(tmp_path))
+    for path, rows in [('a.md', [[1, 0], [.8, .6]]), ('denied.md', [[1, 0]]), ('z.md', [[0, 1]])]:
+        idx.upsert_file(path, [f'{path}-{n}' for n in range(len(rows))], _mat(*rows), 1.0)
+    query = _pad([1, 0])
+    allowed = {'a.md', 'z.md'}
+    expected = idx.search(query, 3, allowed_paths=allowed)
+    expected_many = idx.search_many(_mat([1, 0], [0, 1]), 3, admits=lambda p: p in allowed)
+    idx.unload_cache()
+    monkeypatch.setenv('EXOMEM_CLOUD_CELL', '1')
+    monkeypatch.setenv('EXOMEM_CLOUD_RESOURCE_POLICY', 'service-v1')
+    monkeypatch.setattr(embeddings.EmbeddingIndex, 'DISK_BLOCK_ROWS', 2)
+    actual = idx.search(query, 3, allowed_paths=allowed)
+    assert [(p, n, text) for p, n, text, _ in actual] == [(p, n, text) for p, n, text, _ in expected]
+    assert [r[3] for r in actual] == pytest.approx([r[3] for r in expected])
+    actual_many = idx.search_many(_mat([1, 0], [0, 1]), 3, admits=lambda p: p in allowed)
+    for a, e in zip(actual_many, expected_many, strict=True):
+        assert [(p, n) for p, n, _ in a] == [(p, n) for p, n, _ in e]
+        assert [r[2] for r in a] == pytest.approx([r[2] for r in e])
+    assert idx.cache_status()['loaded'] is False
+    # A heavy explicit consumer must not change later ordinary-save residency.
+    assert len(idx.all_vectors()[0]) == 4
+    assert idx.cache_status()['loaded'] is False
+
+
+def test_service_scoring_binds_producer_space_to_read_snapshot(tmp_path, monkeypatch):
+    """A same-width cutover after encoding must refuse rather than mix spaces."""
+    from exomem import recall_space
+    idx = embeddings.get_embedding_index(_fresh_vault(tmp_path))
+    idx.upsert_file('a.md', ['old'], _mat([1, 0]), 1.0)
+    encoded_for = idx.identity
+    with idx._connect() as conn:
+        conn.execute('UPDATE meta SET value=? WHERE key=?', ('other-encoder', recall_space.META_MODEL))
+    monkeypatch.setenv('EXOMEM_CLOUD_CELL', '1')
+    monkeypatch.setenv('EXOMEM_CLOUD_RESOURCE_POLICY', 'service-v1')
+    with pytest.raises(recall_space.VectorSpaceMismatch):
+        idx.search(_pad([1, 0]), 1, encoded_for=encoded_for)
+
+
+def test_service_scoring_hydrates_winners_from_the_scored_snapshot(tmp_path, monkeypatch):
+    """A concurrent replacement cannot attach new text to an old score."""
+    idx = embeddings.get_embedding_index(_fresh_vault(tmp_path))
+    idx.upsert_file('a.md', ['old'], _mat([1, 0]), 1.0)
+    monkeypatch.setenv('EXOMEM_CLOUD_CELL', '1')
+    monkeypatch.setenv('EXOMEM_CLOUD_RESOURCE_POLICY', 'service-v1')
+    changed = False
+    class ReplacingAllowed(set):
+        def __contains__(self, path):
+            nonlocal changed
+            if not changed:
+                changed = True
+                idx.upsert_file('a.md', ['new'], _mat([0, 1]), 2.0)
+            return super().__contains__(path)
+    hits = idx.search(_pad([1, 0]), 1, allowed_paths=ReplacingAllowed({'a.md'}))
+    assert hits == [('a.md', 0, 'old', pytest.approx(1.0))]
+    assert changed
