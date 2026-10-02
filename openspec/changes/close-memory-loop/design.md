@@ -167,6 +167,106 @@ sources to unrelated claims. Derive original roots from retained original
 identity, using the verified episode identity for episode recap inputs; changing
 a version, unit selector or destination cannot mint an additional root.
 
+The v1 envelope has exactly `inputs`, `assessments` and `bindings`. `inputs`
+is a map of page-local labels to `{reference, version}`, with optional
+`unit_fingerprint` and `span`. Labels only connect this envelope's collections;
+they are never source identities or authenticated principals. `reference` uses
+the existing canonical memory reference, optionally with its exact unit fragment.
+`version` is the material version. A unit input also retains its current unit
+fingerprint. Spans use the existing start/end character-offset convention,
+relative to the selected body or exact unit text and bound by that version.
+Assessments contain exactly `inputs` (labels), `basis`, `by` and `reason`;
+bindings contain exactly `inputs` (the contributing labels) and `scope`.
+Neither collection needs another identifier or attribution store.
+
+Scopes are closed variants: `unit` uses the existing local `unit_ref` fragment,
+fingerprint and optional exact subspan; `relation` uses its registered relation,
+direction (`outbound` or `inbound`), canonical peer reference and authored
+`occurrence_fingerprint`; `field` uses the top-level field and value fingerprint;
+`record_field` additionally uses the existing collection ID and item key.
+A relation's owning page supplies its own endpoint: resolution and its occurrence
+fingerprint bind the resulting directed tuple, not a page-wide link list.
+The existing preparation owners may fill an omitted target fingerprint for a
+new authored effect; persisted metadata requires it and is never rebound.
+
+Serialized scopes use the discriminator `kind` and these exact keys:
+
+- `unit`: `unit_ref` (the existing local fragment, including its leading `#`),
+  `fingerprint`, and optional `span`.
+- `relation`: `relation`, `direction`, `peer`, `occurrence_fingerprint`.
+- `field`: `field`, `fingerprint`.
+- `record_field`: `collection_id` (the existing canonical UUID), `item_key`
+  (the existing string identity), `field`, `fingerprint`.
+
+Versions/fingerprints are 64-character lowercase hexadecimal strings. Input
+and unit-scope spans use `start_offset` and `end_offset`: zero-based,
+end-exclusive character offsets relative to the selected input body/unit text
+or target unit text, respectively. Input unit revisions use `unit_fingerprint`;
+the exact selector remains in `reference`. Only the target fingerprint may be
+omitted for initial preparation, never a required input/version binding.
+
+One shared parser/encoder owns this grammar. Duplicate JSON keys, unknown
+fields/variants/versions, dangling labels, duplicate membership, invalid spans
+or multiple designated blocks cannot become assessed support. New authoring
+gets a typed refusal; existing unsupported or malformed metadata is unassessed.
+Keep the reserved block's location even when it is invalid so later disclosure
+can withhold the whole payload rather than treating it as safe ordinary prose.
+Fenced/inline examples are not designated metadata. Canonical JSON escaping
+must prevent authored attribution or reasons from terminating the HTML comment.
+The existing eight-input, 32-binding and 16 KiB bounds apply without additional
+per-service state or an extra matrix of content-specific limits.
+
+Markdown context has one shared owner, `markdown_regions.py`, backed by the
+core-pinned `markdown-it-py==4.2.0` CommonMark parser. Delegate block/container,
+inline-code and escape recognition to its maintained rules; do not extend a
+second regex Markdown parser. A small offset adapter returns code and comment
+spans in the original Python string, preserving Unicode and CR/LF offsets.
+The vault code-mask compatibility wrapper and managed/legacy provenance
+selection consume that same owner. Origin JSON is decoded from original slices.
+Admit comment starts positively through actual non-silent Markdown rule
+consumption, rather than globally finding openers and accumulating exclusions.
+Use core-pinned `html5lib==1.1` for one document-wide ownership pass over the
+already-parsed Markdown tokens, rendered by the upstream renderer. Instrument
+its existing callbacks to register sparse rendered-to-original opener positions;
+do not parse Markdown twice or copy rendering/token traversal. The maintained
+HTML5 tree parser supplies namespace and raw/RCDATA transitions across inline,
+block and comment-tail boundaries. Delegate its tokenizer states through small
+per-instance hooks after reset, never copied rules or a global patch. Preserve
+Python >=3.11 and recheck the hooks when upgrading either dependency.
+Parser-owned attributes, link/image titles and destinations, raw/RCDATA text and
+foreign-content CDATA are not comments. A real comment within `pre` remains a
+comment. An unfinished inline tag not recognized by CommonMark does not invent
+attribute ownership or suppress a real inline comment. Standalone CommonMark
+CDATA data remains Markdown-owned through its terminator; a subsequent tail
+uses the same delegated HTML ownership stream. Escape the standalone CDATA
+carrier through its terminator with upstream escaping, preserving any real tail.
+Bogus-comment content does not itself admit an origin opener. A zero-output
+checkpoint from a failed non-silent inline comment visit preserves a malformed
+carrier only when the delegated tokenizer is in data state; never inject a fake
+HTML comment or discard an already-established raw owner. Image-label HTML is
+rendered as literal alt content, not independently admitted metadata; its nested
+code offsets remain exact. Normalize the completed rendered stream's CR/LF
+positions and shift sparse checkpoints before mapping tokenizer positions.
+Skip rendering and HTML parsing when no relevant opener exists. Ordinary
+comments take the direct cheap path only when the emitted stream demonstrably
+has no state-affecting HTML and their carriers have no literal angle brackets
+or non-whitespace tail. Uncertain cases use the same document-wide pass.
+Deduplicate admitted starts before carrier collection.
+Keep the existing first-comment-terminator/EOF carrier convention so malformed
+and unsupported reserved payloads remain locatable for disclosure. The scanner
+supplies locations, never input authority or assessed support.
+
+An unmatched backtick cannot cross a block boundary to hide real prose or
+metadata; fences inside comment data cannot own later comments; list/quote
+fences and indented code remain examples; escaped openers are not comments.
+A standalone HTML-comment block between backticks on separate paragraphs is
+not an inline-code example. Preserve true multiline inline spans instead.
+Use cheap syntax-absence checks and reuse one scan where an operation needs
+both comments and code masking. Do not add a global document-content cache.
+An unmappable offset must fail the operation, not return absent metadata or
+fall back to regex approval. Measure the shared consumer overhead: parser
+correctness does not waive existing compiler latency and privacy gates.
+
 Compute `evidence_version` once in the shared provenance code from the retained
 body and canonical parsed frontmatter, excluding only `ingested_into`. All other
 metadata, including episode status, update time, successor, original identity,
@@ -176,6 +276,11 @@ version separate from the freshly checked whole-page `content_hash` and existing
 write guards. Expose it only after a complete Source/Evidence read passes the
 existing full-release and truncation checks, including exact-unit parent release;
 withheld, partial or frontmatter-only output provides no binding value.
+For an exact unit, full parent authorization and unchanged returned
+unit/context/parent metadata are required. The version guards that selected
+scope's parent revision; it does not attest that unreturned parent text was
+delivered or credential-scanned. Terminal filtering that changes the actual
+requested page or unit withdraws the version without changing canonical hashes.
 
 Treat the reserved origin block as structured provenance at the existing
 disclosure boundary, not as ordinary authored prose. Before returning body/raw

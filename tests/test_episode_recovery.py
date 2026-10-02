@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    commands,
     freshness,
     memory_refs,
     semantic_index,
@@ -14,7 +15,7 @@ from exomem import (
     working_set_runtime,
 )
 from exomem.governance import egress, receipts
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
 _ID = "12345678-1234-5678-1234-567812345678"
 _REL = "Knowledge Base/Sources/episode-input.md"
@@ -30,6 +31,7 @@ def _write_page(
     *,
     status: str = "active",
     aliases: tuple[str, ...] = (),
+    ingestion_backrefs: bool = False,
 ) -> str:
     path = vault / _REL
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -41,6 +43,8 @@ def _write_page(
         f"status: {status}\n"
     )
     source += f"aliases: {list(aliases)!r}\n" if aliases else ""
+    if ingestion_backrefs:
+        source += "ingested_into: []\n"
     source += (
         "created: 2026-09-20\n"
         "updated: 2026-09-20\n"
@@ -113,6 +117,31 @@ def test_recover_page_input_across_sessions_for_same_audience(vault: Path) -> No
     assert recovered["body"] == "Original authorized source body.\n"
 
 
+def test_compiling_a_source_does_not_invalidate_retained_episode_input(vault: Path) -> None:
+    """A writer-added backlink is not a revision of the retained evidence."""
+    reference = _write_page(vault, "Original retained observation.\n", ingestion_backrefs=True)
+    with request_scope(owner_principal(surface="mcp")):
+        owner = _owner_store(vault)
+        created = owner.create("source-compilation", reference=reference)
+        before = commands.op_get(vault, path=_REL)
+        note = commands.op_note(
+            vault,
+            title="Retained observation conclusion",
+            note_type="insight",
+            content="## Findings\n\n- [finding] Preserve the original observation.\n",
+            sources=[_REL.removesuffix(".md")],
+            status="draft",
+        )
+        after = commands.op_get(vault, path=_REL)
+        recovered = _owner_store(vault).recover_input(created["episode_id"])
+
+    assert note["path"].removesuffix(".md") in str(after["frontmatter"]["ingested_into"])
+    assert after["body"] == before["body"]
+    assert after["content_hash"] != before["content_hash"]
+    assert recovered["status"] == "available"
+    assert recovered["body"] == before["body"]
+
+
 def test_different_audience_cannot_inspect_or_recover_same_logical_episode(vault: Path) -> None:
     reference = _write_page(vault, "Audience A only.\n")
     with request_scope(_owner("client-a")):
@@ -179,6 +208,25 @@ def test_recover_exact_unit_preserves_only_its_source_span(vault: Path) -> None:
     assert recovered["text"] == "- [finding] Exact unit text ^exact"
 
 
+def test_retained_unit_and_committed_recap_survive_only_backlink_changes(vault: Path) -> None:
+    """Both input routes ignore backlinks while recap lifecycle revisions stay binding."""
+    reference = _write_page(vault, "- [finding] Retained recap ^recap\n", ingestion_backrefs=True)
+    unit_ref = semantic_index.current_parent_index_state(vault, _REL).document.units[0].unit_ref
+    assert unit_ref
+    with request_scope(_owner("client-a")):
+        owner = _owner_store(vault)
+        unit = owner.create("retained-unit", reference=unit_ref)
+        recap = owner.bind_committed_input("retained-recap", path=_REL, reference=reference)
+        path = vault / _REL
+        original = path.read_text(encoding="utf-8")
+        path.write_text(original.replace("ingested_into: []", "ingested_into: [compiled]"), encoding="utf-8")
+        assert owner.recover_input(unit["episode_id"])["status"] == "available"
+        assert owner.recover_input(recap["episode_id"])["status"] == "available"
+        path.write_text(original.replace("updated: 2026-09-20", "updated: 2026-09-21"), encoding="utf-8")
+        assert owner.recover_input(unit["episode_id"])["status"] == "stale"
+        assert owner.recover_input(recap["episode_id"])["status"] == "stale"
+
+
 def test_append_input_uses_cas_and_facade_never_returns_raw_history(vault: Path) -> None:
     first = _write_page(vault, "First input.\n")
     with request_scope(_owner("client-a")):
@@ -239,6 +287,7 @@ def test_recovery_refuses_l5_excerpt_as_incomplete_page_input(vault: Path) -> No
         created = _owner_store(vault).create("l5", reference=reference)
     _write_source_rule(vault, ceiling=5)
     with request_scope(_owner("client-a")):
+        assert "evidence_version" not in commands.op_get(vault, path=_REL)
         recovered = _owner_store(vault).recover_input(created["episode_id"])
 
     assert recovered == {"status": "unavailable", "input_revision": 1}
@@ -304,7 +353,10 @@ def test_recovery_refuses_malformed_v2_journal_without_hiding_integrity_failure(
             _owner_store(vault).recover_input(created["episode_id"])
 
 
-def test_recovery_rejects_empty_policy_snapshot_swap(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("committed", [False, True])
+def test_recovery_rejects_empty_policy_snapshot_swap(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, committed: bool
+) -> None:
     from exomem import episode_recovery
 
     reference = _write_page(vault, "Bound snapshot.\n")
@@ -317,8 +369,13 @@ def test_recovery_rejects_empty_policy_snapshot_swap(vault: Path, monkeypatch: p
 
     monkeypatch.setattr(episode_recovery.egress, "annotate_page", swap_after_authorization)
     with request_scope(_owner("client-a")):
-        with pytest.raises(ValueError, match="EPISODE_INPUT_UNAVAILABLE"):
-            _owner_store(vault).create("swapped", reference=reference)
+        if committed:
+            bound = _owner_store(vault).bind_committed_input("swapped", path=_REL, reference=reference)
+            assert bound["ledger"] == "digest_only"
+            assert bound["recovery"] == "unavailable"
+        else:
+            with pytest.raises(ValueError, match="EPISODE_INPUT_UNAVAILABLE"):
+                _owner_store(vault).create("swapped", reference=reference)
 
 
 def test_terminal_credential_scrub_refuses_complete_recovery(vault: Path) -> None:

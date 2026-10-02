@@ -219,7 +219,7 @@ def test_journal_bounds_and_malformed_transition_refuse(vault: Path, monkeypatch
         store.read(first["state"]["episode_id"])
 
 
-def _prepared(store, *, start_attempt=True):
+def _prepared(store, *, start_attempt=True, input_evidence=None):
     proposed = curation.propose(
         store.vault_root,
         {
@@ -242,7 +242,10 @@ def _prepared(store, *, start_attempt=True):
     )
     plan = curation.CurationStore(store.vault_root).load_plan(proposed["run_id"])
     step = plan["steps"][0]
-    current = store.create("write-episode", {"excerpt": "Keep the supported result."})
+    current = store.create(
+        "write-episode",
+        input_evidence if input_evidence is not None else {"excerpt": "Keep the supported result."},
+    )
     current = _advance(store, current, "declare_candidate", key="result")
     candidate = current["state"]["candidates"][0]["candidate_id"]
     current = _advance(
@@ -303,10 +306,28 @@ def _apply(vault, proposed):
 
 
 def test_restart_after_commit_reuses_receipt_without_executing_again(vault: Path, monkeypatch):
-    store = _store(vault)
-    current, candidate, leaf, proposed = _prepared(store)
+    from exomem import memory_refs
+    from exomem.episode_recovery import EpisodeInputOwner
+    from exomem.episode_store import EpisodeStore
+    from exomem.get_page import get_page
+    from exomem.governance.principal import owner_principal, request_scope
+
+    path = vault / "Knowledge Base/Sources/legacy-episode-input.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    reference = memory_refs.memory_ref("12345678-1234-5678-1234-567812345678")
+    source = "---\ntype: source\nexomem_id: 12345678-1234-5678-1234-567812345678\ningested_into: []\n---\n\nKeep the supported result.\n"
+    path.write_text(source, encoding="utf-8")
+    legacy = {
+        "reference": reference,
+        "digest": model._hash(
+            "exomem-episode-input-page-v1", reference,
+            get_page(vault, path=path.relative_to(vault).as_posix()).content_hash,
+        ),
+    }
+    store = EpisodeStore(vault, owner_audience_id="owner")
+    current, candidate, leaf, proposed = _prepared(store, input_evidence=legacy)
     _apply(vault, proposed)
-    recovered = _store(vault).read(current["state"]["episode_id"])
+    recovered = store.read(current["state"]["episode_id"])
     assert recovered["state"]["candidates"][0]["leaves"][0]["outcome"] == "uncertain"
     with pytest.raises(model.EpisodeError, match="EPISODE_ATTEMPT_UNCERTAIN"):
         _advance(store, recovered, "mark_attempt_started", candidate=candidate, leaf=leaf)
@@ -315,8 +336,29 @@ def test_restart_after_commit_reuses_receipt_without_executing_again(vault: Path
         store, recovered, "reconcile_curation_leaf", candidate=candidate, leaf=leaf
     )
     complete = _advance(store, reconciled, "attest_postcommit", input_revision=1, leaf_ids=[leaf])
-    assert _store(vault).read(current["state"]["episode_id"]) == complete
+    identity = current["state"]["episode_id"]
+    assert store.read(identity) == complete
     assert complete["state"]["complete"]
+    saved = store.path(identity).read_bytes()
+    with request_scope(owner_principal(surface="mcp")):
+        owner = EpisodeInputOwner(vault)
+        assert owner.recover_input(identity)["status"] == "available"
+        path.write_text(source.replace("ingested_into: []", "ingested_into: [compiled]"), encoding="utf-8")
+        assert owner.recover_input(identity)["status"] == "stale"
+        assert store.read(identity) == complete
+        assert store.path(identity).read_bytes() == saved
+        owner.append_input(
+            identity, expected_revision=complete["revision"],
+            expected_digest=complete["journal_digest"], reference=reference,
+        )
+        assert owner.recover_input(identity)["status"] == "available"
+    revised = store.read(identity)["state"]
+    assert revised["input_revisions"][0]["evidence"] == {**legacy, "recovery": "available"}
+    assert revised["input_revisions"][-1]["evidence"]["version_scheme"] == "evidence-v1"
+    assert revised["candidates"] == complete["state"]["candidates"]
+    original, appended = json.loads(saved), json.loads(store.path(identity).read_bytes())
+    assert appended["root_hash"] == original["root_hash"]
+    assert appended["transitions"][:-1] == original["transitions"]
 
 
 def test_lost_receipt_keeps_history_but_refuses_fresh_coverage(vault: Path):

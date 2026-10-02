@@ -204,6 +204,14 @@ SHALL withhold the whole payload, including attribution and free-text reasons.
 Redaction SHALL NOT rewrite canonical bytes or claim an exact raw representation.
 Existing drift guards and exact-read refusal rules SHALL remain unchanged.
 
+The managed v1 envelope SHALL keep retained input bindings, attributed
+assessments and selected output scopes distinct. Page-local input labels SHALL
+NOT establish original identity or authority. A malformed, unsupported,
+ambiguous or over-limit envelope SHALL NOT establish assessed support; new
+authoring SHALL receive a typed refusal rather than silent truncation. Existing
+unsupported metadata SHALL remain unassessed, and its reserved payload SHALL
+remain identifiable for the existing disclosure boundary.
+
 #### Scenario: One turn becomes four pages
 
 - **WHEN** a single episode is preserved as a Source, entity facet, focused note and Records item
@@ -239,6 +247,30 @@ Existing drift guards and exact-read refusal rules SHALL remain unchanged.
 - **WHEN** a reader may read a compiled page but cannot fully read one of the retained inputs named by its managed origin block
 - **THEN** public page, raw, unit-context and projection output do not disclose that block's input references, versions, counts, attribution or reasons
 - **AND** the canonical page and its drift guard remain unchanged, while a redacted response does not claim exact raw content
+
+#### Scenario: Malformed or literal metadata does not establish support
+
+- **WHEN** a designated origin block has duplicate keys or blocks, dangling inputs, an unsupported variant or invalid scope, or provenance-looking text appears only in a code example
+- **THEN** it establishes no assessed independent support
+- **AND** invalid new authoring is refused, while existing unsupported reserved payload remains identifiable for whole-payload disclosure filtering
+- **AND** authored attribution or reasons cannot terminate a valid canonical origin comment
+
+#### Scenario: Markdown ownership cannot hide or activate reserved metadata
+
+- **WHEN** a page contains unmatched backticks across block boundaries, fences inside comments, container-owned code examples, escaped comment openers or malformed reserved comments
+- **THEN** only actual authored comments outside code may establish origin metadata, and every malformed or unsupported reserved comment remains locatable without hiding later comments
+- **AND** removable spans retain exact original character offsets for Unicode and CRLF text
+- **AND** an offset-mapping failure refuses the operation rather than silently returning absent metadata or assessed support
+
+#### Scenario: Literal HTML and link values cannot supply origin metadata
+
+- **WHEN** provenance-looking text is consumed as a parser-owned quoted HTML attribute, a Markdown link/image title or destination, raw/RCDATA text, or foreign-content CDATA
+- **THEN** it supplies no origin comment or assessed support
+- **AND** actual comments, including comments inside `pre`, remain locatable at their original offsets
+- **AND** standalone CDATA follows CommonMark ownership while opaque HTML blocks follow HTML5 namespace semantics, without treating bogus-comment data as an origin opener
+- **AND** a real comment after standalone CDATA's terminator remains locatable even on the same physical line
+- **AND** consumed raw/RCDATA ownership persists across inline, block and comment-tail token boundaries until its actual HTML5 exit; malformed reserved starts in that content remain literal rather than attribution
+- **AND** nested image-label code positions remain exact without admitting provenance from rendered alt attributes
 
 #### Scenario: Normalized Records provenance survives interrupted commitment
 

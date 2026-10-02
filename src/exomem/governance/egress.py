@@ -4267,6 +4267,9 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     """
     if result is None:
         return None
+    evidence_projection = (
+        result if isinstance(result, dict) and "evidence_version" in result else None
+    )
     issuance_context = scrubber._issuance_projection_context(result)
     if issuance_context is not None:
         # `rotate` has already invalidated the request's prior credential by
@@ -4302,6 +4305,15 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
+    # A material version requires an unchanged requested page or exact unit.
+    # Later filtering can turn that response into a projection; keep its
+    # canonical hash, but withdraw the binding without scanning unreturned text.
+    if (
+        evidence_projection is not None
+        and isinstance(cleaned, dict)
+        and cleaned != evidence_projection
+    ):
+        cleaned.pop("evidence_version", None)
     return cleaned
 
 

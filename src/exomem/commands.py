@@ -641,6 +641,7 @@ class GetResponse(TypedDict):
     frontmatter: dict[str, Any]
     body: NotRequired[str]
     content_hash: NotRequired[str]
+    evidence_version: NotRequired[str]
     mtime: NotRequired[float]
     content: NotRequired[str]
     has_frontmatter: NotRequired[bool]
@@ -4239,6 +4240,18 @@ def op_get(
         else:
             out["body_truncated"] = bool(out.get("body_truncated", False))
         out["body_chars"] = len(str(out.get("body", "")))
+    if (
+        not frontmatter_only
+        and str(result.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+        and out.get("body") == result.body
+        and out.get("frontmatter") == result.frontmatter
+        and out.get("content_hash") == result.content_hash
+        and not out.get("body_truncated")
+    ):
+        try:
+            out["evidence_version"] = provenance_module.evidence_version(result.content)
+        except ValueError:
+            pass
     if "body" in out and not frontmatter_only:
         # Pull-first sensing (default off): what released later notes did to
         # this page. Absent when there is nothing to say, or when the snapshot
@@ -7248,12 +7261,24 @@ def op_read_memory(
             include_history=False,
         )
         working_set_heat_module.note_selection(vault_root, [page.path], "read")
-        return semantic_unit_read_module.read_semantic_unit(
+        unit = semantic_unit_read_module.read_semantic_unit(
             vault_root,
             page=page,
             unit_ref=unit_ref,
             frontmatter=released.get("frontmatter"),
-        ).as_dict()
+        )
+        out = unit.as_dict()
+        if (
+            unit.status == "found"
+            and unit.unit is not None
+            and str(page.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+            and released.get("frontmatter") == page.frontmatter
+        ):
+            try:
+                out["evidence_version"] = provenance_module.evidence_version(page.content)
+            except ValueError:
+                pass
+        return out
     return op_get(
         vault_root,
         path=path,

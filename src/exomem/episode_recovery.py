@@ -11,10 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import curation, memory_refs, semantic_unit_read
+from . import curation, memory_refs, provenance, semantic_unit_read
 from . import episode_model as model
 from .episode_store import EpisodeStore
-from .get_page import GetError, get_page
+from .get_page import GetError, GetResult, get_page
 from .governance import egress
 from .governance.principal import effective_principal
 
@@ -81,7 +81,32 @@ class EpisodeInputOwner:
             raise _error("EPISODE_INPUT_INVALID", "input reference is invalid")
         return canonical, f"{canonical}#{fragment}" if marker else None
 
-    def _resolve_reference(self, reference: Any) -> _ResolvedInput:
+    @staticmethod
+    def _page_evidence(
+        page: GetResult, canonical: str, version_scheme: str | None,
+        *, unit_ref: str | None = None, unit_fingerprint: str | None = None,
+    ) -> dict[str, str]:
+        material = version_scheme == model.MATERIAL_EVIDENCE_SCHEME
+        try:
+            version = provenance.evidence_version(page.content) if material else page.content_hash
+        except ValueError as error:
+            raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable") from error
+        evidence = {
+            "reference": unit_ref or canonical,
+            "digest": (
+                model._hash("exomem-episode-input-page-v1", canonical, version)
+                if unit_ref is None else model._hash(
+                    "exomem-episode-input-unit-v1", canonical, version, unit_ref, unit_fingerprint
+                )
+            ),
+        }
+        if material:
+            evidence["version_scheme"] = model.MATERIAL_EVIDENCE_SCHEME
+        return evidence
+
+    def _resolve_reference(
+        self, reference: Any, *, version_scheme: str | None = None, new_input: bool = False
+    ) -> _ResolvedInput:
         # The source snapshot is authorization evidence.  It is retained only
         # in the nested collector; this facade records a receipt later for the
         # exact body or unit span that it actually returns.
@@ -89,7 +114,9 @@ class EpisodeInputOwner:
         with egress.disclosure_boundary(
             self.vault_root, "episode-input-authorization"
         ) as collector:
-            resolved = self._resolve_reference_authorized(reference)
+            resolved = self._resolve_reference_authorized(
+                reference, version_scheme=version_scheme, new_input=new_input
+            )
         authorization = [
             outcome.value
             for outcome in collector.outcomes
@@ -105,7 +132,9 @@ class EpisodeInputOwner:
             authorization=authorization[0] if authorization else None,
         )
 
-    def _resolve_reference_authorized(self, reference: Any) -> _ResolvedInput:
+    def _resolve_reference_authorized(
+        self, reference: Any, *, version_scheme: str | None, new_input: bool
+    ) -> _ResolvedInput:
         canonical, unit_ref = self._reference(reference)
         principal = effective_principal()
         try:
@@ -120,6 +149,8 @@ class EpisodeInputOwner:
             or str(page.frontmatter.get("status") or "").casefold() == "superseded"
         ):
             raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable")
+        if new_input and str(page.frontmatter.get("type") or "").casefold() in {"source", "evidence"}:
+            version_scheme = model.MATERIAL_EVIDENCE_SCHEME
         released = egress.annotate_page(
             self.vault_root,
             {
@@ -138,6 +169,10 @@ class EpisodeInputOwner:
             released is None
             or released.get("content_hash") != page.content_hash
             or released.get("body") != page.body
+            or (
+                version_scheme == model.MATERIAL_EVIDENCE_SCHEME
+                and released.get("frontmatter") != page.frontmatter
+            )
         ):
             raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable")
         try:
@@ -148,12 +183,7 @@ class EpisodeInputOwner:
             raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable")
         if unit_ref is None:
             return _ResolvedInput(
-                evidence={
-                    "reference": canonical,
-                    "digest": model._hash(
-                        "exomem-episode-input-page-v1", canonical, page.content_hash
-                    ),
-                },
+                evidence=self._page_evidence(page, canonical, version_scheme),
                 body=page.body,
             )
         unit = semantic_unit_read.read_semantic_unit(
@@ -162,16 +192,10 @@ class EpisodeInputOwner:
         if unit.status != "found" or unit.unit is None or unit.parent.ref != canonical:
             raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable")
         return _ResolvedInput(
-            evidence={
-                "reference": unit_ref,
-                "digest": model._hash(
-                    "exomem-episode-input-unit-v1",
-                    canonical,
-                    page.content_hash,
-                    unit_ref,
-                    unit.unit.fingerprint,
-                ),
-            },
+            evidence=self._page_evidence(
+                page, canonical, version_scheme, unit_ref=unit_ref,
+                unit_fingerprint=unit.unit.fingerprint,
+            ),
             text=unit.unit.span.text,
         )
 
@@ -185,7 +209,7 @@ class EpisodeInputOwner:
                 raise _error("EPISODE_INPUT_INVALID", "input digest is invalid")
             return {"digest": input_digest}
         assert reference is not None
-        return self._resolve_reference(reference).evidence
+        return self._resolve_reference(reference, new_input=True).evidence
 
     def create(
         self, key: str, *, reference: str | None = None, input_digest: str | None = None
@@ -212,6 +236,11 @@ class EpisodeInputOwner:
         if memory_refs.ref_from_markdown(page.content) != canonical:
             raise _error("EPISODE_INPUT_INVALID", "the page at that path holds another ref")
         digest = model._hash("exomem-episode-input-page-v1", canonical, page.content_hash)
+        version_scheme = (
+            model.MATERIAL_EVIDENCE_SCHEME
+            if str(page.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+            else None
+        )
         if str(page.frontmatter.get("status") or "").casefold() == "superseded":
             return {"digest": digest}
         with egress.disclosure_boundary(self.vault_root, "episode-input-authorization"):
@@ -233,9 +262,19 @@ class EpisodeInputOwner:
             released is None
             or released.get("content_hash") != page.content_hash
             or released.get("body") != page.body
+            or (
+                version_scheme == model.MATERIAL_EVIDENCE_SCHEME
+                and released.get("frontmatter") != page.frontmatter
+            )
         ):
             return {"digest": digest}
-        return {"reference": canonical, "digest": digest}
+        try:
+            current = get_page(self.vault_root, path=page.path)
+            if current.content_hash != page.content_hash or current.content != page.content:
+                return {"digest": digest}
+            return self._page_evidence(page, canonical, version_scheme)
+        except (GetError, OSError, ValueError):
+            return {"digest": digest}
 
     def bind_committed_input(
         self, key: str, *, path: str, reference: str, about: tuple[str, ...] = ()
@@ -372,7 +411,9 @@ class EpisodeInputOwner:
                 if "reference" not in evidence:
                     return {"status": "unavailable", "input_revision": revision["revision"]}
                 try:
-                    resolved = self._resolve_reference(evidence["reference"])
+                    resolved = self._resolve_reference(
+                        evidence["reference"], version_scheme=evidence.get("version_scheme")
+                    )
                 except model.EpisodeError:
                     return {"status": "unavailable", "input_revision": revision["revision"]}
                 if resolved.evidence["digest"] != evidence.get("digest"):
