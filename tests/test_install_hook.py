@@ -35,6 +35,15 @@ CAPTURE_SCRIPT = _HOOKS / "exomem_capture_nudge.py"
 RETRIEVE_SCRIPT = _HOOKS / "exomem_retrieve_nudge.py"
 
 
+@pytest.fixture(autouse=True)
+def _pin_install_hook_umask():
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
 def _stop_cmds(data: dict) -> list[str]:
     return [h["command"] for g in data["hooks"].get("Stop", []) for h in g["hooks"]]
 
@@ -1046,7 +1055,7 @@ def test_install_refuses_every_symlink_outside_the_alternate_shape(
     assert not list(config_dir.glob(".*.tmp-*"))
 
 
-def test_an_alternate_link_to_a_group_writable_source_is_still_refused(
+def test_an_alternate_link_to_a_writable_source_is_still_refused(
     tmp_path: Path,
 ) -> None:
     """The relaxation moves the guards onto the target; it does not lift them.
@@ -1054,14 +1063,16 @@ def test_an_alternate_link_to_a_group_writable_source_is_still_refused(
     The link shape is admitted here, so the refusal has to come from the
     target's own ownership and `0o022` check rather than from the link test --
     which is what the error message pins. A source another local principal can
-    write is a source that can choose what the agent runs.
+    write is a source that can choose what the agent runs. Group-write through
+    the owner's own private group is not another principal (#1470), so the
+    fixture makes the source writable by others.
     """
     require_posix_file_modes()
     hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
     source = tmp_path / "settings.json##os.WSL"
     untouched = '{"untouched": true}\n'
     source.write_text(untouched, encoding="utf-8")
-    source.chmod(0o664)
+    source.chmod(0o646)
     try:
         sp.symlink_to(source.name)
     except OSError:
@@ -1071,7 +1082,7 @@ def test_an_alternate_link_to_a_group_writable_source_is_still_refused(
         hook_module.install_hook(hook_dir=hd, settings_path=sp)
 
     assert source.read_text(encoding="utf-8") == untouched
-    assert source.stat().st_mode & 0o777 == 0o664
+    assert source.stat().st_mode & 0o777 == 0o646
     assert not list(tmp_path.glob("*.backup-*"))
 
 

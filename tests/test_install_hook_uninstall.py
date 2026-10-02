@@ -17,6 +17,7 @@ reporting success.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,15 @@ FOREIGN = {
     "command": "bash ~/.claude/hooks/somebody-elses-hook.sh",
     "timeout": 7,
 }
+
+
+@pytest.fixture(autouse=True)
+def _pin_install_hook_umask():
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
 
 
 def _install(tmp_path: Path, client: str = "claude") -> tuple[Path, Path]:

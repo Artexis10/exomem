@@ -42,6 +42,7 @@ native activation. No-option installs retain the legacy reminder/stub behaviour.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -50,7 +51,9 @@ import secrets
 import shlex
 import stat
 import subprocess
+import sys
 import time
+from functools import cache
 from pathlib import Path
 
 _HOOK_DIR_SRC = Path(__file__).parent / "_hooks"
@@ -268,6 +271,117 @@ def _hook_entry(item: dict, timeout: int) -> dict:
     return entry
 
 
+def _is_private_group(gid: int) -> bool:
+    return _private_group_for_user(os.geteuid(), gid)
+
+
+@cache
+def _private_group_for_user(euid: int, gid: int) -> bool:
+    """Require the user-private-group convention and no other known members."""
+    # A cached private answer lasts for the process lifetime unless explicitly cleared.
+    try:
+        import grp
+        import pwd
+
+        user = pwd.getpwuid(euid)
+        if gid != user.pw_gid:
+            return False
+        group = grp.getgrgid(gid)
+        if group.gr_name != user.pw_name:
+            return False
+        if any(member != user.pw_name for member in group.gr_mem):
+            return False
+        # gr_mem omits primary-group users, so an empty list can still be shared.
+        members = pwd.getpwall()
+        # NSS may return only local users. Refuse an enumeration missing this user.
+        if not any(
+            member.pw_name == user.pw_name and member.pw_uid == user.pw_uid
+            for member in members
+        ):
+            return False
+        return not any(
+            member.pw_gid == gid and member.pw_name != user.pw_name
+            for member in members
+        )
+    except (ImportError, KeyError, OSError):
+        return False
+
+
+def _has_untrusted_writers(info: os.stat_result, target: int | Path) -> bool:
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o002:
+        return True
+    if not mode & 0o020:
+        return False
+    if (
+        sys.platform != "linux"
+        or info.st_uid != os.geteuid()
+        or not _is_private_group(info.st_gid)
+    ):
+        return True
+    # ACLs can grant writers beyond the private group described by the mode bits.
+    try:
+        attrs = (
+            os.listxattr(target) if isinstance(target, int)
+            else os.listxattr(target, follow_symlinks=False)
+        )
+        return bool({"system.posix_acl_access", "system.nfs4_acl", "system.cifs_acl"}.intersection(attrs))
+    except OSError as error:
+        return error.errno not in {errno.ENOTSUP, errno.EOPNOTSUPP}
+
+
+def _require_trusted_directory(directory) -> None:
+    """Keep the secure ancestor walk, accepting only the owner's private group.
+
+    This is installer policy. The standalone continuation hook retains its
+    stricter directory rule for private checkpoint state.
+    """
+    if os.name == "nt":
+        return
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    absolute = directory.path.absolute()
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    handles: list[int] = []
+    offenders: list[tuple[str, str]] = []
+    try:
+        current = os.open(absolute.anchor or "/", flags)
+        handles.append(current)
+        walked = Path(absolute.anchor or "/")
+        parts = absolute.parts[1:]
+        for index, part in enumerate(parts):
+            current = os.open(part, flags, dir_fd=current)
+            handles.append(current)
+            walked /= part
+            info = os.fstat(current)
+            mode = stat.S_IMODE(info.st_mode)
+            if index == len(parts) - 1:
+                if info.st_uid != os.geteuid():
+                    offenders.append((str(walked), "owned by another user"))
+                elif _has_untrusted_writers(info, current):
+                    offenders.append((str(walked), f"group/other-writable ({mode:04o})"))
+            else:
+                sticky_trusted = bool(mode & stat.S_ISVTX) and info.st_uid in {0, os.geteuid()}
+                if _has_untrusted_writers(info, current) and not sticky_trusted:
+                    offenders.append((str(walked), f"group/other-writable ({mode:04o})"))
+        if offenders:
+            detail = "; ".join(f"{path} ({reason})" for path, reason in offenders)
+            leaf = str(absolute)
+            scope = detail if offenders[-1][0] == leaf else f"{detail} (ancestor(s) of {leaf})"
+            raise OSError(
+                errno.EPERM,
+                f"unsafe writable or foreign-owned directory: {scope}; "
+                f"fix: {safe.trusted_directory_remediation(offenders)}",
+            )
+        retained = os.fstat(directory.fd)
+        reopened = os.fstat(current)
+        if (retained.st_dev, retained.st_ino) != (reopened.st_dev, reopened.st_ino):
+            raise OSError(errno.EPERM, "trusted directory identity changed")
+    finally:
+        while handles:
+            os.close(handles.pop())
+
+
 def _safe_file_status(path: Path) -> dict:
     safe_regular = False
     mode_ok = False
@@ -276,7 +390,7 @@ def _safe_file_status(path: Path) -> dict:
         listed = os.lstat(path)
         safe_regular = stat.S_ISREG(listed.st_mode) and not stat.S_ISLNK(listed.st_mode)
         mode_ok = safe_regular and (
-            os.name == "nt" or not bool(stat.S_IMODE(listed.st_mode) & 0o022)
+            os.name == "nt" or not _has_untrusted_writers(listed, path)
         )
         if not safe_regular:
             raise OSError("not a safe regular file")
@@ -371,7 +485,7 @@ def _read_json(path: Path) -> tuple[dict | None, str | None]:
 
     try:
         with safe._open_secure_directory(path.parent, create=False) as directory:
-            safe._require_trusted_directory(directory)
+            _require_trusted_directory(directory)
             name = _resolved_config_name(directory, path.name, path)
             kind = safe._existing_kind(directory, name)
             if kind is None or not stat.S_ISREG(kind):
@@ -380,9 +494,11 @@ def _read_json(path: Path) -> tuple[dict | None, str | None]:
             try:
                 info = os.fstat(fd)
                 if os.name != "nt" and (
-                    info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022
+                    info.st_uid != os.geteuid() or _has_untrusted_writers(info, fd)
                 ):
-                    raise OSError(f"unsafe writable hook config file: {path}")
+                    raise OSError(
+                        f"unsafe writable hook config file: {path}; fix: chmod g-w,o-w {path}"
+                    )
                 chunks: list[bytes] = []
                 total = 0
                 while total <= 8 * 1024 * 1024:
@@ -642,7 +758,7 @@ def _script_status(hook_dir: Path, script: str, wrapper: str) -> dict:
     try:
         directory_context = safe._open_secure_directory(hook_dir, create=False)
         directory = directory_context.__enter__()
-        safe._require_trusted_directory(directory)
+        _require_trusted_directory(directory)
     except OSError:
         if directory_context is not None:
             directory_context.__exit__(None, None, None)
@@ -701,7 +817,7 @@ def _safe_file_status_at(directory, name: str, display_path: Path) -> dict:
             safe_regular = stat.S_ISREG(info.st_mode)
             mode_ok = safe_regular and (
                 os.name == "nt"
-                or (info.st_uid == os.geteuid() and not stat.S_IMODE(info.st_mode) & 0o022)
+                or (info.st_uid == os.geteuid() and not _has_untrusted_writers(info, fd))
             )
             h = hashlib.sha256()
             while True:
@@ -944,6 +1060,7 @@ def check_hooks(
     at current `exomem_*` hooks instead of legacy `kb_*` hooks, and reports where
     logs/cooldown state land. Returns a JSON-serializable report.
     """
+    _private_group_for_user.cache_clear()
     activation_mode = _activation_mode(activation_mode)
     normalized = tuple(_normalize_client(c) for c in clients)
     if len(normalized) != len(set(normalized)):
@@ -1298,7 +1415,7 @@ def _deploy_file(source: Path, destination: Path) -> None:
     from ._hooks import exomem_continuation_checkpoint as safe
 
     with safe._open_secure_directory(destination.parent, create=True) as parent:
-        safe._require_trusted_directory(parent)
+        _require_trusted_directory(parent)
         existing = safe._existing_kind(parent, destination.name)
         if existing is not None and not stat.S_ISREG(existing):
             raise OSError(f"refusing unsafe hook destination {destination.name}")
@@ -1347,8 +1464,11 @@ def _snapshot_config_at(directory, name: str, display_path: Path) -> dict:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise OSError(f"hook config is not a regular file: {display_path}")
-        if os.name != "nt" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022):
-            raise OSError(f"hook config is unsafe or writable: {display_path}")
+        if os.name != "nt" and (info.st_uid != os.geteuid() or _has_untrusted_writers(info, fd)):
+            raise OSError(
+                f"hook config is unsafe or writable: {display_path}; "
+                f"fix: chmod g-w,o-w {display_path}"
+            )
         chunks = []
         while True:
             chunk = os.read(fd, 1024 * 1024)
@@ -1385,7 +1505,7 @@ def _snapshot_config(path: Path) -> dict:
 
     try:
         with safe._open_secure_directory(path.parent, create=False) as directory:
-            safe._require_trusted_directory(directory)
+            _require_trusted_directory(directory)
             return _snapshot_config_at(directory, path.name, path)
     except FileNotFoundError:
         return {
@@ -1503,8 +1623,14 @@ def _write_unique_at(directory, name: str, raw: bytes, mode: int) -> None:
         mode,
     )
     try:
+        info = os.fstat(fd)
+        if os.name != "nt" and (info.st_uid != os.geteuid() or _has_untrusted_writers(info, fd)):
+            raise OSError(f"created hook config is unsafe or writable: {directory.path / name}")
         safe._write_all(fd, raw)
         os.fsync(fd)
+    except BaseException:
+        safe._unlink_at(directory, name)
+        raise
     finally:
         os.close(fd)
 
@@ -1513,7 +1639,7 @@ def _write_unique(path: Path, raw: bytes, mode: int) -> None:
     from ._hooks import exomem_continuation_checkpoint as safe
 
     with safe._open_secure_directory(path.parent, create=True) as directory:
-        safe._require_trusted_directory(directory)
+        _require_trusted_directory(directory)
         _write_unique_at(directory, path.name, raw, mode)
 
 
@@ -1537,7 +1663,7 @@ def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
 
     path = Path(path).expanduser()
     with safe._open_secure_directory(path.parent, create=create) as parent:
-        safe._require_trusted_directory(parent)
+        _require_trusted_directory(parent)
         name = _resolved_config_name(parent, path.name, path)
         written = path if name == path.name else path.parent / name
         for _attempt in range(3):
@@ -1550,7 +1676,8 @@ def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
                 continue
             raw = (json.dumps(merged, indent=2) + "\n").encode("utf-8")
             temporary = f".{name}.tmp-{os.getpid()}-{secrets.token_hex(6)}"
-            _write_unique_at(parent, temporary, raw, initial["mode"])
+            write_mode = initial["mode"] & ~0o022
+            _write_unique_at(parent, temporary, raw, write_mode)
             latest = _snapshot_config_at(parent, name, written)
             if not _same_snapshot(initial, latest):
                 safe._unlink_at(parent, temporary)
@@ -1558,7 +1685,7 @@ def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
             backup_name: str | None = None
             if initial["exists"]:
                 backup_name = _backup_name(name)
-                _write_unique_at(parent, backup_name, initial["raw"], initial["mode"])
+                _write_unique_at(parent, backup_name, initial["raw"], write_mode)
             final = _snapshot_config_at(parent, name, written)
             if not _same_snapshot(initial, final):
                 safe._unlink_at(parent, temporary)
@@ -1665,6 +1792,7 @@ def install_hook(
     Returns {"installed": [{event, script, wrapper, command}], "wired", "settings",
     "client"}. Raises FileNotFoundError if a bundled hook file is missing.
     """
+    _private_group_for_user.cache_clear()
     client = _normalize_client(client)
     activation_mode = _activation_mode(activation_mode)
     home = _profile_home(client, settings_path) if activation_mode else _default_home(client)
@@ -1748,6 +1876,7 @@ def install_hook(
 def install_all_hooks(
     *, wire: bool = True, timeout: int = 10, activation_mode: str | None = None
 ) -> dict:
+    _private_group_for_user.cache_clear()
     reports: list[dict] = []
     for client in SUPPORTED_CLIENTS:
         try:
@@ -1887,7 +2016,7 @@ def _write_upgrade_refresh_report(home: Path, report: dict) -> None:
     path = _upgrade_refresh_report_path(home)
     try:
         with safe._open_secure_directory(path.parent, create=True) as directory:
-            safe._require_trusted_directory(directory)
+            _require_trusted_directory(directory)
             existing = safe._existing_kind(directory, path.name)
             if existing is not None:
                 if not stat.S_ISREG(existing):
@@ -2071,7 +2200,7 @@ def read_last_upgrade_refresh(home: Path | None = None) -> dict | None:
 
         path = _upgrade_refresh_report_path(resolved_home)
         with safe._open_secure_directory(path.parent, create=False) as directory:
-            safe._require_trusted_directory(directory)
+            _require_trusted_directory(directory)
             if not stat.S_ISREG(safe._existing_kind(directory, path.name) or 0):
                 return None
             fd = safe._open_secure_file_at(directory, path.name, os.O_RDONLY)
@@ -2302,6 +2431,7 @@ def uninstall_hook(
     Never raises for a config it could not read: an uninstall reports what it
     could not reach, because the user still has to go and finish it by hand.
     """
+    _private_group_for_user.cache_clear()
     client = _normalize_client(client)
     hook_dir = Path(hook_dir).expanduser() if hook_dir else _default_hook_dir(client)
     settings = Path(settings_path).expanduser() if settings_path else _default_settings(client)

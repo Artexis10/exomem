@@ -385,9 +385,9 @@ def test_installed_capture_and_continuation_keep_same_session_in_separate_homes(
     assert not (tmp_path / ".cache").exists()
 
 
-@pytest.mark.parametrize("unsafe", ["symlink", "group-write"])
+@pytest.mark.parametrize("unsafe", ["symlink", "other-write"])
 def test_explicit_mode_preserves_untrusted_config_refusal(tmp_path, unsafe):
-    if unsafe == "group-write":
+    if unsafe == "other-write":
         require_posix_file_modes()
     settings = tmp_path / "profile" / "hooks.json"
     settings.parent.mkdir(mode=0o700)
@@ -397,7 +397,7 @@ def test_explicit_mode_preserves_untrusted_config_refusal(tmp_path, unsafe):
         settings.symlink_to(target)
     else:
         settings.write_text(target.read_text())
-        settings.chmod(0o660)
+        settings.chmod(0o666)
     with pytest.raises(OSError):
         installer.install_hook(
             client="codex",
