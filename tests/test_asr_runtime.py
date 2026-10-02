@@ -29,6 +29,14 @@ def test_quiet_is_cpu_even_when_cuda_is_admitted(monkeypatch: pytest.MonkeyPatch
     assert (selected.device, selected.compute_type) == ("cpu", "int8")
 
 
+def test_service_profile_uses_cpu_despite_stored_performance_and_admitted_cuda(monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    selected = asr_runtime.select_asr_runtime(probe=_probe())
+    assert (selected.device, selected.compute_type) == ("cpu", "int8")
+
+
 def test_explicit_cuda_never_falls_back_when_probe_declines(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_ASR_DEVICE", "cuda")
     with pytest.raises(asr_runtime.ASRRuntimeRefusal, match="no CUDA device"):

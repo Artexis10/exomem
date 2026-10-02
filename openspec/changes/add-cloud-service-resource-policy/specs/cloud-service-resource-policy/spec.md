@@ -4,6 +4,15 @@ Defines the managed Cloud service's compute policy and measurable responsiveness
 
 ## ADDED Requirements
 
+### Requirement: Supported vault configuration independence
+
+The service policy SHALL apply through existing vault discovery, schema and semantic indexing contracts to all supported vault configurations. Work classification MUST NOT depend on maintainer-specific path names, personal metadata or a particular optional schema feature. Deployment resource policy SHALL remain operator-controlled code. Inputs exceeding the declared resource budget SHALL remain visibly deferred/refused without changing canonical data or pretending configuration independence guarantees unlimited capacity.
+
+#### Scenario: Alternative supported vault layout
+- **WHEN** a Cloud cell uses an alternative supported schema or vault-root configuration
+- **THEN** ordinary save, deferred semantic recovery and fresh recall use the same service policy and publication fences
+- **AND** no private folder convention or tenant performance-mode change is required
+
 ### Requirement: Operator-owned Cloud service profile
 
 Cloud SHALL support explicit `legacy` and `service-v1` deployment profiles. A missing selection SHALL preserve legacy behavior. Only operator-controlled Cloud deployment configuration SHALL select `service-v1`; tenant requests, engagement settings and generic model configuration MUST NOT change it. Invalid selections or selecting the service profile outside a valid Cloud deployment SHALL fail configuration with a value-free error. The system SHALL report profile and selection source separately from stored workstation mode and engagement preference; profile selection MUST NOT rewrite either stored preference.

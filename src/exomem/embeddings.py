@@ -1669,6 +1669,57 @@ def upsert_after_write_status(
     defer_during_warm: bool = True,
     batch_size: int = 256,
 ) -> EmbeddingSyncStatus:
+    """Prepare service parents individually within the shared peak allowance."""
+    from . import mode, runtime_resources, vault
+
+    if not mode.service_profile_enabled() or os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return _upsert_after_write_status(
+            vault_root, written_paths, defer_during_warm=defer_during_warm, batch_size=batch_size
+        )
+    eligible = [
+        path for path in written_paths
+        if index_paths.is_embeddable_path(path)
+        and index_paths.rel_to_vault(vault_root, path) is not None
+        and recall_policy.is_recall_candidate(vault_root, path)
+    ]
+    if not eligible:
+        return _upsert_after_write_status(
+            vault_root, written_paths, defer_during_warm=defer_during_warm, batch_size=batch_size
+        )
+    suppressed = [path for path in written_paths if path not in eligible]
+    if suppressed:
+        _upsert_after_write_status(vault_root, suppressed, defer_during_warm=defer_during_warm)
+    failure: EmbeddingSyncStatus | None = None
+    for path in eligible:
+        try:
+            with runtime_resources.semantic_preparation(vault_root, path) as preparation:
+                status = _upsert_after_write_status(
+                    vault_root, [path], defer_during_warm=defer_during_warm,
+                    batch_size=1, preparation=preparation,
+                )
+        except runtime_resources.PreparationBudgetExceeded:
+            status = EmbeddingSyncStatus("degraded", "embedding_preparation_budget_exceeded", 1)
+        except runtime_resources.PreparationCapacityBusy:
+            status = EmbeddingSyncStatus("degraded", "embedding_preparation_busy", 1)
+        except (OSError, UnicodeError, vault.PathGuardError):
+            status = EmbeddingSyncStatus("degraded", "embedding_input_unavailable", 1)
+        if status.status != "completed":
+            failure = failure or status
+    return EmbeddingSyncStatus(
+        failure.status if failure else "completed",
+        failure.code if failure else "embedding_upsert_completed",
+        len(eligible),
+    )
+
+
+def _upsert_after_write_status(
+    vault_root: Path,
+    written_paths: list[Path],
+    *,
+    defer_during_warm: bool = True,
+    batch_size: int = 256,
+    preparation: Any = None,
+) -> EmbeddingSyncStatus:
     """Re-embed eligible files and return an observable bounded outcome."""
     global _IMPORT_FAILED
     md_paths: list[Path] = []
@@ -1769,7 +1820,7 @@ def upsert_after_write_status(
         return finish(
             EmbeddingSyncStatus("degraded", "embedding_index_open_failed", eligible_count)
         )
-    from . import freshness
+    from . import freshness, vault
 
     captured_policy_identity = recall_policy.recall_policy_identity(vault_root)
     per_file: list[tuple[Path, Any, list[str], float, freshness.FileSignature]] = []
@@ -1778,6 +1829,8 @@ def upsert_after_write_status(
         try:
             stat = md.stat()
             signature = freshness.stat_signature(md)
+            if preparation is not None and signature != preparation.signature:
+                raise OSError("semantic input changed during preparation")
             mtime = stat.st_mtime
         except FileNotFoundError:
             # File was just written then disappeared — treat as a delete.
@@ -1795,7 +1848,16 @@ def upsert_after_write_status(
             failure_code = "embedding_input_unavailable"
             continue
         try:
-            page = find_module._CACHE.get(md, vault_root)
+            if preparation is None:
+                page = find_module._CACHE.get(md, vault_root)
+            else:
+                from . import find_corpus
+
+                page = find_corpus.parse_page(
+                    md, mtime, vault_root,
+                    content=preparation.source.encode("utf-8"),
+                    resolved_relative=md.relative_to(vault_root).as_posix(),
+                )
         except Exception as e:  # noqa: BLE001 - parsing/cache failures are observable
             log.warning("embedding input could not be parsed: %s", e)
             failure_code = "embedding_input_unavailable"
@@ -1803,6 +1865,9 @@ def upsert_after_write_status(
         if page is None:
             failure_code = "embedding_input_unavailable"
             continue
+        if preparation is not None:
+            identity = getattr(index, "identity", None)
+            preparation.check_page(page, vector_dim=identity.dim if identity else recall_space.current_dim())
         try:
             chunks = _chunks_for_page(vault_root, page)
         except Exception as e:  # noqa: BLE001 - chunk extraction is best-effort
@@ -1886,12 +1951,14 @@ def upsert_after_write_status(
 
         def still_current(path: Path = md, expected: freshness.FileSignature = signature) -> bool:
             try:
+                if preparation is not None:
+                    preparation.guard.recheck(vault_root)
                 return (
                     recall_policy.is_recall_candidate(vault_root, path)
                     and freshness.stat_signature(path) == expected
                     and recall_policy.recall_policy_identity(vault_root) == captured_policy_identity
                 )
-            except OSError:
+            except (OSError, vault.PathGuardError):
                 return False
 
         if not still_current():
@@ -1901,7 +1968,9 @@ def upsert_after_write_status(
                 log.warning("embedding drift purge failed for %s: %s", rel_path, error)
             failure_code = failure_code or "embedding_input_drifted"
             continue
-        stored_chunks, stored_units = _stored_text_vectors(index, rel_path)
+        stored_chunks, stored_units = _stored_text_vectors(
+            index, rel_path, max_bytes=preparation.reuse_allowance if preparation else None
+        )
         try:
             with recall_space.encoding_for(index):
                 vectors, producer = _encode_prepared(
@@ -1918,7 +1987,9 @@ def upsert_after_write_status(
             continue
         unit_replacement = None
         try:
-            state = semantic_index.current_parent_index_state(vault_root, md)
+            state = semantic_index.current_parent_index_state(
+                vault_root, md, source=preparation.source if preparation else None
+            )
             units = [unit for unit in state.document.units if unit.unit_ref is not None]
             with recall_space.encoding_for(index):
                 unit_vectors, unit_producer = _encode_prepared(
@@ -1994,14 +2065,17 @@ def _live_embed_max_chunks() -> int:
 
 
 def _stored_text_vectors(
-    index: Any, rel_path: str
+    index: Any, rel_path: str, *, max_bytes: int | None = None
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     """The page's published vectors by text, or nothing when they cannot be read.
 
     Reuse is an economy, never a dependency: a sidecar that cannot answer costs
     this write a full encode, which is what it cost before."""
     try:
-        chunks, units = index.stored_text_vectors(rel_path)
+        chunks, units = (
+            index.stored_text_vectors(rel_path)
+            if max_bytes is None else index.stored_text_vectors(rel_path, max_bytes=max_bytes)
+        )
     except Exception as e:  # noqa: BLE001 - fall back to encoding everything
         log.debug("stored vectors unavailable for reuse (%s)", type(e).__name__)
         return {}, {}

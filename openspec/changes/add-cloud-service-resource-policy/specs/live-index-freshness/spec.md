@@ -25,6 +25,10 @@ The service profile SHALL bound bulk/recovery model work at actual encode-batch 
 
 Outer request admission SHALL remain nonblocking. Fair execution waiters SHALL already be admitted and count against the same reserved model budget, including service-owned callers. Foreground precedence SHALL include a bounded aging turn for bulk work so sustained interactive traffic does not permanently starve recovery. Partial parent preparation MUST NOT relax exact-parent publication, source-version or vector-identity checks. Local default admission behavior SHALL remain unchanged.
 
+Existing derived-component custody SHALL remain with its current owner when semantic execution is delegated. Queued or publishing work SHALL remain pending rather than being completed or recorded as a failed attempt. Exact semantic publication and the component's own canonical/custody completion fence SHALL both be satisfied before semantic completion. Repeated pending observations MUST NOT supersede in-flight semantic receipts by minting new revisions.
+
+The aggregate preparation budget SHALL reserve capacity for small work and include expanded text, both vector projections at their actual width and peak intermediate/publication copies. Optional reuse of old vectors SHALL be size-checked before reading all old rows and skipped when it would exceed the allowance. Classification MUST NOT invoke model inference merely to determine work size.
+
 #### Scenario: Large parent and a small live update compete
 - **WHEN** a large parent is being indexed and a bounded ordinary update arrives
 - **THEN** the live update can obtain model execution without waiting for the entire large parent
@@ -44,3 +48,13 @@ Outer request admission SHALL remain nonblocking. Fair execution waiters SHALL a
 - **WHEN** a bulk parent exceeds the source or prepared-data budget
 - **THEN** its receipt remains durable with an observable resource-budget refusal
 - **AND** eligible small parents continue to progress without allocating the oversized representation
+
+#### Scenario: A large old version becomes a small replacement
+- **WHEN** a small current parent has an old stored representation exceeding the reuse allowance
+- **THEN** recovery re-encodes the bounded replacement instead of allocating all old vectors
+- **AND** the current parent is published only after its normal exact-source checks
+
+#### Scenario: Delegated derived component awaits semantic publication
+- **WHEN** the existing component owner has submitted semantic work that is still queued or encoding
+- **THEN** its semantic component remains pending without failure backoff or duplicate revision minting
+- **AND** only exact semantic publication plus current component custody can complete it

@@ -72,10 +72,11 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     ``exomem.server.load_dotenv`` still neutralize dotenv loading exactly as they
     did before this extraction.
     """
+    from . import cloud_cell
+
+    cloud_cell.resource_policy()
     if hosted_mode_enabled():
         return _initialize_hosted_runtime()
-
-    from . import cloud_cell
 
     if cloud_cell.cloud_mode_enabled():
         # A cloud cell reads no `.env` file: configuration comes only from the

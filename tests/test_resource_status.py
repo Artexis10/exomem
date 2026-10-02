@@ -52,6 +52,8 @@ def test_collect_does_not_import_torch_or_probe_cuda(monkeypatch, tmp_path: Path
         # rather than in the log. Both are pure env/config reads — no import.
         "preload_policy": False,
         "reap_when_idle": True,
+        "core_pinned_policy": False,
+        "core_ready": False,
     }
     assert status["media"]["worker_active"] is False
     assert status["asr"] == {
@@ -64,6 +66,42 @@ def test_collect_does_not_import_torch_or_probe_cuda(monkeypatch, tmp_path: Path
         "runtime": "not probed (allocation-free status)",
     }
     assert not (tmp_path / "Knowledge Base" / ".media-jobs.sqlite").exists()
+
+
+def test_service_status_reports_unloaded_core_without_creating_state(monkeypatch, tmp_path):
+    _forbid_torch_import(monkeypatch)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    from exomem import state_paths
+
+    state = state_paths.vault_state_dir(tmp_path)
+    before = state.exists()
+    result = resource_status.collect(tmp_path)
+    assert result["models"]["core_pinned_policy"] is True
+    assert result["models"]["embeddings"] is False
+    assert result["models"]["core_ready"] is False
+    assert result["deferred_work"]["semantic_debt"] == {
+        "state": "absent", "count": 0, "oldest_age_seconds": None,
+    }
+    assert state.exists() is before
+
+
+def test_semantic_debt_retry_preserves_age_and_unreadable_is_unknown(monkeypatch, tmp_path):
+    from exomem import deferred_index
+
+    monkeypatch.setattr(deferred_index.time, "time", lambda: 100.0)
+    deferred_index.add(tmp_path, ["Knowledge Base/Notes/x.md"])
+    monkeypatch.setattr(deferred_index.time, "time", lambda: 130.0)
+    receipts = deferred_index.snapshot(tmp_path)
+    deferred_index.rotate_receipts(tmp_path, receipts)
+    deferred_index.add(tmp_path, ["Knowledge Base/Notes/x.md"])
+    result = deferred_index.semantic_debt_status(tmp_path)
+    assert result == {"state": "ok", "count": 1, "oldest_age_seconds": 30.0}
+    path = deferred_index.store_path(tmp_path)
+    path.write_bytes(b"not a SQLite database")
+    assert deferred_index.semantic_debt_status(tmp_path) == {
+        "state": "unknown", "count": None, "oldest_age_seconds": None,
+    }
 
 
 def test_collect_reports_already_loaded_modules_without_loading_missing_ones(

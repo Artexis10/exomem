@@ -848,8 +848,18 @@ def add_receipts(vault_root: Path, rel_paths: list[str]) -> list[DeferredReceipt
     return receipts
 
 
+def ensure_receipts(vault_root: Path, rel_paths: list[str]) -> list[DeferredReceipt]:
+    """Retain existing execution custody without revising an in-flight receipt.
+
+    Canonical producers still use ``add_receipts`` for a new edit. Repeated
+    component/warmup handoffs merely ensure debt exists; they are not edits.
+    """
+    receipts, _added = _add_receipts(vault_root, rel_paths, preserve_existing=True)
+    return receipts
+
+
 def _add_receipts(
-    vault_root: Path, rel_paths: list[str]
+    vault_root: Path, rel_paths: list[str], *, preserve_existing: bool = False
 ) -> tuple[list[DeferredReceipt], int]:
     rels: list[str] = []
     rejected: list[str] = []
@@ -887,6 +897,8 @@ def _add_receipts(
                         "(rel_path, created_at, updated_at, revision) VALUES (?, ?, ?, ?)",
                         (rel, now, now, revision),
                     )
+                elif preserve_existing:
+                    revision = int(row[0])
                 else:
                     revision = int(row[0]) + 1
                     conn.execute(
@@ -1402,7 +1414,11 @@ def list_full_paths(vault_root: Path, *, limit: int | None = None) -> list[str]:
 
 
 def snapshot(
-    vault_root: Path, *, limit: int | None = None
+    vault_root: Path,
+    *,
+    limit: int | None = None,
+    paths: set[str] | None = None,
+    after_path: str | None = None,
 ) -> list[DeferredReceipt]:
     path = store_path(vault_root)
     if not path.exists():
@@ -1414,14 +1430,24 @@ def snapshot(
             for row in conn.execute("PRAGMA table_info(semantic_upserts)")
         }
         revision = "revision" if "revision" in columns else "1 AS revision"
-        sql = (
-            f"SELECT rel_path, {revision} FROM semantic_upserts "
-            "ORDER BY updated_at, rel_path"
-        )
-        params: tuple[Any, ...] = ()
+        sql = f"SELECT rel_path, {revision} FROM semantic_upserts "
+        params: list[Any] = []
+        clauses: list[str] = []
+        if paths is not None:
+            wanted = sorted({rel for raw in paths if (rel := _safe_markdown_rel_path(raw))})
+            if not wanted:
+                return []
+            clauses.append(f"rel_path IN ({','.join('?' for _ in wanted)})")
+            params.extend(wanted)
+        if after_path is not None:
+            clauses.append("rel_path > ?")
+            params.append(after_path)
+        if clauses:
+            sql += "WHERE " + " AND ".join(clauses) + " "
+        sql += "ORDER BY " + ("rel_path" if after_path is not None else "updated_at, rel_path")
         if limit is not None:
             sql += " LIMIT ?"
-            params = (max(0, limit),)
+            params.append(max(0, limit))
         receipts = [
             DeferredReceipt(str(row[0]), int(row[1]))
             for row in conn.execute(sql, params).fetchall()
@@ -2170,6 +2196,29 @@ def _clear(
 
 def status(vault_root: Path | None) -> dict[str, Any]:
     return _status(vault_root, table="semantic_upserts")
+
+
+def semantic_debt_status(vault_root: Path | None) -> dict[str, Any]:
+    """Read first-enqueue age without creating state or disguising read failures."""
+    unknown = {"state": "unknown", "count": None, "oldest_age_seconds": None}
+    if vault_root is None:
+        return unknown
+    try:
+        if not store_path(vault_root).exists():
+            return {"state": "absent", "count": 0, "oldest_age_seconds": None}
+        conn = _connect_readonly(vault_root)
+        try:
+            count, oldest = conn.execute(
+                "SELECT count(*), min(created_at) FROM semantic_upserts"
+            ).fetchone()
+        finally:
+            conn.close()
+        return {
+            "state": "ok", "count": int(count),
+            "oldest_age_seconds": max(0.0, time.time() - float(oldest)) if oldest is not None else None,
+        }
+    except (OSError, sqlite3.Error, ValueError):
+        return unknown
 
 
 def full_status(vault_root: Path | None) -> dict[str, Any]:

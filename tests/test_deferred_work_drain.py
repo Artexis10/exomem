@@ -108,6 +108,24 @@ def test_add_full_receipts_returns_its_atomic_revision_when_a_readd_races(
     ]
 
 
+def test_semantic_handoff_preserves_revision_and_scans_bounded_pages(vault: Path) -> None:
+    rels = [f"Knowledge Base/queued-{i}.md" for i in range(3)]
+    for rel in rels:
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# Queued\n", encoding="utf-8")
+    original = deferred_index.add_receipts(vault, rels)
+    assert deferred_index.ensure_receipts(vault, rels) == original
+    first = deferred_index.snapshot(vault, limit=2, after_path="")
+    second = deferred_index.snapshot(vault, limit=2, after_path=first[-1].rel_path)
+    assert first + second == original
+    assert deferred_index.snapshot(vault, limit=2, paths={rels[2]}) == [original[2]]
+    newer = deferred_index.add_receipts(vault, [rels[0]])
+    assert newer[0].revision > original[0].revision
+    assert deferred_index.clear_receipts(vault, original[:1]) == 0
+    assert deferred_index.ensure_receipts(vault, [rels[0]]) == newer
+
+
 def test_index_command_clears_both_deferred_queues(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1586,14 +1586,14 @@ class EmbeddingIndex:
         return [str(text) for _idx, text, _mtime in rows], max(mtimes)
 
     def stored_text_vectors(
-        self, rel_path: str
+        self, rel_path: str, *, max_bytes: int | None = None
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
         """One page's published chunk and unit vectors keyed by exact text."""
-        chunks, units, _space = self.stored_text_vectors_with_space(rel_path)
+        chunks, units, _space = self.stored_text_vectors_with_space(rel_path, max_bytes=max_bytes)
         return chunks, units
 
     def stored_text_vectors_with_space(
-        self, rel_path: str
+        self, rel_path: str, *, max_bytes: int | None = None
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], recall_space.SpaceIdentity | None]:
         """One page's published vectors keyed by the exact text each was encoded
         from, and their space identity, all from one read transaction.
@@ -1612,6 +1612,24 @@ class EmbeddingIndex:
         try:
             conn.execute("BEGIN", ())
             space = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            if max_bytes is not None:
+                # Blob + copied array, decoded strings and per-row containers.
+                # Check both projections in the same snapshot before fetchall;
+                # a formerly huge parent can now be a tiny replacement.
+                reuse_bytes = conn.execute(
+                    "SELECT COALESCE(SUM(2 * length(vector) + "
+                    "4 * length(CAST(chunk_text AS BLOB)) + 512), 0) "
+                    "FROM chunks WHERE file_path = ?",
+                    (rel_path,),
+                ).fetchone()[0]
+                reuse_bytes += conn.execute(
+                    "SELECT COALESCE(SUM(2 * length(vector) + "
+                    "4 * length(CAST(content AS BLOB)) + 512), 0) "
+                    "FROM semantic_unit_vectors WHERE parent_path = ?",
+                    (rel_path,),
+                ).fetchone()[0]
+                if reuse_bytes > max_bytes:
+                    return {}, {}, space
             chunk_rows = conn.execute(
                 "SELECT chunk_text, vector FROM chunks WHERE file_path = ?",
                 (rel_path,),

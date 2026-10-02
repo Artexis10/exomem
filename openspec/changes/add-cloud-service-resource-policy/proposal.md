@@ -5,6 +5,7 @@ Cloud needs a service policy that delivers responsive search and prompt semantic
 ## What Changes
 
 - Add an operator-selected `service-v1` Cloud resource profile, independently resolved from workstation modes. Existing images retain legacy behavior until an ordinary digest-pinned rollout selects the new profile.
+- Apply the same policy to every supported vault schema/layout through existing vault discovery and indexing contracts. Deployment settings and resource budgets come from operator code; no maintainer-specific folder names or tenant-side performance-mode workaround is required.
 - Keep only the core recall encoder resident in a running healthy cell. Preserve lazy, reclaimable corpus caches and optional models; do not equate Cloud with Performance or preload the whole vault.
 - Wake existing durable deferred indexing promptly inside its owning service and share existing compute admission fairly with interactive queries and bounded import/recovery work. Preserve successful inline indexing and exact revision publication.
 - Expose effective policy, core-model readiness and oldest pending semantic work without loading resources. Canonical commit and semantic freshness remain distinct outcomes.

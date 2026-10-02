@@ -184,6 +184,108 @@ def test_a_stored_vector_of_another_width_is_not_reused(live, monkeypatch) -> No
     assert encoder.calls[0] == ["alpha"]
 
 
+def test_reuse_budget_skips_large_old_projection_without_losing_new_write(live, monkeypatch) -> None:
+    vault, target, encoder = live
+    monkeypatch.setattr(embeddings, "_chunks_for_page", lambda *_a, **_k: ["alpha", "beta"])
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    index = embeddings.get_embedding_index(vault)
+
+    # A replacement can be small even when its previous projections exceeded
+    # the caller's preparation allowance. Reuse may be skipped, never required.
+    chunks, units, space = index.stored_text_vectors_with_space(PAGE, max_bytes=1)
+    assert chunks == units == {}
+    assert space is not None
+    chunks, units, _space = index.stored_text_vectors_with_space(PAGE, max_bytes=1024 * 1024)
+    assert set(chunks) == {"alpha", "beta"}
+    assert len(units) == 1
+    encoder.calls.clear()
+    monkeypatch.setattr(index, "stored_text_vectors", lambda rel, **_kwargs: (
+        index.stored_text_vectors_with_space(rel, max_bytes=1)[:2]
+    ))
+    monkeypatch.setattr(embeddings, "_chunks_for_page", lambda *_a, **_k: ["alpha"])
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    assert encoder.calls[0] == ["alpha"]
+    assert [text for _i, text, _stamp in _chunk_rows(vault)] == ["alpha"]
+
+
+def test_service_refuses_title_expansion_before_encoding_or_publication(live, monkeypatch) -> None:
+    vault, target, encoder = live
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    old_rows = _chunk_rows(vault)
+    encoder.calls.clear()
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    replacement = _source([]).replace("title: Reuse", "title: " + "t" * 12000)
+    replacement += "a\n\n" * 600
+    target.write_text(replacement, encoding="utf-8")
+
+    status = embeddings.upsert_after_write_status(vault, [target])
+    assert status.code == "embedding_preparation_budget_exceeded"
+    assert status.status != "completed"
+    assert encoder.calls == []
+    assert _chunk_rows(vault) == old_rows
+    assert target.read_text(encoding="utf-8") == replacement
+    assert runtime_resources.status()["semantic_preparation"]["reserved_bytes"] == 0
+
+
+def test_service_snapshot_parse_stays_bounded_during_cache_reload_race(live, monkeypatch) -> None:
+    from exomem import find_corpus
+
+    vault, target, _encoder = live
+    original = _source(["- [config_rule] Bound the input #sqlite ^obs-aaaa1111"])
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    cache_get = find_module._CACHE.get
+    parse_page = find_corpus.parse_page
+    parsed_bytes: list[int] = []
+
+    def racing_reload(path, root):
+        path.write_text(_source([]) + "large prose " * 450000, encoding="utf-8")
+        return cache_get(path, root)
+
+    def observe_parse(*args, **kwargs):
+        parsed_bytes.append(len(kwargs.get("content") or b""))
+        return parse_page(*args, **kwargs)
+
+    monkeypatch.setattr(find_module._CACHE, "get", racing_reload)
+    monkeypatch.setattr(find_corpus, "parse_page", observe_parse)
+    embeddings.upsert_after_write_status(vault, [target])
+    assert parsed_bytes
+    assert max(parsed_bytes) <= len(original.encode("utf-8"))
+
+
+def test_service_bounds_dense_yaml_before_constructing_nodes(live, monkeypatch) -> None:
+    vault, target, encoder = live
+    source = _source([]).replace("status: active", "status: active\ntags: [" + "a," * 75000 + "a]")
+    target.write_text(source, encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    status = embeddings.upsert_after_write_status(vault, [target])
+    assert status.code == "embedding_preparation_budget_exceeded"
+    assert encoder.calls == []
+    assert runtime_resources.status()["semantic_preparation"]["reserved_bytes"] == 0
+
+
+def test_service_bounds_yaml_alias_expansion_before_construction(live, monkeypatch) -> None:
+    vault, target, encoder = live
+    nodes = ["base: &a0 {x: y}"]
+    nodes.extend(f"level{i}: &a{i} {{<<: [*a{i - 1}, *a{i - 1}]}}" for i in range(1, 21))
+    source = _source([]).replace("status: active", "status: active\n" + "\n".join(nodes))
+    target.write_text(source, encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    status = embeddings.upsert_after_write_status(vault, [target])
+    assert status.code == "embedding_preparation_budget_exceeded"
+    assert encoder.calls == []
+
+    # Ordinary bounded alias reuse is still a supported input, not an alias ban.
+    target.write_text(_source([]).replace("status: active", "status: active\nshared: &tags [one, two]\ntags: *tags"), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+
+
 def test_stored_text_vectors_never_creates_the_sidecar(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("EXOMEM_STATE_DIR", str(tmp_path / "state"))
     vault = tmp_path / "vault"

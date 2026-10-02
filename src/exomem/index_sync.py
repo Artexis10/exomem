@@ -140,6 +140,10 @@ def derived_acknowledgement_snapshot(
             return "not_required" if advisory else "completed"
         if status.state == "completed":
             return "completed"
+        if status.state == "retryable" and status.failure_code is None:
+            # Delegated execution still owns durable pending work; releasing
+            # a claim while it runs did not record a failed attempt.
+            return "pending"
         if status.state in _FAST_ACK_FAILED_STATES:
             return "failed"
         if status.state in _FAST_ACK_PENDING_STATES:
@@ -768,6 +772,7 @@ def deferred_work_status(vault_root: Path | None = None) -> dict:
     """No-allocation summary of durable expensive index work."""
     return {
         "semantic_upserts": deferred_index.status(vault_root),
+        "semantic_debt": deferred_index.semantic_debt_status(vault_root),
         "full_upserts": deferred_index.full_status(vault_root),
     }
 

@@ -17,6 +17,18 @@ import pytest
 from exomem import media_worker, resource_status, runtime_resources
 
 
+def test_cloud_budget_is_validated_before_native_runtime_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.cloud_cell import CloudConfigError
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.setenv("EXOMEM_SYNC_WORKERS", "3")
+    with pytest.raises(CloudConfigError):
+        runtime_resources.resolve_policy()
+
+
 def test_default_compute_policy_is_host_cooperative(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_CPU_THREADS", raising=False)
     monkeypatch.delenv("EXOMEM_SYNC_WORKERS", raising=False)
@@ -925,3 +937,90 @@ def test_active_cleanup_times_out_then_kills_without_a_real_manager(
         (["systemctl", "--user", "stop", "sample-unit"], 5),
         (["systemctl", "--user", "kill", "sample-unit"], 5),
     ]
+
+
+def test_service_onnx_session_obeys_reported_default_budget(monkeypatch):
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.delenv("EXOMEM_CPU_THREADS", raising=False)
+    monkeypatch.setattr(runtime_resources, "effective_online_cpus", lambda: 2)
+    options = types.SimpleNamespace()
+    runtime_resources.configure_onnx_session_options(options, default_threads=2)
+    assert options.intra_op_num_threads == runtime_resources.resolve_policy().cpu_threads == 1
+
+
+def test_service_bulk_cannot_reacquire_ahead_of_an_admitted_small_caller(monkeypatch):
+    """The legacy RLock let a bulk caller take all 256 turns ahead of its waiter."""
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    gate = runtime_resources.ModelAdmissionGate(2)
+    admitted = threading.Event()
+    turns = []
+
+    def small():
+        with gate.admission():
+            admitted.set()
+            with gate.execution():
+                turns.append("small")
+
+    with gate.admission():
+        with gate.execution(work_class="bulk"):
+            worker = threading.Thread(target=small)
+            worker.start()
+            assert admitted.wait(2)
+            deadline = time.monotonic() + 2
+            while gate.waiting_counts()["foreground"] != 1 and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert gate.waiting_counts()["foreground"] == 1
+        for _ in range(16):
+            with gate.execution(work_class="bulk"):
+                turns.append("bulk")
+    worker.join(2)
+    assert not worker.is_alive()
+    assert turns.index("small") < 16
+    assert gate.admitted_count() == 0
+
+
+def test_service_bulk_waiter_gets_an_aging_turn_and_cancel_releases_admission(monkeypatch):
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    gate = runtime_resources.ModelAdmissionGate(3)
+    admitted = threading.Event()
+    cancelled = threading.Event()
+    turns = []
+
+    def bulk():
+        with gate.admission():
+            admitted.set()
+            with gate.execution(work_class="bulk"):
+                turns.append("bulk")
+
+    def waiting_cancelled():
+        try:
+            with gate.execution(cancel_event=cancelled):
+                pytest.fail("cancelled work ran")
+        except runtime_resources.ModelBusyError:
+            pass
+
+    with gate.admission():
+        with gate.execution():
+            worker = threading.Thread(target=bulk)
+            worker.start()
+            assert admitted.wait(2)
+            deadline = time.monotonic() + 2
+            while gate.waiting_counts()["bulk"] != 1 and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert gate.waiting_counts()["bulk"] == 1
+        for _ in range(16):
+            with gate.execution():
+                turns.append("foreground")
+        with gate.execution():
+            cancelled.set()
+            cancel_worker = threading.Thread(target=waiting_cancelled)
+            cancel_worker.start()
+            cancel_worker.join(2)
+            assert not cancel_worker.is_alive()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert turns.index("bulk") <= 8
+    assert gate.admitted_count() == 0
