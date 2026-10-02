@@ -3258,23 +3258,23 @@ def repair_is_provisioned(
     acknowledged = acknowledged_checkpoint(vault_root)
     if acknowledged is not None and acknowledged.covers(required):
         return True
-    if outcome == "completed":
-        return False
-    if registered_checkpoint(vault_root, state_root=state_root) == required:
-        return True
-    if outcome == "registered":
-        # The claim was a flight, and there is none. Nothing else substitutes:
-        # the queue entry below is written by the batch itself and would say
-        # nothing about whether this branch did what it reported.
-        return False
-    from . import deferred_index
+    if outcome != "completed":
+        if registered_checkpoint(vault_root, state_root=state_root) == required:
+            return True
+        if outcome != "registered":
+            # A queue cannot excuse a claimed flight that never existed.
+            from . import deferred_index
 
-    if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
-        return True
-    queued = set(deferred_index.list_graph_paths(vault_root))
-    if not queued:
-        return False
-    return all(path in queued for path, _digest in required.paths)
+            if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
+                return True
+            queued = set(deferred_index.list_graph_paths(vault_root))
+            if queued and all(path in queued for path, _digest in required.paths):
+                return True
+    # Repair publishes its acknowledgement before consuming the queue/flight.
+    # If it finished between our first read and the mechanism check, absence
+    # now means completion, not a missing handoff. Re-read the covering proof.
+    acknowledged = acknowledged_checkpoint(vault_root)
+    return acknowledged is not None and acknowledged.covers(required)
 
 
 def temporary_sidecar_path(live: Path, checkpoint: GraphSyncCheckpoint) -> Path:
