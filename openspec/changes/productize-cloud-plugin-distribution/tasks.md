@@ -7,6 +7,8 @@
 
 - [ ] 1.4 Release the shared engagement and annotation correction, refresh actual provider discovery, and verify live bootstrap policy gates activation and episode capture. Preserve verbatim warranted turns, relevant bounded conversation input and immutable historical profile annotations. Source verification does not close the post-release portal acceptance.
 
+- [ ] 1.5 Resolve the audited directory findings in the canonical tool/Skill source: enforce mutation admission for vocabulary-question review, clarify adoption presentation, link shared API documentation and use returned upload credentials only. Independently verify historical profiles and ordinary read behavior; regenerate packages, release, and revalidate both actual provider drafts. Record provider-review holds separately from actionable defects and ignored-field warnings.
+
 ## 2. Behavioural evaluation
 
 - [x] 2.1 Add the shared synthetic corpus and observable trace evaluator with red-first tests for missing calls, wrong arguments, fabricated success, denied writes, absent independent readbacks and drift.

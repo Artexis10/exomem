@@ -308,7 +308,10 @@ def test_agent_contract_is_mcp_ready_deterministic_and_additive() -> None:
     assert "agent_profile" not in legacy
     assert "transfer_grant" not in contract
 
-    canonical_commands = {command.name: command for command in commands.PRODUCT_COMMANDS}
+    profile_commands = {
+        command.name: command
+        for command in commands.product_commands_for_profile(ALPHA_PROFILE, "rest")
+    }
     for entry in contract["commands"]:
         name = entry["name"]
         mcp_tool = entry["mcp_tool"]
@@ -321,7 +324,7 @@ def test_agent_contract_is_mcp_ready_deterministic_and_additive() -> None:
         assert mcp_tool["inputSchema"] == committed["mcp_tool"]["inputSchema"]
         expected_annotations = committed["mcp_tool"]["annotations"]
         assert mcp_tool["annotations"] == expected_annotations
-        assert mcp_tool["annotations"]["idempotentHint"] is canonical_commands[name].read_only
+        assert mcp_tool["annotations"]["idempotentHint"] is profile_commands[name].read_only
 
 
 def test_hosted_alpha_mcp_tools_omit_absent_optional_fields_without_losing_schema_nulls() -> None:

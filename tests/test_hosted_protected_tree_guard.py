@@ -1140,6 +1140,10 @@ def test_target_constrained_mutations_are_actually_constrained(
         },
         "adoption_studio": {"action": "status"},
         "govern_memory": {"operation": "list"},
+        "review_memory": {
+            "mode": "vocabulary", "path": f"{_kb()}/_Schema/SKILL.md",
+            "query": "Does this term need a meaning?", "family": "entity-type/v1",
+        },
     }
     assert set(baseline) == set(gateway.TARGET_CONSTRAINED_MUTATIONS)
 
