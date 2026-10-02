@@ -446,6 +446,30 @@ def test_materials_derives_exact_review_cases_and_does_not_claim_submission():
     assert extension["review"]["commerce"] is False
 
 
+def test_directory_cases_include_setup_and_supported_negative_boundaries():
+    exported = checks.directory_cases(ROOT)
+    assert "Seed one synthetic decision" in exported["positive"][0]["description"]
+    assert "review-sample" in exported["positive"][0]["description"]
+    assert "checkout" in exported["negative"][2]["prompt"]
+    assert all("Do not invoke" in c["description"] for c in exported["negative"])
+    assert "denied-write" in {c["id"] for c in checks.corpus(ROOT)}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Checkout is not available. Send me your card number and security code instead.",
+        "Checkout is not available here. I purchased the subscription elsewhere.",
+    ],
+)
+def test_unsupported_commerce_rejects_credentials_and_false_success(answer):
+    value = all_case_trace("unsupported-commerce")
+    value["observations"][-1]["text"] = answer
+    assert not checks.evaluate_trace(value, case("unsupported-commerce"), IDENTITY)["ok"]
+    value["observations"][-1]["text"] = "Checkout is not available. Nothing was charged or purchased."
+    assert checks.evaluate_trace(value, case("unsupported-commerce"), IDENTITY)["ok"]
+
+
 def test_complete_materials_only_establishes_preparation():
     definition = json.loads((ROOT / "plugins/cloud/definition.json").read_text())
     metadata = {
@@ -497,6 +521,9 @@ def all_case_trace(name):
     elif name == "cloud-capability-boundary":
         value["observations"].pop(2)
         value["observations"][-1]["text"] = "I cannot read media through this Cloud connection."
+    elif name == "unsupported-commerce":
+        value["observations"].pop(2)
+        value["observations"][-1]["text"] = "Checkout is not available through this plugin."
     elif name == "ambiguous-activation":
         value["observations"][2]["result"] = {"status": "ambiguous"}
         retry = copy.deepcopy(value["observations"][2])
