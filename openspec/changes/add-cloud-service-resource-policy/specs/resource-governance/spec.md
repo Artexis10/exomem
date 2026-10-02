@@ -33,6 +33,20 @@ Release verification SHALL measure the persistent service separately from transi
 
 ## ADDED Requirements
 
+### Requirement: Service-policy allocator release is bounded and shared
+
+Existing completed-work allocator release callers SHALL share one process-wide minimum interval of five seconds under the validated service-v1 profile. Local and legacy profiles SHALL retain the sixty-second interval. Calls suppressed by that allowance SHALL retain the existing pending-release retry behavior. The policy SHALL NOT add a per-request trim, periodic release worker or core unload. Eligibility for an allocator release SHALL NOT be represented as proof of passing memory or latency acceptance.
+
+#### Scenario: Adjacent completed service turns can return freed heap
+- **WHEN** completed service-v1 work asks to return freed allocator pages five seconds after the last eligible call
+- **THEN** that call is eligible under the shared allowance
+- **AND** earlier calls are suppressed and remain pending for an existing retry caller
+- **AND** actual cgroup peaks and latency still govern promotion
+
+#### Scenario: Local and legacy release timing is preserved
+- **WHEN** a local or legacy completed-work caller requests a trim inside sixty seconds of the last eligible call
+- **THEN** the call remains suppressed by the existing allowance
+
 ### Requirement: Service-policy status preserves no-allocation diagnostics
 
 Resource status SHALL report effective Cloud profile/source, current core loaded/readiness state, pending semantic debt count and oldest original debt age, and background budget/activity without loading models, allocating corpus representations, creating sidecars or initializing CUDA. Unknown measurements SHALL remain unknown. Retry timestamps MUST NOT reset the age of unresolved work. Status MUST NOT equate canonical commit, Kubernetes readiness and completed semantic publication.
