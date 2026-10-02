@@ -108,5 +108,16 @@ sample's effective setting was restored to balanced. Corrected-package native
 retesting, the remaining cases, Claude acceptance, fresh portal scans and the
 real demo remain open. Neither provider draft has been submitted or published.
 
+The corrected private candidate still attempted an unsolicited engagement
+change during proactive capture. The request was denied, and the separate
+bounded sample observation persisted. A later fresh read after the 0.102.4 roll
+reported Maximal instead of the previously verified Balanced; its cause remains
+unresolved and the original receipts are preserved. The explicit-only rule now
+also appears in the canonical portable core, every standalone workflow, the
+configuration tool description and bootstrap route. Optional activation context
+is described with the existing server bounds, never as full history. This is a
+source correction, not evidence that native behavior or the portal finding is
+resolved. Tasks 1.4 and 3.1–3.4 remain open.
+
 - [x] 4.1 Resolve author-independent review findings, run scoped tests plus completion-boundary full CI and privacy checks, and merge the cohesive verified batch.
 - [ ] 4.2 Verify released packages and production outcome, reconcile prior acceptance debt, sync/archive only completed OpenSpec scope and retire the clean task worktree.
