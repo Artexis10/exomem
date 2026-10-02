@@ -1106,6 +1106,60 @@ _SENTENCE_BREAK = re.compile(
 _TOKEN_JOINERS = re.compile(r"['\-]+")
 
 
+def _positioned_words(turn: str) -> tuple[tuple[tuple[int, tuple[str, ...]], ...], ...]:
+    """Word units at their raw token positions, kept apart by sentence.
+
+    Runs keep their place but contribute no pairable stems. A word's index
+    in its sentence is its distinct unit id, including compound parts.
+    """
+    from . import bm25 as bm25_module
+
+    sentences = []
+    for sentence in _SENTENCE_BREAK.split(str(turn)):
+        words = []
+        for index, token in enumerate(
+            working_set_index.tokens_of(working_set_index.normalize(sentence))
+        ):
+            for part in _TOKEN_JOINERS.split(token):
+                for unit in bm25_module.token_units(part, query=True):
+                    words.append((index, () if unit.run else tuple(dict.fromkeys(unit.stems))))
+        sentences.append(tuple(words))
+    return tuple(sentences)
+
+
+def _pair_occurrences(
+    sentences: Sequence[Sequence[tuple[int, tuple[str, ...]]]],
+    rare_terms: Sequence[str],
+    *,
+    window: int | None = None,
+    partners: Sequence[str] = (),
+) -> Iterable[tuple[int, int, int, tuple[str, str]]]:
+    """Admissible pairs with their sentence and distinct word-unit positions."""
+    span = working_set.RETRIEVAL_CARRY_RARE_WINDOW if window is None else int(window)
+    distinctive = {str(term) for term in rare_terms}
+    wanted = distinctive | {str(term) for term in partners}
+    if len(wanted) < 2 or not distinctive:
+        return
+    for sentence_id, words in enumerate(sentences):
+        placed = [
+            (index, unit_id, stem)
+            for unit_id, (index, stems) in enumerate(words)
+            for stem in stems
+            if stem in wanted
+        ]
+        for position, (left_at, left_unit, left) in enumerate(placed):
+            for right_at, right_unit, right in placed[position + 1 :]:
+                if right_at - left_at > span:
+                    break
+                if (
+                    left != right
+                    and left_unit != right_unit
+                    and (left in distinctive or right in distinctive)
+                ):
+                    first, second = sorted((left, right))
+                    yield sentence_id, left_unit, right_unit, (first, second)
+
+
 def adjacent_rare_pairs(
     turn: str,
     rare_terms: Sequence[str],
@@ -1154,43 +1208,16 @@ def adjacent_rare_pairs(
     for `carry_title_groups`, where the page's own TITLE, checked by the
     caller, is what makes an ordinary word part of a name.
     """
-    from . import bm25 as bm25_module
-
-    span = working_set.RETRIEVAL_CARRY_RARE_WINDOW if window is None else int(window)
-    distinctive = {str(term) for term in rare_terms}
-    wanted = distinctive | {str(term) for term in partners}
-    if len(wanted) < 2 or not distinctive:
-        return ()
-    pairs: set[tuple[str, str]] = set()
-    # Split the RAW text: `normalize` folds case and width but keeps the
-    # punctuation, and splitting per sentence is what keeps a window from
-    # reaching across one.
-    unit_id = 0
-    for sentence in _SENTENCE_BREAK.split(str(turn)):
-        placed: list[tuple[int, int, str]] = []
-        for index, token in enumerate(
-            working_set_index.tokens_of(working_set_index.normalize(sentence))
-        ):
-            for part in _TOKEN_JOINERS.split(token):
-                for unit in bm25_module.token_units(part, query=True):
-                    unit_id += 1
-                    if unit.run:
-                        continue
-                    for stem in dict.fromkeys(unit.stems):
-                        if stem in wanted:
-                            placed.append((index, unit_id, stem))
-        for position, (left_at, left_unit, left) in enumerate(placed):
-            for right_at, right_unit, right in placed[position + 1 :]:
-                if right_at - left_at > span:
-                    break
-                if (
-                    left != right
-                    and left_unit != right_unit
-                    and (left in distinctive or right in distinctive)
-                ):
-                    first, second = sorted((left, right))
-                    pairs.add((first, second))
-    return tuple(sorted(pairs))
+    return tuple(
+        sorted(
+            {
+                pair
+                for _sentence, _left, _right, pair in _pair_occurrences(
+                    _positioned_words(turn), rare_terms, window=window, partners=partners
+                )
+            }
+        )
+    )
 
 
 def rare_turn_terms(
@@ -1407,21 +1434,27 @@ def _carry_title_groups(
     distinctive word and neighbour do not both sit in some current page's
     title names nothing, exactly as before; a title made only of ordinary
     words never qualifies, because at least one word of the pair is distinctive.
-    Runs only when the strict phrase rule found no page.
+    A complete title qualifies its own occurrence; equal namesakes and titles
+    containing that whole phrase still compete. Runs only when the strict
+    phrase rule found no page.
     """
     from . import lexstore
 
-    loose = tuple(
-        pair
-        for pair in adjacent_rare_pairs(turn, rare, partners=stems)
-        if pair not in set(pairs)
+    sentences = _positioned_words(turn)
+    strict = set(pairs)
+    occurrences = tuple(
+        occurrence
+        for occurrence in _pair_occurrences(sentences, rare, partners=stems)
+        if occurrence[3] not in strict
     )
+    loose = tuple(sorted({pair for _sentence, _left, _right, pair in occurrences}))
     if not loose:
         return []
+    fetch = working_set.carry_fetch_size(corpus_pages) if limit is None else limit
     result = lexstore.search_bm25_result(
         vault_root,
         content_words(turn),
-        working_set.carry_fetch_size(corpus_pages) if limit is None else limit,
+        fetch,
         scope="kb",
         freshness=freshness,
         allow_delta=False,
@@ -1431,10 +1464,10 @@ def _carry_title_groups(
         exclude_navigation=True,
         exclude_raw_material=True,
     )
-    if not result.readiness.complete:
+    if not result.readiness.complete or len(result.value or ()) >= fetch:
+        # A bounded prefix cannot prove that a namesake was not cut off.
         return []
-    components = phrase_components(loose)
-    by_component: list[list[tuple[str, float]]] = [[] for _ in components]
+    candidates = []
     for path, score in result.value or ():
         path = str(path)
         if (
@@ -1447,10 +1480,89 @@ def _carry_title_groups(
         if not title:
             continue
         title_stems = frozenset(pairable_stems(title))
+        title_sentences = tuple(
+            tuple(word_stems for _position, word_stems in words)
+            for words in _positioned_words(title)
+            if words
+        )
+        candidates.append((path, float(score), title_stems, title_sentences))
+
+    turn_words = [tuple(word_stems for _position, word_stems in words) for words in sentences]
+    matches = set()
+    eligible = set(stems)
+    for _path, _score, title_stems, title_sentences in candidates:
+        if len(title_sentences) != 1 or not title_stems <= eligible:
+            continue
+        title_words = title_sentences[0]
+        if not all(title_words):
+            continue
+        for sentence_id, words in enumerate(turn_words):
+            for start in range(len(words) - len(title_words) + 1):
+                end = start + len(title_words)
+                if words[start:end] == title_words and any(
+                    sentence == sentence_id and start <= left < right < end
+                    for sentence, left, right, _pair in occurrences
+                ):
+                    matches.add((sentence_id, start, end))
+    # A longer stated title consumes its nested matches at this occurrence.
+    matches = sorted(
+        match
+        for match in matches
+        if not any(
+            outer != match
+            and outer[0] == match[0]
+            and outer[1] <= match[1]
+            and match[2] <= outer[2]
+            for outer in matches
+        )
+    )
+    qualified = []
+    for sentence_id, start, end in matches:
+        phrase = turn_words[sentence_id][start:end]
+        supporting = {
+            path
+            for path, _score, _title_stems, title_sentences in candidates
+            if any(
+                title_words[at : at + len(phrase)] == phrase
+                for title_words in title_sentences
+                for at in range(len(title_words) - len(phrase) + 1)
+            )
+        }
+        spans = [(sentence_id, start, end)]
+        rest = []
+        for other_spans, paths in qualified:
+            if any(
+                sentence == sentence_id and left < end and start < right
+                for sentence, left, right in other_spans
+            ):
+                spans.extend(other_spans)
+                supporting.update(paths)
+            else:
+                rest.append((other_spans, paths))
+        qualified = [*rest, (spans, supporting)]
+    groups = [
+        tuple((path, score) for path, score, _stems, _words in candidates if path in supporting)
+        for _spans, supporting in qualified
+    ]
+    remaining = tuple(
+        sorted(
+            {
+                pair
+                for sentence_id, left, right, pair in occurrences
+                if not any(
+                    sentence == sentence_id and (start <= left < end or start <= right < end)
+                    for sentence, start, end in matches
+                )
+            }
+        )
+    )
+    components = phrase_components(remaining)
+    by_component: list[list[tuple[str, float]]] = [[] for _ in components]
+    for path, score, title_stems, _title_words in candidates:
         for index, component in enumerate(components):
             if any(set(pair) <= title_stems for pair in component):
-                by_component[index].append((path, float(score)))
-    return [tuple(group) for group in by_component if group]
+                by_component[index].append((path, score))
+    return groups + [tuple(group) for group in by_component if group]
 
 
 def carry_candidates(
