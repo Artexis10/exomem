@@ -660,7 +660,7 @@ class EmbeddingIndex:
         *,
         identity: recall_space.SpaceIdentity,
         validate: Callable[[], bool] | None = None,
-    ) -> None:
+    ) -> tuple[int, int, int, int] | None:
         """Publish one bounded group of prepared parents, then release old caches."""
         unit_replacements = unit_replacements or []
         if not replacements and not unit_replacements:
@@ -729,6 +729,65 @@ class EmbeddingIndex:
         finally:
             conn.close()
         self._complete_publication(stored, own_token)
+        return own_token
+
+    def parent_publication_current(
+        self,
+        rel_path: str,
+        *,
+        token: tuple[int, int, int, int],
+        identity: recall_space.SpaceIdentity,
+        chunk_count: int,
+        unit_count: int,
+        parent_generation: str,
+        parent_source_hash: str,
+    ) -> bool:
+        """Check a known exact publication without reading text or vector blobs.
+
+        The chunk owner's existing contiguous change log proves that this
+        parent's chunks have not moved since its transaction. Unit rows carry
+        their deterministic generation/source hash. An absent/gapped proof is
+        refused and replayed; unrelated publications do not invalidate it.
+        """
+        if not self.path.exists() or self.path != index_paths.sidecar_path(self.vault_root):
+            return False
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            current = self._build_token(conn)
+            if current[0] != token[0] or current[2] != token[2] or current[1] < token[1]:
+                return False
+            stored = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            if stored != identity and (chunk_count or unit_count or stored is not None):
+                return False
+            if current[1] != token[1]:
+                start, upto = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
+                if start is None or start > token[1] or upto != current[1]:
+                    return False
+                changed = conn.execute(
+                    "SELECT generation FROM chunk_path_log WHERE file_path = ?",
+                    (rel_path,),
+                ).fetchone()
+                if changed is not None and int(changed[0]) > token[1]:
+                    return False
+            width = identity.dim * 4
+            chunks = conn.execute(
+                "SELECT COUNT(*), MIN(chunk_idx), MAX(chunk_idx), "
+                "SUM(length(vector) != ?) FROM chunks WHERE file_path = ?",
+                (width, rel_path),
+            ).fetchone()
+            if chunks[0] != chunk_count or (chunks[3] or 0) != 0:
+                return False
+            if chunk_count and (chunks[1], chunks[2]) != (0, chunk_count - 1):
+                return False
+            units = conn.execute(
+                "SELECT COUNT(*), SUM(parent_generation != ? OR parent_source_hash != ? "
+                "OR length(vector) != ?) FROM semantic_unit_vectors WHERE parent_path = ?",
+                (parent_generation, parent_source_hash, width, rel_path),
+            ).fetchone()
+            return units[0] == unit_count and (units[1] or 0) == 0
+        finally:
+            conn.close()
 
     def delete_file(self, rel_path: str) -> None:
         """Remove one parent's page and semantic-unit rows if the sidecar exists."""

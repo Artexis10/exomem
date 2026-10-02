@@ -316,6 +316,15 @@ def _registry_hashes(
     )
 
 
+def current_registry_identity(vault_root: Path) -> tuple[int, str, str]:
+    """Current parser and registry stamps, without reading or parsing a parent."""
+    hashes = _registry_hashes(
+        semantic_language_registry.load_registry(vault_root),
+        relation_registry.load_registry(vault_root),
+    )
+    return (PARSER_VERSION, *hashes)
+
+
 def _page_projects(frontmatter: Mapping[Any, Any]) -> tuple[str, ...]:
     projects: set[str] = set()
     project = frontmatter.get("project")

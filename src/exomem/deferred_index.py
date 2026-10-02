@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import sqlite3
 import tempfile
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -28,6 +29,17 @@ _GRAPH_FULL_REBUILD_SEQUENCE_KEY = "graph_full_rebuild_sequence"
 #: debt at the same value".
 _GRAPH_FULL_REBUILD_MARKS_KEY = "graph_full_rebuild_marks"
 _PENDING_VISIBILITY_GENERATION_KEY = "pending_visibility_generation:v1"
+
+# Additive fields on the existing queue. Legacy writers may update revision
+# alone; retry_revision prevents their new input inheriting an old refusal.
+_SEMANTIC_RETRY_COLUMNS = {
+    "next_attempt_at": "REAL NOT NULL DEFAULT 0",
+    "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+    "failure_code": "TEXT",
+    "refused_input": "TEXT",
+    "refused_policy": "TEXT",
+    "retry_revision": "INTEGER NOT NULL DEFAULT 0",
+}
 
 #: The queues this store carries, and the tables behind them.  The graph queue
 #: is the newest and the reason the mapping exists: it reuses the semantic
@@ -619,6 +631,9 @@ def _connect_created_owned(
             "ALTER TABLE semantic_upserts "
             "ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
         )
+    for name, declaration in _SEMANTIC_RETRY_COLUMNS.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE semantic_upserts ADD COLUMN {name} {declaration}")
     full_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(full_upserts)")}
     if "revision" not in full_columns:
         conn.execute(
@@ -791,6 +806,69 @@ class DeferredReceipt:
     #: checkpoint to name. Unknown is never usable as coverage: a receipt that
     #: cannot say which generation it owes cannot prove that generation queued.
     graph_generation: int | None = None
+    next_attempt_at: float = field(default=0.0, compare=False)
+    attempt_count: int = field(default=0, compare=False)
+    failure_code: str | None = field(default=None, compare=False)
+    refused_input: str | None = field(default=None, compare=False)
+    refused_policy: str | None = field(default=None, compare=False)
+
+
+def semantic_receipt_eligible(
+    receipt: DeferredReceipt, *, input_signature: str, policy: str, now: float
+) -> bool:
+    """A refused parent waits for changed input or effective preparation policy."""
+    if receipt.failure_code == "resource_budget_exceeded":
+        return (receipt.refused_input, receipt.refused_policy) != (input_signature, policy)
+    return receipt.next_attempt_at <= now
+
+
+def retry_semantic(
+    vault_root: Path,
+    receipt: DeferredReceipt,
+    *,
+    failure_code: str,
+    input_signature: str | None = None,
+    policy: str | None = None,
+    now: float | None = None,
+) -> bool:
+    """Record bounded eligibility only if the attempted revision still owns debt."""
+    if failure_code not in {
+        "embedding_failed", "resource_budget_exceeded", "preparation_busy",
+        "input_unavailable", "input_changed",
+    }:
+        raise ValueError("unsupported semantic retry code")
+    if failure_code == "resource_budget_exceeded" and (
+        not input_signature or not policy
+        or len(input_signature) > 128 or len(policy) > 128
+    ):
+        raise ValueError("budget refusal requires bounded input and policy identities")
+    at = time.time() if now is None else now
+    if not math.isfinite(at):
+        raise ValueError("semantic retry time must be finite")
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            row = conn.execute(
+                "SELECT attempt_count, retry_revision FROM semantic_upserts "
+                "WHERE rel_path = ? AND revision = ?",
+                (receipt.rel_path, receipt.revision),
+            ).fetchone()
+            if row is None:
+                return False
+            attempts = max(0, int(row[0])) if int(row[1]) == receipt.revision else 0
+            delay = min(60.0, 2.0 ** min(attempts, 6))
+            result = conn.execute(
+                "UPDATE semantic_upserts SET next_attempt_at = ?, attempt_count = ?, "
+                "failure_code = ?, refused_input = ?, refused_policy = ?, retry_revision = ? "
+                "WHERE rel_path = ? AND revision = ?",
+                (at + delay, min(attempts + 1, 64), failure_code,
+                 input_signature if failure_code == "resource_budget_exceeded" else None,
+                 policy if failure_code == "resource_budget_exceeded" else None,
+                 receipt.revision, receipt.rel_path, receipt.revision),
+            )
+            return result.rowcount == 1
+    finally:
+        conn.close()
 
 
 class EmbeddingFreshness(StrEnum):
@@ -903,6 +981,8 @@ def _add_receipts(
                     revision = int(row[0]) + 1
                     conn.execute(
                         "UPDATE semantic_upserts SET updated_at = ?, revision = ? "
+                        ", next_attempt_at = 0, attempt_count = 0, failure_code = NULL "
+                        ", refused_input = NULL, refused_policy = NULL, retry_revision = 0 "
                         "WHERE rel_path = ?",
                         (now, revision, rel),
                     )
@@ -1430,7 +1510,9 @@ def snapshot(
             for row in conn.execute("PRAGMA table_info(semantic_upserts)")
         }
         revision = "revision" if "revision" in columns else "1 AS revision"
-        sql = f"SELECT rel_path, {revision} FROM semantic_upserts "
+        retry_columns = set(_SEMANTIC_RETRY_COLUMNS) <= columns
+        retry_select = ", " + ", ".join(_SEMANTIC_RETRY_COLUMNS) if retry_columns else ""
+        sql = f"SELECT rel_path, {revision}{retry_select} FROM semantic_upserts "
         params: list[Any] = []
         clauses: list[str] = []
         if paths is not None:
@@ -1448,10 +1530,12 @@ def snapshot(
         if limit is not None:
             sql += " LIMIT ?"
             params.append(max(0, limit))
-        receipts = [
-            DeferredReceipt(str(row[0]), int(row[1]))
-            for row in conn.execute(sql, params).fetchall()
-        ]
+        receipts = []
+        for row in conn.execute(sql, params).fetchall():
+            metadata = {}
+            if retry_columns and int(row[7]) == int(row[1]):
+                metadata = dict(zip(tuple(_SEMANTIC_RETRY_COLUMNS)[:-1], row[2:7], strict=True))
+            receipts.append(DeferredReceipt(str(row[0]), int(row[1]), **metadata))
     finally:
         conn.close()
     valid: list[DeferredReceipt] = []
@@ -1465,7 +1549,7 @@ def snapshot(
         if admission is False:
             rejected.append(receipt)
         else:
-            valid.append(DeferredReceipt(rel, receipt.revision))
+            valid.append(receipt)
     if rejected:
         clear_receipts(vault_root, rejected)
     return valid
@@ -2200,22 +2284,30 @@ def status(vault_root: Path | None) -> dict[str, Any]:
 
 def semantic_debt_status(vault_root: Path | None) -> dict[str, Any]:
     """Read first-enqueue age without creating state or disguising read failures."""
-    unknown = {"state": "unknown", "count": None, "oldest_age_seconds": None}
+    unknown = {"state": "unknown", "count": None, "oldest_age_seconds": None,
+               "resource_refused_count": None}
     if vault_root is None:
         return unknown
     try:
         if not store_path(vault_root).exists():
-            return {"state": "absent", "count": 0, "oldest_age_seconds": None}
+            return {"state": "absent", "count": 0, "oldest_age_seconds": None,
+                    "resource_refused_count": 0}
         conn = _connect_readonly(vault_root)
         try:
             count, oldest = conn.execute(
                 "SELECT count(*), min(created_at) FROM semantic_upserts"
             ).fetchone()
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(semantic_upserts)")}
+            refused = conn.execute(
+                "SELECT count(*) FROM semantic_upserts WHERE failure_code = ? AND retry_revision = revision",
+                ("resource_budget_exceeded",),
+            ).fetchone()[0] if {"failure_code", "retry_revision"} <= columns else None
         finally:
             conn.close()
         return {
             "state": "ok", "count": int(count),
             "oldest_age_seconds": max(0.0, time.time() - float(oldest)) if oldest is not None else None,
+            "resource_refused_count": int(refused) if refused is not None else None,
         }
     except (OSError, sqlite3.Error, ValueError):
         return unknown

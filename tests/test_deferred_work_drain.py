@@ -126,6 +126,56 @@ def test_semantic_handoff_preserves_revision_and_scans_bounded_pages(vault: Path
     assert deferred_index.ensure_receipts(vault, [rels[0]]) == newer
 
 
+def test_semantic_retry_cas_does_not_delay_new_work_or_survive_changed_input(vault: Path) -> None:
+    rels = ["Knowledge Base/poison.md", "Knowledge Base/new.md"]
+    for rel in rels:
+        (vault / rel).write_text("# Note\n", encoding="utf-8")
+    [poison] = deferred_index.add_receipts(vault, rels[:1])
+    deferred_index.retry_semantic(
+        vault, poison, failure_code="embedding_failed", now=10.0
+    )
+    [new] = deferred_index.add_receipts(vault, rels[1:])
+    observed = {r.rel_path: r for r in deferred_index.snapshot(vault)}
+    assert not deferred_index.semantic_receipt_eligible(
+        observed[poison.rel_path], input_signature="same", policy="v1", now=10.0
+    )
+    assert deferred_index.semantic_receipt_eligible(
+        observed[new.rel_path], input_signature="same", policy="v1", now=10.0
+    )
+    deferred_index.retry_semantic(
+        vault, poison, failure_code="resource_budget_exceeded",
+        input_signature="same", policy="v1", now=11.0,
+    )
+    [blocked] = deferred_index.snapshot(vault, paths={poison.rel_path})
+    assert deferred_index.semantic_debt_status(vault)["resource_refused_count"] == 1
+    assert not deferred_index.semantic_receipt_eligible(
+        blocked, input_signature="same", policy="v1", now=1000.0
+    )
+    assert deferred_index.semantic_receipt_eligible(
+        blocked, input_signature="edited", policy="v1", now=12.0
+    )
+    assert deferred_index.semantic_receipt_eligible(
+        blocked, input_signature="same", policy="v2", now=12.0
+    )
+    deferred_index.ensure_receipts(vault, rels[:1])
+    [retained] = deferred_index.snapshot(vault, paths={poison.rel_path})
+    assert retained.failure_code == "resource_budget_exceeded"
+
+    # Legacy rollback writes know only revision; their edits must also invalidate
+    # modern retry state when this policy is deployed again.
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute("UPDATE semantic_upserts SET revision = revision + 1 WHERE rel_path = ?", (poison.rel_path,))
+    [edited] = deferred_index.snapshot(vault, paths={poison.rel_path})
+    assert edited.failure_code is None
+    assert deferred_index.semantic_debt_status(vault)["resource_refused_count"] == 0
+    assert deferred_index.semantic_receipt_eligible(
+        edited, input_signature="same", policy="v1", now=12.0
+    )
+    assert not deferred_index.retry_semantic(
+        vault, poison, failure_code="embedding_failed", now=12.0
+    )
+
+
 def test_index_command_clears_both_deferred_queues(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

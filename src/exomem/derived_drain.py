@@ -112,7 +112,9 @@ def _key(vault_root: Path) -> str:
 
 def progress_limit(*, mode_name: str | None = None, resource_limit: int | None = None) -> int:
     """Return a bounded pass allowance with one correctness slot minimum."""
-    selected = mode.normalize(mode_name) if mode_name is not None else mode.resolve_mode()
+    selected = "normal" if mode.service_profile_enabled() else (
+        mode.normalize(mode_name) if mode_name is not None else mode.resolve_mode()
+    )
     if selected == "quiet":
         policy_limit = QUIET_PASS_LIMIT
     elif selected == "performance":

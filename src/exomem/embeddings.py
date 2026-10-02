@@ -29,7 +29,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, BinaryIO, NamedTuple
 
@@ -1629,6 +1629,47 @@ def index_cache_status() -> dict:
 
 
 @dataclass(frozen=True, slots=True)
+class EmbeddingPublication:
+    """Volatile proof of both projections published from one guarded source."""
+
+    guard: Any
+    index: Any
+    identity: recall_space.SpaceIdentity
+    token: tuple[int, int, int, int]
+    chunk_count: int
+    unit_count: int
+    parent_generation: str
+    parent_source_hash: str
+    policy_identity: tuple[str, str]
+    registry_identity: tuple[int, str, str]
+    claims_enabled: bool = False
+    claim_checksum: str | None = None
+
+    def current(self, vault_root: Path, *, claims_required: bool = False) -> bool:
+        from . import claims, semantic_index, vault
+
+        try:
+            self.guard.recheck(vault_root)
+            if claims_required and (
+                not self.claims_enabled
+                or not claims.publication_current(vault_root, self.guard.target, self.claim_checksum, self.identity.dim)
+            ):
+                return False
+            return (
+                recall_policy.recall_policy_identity(vault_root) == self.policy_identity
+                and semantic_index.current_registry_identity(vault_root) == self.registry_identity
+                and self.index.parent_publication_current(
+                    self.guard.target, token=self.token, identity=self.identity,
+                    chunk_count=self.chunk_count, unit_count=self.unit_count,
+                    parent_generation=self.parent_generation,
+                    parent_source_hash=self.parent_source_hash,
+                )
+            )
+        except (OSError, sqlite3.Error, vault.PathGuardError):
+            return False
+
+
+@dataclass(frozen=True, slots=True)
 class EmbeddingSyncStatus:
     """Bounded outcome from one embedding-sidecar dispatch.
 
@@ -1640,6 +1681,9 @@ class EmbeddingSyncStatus:
     status: str
     code: str
     eligible_count: int
+    # Internal only: public receipts remain bounded and content-free. A
+    # restarted dispatcher replays rather than inventing this volatile proof.
+    publication: EmbeddingPublication | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.status) is not str or self.status not in {
@@ -1690,6 +1734,7 @@ def upsert_after_write_status(
     if suppressed:
         _upsert_after_write_status(vault_root, suppressed, defer_during_warm=defer_during_warm)
     failure: EmbeddingSyncStatus | None = None
+    publication: EmbeddingPublication | None = None
     for path in eligible:
         try:
             with runtime_resources.semantic_preparation(vault_root, path) as preparation:
@@ -1697,6 +1742,8 @@ def upsert_after_write_status(
                     vault_root, [path], defer_during_warm=defer_during_warm,
                     batch_size=1, preparation=preparation,
                 )
+                if len(eligible) == 1:
+                    publication = status.publication
         except runtime_resources.PreparationBudgetExceeded:
             status = EmbeddingSyncStatus("degraded", "embedding_preparation_budget_exceeded", 1)
         except runtime_resources.PreparationCapacityBusy:
@@ -1709,6 +1756,7 @@ def upsert_after_write_status(
         failure.status if failure else "completed",
         failure.code if failure else "embedding_upsert_completed",
         len(eligible),
+        publication=publication if failure is None else None,
     )
 
 
@@ -1891,9 +1939,10 @@ def _upsert_after_write_status(
     prepared: list[tuple] = []
     prepared_count = 0
     batch_identity: recall_space.SpaceIdentity | None = None
+    publication: EmbeddingPublication | None = None
 
     def flush_prepared() -> None:
-        nonlocal prepared_count, batch_identity, failure_code
+        nonlocal prepared_count, batch_identity, failure_code, publication
         if not prepared:
             return
         current = []
@@ -1911,12 +1960,23 @@ def _upsert_after_write_status(
             try:
                 publish = getattr(index, "upsert_batch", None)
                 if callable(publish):
-                    publish(
+                    publication_token = publish(
                         [item[1] for item in current],
                         [item[2] for item in current if item[2] is not None],
                         identity=batch_identity,
                         validate=lambda: all(item[3]() for item in current),
                     )
+                    if preparation is not None and len(current) == 1 and publication_token is not None:
+                        _md, replacement, unit, _validator = current[0]
+                        if unit is not None:
+                            state, unit_vectors, _mtime = unit
+                            publication = EmbeddingPublication(
+                                preparation.guard, index, batch_identity, publication_token,
+                                len(replacement[1]), len(unit_vectors), state.parent_generation,
+                                state.parent_source_hash, captured_policy_identity,
+                                (state.parser_version, state.language_registry_hash,
+                                 state.relation_registry_hash),
+                            )
                 else:
                     # Keep the historical narrow index-adapter seam.
                     for _md, (rel, chunks, vectors, mtime), unit, _validate in current:
@@ -2033,7 +2093,16 @@ def _upsert_after_write_status(
         from . import claims
 
         if claims.claim_level_enabled() and published_paths:
-            claims.upsert_claims_after_write(vault_root, published_paths)
+            if preparation is None:
+                claims.upsert_claims_after_write(vault_root, published_paths)
+            else:
+                pages = {md: (page, signature) for md, page, _chunks, _mtime, signature in per_file}
+                claims.upsert_claims_after_write(vault_root, published_paths, pages=pages)
+                if publication is not None:
+                    publication = replace(publication, claims_enabled=True,
+                                          claim_checksum=claims.claim_checksum_for_page(pages[published_paths[0]][0]))
+                    if not publication.current(vault_root, claims_required=True):
+                        failure_code = failure_code or "embedding_auxiliary_failed"
     except Exception as e:  # noqa: BLE001
         log.debug("claim sidecar upsert skipped (%s)", e)
         failure_code = failure_code or "embedding_auxiliary_failed"
@@ -2042,6 +2111,7 @@ def _upsert_after_write_status(
             "completed" if failure_code is None else "degraded",
             failure_code or "embedding_upsert_completed",
             eligible_count,
+            publication=publication if failure_code is None else None,
         )
     )
 

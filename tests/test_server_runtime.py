@@ -509,6 +509,63 @@ def test_local_runtime_lifespan_waits_for_inflight_activation_before_teardown(
         readiness.reset()
 
 
+def test_local_runtime_lifespan_refuses_to_finish_with_live_semantic_worker(tmp_path, monkeypatch) -> None:
+    """Shutdown must not report completion while an uncancelled encode still runs."""
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    activation = server_runtime.LocalRuntimeActivation(tmp_path, deferred=True)
+
+    def still_running():
+        raise RuntimeError("semantic drain is still running during shutdown")
+
+    activation.semantic_drain = SimpleNamespace(stop=still_running)
+
+    async def exercise():
+        with pytest.raises(RuntimeError, match="semantic drain is still running"):
+            async with activation.lifespan()(SimpleNamespace()):
+                pass
+
+    asyncio.run(exercise())
+
+
+def test_local_runtime_shutdown_rechecks_a_worker_assigned_after_first_stop(tmp_path, monkeypatch) -> None:
+    """Joining activation is insufficient when its late worker cannot stop."""
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    activation = server_runtime.LocalRuntimeActivation(tmp_path, deferred=True)
+    stopped = threading.Event()
+    release = threading.Event()
+    original_stop = activation._stop_background_workers
+
+    def stop():
+        original_stop()
+        stopped.set()
+
+    def late_start():
+        assert release.wait(timeout=2)
+        def live_stop():
+            raise RuntimeError("still encoding")
+        activation.semantic_drain = SimpleNamespace(stop=live_stop)
+
+    monkeypatch.setattr(activation, "_stop_background_workers", stop)
+
+    async def exercise():
+        lifetime = activation.lifespan()(SimpleNamespace())
+        await lifetime.__aenter__()
+        activation._thread = threading.Thread(target=late_start)
+        activation._thread.start()
+        exiting = asyncio.create_task(lifetime.__aexit__(None, None, None))
+        assert await asyncio.to_thread(stopped.wait, 1)
+        release.set()
+        with pytest.raises(RuntimeError, match="semantic drain is still running"):
+            await asyncio.wait_for(exiting, 2)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        if activation._thread is not None:
+            activation._thread.join(timeout=2)
+
+
 def test_local_runtime_lifespan_interrupts_a_stuck_admission_wait(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

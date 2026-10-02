@@ -331,6 +331,7 @@ RUN usermod --home /data/host exomem
 # EXOMEM_RECALL_MODEL: a cloud cell encodes recall with the multilingual model
 # a personal server runs; a hosted cell keeps the English one.
 ENV EXOMEM_CONTAINER_VARIANT=cloud \
+    EXOMEM_CLOUD_RESOURCE_POLICY=service-v1 \
     EXOMEM_RECALL_MODEL=BAAI/bge-m3 \
     EXOMEM_LOG_DIR=/tmp/exomem-logs \
     FASTMCP_CHECK_FOR_UPDATES=off \

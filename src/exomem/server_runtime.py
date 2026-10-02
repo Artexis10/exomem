@@ -148,6 +148,7 @@ class LocalRuntimeActivation:
         self.media_worker: Any | None = None
         self.file_watcher: Any | None = None
         self.derived_drain: Any | None = None
+        self.semantic_drain: Any | None = None
         self.vocabulary_recovery: Any | None = None
         # The recovery watcher runs until told to stop, so it has its own stop
         # event: every path that stops the other workers stops it too.
@@ -208,6 +209,10 @@ class LocalRuntimeActivation:
             self._stop_background_workers()
             return
         self._wait_for_required_admission()
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
+        self._start_component("semantic drain", self._start_semantic_drain)
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
@@ -310,7 +315,9 @@ class LocalRuntimeActivation:
 
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
+        semantic_failure = None
         for label, worker in (
+            ("semantic drain", self.semantic_drain),
             ("derived drain", self.derived_drain),
             ("media", self.media_worker),
             ("file watcher", self.file_watcher),
@@ -320,7 +327,9 @@ class LocalRuntimeActivation:
                 continue
             try:
                 stop()
-            except Exception:  # noqa: BLE001 - shutdown still has to join activation
+            except Exception as error:  # noqa: BLE001 - shutdown still has to join activation
+                if label == "semantic drain":
+                    semantic_failure = error
                 log.warning("%s runtime shutdown failed", label, exc_info=True)
         if self.dreamer is not None:
             try:
@@ -329,6 +338,8 @@ class LocalRuntimeActivation:
                 log.warning("dreamer runtime shutdown failed", exc_info=True)
         self._vocabulary_stop.set()
         self._join_vocabulary_recovery()
+        if semantic_failure is not None:
+            raise RuntimeError("semantic drain is still running during shutdown") from semantic_failure
 
     def _join_vocabulary_recovery(self) -> None:
         """Join the recovery watcher, bounded; it exits within one poll."""
@@ -354,6 +365,11 @@ class LocalRuntimeActivation:
 
     def _start_derived_drain(self, vault_root: Path) -> None:
         self.derived_drain = _start_derived_drain(vault_root)
+
+    def _start_semantic_drain(self, vault_root: Path) -> None:
+        from . import semantic_drain
+
+        self.semantic_drain = semantic_drain.start(vault_root)
 
     def _start_vocabulary_recovery(self, vault_root: Path) -> None:
         """Drain queued recovery in the background, not on a client review call."""
@@ -409,9 +425,18 @@ class LocalRuntimeActivation:
                     thread = self._thread
                 if timer is not None:
                     timer.cancel()
-                self._stop_background_workers()
+                shutdown_error = None
+                try:
+                    self._stop_background_workers()
+                except RuntimeError as error:
+                    shutdown_error = error
                 if thread is not None and thread is not threading.current_thread():
                     await anyio.to_thread.run_sync(thread.join)
+                # A starter may have assigned its worker after the first stop.
+                try:
+                    self._stop_background_workers()
+                except RuntimeError as error:
+                    shutdown_error = error
                 # Activation may have started the watcher after the stop above;
                 # it saw the stop event already set, so this join is short.
                 self._vocabulary_stop.set()
@@ -424,6 +449,8 @@ class LocalRuntimeActivation:
 
                 with anyio.CancelScope(shield=True):
                     await anyio.to_thread.run_sync(service_standby.discard)
+                if shutdown_error is not None:
+                    raise shutdown_error
 
         return _lifespan
 

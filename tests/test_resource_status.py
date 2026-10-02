@@ -82,6 +82,7 @@ def test_service_status_reports_unloaded_core_without_creating_state(monkeypatch
     assert result["models"]["core_ready"] is False
     assert result["deferred_work"]["semantic_debt"] == {
         "state": "absent", "count": 0, "oldest_age_seconds": None,
+        "resource_refused_count": 0,
     }
     assert state.exists() is before
 
@@ -96,11 +97,15 @@ def test_semantic_debt_retry_preserves_age_and_unreadable_is_unknown(monkeypatch
     deferred_index.rotate_receipts(tmp_path, receipts)
     deferred_index.add(tmp_path, ["Knowledge Base/Notes/x.md"])
     result = deferred_index.semantic_debt_status(tmp_path)
-    assert result == {"state": "ok", "count": 1, "oldest_age_seconds": 30.0}
+    assert result == {
+        "state": "ok", "count": 1, "oldest_age_seconds": 30.0,
+        "resource_refused_count": 0,
+    }
     path = deferred_index.store_path(tmp_path)
     path.write_bytes(b"not a SQLite database")
     assert deferred_index.semantic_debt_status(tmp_path) == {
         "state": "unknown", "count": None, "oldest_age_seconds": None,
+        "resource_refused_count": None,
     }
 
 
