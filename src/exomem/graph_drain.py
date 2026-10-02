@@ -454,6 +454,16 @@ def _whole_vault_hold(vault_root: Path, not_before: float, held_since: float | N
 
 
 def _run(vault_root: Path) -> None:
+    from . import foreground_priority
+
+    try:
+        with foreground_priority.cancellable(_stop):
+            _run_owned(vault_root)
+    except foreground_priority.BulkCancelled:
+        log.info("graph drain cancelled; queued recovery remains pending")
+
+
+def _run_owned(vault_root: Path) -> None:
     interval = IDLE_POLL_SECONDS
     # The no-progress backoff (0.0 after progress), the earliest moment the next
     # whole-vault attempt may start, and the first debt signal the next
@@ -543,6 +553,8 @@ def start(vault_root: Path) -> threading.Thread | None:
         return None
     with _LOCK:
         if _thread is not None and _thread.is_alive():
+            if _stop.is_set():
+                raise RuntimeError("graph drain is stopping")
             return _thread
         _stop.clear()
         _PROGRESS.clear()
@@ -562,13 +574,17 @@ def start(vault_root: Path) -> threading.Thread | None:
         return thread
 
 
-def stop(timeout: float = 2.0) -> None:
+def stop(timeout: float = 2.0, *, worker: threading.Thread | None = None) -> None:
     """Stop the drain daemon and wait briefly for it to finish."""
     global _thread
     with _LOCK:
         thread = _thread
-        _thread = None
-    _stop.set()
-    _DEBT.set()
-    if thread is not None:
+        if worker is not None and thread is not worker:
+            return
+        _stop.set()
+        _DEBT.set()
+    if thread is not None and thread is not threading.current_thread():
         thread.join(timeout=timeout)
+    with _LOCK:
+        if _thread is thread and (thread is None or not thread.is_alive()):
+            _thread = None

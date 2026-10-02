@@ -9468,6 +9468,9 @@ def schedule_background_rebuild(
 
         mutation_coordinator = active_manager()._mutation_coordinator_for(vault_root)
     key = f"{Path(vault_root).resolve()}\0{mutation_coordinator.state_root.resolve(strict=False)}"
+    coordinator = graph_sync.rebuild_coordinator(
+        vault_root, state_root=mutation_coordinator.state_root
+    )
     with _REBUILD_LOCK:
         if key in _REBUILDING:
             # D5: coalesce, do not drop. The in-flight pass sampled its corpus
@@ -9477,14 +9480,17 @@ def schedule_background_rebuild(
             return False
         _REBUILDING.add(key)
 
-    def _run() -> None:
+    def _run(shutdown: threading.Event | None) -> None:
         try:
             from .foreground_activity import background_scope
 
-            with background_scope(vault_root):
-                EpistemicGraphIndex(
-                    vault_root, mutation_coordinator=mutation_coordinator
-                ).rebuild_all()
+            with foreground_priority.cancellable(shutdown):
+                with background_scope(vault_root):
+                    EpistemicGraphIndex(
+                        vault_root, mutation_coordinator=mutation_coordinator
+                    ).rebuild_all()
+        except foreground_priority.BulkCancelled:
+            log.info("background graph rebuild cancelled; recovery remains pending")
         except graph_sync.GraphRebuildInProgress:
             # Another process owns the kernel-backed rebuild claim.  That is a
             # healthy coalescing state, not a failed publication requiring a
@@ -9508,8 +9514,15 @@ def schedule_background_rebuild(
                     vault_root, mutation_coordinator=mutation_coordinator
                 )
 
-    threading.Thread(target=_run, name="exomem-graph-rebuild", daemon=True).start()
-    return True
+    started = False
+    try:
+        started = coordinator.start_worker(_run)
+        return started
+    finally:
+        if not started:
+            with _REBUILD_LOCK:
+                _REBUILDING.discard(key)
+                _REBUILD_FOLLOWUP.discard(key)
 
 
 def _record_graph_repair_demand(

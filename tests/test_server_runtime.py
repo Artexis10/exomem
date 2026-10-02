@@ -1019,6 +1019,39 @@ def test_shutdown_stops_the_dreamer(tmp_path, monkeypatch: pytest.MonkeyPatch) -
         readiness.reset()
 
 
+def test_shutdown_reports_a_live_owned_graph_producer(tmp_path, monkeypatch):
+    """Actual activation must not report cleanup while its producer still runs."""
+    from exomem import graph_drain
+
+    _quiet_starters(monkeypatch, [])
+    entered = threading.Event()
+    release = threading.Event()
+
+    def work(_root):
+        entered.set()
+        release.wait(10)
+
+    monkeypatch.delenv("EXOMEM_DISABLE_GRAPH_DRAIN", raising=False)
+    monkeypatch.setattr(graph_drain, "_run", work)
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", graph_drain.start)
+    activation = server_runtime.LocalRuntimeActivation(tmp_path, fallback_seconds=60)
+
+    async def exercise():
+        with pytest.raises(RuntimeError, match="graph drain is still running"):
+            async with activation.lifespan()(SimpleNamespace()):
+                activation.start()
+                await asyncio.to_thread(activation._thread.join, 5)
+                assert entered.wait(1)
+                assert activation.graph_drain.is_alive()
+        assert activation.graph_cleanup_attempted
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        graph_drain.stop()
+
+
 def test_stopping_background_workers_joins_the_vocabulary_watcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

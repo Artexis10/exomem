@@ -172,23 +172,32 @@ def yielding(items: Iterable[_T], *, max_wait: float = MAX_YIELD_SECONDS) -> Ite
 
 
 @contextmanager
-def bulk(*, stop: threading.Event | None = None) -> Iterator[None]:
-    """Mark this thread's work as an off-boundary bulk pass for `yielding_in_bulk`."""
+def cancellable(stop: threading.Event | None) -> Iterator[None]:
+    """Own cancellation without changing a nested pass's scheduling budget."""
     previous_stop = getattr(_local, "stop", None)
     if stop is not None:
         _local.stop = stop
-    outermost = not getattr(_local, "bulk", 0)
-    _local.bulk = getattr(_local, "bulk", 0) + 1
-    if outermost:
-        _local.budget = _PassBudget()
     try:
         check_cancelled()
         yield
     finally:
         _local.stop = previous_stop
-        _local.bulk -= 1
+
+
+@contextmanager
+def bulk(*, stop: threading.Event | None = None) -> Iterator[None]:
+    """Mark this thread's work as an off-boundary bulk pass for `yielding_in_bulk`."""
+    with cancellable(stop):
+        outermost = not getattr(_local, "bulk", 0)
+        _local.bulk = getattr(_local, "bulk", 0) + 1
         if outermost:
-            _local.budget = None
+            _local.budget = _PassBudget()
+        try:
+            yield
+        finally:
+            _local.bulk -= 1
+            if outermost:
+                _local.budget = None
 
 
 def yielding_in_bulk(items: Iterable[_T]) -> Iterable[_T]:

@@ -71,11 +71,17 @@ An operator SHALL be able to return a canary to a verified compatible legacy dep
 - **AND** the new writes and their outstanding derived work remain recoverable
 
 
-### Requirement: Cancellable owned startup recovery
+### Requirement: Cancellable owned graph recovery
 
-Service shutdown SHALL cancel synchronous startup graph recovery between complete private work units, source proofs and retries, retain durable pending work, and release its rebuild owner and temporary artifacts. Cancellation alone MUST NOT publish partial work or invent source movement. An already-started atomic replacement SHALL complete its publication bookkeeping. Shutdown SHALL skip later startup draining and warming and join activation rather than detach it.
+Service shutdown SHALL cancel synchronous startup, registered and query-triggered graph recovery between complete private work units, source proofs and retries, retain durable pending work, and release its rebuild owner and temporary artifacts. Cancellation alone MUST NOT publish partial work or invent source movement. An already-started atomic replacement SHALL complete its publication bookkeeping and remain successful for covered waiters. Shutdown SHALL seal new graph admissions and coalesced successors, stop the owned graph-drain producer, skip later startup draining and warming, and join activation and graph workers rather than detach them. A failed bounded service join MUST NOT enter the one-shot CLI completion wait; ordinary CLI completion behavior SHALL remain unchanged.
 
 #### Scenario: Shutdown during a write-warmed startup rebuild
 - **WHEN** shutdown arrives while startup recovery builds or proves a private graph sidecar
 - **THEN** recovery unwinds without publishing the unfinished sidecar or retiring its outstanding debt
 - **AND** the activation thread ends within the existing native shutdown grace window
+
+#### Scenario: Shutdown after activation while registered graph work remains
+- **WHEN** activation has ended but a registered or query-triggered rebuild remains active
+- **THEN** the service lifetime cancels unfinished private work and rejects a subsequent rebuild
+- **AND** any admitted replacement completes before its worker ends
+- **AND** server exit does not add a 300-second CLI drain after service cleanup

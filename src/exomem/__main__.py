@@ -139,19 +139,23 @@ def main(argv: list[str] | None = None) -> int:
 
     preload_local_dotenv_policy()
     bootstrap()
-    # Wrapped so *every* exit drains, including the early returns above
-    # `_run_cli`. A graph rebuild no longer blocks the write that caused it, and
-    # it runs on a daemon thread. That is right for the long-lived server and
-    # wrong here: this process is about to exit and would take the rebuild with
-    # it, so a CLI write would report `pending` and nothing would ever make it
-    # true. The boundary is process lifetime, not the write path -- and a
-    # boundary that only some exits honour is not one.
+    raw = list(sys.argv[1:] if argv is None else argv)
+    # Named commands and identification/help keep their completion wait. A
+    # serving route skips it only when its managed lifecycle already joined.
+    serving = (not raw or raw[0].startswith("-")) and not any(
+        item in {"--version", "--help", "-h"} for item in raw
+    )
     try:
         return _run_cli(argv)
     finally:
-        from . import graph_sync
+        from . import graph_sync, service_standby
 
-        if not graph_sync.drain_active_rebuilds():
+        drained = (
+            graph_sync.drain_active_rebuilds(timeout=0.0)
+            if serving and service_standby.graph_cleanup_attempted()
+            else graph_sync.drain_active_rebuilds()
+        )
+        if not drained:
             print(
                 "exomem: a graph rebuild did not finish before exit; the change is "
                 "committed and `exomem reconcile` will bring the graph up to date",

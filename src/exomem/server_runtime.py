@@ -155,6 +155,17 @@ class LocalRuntimeActivation:
         self._vocabulary_stop = threading.Event()
         self.recall_reembed: Any | None = None
         self.dreamer: Any | None = None
+        self.graph_drain: threading.Thread | None = None
+        self.graph_cleanup_attempted = False
+        if not deferred:
+            self._bind_graph_rebuild_lifetime()
+
+    def _bind_graph_rebuild_lifetime(self) -> None:
+        from . import graph_sync
+        from .writer_lease import active_manager
+
+        state = active_manager()._mutation_coordinator_for(self.vault_root).state_root
+        graph_sync.rebuild_coordinator(self.vault_root, state_root=state).bind_shutdown(self._shutdown)
 
     def release(self) -> None:
         """Hand this process the ownership a standby refused, then activate."""
@@ -162,6 +173,8 @@ class LocalRuntimeActivation:
 
         with self._lock:
             was_deferred = self._deferred
+            if was_deferred:
+                self._bind_graph_rebuild_lifetime()
             self._deferred = False
         if was_deferred and warmup.warmup_enabled():
             readiness.manage_runtime()
@@ -240,7 +253,7 @@ class LocalRuntimeActivation:
             daemon=True,
         ).start()
         starters = (
-            ("graph drain", _start_graph_drain),
+            ("graph drain", self._start_graph_drain),
             ("media", self._start_media_worker),
             ("vocabulary recovery", self._start_vocabulary_recovery),
             ("recall re-embed", self._start_recall_reembed),
@@ -318,6 +331,10 @@ class LocalRuntimeActivation:
 
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
+        if self.graph_drain is not None:
+            from . import graph_drain
+
+            graph_drain.stop(worker=self.graph_drain)
         semantic_failure = None
         for label, worker in (
             ("semantic drain", self.semantic_drain),
@@ -341,6 +358,8 @@ class LocalRuntimeActivation:
                 log.warning("dreamer runtime shutdown failed", exc_info=True)
         self._vocabulary_stop.set()
         self._join_vocabulary_recovery()
+        if self.graph_drain is not None and self.graph_drain.is_alive():
+            raise RuntimeError("graph drain is still running during shutdown")
         if semantic_failure is not None:
             raise RuntimeError("semantic drain is still running during shutdown") from semantic_failure
 
@@ -365,6 +384,9 @@ class LocalRuntimeActivation:
 
     def _start_media_worker(self, vault_root: Path) -> None:
         self.media_worker = _start_media_worker(vault_root)
+
+    def _start_graph_drain(self, vault_root: Path) -> None:
+        self.graph_drain = _start_graph_drain(vault_root)
 
     def _start_derived_drain(self, vault_root: Path) -> None:
         self.derived_drain = _start_derived_drain(vault_root)
@@ -444,6 +466,15 @@ class LocalRuntimeActivation:
                 # it saw the stop event already set, so this join is short.
                 self._vocabulary_stop.set()
                 await anyio.to_thread.run_sync(self._join_vocabulary_recovery)
+                from . import graph_sync
+
+                if not self._deferred:
+                    self.graph_cleanup_attempted = True
+                    drained = await anyio.to_thread.run_sync(
+                        lambda: graph_sync.drain_active_rebuilds(timeout=5.0)
+                    )
+                    if not drained:
+                        shutdown_error = RuntimeError("graph rebuilds are still running during shutdown")
                 # A discarded standby must not leave the catalogue it built
                 # behind; a no-op for any worker that is not an unpromoted one.
                 # Off the loop: it may wait, bounded, for a build to stop, and

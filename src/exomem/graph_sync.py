@@ -2658,6 +2658,41 @@ class GraphRebuildCoordinator:
         self._running = False
         self._builder: Callable[[GraphSyncCheckpoint], GraphBuildOutcome] | None = None
         self._waiter_count = 0
+        self._shutdown: threading.Event | None = None
+        self._workers: set[threading.Thread] = set()
+
+    def bind_shutdown(self, shutdown: threading.Event) -> None:
+        """Retain one service lifetime through its last graph callback."""
+        with self._condition:
+            if self._shutdown is shutdown:
+                return
+            if self._running or self._workers:
+                raise RuntimeError("graph rebuild workers still own the prior lifetime")
+            self._shutdown = shutdown
+
+    def start_worker(self, target: Callable[[threading.Event | None], None]) -> bool:
+        """Seal admission and capture the lifetime before launching a worker."""
+        with self._condition:
+            shutdown = self._shutdown
+            if shutdown is not None and shutdown.is_set():
+                return False
+
+            def run() -> None:
+                try:
+                    target(shutdown)
+                finally:
+                    with self._condition:
+                        self._workers.discard(threading.current_thread())
+                        self._condition.notify_all()
+
+            thread = threading.Thread(target=run, name=GRAPH_REBUILD_THREAD_NAME, daemon=True)
+            self._workers.add(thread)
+            try:
+                thread.start()
+            except BaseException:
+                self._workers.discard(thread)
+                raise
+            return True
 
     @property
     def writer_hold_count(self) -> int:
@@ -2687,6 +2722,11 @@ class GraphRebuildCoordinator:
                 return GraphRebuildStart(False)
             if self._required is None or checkpoint.generation > self._required.generation:
                 self._required = checkpoint
+            if self._shutdown is not None and self._shutdown.is_set():
+                if not self._running and self._error is None:
+                    self._error = GraphRebuildStopped(_RETRY_OR_RECONCILE)
+                self._condition.notify_all()
+                return GraphRebuildStart(False)
             if self._running:
                 self._condition.notify_all()
                 return GraphRebuildStart(False)
@@ -2697,11 +2737,11 @@ class GraphRebuildCoordinator:
             self._outcome = None
             self._builder = builder
             try:
-                threading.Thread(
-                    target=self._run,
-                    name="exomem-graph-rebuild",
-                    daemon=True,
-                ).start()
+                if not self.start_worker(self._run):
+                    self._running = False
+                    self._error = GraphRebuildStopped(_RETRY_OR_RECONCILE)
+                    self._condition.notify_all()
+                    return GraphRebuildStart(False)
             except RuntimeError:
                 self._running = False
                 self._error = GraphRebuildRegistrationError(
@@ -2783,7 +2823,7 @@ class GraphRebuildCoordinator:
         projection.__cause__ = error
         return projection
 
-    def _run(self) -> None:
+    def _run(self, shutdown: threading.Event | None = None) -> None:
         attempts = 0
         while attempts < MAX_GRAPH_REBUILD_ATTEMPTS:
             attempts += 1
@@ -2793,13 +2833,15 @@ class GraphRebuildCoordinator:
                 required = self._required
                 builder = self._builder
             try:
+                from . import foreground_priority
                 from .foreground_activity import background_scope
 
-                with background_scope(
-                    self.vault_root,
-                    waiter_bypass=lambda: self.waiter_count > 0,
-                ):
-                    outcome = builder(required)
+                with foreground_priority.cancellable(shutdown):
+                    with background_scope(
+                        self.vault_root,
+                        waiter_bypass=lambda: self.waiter_count > 0,
+                    ):
+                        outcome = builder(required)
             except BaseException as error:  # noqa: BLE001 - integration path
                 if isinstance(error, GraphRebuildInProgress):
                     logger.info(
@@ -2828,7 +2870,8 @@ class GraphRebuildCoordinator:
                         )
                     projection = GraphRebuildStopped(remediation)
                     projection.__cause__ = error
-                logger.exception(
+                report = logger.info if isinstance(error, foreground_priority.BulkCancelled) else logger.exception
+                report(
                     "graph rebuild stopped checkpoint_sha256=%s generation=%s",
                     required.checkpoint_sha256,
                     required.generation,
@@ -2844,6 +2887,9 @@ class GraphRebuildCoordinator:
                     self._condition.notify_all()
                     return
                 if self._required is not None and not outcome.covers(self._required):
+                    # Covered waiters retain this durable publication even if
+                    # newer demand requires another pass.
+                    self._outcome = outcome
                     continue
                 self._outcome = outcome
                 self._running = False
@@ -2866,6 +2912,12 @@ class GraphRebuildCoordinator:
             )
             if not ready:
                 raise TimeoutError("graph rebuild did not finish before the wait deadline")
+            if (
+                isinstance(self._error, GraphRebuildStopped)
+                and self._outcome is not None
+                and self._outcome.covers(checkpoint)
+            ):
+                return self._outcome
             if self._error is not None:
                 raise self._error
             assert self._outcome is not None
@@ -2880,6 +2932,15 @@ def _registration_key(vault_root: Path, state_root: Path | None) -> str:
     return _rebuild_lock_key(vault_root, _registration_runtime_root(state_root))
 
 
+def rebuild_coordinator(
+    vault_root: Path, *, state_root: Path | None = None
+) -> GraphRebuildCoordinator:
+    """Share flight and service-lifetime ownership at the exact state key."""
+    key = _registration_key(vault_root, state_root)
+    with _COORDINATORS_LOCK:
+        return _COORDINATORS.setdefault(key, GraphRebuildCoordinator(Path(vault_root)))
+
+
 def register_rebuild(
     vault_root: Path,
     checkpoint: GraphSyncCheckpoint,
@@ -2889,8 +2950,7 @@ def register_rebuild(
 ) -> GraphRebuildRegistration:
     """Capture exact rebuild work; callers start or join only after their guard exits."""
     key = _registration_key(vault_root, state_root)
-    with _COORDINATORS_LOCK:
-        coordinator = _COORDINATORS.setdefault(key, GraphRebuildCoordinator(Path(vault_root)))
+    coordinator = rebuild_coordinator(vault_root, state_root=state_root)
     registration = GraphRebuildRegistration(coordinator, checkpoint, builder)
     pending = dict(_PENDING_WAITERS.get() or {})
     pending[key] = (registration, checkpoint)
