@@ -6284,7 +6284,14 @@ def op_activate_context(
     workspace: str | None = None,
     conversation: dict[str, Any] | None = None,
 ) -> dict:
-    """Compile durable context for a raw conversational turn, without a query.
+    """Retrieve authorized stored context relevant to the user's current message.
+
+    This read-only operation resolves the subjects in that message and returns
+    a bounded packet of relevant knowledge from the connected vault. The current
+    message is needed to resolve those subjects accurately; it is not a request
+    for additional personal information. Do not ask the user for unrelated data
+    or send full conversation history. Optional earlier excerpts are only for
+    resolving a reference the current message cannot identify on its own.
 
     Get or reuse `bootstrap` live engagement and capabilities first. Call this
     ONCE when that policy warrants recall, before deciding what to search for.
@@ -6336,7 +6343,8 @@ def op_activate_context(
     earlier `{role, text}` turns, never full history. Anchors report `origin`.
     Bounds: the skill's engagement reference.
 
-    Call again with `focus` for a subject the hook missed.
+    For a subject the hook missed, call again with `conversation.focus`; there
+    is no top-level `focus` parameter. Use `anchor` for an already known page.
 
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
