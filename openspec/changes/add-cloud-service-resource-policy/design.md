@@ -72,6 +72,8 @@ Extend the existing resource/status surface with deployment profile/source, core
 
 Canonical commit remains terminal even when derived work is pending/failed. Existing writer/read receipts and resource diagnostics communicate that distinction; this change does not declare a canonical receipt to be semantic freshness. Semantic acceptance proves the exact source version in both chunk and semantic-unit projections, plus a grounded hybrid query. During ordinary background work, reported effective retrieval lanes must be truthful about any refusal/degradation.
 
+Startup graph recovery observes the watcher stop event through the existing off-boundary bulk scope. Cooperative checkpoints cover private row construction, shared filesystem/resolver walks, exact-source proofs, reconciliation and retries. Nested bulk scopes inherit cancellation; ordinary callers remain unchanged. A dedicated cancellation outcome unwinds private transactions and owner/temporary cleanup without declaring projection movement or paying durable debt. Check before publication authority and immediately before replacement; once replacement starts, its atomic publication and bookkeeping complete. Cancellation skips the subsequent startup drain and matrix warm, and shutdown still joins activation. Native write-warmed shutdown must finish inside the existing 30-second grace window; a detached worker or larger timeout does not satisfy ownership.
+
 ### 6. Fixed acceptance budgets before promotion
 
 These are proposed release gates, not claims about legacy Cloud performance. Use existing acceptance tooling and private bounded receipts; add no broad benchmark framework. Bind outcomes to exact image/source, policy, vault generation and cgroup limits.

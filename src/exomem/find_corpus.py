@@ -378,16 +378,18 @@ def walk_md(root: Path):
     Skips Obsidian `*.sync-conflict-*.md` files — transient conflict
     duplicates that would otherwise pollute the index and search results.
     """
-    from . import reserved_paths
+    from . import foreground_priority, reserved_paths
 
     anchor = Path(root)
 
     def walk(current: Path):
+        foreground_priority.check_cancelled()
         try:
             children = tuple(current.iterdir())
         except OSError:
             return
         for child in children:
+            foreground_priority.check_cancelled()
             kind = _walk_md_entry(anchor, child, reserved_paths)
             if kind == "dir":
                 yield from walk(child)

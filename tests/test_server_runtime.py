@@ -1048,3 +1048,23 @@ def test_stopping_background_workers_joins_the_vocabulary_watcher(
         for thread in threading.enumerate()
         if thread.name == "exomem-vocabulary-recovery" and thread.is_alive()
     ]
+
+
+def test_shutdown_during_watcher_recovery_does_not_launch_matrix_warm(tmp_path, monkeypatch):
+    """Returning from cancelled recovery must end the activation chain."""
+    activation = server_runtime.LocalRuntimeActivation(tmp_path)
+
+    def start(label, _starter):
+        if label == "file watcher recovery":
+            activation._shutdown.set()
+
+    monkeypatch.setattr(activation, "_start_component", start)
+    monkeypatch.setattr(activation, "_wait_for_recall_seed", lambda: None)
+    monkeypatch.setattr(activation, "_wait_for_required_admission", lambda: None)
+    monkeypatch.setattr(activation, "_downgrade_recall_runtime", lambda: None)
+    monkeypatch.setattr(activation, "_stop_background_workers", lambda: None)
+    monkeypatch.setattr(
+        server_runtime.threading, "Thread",
+        lambda **_kwargs: pytest.fail("shutdown launched fresh matrix warm work"),
+    )
+    activation._activate()

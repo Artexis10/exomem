@@ -71,6 +71,26 @@ def in_flight() -> int:
         return _in_flight
 
 
+class BulkCancelled(BaseException):
+    """Owned bulk work stopped; ordinary proof failures must not swallow it."""
+
+
+def check_cancelled() -> None:
+    """Cancel this thread's owned bulk scope between complete work units."""
+    stop = getattr(_local, "stop", None)
+    if stop is not None and stop.is_set():
+        raise BulkCancelled()
+
+
+def wait_for_retry(seconds: float) -> None:
+    """Keep ordinary retry sleep; wake an owned bulk scope on its stop event."""
+    stop = getattr(_local, "stop", None)
+    if stop is None:
+        time.sleep(seconds)
+    elif stop.wait(seconds):
+        raise BulkCancelled()
+
+
 class _PassBudget:
     """How long one `bulk()` pass has run, waited, and may still run unyielded."""
 
@@ -102,6 +122,7 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     Inside a `bulk()` pass the wait is also held to the pass's progress floor
     (`MAX_WAIT_SHARE`).
     """
+    check_cancelled()
     budget: _PassBudget | None = getattr(_local, "budget", None)
     if budget is not None:
         budget.units += 1
@@ -120,6 +141,7 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
             return 0.0
     with _condition:
         released = _condition.wait_for(lambda: _in_flight == 0, timeout=limit)
+    check_cancelled()
     now = time.monotonic()
     waited = now - started
     if budget is not None:
@@ -150,15 +172,20 @@ def yielding(items: Iterable[_T], *, max_wait: float = MAX_YIELD_SECONDS) -> Ite
 
 
 @contextmanager
-def bulk() -> Iterator[None]:
+def bulk(*, stop: threading.Event | None = None) -> Iterator[None]:
     """Mark this thread's work as an off-boundary bulk pass for `yielding_in_bulk`."""
+    previous_stop = getattr(_local, "stop", None)
+    if stop is not None:
+        _local.stop = stop
     outermost = not getattr(_local, "bulk", 0)
     _local.bulk = getattr(_local, "bulk", 0) + 1
     if outermost:
         _local.budget = _PassBudget()
     try:
+        check_cancelled()
         yield
     finally:
+        _local.stop = previous_stop
         _local.bulk -= 1
         if outermost:
             _local.budget = None

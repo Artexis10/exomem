@@ -370,3 +370,18 @@ def test_a_lone_request_mid_pass_still_holds_the_pass() -> None:
         waited = foreground_priority.yield_to_foreground(max_wait=5.0)
         worker.join(5.0)
     assert 0.2 <= waited < 2.0
+
+
+def test_nested_bulk_stop_interrupts_without_traffic_and_restores_scope() -> None:
+    """Zero traffic/free scheduling units must not defeat lifecycle cancellation."""
+    stop = threading.Event()
+    completed = []
+    with pytest.raises(foreground_priority.BulkCancelled):
+        with foreground_priority.bulk(stop=stop):
+            with foreground_priority.bulk():
+                for item in foreground_priority.yielding_in_bulk(range(3)):
+                    completed.append(item)
+                    stop.set()
+    assert completed == [0]
+    with foreground_priority.bulk():
+        assert list(foreground_priority.yielding_in_bulk(range(3))) == [0, 1, 2]

@@ -69,3 +69,13 @@ An operator SHALL be able to return a canary to a verified compatible legacy dep
 - **WHEN** a canary fails service acceptance after accepting new canonical writes
 - **THEN** promotion stops and the operator can return to a compatible legacy deployment
 - **AND** the new writes and their outstanding derived work remain recoverable
+
+
+### Requirement: Cancellable owned startup recovery
+
+Service shutdown SHALL cancel synchronous startup graph recovery between complete private work units, source proofs and retries, retain durable pending work, and release its rebuild owner and temporary artifacts. Cancellation alone MUST NOT publish partial work or invent source movement. An already-started atomic replacement SHALL complete its publication bookkeeping. Shutdown SHALL skip later startup draining and warming and join activation rather than detach it.
+
+#### Scenario: Shutdown during a write-warmed startup rebuild
+- **WHEN** shutdown arrives while startup recovery builds or proves a private graph sidecar
+- **THEN** recovery unwinds without publishing the unfinished sidecar or retiring its outstanding debt
+- **AND** the activation thread ends within the existing native shutdown grace window

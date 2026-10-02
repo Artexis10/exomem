@@ -228,6 +228,9 @@ class LocalRuntimeActivation:
             "file watcher recovery",
             self._finish_file_watcher_startup,
         )
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         # Lazily, once the drain is done and off this thread: nothing below
         # waits on a matrix load, and the reaper still frees it when idle.
         threading.Thread(

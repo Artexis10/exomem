@@ -3326,6 +3326,7 @@ class EpistemicGraphIndex:
         published: dict[str, int] | None = None
         paid_marker: tuple[int, int] | None = None
         while attempts < REBUILD_PUBLICATION_ATTEMPTS:
+            foreground_priority.check_cancelled()
             attempts += 1
             # Read before this attempt samples its epoch: whole-vault debt that
             # already exists now is paid by the publication this attempt makes.
@@ -3457,6 +3458,7 @@ class EpistemicGraphIndex:
                     except Exception:  # noqa: BLE001 - the refusal is the outcome
                         log.debug("graph Class C mark reconcile failed", exc_info=True)
                     raise
+                foreground_priority.check_cancelled()
                 ticket = self._prepare_publication_ticket(
                     temporary,
                     epoch=graph_sync.GraphPublicationEpoch(
@@ -3486,9 +3488,11 @@ class EpistemicGraphIndex:
                     )
                     if ticket is None:
                         continue
+                foreground_priority.check_cancelled()
                 with self._mutation_coordinator.hold(
                     operation="epistemic_graph_publish_rebuild", holder_kind="graph"
                 ):
+                    foreground_priority.check_cancelled()
                     if not self._publication_ticket_matches(ticket):
                         continue
                     try:
@@ -3498,6 +3502,7 @@ class EpistemicGraphIndex:
                     try:
                         if not self._publication_ticket_matches(ticket):
                             continue
+                        foreground_priority.check_cancelled()
                         try:
                             graph_sync.replace_sidecar(
                                 temporary,
@@ -3595,7 +3600,9 @@ class EpistemicGraphIndex:
             vault_module.evict_inbound_index(self.vault_root)
         entries = (
             (str(path), freshness.stat_signature(path))
-            for path in vault_module.walk_vault_md(self.vault_root)
+            for path in foreground_priority.yielding_in_bulk(
+                vault_module.walk_vault_md(self.vault_root)
+            )
         )
         result = freshness.reconcile(
             self.vault_root,
@@ -4144,6 +4151,7 @@ class EpistemicGraphIndex:
         started = time.monotonic()
         try:
             while _may_restabilize(attempts, retarget=retarget, started=started):
+                foreground_priority.check_cancelled()
                 attempts += 1
                 retarget = False
                 attempt_started = time.monotonic()
@@ -9799,7 +9807,8 @@ def _logged_whole_vault_rebuild(generation: int | None) -> Iterator[None]:
     except BaseException as error:
         log.info(
             "graph rebuild finished outcome=%s reason=%s elapsed_ms=%.1f generation=%s",
-            "coalesced" if isinstance(error, graph_sync.GraphRebuildInProgress) else "failed",
+            "cancelled" if isinstance(error, foreground_priority.BulkCancelled)
+            else "coalesced" if isinstance(error, graph_sync.GraphRebuildInProgress) else "failed",
             _rebuild_failure_reason(error),
             (time.monotonic() - started) * 1000.0,
             generation,
