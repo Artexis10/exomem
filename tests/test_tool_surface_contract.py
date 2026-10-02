@@ -689,9 +689,9 @@ def test_the_server_tells_every_client_to_activate_context_first(
 
     assert "activate_context" in instructions
     assert "verbatim" in instructions
-    assert "before" in instructions.lower()
+    assert "bootstrap" in instructions and "first" in instructions
     assert "All tools named here belong to this server" in instructions
-    assert "When Exomem is enabled" in instructions
+    assert "When recall is warranted" in instructions
     tools = asyncio.run(mcp.list_tools())
     assert "activate_context" in {tool.name for tool in tools}
     # Short enough that a client which truncates server instructions keeps it.

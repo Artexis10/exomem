@@ -159,13 +159,14 @@ def test_historical_resolved_command_schemas_reproduce_committed_identities(
 
 
 @pytest.mark.parametrize("candidate", HISTORICAL_CANDIDATES)
-def test_historical_profiles_publish_their_pinned_parameter_names(candidate: str) -> None:
+def test_historical_profiles_publish_their_pinned_parameters_and_annotations(candidate: str) -> None:
     committed = _committed_compatibility(candidate)
     profile = hosted_plugins.CANDIDATE_PROFILES[candidate]
     resolved = _resolved(profile)
     for entry in committed["agent_contract"]["commands"]:
         published = tuple(param["name"] for param in entry["params"])
         assert tuple(param.name for param in resolved[entry["name"]].params) == published
+        assert resolved[entry["name"]].mcp_annotations.model_dump(by_alias=True, exclude_none=True) == entry["mcp_tool"]["annotations"]
 
 
 @pytest.mark.parametrize("candidate", HISTORICAL_CANDIDATES)

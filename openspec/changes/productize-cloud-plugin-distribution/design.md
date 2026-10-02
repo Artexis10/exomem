@@ -23,6 +23,10 @@ Deliver generated native packages, one shared behavioural evaluator, native acce
 
 9. Keep server-wide MCP instructions scoped to an enabled Exomem connection and explicitly identify the named operations as this server's own tools. Retain the shared activation, continuity, duplicate-suppression and episode semantics; do not add provider-specific metadata overrides to satisfy a scanner.
 
+   Live bootstrap engagement and capabilities govern invocation, not connection alone. Only send a verbatim turn when recall is warranted under that policy; optional conversation carries relevant bounded context, never full history. Episode recording requires an explicit request or the live proactive-capture disposition. Apply these rules in canonical server/tool/Skill guidance and regenerate every provider package. Directory submission and publication remain held for the publisher's review.
+
+   Derive truthful MCP hints from the same canonical command surface: `capture_source` and `preserve_artifacts` are open-world because temporary artifact handles invoke an external HTTPS download, not because provenance has a URL. `episode_memory` and `adoption_studio` may execute replacement or supersession and therefore carry the destructive hint. Hints do not grant execution authority or replace existing approval and tenant checks.
+
 ## Risks / Trade-offs
 
 ### Profile-aware canonical hook activation

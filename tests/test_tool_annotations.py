@@ -4,8 +4,8 @@ open-world hints) so cautious clients render them correctly.
 ChatGPT's tool-call panel badged the read-only `find` as WRITE / OPEN-WORLD /
 DESTRUCTIVE because the tools shipped no MCP annotation hints, so the client
 assumed the worst. The hints are derived from the command registry:
-`readOnlyHint = not cli_writes`, `openWorldHint = False` for every tool (exomem is
-a closed local vault), and `destructiveHint` is True only for the small set of
+`readOnlyHint = not cli_writes`, `openWorldHint = True` for external artifact
+downloads, and `destructiveHint` is True only for the small set of
 overwrite/remove ops (`commands.DESTRUCTIVE_OPS`). This test pins that contract
 against the live server so a new tool can't ship un-annotated or mis-classified.
 
@@ -59,11 +59,13 @@ def test_every_tool_is_annotated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert not missing, f"tools missing MCP annotations: {sorted(missing)}"
 
 
-def test_open_world_hint_false_for_all(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # exomem operates on a closed local vault and reaches no external systems.
+def test_open_world_hint_matches_external_download_capability(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # URL provenance alone is closed-world; temporary artifact handles are fetched.
     ann = _live_annotations(_build_server(monkeypatch, tmp_path))
-    open_world = [n for n, a in ann.items() if not a or a.get("openWorldHint") is not False]
-    assert not open_world, f"tools not marked closed-world: {sorted(open_world)}"
+    open_world = {n for n, a in ann.items() if a and a.get("openWorldHint") is True}
+    assert open_world == {"capture_source", "preserve_artifacts"}
 
 
 def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -81,6 +83,9 @@ def test_destructive_hint_only_for_overwrite_ops(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     ann = _live_annotations(_build_server(monkeypatch, tmp_path))
+    # Composite workflows can execute replacement/supersession, not only append.
+    assert ann["episode_memory"]["destructiveHint"] is True
+    assert ann["adoption_studio"]["destructiveHint"] is True
     for cmd in commands_module.PRODUCT_COMMANDS:
         if "mcp" not in cmd.surfaces or cmd.read_only:
             continue
