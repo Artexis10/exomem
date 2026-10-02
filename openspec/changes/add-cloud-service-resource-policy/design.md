@@ -1,0 +1,92 @@
+## Context
+
+See proposal.md for motivation. The observed long freshness delay occurred on a desktop running Quiet, not Cloud. The inspected Cloud cell runs Normal with non-deferred ordinary indexing. Normal warmup already preloads a served ONNX encoder when its artifact is available; it does not preload all corpus caches. The change must preserve that working path rather than invent a replacement.
+
+Current compute admission already reserves request workers, releases bulk execution between encoder batches, and gives a concurrent ONNX query a separate interactive execution lane. CPU encoding defaults to batches of eight. These mechanisms are useful but do not establish latency fairness: a bulk encode retains admission for its whole input, and releasing a lock alone does not prevent reacquisition starvation. Deferred semantic work is durable; ordinary periodic replay is coupled to watcher reconciliation, including graph and full-refresh work.
+
+Existing tenant CPU/memory limits remain 2 CPU / 3 GiB. The largest maintained vault has approximately 86,000 chunk rows; current corpus representations can grow with vault size. This policy does not make that memory independent of corpus size or ship the separately reviewed disk-first corpus design.
+
+## Goals / Non-Goals
+
+**Goals:** make Cloud resource policy operator-owned; keep the core recall encoder warm without making every model/cache permanent; promptly recover deferred writes; prove interactive responsiveness during bulk work and safe aggregate capacity before promotion.
+
+**Non-Goals:** change local Quiet/Normal/Performance semantics, engagement preferences, vector space, writer authority, model reasoning, optional feature enablement, tenant limits or data/backup formats. No new durable queue, standalone index daemon, out-of-process drain or general-purpose scheduling framework. This profile is not the disk-first design's mediated-writer capability and conveys no additional filesystem or mutation authority.
+
+## Decisions
+
+### 1. Resolve an explicit deployment profile
+
+Add `EXOMEM_CLOUD_RESOURCE_POLICY=legacy|service-v1`, parsed alongside existing Cloud configuration. Absence remains `legacy`. `service-v1` requires a valid Cloud cell deployment; outside Cloud it is a configuration error rather than silently changing a desktop. Unknown values fail startup with a value-free configuration error.
+
+The Cloud image supplies `service-v1` only in the release containing this feature. Digest-pinned per-cell upgrades provide the canary mechanism; generic tenant/model environment input cannot select it, and the existing forbidden `EXOMEM_CLOUD_` prefix remains. An explicit operator `legacy` deployment override can disable the profile. Effective service profile and workstation mode are separately reported. Cloud `service-v1` ignores workstation mode for compute policy but does not rewrite the user's stored mode or engagement setting. Conflicting legacy compute overrides are rejected under `service-v1` rather than silently defeating its contract; supported service budget overrides are validated and reported with their source.
+
+For v1, reject non-empty `EXOMEM_PRELOAD_MODELS`, `EXOMEM_RELEASE_GPU_WHEN_IDLE` and unsafe native-thread override opt-in under the service profile. Existing device overrides can only select CPU. Existing `EXOMEM_EMBED_BATCH` accepts integers 1–8, `EXOMEM_CPU_THREADS` accepts 1–2, and `EXOMEM_SYNC_WORKERS` accepts 4–8 with the existing non-model reserve and at least two admitted model callers. Defaults remain eight chunks, one CPU thread per encode and eight request workers. Keep existing idle/reconcile controls only when they preserve cache reclamation and the prompt-debt wake path; a watcher file cap cannot suppress all semantic recovery. No new tuning surface is introduced merely for the plan's acceptance thresholds.
+
+Independence includes imperative paths: the current stored-mode watcher calls `mode.apply_live()`, which unloads all model slots. Under `service-v1`, that path must preserve the service core and effective CPU/cache/index policy even if a stored workstation mode changes. Legacy/local live mode application remains unchanged. Profile selection is restart/deployment scoped, not a mutable per-request service setting.
+
+This avoids adding a control-plane schema or replacing all image defaults merely to try one cell. Setting global Performance was rejected because it conflates core warmth, optional models, device use and unbounded cache retention.
+
+### 2. Pin the serving core, not every resource
+
+Healthy running `service-v1` cells keep the core CPU ONNX recall encoder resident. Existing model guards/readiness own load, in-flight use and unload safety; warmup selects the core group without using the global preload-all switch. Existing serving-encoder migration behavior remains authoritative: no space is marked ready until its actual encoder is usable. A failed core preload reports semantic degraded/unavailable while preserving lexical retrieval and canonical writes with durable semantic debt. Core pinning starts after successful load, not by falsely marking a failed component ready.
+
+The reaper preserves the selected core slot and continues to reclaim inactive optional models and existing evictable corpus caches. Optional activation encoders, reranking, CLIP/OCR/ASR are not preloaded or enabled by the profile. An activation encoder already shared with recall uses that same instance. Core residency ends on the existing service stop/quiesce path; v1 adds no second idle-cooling lifecycle. The cost of an always-resident core is charged explicitly to each running cell in admission/capacity verification.
+
+Corpus caches remain lazy and idle-reclaimable. Use existing bounded cache controls, including the FrontmatterCache byte-budget work in `bound-cell-memory`, if measurements identify that cache as the blocking allocation. Do not introduce another cache manager. A corpus representation that still exceeds the acceptance envelope blocks promotion and returns to the existing memory workstream; disabling reclamation is not a remedy.
+
+### 3. Wake durable debt inside the existing service
+
+Notify the existing watcher/service owner after recording semantic debt; notification carries no content and is only a hint. Coalesce notifications, wake after the canonical writer relinquishes its lease, and replay semantic receipts without requiring a full drift scan or graph/full-refresh drain first. One service-owned semantic dispatcher consumes these notifications; the graph daemon keeps its existing ownership. Startup scans the durable queue after existing admission reaches a terminal state, and periodic reconciliation remains the lost-notification fallback.
+
+Use the existing deferred queue and receipt CAS. The dispatcher prepares one bounded small parent at a time and owns at most one concurrently running bulk-replay task. The bulk task executes the existing whole-parent replay; the dispatcher stays free to claim new small receipts while it runs. This is one fixed service-owned task, not an executor pool or a second durable queue. The existing reconcile path delegates service-profile semantic receipts to this same owner rather than racing a second full semantic drain. Successful inline indexing stays inline; its exact receipt publication can make a queued claim obsolete, which remains a harmless CAS miss.
+
+Classify a small recovery parent by bounded current-source inspection: at most 1 KiB and three chunks plus three semantic units. Larger parents go to the one bulk task. Inspect durable queue metadata in pages of at most 64, rotate the scan cursor across turns, and prioritize known newly recorded receipt references as hints; a restart resumes scanning authoritative durable state. Admission/preparation keeps one small parent plus one bulk parent at most, with a 64 MiB aggregate prepared-data budget. A bulk source over 16 MiB or estimated preparation exceeding that budget remains durable with a visible resource-budget refusal; do not build the oversized representation merely to learn its allocation. Estimates include text and both vector projections and require conservative checked bounds. An over-budget parent does not block small work or hot-retry until its input or policy changes.
+
+Select at most eight candidate receipts per dispatch turn; check elapsed time between bounded metadata/preparation steps, yielding after one second of overhead plus the current bounded encode operation. Time checks between receipts alone are not a preemption mechanism; the separate single bulk task is what permits small recovery to reach model admission during a large parent's encode. Failed work remains durable, rotates behind other eligible work and uses capped exponential retry delay (1–60 seconds); fresh work can wake immediately despite an older poisoned receipt. Attempt accounting must not postpone a healthy receipt merely because another failed.
+
+Wakeups do not acquire a writer lease while a producer still holds it, hold database transactions across inference, clear receipt generations after a newer edit, or bypass graph/semantic readiness. Both in-service callers use the existing derived publication serialization and exact-source checks; queued and inline work must not publish out of order as current. A notification arriving during drain is observed on the next turn; service shutdown stops/joins its dispatcher and bulk task without discarding durable work. Do not serialize a second payload copy to persist scheduling state. Cross-restart retry hints are reconstructed from authoritative receipts; no prepared vectors survive a process restart.
+
+### 4. Budget the existing model lane at real encode boundaries
+
+Keep the existing request-worker reserve and concurrent ONNX query lane. Cloud bulk/recovery work has at most one admitted bulk encoder job; the dispatcher can submit pending small-write recovery between its actual CPU batches. Outer request admission remains nonblocking: overflow calls refuse promptly as today instead of occupying every request worker while awaiting a permit. Fair waiting with shutdown cancellation applies only after successful admission, and every waiting model caller counts against that same model budget. Add foreground precedence and an aging bulk turn after at most eight foreground turns to the existing execution gate, not a new executor pool. Carry explicit work class at the existing call boundary; ordinary local callers retain current defaults. The two service-owned callers also count against the same model budget, and neither holds a vault writer lease while waiting.
+
+Retain CPU batch size eight as the maximum service-v1 batch, with the existing tokenizer input bound; operator tuning can reduce it. A parent with many chunks is still prepared/published as one exact current parent, while its inference runs in bounded turns. Reuse current per-parent preparation and publication checks; never advertise partial parent vectors as complete. Newly submitted small writes must not sit behind a bulk admission held across an entire large parent. If the existing preparation path cannot achieve that without a new staging format or weakened fences, stop that implementation step and revise this change before coding a new format.
+
+Fair admission is necessary but not itself proof of latency: native CPU thread budgets still constrain competition between the ONNX query and bulk lanes. The under-load outcome gate decides whether the batch/thread budget is adequate. Baseline measurement comes before changing an already-working gate; skip any proposed gate change whose required behavior is already demonstrated by a deterministic boundary test and measured acceptance.
+
+### 5. Report actual state without warming it
+
+Extend the existing resource/status surface with deployment profile/source, core loaded/readiness state, semantic pending count and oldest outstanding receipt creation time, and bulk activity/budget. Compute ages from immutable debt creation time, not retry timestamps. Unsupported/expensive metrics stay unknown. No model load, corpus matrix read, new sidecar or CUDA context is created by status.
+
+Canonical commit remains terminal even when derived work is pending/failed. Existing writer/read receipts and resource diagnostics communicate that distinction; this change does not declare a canonical receipt to be semantic freshness. Semantic acceptance proves the exact source version in both chunk and semantic-unit projections, plus a grounded hybrid query. During ordinary background work, reported effective retrieval lanes must be truthful about any refusal/degradation.
+
+### 6. Fixed acceptance budgets before promotion
+
+These are proposed release gates, not claims about legacy Cloud performance. Use existing acceptance tooling and private bounded receipts; add no broad benchmark framework. Bind outcomes to exact image/source, policy, vault generation and cgroup limits.
+
+| Outcome | Gate and measurement |
+|---|---|
+| Small ordinary note freshness | Twenty new/revised synthetic notes, each at most 1 KiB UTF-8 and three chunk rows plus three semantic units. Time from canonical commit to exact-version chunk AND unit publication: p95 <=5 s, every sample <=10 s, both idle and during a sustained bulk import. Record request-to-commit separately so a slow commit cannot hide a slow save. Total request-to-publication p95 <=10 s and every sample <=20 s. No replay retry is issued by the caller. |
+| Interactive hybrid retrieval | Replay the maintained 25-query set warm and while importing. Core vector lane participates in every eligible query; p95 <=3 s, none >10 s, no new refusal/degradation. Record top-hit and overlap changes for relevance adjudication; identical rankings are not required. |
+| Idle and recovery | After the existing 900-second reaper window, core remains resident while loaded optional/cache slots are eligible for safe reclamation. Repeat small-note/query gates. Restart once with queued work; exact durable work converges and superseded generations never clear newer debt. Measure restart/cold readiness separately, not as a warm-query sample. |
+| Resource envelope | Same 2 CPU / 3 GiB cell limits; cgroup peak <=80% of memory.max across warm search/save/import and no OOM/restart attributable to the workload. Stop before predicted unsafe allocation. This is a Cloud gate, not the desktop 512 MiB persistent-core fixture budget. |
+| Node capacity | Fresh simultaneous warm-cell measurements, including platform/unrequested workload usage and reservations, leave >=20% allocatable memory headroom. For each additional admission charge the greater of declared request and observed warmed per-cell peak; do not extrapolate from cold cells or attachment slots. No multi-friend admission until that calculation passes. |
+
+The small-note gate covers ordinary interactive edits, not arbitrary bulk documents, unavailable model artifacts or an explicit embedding-space migration. Such work remains visible pending/degraded, never falsely counted as a passing sample. Warm status is not inferred from Kubernetes Ready alone. A gate miss blocks promotion; changing a numeric gate requires an explicit documented design revision, not a retry or hidden threshold relaxation.
+
+## Risks / Trade-offs
+
+- Always-resident core increases idle running-cell cost → measure simultaneous warmed cells and reserve headroom before each new admission; use existing lifecycle stop when applicable, not an invented cheap floor.
+- Native inference is not preemptible within a batch → cap actual batch size, preserve thread budgets, and prove foreground outcomes under realistic import load.
+- More frequent debt replay can contend with canonical/graph work → coalesced in-service wakeups after lease release, short turns, durable retry/backoff and unchanged generation fences.
+- Corpus caches may still dominate memory → block promotion and complete the already-owned byte-bound/disk-first work instead of silently raising limits.
+- Operational status can overstate success → distinguish canonical, derived, encoder and Kubernetes readiness; require exact fresh reads and projection evidence.
+
+## Migration Plan
+
+1. Critique this design, collect the legacy Cloud baseline on an isolated representative vault with real CPU ONNX, and settle any discovered architectural blockers before implementation. Desktop Quiet delay is motivation, not that baseline.
+2. Implement and independently review the integrated runtime/profile changes; run affected suites iteratively and the completion-boundary required corpus/CI once. Ship an ordinary signed, digest-pinned release; no fleet default change accompanies publication.
+3. Exercise writes on an isolated test tenant/vault with external sends/payments blocked. Run restart/under-load acceptance there before an authorized owner canary. Confirm backup and exact owner identity through the approved route; expired OAuth is not solved by using the reviewer identity.
+4. Roll only the known owner cell, verify model readiness and source preservation, and run the maintained owner-vault workflow at the same limits. Existing data/privacy constraints still apply to measurement receipts. This owner outcome, integrated review and independent live verification define this change's delivery closure; a separately authorized QA/reviewer pass can follow within a coordinated native acceptance window.
+5. Fleet-default promotion and friend invitations are deferred programme follow-through, not required tasks for closing this runtime change. They additionally require resolution of the separate reviewer preference-preservation incident, native acceptance and a fresh warm-capacity calculation for each new admission. Do not claim those gates passed merely because this change shipped.
+6. Roll back through a verified compatible legacy image or explicit operator legacy profile, preserving canonical data and durable queue debt. Never restore a pre-upgrade vault snapshot over writes made after upgrade. Record why promotion failed and leave friends/submissions held.
