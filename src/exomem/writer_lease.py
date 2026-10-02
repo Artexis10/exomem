@@ -5221,9 +5221,16 @@ class LeaseManager:
             if post_terminal_housekeeping:
                 _drain_post_terminal_housekeeping(post_terminal_housekeeping)
             if post_terminal_fanout:
-                reports, drain_failed = _drain_post_terminal_fanout(
-                    post_terminal_fanout
-                )
+                # The leaf's manager context has ended, but these callbacks
+                # still belong to this invocation. Graph registrations must
+                # use the same state root as the finalizer below.
+                manager_token = _ACTIVE_LEASE_MANAGER.set(self)
+                try:
+                    reports, drain_failed = _drain_post_terminal_fanout(
+                        post_terminal_fanout
+                    )
+                finally:
+                    _ACTIVE_LEASE_MANAGER.reset(manager_token)
                 result = _with_post_terminal_fanout_acknowledgement(
                     result, reports, drain_failed=drain_failed
                 )

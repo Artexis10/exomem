@@ -628,7 +628,7 @@ def add(
                 # Keep this receipt after a successful inline drain too: a
                 # same-path ABA write may have replaced its queued revision.
                 # The background drain owns exact-revision retirement.
-                deferred_index.add_full(
+                receipts = deferred_index.add_full_receipts(
                     vault_root,
                     [path.relative_to(vault_root).as_posix() for path in replaced],
                 )
@@ -638,7 +638,23 @@ def add(
                 if not fanout_succeeded[0]:
                     raise writer_lease._PostCommitOutcomeUncertain() from None
             else:
-                if not writer_lease.defer_until_terminal_persisted(run_fanout):
+                def run_terminal_fanout() -> list[object]:
+                    from . import epistemic_graph
+
+                    # This callback has a durable parent and a terminal that
+                    # can report pending. A direct caller below must still
+                    # converge, even though it also retained full receipts.
+                    coordinator = writer_lease.active_manager()._mutation_coordinator_for(
+                        vault_root
+                    )
+                    with epistemic_graph.parent_receipted_graph_handoff(
+                        vault_root,
+                        state_root=coordinator.state_root,
+                        receipts=tuple(receipts),
+                    ):
+                        return run_fanout()
+
+                if not writer_lease.defer_until_terminal_persisted(run_terminal_fanout):
                     run_fanout()
 
     try:
