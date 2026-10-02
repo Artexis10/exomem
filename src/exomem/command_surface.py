@@ -273,7 +273,11 @@ def mcp_tool_annotations(
 ) -> ToolAnnotations:
     """MCP behaviour hints for one tool — what cautious clients render as badges."""
     return ToolAnnotations(
-        title=name.replace("_", " ").title(),
+        title=(
+            "Adopt Existing Memory"
+            if name == "adoption_studio"
+            else name.replace("_", " ").title()
+        ),
         readOnlyHint=read_only,
         destructiveHint=False if read_only else (name in DESTRUCTIVE_OPS),
         idempotentHint=idempotent,

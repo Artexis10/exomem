@@ -8778,6 +8778,10 @@ def op_read_media(
     )
 
 
+def _review_question_submission(path: Any, query: Any, family: Any) -> bool:
+    return path is not None or bool(query) or family is not None
+
+
 def op_review_memory(
     vault_root: Path,
     mode: str = "attention",
@@ -8800,7 +8804,9 @@ def op_review_memory(
     """Review memory health, provenance, drift, or source backlog.
 
     Default mode is read-only attention review. Write-capable repairs are in
-    `maintain_memory`, not here.
+    `maintain_memory`, not here. Vocabulary mode with `path`, `query` and
+    `family` saves a meaning question in review state. That submission requires
+    write access, but grants no permission to change a page or vocabulary.
 
     `mode="audit", categories=["unresolved_source_citation"]` finds compiled
     pages whose explicit sources do not resolve to authorized governed Source
@@ -8886,7 +8892,7 @@ def op_review_memory(
         requested page.
     """
     if mode == "vocabulary":
-        question_submission = path is not None or bool(query) or family is not None
+        question_submission = _review_question_submission(path, query, family)
         unrelated = any(
             item is not None
             for item in (categories, sources, suggested_title, tag, key, value)
@@ -12529,6 +12535,10 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             return kwargs.get("dry_run") is True
         if adapter == "apply-conditional":
             return kwargs.get("apply") is not True
+        if adapter == "question-conditional":
+            return not _review_question_submission(
+                kwargs.get("path"), kwargs.get("query", ""), kwargs.get("family")
+            )
         return adapter != "mutation"
     if command.name == "edit_memory":
         if kwargs.get("validate_only") is True:
@@ -13039,7 +13049,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "review_memory",
         op_review_memory,
         1,
-        False,
+        True,
         False,
         None,
         _MCRC,
@@ -13307,6 +13317,15 @@ def _build_product_commands() -> tuple[Command, ...]:
                 )
                 for param in params
             )
+        # Keep the reference in the description, before any Args/Returns
+        # sections that MCP's docstring parser consumes as schema metadata.
+        introduction, separator, details = desc.partition("\n\n")
+        desc = (
+            introduction.rstrip()
+            + "\n\n    API reference: "
+            "https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md"
+            + (separator + details if separator else "\n")
+        )
         cmds.append(
             Command(
                 name=name,
@@ -13875,14 +13894,31 @@ def apply_legacy_profile_pin(
     if contract is None and current == names:
         return command
     if contract is not None:
+        properties = contract.input_schema.get("properties")
+        if not isinstance(properties, Mapping):
+            raise RuntimeError(f"{command.name}: pinned input schema has no properties")
+        if command.name == "review_memory":
+            historical_modes = next(
+                (
+                    _legacy_param(param, properties["mode"]).choices
+                    for param in contract.params if param["name"] == "mode"
+                ),
+                (),
+            )
+            # The published wrapper enforces these finite modes and rejects
+            # extra arguments. It cannot reach question submission, unlike
+            # the current write-capable tool. Never relax the general pin guard.
+            if (
+                historical_modes
+                and "vocabulary" not in historical_modes
+                and "family" not in keep
+            ):
+                command = dataclass_replace(command, cli_writes=False, response_detail=None)
         # Historical metadata is fixed by its published descriptor, not today's
         # hint classification. A changed write capability still breaks the pin.
         if contract.annotations.get("readOnlyHint") is not command.read_only:
             raise RuntimeError(f"{command.name}: pinned read-only classification changed")
         published = {str(param["name"]): param for param in contract.params}
-        properties = contract.input_schema.get("properties")
-        if not isinstance(properties, Mapping):
-            raise RuntimeError(f"{command.name}: pinned input schema has no properties")
         params = tuple(
             _legacy_param(published[param.name], properties[param.name])
             for param in command.params
