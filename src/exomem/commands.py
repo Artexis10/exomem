@@ -13222,7 +13222,10 @@ def _build_product_commands() -> tuple[Command, ...]:
     cmds: list[Command] = []
     for name, leaf, tier, writes, needs_schema, positional, surfaces, routes, meta in _PRODUCT_SPEC:
         skip = 2 if needs_schema else 1
-        desc = leaf.__doc__ or ""
+        # Python 3.13 dedents compiled docstrings; older supported interpreters
+        # retain their source indentation. Normalize before inserting a line so
+        # every renderer and runtime publishes the same tool contract.
+        desc = inspect.cleandoc(leaf.__doc__ or "")
         params = _derive_params(leaf, skip=skip, positional=positional)
         response_detail = "full" if name == "govern_memory" else "compact" if writes else None
         if name == "edit_memory":

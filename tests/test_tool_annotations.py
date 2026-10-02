@@ -135,3 +135,14 @@ def test_current_tool_descriptions_link_to_the_shared_api_reference(
     assert all(reference in tool.to_mcp_tool().description for tool in tools)
     adoption = next(tool.to_mcp_tool() for tool in tools if tool.name == "adoption_studio")
     assert adoption.annotations.title == "Adopt Existing Memory"
+
+
+def test_api_reference_contract_is_stable_across_python_docstring_indentation(monkeypatch) -> None:
+    """3.13 dedents compiled docs; a 3.11 renderer must emit the same contract."""
+    command = next(c for c in commands_module.PRODUCT_COMMANDS if c.name == "coordination_status")
+    descriptions = []
+    for doc in ("Summary.\n\n    Details.\n    ", "Summary.\n\nDetails.\n"):
+        monkeypatch.setattr(command.leaf, "__doc__", doc)
+        rebuilt = next(c for c in commands_module._build_product_commands() if c.name == command.name)
+        descriptions.append(rebuilt.doc)
+    assert descriptions[0] == descriptions[1]
