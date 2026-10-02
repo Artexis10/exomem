@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.102.5](https://github.com/Artexis10/exomem/compare/v0.102.4...v0.102.5) (2026-10-02)
+
+
+### Bug Fixes
+
+* **cloud:** resolve actionable directory tool findings ([#1518](https://github.com/Artexis10/exomem/issues/1518)) ([21e1e45](https://github.com/Artexis10/exomem/commit/21e1e459f8b29ab059d0f144b86a561f3f0cf57c))
+* **infra:** name the shared Substrate control host clearly ([#1513](https://github.com/Artexis10/exomem/issues/1513)) ([5177e50](https://github.com/Artexis10/exomem/commit/5177e50a1952d318252544c363e43d590caa4ac4))
+* **mcp:** stabilize tool descriptions across Python versions ([#1519](https://github.com/Artexis10/exomem/issues/1519)) ([15add90](https://github.com/Artexis10/exomem/commit/15add9076a161c084375cd207c248b1cf1db329c))
+* **memory:** require explicit intent to change saved engagement ([#1516](https://github.com/Artexis10/exomem/issues/1516)) ([2155c0b](https://github.com/Artexis10/exomem/commit/2155c0b82587184f2aaf9c18356c6fa7d8f1f559))
+* **plugins:** make directory review examples runnable ([#1514](https://github.com/Artexis10/exomem/issues/1514)) ([cf4907c](https://github.com/Artexis10/exomem/commit/cf4907cb56dc193356e5d69843862ebe6799de70))
+
 ## [0.102.4](https://github.com/Artexis10/exomem/compare/v0.102.3...v0.102.4) (2026-10-02)
 
 
