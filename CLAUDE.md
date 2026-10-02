@@ -1,9 +1,5 @@
 # exomem — instructions for Claude
 
-For unfamiliar cross-file code paths, optional Graft CLI queries can provide a
-small starting map. Read `docs/code-navigation.md` when using it; verify its
-results in source and use normal search when it misses.
-
 ## Shared-checkout and live-state boundaries
 
 Every new change, including docs and OpenSpec, belongs in its own linked worktree from `origin/main`. Keep the primary on `main`; inspect status and all worktrees before editing. Never discard or overwrite another session's files or processes. Never use `git stash` in any checkout: the stack is repository-global.
