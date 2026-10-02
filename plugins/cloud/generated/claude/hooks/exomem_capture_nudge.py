@@ -3,18 +3,25 @@
 
 The KB skill already says to auto-capture at stepping-stones, but skill prose is
 *passive* — over a long thread the model forgets to check, so "auto-save" quietly
-never fires. This hook re-arms the check: when an agent finishes a substantial turn
-that hasn't already written to the KB, it blocks the stop with a one-line reminder
-so the agent evaluates whether a capture is warranted before ending. A substantial
-turn alone does not require a write.
+never fires. This hook re-arms the check: when a turn lands durable work and
+hasn't already written to the KB, it blocks the stop with a one-line reminder
+so the agent evaluates whether a capture is warranted before ending. A landing
+alone does not require a write.
 
 LANGUAGE-AGNOSTIC by design. It does NOT gate on English keywords — that would
-miss Japanese and every other language. The gate is structural: a turn is a
-candidate if the assistant's reply is substantial (>= a char threshold) and the
-KB wasn't already written this turn. A per-session cooldown bounds how often it
-can fire, so cost stays low while the agent — which judges "is this really a
-stepping-stone?" well in any language — makes the actual call (the reminder tells
-it to do nothing if it isn't one).
+miss Japanese and every other language. The gate is structural, and every
+extra fire costs a full-context model turn, so below the most aggressive
+prominence ("maximal") a turn is a candidate only if it contains a LANDING: a
+successful shell command that commits, pushes, merges, tags or opens/merges a
+pull request or release (`_LANDING_COMMANDS`; Claude `Bash` and Codex shell/exec
+calls). Q&A, reading and CI-watching turns stay silent however long the reply.
+Measured over 14 days a length gate fired on ~76% of prompts and only 20% of
+those turns wrote anything. At "maximal" the older gate stays: the reply is
+substantial (>= a char threshold). Either way the KB must not already have been
+written this turn, and a per-session cooldown bounds how often it can fire, while
+the agent — which judges "is this really a stepping-stone?" well in any language —
+makes the actual call (the reminder tells it to do nothing if it isn't one).
+Conversation-level decisions with no landing are covered by the episode ask below.
 
 Cheap and safe: the script itself is free (stdlib only), but reminder context also
 consumes tokens. Self-disarms via `stop_hook_active` (no loops); the
@@ -22,8 +29,9 @@ cooldown caps frequency; every trigger is logged under the active client home fo
 tuning.
 
 Tunables (env): EXOMEM_CAPTURE_NUDGE_DISABLE=1 (off), EXOMEM_CAPTURE_NUDGE_MIN_CHARS
-(default 300 — lower it for a dense script like Japanese, which packs more meaning
-per char), EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC (default 300). The legacy KB_CAPTURE_NUDGE_*
+(default 300 — the "maximal" length gate and the episode ask's "substantive turn"; lower
+it for a dense script like Japanese, which packs more meaning per char),
+EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC (default 300). The legacy KB_CAPTURE_NUDGE_*
 names are still accepted for back-compat (aliased to the EXOMEM_* names at startup).
 
 Episode ask. Every K substantive turns (K and a cooldown by prominence,
@@ -87,6 +95,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import sys
 import threading
 import time
@@ -378,6 +387,7 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
     tools: list[dict] = []
     failed_tool_ids: set[str] = set()
     completed_codex_tool_ids: set[str] = set()
+    shell_exit_ok_ids: set[str] = set()
     for line in reversed([ln for ln in raw.splitlines() if ln.strip()]):
         try:
             obj = json.loads(line)
@@ -396,8 +406,21 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
         )
         role = msg.get("role") if isinstance(msg, dict) else None
         typ = record.get("type") if isinstance(record, dict) else None
-        if typ == "function_call_output":
+        if typ == "custom_tool_call":
+            # Current Codex runs shell commands as `exec` cells of JavaScript.
+            tools.append(
+                {
+                    "id": str(record.get("call_id") or ""),
+                    "name": str(record.get("name") or ""),
+                    "operation": "",
+                    "input": {"source": record.get("input")},
+                    "requires_confirmed_output": True,
+                }
+            )
+        elif typ in {"function_call_output", "custom_tool_call_output"}:
             call_id = str(record.get("call_id") or "")
+            if call_id and _exit_codes_ok(record.get("output")):
+                shell_exit_ok_ids.add(call_id)
             if call_id and _codex_call_output_succeeded(record.get("output")):
                 completed_codex_tool_ids.add(call_id)
             elif call_id:
@@ -454,6 +477,10 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
                 break  # reached the human prompt that began this turn
     for tool in tools:
         tool_id = tool["id"]
+        if tool.get("requires_confirmed_output") and _tool_commands(tool):
+            # Shell output carries exit codes, not the connector `Output:` JSON.
+            tool["failed"] = tool_id not in shell_exit_ok_ids
+            continue
         tool["failed"] = bool(
             tool_id
             and (
@@ -484,6 +511,134 @@ def _successful_kb_write(tool: dict) -> bool:
     if "edit_memory" in name.lower() and tool_input.get("validate_only") is True:
         return False
     return True
+
+
+#: Command words whose success lands durable work. Matched structurally on the
+#: parsed command (see `_landing_command`), never as a substring of prose.
+_LANDING_COMMANDS = (
+    ("git", "commit"),
+    ("git", "push"),
+    ("git", "merge"),
+    ("git", "tag"),
+    ("yadm", "commit"),
+    ("yadm", "push"),
+    ("gh", "pr", "create"),
+    ("gh", "pr", "merge"),
+    ("gh", "release", "create"),
+)
+_SHELL_TOOLS = frozenset(
+    {"bash", "exec", "exec_command", "shell", "shell_command", "local_shell"}
+)
+_SHELL_WRAPPERS = frozenset({"env", "sudo", "command", "time", "nohup", "exec"})
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
+#: Global options that take a value, which must not be read as the subcommand.
+_VALUE_OPTIONS = {
+    "git": frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}),
+    "yadm": frozenset({"-Y", "--yadm-dir", "--yadm-data", "-C", "-c"}),
+    "gh": frozenset({"-R", "--repo", "--hostname"}),
+}
+_SEPARATORS = frozenset({"&&", "||", ";", "&", "|", "(", ")", "\n", ";;", "|&"})
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_EXIT_CODE = re.compile(
+    r"(?:exit_code\W+|exited with code\s+|exit code:?\s+)(-?\d+)", re.I
+)
+#: `cmd: "..."` literals in the source a Codex `exec` cell runs.
+_EXEC_CMD_LITERAL = re.compile(
+    r"""\bcmd\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`)"""
+)
+
+
+def _command_tokens(command: str) -> list[str] | None:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:  # unbalanced quotes: not a command we can read
+        return None
+
+
+def _landing_command(command: str, depth: int = 0) -> bool:
+    """Whether a shell command line runs one of `_LANDING_COMMANDS`.
+
+    The command words are matched at the start of each `&&`/`;`/`|`/newline
+    segment, after env assignments and a few wrappers, so `git commit -m "git
+    push later"` and `echo git push` do not count while `CI=1 git -C repo push`
+    and `bash -lc "make && git push"` do.
+    """
+    tokens = _command_tokens(command) if depth < 3 else None
+    if not tokens:
+        return False
+    segment: list[str] = []
+    for token in [*tokens, ";"]:
+        if token not in _SEPARATORS:
+            segment.append(token)
+            continue
+        words, segment = segment, []
+        while words and (
+            _ENV_ASSIGNMENT.match(words[0]) or words[0] in _SHELL_WRAPPERS
+        ):
+            words.pop(0)
+        if not words:
+            continue
+        program = Path(words[0]).name
+        if program in _SHELLS:
+            script = next(
+                (words[i + 1] for i, w in enumerate(words[:-1]) if re.fullmatch(r"-[a-z]*c[a-z]*", w)),
+                None,
+            )
+            if script and _landing_command(script, depth + 1):
+                return True
+            continue
+        if program not in _VALUE_OPTIONS:
+            continue
+        rest = words[1:]
+        while rest and rest[0].startswith("-"):
+            skip = 2 if rest[0] in _VALUE_OPTIONS[program] else 1
+            rest = rest[skip:]
+        if any(
+            rest[: len(spec) - 1] == list(spec[1:])
+            for spec in _LANDING_COMMANDS
+            if spec[0] == program
+        ):
+            return True
+    return False
+
+
+def _tool_commands(tool: dict) -> list[str]:
+    """The shell command lines a Claude `Bash` or Codex shell/exec call ran."""
+    if str(tool.get("name") or "").lower() not in _SHELL_TOOLS:
+        return []
+    tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
+    if tool.get("name") == "exec" and isinstance(tool_input.get("source"), str):
+        found = []
+        for literal in _EXEC_CMD_LITERAL.findall(tool_input["source"]):
+            try:
+                found.append(json.loads(literal) if literal[0] == '"' else literal[1:-1])
+            except ValueError:
+                continue
+        return found
+    command = tool_input.get("command") or tool_input.get("cmd")
+    if isinstance(command, list):
+        command = shlex.join(str(part) for part in command)
+    return [command] if isinstance(command, str) else []
+
+
+def _exit_codes_ok(output: object) -> bool:
+    """A shell call's reported exit codes, all zero and at least one present."""
+    if isinstance(output, list):
+        output = "\n".join(str(b.get("text", "")) for b in output if isinstance(b, dict))
+    if not isinstance(output, str):
+        return False
+    codes = _EXIT_CODE.findall(output)
+    return bool(codes) and all(int(code) == 0 for code in codes)
+
+
+def _successful_landing(tool: dict) -> bool:
+    """Whether one observed tool call completed a landing command."""
+    if tool.get("failed"):
+        return False
+    return any(_landing_command(command) for command in _tool_commands(tool))
 
 
 #: Written by `install-hook`, cleared once an exomem MCP tool is observed. The
@@ -1073,8 +1228,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     if attempted:  # capture was attempted this turn; coverage is the checks above
         return 0
-    if len(assistant_text.strip()) < min_chars:  # trivial turn, not a landing
-        return 0
+    if level == "maximal":  # the most aggressive level keeps the length gate
+        if len(assistant_text.strip()) < min_chars:
+            return 0
+    elif not any(_successful_landing(tool) for tool in tools):
+        return 0  # nothing landed: Q&A, reading and watching turns stay silent
 
     ok, stamp = _cooldown_ok(session_id, cooldown)
     if not ok:  # fired recently this session — keep cost bounded

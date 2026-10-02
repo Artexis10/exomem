@@ -2042,8 +2042,13 @@ def _transcript(
     assistant_tool: str | None = None,
     assistant_tool_input: dict | None = None,
     assistant_tool_result: dict | None = None,
+    landing: bool = False,
 ) -> Path:
     content: list[dict] = []
+    if landing:  # a successful `git push`: below `maximal` only a landing is nudged
+        content.append(
+            {"type": "tool_use", "id": "tool-land", "name": "Bash", "input": {"command": "git push"}}
+        )
     if assistant_tool:
         content.append(
             {
@@ -2173,10 +2178,10 @@ def _codex_rollout_with_exomem_call(
 # --- capture (Stop) gate --------------------------------------------------------
 
 
-def test_capture_fires_on_substantial_turn(tmp_path: Path) -> None:
+def test_capture_fires_on_a_landing_turn(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    t = _transcript(tmp_path, "q?", "We landed on a clear decision. " + "x" * 450)
+    t = _transcript(tmp_path, "q?", "Pushed.", landing=True)
     r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "s1"}, home)
     assert '"decision": "block"' in r.stdout
 
@@ -2186,7 +2191,7 @@ def test_capture_fires_language_agnostic_japanese(tmp_path: Path) -> None:
     home.mkdir()
     jp = "これは重要な結論です。" * 40
     t = _transcript(tmp_path, "質問", jp)
-    r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "jp"}, home)
+    r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "jp"}, home, {"EXOMEM_PROMINENCE": "maximal"})
     assert '"decision": "block"' in r.stdout
 
 
@@ -2203,7 +2208,7 @@ def test_capture_reads_codex_0144_rollout_transcript(tmp_path: Path) -> None:
         CAPTURE_SCRIPT,
         {"transcript_path": str(transcript), "session_id": "codex-rollout"},
         home,
-        {"EXOMEM_HOOK_CLIENT": "codex"},
+        {"EXOMEM_HOOK_CLIENT": "codex", "EXOMEM_PROMINENCE": "maximal"},
     )
 
     payload = json.loads(result.stdout)
@@ -2222,7 +2227,7 @@ def test_capture_codex_uses_last_message_without_transcript(tmp_path: Path) -> N
             "session_id": "codex-last-message",
         },
         home,
-        {"EXOMEM_HOOK_CLIENT": "codex"},
+        {"EXOMEM_HOOK_CLIENT": "codex", "EXOMEM_PROMINENCE": "maximal"},
     )
 
     payload = json.loads(result.stdout)
@@ -2346,7 +2351,7 @@ def test_capture_codex_still_fires_after_failed_exomem_function_call(
             "session_id": "codex-write-failed",
         },
         home,
-        {"EXOMEM_HOOK_CLIENT": "codex"},
+        {"EXOMEM_HOOK_CLIENT": "codex", "EXOMEM_PROMINENCE": "maximal"},
     )
 
     payload = json.loads(result.stdout)
@@ -2404,7 +2409,7 @@ def test_capture_still_fires_after_validate_only_edit(tmp_path: Path) -> None:
         assistant_tool_input={"validate_only": True},
     )
 
-    r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "preview"}, home)
+    r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "preview"}, home, {"EXOMEM_PROMINENCE": "maximal"})
 
     assert '"decision": "block"' in r.stdout
 
@@ -2421,7 +2426,7 @@ def test_capture_still_fires_after_failed_edit(tmp_path: Path) -> None:
         assistant_tool_result={"is_error": True, "content": "STALE_EDIT"},
     )
 
-    r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "failed"}, home)
+    r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "failed"}, home, {"EXOMEM_PROMINENCE": "maximal"})
 
     assert '"decision": "block"' in r.stdout
 
@@ -2453,7 +2458,7 @@ def test_capture_silent_when_stop_hook_active(tmp_path: Path) -> None:
 def test_capture_cooldown_suppresses_second_fire(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    t = _transcript(tmp_path, "q?", "Big conclusion. " + "x" * 450)
+    t = _transcript(tmp_path, "q?", "Pushed.", landing=True)
     ev = {"transcript_path": str(t), "session_id": "cd"}
     first = _run(CAPTURE_SCRIPT, ev, home)
     second = _run(CAPTURE_SCRIPT, ev, home)
@@ -2469,7 +2474,7 @@ def test_capture_codex_client_accepts_camel_case_and_uses_codex_state(tmp_path: 
         CAPTURE_SCRIPT,
         {"transcriptPath": str(t), "sessionId": "codex-cap"},
         home,
-        {"EXOMEM_HOOK_CLIENT": "codex"},
+        {"EXOMEM_HOOK_CLIENT": "codex", "EXOMEM_PROMINENCE": "maximal"},
     )
     payload = json.loads(r.stdout)
     assert payload["decision"] == "block"
@@ -2677,6 +2682,7 @@ def test_capture_still_fires_after_read_only_lifecycle_discovery(
         CAPTURE_SCRIPT,
         {"transcript_path": str(t), "session_id": f"readonly-{tool}-{sorted(payload.values())[0]}"},
         home,
+        {"EXOMEM_PROMINENCE": "maximal"},
     )
 
     assert '"decision": "block"' in r.stdout
