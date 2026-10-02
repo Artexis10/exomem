@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.102.2](https://github.com/Artexis10/exomem/compare/v0.102.1...v0.102.2) (2026-10-02)
+
+
+### Bug Fixes
+
+* **graph:** recognize repair completion during handoff checks ([#1507](https://github.com/Artexis10/exomem/issues/1507)) ([7487e7b](https://github.com/Artexis10/exomem/commit/7487e7b29b4eca95105689838102da7f1c6d4a78))
+* **hooks:** accept an owner-private group-writable config, and never create a group-writable one ([#1479](https://github.com/Artexis10/exomem/issues/1479)) ([66fe990](https://github.com/Artexis10/exomem/commit/66fe990f98532903ba18a817a9473ab935cd83b0))
+* **mcp:** honor live memory engagement and truthful tool hints ([#1506](https://github.com/Artexis10/exomem/issues/1506)) ([ea32925](https://github.com/Artexis10/exomem/commit/ea3292588b8ef7ffaa34b4d5df19afe1b94eaaed))
+
 ## [0.102.1](https://github.com/Artexis10/exomem/compare/v0.102.0...v0.102.1) (2026-10-01)
 
 
