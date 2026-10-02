@@ -492,6 +492,48 @@ def test_published_private_identity_is_implicitly_consumed_by_generic_leaf(
     assert error.value.code == "RESERVED_PATH"
 
 
+def test_merged_private_names_remain_fresh_for_an_ordinary_read(tmp_path: Path) -> None:
+    """A working merge must not freeze a departed private name onto an ordinary file."""
+    kb = tmp_path / "Knowledge Base"
+    notes = kb / "Notes"
+    notes.mkdir(parents=True)
+    private = kb / ".embeddings.sqlite"
+    private.write_bytes(b"moved bytes")
+    baseline = reserved_paths.IdentityCatalogue.from_vault(tmp_path)
+    merged = reserved_paths._merge_identity_catalogues(
+        baseline, reserved_paths.IdentityCatalogue({})
+    )
+    ordinary = notes / "moved.bin"
+    private.rename(ordinary)
+
+    assert reserved_paths.read_generic_bytes(
+        tmp_path, "Knowledge Base/Notes/moved.bin", identities=merged
+    ).data == b"moved bytes"
+
+
+@pytest.mark.parametrize("stale_first_claim", [False, True])
+def test_merge_refuses_live_owner_collisions_even_outside_the_read_target(
+    tmp_path: Path, stale_first_claim: bool
+) -> None:
+    """Lazy lookup cannot postpone a conflicting-owner refusal until its key is read."""
+    kb = tmp_path / "Knowledge Base"
+    kb.mkdir()
+    private = kb / ".graph.sqlite"
+    private.write_bytes(b"private bytes")
+    identity = reserved_paths._lstat_identity(private)
+    key = (identity.device, identity.inode, identity.kind)
+    paths = [("graph-store", "Knowledge Base/.graph.sqlite")]
+    if stale_first_claim:
+        paths.insert(0, ("embeddings-store", "Knowledge Base/.embeddings.sqlite"))
+    named = reserved_paths.IdentityCatalogue(
+        {key: paths[0][0]}, {key: tuple(paths)}, tmp_path
+    )
+    raw = reserved_paths.IdentityCatalogue({key: "embeddings-store"})
+
+    with pytest.raises(RuntimeError, match="multiple owners"):
+        reserved_paths._merge_identity_catalogues(named, raw)
+
+
 def test_owner_identity_publication_requires_exact_authority_and_coordination(
     tmp_path: Path,
 ) -> None:
