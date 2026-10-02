@@ -110,3 +110,28 @@ def test_no_hand_registered_tools(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert "mint_download_token" not in ann
     assert "note" not in ann
     assert ann["transfer_artifact"]["readOnlyHint"] is False
+
+
+def test_review_question_is_not_advertised_or_classified_as_a_read() -> None:
+    command = next(c for c in commands_module.PRODUCT_COMMANDS if c.name == "review_memory")
+    assert command.mcp_annotations.read_only_hint is False
+    assert command.mcp_annotations.destructive_hint is False
+    assert commands_module.invocation_is_read_only(command, {"mode": "attention"})
+    assert commands_module.invocation_is_read_only(command, {"mode": "vocabulary"})
+    assert not commands_module.invocation_is_read_only(
+        command,
+        {
+            "mode": "vocabulary", "path": "Knowledge Base/Notes/example.md",
+            "query": "What does this term mean?", "family": "relation-type/v1",
+        },
+    )
+
+
+def test_current_tool_descriptions_link_to_the_shared_api_reference(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tools = asyncio.run(_build_server(monkeypatch, tmp_path).list_tools())
+    reference = "https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md"
+    assert all(reference in tool.to_mcp_tool().description for tool in tools)
+    adoption = next(tool.to_mcp_tool() for tool in tools if tool.name == "adoption_studio")
+    assert adoption.annotations.title == "Adopt Existing Memory"

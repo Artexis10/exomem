@@ -153,13 +153,6 @@ def test_triage_operation_dismisses_and_reopens_current_item(tmp_path: Path) -> 
     assert visible[0].ref == item.ref
 
 
-def test_review_and_triage_permissions_are_separate() -> None:
-    registry = {command.name: command for command in commands.PRODUCT_COMMANDS}
-
-    assert registry["review_memory"].read_only is True
-    assert registry["triage_memory"].read_only is False
-
-
 def test_the_error_code_vocabulary_covers_every_raise_in_the_module() -> None:
     """The allowlist is checked against the module's own raise sites.
 

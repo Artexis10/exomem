@@ -348,8 +348,10 @@ PROTECTED_TREE_PATH_ARGUMENTS: dict[str, ProtectedTargets] = {
 #:   `path`/`paths` as `source`. A selector says which documents a policy
 #:   covers and a source says what to read; the policy documents it writes are
 #:   fixed-placement.
+#: - `review_memory` reads its anchor and writes only a consideration to fixed
+#:   machine-local review state; its path is never a content write destination.
 #:
-#: These are claims about five leaves, and the comment above records what
+#: These are fixed-placement claims, and the comment above records what
 #: happened the last time such claims were made by inspection alone. Every one
 #: is put through `test_target_constrained_mutations_are_actually_constrained`,
 #: which probes each string argument of each member rather than a chosen few.
@@ -367,6 +369,7 @@ TARGET_CONSTRAINED_MUTATIONS: frozenset[str] = frozenset(
         "preserve_artifacts",
         "adoption_studio",
         "govern_memory",
+        "review_memory",
     }
 )
 

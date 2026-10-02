@@ -27,6 +27,10 @@ Deliver generated native packages, one shared behavioural evaluator, native acce
 
    Derive truthful MCP hints from the same canonical command surface: `capture_source` and `preserve_artifacts` are open-world because temporary artifact handles invoke an external HTTPS download, not because provenance has a URL. `episode_memory` and `adoption_studio` may execute replacement or supersession and therefore carry the destructive hint. Hints do not grant execution authority or replace existing approval and tenant checks.
 
+   `review_memory` is write-capable because its explicit vocabulary-question mode persists a review consideration. Ordinary review modes remain reads; question submission must pass existing writer, Cloud read-only and lifecycle admission. The classifier and leaf share the same submission predicate. Historical wrappers remain read-only only when their enforced published modes exclude question submission. Canonical tool descriptions link the shared API reference; display titles may clarify intent without renaming tool identifiers. Upload guidance uses only a returned transfer URL and short-lived token, never a guessed endpoint or machine credential.
+
+   Directory findings are distinct from execution evidence. Retain listing fields the current Claude directory documents even if its older runtime schema emits ignored-field warnings. Python-hook static analysis can require human review; do not remove hooks or duplicate behavior to fabricate a green scan. Refresh discovery against the released runtime before closing tool findings.
+
 ## Risks / Trade-offs
 
 ### Profile-aware canonical hook activation
