@@ -19,6 +19,8 @@
 
 - [ ] 3.5 Complete the measured bound-cell-memory dependency within this batch: service-v1 chunk recall/advisories use bounded exact disk scoring, selected-parent pairwise reads reduce bounded blocks, doctor counts with SQL, explicit all-vector consumers never repopulate the service persistent cache, and completed semantic recovery reuses throttled allocator hygiene after releasing preparation. Establish eligibility/score parity and one-snapshot consistency under concurrent replacement before native owner-copy save/query/import measurements. Keep local/legacy behavior and every fixed resource/outcome gate unchanged; do not promote on latency-only success.
 
+- [ ] 3.6 Complete the measured bound-cell-memory D4 dependency: service-v1 parsed-page cache has a 32 MiB default byte budget plus existing entry count, validated override and charged existing body variants/frontmatter. Prove byte-driven LRU, readable oversized pages without collateral eviction and retired replacement/invalidation charges. Preserve legacy/local defaults and numeric native gates; this is not D5 activation.
+
 ## 4. Integrated outcome verification and release
 
 - [ ] 4.1 Set the Cloud image's explicit service profile, retain local/Hosted image defaults and preserve the model_env forbidden-prefix contract. Update the operator runbook with profile diagnostics, validated overrides, capacity calculation and compatible rollback. Verify image/profile contract checks and public-artifact privacy validation.

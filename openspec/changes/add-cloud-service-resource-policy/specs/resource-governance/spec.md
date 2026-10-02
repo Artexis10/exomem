@@ -56,3 +56,13 @@ Under service-v1, ordinary chunk recall and write-advisory scoring SHALL preserv
 - **WHEN** a parent or stored vector space is replaced during chunk scoring
 - **THEN** the result's vectors, width, row metadata and hydrated winner texts come from one consistent read snapshot
 - **AND** no result combines old scores with newly replaced text
+
+### Requirement: Service-policy parsed-page retention is byte bounded
+
+Under service-v1, the parsed-page cache SHALL enforce a byte budget alongside its existing entry count. Its charge SHALL include parsed body/frontmatter and retained stripped/lowercase body variants. Oversized pages SHALL remain readable without retention or collateral eviction of unrelated cached pages. Replacement, path/scope invalidation and release SHALL retire charges. With no explicit byte override, local/legacy cache defaults SHALL remain unchanged. The cache budget SHALL NOT be represented as whole-process acceptance or disk-semantic serving authority.
+
+#### Scenario: Large pages cannot consume unbounded retained cache bytes
+- **WHEN** service-v1 reads differently sized pages under a byte budget
+- **THEN** least-recently-used entries are evicted by charged bytes as well as count
+- **AND** a page larger than the budget is returned correctly but is not retained
+- **AND** native memory and latency gates still govern promotion

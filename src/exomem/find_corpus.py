@@ -7,6 +7,8 @@ import logging
 import os
 import re
 import stat
+import sys
+import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -53,6 +55,45 @@ def _page_cache_size() -> int:
         return _DEFAULT_PAGE_CACHE_SIZE
 
 
+def _page_cache_bytes() -> int | None:
+    from . import mode
+
+    default = 32 * 1024 * 1024 if mode.service_profile_enabled() else None
+    raw = os.environ.get("EXOMEM_PAGE_CACHE_BYTES")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        log.warning("EXOMEM_PAGE_CACHE_BYTES is not an int; using default")
+        return default
+
+
+def _page_retained_bytes(page: ParsedPage) -> int:
+    # Charge existing lazy text copies before admission. Alias-aware traversal
+    # also terminates on recursive YAML and does not duplicate shared metadata.
+    page.__dict__["_byte_bounded_cache"] = True
+    page.__dict__.pop("stem_set", None)
+    _ = page.body_stripped
+    _ = page.body_norm
+    _ = page.title_norm
+    total = sys.getsizeof(page)
+    pending = [vars(page)]
+    seen: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        total += sys.getsizeof(value)
+        if isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            pending.extend(value)
+    return total
+
+
 @dataclass
 class FrontmatterCache:
     """Per-process cache invalidated by file identity or content changes."""
@@ -61,6 +102,9 @@ class FrontmatterCache:
     _signatures: dict[Path, tuple[int, int, int, int, int, bytes]] = field(
         default_factory=dict, repr=False
     )
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
+    _weights: dict[Path, int] = field(default_factory=dict, repr=False)
+    _retained_bytes: int = field(default=0, repr=False)
     #: Served-from-cache count: the use signal the idle reaper watches.
     hits: int = 0
 
@@ -81,8 +125,25 @@ class FrontmatterCache:
         Counting it as a custody rebuild would put a reaper's noise into the
         one number that says whether a governed write discarded work.
         """
-        self.entries.clear()
-        self._signatures.clear()
+        with self._lock:
+            self.entries.clear()
+            self._signatures.clear()
+            self._weights.clear()
+            self._retained_bytes = 0
+
+    def _discard(self, path: Path) -> bool:
+        with self._lock:
+            removed = self.entries.pop(path, None) is not None
+            self._signatures.pop(path, None)
+            self._retained_bytes -= self._weights.pop(path, 0)
+            return removed
+
+    def _evict_to_limits(self, byte_limit: int | None) -> None:
+        with self._lock:
+            while len(self.entries) > _page_cache_size() or (
+                byte_limit is not None and self._retained_bytes > byte_limit
+            ):
+                self._discard(next(iter(self.entries)))
 
     def invalidate_paths(self, vault_root: Path, rel_paths: Iterable[str]) -> int:
         """Drop the entries a receipt names, and only those. Returns the count.
@@ -97,9 +158,8 @@ class FrontmatterCache:
         evicted = 0
         for rel in rel_paths:
             for candidate in _cache_key_candidates(root, rel):
-                if self.entries.pop(candidate, None) is not None:
+                if self._discard(candidate):
                     evicted += 1
-                self._signatures.pop(candidate, None)
         return evicted
 
     def invalidate_scope(self, vault_root: Path, scope: str) -> int:
@@ -110,14 +170,15 @@ class FrontmatterCache:
         except OSError:
             anchor = root
         dropped = 0
-        for path in tuple(self.entries):
+        with self._lock:
+            paths = tuple(self.entries)
+        for path in paths:
             try:
                 resolved = path.resolve()
             except OSError:
                 resolved = path
             if resolved == anchor or anchor in resolved.parents:
-                self.entries.pop(path, None)
-                self._signatures.pop(path, None)
+                self._discard(path)
                 dropped += 1
         return dropped
 
@@ -157,15 +218,8 @@ class FrontmatterCache:
     def get(self, path: Path, vault_root: Path) -> ParsedPage | None:
         snapshot = _read_page_snapshot(path, vault_root)
         if snapshot is None:
-            self.entries.pop(path, None)
-            self._signatures.pop(path, None)
+            self._discard(path)
             return None
-        if len(self._signatures) != len(self.entries):
-            self._signatures = {
-                cached_path: self._signatures[cached_path]
-                for cached_path in self.entries
-                if cached_path in self._signatures
-            }
         content = snapshot.data
         # Stat metadata is not content identity: on native Windows ctime is
         # creation time, so a same-size rewrite can preserve this whole tuple.
@@ -179,19 +233,39 @@ class FrontmatterCache:
             snapshot.identity.inode,
             hashlib.blake2b(content, digest_size=16).digest(),
         )
-        cached = self.entries.get(path)
-        if cached and self._signatures.get(path) == signature:
-            self.entries.move_to_end(path)
-            self.hits += 1
-            return cached
+        with self._lock:
+            if len(self._signatures) != len(self.entries):
+                self._signatures = {
+                    cached_path: self._signatures[cached_path]
+                    for cached_path in self.entries
+                    if cached_path in self._signatures
+                }
+            byte_limit = _page_cache_bytes()
+            if byte_limit is not None and len(self._weights) != len(self.entries):
+                self._weights = {key: _page_retained_bytes(page) for key, page in self.entries.items()}
+                self._retained_bytes = sum(self._weights.values())
+            cached = self.entries.get(path)
+            if cached and self._signatures.get(path) == signature:
+                if byte_limit is not None:
+                    weight = _page_retained_bytes(cached)
+                    self._retained_bytes += weight - self._weights.get(path, 0)
+                    self._weights[path] = weight
+                self.entries.move_to_end(path)
+                self.hits += 1
+                self._evict_to_limits(byte_limit)
+                return cached
         parsed = parse_page(path, snapshot.mtime, vault_root, content=content)
-        if parsed is not None:
-            self.entries[path] = parsed
-            self._signatures[path] = signature
-            self.entries.move_to_end(path)
-            while len(self.entries) > _page_cache_size():
-                evicted_path, _ = self.entries.popitem(last=False)
-                self._signatures.pop(evicted_path, None)
+        weight = _page_retained_bytes(parsed) if parsed is not None and byte_limit is not None else 0
+        with self._lock:
+            self._discard(path)
+            if parsed is not None and (byte_limit is None or weight <= byte_limit):
+                self.entries[path] = parsed
+                self._signatures[path] = signature
+                if byte_limit is not None:
+                    self._weights[path] = weight
+                    self._retained_bytes += weight
+                self.entries.move_to_end(path)
+                self._evict_to_limits(byte_limit)
         return parsed
 
 

@@ -96,6 +96,9 @@ Context-pack pairwise geometry reads only the selected parents' exact stored chu
 
 Reuse the existing throttled allocator hygiene after completed semantic recovery once preparation/result temporaries have been released. No forced garbage collection, per-request trim, new allocator dependency, shortened throttle or core unload is added. Attribute remaining retained bytes before expanding into byte-cache or disk-semantic caller integration.
 
+A second measured attribution identifies roughly 90–105 MiB in parsed bodies and their stripped/lowercase variants, with additional parsed frontmatter. Complete existing bound-cell-memory D4 under service-v1: retain the existing entry-count limit and add a 32 MiB default byte budget with `EXOMEM_PAGE_CACHE_BYTES` override. Charge actual Python body/frontmatter objects and initialize existing lazy body/title text variants before cache admission so their later use cannot grow the charged text. Budgeted pages do not retain lazy stem sets; their returned token values stay unchanged. Admission, replacement and accounting are atomic, with reads and parsing outside the cache lock. Deduplicate aliases within a page when sizing parsed YAML; oversized pages remain readable but are not retained and do not evict unrelated hot pages. Replacement, exact invalidation, scope invalidation and release retire the corresponding charge. Legacy/local defaults remain entry-count-only when the override is absent. This bounds the cache retention decision, not the whole process or semantic corpus; measured cgroup and latency gates remain binding. No canonical authority, parsing result, corpus eviction or new cache manager changes.
+
+
 ## Risks / Trade-offs
 
 - Always-resident core increases idle running-cell cost → measure simultaneous warmed cells and reserve headroom before each new admission; use existing lifecycle stop when applicable, not an invented cheap floor.
