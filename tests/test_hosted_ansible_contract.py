@@ -666,7 +666,7 @@ def test_inventory_generator_optionally_emits_the_control_database_host(
     )
     assert result.returncode == 0, result.stderr
     parsed = json.loads(inventory.read_text(encoding="utf-8"))
-    assert parsed["all"]["children"]["control_nodes"]["hosts"]["exomem-control-db"] == {
+    assert parsed["all"]["children"]["control_nodes"]["hosts"]["substrate-control-01"] == {
         "ansible_host": "192.0.2.20",
         "ansible_user": "alpha-admin",
         "postgres_private_ip": "10.50.1.20",
