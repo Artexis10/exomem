@@ -742,7 +742,19 @@ def test_fresh_mcp_codex_capture_checks_live_capabilities_without_restart_wait(
                 "payload": {
                     "type": "custom_tool_call",
                     "name": "exec",
-                    "input": 'text(await tools.mcp__exomem__remember({text:"synthetic"}));',
+                    "call_id": "c1",
+                    "input": 'text(await tools.exec_command({cmd:"git push"}));',
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "c1",
+                    "output": '{"exit_code":0,"output":"done"}',
                 },
             }
         )

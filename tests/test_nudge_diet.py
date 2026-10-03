@@ -134,8 +134,25 @@ def _context(out: str) -> str:
 PROMPT = "Please look at how the depot ledger reconciles and tell me what changed."
 
 
+def _landing_event(tmp_path: Path, session: str) -> dict:
+    """A Stop event whose turn pushed: below `maximal` only a landing is nudged."""
+    rows = [
+        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "q"}]}},
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "git push"}}],
+            },
+        },
+    ]
+    transcript = tmp_path / f"{session}.jsonl"
+    transcript.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    return {"session_id": session, "transcript_path": str(transcript), "last_assistant_message": "Pushed."}
+
+
 def test_the_capture_check_is_full_once_then_short(tmp_path):
-    event = {"session_id": "s-cap", "last_assistant_message": "x" * 400}
+    event = _landing_event(tmp_path, "s-cap")
     env = {
         "EXOMEM_PROMINENCE": "balanced",
         "EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC": "0",
@@ -199,7 +216,7 @@ def test_a_lifecycle_event_rearms_both_full_texts(tmp_path):
     )
     _run(
         "exomem_capture_nudge.py",
-        {"session_id": session, "last_assistant_message": "x" * 400},
+        _landing_event(tmp_path, session),
         tmp_path,
         EXOMEM_PROMINENCE="balanced",
         EXOMEM_EPISODE_ASK_TURNS="0",
