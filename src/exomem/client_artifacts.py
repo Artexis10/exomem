@@ -410,6 +410,7 @@ def stage_artifact(
     batch_deadline: float | None = None,
     vault_root: Path | None = None,
     lane: str | None = None,
+    index: int = 0,
 ) -> StagedArtifact:
     """Download one handle to a private temporary file before vault mutation.
 
@@ -420,6 +421,26 @@ def stage_artifact(
 
     if is_held_reference(file.get("download_url")):
         return _redeem_held(file, budget, vault_root=vault_root, lane=lane)
+    from .cloud_cell import cloud_mode_enabled
+
+    if cloud_mode_enabled():
+        from .cloud_artifact_transport import stage_cloud_artifact
+
+        return stage_cloud_artifact(
+            file, budget, index=index, lane=lane, batch_deadline=batch_deadline
+        )
+    return stage_direct_artifact(file, budget, batch_deadline=batch_deadline)
+
+
+def stage_direct_artifact(
+    file: Mapping[str, object],
+    budget: FetchBudget,
+    *,
+    batch_deadline: float | None = None,
+    allowed_ports: frozenset[int] | None = None,
+    cancelled: threading.Event | None = None,
+) -> StagedArtifact:
+    """Canonical safe fetch, also used by the isolated artifact broker."""
     file_id = _file_id(file)
     current_url = str(file.get("download_url") or "")
     redirects = 0
@@ -427,10 +448,14 @@ def stage_artifact(
     deadline = min(_monotonic() + _RETRIEVAL_DEADLINE_SECONDS, batch_deadline or float("inf"))
     try:
         while True:
+            if cancelled is not None and cancelled.is_set():
+                raise SafeFetchError("SAFE_FETCH_FAILED", "download retrieval cancelled")
             remaining_retrieval_timeout(deadline)
             parsed = validate_download_url(current_url)
             host = (parsed.hostname or "").encode("idna").decode("ascii")
             port = parsed.port or 443
+            if allowed_ports is not None and port not in allowed_ports:
+                raise SafeFetchError("SAFE_FETCH_FAILED", "download port is not allowed")
             addresses = resolve_public_addresses(host, port, deadline=deadline)
             remaining_retrieval_timeout(deadline)
             target = parsed.path or "/"
@@ -498,9 +523,11 @@ def stage_artifact(
                 try:
                     declared_size = int(content_length)
                     budget.validate_content_length(declared_size)
-                except ValueError as error:
+                except (ValueError, SafeFetchError) as error:
                     response.close()
                     selected_connection.close()
+                    if isinstance(error, SafeFetchError):
+                        raise
                     raise SafeFetchError("SAFE_FETCH_FAILED", "download response is invalid") from error
             fd, raw_path = tempfile.mkstemp(prefix="exomem-artifact-")
             destination = Path(raw_path)
@@ -514,6 +541,8 @@ def stage_artifact(
                 try:
                     with os.fdopen(fd, "wb") as output:
                         while True:
+                            if cancelled is not None and cancelled.is_set():
+                                raise SafeFetchError("SAFE_FETCH_FAILED", "download retrieval cancelled")
                             if selected_connection.sock is not None:
                                 selected_connection.sock.settimeout(remaining_retrieval_timeout(deadline))
                             block = _bounded_retrieval_call(
@@ -544,14 +573,14 @@ def stage_artifact(
                 digest.hexdigest(), content_type
             )
             return StagedArtifact(file_id, destination, written, digest.hexdigest(), content_type, filename)
-    except SafeFetchError:
-        if destination is not None:
-            destination.unlink(missing_ok=True)
-        raise
     except (OSError, http.client.HTTPException) as error:
         if destination is not None:
             destination.unlink(missing_ok=True)
         raise SafeFetchError("SAFE_FETCH_FAILED", "download could not be retrieved") from error
+    except BaseException:
+        if destination is not None:
+            destination.unlink(missing_ok=True)
+        raise
 
 
 def _failed(file_id: str, error: SafeFetchError | PreserveError) -> dict[str, str]:
@@ -1115,6 +1144,8 @@ def _capture_source_adoption(
                 selected,
                 FetchBudget(),
                 batch_deadline=_monotonic() + _BATCH_DEADLINE_SECONDS,
+                lane="source",
+                index=selected_index,
             )
             _validate_staged_adoption(artifact, envelope)
         except SafeFetchError as fetch_error:
@@ -1240,6 +1271,8 @@ def _preserve_evidence_adoption(
                 selected,
                 FetchBudget(),
                 batch_deadline=_monotonic() + _BATCH_DEADLINE_SECONDS,
+                lane="evidence",
+                index=selected_index,
             )
             _validate_staged_adoption(artifact, envelope)
         except SafeFetchError as fetch_error:
@@ -1386,7 +1419,7 @@ def capture_source_artifacts(
                 raise SafeFetchError("INVALID_FILE", "download_url is required")
             _content_type(file.get("mime_type"))
             staged[index] = stage_artifact(
-                file, budget, batch_deadline=batch_deadline, vault_root=vault_root, lane="source"
+                file, budget, batch_deadline=batch_deadline, vault_root=vault_root, lane="source", index=index
             )
         except SafeFetchError as error:
             file_id = str(file.get("file_id") or "") if isinstance(file, Mapping) else ""
@@ -1526,7 +1559,7 @@ def preserve_artifacts(
                 raise SafeFetchError("INVALID_FILE", "download_url is required")
             _content_type(file.get("mime_type"))
             staged[index] = stage_artifact(
-                file, budget, batch_deadline=batch_deadline, vault_root=vault_root, lane="evidence"
+                file, budget, batch_deadline=batch_deadline, vault_root=vault_root, lane="evidence", index=index
             )
         except SafeFetchError as error:
             file_id = str(file.get("file_id") or "") if isinstance(file, Mapping) else ""
