@@ -1457,7 +1457,7 @@
         "capacity ceiling"
       ],
       "observed_status": "resolved",
-      "packet_chars": 453,
+      "packet_chars": 452,
       "passed": false,
       "poison": {
         "hit": 0,
