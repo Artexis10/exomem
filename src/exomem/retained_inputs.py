@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
+import time
+from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from . import memory_refs, reserved_paths, semantic_unit_read, semantic_units
 from .get_page import GetError, GetResult, get_page, prepare_page_read
-from .governance import egress
+from .governance import authorization_custody, authorization_session_lifecycle, egress, store
 from .governance.principal import RequestPrincipal, effective_principal
 from .vault import PathGuard
 
@@ -173,3 +176,48 @@ def resolve_retained_input(
     """Resolve one currently released input; committed_path is trusted receipt plumbing."""
     snapshot = _read_snapshot(vault_root, reference, committed_path=committed_path)
     return _release_snapshot(vault_root, snapshot)
+
+
+def exact_text_visible(vault_root: Path, value: str) -> bool:
+    """Check an exact selected representation without recording unreturned targets."""
+    principal = _principal()
+    if not egress.direct_text_references_visible(vault_root, value, principal=principal):
+        return False
+    with egress.disclosure_boundary(vault_root, "retained-input-reference-validation") as collector:
+        redacted = egress.redact_withheld_references(vault_root, value, principal=principal)
+        scrubbed = egress.postfilter("get", redacted, vault_root)
+    if collector.credential_redactions:
+        egress._record_credential_block(collector.credential_redactions)  # noqa: SLF001
+    return redacted == value and scrubbed == value
+
+
+def recheck_retained_inputs(
+    vault_root: Path, selections: tuple[tuple[RetainedInput, str], ...]
+) -> None:
+    """Refresh a bounded set's release checks, not an atomic cross-system snapshot."""
+    for snapshot, text in selections:
+        released = _release_snapshot(vault_root, snapshot)
+        if (
+            released.released is None
+            or released.released.get("frontmatter") != snapshot.page.frontmatter
+            or not exact_text_visible(vault_root, text)
+        ):
+            raise _unavailable()
+    context = _principal().verified_authorization_session
+    if context is not None:
+        try:
+            now = int(time.time())
+            custody = authorization_custody.load_authorization_custody(vault_root, now=now)
+            with closing(store.open_active_governance_read_connection(vault_root)) as connection:
+                connection.execute("BEGIN")
+                authorization_session_lifecycle.status_verified_session(
+                    connection, custody=custody, context=context, now=now
+                )
+        except (
+            authorization_custody.AuthorizationCustodyUnavailable,
+            authorization_session_lifecycle.AuthorizationSessionUnavailable,
+            OSError,
+            sqlite3.Error,
+            store.UnsupportedGovernanceSchema,
+        ) as error:
+            raise _unavailable() from error

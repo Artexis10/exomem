@@ -105,6 +105,31 @@ def test_unit_resolution_abstains_without_a_current_unique_parent_bound_unit() -
     assert match_origin_scope(scope, document=unbound, authoring=True).status == "unavailable"
 
 
+def test_record_unit_uses_the_existing_item_path_without_inventing_a_memory_identity() -> None:
+    """A file Record can bind its own unit; a different owning item cannot lend that unit."""
+    document = parse_semantic_units(
+        "- [finding] The retained reading. ^reading\n",
+        path="Knowledge Base/Records/Readings/Entries/one.md",
+    )
+    scope = {"kind": "unit", "unit_ref": "#reading"}
+    owner = document.parent_ref
+    matched = match_origin_scope(
+        scope, document=document, owner_ref=owner,
+        record_identity=(_COLLECTION, "one"), authoring=True,
+    )
+    assert matched.status == "found"
+    assert matched.scope["fingerprint"] == document.units[0].fingerprint
+    assert match_origin_scope(
+        matched.scope, document=document, owner_ref=owner,
+        record_identity=(_COLLECTION, "one"),
+    ).status == "found"
+    assert match_origin_scope(scope, document=document, authoring=True).status == "unavailable"
+    assert match_origin_scope(
+        scope, document=document, owner_ref=owner.replace("one.md", "two.md"),
+        record_identity=(_COLLECTION, "two"), authoring=True,
+    ).status == "unavailable"
+
+
 def test_authoring_fills_only_an_omitted_fingerprint_without_mutating_the_request() -> None:
     """Preparation cannot silently refresh a supplied old fingerprint or a retained omission."""
     request = {"kind": "field", "field": "summary"}

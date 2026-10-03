@@ -13,11 +13,13 @@ from exomem import (
     lexstore,
     memory_refs,
     observe_memory,
+    provenance,
     reconcile,
     semantic_index,
     semantic_language_registry,
     vault,
 )
+from exomem.governance.principal import owner_principal, request_scope
 
 PAGE_ID = "00000000-0000-4000-8000-000000000081"
 PAGE = "Knowledge Base/Notes/Insights/observe.md"
@@ -83,6 +85,114 @@ def _page_hash(page: Path) -> str:
     with this one on an LF page.
     """
     return vault.content_hash(page.read_bytes().decode("utf-8"))
+
+
+def _origin_block(root: Path, scope: dict) -> str:
+    source = f"---\ntype: source\nexomem_id: {uuid.uuid4()}\n---\n\nRetained rule evidence.\n"
+    _write_page(root, rel="Knowledge Base/Sources/observe-original.md", source=source)
+    return provenance.encode_origin(
+        {
+            "inputs": {"original": {
+                "reference": memory_refs.ref_from_markdown(source),
+                "version": provenance.evidence_version(source),
+            }},
+            "assessments": [],
+            "bindings": [{"inputs": ["original"], "scope": scope}],
+        },
+        authoring=True,
+    )
+
+
+def test_public_observe_detaches_origin_without_changing_generated_unit_identity(tmp_path: Path) -> None:
+    """Authored metadata must neither violate compact shape nor seed the unit anchor."""
+    page = _write_page(tmp_path)
+    content = "Keep WAL enabled <!-- ordinary comment -->; sample `<!-- exomem-origin:v1 {} -->`."
+    with request_scope(owner_principal(surface="cli")):
+        clean = commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="validate", category="rule", content=content
+        )
+        block = _origin_block(tmp_path, {"kind": "unit", "unit_ref": "#" + clean["unit"]["anchor"]})
+        prepared = commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="validate", category="rule", content=content + "\n\n" + block
+        )
+        result = commands.op_observe_memory(
+            tmp_path, path=PAGE, category="rule", content=content + "\n\n" + block
+        )
+        assert prepared["after_hash"] == result["after_hash"] == _page_hash(page)
+        actual = semantic_index.current_parent_index_state(tmp_path, PAGE).document.resolve_unit(
+            result["unit_ref"]
+        ).unit
+        assert actual is not None and actual.content == content
+        assert actual.anchor == clean["unit"]["anchor"]
+        assert "\n" not in actual.span.text and block not in actual.span.text
+        metadata = provenance.parse_origin(page.read_text(), managed=True, strict=True)
+        assert metadata.payload["bindings"][0]["scope"]["fingerprint"] == actual.fingerprint
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="update", category="rule", content="Updated rule",
+            unit_ref=result["unit_ref"], expected_fingerprint=actual.fingerprint,
+            expected_hash=result["after_hash"],
+        )
+        commands.op_observe_memory(tmp_path, path=PAGE, category="rule", content="A separate rule")
+        assert provenance.parse_origin(page.read_text(), managed=True).payload == metadata.payload
+        before = page.read_bytes()
+        with pytest.raises(ValueError, match="ORIGIN_METADATA_INVALID"):
+            commands.op_observe_memory(
+                tmp_path, path=PAGE, category="rule", content="Another rule\n\n" + block
+            )
+        assert page.read_bytes() == before
+
+
+def test_public_observe_update_detaches_new_origin_before_rendering(tmp_path: Path) -> None:
+    """The guarded update path must detach its supplied block as well as add does."""
+    page = _write_page(tmp_path, source=_page_source("- [rule] Old rule ^existing\n"))
+    unit = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units[0]
+    block = _origin_block(tmp_path, {"kind": "unit", "unit_ref": "#existing"})
+    with request_scope(owner_principal(surface="cli")):
+        updated = commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="update", category="rule", content="New rule\n\n" + block,
+            unit_ref=unit.unit_ref, expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
+        )
+    assert updated["unit"]["content"] == "New rule"
+    assert provenance.parse_origin(page.read_text(), managed=True, strict=True).payload["bindings"][0][
+        "scope"
+    ]["fingerprint"] == updated["unit"]["fingerprint"]
+
+
+def test_public_observe_rich_origin_stays_outside_every_unit(tmp_path: Path) -> None:
+    """An EOF carrier would enter the last rich body and make its fingerprint self-referential."""
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Claim\n- category: rule\n- id: earlier\n\nExisting rich body.\n"
+    ))
+    earlier = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units[0]
+    block = _origin_block(tmp_path, {"kind": "unit", "unit_ref": "#new-rich"})
+    with request_scope(owner_principal(surface="cli")):
+        created = commands.op_observe_memory(
+            tmp_path, path=PAGE, category="rule", kind="claim", id="new-rich",
+            content="New rich body.\n\nSecond paragraph.\n\n" + block,
+        )
+    document = semantic_index.current_parent_index_state(tmp_path, PAGE).document
+    assert document.resolve_unit(earlier.unit_ref).unit.fingerprint == earlier.fingerprint
+    actual = document.resolve_unit(created["unit_ref"]).unit
+    assert actual.content == "New rich body.\n\nSecond paragraph."
+    assert all("exomem-origin" not in unit.span.text for unit in document.units)
+    assert provenance.parse_origin(page.read_text(), managed=True, strict=True).payload["bindings"][0][
+        "scope"
+    ]["fingerprint"] == actual.fingerprint
+
+
+def test_observe_origin_only_content_is_still_empty(tmp_path: Path) -> None:
+    """A valid metadata envelope cannot stand in for a nonempty observation."""
+    page = _write_page(tmp_path)
+    block = provenance.encode_origin({"inputs": {}, "assessments": [], "bindings": []})
+    before = page.read_bytes()
+    with pytest.raises(ValueError, match="INVALID_OBSERVE_INPUT"):
+        commands.op_observe_memory(tmp_path, path=PAGE, category="rule", content=block)
+    with pytest.raises(observe_memory.ObserveMemoryError) as invalid:
+        observe_memory.observe_memory(
+            tmp_path, path=PAGE, category="rule", content="Valid text <!-- exomem-origin:v1 secret -->"
+        )
+    assert invalid.value.code == "ORIGIN_METADATA_INVALID" and "secret" not in invalid.value.reason
+    assert page.read_bytes() == before
 
 
 def test_add_compact_observation_is_canonical_addressable_and_indexed(

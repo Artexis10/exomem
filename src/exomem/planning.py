@@ -1571,6 +1571,7 @@ def _validate_final_relationships(
     snapshot: record_formats.AdapterSnapshot,
     plan_id: str,
     values: Mapping[str, Any],
+    _body: str | None = None,
 ) -> None:
     before = next(
         (record.values for record in snapshot.records if record.identity.key == plan_id), values

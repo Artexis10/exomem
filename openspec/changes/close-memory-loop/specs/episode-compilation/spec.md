@@ -204,6 +204,14 @@ SHALL withhold the whole payload, including attribution and free-text reasons.
 Redaction SHALL NOT rewrite canonical bytes or claim an exact raw representation.
 Existing drift guards and exact-read refusal rules SHALL remain unchanged.
 
+Before returning a whole managed payload, the reader SHALL retain its bounded
+input proofs, perform a final fresh release/selected-text check of each snapshot,
+recheck any verified authorization-session context, and then recheck all input
+and episode-journal byte guards. A change observed at these checkpoints SHALL
+remove the whole payload without withholding otherwise permitted parent prose.
+This SHALL preserve the existing observational read guarantee, not claim an
+atomic snapshot across filesystem, policy, session and external custody state.
+
 The managed v1 envelope SHALL keep retained input bindings, attributed
 assessments and selected output scopes distinct. Page-local input labels SHALL
 NOT establish original identity or authority. A malformed, unsupported,
@@ -275,6 +283,12 @@ and interruption semantics, without promising cross-file power-loss atomicity.
 - **THEN** public page, raw, unit-context and projection output do not disclose that block's input references, versions, counts, attribution or reasons
 - **AND** the canonical page and its drift guard remain unchanged, while a redacted response does not claim exact raw content
 
+#### Scenario: An earlier input changes during a multi-input carrier read
+
+- **WHEN** an earlier retained input changes or loses permission while a later input is being resolved
+- **THEN** the final retained-snapshot and guard checkpoints remove the complete origin payload while keeping otherwise permitted parent prose
+- **AND** canonical bytes and hashes stay unchanged, and the result does not claim exact raw content or cross-system linearizability
+
 #### Scenario: Malformed or literal metadata does not establish support
 
 - **WHEN** a designated origin block has duplicate keys or blocks, dangling inputs, an unsupported variant or invalid scope, or provenance-looking text appears only in a code example
@@ -304,6 +318,13 @@ and interruption semantics, without promising cross-file power-loss atomicity.
 - **WHEN** preparation fills an omitted origin target fingerprint for a Records append and commitment is interrupted before episode reconciliation
 - **THEN** preparation, commitment and receipt lookup bind the same normalized payload
 - **AND** resumption reuses the original committed receipt without another append or origin
+
+#### Scenario: Original authored Records arguments retain their committed effect
+
+- **WHEN** a caller repeats the original omitted-fingerprint Records leaf or retains it beside a new leaf, after commitment through the episode or its bound curation plan
+- **THEN** preparation recognizes the exact retained normalization without current Source or target reads for that historical leaf, preserves its binding and effect revision, and does not append it again
+- **AND** changed authored prose, input bindings, output scopes or supplied fingerprints cannot borrow that retained effect identity
+- **AND** historical input permission is not recertified, while every genuinely new leaf still passes current preparation and authorization
 
 ### Requirement: Bounded partial work resumes honestly
 

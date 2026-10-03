@@ -17,6 +17,7 @@ from .episode_store import EpisodeStore
 from .get_page import GetResult
 from .governance import egress
 from .governance.principal import effective_principal
+from .vault import PathGuard
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _MAX_RESPONSE_BYTES = 8192
@@ -36,6 +37,14 @@ class _ResolvedInput:
     body: str | None = None
     text: str | None = None
     authorization: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class EpisodeRootProof:
+    """An exact owned journal binding, not input release permission."""
+
+    root: str
+    guard: PathGuard
 
 
 class EpisodeInputOwner:
@@ -58,6 +67,38 @@ class EpisodeInputOwner:
 
     def _store(self) -> EpisodeStore:
         return EpisodeStore(self.vault_root, owner_audience_id=self._owner())
+
+    def prove_original(self, resolved: retained_inputs.RetainedInput) -> EpisodeRootProof | None:
+        """Prove a recap's whole parent against only this audience's journal."""
+        page = resolved.page
+        if (
+            resolved.released is None
+            or resolved.guard is None
+            or str(page.frontmatter.get("type") or "").casefold() != "source"
+            or str(page.frontmatter.get("source_type") or "").casefold() != "episode"
+        ):
+            return None
+        try:
+            store = self._store()
+            identity = model.episode_id(page.frontmatter.get("episode"))
+            with store._guard():
+                current, guard = store.read_guarded(identity)
+                for revision in current["state"]["input_revisions"]:
+                    evidence = revision["evidence"]
+                    if evidence.get("reference") != resolved.canonical:
+                        continue
+                    expected = self._page_evidence(
+                        page, resolved.canonical, evidence.get("version_scheme")
+                    )
+                    if evidence.get("digest") == expected["digest"]:
+                        guard.recheck(self.vault_root)
+                        return EpisodeRootProof(
+                            model._hash("exomem-episode-origin-v1", store.owner_audience_id, identity),
+                            guard,
+                        )
+        except (OSError, ValueError):
+            return None
+        return None
 
     @staticmethod
     def _projection(current: dict[str, Any]) -> dict[str, Any]:
@@ -330,25 +371,7 @@ class EpisodeInputOwner:
                 field, value = ("body", resolved.body) if resolved.body is not None else ("text", resolved.text)
                 if value is None or len(value.encode("utf-8")) > _MAX_RESPONSE_BYTES:
                     return {"status": "unavailable", "input_revision": revision["revision"]}
-                if not egress.direct_text_references_visible(
-                    self.vault_root, value, principal=effective_principal()
-                ):
-                    return {"status": "unavailable", "input_revision": revision["revision"]}
-                # The legacy reference gate records every target it examines.
-                # It only proves that this representation is safe; its target
-                # outcomes cannot be receipts for content this facade returns.
-                with egress.disclosure_boundary(
-                    self.vault_root, "episode-input-reference-validation"
-                ) as redaction_collector:
-                    redacted = egress.redact_withheld_references(
-                        self.vault_root, value, principal=effective_principal()
-                    )
-                    scrubbed = egress.postfilter("get", redacted, self.vault_root)
-                if redaction_collector.credential_redactions:
-                    egress._record_credential_block(  # noqa: SLF001
-                        redaction_collector.credential_redactions
-                    )
-                if redacted != value or scrubbed != value:
+                if not retained_inputs.exact_text_visible(self.vault_root, value):
                     return {"status": "unavailable", "input_revision": revision["revision"]}
                 representation = (
                     "page_body" if field == "body" else "semantic_unit_span"

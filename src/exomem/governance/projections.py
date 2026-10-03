@@ -16,13 +16,14 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from .. import provenance
 from . import bridges
 from .decisions import Decision, decide
 from .policy import Policy, StandingGrant
 from .principal import OWNER_AUDIENCE
 
 MAX_PROJECTION_VARIANTS_PER_ITEM = 256
-PROJECTOR_SCHEMA_VERSION = 1
+PROJECTOR_SCHEMA_VERSION = 2
 MAX_HIDDEN_CORPUS_WIRE_DELTA_MS = 25
 MAX_HIDDEN_CORPUS_WIRE_DELTA_RATIO = 0.10
 MAX_GOVERNED_CATALOG_ITEMS = 16_384
@@ -512,7 +513,14 @@ def build_projection_variant(
     if type(projector_schema_version) is not int or projector_schema_version <= 0:
         raise ProjectionCanonicalizationError("projector_schema_version must be positive")
     canonical_strip = _canonical_strip(decision.release_strip)
-    fixed = _fixed_search_fields(decision, full_search_fields)
+    fields = _canonical_full_fields(full_search_fields)
+    cleaned_fields: dict[str, str] = {}
+    for name, original in fields.items():
+        prose = provenance.origin_prose(original, owner_path=identity)
+        if prose.strip() or prose == original:
+            cleaned_fields[name] = prose
+    fields = cleaned_fields
+    fixed = _fixed_search_fields(decision, fields)
     if fixed is None:
         return None
     projected_level, fields = fixed

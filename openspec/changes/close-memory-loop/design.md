@@ -293,6 +293,19 @@ content: omit the raw representation and retain existing exact-read refusal
 rules and canonical drift guards. Source capture text is still raw evidence,
 not a designated managed origin block.
 
+Retain the complete bounded set of input proofs through a carrier read. After
+initial resolution, run one final sweep through the shared snapshot release and
+exact-text checks, requiring unchanged full frontmatter; then refresh a verified
+authorization session through its existing custody/status owner when present.
+Check every input and episode-journal byte guard after that sweep, immediately
+before returning the carrier. This observes persistent changes during initial
+resolution; it does not promise a linearizable snapshot across files, policy,
+sessions and external custody, or prevent changes after their final checks.
+Do not add transitive dependency-proof storage or repeat resolution indefinitely.
+The control prevents stale attribution release; a wrong firing costs the caller
+attribution for that response, not ordinary parent prose or a human approval.
+Existing exact-read refusal rules still apply when the projection differs.
+
 New retained Source/Evidence episode inputs use the material version through the
 existing input-model/journal compatibility path. Historical digests, attempted
 leaf identities and receipts remain unchanged. A legacy binding that cannot be
@@ -366,6 +379,14 @@ body/payload rather than recomputing a hash from the originally supplied body.
 Preparation, commit and receipt reconciliation must therefore bind identical
 canonical bytes, including a target fingerprint filled during preparation.
 This is an internal adapter change, not another argument or persistence layer.
+An unchanged original authored Records proposal may be repeated or retained
+beside new leaves after commitment, including commitment through curation before
+the episode records an attempt. Recognize it by applying only omitted output
+fingerprints from the exact retained binding and the same carrier placement and
+encoding. The result and all other arguments must equal the retained effect;
+do not reread today's Source or target, recertify historical input permission,
+or relax attempted-effect identity. Changed prose, inputs, scopes or supplied
+fingerprints are not an equivalent request.
 
 One scoped resolver selects actual contributing units, field values or relation
 occurrences before aggregation. Do not use a first-link-only or page-wide

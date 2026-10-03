@@ -58,6 +58,33 @@ def test_creation_is_idempotent_without_resetting_later_progress(vault: Path):
     assert store.read(initial["state"]["episode_id"]) == later
 
 
+def test_guarded_read_binds_reconstruction_and_invalidates_after_a_revision(vault: Path):
+    """A proof must guard the journal it reconstructed, not a later reread."""
+    store = _store(vault)
+    initial = store.create("guarded-proof", {"excerpt": "Retained original."})
+    identity = initial["state"]["episode_id"]
+    projection, guard = store.read_guarded(identity)
+    assert projection == initial
+    guard.recheck(vault)
+    _advance(store, initial, "declare_candidate", key="later")
+    with pytest.raises(ValueError, match="PATH_GUARD_CHANGED"):
+        guard.recheck(vault)
+
+
+def test_guarded_read_refuses_raw_journal_bytes_above_its_cap(vault: Path, monkeypatch):
+    """Trailing JSON whitespace cannot bypass the guarded reader's byte bound."""
+    from exomem import episode_store
+
+    store = _store(vault)
+    initial = store.create("bounded-proof", {"excerpt": "Retained original."})
+    path = store.path(initial["state"]["episode_id"])
+    raw = path.read_bytes()
+    monkeypatch.setattr(episode_store, "MAX_JOURNAL_BYTES", len(raw))
+    path.write_bytes(raw + b" ")
+    with pytest.raises(ValueError):
+        store.read_guarded(initial["state"]["episode_id"])
+
+
 def test_original_evidence_corruption_is_detected_before_any_transition(vault: Path):
     store = _store(vault)
     initial = store.create("episode", {"excerpt": "Original."})
@@ -67,6 +94,8 @@ def test_original_evidence_corruption_is_detected_before_any_transition(vault: P
     path.write_text(json.dumps(journal))
     with pytest.raises(model.EpisodeError, match="EPISODE_JOURNAL_INVALID"):
         store.read(initial["state"]["episode_id"])
+    with pytest.raises(model.EpisodeError, match="EPISODE_JOURNAL_INVALID"):
+        store.read_guarded(initial["state"]["episode_id"])
 
 
 def test_stale_session_cannot_overwrite_another_revision(vault: Path):
@@ -173,6 +202,8 @@ def test_symlinked_episode_storage_cannot_read_or_write_outside(vault: Path, tmp
         store.create("episode", {"excerpt": "Original."})
     with pytest.raises((curation.CurationError, model.EpisodeError), match="UNSAFE"):
         store.read(model.episode_id("episode"))
+    with pytest.raises(curation.CurationError, match="UNSAFE"):
+        store.read_guarded(model.episode_id("episode"))
     assert list(outside.iterdir()) == []
 
 

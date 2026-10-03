@@ -1288,6 +1288,8 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                 expected_container_hash=args["expected_container_hash"],
                 why=args["why"],
             )
+            if appended["body"] != (args.get("body") or ""):
+                step["args"]["body"] = appended["body"]
             if appended["semantic_profile"] != "records":
                 raise _error("RECORDS_PROFILE_REQUIRED", "a Records leaf appends to Records only")
             if appended["strategy"] != "markdown-items":

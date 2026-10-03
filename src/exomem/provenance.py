@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
+from . import context_refs, memory_refs, semantic_units
 from . import find as find_module
 from . import get_page as get_page_module
-from . import memory_refs, semantic_units
 from .markdown_regions import MarkdownPositionError, scan_markdown
 from .vault import FrontmatterError, kb_root, parse_frontmatter
 
@@ -94,6 +94,12 @@ class OriginDocument:
     payload: dict | None = None
     spans: tuple[tuple[int, int], ...] = ()
     reason: str | None = None
+
+    def without_metadata(self, content: str) -> str:
+        """Remove this document's designated spans from the same source text."""
+        for start, end in reversed(self.spans):
+            content = content[:start] + content[end:]
+        return content
 
 
 @dataclass(frozen=True)
@@ -290,7 +296,20 @@ def match_origin_scope(
         if kind == "unit":
             if document is None or document.parent_ref is None:
                 return OriginScopeMatch("unavailable")
-            parent = _origin_reference(document.parent_ref, allow_unit=False)
+            parent = document.parent_ref
+            if parent.startswith("exomem://vault/"):
+                # File Records already use the parser's path label, not a memory
+                # UUID. Only their owning adapter may supply that exact label.
+                path = unquote(parent.removeprefix("exomem://vault/"))
+                if (
+                    record_identity is None
+                    or owner_ref != parent
+                    or not path
+                    or context_refs.vault_ref(path) != parent
+                ):
+                    return OriginScopeMatch("unavailable")
+            else:
+                parent = _origin_reference(parent, allow_unit=False)
             if owner_ref is not None and parent != owner_ref:
                 return OriginScopeMatch("unavailable")
             resolution = document.resolve_unit(
@@ -450,6 +469,20 @@ def parse_origin(
                 raise
             raise refusal from error
         return OriginDocument("unassessed", spans=spans, reason=refusal.reason)
+
+
+def parse_owned_origin(content: str, *, owner_path: str) -> OriginDocument:
+    """Identify managed attribution using its real owner, not a claimed page type."""
+    if "<!--" not in content or "exomem-origin" not in content.lower():
+        return OriginDocument("absent")
+    from . import source_closure
+
+    return parse_origin(content, managed=not source_closure._eligible_path(owner_path))  # noqa: SLF001
+
+
+def origin_prose(content: str, *, owner_path: str) -> str:
+    """Keep structured managed attribution out of prose, preserving raw captures."""
+    return parse_owned_origin(content, owner_path=owner_path).without_metadata(content)
 
 
 def summarize_origins(

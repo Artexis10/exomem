@@ -75,6 +75,50 @@ def test_excerpt_centers_on_match(vault: Path) -> None:
         assert "insulin" in text
 
 
+def test_semantic_chunk_inside_origin_carrier_uses_complete_parent(vault: Path) -> None:
+    path = vault / "Knowledge Base/Notes/Insights/origin-chunk.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntype: source\n---\n\n# Origin chunk\n\n"
+        "<!-- exomem-origin:v9\nprivate-attribution\n-->\n\n"
+        "Visible regulator conclusion.\n",
+        encoding="utf-8",
+    )
+    page = find_module._CACHE.get(path, vault)
+
+    excerpt = find_module._semantic_excerpt(
+        page, "regulation", "private-attribution\n-->\n\nVisible regulator", None
+    )
+
+    assert "Visible regulator conclusion." in excerpt
+    assert "private-attribution" not in excerpt
+    assert "regulator" in find_module._stem_anchored_excerpt(page, "regulation")
+
+
+def test_origin_excerpt_keeps_raw_capture_and_literal_example(vault: Path) -> None:
+    carrier = "<!-- exomem-origin:v9 literal-attribution -->"
+    captures = {
+        "Knowledge Base/Sources/origin-raw.md": "# Raw capture\n\n" + carrier,
+        "Knowledge Base/Notes/origin-literal.md": "# Literal example\n\n`" + carrier + "`",
+    }
+    for rel_path, body in captures.items():
+        path = vault / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\ntype: insight\ntitle: Public " + carrier + " title\n---\n\n" + body,
+            encoding="utf-8",
+        )
+    find_module.clear_cache()
+
+    hits = find_module.find(vault, query="literal-attribution", mode="keyword", graph=False)
+
+    assert {hit.path for hit in hits} == set(captures)
+    assert all(carrier in hit.excerpt for hit in hits)
+    titles = {hit.path: hit.title for hit in hits}
+    assert titles["Knowledge Base/Sources/origin-raw.md"] == "Public " + carrier + " title"
+    assert titles["Knowledge Base/Notes/origin-literal.md"] == "Public  title"
+
+
 def test_no_matches_returns_empty(vault: Path) -> None:
     hits = find_module.find(vault, query="zzzzzzznotfoundzzzzz")
     assert hits == []

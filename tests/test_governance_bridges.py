@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -162,6 +163,7 @@ def _bridge_text(
     *,
     bridge_id: str = "00000000-0000-4000-8000-000000000201",
     review: str = "2026-12-01",
+    source_path: str = SOURCE_PATH,
 ) -> str:
     return (
         "---\n"
@@ -172,7 +174,7 @@ def _bridge_text(
         "created: 2026-07-28\n"
         "updated: 2026-07-28\n"
         "sources:\n"
-        f"  - '[[{SOURCE_PATH.removesuffix('.md')}]]'\n"
+        f"  - '[[{source_path.removesuffix('.md')}]]'\n"
         f"bridge_of: [{SOURCE_REF!r}]\n"
         "bridge_scope: workload-planning\n"
         f"bridge_review: {review}\n"
@@ -182,7 +184,7 @@ def _bridge_text(
         "## Observations\n"
         "- [constraint] Do not assume unlimited evening capacity #planning ^capacity\n\n"
         "## Relations\n"
-        f"- derived_from [[{SOURCE_PATH.removesuffix('.md')}]]\n"
+        f"- derived_from [[{source_path.removesuffix('.md')}]]\n"
     )
 
 
@@ -200,14 +202,19 @@ def _write_bridge_fixture(
     source_title: str = "Private source title",
     source_ceiling: int = 0,
     source_rule_extra: str = "",
+    bridge_path: str = BRIDGE_PATH,
+    source_path: str = SOURCE_PATH,
+    bridge_suffix: str = "",
 ) -> tuple[Path, Path]:
-    source = vault / SOURCE_PATH
-    bridge = vault / BRIDGE_PATH
+    source = vault / source_path
+    bridge = vault / bridge_path
     source.parent.mkdir(parents=True, exist_ok=True)
     bridge.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(_bridge_source_text(title=source_title), encoding="utf-8")
-    bridge.write_text(_bridge_text(review=review), encoding="utf-8")
-    _write_policy(vault, "scopes", "private", _scope_document(SCOPE_A))
+    bridge.write_text(
+        _bridge_text(review=review, source_path=source_path) + bridge_suffix, encoding="utf-8"
+    )
+    _write_policy(vault, "scopes", "private", _scope_document(SCOPE_A, path=source_path))
     _write_policy(
         vault,
         "rules",
@@ -220,6 +227,7 @@ def _write_bridge_fixture(
     )
     if approval:
         release = _release_document()
+        release = release.replace(BRIDGE_PATH, bridge_path).replace(SOURCE_PATH, source_path)
         release = release.replace(SHA_A, hashlib.sha256(bridge.read_bytes()).hexdigest(), 1)
         release = release.replace(SHA_B, hashlib.sha256(source.read_bytes()).hexdigest(), 1)
         release = release.replace("c" * 64, _restriction_signature(vault), 1)
@@ -542,13 +550,15 @@ def test_exact_approved_unchanged_bridge_releases_but_source_stays_withheld(
     assert BRIDGE_PATH in [hit.get("path") for hit in hits]
 
 
+@pytest.mark.parametrize("bridge_suffix", ["", "<!-- exomem-origin:v2 PRIVATE-ATTRIBUTION -->"])
 def test_l4_source_renders_only_the_exact_approved_bridge_abstraction(
-    vault: Path,
+    vault: Path, bridge_suffix: str,
 ) -> None:
     _write_bridge_fixture(
         vault,
         approval=True,
         source_ceiling=egress.LEVEL_EXCERPT_REDACTED,
+        bridge_suffix=bridge_suffix,
         source_rule_extra=(
             "options:\n"
             f"  bridge: {RELEASE_ID}\n"
@@ -567,6 +577,168 @@ def test_l4_source_renders_only_the_exact_approved_bridge_abstraction(
     assert RELEASE_ID not in str(page)
     assert SOURCE_PATH not in str(page)
     assert SOURCE_REF not in str(page)
+
+
+def test_nonempty_policy_reads_logical_unicode_source_from_its_physical_spelling(
+    vault: Path,
+) -> None:
+    logical_path = "Knowledge Base/Sources/café.md"
+    source = vault / unicodedata.normalize("NFD", logical_path)
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        _bridge_source_text(marker="ORDINARY-SOURCE").replace("type: research-note", "type: source"),
+        encoding="utf-8",
+    )
+    _write_policy(vault, "scopes", "source", _scope_document(SCOPE_A, path=logical_path))
+    _write_policy(vault, "rules", "source", _rule_document(scope_ids=(SCOPE_A,), ceiling=6))
+
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=logical_path)
+
+    assert page["path"] == logical_path
+    assert "ORDINARY-SOURCE" in page["body"]
+
+
+def test_exact_nfd_bridge_and_dependency_release_and_invalidate_together(vault: Path) -> None:
+    bridge_path = unicodedata.normalize("NFD", "Knowledge Base/Notes/Insights/café.md")
+    source_path = unicodedata.normalize("NFD", "Knowledge Base/Sources/privé.md")
+    _bridge, source = _write_bridge_fixture(
+        vault,
+        approval=True,
+        bridge_path=bridge_path,
+        source_path=source_path,
+        source_ceiling=egress.LEVEL_EXCERPT_REDACTED,
+        source_rule_extra=(
+            "options:\n"
+            f"  bridge: {RELEASE_ID}\n"
+            "  abstract: safe fallback abstraction\n"
+        ),
+    )
+    compiled = policy.load(vault)
+    grant = compiled.release_grants[0]
+
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=bridge_path)
+        abstraction = commands.op_get(vault, path=source_path, include_raw=True)
+    due = bridges.review_signal(vault, grant, policy=compiled, today=dt.date(2026, 12, 1))
+
+    assert page["path"] == bridge_path
+    assert page["body"] == APPROVED_BRIDGE_ABSTRACTION
+    assert source_path not in json.dumps(page, ensure_ascii=False, default=str)
+    assert SOURCE_REF not in str(page)
+    assert abstraction == {
+        "withheld": True,
+        "level": egress.LEVEL_EXCERPT_REDACTED,
+        "bridge": APPROVED_BRIDGE_ABSTRACTION,
+    }
+    assert due is not None and due.cause == bridges.DUE_REVIEW
+
+    source.write_text(_bridge_source_text(marker="DEPENDENCY-EDITED"), encoding="utf-8")
+    with request_scope(_external()):
+        with pytest.raises(ValueError, match="^NOT_FOUND"):
+            commands.op_get(vault, path=bridge_path)
+        lowered = commands.op_get(vault, path=source_path, include_raw=True)
+    changed = bridges.review_signal(vault, grant, policy=compiled, today=dt.date(2026, 12, 2))
+
+    assert lowered["level"] == egress.LEVEL_ABSTRACT
+    assert lowered["abstract"] == "safe fallback abstraction"
+    assert "bridge" not in lowered
+    assert changed is not None and changed.cause == bridges.SOURCE_CHANGED_OR_RESTRICTION_CHANGED
+    assert changed.signal_version != due.signal_version
+
+
+def test_equivalent_bridge_leaves_with_distinct_ids_refuse_l4_release(vault: Path) -> None:
+    bridge_path = "Knowledge Base/Notes/Insights/café.md"
+    bridge, _source = _write_bridge_fixture(
+        vault,
+        approval=True,
+        bridge_path=bridge_path,
+        source_ceiling=egress.LEVEL_EXCERPT_REDACTED,
+        source_rule_extra=(
+            "options:\n"
+            f"  bridge: {RELEASE_ID}\n"
+            "  abstract: safe fallback abstraction\n"
+        ),
+    )
+    other = vault / unicodedata.normalize("NFD", bridge_path)
+    other.write_text(
+        bridge.read_text(encoding="utf-8").replace(
+            "00000000-0000-4000-8000-000000000201", "00000000-0000-4000-8000-000000000203"
+        ),
+        encoding="utf-8",
+    )
+
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=SOURCE_PATH)
+        with pytest.raises(ValueError, match="^AMBIGUOUS_PATH"):
+            commands.op_get(vault, path=bridge_path)
+
+    assert page["level"] == egress.LEVEL_ABSTRACT
+    assert page["abstract"] == "safe fallback abstraction"
+    assert "bridge" not in page
+
+
+def test_l4_bridge_read_refuses_a_published_private_identity(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge, _source = _write_bridge_fixture(
+        vault,
+        approval=True,
+        source_ceiling=egress.LEVEL_EXCERPT_REDACTED,
+        source_rule_extra=(
+            "options:\n"
+            f"  bridge: {RELEASE_ID}\n"
+            "  abstract: safe fallback abstraction\n"
+        ),
+    )
+    identity = reserved_paths._lstat_identity(bridge)
+    with reserved_paths._subsystem_authority_scope("embedding_index"):
+        with reserved_paths._identity_coordination_scope(vault):
+            reserved_paths._publish_owner_identities(
+                vault, "embeddings-store", {"Knowledge Base/.embeddings.sqlite": identity}
+            )
+    monkeypatch.setattr(
+        reserved_paths,
+        "_published_identity_catalogue",
+        lambda _root: reserved_paths.IdentityCatalogue(
+            {(identity.device, identity.inode, identity.kind): "embeddings-store"}
+        ),
+    )
+
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=SOURCE_PATH)
+
+    assert page["level"] == egress.LEVEL_ABSTRACT
+    assert page["abstract"] == "safe fallback abstraction"
+    assert "bridge" not in page
+
+
+def test_renamed_bridge_stays_stale_and_readable_malformed_edits_change_review_version(
+    vault: Path,
+) -> None:
+    bridge_path = "Knowledge Base/Notes/Insights/café.md"
+    bridge, _source = _write_bridge_fixture(vault, approval=True, bridge_path=bridge_path)
+    compiled = policy.load(vault)
+    grant = compiled.release_grants[0]
+    renamed = bridge.rename(vault / unicodedata.normalize("NFD", bridge_path))
+
+    with request_scope(_external()):
+        with pytest.raises(ValueError, match="^NOT_FOUND"):
+            commands.op_get(vault, path=bridge_path)
+    renamed_signal = bridges.review_signal(
+        vault, grant, policy=compiled, today=dt.date(2026, 12, 1)
+    )
+    assert renamed_signal is not None and renamed_signal.cause == bridges.BRIDGE_EDITED
+
+    renamed.write_bytes(b"---\nbridge_of: [\xff]\n---\nfirst malformed edit\n")
+    first = bridges.review_signal(vault, grant, policy=compiled, today=dt.date(2026, 12, 1))
+    renamed.write_bytes(b"---\nbridge_of: [\xfe]\n---\nsecond malformed edit\n")
+    second = bridges.review_signal(vault, grant, policy=compiled, today=dt.date(2026, 12, 1))
+
+    assert first is not None and first.cause == bridges.BRIDGE_EDITED
+    assert second is not None and second.cause == bridges.BRIDGE_EDITED
+    assert first.bridge_hash != second.bridge_hash
+    assert first.signal_version != second.signal_version
 
 
 def test_l4_source_bridge_edit_lowers_without_reusing_cached_approval(

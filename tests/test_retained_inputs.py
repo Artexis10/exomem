@@ -80,3 +80,45 @@ def test_snapshot_preparation_refuses_a_disappearing_physical_leaf(
             "status": "unavailable",
             "input_revision": 1,
         }
+
+
+def test_final_input_checkpoint_refreshes_verified_session_status(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final checkpoint must not accept a dispatcher context after its session closes."""
+    from test_authorization_session_lifecycle import NOW, _custody, _file_connection
+
+    from exomem.governance import authorization_session_lifecycle, store
+
+    database = store.sidecar_path(vault)
+    database.parent.mkdir(parents=True, exist_ok=True)
+    connection, migration = _file_connection(database)
+    custody = _custody(migration.activation_state_digest)
+    opened = authorization_session_lifecycle.open_session(
+        connection,
+        custody=custody,
+        principal_id="client-a",
+        issuer_family="cli-local-owner",
+        now=NOW,
+        ttl_seconds=600,
+    )
+    monkeypatch.setattr(retained_inputs.time, "time", lambda: NOW + 1)
+    monkeypatch.setattr(
+        retained_inputs.authorization_custody,
+        "load_authorization_custody",
+        lambda root, *, now: custody,
+    )
+    principal = RequestPrincipal(audience_id="client-a").with_verified_authorization_session(
+        opened.context, issuer_family="cli-local-owner"
+    )
+    try:
+        with request_scope(principal):
+            retained_inputs.recheck_retained_inputs(vault, ())
+            authorization_session_lifecycle.close_verified_session(
+                connection, custody=custody, context=opened.context, now=NOW + 1
+            )
+            with pytest.raises(retained_inputs.RetainedInputError) as failure:
+                retained_inputs.recheck_retained_inputs(vault, ())
+        assert failure.value.code == "RETAINED_INPUT_UNAVAILABLE"
+    finally:
+        connection.close()

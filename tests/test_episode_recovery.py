@@ -32,6 +32,7 @@ def _write_page(
     status: str = "active",
     aliases: tuple[str, ...] = (),
     ingestion_backrefs: bool = False,
+    episode: str | None = None,
 ) -> str:
     path = vault / _REL
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,6 +44,8 @@ def _write_page(
         f"status: {status}\n"
     )
     source += f"aliases: {list(aliases)!r}\n" if aliases else ""
+    if episode is not None:
+        source += f"source_type: episode\nepisode: {episode}\n"
     if ingestion_backrefs:
         source += "ingested_into: []\n"
     source += (
@@ -682,3 +685,131 @@ def test_bind_committed_input_keeps_two_audiences_isolated(vault: Path) -> None:
     assert second["journal_digest"] != first["journal_digest"]
     assert revised["input_revision"] == 2
     assert still["input_revision"] == 1
+
+
+def test_recorded_recap_revisions_and_exact_units_share_one_root(vault: Path, source_schema) -> None:
+    """Neither a new recap page nor its selected unit is another original."""
+    from exomem import retained_inputs
+
+    key = "ep-" + "31" * 16
+    with request_scope(_owner("root-proof-a")):
+        owner = _owner_store(vault)
+        roots = []
+        for summary in ("First recap", "Revised recap"):
+            recorded = commands.op_episode_memory(
+                vault, source_schema, action="record", episode=key,
+                subject="Retained root proof", summary=summary,
+                worked_on=["[finding] A retained observation ^root-proof"],
+            )
+            reference = recorded["source"]["ref"]
+            parent = owner.prove_original(retained_inputs.resolve_retained_input(vault, reference))
+            unit = owner.prove_original(
+                retained_inputs.resolve_retained_input(vault, reference + "#root-proof")
+            )
+            assert parent is not None and unit is not None
+            assert parent.root == unit.root
+            roots.append(parent.root)
+        assert roots[0] == roots[1]
+    with request_scope(_owner("root-proof-b")):
+        owner = _owner_store(vault)
+        owner.bind_committed_input(key, path=recorded["source"]["path"], reference=reference)
+        other = owner.prove_original(retained_inputs.resolve_retained_input(vault, reference))
+        assert other is not None and other.root != roots[-1]
+
+
+@pytest.mark.parametrize("history", ["missing", "digest-only", "foreign", "ownerless", "corrupt", "unit-only"])
+def test_recap_labels_without_exact_owned_parent_history_supply_no_root(vault: Path, history) -> None:
+    """Labels cannot replace a bound parent, adopt another owner, or repair corruption."""
+    from exomem import episode_model as model
+    from exomem import retained_inputs
+    from exomem.episode_store import EpisodeStore
+
+    key = "ep-" + "42" * 16
+    reference = _write_page(vault, "- [finding] Unproven recap ^root-proof\n", episode=key)
+    with request_scope(_owner("root-proof-a")):
+        owner = _owner_store(vault)
+        resolved = retained_inputs.resolve_retained_input(vault, reference)
+        if history != "missing":
+            evidence = owner._page_evidence(resolved.page, reference, model.MATERIAL_EVIDENCE_SCHEME)
+            audience = "root-proof-b" if history == "foreign" else "root-proof-a"
+            store = EpisodeStore(vault, owner_audience_id=None if history == "ownerless" else audience)
+            if history == "digest-only":
+                evidence = {"digest": evidence["digest"]}
+            elif history == "unit-only":
+                evidence = owner._resolve_reference(reference + "#root-proof", new_input=True).evidence
+            stored = store.create(key, evidence)
+            if history == "corrupt":
+                store.path(stored["state"]["episode_id"]).write_text("{invalid", encoding="utf-8")
+        assert owner.prove_original(resolved) is None
+
+
+@pytest.mark.parametrize("scheme", [None, "evidence-v1"])
+def test_recap_root_honors_recorded_digest_scheme_and_rejects_changed_material(vault: Path, scheme) -> None:
+    """Old raw hashes stay raw; only material bindings tolerate ingestion bookkeeping."""
+    from exomem import episode_model as model
+    from exomem import retained_inputs
+    from exomem.episode_store import EpisodeStore
+
+    key = "ep-" + "53" * 16
+    reference = _write_page(vault, "Retained recap.\n", episode=key, ingestion_backrefs=True)
+    with request_scope(_owner("root-proof-a")):
+        owner = _owner_store(vault)
+        resolved = retained_inputs.resolve_retained_input(vault, reference)
+        current = EpisodeStore(vault, owner_audience_id="root-proof-a").create(
+            key, owner._page_evidence(resolved.page, reference, scheme)
+        )
+        proof = owner.prove_original(resolved)
+        assert proof is not None
+        path = vault / _REL
+        path.write_text(path.read_text().replace("ingested_into: []", "ingested_into: [compiled]"))
+        after = retained_inputs.resolve_retained_input(vault, reference)
+        assert (owner.prove_original(after) is not None) == (scheme == model.MATERIAL_EVIDENCE_SCHEME)
+        _write_page(vault, "Changed recap.\n", episode=key, ingestion_backrefs=True)
+        assert owner.prove_original(retained_inputs.resolve_retained_input(vault, reference)) is None
+        owner.append_input(
+            current["state"]["episode_id"], expected_revision=current["revision"],
+            expected_digest=current["journal_digest"], reference=reference,
+        )
+        with pytest.raises(ValueError, match="PATH_GUARD_CHANGED"):
+            proof.guard.recheck(vault)
+
+
+def test_recap_root_requires_a_released_guarded_snapshot(vault: Path) -> None:
+    """The internal proof must not accept the committed adapter's private fallback."""
+    from dataclasses import replace
+
+    from exomem import retained_inputs
+
+    key = "ep-" + "64" * 16
+    reference = _write_page(vault, "Retained recap.\n", episode=key)
+    with request_scope(_owner("root-proof-a")):
+        owner = _owner_store(vault)
+        owner.bind_committed_input(key, path=_REL, reference=reference)
+        resolved = retained_inputs.resolve_retained_input(vault, reference)
+        assert owner.prove_original(replace(resolved, released=None)) is None
+        assert owner.prove_original(replace(resolved, guard=None)) is None
+
+
+def test_recap_root_refuses_a_journal_changed_during_proof(vault: Path, monkeypatch) -> None:
+    """An old matching reconstruction cannot escape the proof's final journal check."""
+    from exomem import retained_inputs
+    from exomem.episode_store import EpisodeStore
+
+    key = "ep-" + "75" * 16
+    reference = _write_page(vault, "Retained recap.\n", episode=key)
+    read_guarded = EpisodeStore.read_guarded
+
+    def change_after_read(store, identity):
+        current, guard = read_guarded(store, identity)
+        store.transition(
+            identity, expected_revision=current["revision"],
+            expected_digest=current["journal_digest"], action="declare_candidate", args={"key": "later"},
+        )
+        return current, guard
+
+    with request_scope(_owner("root-proof-a")):
+        owner = _owner_store(vault)
+        owner.bind_committed_input(key, path=_REL, reference=reference)
+        resolved = retained_inputs.resolve_retained_input(vault, reference)
+        monkeypatch.setattr(EpisodeStore, "read_guarded", change_after_read)
+        assert owner.prove_original(resolved) is None

@@ -54,7 +54,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import curation, episode_capture, memory_refs
+from . import curation, episode_capture, memory_refs, origin_bindings
 from . import episode_model as model
 from .episode_reconciliation import current_coverage, reconcile_curation_leaf
 from .episode_recovery import EpisodeInputOwner
@@ -599,13 +599,66 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
         if existing
         else model.candidate_id(session.state["episode_id"], key)
     )
-    trial = session.state if existing else model.declare_candidate(session.state, key)
+    base = session.state if existing else model.declare_candidate(session.state, key)
+    proposed, incoming = model._proposal(proposal, identity)  # noqa: SLF001
+    _check_decision_shape(proposed)
+    blocker = _destination_blocker(
+        session.vault_root, proposed, incoming,
+        _visible(session.vault_root, _destination_refs(proposed)),
+    )
+    if blocker is not None:
+        raise _error(*blocker)
+
+    def needs_seal(leaf: Mapping[str, Any]) -> bool:
+        return not leaf["attempts"] and (
+            leaf["binding"] is None
+            or (
+                not _committed(session.vault_root, leaf["binding"]["run_id"])
+                and _blockers(session.vault_root, leaf["binding"]["run_id"])
+            )
+        )
+
+    prior = {leaf["leaf_id"]: leaf for leaf in existing["leaves"]} if existing else {}
+    preparations: dict[str, curation.PreparedProposal] = {}
+    for leaf in incoming:
+        old = prior.get(leaf["leaf_id"])
+        if (
+            old is not None
+            and old["binding"] is not None
+            and old["effect_digest"] != leaf["effect_digest"]
+            and leaf["kind"] == old["kind"] == "append-record"
+            and isinstance(body := leaf["args"].get("body"), str)
+            and isinstance(retained := old["args"].get("body"), str)
+            and origin_bindings.matches_retained_origin(body, retained)
+        ):
+            args = {**leaf["args"], "body": retained}
+            digest = model._effect(leaf["kind"], args)  # noqa: SLF001
+            if digest == old["effect_digest"]:
+                leaf["args"], leaf["effect_digest"] = args, digest
+        changed = old is not None and old["effect_digest"] != leaf["effect_digest"]
+        eligible = old is None or not old["attempts"] or (
+            changed and old["outcome"] == "proven_uncommitted"
+        )
+        if eligible and (old is None or changed or needs_seal(old)):
+            prepared = _prepare_seal(session.vault_root, leaf)
+            preparations[leaf["leaf_id"]] = prepared
+            leaf["args"] = prepared.plan["steps"][0]["args"]
+    normalized_proposal = {
+        **proposed,
+        "leaves": [
+            {name: leaf[name] for name in ("leaf_key", "effect_revision", "kind", "args")}
+            for leaf in incoming
+        ],
+    }
+    # The accepted proposal and the sealed step must describe identical bytes.
+    # Historical attempted effects are never normalized against today's vault.
     revised = True
     try:
-        trial = model.revise_proposal(trial, identity, proposal)
+        trial = model.revise_proposal(base, identity, normalized_proposal)
     except model.EpisodeError as error:
         if error.code != "EPISODE_PROPOSAL_UNCHANGED":
             raise
+        trial = base
         revised = False
     decided = model._candidate(trial, identity)  # noqa: SLF001
     _check_decision_shape(decided["proposal"])
@@ -617,23 +670,14 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
     )
     if blocker is not None:
         raise _error(*blocker)
-    unsealed = [
-        leaf
-        for leaf in decided["leaves"]
-        if not leaf["attempts"]
-        and (
-            leaf["binding"] is None
-            or (
-                not _committed(session.vault_root, leaf["binding"]["run_id"])
-                and _blockers(session.vault_root, leaf["binding"]["run_id"])
-            )
-        )
-    ]
+    unsealed = [leaf for leaf in decided["leaves"] if needs_seal(leaf)]
     commands: list[tuple[str, dict[str, Any]]] = []
     if existing is None:
         commands.append(("declare_candidate", {"key": key}))
     if revised:
-        commands.append(("revise_proposal", {"candidate": identity, "proposal": proposal}))
+        commands.append(
+            ("revise_proposal", {"candidate": identity, "proposal": normalized_proposal})
+        )
     # A lower bound on what the journal takes: the commands plus each sealed
     # plan's step. Too little room refuses before any plan is sealed.
     transitions, room = session.store.room(session.identity)
@@ -645,7 +689,15 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
         raise _error("EPISODE_TOO_LARGE", "the episode journal has no room for this preparation")
     # Every leaf passes its preparation before any plan is sealed, so a refused
     # leaf leaves no sealed plan behind for its siblings.
-    ready = [(leaf, _prepare_seal(session.vault_root, leaf)) for leaf in unsealed]
+    ready = [
+        (
+            leaf,
+            preparations[leaf["leaf_id"]]
+            if leaf["leaf_id"] in preparations
+            else _prepare_seal(session.vault_root, leaf),
+        )
+        for leaf in unsealed
+    ]
     for leaf, prepared in ready:
         proposed = curation.seal_proposal(session.vault_root, prepared, allow_records=True)
         commands.append(

@@ -4,10 +4,30 @@ from __future__ import annotations
 
 import re
 
+from . import provenance
 from .find_types import ParsedPage
+from .semantic_units import SemanticUnit
 
 EXCERPT_RADIUS = 100  # chars on each side of the match
 EXCERPT_MAX_LEN = 220
+
+
+def prose_units(
+    page: ParsedPage, units: tuple[SemanticUnit, ...]
+) -> tuple[SemanticUnit, ...]:
+    """Keep canonical identities, omitting units whose fields overlap managed metadata."""
+    metadata = provenance.parse_owned_origin(page.body, owner_path=page.rel_path)
+    if not metadata.spans:
+        return units
+    return tuple(
+        unit
+        for unit in units
+        if page.body[unit.span.start_offset:unit.span.end_offset] == unit.span.text
+        and not any(
+            start < unit.span.end_offset and unit.span.start_offset < end
+            for start, end in metadata.spans
+        )
+    )
 
 
 def transcript_ts_for_hit(
@@ -95,7 +115,7 @@ def stem_anchored_excerpt(page: ParsedPage, query_norm: str) -> str:
     """Snippet anchored on the first body word whose stem matches the query."""
     from . import bm25 as bm25_module
 
-    body = page.body.strip()
+    body = provenance.origin_prose(page.body, owner_path=page.rel_path).strip()
     if not body:
         return ""
     anchor_idx = -1
@@ -138,6 +158,9 @@ def semantic_excerpt(
     keyword_excerpt: str | None,
 ) -> str:
     """Prefer the matching chunk text, then fall back to the keyword excerpt."""
+    if provenance.origin_prose(page.body, owner_path=page.rel_path) != page.body:
+        # A stored chunk may start inside a carrier, without its opening marker.
+        return make_excerpt(page, query_norm) or stem_anchored_excerpt(page, query_norm)
     if best_chunk:
         body = best_chunk
         title_prefix = (page.title or "").strip()
@@ -152,12 +175,13 @@ def semantic_excerpt(
 
 def make_excerpt(page: ParsedPage, query_norm: str) -> str | None:
     """Return a short snippet anchored to the query, or None when no token matches."""
-    body = page.body_stripped
+    prose = provenance.origin_prose(page.body, owner_path=page.rel_path)
+    body = page.body_stripped if prose == page.body else prose.strip()
     if not query_norm:
         snippet = body[:EXCERPT_MAX_LEN]
         return collapse(snippet)
     title_norm = page.title_norm
-    body_norm = page.body_norm
+    body_norm = page.body_norm if prose == page.body else body.lower()
     tokens = query_norm.split()
     if not tokens:
         snippet = body[:EXCERPT_MAX_LEN]

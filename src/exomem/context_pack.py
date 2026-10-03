@@ -39,6 +39,8 @@ from . import (
     corpus_aware,
     epistemic_graph,
     find_corpus,
+    find_results,
+    provenance,
     recall_policy,
     semantic_index,
     semantic_units,
@@ -233,7 +235,7 @@ def _outline(lines: list[str]) -> list[str]:
 
 
 def _extract_claims(page: ParsedPage, *, claim_chars: int = _DEFAULT_CLAIM_CHARS) -> dict:
-    lines = _strip_fences(page.body)
+    lines = _strip_fences(provenance.origin_prose(page.body, owner_path=page.rel_path))
     return {
         "title": page.title,
         "type": page.page_type,
@@ -527,7 +529,12 @@ def _neighborhood(
         directions = entry["directions"]
         direction = "both" if len(directions) > 1 else next(iter(directions))
         lede = (
-            _cap(_first_sentence(_lede(_strip_fences(page.body))), _NEIGHBOR_LEDE_CHARS)
+            _cap(
+                _first_sentence(
+                    _lede(_strip_fences(provenance.origin_prose(page.body, owner_path=page.rel_path)))
+                ),
+                _NEIGHBOR_LEDE_CHARS,
+            )
             if page
             else ""
         )
@@ -832,8 +839,9 @@ def assemble_pack(
         plans: list[_UnitPackPlan] = []
         for page in packed_pages:
             document = semantic_states[page.rel_path].document
+            units = find_results.prose_units(page, document.units)
             by_ref = {
-                unit.unit_ref: unit for unit in document.units if unit.unit_ref is not None
+                unit.unit_ref: unit for unit in units if unit.unit_ref is not None
             }
             selected: list[tuple[int, int, semantic_units.SemanticUnit]] = []
             unresolved = 0
@@ -858,7 +866,7 @@ def assemble_pack(
                     parent=parent,
                     selected=selected,
                     fillers=[
-                        unit for unit in document.units if id(unit) not in selected_ids
+                        unit for unit in units if id(unit) not in selected_ids
                     ],
                     dropped_provenance=dropped_provenance,
                 )
