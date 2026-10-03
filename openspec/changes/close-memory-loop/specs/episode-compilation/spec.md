@@ -212,6 +212,15 @@ authoring SHALL receive a typed refusal rather than silent truncation. Existing
 unsupported metadata SHALL remain unassessed, and its reserved payload SHALL
 remain identifiable for the existing disclosure boundary.
 
+Origin-bearing authoring SHALL freshly validate exact input/version/scope and
+episode-root bindings under current applicable authority before first publication
+and at the existing rollback-capable completion checkpoint. Byte guards, saved
+disclosure receipts and an earlier permission verdict SHALL NOT satisfy current
+authorization. Same-batch Source bookkeeping that preserves the material version
+SHALL NOT invalidate its own binding. Ordinary refusal at either checkpoint SHALL
+leave no committed origin-bearing effect and SHALL preserve existing rollback
+and interruption semantics, without promising cross-file power-loss atomicity.
+
 #### Scenario: One turn becomes four pages
 
 - **WHEN** a single episode is preserved as a Source, entity facet, focused note and Records item
@@ -241,6 +250,24 @@ remain identifiable for the existing disclosure boundary.
 - **WHEN** legacy provenance lists distinct sources without an adequate independence assessment, or an assessment's exact retained-input binding is stale or unavailable
 - **THEN** that evidence is explicitly unassessed and cannot add assessed independent recurrence
 - **AND** supported important first mentions remain eligible through the existing governed path without requiring a recurrence quota
+
+#### Scenario: Recap labels cannot forge an episode origin
+
+- **WHEN** a retained recap has episode labels but lacks an exact canonical-parent/digest binding in the current audience's existing episode ledger
+- **THEN** it supplies no episode root and receives no fallback root from those labels or its page identity
+- **AND** missing, digest-only, corrupt, mismatched and foreign-owned history remain unavailable for that proof without searching or repairing another audience's ledger
+
+#### Scenario: Input permission changes during publication
+
+- **WHEN** applicable input release permission narrows or expires after preparation, including after one destination has been installed
+- **THEN** fresh checks before first publication and at rollback-capable completion refuse the origin-bearing effect and roll back installed auxiliaries
+- **AND** unchanged input bytes or a saved disclosure receipt cannot preserve the earlier authority
+
+#### Scenario: Source bookkeeping preserves a valid prepared origin
+
+- **WHEN** the same atomic batch adds an `ingested_into` backref while preserving the input's material version, selected scope and current permission
+- **THEN** the complete post-image retains that origin without an old-byte guard invalidating the batch's own replacement
+- **AND** changing input body, lifecycle metadata, selected scope or applicable authority still refuses rather than rebinds it
 
 #### Scenario: A permitted parent does not disclose a withheld origin
 

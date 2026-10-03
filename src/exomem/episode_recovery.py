@@ -11,10 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import curation, memory_refs, provenance, semantic_unit_read
+from . import curation, provenance, retained_inputs
 from . import episode_model as model
 from .episode_store import EpisodeStore
-from .get_page import GetError, GetResult, get_page
+from .get_page import GetResult
 from .governance import egress
 from .governance.principal import effective_principal
 
@@ -24,6 +24,10 @@ _MAX_RESPONSE_BYTES = 8192
 
 def _error(code: str, reason: str) -> model.EpisodeError:
     return model.EpisodeError(code, reason)
+
+
+def _retained_error(error: retained_inputs.RetainedInputError) -> model.EpisodeError:
+    return _error(error.code.replace("RETAINED_", "EPISODE_", 1), error.reason)
 
 
 @dataclass(frozen=True)
@@ -68,18 +72,10 @@ class EpisodeInputOwner:
 
     @staticmethod
     def _reference(value: Any) -> tuple[str, str | None]:
-        if not isinstance(value, str) or not value.strip() or len(value) > 2048:
-            raise _error("EPISODE_INPUT_INVALID", "input reference is invalid")
-        parent, marker, fragment = value.partition("#")
-        canonical_id = memory_refs.parse_memory_ref(parent)
-        canonical = memory_refs.memory_ref(canonical_id) if canonical_id is not None else None
-        if (
-            canonical is None
-            or parent != canonical
-            or (marker and (not fragment or "#" in fragment))
-        ):
-            raise _error("EPISODE_INPUT_INVALID", "input reference is invalid")
-        return canonical, f"{canonical}#{fragment}" if marker else None
+        try:
+            return retained_inputs.parse_reference(value)
+        except retained_inputs.RetainedInputError as error:
+            raise _retained_error(error) from error
 
     @staticmethod
     def _page_evidence(
@@ -107,96 +103,32 @@ class EpisodeInputOwner:
     def _resolve_reference(
         self, reference: Any, *, version_scheme: str | None = None, new_input: bool = False
     ) -> _ResolvedInput:
-        # The source snapshot is authorization evidence.  It is retained only
-        # in the nested collector; this facade records a receipt later for the
-        # exact body or unit span that it actually returns.
-        canonical, _unit_ref = self._reference(reference)
-        with egress.disclosure_boundary(
-            self.vault_root, "episode-input-authorization"
-        ) as collector:
-            resolved = self._resolve_reference_authorized(
-                reference, version_scheme=version_scheme, new_input=new_input
-            )
-        authorization = [
-            outcome.value
-            for outcome in collector.outcomes
-            if outcome.value.get("decision") == "released"
-            and outcome.value.get("ref") == canonical
-        ]
-        if len(authorization) > 1:
-            raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable")
-        return _ResolvedInput(
-            evidence=resolved.evidence,
-            body=resolved.body,
-            text=resolved.text,
-            authorization=authorization[0] if authorization else None,
-        )
-
-    def _resolve_reference_authorized(
-        self, reference: Any, *, version_scheme: str | None, new_input: bool
-    ) -> _ResolvedInput:
-        canonical, unit_ref = self._reference(reference)
-        principal = effective_principal()
         try:
-            path = egress.resolve_visible_identifier(
-                self.vault_root, canonical, principal=principal
-            )
-            page = get_page(self.vault_root, path=path)
-        except (memory_refs.ReferenceError, GetError, OSError, ValueError) as error:
-            raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable") from error
-        if (
-            memory_refs.ref_from_markdown(page.content) != canonical
-            or str(page.frontmatter.get("status") or "").casefold() == "superseded"
-        ):
-            raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable")
-        if new_input and str(page.frontmatter.get("type") or "").casefold() in {"source", "evidence"}:
+            resolved = retained_inputs.resolve_retained_input(self.vault_root, reference)
+        except retained_inputs.RetainedInputError as error:
+            raise _retained_error(error) from error
+        page = resolved.page
+        if new_input and str(page.frontmatter.get("type") or "").casefold() in {
+            "source",
+            "evidence",
+        }:
             version_scheme = model.MATERIAL_EVIDENCE_SCHEME
-        released = egress.annotate_page(
-            self.vault_root,
-            {
-                "path": page.path,
-                "frontmatter": page.frontmatter,
-                "body": page.body,
-                "content": page.content,
-                "content_hash": page.content_hash,
-                "mtime": page.mtime,
-            },
-            principal=principal,
-            snapshot_content=page.content,
-            stable_ref=canonical,
-        )
         if (
-            released is None
-            or released.get("content_hash") != page.content_hash
-            or released.get("body") != page.body
-            or (
-                version_scheme == model.MATERIAL_EVIDENCE_SCHEME
-                and released.get("frontmatter") != page.frontmatter
-            )
+            version_scheme == model.MATERIAL_EVIDENCE_SCHEME
+            and resolved.released.get("frontmatter") != page.frontmatter
         ):
-            raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable")
-        try:
-            current = get_page(self.vault_root, path=page.path)
-        except (GetError, OSError, ValueError) as error:
-            raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable") from error
-        if current.content_hash != page.content_hash or current.content != page.content:
-            raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable")
-        if unit_ref is None:
-            return _ResolvedInput(
-                evidence=self._page_evidence(page, canonical, version_scheme),
-                body=page.body,
-            )
-        unit = semantic_unit_read.read_semantic_unit(
-            self.vault_root, page=page, unit_ref=unit_ref
-        )
-        if unit.status != "found" or unit.unit is None or unit.parent.ref != canonical:
             raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable")
         return _ResolvedInput(
             evidence=self._page_evidence(
-                page, canonical, version_scheme, unit_ref=unit_ref,
-                unit_fingerprint=unit.unit.fingerprint,
+                page,
+                resolved.canonical,
+                version_scheme,
+                unit_ref=resolved.unit_ref,
+                unit_fingerprint=resolved.unit.fingerprint if resolved.unit else None,
             ),
-            text=unit.unit.span.text,
+            body=page.body if resolved.unit is None else None,
+            text=resolved.unit.span.text if resolved.unit else None,
+            authorization=resolved.authorization,
         )
 
     def _evidence(
@@ -230,50 +162,27 @@ class EpisodeInputOwner:
         error would invite a retry that writes nothing new.
         """
         try:
-            page = get_page(self.vault_root, path=path)
-        except (GetError, OSError, ValueError) as error:
-            raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable") from error
-        if memory_refs.ref_from_markdown(page.content) != canonical:
-            raise _error("EPISODE_INPUT_INVALID", "the page at that path holds another ref")
+            snapshot = retained_inputs._read_snapshot(  # noqa: SLF001
+                self.vault_root, canonical, committed_path=path
+            )
+        except retained_inputs.RetainedInputError as error:
+            raise _retained_error(error) from error
+        page = snapshot.page
         digest = model._hash("exomem-episode-input-page-v1", canonical, page.content_hash)
         version_scheme = (
             model.MATERIAL_EVIDENCE_SCHEME
             if str(page.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
             else None
         )
-        if str(page.frontmatter.get("status") or "").casefold() == "superseded":
-            return {"digest": digest}
-        with egress.disclosure_boundary(self.vault_root, "episode-input-authorization"):
-            released = egress.annotate_page(
-                self.vault_root,
-                {
-                    "path": page.path,
-                    "frontmatter": page.frontmatter,
-                    "body": page.body,
-                    "content": page.content,
-                    "content_hash": page.content_hash,
-                    "mtime": page.mtime,
-                },
-                principal=effective_principal(),
-                snapshot_content=page.content,
-                stable_ref=canonical,
-            )
-        if (
-            released is None
-            or released.get("content_hash") != page.content_hash
-            or released.get("body") != page.body
-            or (
-                version_scheme == model.MATERIAL_EVIDENCE_SCHEME
-                and released.get("frontmatter") != page.frontmatter
-            )
-        ):
-            return {"digest": digest}
         try:
-            current = get_page(self.vault_root, path=page.path)
-            if current.content_hash != page.content_hash or current.content != page.content:
+            released = retained_inputs._release_snapshot(self.vault_root, snapshot)  # noqa: SLF001
+            if (
+                version_scheme == model.MATERIAL_EVIDENCE_SCHEME
+                and released.released.get("frontmatter") != page.frontmatter
+            ):
                 return {"digest": digest}
             return self._page_evidence(page, canonical, version_scheme)
-        except (GetError, OSError, ValueError):
+        except (retained_inputs.RetainedInputError, model.EpisodeError):
             return {"digest": digest}
 
     def bind_committed_input(

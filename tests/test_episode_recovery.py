@@ -208,6 +208,26 @@ def test_recover_exact_unit_preserves_only_its_source_span(vault: Path) -> None:
     assert recovered["text"] == "- [finding] Exact unit text ^exact"
 
 
+def test_exact_unit_binding_refuses_a_swap_during_selection(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Authorization of the old parent cannot survive a swap while its unit is selected."""
+    from exomem import semantic_unit_read
+
+    reference = _write_page(vault, "- [finding] Original unit ^exact\n") + "#exact"
+    original = semantic_unit_read.read_semantic_unit
+
+    def swap_during_selection(*args, **kwargs):
+        selected = original(*args, **kwargs)
+        _write_page(vault, "- [finding] Replacement unit ^exact\n")
+        return selected
+
+    monkeypatch.setattr(semantic_unit_read, "read_semantic_unit", swap_during_selection)
+    with request_scope(_owner("client-a")):
+        with pytest.raises(ValueError, match="EPISODE_INPUT_UNAVAILABLE"):
+            _owner_store(vault).create("unit-swap", reference=reference)
+
+
 def test_retained_unit_and_committed_recap_survive_only_backlink_changes(vault: Path) -> None:
     """Both input routes ignore backlinks while recap lifecycle revisions stay binding."""
     reference = _write_page(vault, "- [finding] Retained recap ^recap\n", ingestion_backrefs=True)
@@ -634,12 +654,12 @@ def test_bind_committed_input_fails_on_an_unresolved_principal_before_reading(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reference = _write_page(vault, "Recap.\n")
-    from exomem import episode_recovery
+    from exomem import retained_inputs
 
     def _no_read(*_args, **_kwargs):
         raise AssertionError("the page was read before the owner resolved")
 
-    monkeypatch.setattr(episode_recovery, "get_page", _no_read)
+    monkeypatch.setattr(retained_inputs, "get_page", _no_read)
     with pytest.raises(ValueError, match="EPISODE_OWNER_UNRESOLVED"):
         _owner_store(vault).bind_committed_input(
             "ep-" + "f6" * 16, path=_REL, reference=reference

@@ -302,6 +302,25 @@ writer preparation before its prepared effect is sealed. Existing normalized
 leaf arguments and receipts cover the canonical bytes; no new mutation argument,
 leaf kind, episode transition or attribution event store is needed.
 
+Extract the existing episode input snapshot/release/selection work into one
+internal retained-input reader, rather than duplicating authorization in the
+origin validator. Reuse the prepared immutable page, nested disclosure owner,
+exact semantic-unit selector and physical raw-byte `PathGuard`; the logical page
+path remains the authorization key. The trusted committed-Source path verifies
+the canonical reference at that path without a corpus walk. Its compatibility
+adapter may keep the privately read snapshot solely for the existing opaque
+digest-only receipt when release or guard acquisition fails. An ordinary input
+read must refuse instead; unavailable text never enters a result or exception.
+
+Episode labels on a recap are lookup cues, not original-identity proof. Only an
+exact canonical-parent/digest match in the current audience's existing episode
+ledger establishes its episode root, using that entry's recorded digest scheme.
+Reuse the journal owner's bounded read and reconstruction, retaining a guard on
+the same journal bytes. Missing, digest-only, corrupt, mismatched or foreign-owned
+history supplies no episode root; do not search other audiences, repair history
+or substitute the recap page identity. Unit selectors, spans and revisions do
+not create new roots. Origin binding remains separate from legacy digest logic.
+
 Writer adapters must extract the reserved block from unit content or entity
 summary before ordinary rendering, place it outside semantic units, and retain
 the existing content validation. In particular, compact observations remain
@@ -319,6 +338,28 @@ mutations; file-Records needs its own thin adapter before payload hashing and th
 existing preparation callback. Its item body and selected fields, not a manifest
 or neighbouring item, own the attribution. Preserve raw Source/Evidence capture
 and current permission checks throughout.
+
+Carry the prepared input and episode proof through those existing preflights to
+the atomic batch. Byte guards and disclosure receipts are not permission proofs:
+one private, non-serialized validation callback must freshly acquire applicable
+policy/session authority and re-resolve the exact inputs, versions, selections
+and roots immediately before the first destination publication and after all
+destinations are installed, while ordinary failure can still roll back the batch.
+An operation's cached verdict or pinned policy snapshot cannot satisfy either
+check. Preserve the atomic owner's caught-failure rollback and interruption
+semantics; this adds no cross-filesystem or SQLite linearizability guarantee.
+
+Source closure may rewrite an input's `ingested_into` in that same batch. Require
+its planned post-image to preserve the material version, use the existing write
+guard and installed-artifact guard, and do not also retain its old-byte guard as
+a read-only requirement. Keep unchanged inputs and episode journals guarded.
+Do not evaluate full release against intermediate backrefs naming destinations
+that are not installed yet: existing byte/identity guards run before each flip,
+and the final permission check evaluates the complete post-image. Origin
+staleness retains a distinct refusal rather than being reported as stale
+vocabulary. Session expiry, revocation, narrower policy or changed bridge
+dependencies at either permission checkpoint must refuse without a committed
+origin-bearing effect, including rollback of installed auxiliaries.
 
 The file-Records preparation callback must receive the writer's normalized
 body/payload rather than recomputing a hash from the originally supplied body.
