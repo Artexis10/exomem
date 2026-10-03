@@ -10,7 +10,7 @@ The production PostgreSQL host serves Substrate authentication, billing and mult
 - Transfer management of existing control-host and dedicated backup resources into separately locked HCP Terraform workspaces using reviewed state-only handover; preserve the running resources and their identities.
 - Make Exomem consume a versioned, non-secret infrastructure dependency contract instead of managing the host. Keep the current Hetzner project and shared private network for this ownership split.
 - Preserve canonical Bitwarden bindings, existing encrypted database credentials, backup lineage and key-only managed SSH. Separate host administration from application-owned migrations.
-- Establish a shared, code-managed Tailscale administration standard for our own infrastructure: restricted server tags, ordinary managed OpenSSH over the tailnet and verified recovery access. Begin with the control host; product repositories consume the shared policy rather than copying it.
+- Establish a shared, code-managed NetBird Cloud administration standard for our own infrastructure: restricted peer groups, ordinary managed OpenSSH over the private mesh and verified recovery access. Begin with the control host; Q, Exomem and Substrate consume the shared policy rather than copying it. Extend adoption to the owner phone, workstations and Moshi connections. Retain Tailscale only during staged migration, retiring each dependency after its NetBird replacement is verified.
 - Keep migration execution disabled until access, recovery, independent review and exact saved-plan gates pass. No optional runtime capability or model is introduced.
 
 ## Capabilities
