@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 # D4: part of every cell's render digest. Bump it whenever the manifests this
 # module renders change, so a new cellctl release reaches cells that have
@@ -23,6 +25,8 @@ GATEWAY_NAMESPACE = "exomem-cloud"
 GATEWAY_POD_LABEL = "app.kubernetes.io/name"
 GATEWAY_POD_LABEL_VALUE = "exomem-cloud-gateway"
 CELL_PORT = 8765
+ARTIFACT_BROKER_PORT = 8767
+ARTIFACT_BROKER_POD_LABEL_VALUE = "exomem-artifact-broker"
 STORAGE_CLASS = "exomem-cloud-encrypted"
 RUNTIME_UID = 10001
 RUNTIME_GID = 10001
@@ -55,6 +59,26 @@ ROW_GENERATION_ANNOTATION = "exomem.io/row-generation"
 
 def namespace_name(cell_id: str) -> str:
     return f"{NAMESPACE_PREFIX}{cell_id}"
+
+
+def check_artifact_broker_url(endpoint: str) -> None:
+    """The preflighted Service IPv4 address needs neither runtime DNS nor discovery."""
+    if not endpoint:
+        return
+    try:
+        parsed = urlsplit(endpoint)
+        address = ipaddress.IPv4Address(parsed.hostname or "")
+        private = any(address in ipaddress.IPv4Network(cidr) for cidr in (
+            "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+        ))
+        valid = private and endpoint in (
+            f"http://{address}:{ARTIFACT_BROKER_PORT}",
+            f"http://{address}:{ARTIFACT_BROKER_PORT}/",
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("artifact broker endpoint must be literal RFC1918 IPv4 HTTP on port 8767")
 
 
 @dataclass(frozen=True)
@@ -129,6 +153,10 @@ class CellManifestSpec:
     # D5: CIDR ranges the job-egress NetworkPolicy excepts from its
     # otherwise-0.0.0.0/0 rule to object storage on 443.
     job_egress_except: tuple[str, ...] = ()
+    artifact_broker_url: str = ""
+
+    def __post_init__(self) -> None:
+        check_artifact_broker_url(self.artifact_broker_url)
 
     @property
     def namespace(self) -> str:
@@ -205,7 +233,7 @@ def render_resource_quota(spec: CellManifestSpec) -> dict:
 
 
 def render_network_policies(spec: CellManifestSpec) -> list[dict]:
-    """Default deny, gateway-only runtime ingress, no runtime egress at all,
+    """Default deny, gateway-only runtime ingress, optional broker-only egress,
     and backup/restore Jobs limited to TCP 443 plus DNS (D5, D11)."""
 
     default_deny = {
@@ -246,11 +274,17 @@ def render_network_policies(spec: CellManifestSpec) -> list[dict]:
                     "ports": [{"protocol": "TCP", "port": CELL_PORT}],
                 }
             ],
-            # No egress rules at all: the runtime pod cannot reach anything,
-            # not even DNS.
             "egress": [],
         },
     }
+    if spec.artifact_broker_url:
+        runtime_ingress["spec"]["egress"] = [{
+            "to": [{
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": GATEWAY_NAMESPACE}},
+                "podSelector": {"matchLabels": {GATEWAY_POD_LABEL: ARTIFACT_BROKER_POD_LABEL_VALUE}},
+            }],
+            "ports": [{"protocol": "TCP", "port": ARTIFACT_BROKER_PORT}],
+        }]
     # L4: a bare `ports: [443]` rule with no `to:` reaches any in-cluster
     # listener and the node's hostPort on 443, not just object storage. An
     # ipBlock of 0.0.0.0/0 that excepts the cluster/private/CGNAT/link-local
@@ -477,6 +511,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         )
     if spec.read_only:
         env.append({"name": "EXOMEM_CLOUD_READ_ONLY", "value": "1"})
+    if spec.artifact_broker_url:
+        env.append({"name": "EXOMEM_CLOUD_ARTIFACT_BROKER_URL", "value": spec.artifact_broker_url})
     env.extend(
         [
             {"name": "EXOMEM_VAULT_PATH", "value": "/data/vault"},

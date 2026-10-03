@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 import traceback
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dataclass_replace
@@ -34,6 +35,7 @@ from .manifests import (
     RENDER_VERSION,
     CellManifestSpec,
     ResourceSettings,
+    check_artifact_broker_url,
     hold_job_name,
     namespace_name,
     render_backup_job,
@@ -272,6 +274,23 @@ class ClusterConfig:
     admission_binding_name: str = DEFAULT_ADMISSION_BINDING_NAME
     isolation_policy_name: str = DEFAULT_ISOLATION_POLICY_NAME
     isolation_binding_name: str = DEFAULT_ISOLATION_BINDING_NAME
+    artifact_broker_url: str = ""
+    artifact_broker_cell_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        check_artifact_broker_url(self.artifact_broker_url)
+        cell_ids = self.artifact_broker_cell_ids
+        if (
+            not isinstance(cell_ids, tuple)
+            or len(cell_ids) > 1024
+            or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
+            or len(set(cell_ids)) != len(cell_ids)
+            or (cell_ids and not self.artifact_broker_url)
+        ):
+            raise ValueError("artifact broker activation requires a literal endpoint and unique base32 cell IDs")
+
+    def artifact_broker_for_cell(self, cell_id: str) -> str:
+        return self.artifact_broker_url if cell_id in self.artifact_broker_cell_ids else ""
 
 
 class ClusterGateway:
@@ -624,6 +643,9 @@ def _compute_render_digest(row: CellRow, cluster_config: ClusterConfig, secrets_
         "backup_key_version": row.backup_key_version,
         "b2_key_version": row.b2_key_version,
     }
+    endpoint = cluster_config.artifact_broker_for_cell(row.cell_id)
+    if endpoint:
+        material["artifact_broker_url"] = endpoint
     blob = json.dumps(material, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
 
@@ -1076,6 +1098,7 @@ async def _reconcile_row(
             render_digest_applied_at=digest_applied_at.isoformat() if digest_applied_at else None,
             row_generation=row.generation,
             job_egress_except=cluster_config.job_egress_except,
+            artifact_broker_url=cluster_config.artifact_broker_for_cell(row.cell_id),
             b2_key_id=key_id,
             b2_key_secret=key_secret,
             **secret_material,

@@ -1,0 +1,157 @@
+{{- if and .Values.cloudGateway.artifactTransportEnabled (not .Values.artifactBroker.enabled) }}
+{{- fail "cloudGateway.artifactTransportEnabled requires artifactBroker.enabled" }}
+{{- end }}
+{{- if .Values.artifactBroker.enabled }}
+{{- range $cidr := list "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "100.64.0.0/10" "169.254.0.0/16" }}
+{{- if not (has $cidr $.Values.cells.jobEgressExcept) }}
+{{- fail (printf "artifactBroker requires cells.jobEgressExcept to include %s" $cidr) }}
+{{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exomem-artifact-broker
+  namespace: {{ .Values.cellctl.namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-artifact-broker
+    app.kubernetes.io/part-of: exomem-cloud
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-artifact-broker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-artifact-broker
+        app.kubernetes.io/part-of: exomem-cloud
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: artifact-broker
+          image: {{ .Values.artifactBroker.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "exomem.artifact_broker"]
+          ports:
+            - name: http
+              containerPort: 8767
+              protocol: TCP
+          env:
+            - name: EXOMEM_ARTIFACT_BROKER_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.artifactBroker.publicKeySecretName }}
+                  key: {{ .Values.artifactBroker.publicKeySecretKey }}
+            - name: TMPDIR
+              value: /tmp
+          resources:
+            {{- .Values.artifactBroker.resources | toYaml | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exomem-artifact-broker
+  namespace: {{ .Values.cellctl.namespace }}
+spec:
+  type: ClusterIP
+  {{- if .Values.artifactBroker.endpoint }}
+  clusterIP: {{ .Values.artifactBroker.endpoint | trimPrefix "http://" | trimSuffix "/" | splitList ":" | first | quote }}
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: exomem-artifact-broker
+  ports:
+    - name: http
+      port: 8767
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exomem-artifact-broker
+  namespace: {{ .Values.cellctl.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-artifact-broker
+  policyTypes: [Ingress, Egress]
+  {{- if .Values.artifactBroker.cellIds }}
+  ingress:
+    - from:
+        {{- range .Values.artifactBroker.cellIds }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ printf "exo-cell-%s" . }}
+              exomem.io/cloud-cell: {{ . }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-cell
+              exomem.io/cell: {{ . }}
+            matchExpressions:
+              - key: exomem.io/cell-job
+                operator: DoesNotExist
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8767
+  {{- else }}
+  ingress: []
+  {{- end }}
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- .Values.cells.jobEgressExcept | toYaml | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}
