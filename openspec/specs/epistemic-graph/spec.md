@@ -1,7 +1,7 @@
 # epistemic-graph Specification
 
 ## Purpose
-TBD - created by archiving change add-epistemic-graph. Update Purpose after archive.
+Maintain a rebuildable SQLite graph sidecar derived from Markdown, wikilinks, references and supersession fields, using the shared relation registry. It exposes a read-only `graph_context` operation and propose-only relation suggestions, with model-backed paths optional, default-off and soft-failing, and bounded graph-native relation review.
 
 ## Requirements
 

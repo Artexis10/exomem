@@ -1,7 +1,7 @@
 # memory-reference-presentation Specification
 
 ## Purpose
-TBD - created by archiving change human-readable-memory-citations. Update Purpose after archive.
+Keep stable memory identity machine-facing while users see titles: agent guidance treats `exomem_id` and `exomem://memory/<uuid>` as move-safe machine identity and cites notes by human-readable title in user-facing prose. The bootstrap and installed skill teach the same rule.
 ## Requirements
 ### Requirement: Agent guidance keeps stable memory identity machine-facing
 

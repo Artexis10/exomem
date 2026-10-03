@@ -1,7 +1,7 @@
 # retry-safe-mutations Specification
 
 ## Purpose
-TBD - created by archiving change make-mcp-mutations-retry-safe. Update Purpose after archive.
+Make MCP mutation retries safe: a successful mutation repeated by the same authenticated principal with the same command and canonical arguments is replayed rather than re-executed, within a narrow bounded window. Failed mutations stay retryable, and explicit idempotency keys remain authoritative for REST and CLI.
 
 ## Requirements
 

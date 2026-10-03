@@ -1,7 +1,7 @@
 # semantic-unit-projection Specification
 
 ## Purpose
-TBD - created by archiving change stabilize-mutations-and-rich-units. Update Purpose after archive.
+Project authored rich-block `tags` and `context` metadata into `SemanticUnit` data, keeping category, governed kind, tags, context and authored relations distinct semantic roles.
 ## Requirements
 ### Requirement: Rich Metadata Is First-Class Semantic Unit Data
 

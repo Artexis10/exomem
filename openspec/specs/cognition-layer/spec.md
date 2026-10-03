@@ -1,7 +1,7 @@
 # cognition-layer Specification
 
 ## Purpose
-TBD - created by archiving change productize-cognition-layer. Update Purpose after archive.
+Describe Exomem as a durable-cognition model of sources, proof, history, decisions, records, review and compiled knowledge, spoken in simple product language. It also defines scan-first, non-destructive adoption of an existing vault with explicit safe modes, and extensible knowledge packs.
 ## Requirements
 ### Requirement: Exomem exposes a simple durable-cognition model
 The product documentation and agent bootstrap SHALL describe Exomem as a durable

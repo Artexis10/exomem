@@ -1,7 +1,7 @@
 # schema-field-exclusion Specification
 
 ## Purpose
-TBD - created by archiving change close-confidence-exclusion-bypass. Update Purpose after archive.
+Refuse caller-authored frontmatter fields on the schema-excluded list in every governed write, using one registry and one refusal code. Stored state stays readable and repairable, and pre-existing violations surface for review without blocking.
 ## Requirements
 ### Requirement: Governed writes refuse schema-excluded frontmatter fields
 

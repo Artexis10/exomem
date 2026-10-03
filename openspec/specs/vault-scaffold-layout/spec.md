@@ -1,7 +1,7 @@
 # vault-scaffold-layout Specification
 
 ## Purpose
-TBD - created by archiving change move-shipped-schema-out-of-the-note-namespace. Update Purpose after archive.
+Deploy product-owned governance markdown outside the user's note namespace in a product-owned location, while readers prefer the new location and accept the legacy one. A vault is identified by either sentinel, the index exclusion moves with the content, and reclaiming the legacy copy is an explicit, verified operation.
 ## Requirements
 ### Requirement: Product-Owned Markdown Lives Outside The Note Namespace
 

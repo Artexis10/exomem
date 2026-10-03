@@ -1,7 +1,7 @@
 # note-type-contract Specification
 
 ## Purpose
-TBD - created by archiving change add-epistemic-loop-primitives. Update Purpose after archive.
+Define the experiment page type's lifecycle and outcome fields: a `concluded` status and a closed categorical `outcome` enum. The frontmatter contract continues to exclude any numeric confidence, credence, probability or certainty field.
 ## Requirements
 ### Requirement: Experiments Carry A Concluded Lifecycle Status
 The experiment page type's status enum SHALL be `active`, `draft`, `archived`, or `concluded`. `concluded` SHALL mean the experiment finished and its result stands; it SHALL NOT imply archival, and archival SHALL remain the separate act of stepping a page out of active rotation. A status outside that enum SHALL still be refused for an experiment.
