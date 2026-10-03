@@ -19,10 +19,15 @@ context re-read (median about 420k tokens in long sessions).
   only at the start of a `&&`/`;`/`|`/newline segment after env assignments and
   a few wrappers, including `bash -c`. Prose inside quotes (a commit message,
   an `echo`) never counts.
-- Success is the existing per-tool signal for Claude (`tool_result.is_error`)
-  and the reported exit code for Codex, whether it runs `exec_command` as a
-  function call or inside an `exec` cell. Missing exit information is
-  unconfirmed and does not count.
+- A command counts unless it fails: the existing per-tool signal for Claude
+  (`tool_result.is_error`), or an explicit non-zero exit code for Codex, whether
+  it runs `exec_command` as a function call or inside an `exec` cell. Missing
+  exit information counts as landed: on real Codex sessions a quarter of landing
+  cells return while the command is still running, and a false positive costs
+  one reminder on a rare event.
+- Dry runs, `git merge --abort/--quit`, `git push --delete`, and a `git tag` that
+  lists, verifies or deletes are not landings. `git commit -n` is `--no-verify`
+  and still commits. `timeout`, `env -u` and `if`/`then`/`!` are command prefixes.
 - Because a landing replaces the length test, a terse "Pushed." after a push
   still gets the check. No new environment knob is added; the existing
   `EXOMEM_CAPTURE_NUDGE_MIN_CHARS` now sets the `maximal` gate and the episode

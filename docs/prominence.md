@@ -86,7 +86,7 @@ yet expose `configure_memory`. Adding it there requires a new hosted profile.
 **Assistants with hooks — Claude Code, Codex — default to `balanced`.** Those clients
 run a capture/retrieve nudge that re-arms the check, so moderate
 instructions are enough. Below `maximal` the capture reminder fires on turns that
-land work (a successful commit, push, merge, tag, or PR/release create or merge),
+land work (a commit, push, merge, tag, or PR/release create or merge),
 not on reply length; `maximal` keeps the length gate.
 
 **Assistants without hooks — claude.ai, ChatGPT, the hosted service — default to

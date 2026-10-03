@@ -12,9 +12,11 @@ LANGUAGE-AGNOSTIC by design. It does NOT gate on English keywords — that would
 miss Japanese and every other language. The gate is structural, and every
 extra fire costs a full-context model turn, so below the most aggressive
 prominence ("maximal") a turn is a candidate only if it contains a LANDING: a
-successful shell command that commits, pushes, merges, tags or opens/merges a
-pull request or release (`_LANDING_COMMANDS`; Claude `Bash` and Codex shell/exec
-calls). Q&A, reading and CI-watching turns stay silent however long the reply.
+shell command that commits, pushes, merges, tags or opens/merges a pull request
+or release (`_LANDING_COMMANDS`; Claude `Bash` and Codex shell/exec calls) and
+did not fail. A command counts unless its output reports an explicit non-zero
+exit code (Claude: `is_error`); a Codex cell that returned while the command was
+still running carries no exit code and counts. Q&A, reading and CI-watching turns stay silent however long the reply.
 Measured over 14 days a length gate fired on ~76% of prompts and only 20% of
 those turns wrote anything. At "maximal" the older gate stays: the reply is
 substantial (>= a char threshold). Either way the KB must not already have been
@@ -387,7 +389,7 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
     tools: list[dict] = []
     failed_tool_ids: set[str] = set()
     completed_codex_tool_ids: set[str] = set()
-    shell_exit_ok_ids: set[str] = set()
+    shell_failed_ids: set[str] = set()
     for line in reversed([ln for ln in raw.splitlines() if ln.strip()]):
         try:
             obj = json.loads(line)
@@ -419,8 +421,8 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
             )
         elif typ in {"function_call_output", "custom_tool_call_output"}:
             call_id = str(record.get("call_id") or "")
-            if call_id and _exit_codes_ok(record.get("output")):
-                shell_exit_ok_ids.add(call_id)
+            if call_id and _exit_code_failed(record.get("output")):
+                shell_failed_ids.add(call_id)
             if call_id and _codex_call_output_succeeded(record.get("output")):
                 completed_codex_tool_ids.add(call_id)
             elif call_id:
@@ -478,8 +480,9 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
     for tool in tools:
         tool_id = tool["id"]
         if tool.get("requires_confirmed_output") and _tool_commands(tool):
-            # Shell output carries exit codes, not the connector `Output:` JSON.
-            tool["failed"] = tool_id not in shell_exit_ok_ids
+            # Shell output carries exit codes, not the connector `Output:` JSON,
+            # and no code means the command was still running: not a failure.
+            tool["failed"] = tool_id in shell_failed_ids
             continue
         tool["failed"] = bool(
             tool_id
@@ -529,7 +532,27 @@ _LANDING_COMMANDS = (
 _SHELL_TOOLS = frozenset(
     {"bash", "exec", "exec_command", "shell", "shell_command", "local_shell"}
 )
-_SHELL_WRAPPERS = frozenset({"env", "sudo", "command", "time", "nohup", "exec"})
+_SHELL_WRAPPERS = frozenset({"sudo", "command", "time", "nohup", "exec"})
+#: Shell keywords that may precede a command in a segment (`if git push; then`).
+_SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!"})
+#: Options of `env` / `timeout` that take a value.
+_ENV_VALUE_OPTIONS = frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"})
+_TIMEOUT_VALUE_OPTIONS = frozenset({"-k", "--kill-after", "-s", "--signal"})
+#: Arguments that make an otherwise-landing command a non-landing: a dry run, an
+#: abandoned merge, a deleted remote ref. `git commit -n` is `--no-verify`, which
+#: still commits, so only `--dry-run` rules a commit out.
+_NON_LANDING_ARGS = {
+    ("git", "commit"): frozenset({"--dry-run"}),
+    ("git", "push"): frozenset({"--dry-run", "-n", "--delete", "-d"}),
+    ("git", "merge"): frozenset({"--abort", "--quit"}),
+}
+#: `git tag` lands only when it creates a tag; these list, verify or delete.
+_TAG_READ_LONG = frozenset(
+    {"list", "contains", "delete", "verify", "points-at", "merged", "no-merged"}
+)
+_TAG_READ_SHORT = frozenset("lndv")
+_TAG_CREATE_LONG = frozenset({"annotate", "sign", "message", "force", "local-user"})
+_TAG_CREATE_SHORT = frozenset("asmfu")
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
 #: Global options that take a value, which must not be read as the subcommand.
 _VALUE_OPTIONS = {
@@ -575,10 +598,7 @@ def _landing_command(command: str, depth: int = 0) -> bool:
             segment.append(token)
             continue
         words, segment = segment, []
-        while words and (
-            _ENV_ASSIGNMENT.match(words[0]) or words[0] in _SHELL_WRAPPERS
-        ):
-            words.pop(0)
+        words = _strip_prefixes(words)
         if not words:
             continue
         program = Path(words[0]).name
@@ -596,13 +616,52 @@ def _landing_command(command: str, depth: int = 0) -> bool:
         while rest and rest[0].startswith("-"):
             skip = 2 if rest[0] in _VALUE_OPTIONS[program] else 1
             rest = rest[skip:]
-        if any(
-            rest[: len(spec) - 1] == list(spec[1:])
-            for spec in _LANDING_COMMANDS
-            if spec[0] == program
-        ):
-            return True
+        for spec in _LANDING_COMMANDS:
+            if spec[0] == program and rest[: len(spec) - 1] == list(spec[1:]):
+                if _lands(spec, rest[len(spec) - 1 :]):
+                    return True
     return False
+
+
+def _strip_prefixes(words: list[str]) -> list[str]:
+    """Drop env assignments, wrappers (`env -u X`, `timeout 5m`) and shell keywords."""
+    while words:
+        word = words[0]
+        if _ENV_ASSIGNMENT.match(word) or word in _SHELL_WRAPPERS or word in _SHELL_KEYWORDS:
+            words = words[1:]
+        elif word == "env":
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[2 if words[0] in _ENV_VALUE_OPTIONS else 1 :]
+        elif word == "timeout":
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[2 if words[0] in _TIMEOUT_VALUE_OPTIONS else 1 :]
+            if words and words[0][:1].isdigit():
+                words = words[1:]
+        else:
+            break
+    return words
+
+
+def _lands(spec: tuple[str, ...], args: list[str]) -> bool:
+    """Whether the arguments after a landing command's words keep it a landing."""
+    if spec == ("git", "tag"):
+        created = False
+        for arg in args:
+            if arg.startswith("--"):
+                name = arg[2:].split("=", 1)[0]
+                if name in _TAG_READ_LONG:
+                    return False
+                created = created or name in _TAG_CREATE_LONG
+            elif arg.startswith("-") and len(arg) > 1:
+                if _TAG_READ_SHORT & set(arg[1:]):
+                    return False
+                created = created or bool(_TAG_CREATE_SHORT & set(arg[1:]))
+            else:
+                created = True  # a positional tag name
+        return created
+    return not (_NON_LANDING_ARGS.get(spec, frozenset()) & set(args))
 
 
 def _tool_commands(tool: dict) -> list[str]:
@@ -624,14 +683,17 @@ def _tool_commands(tool: dict) -> list[str]:
     return [command] if isinstance(command, str) else []
 
 
-def _exit_codes_ok(output: object) -> bool:
-    """A shell call's reported exit codes, all zero and at least one present."""
+def _exit_code_failed(output: object) -> bool:
+    """Whether a shell call's output reports an explicit non-zero exit code.
+
+    No code at all is not a failure: a Codex cell can return while the command
+    is still running, and a slow commit or push is still a landing.
+    """
     if isinstance(output, list):
         output = "\n".join(str(b.get("text", "")) for b in output if isinstance(b, dict))
     if not isinstance(output, str):
         return False
-    codes = _EXIT_CODE.findall(output)
-    return bool(codes) and all(int(code) == 0 for code in codes)
+    return any(int(code) != 0 for code in _EXIT_CODE.findall(output))
 
 
 def _successful_landing(tool: dict) -> bool:

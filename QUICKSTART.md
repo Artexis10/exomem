@@ -571,7 +571,7 @@ restores the hooks from the committed copy. A source it cannot parse (a yadm
 template) is named in the report and exits non-zero rather than being rewritten
 blind.
 
-Below `maximal` the capture reminder fires only on turns that land work (a successful
+Below `maximal` the capture reminder fires only on turns that land work (a
 commit, push, merge, tag, or PR/release create or merge); `EXOMEM_CAPTURE_NUDGE_MIN_CHARS`
 then sets the `maximal` length gate and what counts as a substantive turn for the episode ask.
 

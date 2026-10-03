@@ -1106,8 +1106,10 @@ def _claude_turn(
     return path
 
 
-def _codex_turn(tmp_path: Path, shape: str, command: str, *, exit_code: int = 0) -> Path:
-    """One Codex turn running `command` as an `exec` cell or an `exec_command` call."""
+def _codex_turn(tmp_path: Path, shape: str, command: str, *, exit_code: int | None = 0) -> Path:
+    """One Codex turn running `command` as an `exec` cell or an `exec_command` call.
+
+    `exit_code=None` is a call that returned while the command was still running."""
     if shape == "exec-cell":
         call = {
             "type": "custom_tool_call",
@@ -1115,7 +1117,11 @@ def _codex_turn(tmp_path: Path, shape: str, command: str, *, exit_code: int = 0)
             "call_id": "c1",
             "input": f"text(await tools.exec_command({{cmd:{json.dumps(command)},workdir:\"/repo\"}}));",
         }
-        chunk = json.dumps({"chunk_id": "a1", "exit_code": exit_code, "output": "done\n"})
+        chunk = json.dumps(
+            {"chunk_id": "a1", "output": "done\n"}
+            if exit_code is None
+            else {"chunk_id": "a1", "exit_code": exit_code, "output": "done\n"}
+        )
         output = {
             "type": "custom_tool_call_output",
             "call_id": "c1",
@@ -1134,7 +1140,9 @@ def _codex_turn(tmp_path: Path, shape: str, command: str, *, exit_code: int = 0)
         output = {
             "type": "function_call_output",
             "call_id": "c1",
-            "output": f"Wall time: 0.1 seconds\nProcess exited with code {exit_code}\nOutput:\ndone\n",
+            "output": "Wall time: 0.1 seconds\nOutput:\ndone\n"
+            if exit_code is None
+            else f"Wall time: 0.1 seconds\nProcess exited with code {exit_code}\nOutput:\ndone\n",
         }
     user = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "q"}]}
     lines = [{"type": "response_item", "payload": item} for item in (user, call, output)]
@@ -1177,6 +1185,13 @@ class TestCaptureReminderLandingGate:
         turn = _codex_turn(tmp_path, shape, "cd /repo && git commit -am 'fix' && git push")
         assert _is_capture_reminder(_stop(monkeypatch, capsys, turn))
 
+    @pytest.mark.parametrize("shape", ["exec-cell", "exec-command"])
+    def test_a_landing_still_running_when_the_cell_returned_counts(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, shape: str
+    ) -> None:
+        turn = _codex_turn(tmp_path, shape, "git push", exit_code=None)
+        assert _is_capture_reminder(_stop(monkeypatch, capsys, turn))
+
     @pytest.mark.parametrize("shape", ["claude", "exec-cell", "exec-command"])
     def test_a_failed_landing_does_not_count(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, shape: str
@@ -1199,6 +1214,18 @@ class TestCaptureReminderLandingGate:
     "command",
     [
         "git commit -m 'x'",
+        "git commit -n -m 'x'",
+        "git merge --continue",
+        "git tag v1.2",
+        "git tag -a v1 -m release",
+        "git tag -fam v1 note",
+        "git push --force-with-lease origin x",
+        "gh pr merge 7 --auto --squash",
+        "timeout 120 git push",
+        "timeout -k 5 2m git push",
+        "env -u GIT_DIR git push",
+        "if git push origin x; then echo ok; fi",
+        "! git commit -m x",
         "git -C ../repo push origin main",
         "CI=1 GIT_TERMINAL_PROMPT=0 git push",
         "make test && git merge --no-ff topic",
@@ -1225,6 +1252,20 @@ def test_landing_commands_are_recognised(command: str) -> None:
         "git log --grep='git commit'",
         "gh pr view 3 && gh pr checks 3",
         "git commit -m 'unbalanced",
+        "git commit --dry-run",
+        "git push --dry-run",
+        "git push -n origin x",
+        "git push --delete origin old",
+        "git push origin -d old",
+        "git merge --abort",
+        "git merge --quit",
+        "git tag",
+        "git tag -l 'v*'",
+        "git tag --list",
+        "git tag -n",
+        "git tag --contains abc123",
+        "git tag -d v1",
+        "git tag -v v1",
     ],
 )
 def test_other_commands_are_not_landings(command: str) -> None:
