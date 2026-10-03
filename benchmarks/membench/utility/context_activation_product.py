@@ -464,7 +464,7 @@ def removed(mechanism: str) -> Iterator[None]:
             mock.patch.object(working_set, "named_domains", top_domain),
             # The gate's removal is the carry of a turn that resolved nothing;
             # a resolved turn's pages named beside it stay off, as they were.
-            mock.patch.object(working_set, "_named_beside", lambda *_a, **_k: ((), (), ())),
+            mock.patch.object(working_set, "_named_beside", lambda *_a, **kwargs: ((), (), (), kwargs["selected_roles"])),
         ):
             yield
         return

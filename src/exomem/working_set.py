@@ -2097,6 +2097,7 @@ def _carry_roles(
     *,
     anchor_names: frozenset[str] = frozenset(),
     omitted: list[str] | None = None,
+    limit: int = context_roles.MAX_SELECTED_ROLES,
 ) -> tuple[dict[str, str], ...]:
     """The lenses a carried page is read through.
 
@@ -2116,6 +2117,8 @@ def _carry_roles(
     that can answer, so a carried conclusion is never lost to a lens the page
     has no material for. An effective material default for `page` also selects
     its bounded query lane; owner narrowing still applies.
+    The multi-page caller requests all candidates and applies the ceiling to
+    their union before running any lane.
     """
     text = str(getattr(analysis, "text", "") or "")
     cued: list[tuple[int, Any]] = []
@@ -2137,14 +2140,14 @@ def _carry_roles(
         cued.append((0 if matched or role.intent else 1, role))
     cued.sort(key=lambda entry: (entry[0], entry[1].priority))
     if omitted is not None:
-        omitted.extend(role.id for _rank, role in cued[context_roles.MAX_SELECTED_ROLES:])
+        omitted.extend(role.id for _rank, role in cued[limit:])
     return tuple(
         {
             "id": role.id,
             "source": "turn_cue" if rank == 0 else "retrieval_carried",
             "lane": role.lane,
         }
-        for rank, role in cued[: context_roles.MAX_SELECTED_ROLES]
+        for rank, role in cued[:limit]
     )
 
 
@@ -2163,9 +2166,9 @@ def _page_unit_categories(
     except Exception:  # noqa: BLE001 - a probe that fails keeps the unfiltered lenses
         log.debug("activation carried page category probe failed for %s", path, exc_info=True)
         return None
-    if not found:
+    if found is None:
         return None
-    return found.get(path) or None
+    return found.get(path, frozenset())
 
 
 def _carried_packet(
@@ -2298,6 +2301,7 @@ def _carried_material(
     status: str = working_set_resolve.RETRIEVAL_CARRIED_STATUS,
     evidence: tuple[str, ...] = ("retrieval",),
     visible: Callable[[str], bool] | None = None,
+    selected_roles: Sequence[Mapping[str, str]] = (),
 ) -> tuple[
     tuple[working_set_resolve.ResolvedAnchor, ...],
     tuple[LaneItem, ...],
@@ -2309,7 +2313,8 @@ def _carried_material(
 
     Each page is read on its own through its selected lanes. A page the lanes
     read nothing off retains its coverage in an abstained packet. Their combined
-    material shares the packet's role cap. Empty items means
+    lenses share six slots, after the resolved anchors' selected roles, and
+    their material shares the packet's item cap. Empty items means
     none of them read anything. Titles and lifecycles are taken as
     `_carried_packet` documents.
     """
@@ -2317,20 +2322,35 @@ def _carried_material(
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
     states: list[Mapping[str, Any]] = []
-    used_roles: dict[str, dict[str, str]] = {}
+    page_roles: dict[str, tuple[str, tuple[dict[str, str], ...]]] = {}
+    candidates: dict[str, dict[str, str]] = {}
     for path in paths:
         if visible is not None and not visible(path):
             continue
         title = _indexed_title(index, path) or _page_title(vault_root, path) or path
-        omitted: list[str] = []
         with _span(timings, "working_set.carry_lenses"):
             roles = _carry_roles(
                 registry,
                 analysis,
                 _page_unit_categories(vault_root, path, freshness_snapshot=freshness_snapshot),
                 anchor_names=context_intents.anchor_terms((title,)),
-                omitted=omitted,
+                limit=len(registry.roles),
             )
+        page_roles[path] = (title, roles)
+        for role in roles:
+            if role["id"] not in candidates or role["source"] == "turn_cue":
+                candidates[role["id"]] = role
+    used_roles = {str(role["id"]): dict(role) for role in selected_roles}
+    remaining = sorted(
+        (role for role in candidates.values() if role["id"] not in used_roles),
+        key=lambda role: (role["source"] != "turn_cue", registry.roles[role["id"]].priority),
+    )
+    slots = max(0, context_roles.MAX_SELECTED_ROLES - len(used_roles))
+    used_roles.update((role["id"], role) for role in remaining[:slots])
+    missing.extend({"role": role["id"], "reason": "role_limit"} for role in remaining[slots:])
+    for path, (title, candidates_for_page) in page_roles.items():
+        role_ids = {role["id"] for role in candidates_for_page}
+        roles = tuple(role for role in used_roles.values() if role["id"] in role_ids)
         carried = working_set_resolve.ResolvedAnchor(
             anchor_id=path,
             path=path,
@@ -2372,7 +2392,6 @@ def _carried_material(
             visible=visible,
             analysis=analysis,
         )
-        gaps = (*gaps, *({"role": role, "reason": "role_limit"} for role in omitted))
         for item in got:
             if item.path == path:
                 # The lane's own reading first, the index's second, the path
@@ -2386,8 +2405,6 @@ def _carried_material(
         anchors.append(carried)
         items.extend(got)
         states.extend(current_state)
-        for role in roles:
-            used_roles.setdefault(role["id"], dict(role))
         missing.extend(gap for gap in gaps if gap not in missing)
     return tuple(anchors), tuple(items), tuple(missing), tuple(states), tuple(used_roles.values())
 
@@ -3047,6 +3064,7 @@ def _compile_packet(
     # as a name, or in a script with no case, is not asked about at all
     # (`band_yieldable_paths`), which is what keeps a rare name plus the band
     # resolving in any language, and keeps the carry's cost off those turns.
+    carry_missing: tuple[Mapping[str, Any], ...] = ()
     if (
         not anchor
         and not analysis.referential
@@ -3077,8 +3095,11 @@ def _compile_packet(
                 recent_context=recent,
                 visible=visible,
             )
-            if packet is not None:
+            if not packet["abstained"] and any(
+                packet[key] for key in ("units", "pointers", "current_state")
+            ):
                 return packet
+            carry_missing = tuple(packet["missing"])
 
     # The conversation carry, fifth on the ladder: after the recency and
     # follow-up carries above (each returned if it decided), before the
@@ -3385,18 +3406,23 @@ def _compile_packet(
         reached=reached,
         analysis=analysis,
     )
-    missing = (*missing, *({"role": role, "reason": "role_limit"} for role in omitted))
+    missing = (
+        *missing,
+        *({"role": role, "reason": "role_limit"} for role in omitted),
+        *(gap for gap in carry_missing if gap not in missing),
+    )
     # Concurrent contexts: pages the turn named beside what it resolved. An
     # additive read that soft-fails; the resolved anchors' own packet is
     # already complete without it.
     beside_anchors: tuple[dict[str, Any], ...] = ()
     if not anchor and not analysis.referential:
-        beside_anchors, beside_items, beside_missing = _named_beside(
+        beside_anchors, beside_items, beside_missing, roles = _named_beside(
             root,
             turn=turn,
             resolved=lane_anchors,
             analysis=analysis,
             registry=registry,
+            selected_roles=roles,
             purpose=purpose,
             timings=timings,
             index=index,
@@ -3441,6 +3467,7 @@ def _named_beside(
     resolved: Sequence[Any],
     analysis: Any,
     registry: context_roles.RoleRegistry,
+    selected_roles: Sequence[Mapping[str, str]],
     purpose: str | None,
     timings: Any,
     index: working_set_index.WorkingSetIndex | None,
@@ -3448,7 +3475,10 @@ def _named_beside(
     freshness_snapshot: Any,
     lexical_seconds: float,
     visible: Callable[[str], bool] | None = None,
-) -> tuple[tuple[dict[str, Any], ...], tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
+) -> tuple[
+    tuple[dict[str, Any], ...], tuple[LaneItem, ...], tuple[dict[str, Any], ...],
+    tuple[dict[str, str], ...],
+]:
     """The ordinary pages a turn named BESIDE the anchors it resolved.
 
     "Should I book the autumn trip given the course schedule?" resolved the
@@ -3460,8 +3490,9 @@ def _named_beside(
     and neighbourhood, so a turn that names only what it resolved reads
     nothing extra and asks no query at all.
 
-    Soft: an exhausted budget or a page the lanes read nothing off leaves the
-    resolved packet exactly as it was.
+    Soft: an exhausted budget leaves the resolved material intact. A page the
+    lanes read nothing off retains its coverage. Carry lenses use only the
+    packet's remaining role slots.
     """
     consumed: set[str] = set()
     exclude: set[str] = set()
@@ -3482,13 +3513,14 @@ def _named_beside(
     )
     domains, _contested = named_domains(groups, exclude=frozenset(exclude))
     if not domains:
-        return (), (), ()
+        return (), (), (), tuple(dict(role) for role in selected_roles)
     try:
-        carried, items, missing, _state, _roles = _carried_material(
+        carried, items, missing, _state, roles = _carried_material(
             vault_root,
             paths=tuple(path for path, _score in domains),
             analysis=analysis,
             registry=registry,
+            selected_roles=selected_roles,
             purpose=purpose,
             timings=timings,
             index=index,
@@ -3497,12 +3529,12 @@ def _named_beside(
             visible=visible,
         )
     except BudgetExhausted:
-        return (), (), ()
+        return (), (), (), tuple(dict(role) for role in selected_roles)
     # Marked so the packet ranks the resolved anchors' material ahead of what
     # was carried beside them, and so a reader can tell "you named this
     # anchor" from "this was carried because you named it".
     items = tuple(replace(item, provenance={**item.provenance, "carried": True}) for item in items)
-    return tuple(anchor.as_dict() for anchor in carried), items, missing
+    return tuple(anchor.as_dict() for anchor in carried), items, missing, roles
 
 
 def _routing_targets(
