@@ -1,7 +1,7 @@
 # multi-host-writer-lease Specification
 
 ## Purpose
-TBD - created by archiving change add-multi-host-writer-lease. Update Purpose after archive.
+Provide opt-in multi-host coordination so exactly one replica holds a fenced writer lease for a vault while all replicas can serve reads. Leases renew and are taken over automatically, every write-capable command passes one lease gate, and mutations fail closed when ownership cannot be confirmed while reads continue.
 ## Requirements
 ### Requirement: Opt-in multi-host coordination
 Exomem SHALL preserve its current single-host behavior unless writer-lease coordination is explicitly configured. When coordination is enabled, every replica SHALL use a stable vault identifier and a unique replica identifier when requesting authority to mutate the vault.

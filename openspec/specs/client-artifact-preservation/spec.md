@@ -1,7 +1,7 @@
 # client-artifact-preservation Specification
 
 ## Purpose
-TBD - created by archiving change preserve-client-artifacts. Update Purpose after archive.
+Let any client preserve attached artifacts into governed Evidence through one batch `preserve_artifacts` command across MCP, REST, OpenAPI and CLI. It treats download URLs and destination segments as hostile input, persists append-only with truthful per-file outcomes, and retains the upload fallback for clients without attachment handles.
 
 ## Requirements
 

@@ -1,7 +1,7 @@
 # hosted-marketplace-release Specification
 
 ## Purpose
-TBD - created by archiving change productize-hosted-marketplace-release. Update Purpose after archive.
+Define the repository contract for hosted marketplace releases: one canonical public marketplace definition with provider overlays, complete provider review material, secret-free deterministic artifacts, and governed claims about automatic memory. Channel readiness is derived from static validation plus signed live and public-admission evidence.
 ## Requirements
 ### Requirement: Current platform package contract
 The system SHALL render the Hosted OpenAI candidate with its registered package application identity and current connection schema while keeping any provider-issued directory identity outside the existing deterministic package and compatibility pipeline.

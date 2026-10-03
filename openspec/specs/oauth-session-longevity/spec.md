@@ -1,7 +1,7 @@
 # oauth-session-longevity Specification
 
 ## Purpose
-TBD - created by archiving change remove-forced-oauth-expiry. Update Purpose after archive.
+Let OAuth session lifetime follow the provider's capabilities by removing the Exomem-specific forced access-token expiry, while keeping the GitHub account verifier, signing key and shared storage. The public path continues to reject local-ingress sessions.
 
 ## Requirements
 

@@ -1,7 +1,7 @@
 # entity-type-registry Specification
 
 ## Purpose
-TBD - created by archiving change add-vault-entity-type-registry. Update Purpose after archive.
+Let a vault extend the core entity type registry through `_Schema/entity-types.yaml`, with guarded writes that preserve observed types and extension folders materialized only when needed. Audit reports unregistered entity types, and registry loading stays within a bounded latency cost.
 
 ## Requirements
 

@@ -1,7 +1,7 @@
 # machine-local-state-placement Specification
 
 ## Purpose
-TBD - created by archiving change relocate-machine-local-state. Update Purpose after archive.
+Place persistent machine-local state outside the vault, under a per-user, per-vault state root, and migrate it only with explicit offline authority and without loss. Desktop deployment follows an ordered, writer-free transition, and the health surface reports placement without exposing absolute paths.
 ## Requirements
 ### Requirement: Persistent machine-local state lives outside the vault
 

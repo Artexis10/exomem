@@ -1,7 +1,7 @@
 # skill-loading Specification
 
 ## Purpose
-TBD - created by archiving change progressive-skill-loading. Update Purpose after archive.
+Keep the core Exomem skill small and routed by intent, so ordinary recall does not load every product reference. It separates harness-specific tool discovery from Exomem's shared operating rules and loads live policy and capability state through session bootstrap when missing.
 
 ## Requirements
 

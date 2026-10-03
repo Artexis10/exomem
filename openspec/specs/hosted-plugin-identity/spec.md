@@ -1,7 +1,7 @@
 # hosted-plugin-identity Specification
 
 ## Purpose
-TBD - created by archiving change decouple-hosted-plugin-release-identity. Update Purpose after archive.
+Derive the hosted plugin compatibility descriptor and its `compatibility_sha256` from the plugin contract surface rather than the Exomem release. The hosted definition does not pin a release, the running release is still reported in the gateway contract, and promotion evidence binds to contract and package identity.
 ## Requirements
 ### Requirement: Descriptor identity tracks the contract surface
 The system SHALL derive the hosted plugin compatibility descriptor and its

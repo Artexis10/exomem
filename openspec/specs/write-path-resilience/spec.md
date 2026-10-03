@@ -1,7 +1,7 @@
 # write-path-resilience Specification
 
 ## Purpose
-TBD - created by archiving change clear-agent-facing-friction. Update Purpose after archive.
+Keep governed writes resilient on the HA edge: corpus context reuse only when an exact census shows it is sync-safe, a 60-second single-origin budget for mutation-capable MCP calls, and 600-second retention of results for implicit acknowledgement recovery. `remember(validate_only=true)` stays a read-only preview that takes no mutation authority.
 
 ## Requirements
 

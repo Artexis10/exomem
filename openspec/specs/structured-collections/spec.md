@@ -1,7 +1,7 @@
 # structured-collections Specification
 
 ## Purpose
-TBD - created by archiving change add-first-class-records. Update Purpose after archive.
+Provide the shared substrate for human-owned structured collections: Markdown manifests, profile-independent mechanics, three canonical storage strategies (chronological logs, one file per item, datasets), collection-scoped item identity and typed schemas. It defines guarded, idempotent, audited mutation, bounded queries, report-only inspection, and guarded manifest revision and representation migration.
 
 ## Requirements
 

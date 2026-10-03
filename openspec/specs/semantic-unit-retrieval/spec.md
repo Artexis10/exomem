@@ -1,7 +1,7 @@
 # semantic-unit-retrieval Specification
 
 ## Purpose
-TBD - created by archiving change add-epistemic-loop-primitives. Update Purpose after archive.
+Expose a semantic unit's governed `verdict` and `check_by` metadata on retrieval hits. A verdict is state only: it does not change ranking, mark supersession or exempt a unit from page-status inheritance.
 ## Requirements
 ### Requirement: Unit Hits Carry Governed Metadata
 A semantic-unit hit SHALL expose the unit's governed `verdict` and `check_by` metadata when present and SHALL omit those keys when absent, so a caller can tell a judged unit from an unjudged one without re-reading the parent page. The governed egress projector SHALL register both fields, and the compact unit projection SHALL carry `verdict` when present so the default result shape distinguishes a refuted unit at a glance.

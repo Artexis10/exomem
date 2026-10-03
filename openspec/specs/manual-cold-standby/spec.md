@@ -1,7 +1,7 @@
 # manual-cold-standby Specification
 
 ## Purpose
-TBD - created by archiving change add-manual-cold-standby. Update Purpose after archive.
+Define an opt-in, default-off manual cold-standby profile driven by one PowerShell operator command with `Configure`, `Status`, `Activate` and `Handoff`. Activation fails closed on unsafe evidence and keeps a single active service behind one stable hostname routed through two named tunnels.
 ## Requirements
 ### Requirement: Cold standby is explicit and default-off
 
