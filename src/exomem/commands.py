@@ -52,6 +52,7 @@ from . import append_to_file as append_to_file_module
 from . import attention as attention_module
 from . import audit as audit_module
 from . import audit_fix as audit_fix_module
+from . import bootstrap_core as bootstrap_core_module
 from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
@@ -70,9 +71,8 @@ from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import envelope as envelope_module
 from . import episode_memory as episode_memory_module
-from . import episode_workflow as episode_workflow_module
-from . import bootstrap_core as bootstrap_core_module
 from . import episode_nudge as episode_nudge_module
+from . import episode_workflow as episode_workflow_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
@@ -828,16 +828,16 @@ def op_bootstrap(
     skill_contract: str | None = None,
     section: str | None = None,
 ) -> dict:
-    """Return Exomem's versioned operating contract and live session state.
+    """Return Exomem's versioned API contract and live account settings.
 
-    Call this when current live state is missing. A client with the installed
-    Exomem skill uses session with its metadata skill-contract digest; generic
-    clients or those missing the rules use compact, full, or diagnostics to
-    learn tool use: when to search, when to save, how to interpret scoped
-    misses, which `find` knobs are cheap vs diagnostic, how compiled notes
-    differ from raw sources/evidence, and how Exomem differs from built-in AI
-    memory. The payload is deterministic instruction plus local compute policy
-    and product-surface metadata; it does not inspect or summarize vault content.
+    Use when the connected account's engagement settings or available
+    capabilities are unknown or have changed. A client with the installed
+    Exomem skill uses session with its metadata skill-contract digest; compact,
+    full, and diagnostics also document Exomem's operations, search defaults,
+    scoped misses, and the distinction between compiled knowledge and raw
+    sources/evidence. The response describes this service's API and configured
+    engagement; it does not configure the host assistant or its built-in memory,
+    inspect vault content, or authorize an operation beyond the user's scope.
     Compact is a core; its `sections` block lists the rest, fetched with `section`.
 
     Args:
@@ -1609,11 +1609,12 @@ def op_bootstrap(
         "epistemic_contract": epistemic_contract,
         "memory_model": {
             "built_in_ai_memory": (
-                "Use as short-term or behavioural memory for user preferences, working "
-                "rules, routing instructions, and current working context."
+                "Assistant-native memory is separate, host-managed storage for "
+                "preferences, working rules, routing, and working context. "
+                "Exomem neither reads nor configures it."
             ),
             "exomem": (
-                "Use as long-term governed memory for durable governed knowledge: "
+                "Exomem stores long-term durable governed knowledge: "
                 "sources, proof/evidence, history, decisions, records, review, and "
                 "compiled conclusions."
             ),
@@ -6317,8 +6318,11 @@ def op_activate_context(
     or send full conversation history. Optional earlier excerpts are only for
     resolving a reference the current message cannot identify on its own.
 
-    Get or reuse `bootstrap` live engagement and capabilities first. Call this
-    ONCE when that policy warrants recall, before deciding what to search for.
+    Retrieve initial context when the account's configured engagement calls for
+    recall, including proactive recall without an explicit reference to prior work.
+    `bootstrap` reports those settings when they are unknown or have changed;
+    existing current settings can be reused. One call supplies the initial context
+    for the message before a more specific search is needed.
     Pass the user's current turn verbatim — this is not a search query and
     must not be rewritten into one. Do not send full conversation history;
     optional context is limited to relevant earlier excerpts. It returns a bounded
