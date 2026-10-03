@@ -5,14 +5,14 @@ Make server administration independent of changing home IP addresses through a s
 ## ADDED Requirements
 
 ### Requirement: Administration policy has one shared source
-Organisation-owned servers SHALL use a versioned shared administration policy and enrollment role. Product repositories SHALL consume that source without independently maintained copies. Adoption SHALL identify the exact intended tailnet, server identity, tag ownership and authorised administrator devices before enrollment. An executing client being connected to a tailnet MUST NOT establish the intended server enrollment identity.
+Organisation-owned servers SHALL use a versioned shared administration policy and enrollment role. NetBird Cloud SHALL be the initial organisation administration provider; its selected account and plan SHALL be verified before enrollment. Product repositories SHALL consume that source without independently maintained copies. Adoption SHALL identify the exact account, server identity, peer-group ownership and authorised administrator devices before enrollment. An executing client being connected to a VPN MUST NOT establish the intended server enrollment identity. NetBird SHALL also become the owner-device VPN standard through staged migration of phone, workstation and Moshi connections. Existing Tailscale dependencies SHALL remain available until their replacement workflows pass. Administrator, server and personal-service groups SHALL retain separate explicit access rules; common VPN membership MUST NOT imply unrestricted access.
 
 #### Scenario: Tailnet identity is unresolved
 - **WHEN** an operator cannot establish the intended tailnet and enrollment authority
 - **THEN** enrollment remains held and the existing managed administration route remains available
 
 ### Requirement: Tailnet transport preserves managed SSH authentication
-Routine administration SHALL use ordinary OpenSSH over the tailnet with the canonical Bitwarden-managed SSH identity and verified host pin. Password-based network authentication MUST remain disabled. Tailscale SSH interception MUST NOT be enabled by this adoption. Server tags and least-privilege network policy SHALL admit authorised administration sources to the intended port and deny unauthorised sources. Enrollment credentials and daemon state MUST remain private; secrets MUST NOT appear in command arguments, task output or repository content.
+Routine administration SHALL use ordinary OpenSSH over the selected private mesh with the canonical Bitwarden-managed SSH identity and verified host pin. Password-based network authentication MUST remain disabled. Provider SSH interception or a separate provider SSH server MUST NOT be enabled by this adoption. Explicit server peer groups and least-privilege network policy SHALL admit authorised administration sources to the intended port and deny unauthorised sources; a default allow-all policy MUST NOT defeat those restrictions. Enrollment credentials and daemon state MUST remain private; secrets MUST NOT appear in command arguments, task output or repository content. Successful enrollment/configuration commands MUST NOT substitute for live account/peer identity and effective configuration evidence.
 
 #### Scenario: An administrator connects over the VPN
 - **WHEN** an authorised administrator uses the managed server profile after adoption
@@ -24,6 +24,13 @@ Routine administration SHALL use ordinary OpenSSH over the tailnet with the cano
 
 ### Requirement: Enrollment does not change application routing
 The administration role MUST NOT advertise subnet or exit-node routes, accept unrelated subnet routes, change host DNS management or migrate database/application traffic as an enrollment side effect. Application endpoints and existing private connectivity SHALL remain unchanged.
+
+#### Scenario: Existing device connectivity survives staged migration
+- **WHEN** company administration and owner-device connections migrate from Tailscale to NetBird
+- **THEN** actual address, route and DNS checks plus fresh personal-service and managed-server connections prove each replacement workflow
+- **AND** desktop coexistence and mobile tunnel switching are checked on their adopted platforms, without requiring two active phone VPN tunnels
+- **AND** each Tailscale dependency is retired only after its NetBird replacement passes
+- **AND** the existing managed SSH command and its key/host pin remain usable without manually choosing a VPN for every connection
 
 #### Scenario: A control host joins the tailnet
 - **WHEN** the control host is enrolled for administration
