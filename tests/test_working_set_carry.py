@@ -1180,8 +1180,9 @@ def test_a_carried_page_with_no_readable_units_abstains(
     assert packet["abstained"] is True
     assert packet["abstention"] == {"reason": "unresolved"}
     assert packet["units"] == []
-    assert packet["anchors"] == []
-    assert "carried_by" not in packet["generation"]
+    assert [a["path"] for a in packet["anchors"]] == [CARRY_PAGE]
+    assert {"role": "x", "reason": "no_material"} in packet["missing"]
+    assert packet["generation"]["carried_by"] == "retrieval"
 
 
 def test_a_carried_page_serves_each_of_its_units_once(

@@ -7779,27 +7779,38 @@ class LexicalStore:
         recall_checkpoint: Any | None = None,
         allow_delta: bool = True,
         allowed_parent_paths: set[str] | None = None,
+        excluded_categories_by_parent: dict[str, list[str]] | None = None,
+        query_units: list | None = None,
+        term_budget: QueryTermBudget | None = None,
     ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
-        """Typed exact category/kind unit query; never used for content-only lanes."""
-        if not (categories or kinds or clauses):
+        """Ready-catalogue unit query, optionally ranking bounded material terms."""
+        if not (categories or kinds or clauses or query_units):
             return CatalogQueryResult(
                 None, CatalogReadiness("unsupported", False, backend())
             )
+
+        def query(conn: sqlite3.Connection) -> list[SemanticUnitLexicalHit]:
+            tokens: list[str] = []
+            if query_units is not None and term_budget is not None:
+                measured = [stem for unit in query_units for stem in unit.stems]
+                frequencies, pages = self._catalogue_term_frequencies(conn, measured, scope)
+                kept, _counted, _dropped = select_query_units(
+                    query_units, frequencies, pages, term_budget,
+                )
+                tokens = list(dict.fromkeys(stem for unit in kept for stem in unit.stems))
+                if not tokens:
+                    return []
+            return self._semantic_unit_query(
+                conn, tokens, k, categories, kinds, scope, allowed_unit_refs,
+                literal_tokens, dnf_clauses=clauses,
+                allowed_parent_paths=allowed_parent_paths,
+                excluded_categories_by_parent=excluded_categories_by_parent,
+            )
+
         return self._serve_from_ready_catalog_result(
             scope,
             freshness,
-            lambda conn: self._semantic_unit_query(
-                conn,
-                [],
-                k,
-                categories,
-                kinds,
-                scope,
-                allowed_unit_refs,
-                literal_tokens,
-                dnf_clauses=clauses,
-                allowed_parent_paths=allowed_parent_paths,
-            ),
+            query,
             "lexical semantic-unit sidecar failed (%s); unit retrieval degrades",
             recall_checkpoint=recall_checkpoint,
             allow_delta=allow_delta,
@@ -7818,6 +7829,7 @@ class LexicalStore:
         dnf_clauses: tuple | None = None,
         *,
         allowed_parent_paths: set[str] | None = None,
+        excluded_categories_by_parent: dict[str, list[str]] | None = None,
     ) -> list[SemanticUnitLexicalHit]:
         col = "in_vault" if scope == "vault" else "in_kb"
         clauses = [f"u.{col} = 1"]
@@ -7843,6 +7855,13 @@ class LexicalStore:
         if allowed_parent_paths is not None:
             clauses.append("u.parent_path IN (SELECT value FROM json_each(?))")
             params.append(json.dumps(sorted(allowed_parent_paths), ensure_ascii=False))
+        if excluded_categories_by_parent is not None:
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM json_each(?) AS parent "
+                "JOIN json_each(parent.value) AS category "
+                "WHERE parent.key = u.parent_path AND category.value = u.category)"
+            )
+            params.append(json.dumps(excluded_categories_by_parent, ensure_ascii=False))
         columns = (
             "u.record_type, u.unit_ref, u.parent_path, u.parent_ref, "
             "u.parent_generation, u.parent_source_hash, u.parser_version, u.form, "
