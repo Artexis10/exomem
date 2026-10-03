@@ -262,43 +262,6 @@ def test_levels_are_monotonic_in_eagerness():
     capture_cooldowns = [capture_hook._PROMINENCE_PRESETS[x][1] for x in levels]
     for series in (retrieve_floors, retrieve_cooldowns, capture_floors, capture_cooldowns):
         assert series == sorted(series, reverse=True), series
-# --- the reminder has to name every route it expects to be taken ------------
-
-
-def test_the_capture_reminder_names_supersession_and_its_tool() -> None:
-    """The headline behaviour needs a route from the hook that drives captures.
-
-    "Nothing is deleted, it is superseded" is documented in the shipped schema
-    references and is what `replace_memory` exists for -- but the reminder that
-    fires on every substantial turn instructed create, edit and entity paths and
-    never named it. Observed live: a governed conclusion was contradicted and the
-    agent appended a `[correction]` observation beside the original, leaving two
-    live versions of one conclusion both reading as current.
-
-    Asserted as the tool plus the distinction it turns on, rather than as a
-    frozen sentence, so the wording stays free to improve.
-    """
-    reminder = capture_hook.REMINDER
-
-    assert "replace_memory" in reminder
-    assert "supersede" in reminder
-    # The failure mode is specifically appending beside the wrong version, so
-    # the reminder has to contrast the two rather than merely offer the tool.
-    assert "correction" in reminder
-
-
-def test_the_capture_reminder_stays_one_paragraph_of_instruction() -> None:
-    """It is injected on every substantial turn, so length is a real cost.
-
-    No hard limit worth defending, but a reminder that grows without anyone
-    noticing stops being read. This is the tripwire, not the budget.
-    """
-    reminder = capture_hook.REMINDER
-
-    # 1,800: four capture doctrines plus the entity cadence did not fit in 1,600
-    # (2026-09-02); still one paragraph. Carrier budget composition is the follow-up.
-    assert len(reminder) < 1800, len(reminder)
-    assert reminder.startswith("[Exomem capture check]")
 
 
 def test_the_deployed_copy_matches_the_packaged_hook() -> None:

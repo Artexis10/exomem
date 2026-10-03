@@ -620,7 +620,7 @@ def fault_reason(proc: _ProcLike, transcript: Transcript) -> str | None:
 
 
 def _capture_nudge_prefix() -> str:
-    """The reminder's opening line, imported from the hook that emits it.
+    """The capture check's opening tag, imported from the hook that emits it.
 
     Imported rather than restated: a literal here could drift from the text the
     product actually writes, and the counter would then report zero firings for
@@ -628,9 +628,9 @@ def _capture_nudge_prefix() -> str:
     one that never nudged at all.
     """
 
-    from exomem._hooks.exomem_capture_nudge import REMINDER
+    from exomem._hooks.exomem_capture_nudge import REMINDER_SHORT
 
-    return REMINDER.split(".", 1)[0]
+    return REMINDER_SHORT.split("]", 1)[0] + "]"
 
 
 def count_hook_activity(stdout: str) -> tuple[int, int]:

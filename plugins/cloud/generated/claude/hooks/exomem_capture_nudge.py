@@ -131,52 +131,22 @@ _KB_WRITE = re.compile(
     re.I,
 )
 
-REMINDER = (
-    "[Exomem capture check] Reuse evidence; skip transient code/test/CI. "
-    "Capture durable outcomes per live policy. "
-    "Decompose before routing; open notes have no priority. Keep hypotheses attributed/uncertain. "
-    "Check coverage once/episode. Stable preference/recurring routine/historical baseline/"
-    "durable affiliation needs stability or recurrence plus reusable comparison/interpretation/decision value; "
-    "fleeting/one-off/incidental/trivial/tentative: quiet. At balanced/maximal, "
-    "after primary work, before the final response, "
-    'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once per session; '
-    "no local scan; no model. Active agent uses active entity registry/selected knowledge packs: "
-    'connect_memory(operation="resolve-entity"); stop on ambiguity; single incidental mention stays '
-    "in context. Uniquely resolved Entity: narrow additive entity facet, else concise compiled "
-    "observation/proactive_capture; "
-    "affiliation relation/link_acceptance; compatible Records only. Hydrate: edit_memory first; else "
-    'connect_memory(operation="create-entity") only for identity stable, and central or recurring: '
-    "proactive_capture. Merge/substantial curation: confirmed "
-    "restructure_execution. Recheck on confirmed batch terminal receipt; closure-only eighth recheck. "
-    "Distil; no transcripts. replace_memory supersedes contradicted "
-    "conclusions, not corrections beside them. Stated intent -> "
-    "Planning/plan_memory; observed outcome -> Records/record_memory. Generated draft stays "
-    "ephemeral; selected is not write consent: proactive_capture keeps exact Source/Evidence bytes "
-    "by role, not MIME. No handle: non-committing handoff; delivery needs Evidence receipt/Record; "
-    "no remote byte inference. No schema: "
-    "structural_suggestions/restructure_execution; relations: link_acceptance. Else/no "
-    "Knowledge Base: stop."
-)
-
-
-#: The short capture check, sent on every fire after a session's first (which carries
-#: the full `REMINDER`, once, and again after a compaction). The full doctrine is in
-#: the served core and in `REMINDER`; a fire that repeats it dozens of times in one
-#: session only spends context. Keeps the incident rules by name.
+#: The capture check, one short line on every fire. It names the rules that prevent known
+#: incidents and points at where the full capture rules live: the shipped engagement
+#: reference, which `read_memory` opens from the vault (`exomem init` deploys it there).
+#: The hook is structural; it does not carry the doctrine.
 REMINDER_SHORT = (
-    "[Exomem capture check] Capture a durable decision, outcome or stable fact per live "
-    "policy: distil, no transcripts; replace_memory supersedes a contradicted conclusion; "
-    "stated intent -> Planning/plan_memory, observed outcome -> Records/record_memory; "
-    "transient code/test/CI stays out. Nothing durable: stop."
+    "[Exomem capture check] Per live policy: no transcripts; replace_memory supersedes a "
+    "contradicted conclusion; intent->Planning/plan_memory, outcome->Records/record_memory; "
+    "no transient code/test/CI; nothing durable: stop. "
+    "Rules: read_memory .exomem/schema/references/engagement.md"
 )
 
-#: The episode ask. Its own constant, so `REMINDER`'s bytes (and every pin on
-#: them) stay exactly as they were. `{key}` is the session's episode key.
+#: The episode ask. `{key}` is the session's episode key.
 EPISODE_ASK = (
-    "[Exomem episode check] If the conversation reached a decision or a stopping point, "
-    'call episode_memory once: action="record", episode="{key}", a one-line subject and '
-    "summary, short worked_on, decided and open items; said only for a user statement worth "
-    "keeping verbatim. Distil; no transcript. Otherwise do nothing."
+    "[Exomem episode check] Decision or stopping point reached? episode_memory once: "
+    'action="record", episode="{key}", subject, summary, short worked_on/decided/open items. '
+    "Otherwise do nothing."
 )
 #: The candidate-coverage ask (task 4.1), with its own prefix. `{key}` is the
 #: episode whose candidates the session prepared, `{next}` its ledger's next step.
@@ -1221,12 +1191,7 @@ def _log(text: str) -> None:
 
 def _capture_reason(reason: str) -> str:
     if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
-        return (
-            "Through the admitted Exomem native MCP, bootstrap if the live operating "
-            "contract is absent and check live capture capabilities first. "
-            "If not connected or capture is unavailable, skip this reminder; "
-            "do not assume writes are available.\n\n" + reason
-        )
+        return "Skip if Exomem is not connected or cannot capture; bootstrap first if no contract.\n" + reason
     return reason
 
 
@@ -1319,12 +1284,9 @@ def main(argv: list[str] | None = None) -> int:
     if not ok:  # fired recently this session — keep cost bounded
         return 0
 
-    # The full doctrine once per session (the stamp is cleared on compaction, which
-    # rewrites the context it lived in); every later fire is the short check.
-    first_fire = not stamp.exists()
     _touch(stamp)
     _log(assistant_text)
-    print(json.dumps({"decision": "block", "reason": _capture_reason(REMINDER if first_fire else REMINDER_SHORT)}))
+    print(json.dumps({"decision": "block", "reason": _capture_reason(REMINDER_SHORT)}))
     return 0
 
 
