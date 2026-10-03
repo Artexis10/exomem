@@ -152,8 +152,9 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
         shutil.copyfile(root / "plugins/cloud/assets/icon.svg", assets / "icon.svg")
         shutil.copyfile(root / "LICENSE", target / "LICENSE")
         readme = (
-            "# Exomem Cloud\n\n"
-            "Exomem Cloud gives assistants governed long-term memory across conversations. "
+            f"# {definition['display_name']}\n\n"
+            "Exomem gives assistants governed long-term memory across conversations "
+            "through its hosted service. "
             "It keeps original sources and evidence separate from compiled conclusions, "
             "and connects related knowledge without treating a summary as its source. "
             "The bundled skills explain recall, continuity, capture and review. "
