@@ -37,9 +37,10 @@
 #
 # Lanes: units (semantic units by category), records (Records collection items),
 # planning (active Planning items), entity (entity/profile page facets),
-# graph (typed neighbourhood), evidence (pointers only, never bodies).
+# graph (typed neighbourhood), evidence (pointers only, never bodies),
+# material (query-matched knowledge no other effective role owns).
 #
-# Anchor kinds: entity, resource, hub, collection, plan, project.
+# Anchor kinds: entity, resource, hub, collection, plan, project, page (carried only).
 #
 # EVIDENCE: most cues only SELECT a role (a lens to run). A cue also listed
 # in `evidence_cues` may additionally make its role's `evidence_categories`
@@ -116,6 +117,13 @@ roles:
     cues: ["i'm planning", "im planning", "planning to", "next", "should i"]
     evidence_cues: ["i'm planning", "im planning", "planning to", "how should i", "should i"]
     evidence_categories: [action]
+
+  material:
+    description: Relevant knowledge beyond the categories owned by other roles.
+    lane: material
+    categories: []
+    anchor_defaults: [project, hub, page]
+    cues: []
 
   methods:
     description: Reusable approaches and designs that apply here.
