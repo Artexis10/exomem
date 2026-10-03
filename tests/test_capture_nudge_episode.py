@@ -108,8 +108,16 @@ def _is_episode_ask(result: dict | None) -> bool:
     return bool(result) and result["reason"].startswith("[Exomem episode check]")
 
 
-def _stops(monkeypatch, capsys, tmp_path, count: int) -> list[dict | None]:
-    transcript = _transcript(tmp_path, SUBSTANTIVE)
+def _stops(monkeypatch, capsys, tmp_path, count: int, *, landed: bool = True) -> list[dict | None]:
+    """`count` substantive Stops. By default each turn also lands work (and saves a
+    note, which keeps the per-turn capture reminder out of the way), because the
+    episode ask needs a landing; `landed=False` is the same turns with none."""
+    if landed:
+        transcript = _claude_turn(
+            tmp_path, SUBSTANTIVE, PUSH, ("mcp__exomem__remember", {"text": "note"}, False), name="landed.jsonl"
+        )
+    else:
+        transcript = _transcript(tmp_path, SUBSTANTIVE)
     return [_stop(monkeypatch, capsys, transcript) for _ in range(count)]
 
 
@@ -141,7 +149,9 @@ def test_the_key_survives_a_simulated_compaction(
     k, cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
     first = _stops(monkeypatch, capsys, tmp_path, k)[-1]
     monkeypatch.setattr(hook.time, "time", lambda: 10**12)
-    compacted = _transcript(tmp_path, "Summary of the earlier conversation. " + "y" * 400, name="c.jsonl")
+    compacted = _claude_turn(
+        tmp_path, "Summary of the earlier conversation. " + "y" * 400, PUSH, name="c.jsonl"
+    )
     second = _stop(monkeypatch, capsys, compacted)
 
     assert _is_episode_ask(first) and _is_episode_ask(second)
@@ -1270,3 +1280,107 @@ def test_landing_commands_are_recognised(command: str) -> None:
 )
 def test_other_commands_are_not_landings(command: str) -> None:
     assert not hook._landing_command(command)
+
+
+# --- the episode ask needs a landing since the last ask or record -------------
+
+
+def _landing_turn(tmp_path: Path, shape: str) -> Path:
+    if shape == "claude":
+        return _claude_turn(tmp_path, "Pushed.", PUSH, name="landing.jsonl")
+    return _codex_turn(tmp_path, shape, "cd /repo && git commit -am 'fix' && git push")
+
+
+def test_a_session_that_never_lands_work_is_never_asked(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(hook.time, "time", lambda: clock["now"])
+    for _ in range(4):
+        assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k + 2, landed=False))
+        clock["now"] += 24 * 3600
+
+
+@pytest.mark.parametrize("shape", ["claude", "exec-cell", "exec-command"])
+def test_a_landing_makes_the_due_ask_fire(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, shape: str
+) -> None:
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k, landed=False))
+
+    assert _is_episode_ask(_stop(monkeypatch, capsys, _landing_turn(tmp_path, shape)))
+
+
+def test_a_landing_before_the_cadence_is_due_waits_for_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    assert _stop(monkeypatch, capsys, _claude_turn(tmp_path, "Pushed.", PUSH, name="early.jsonl")) is not None
+    results = _stops(monkeypatch, capsys, tmp_path, k, landed=False)
+    assert not any(_is_episode_ask(r) for r in results[:-1])
+    assert _is_episode_ask(results[-1])
+
+
+def test_an_ask_answered_without_a_record_waits_for_a_new_landing(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    k, cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(hook.time, "time", lambda: clock["now"])
+    assert _is_episode_ask(_stops(monkeypatch, capsys, tmp_path, k)[-1])
+
+    for _ in range(3):
+        clock["now"] += cooldown
+        assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, 3, landed=False))
+
+    assert _is_episode_ask(_stops(monkeypatch, capsys, tmp_path, 1)[-1])
+
+
+def test_a_landing_on_the_asking_turn_does_not_count_twice(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The continuation that answers the ask re-reads the same turn, landing included."""
+    k, cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(hook.time, "time", lambda: clock["now"])
+    landed = _claude_turn(tmp_path, SUBSTANTIVE, PUSH, ("mcp__exomem__remember", {"text": "n"}, False))
+    _stops(monkeypatch, capsys, tmp_path, k - 1, landed=False)
+    assert _is_episode_ask(_stop(monkeypatch, capsys, landed))
+    assert _stop(monkeypatch, capsys, landed, active=True) is None
+
+    clock["now"] += cooldown
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, 2, landed=False))
+
+
+def test_a_record_covers_the_landings_before_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    _stops(monkeypatch, capsys, tmp_path, k - 1)  # landed, not yet due
+    assert not _is_episode_ask(_stop(monkeypatch, capsys, _recorded_transcript(tmp_path, "rec.jsonl")))
+
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k + 1, landed=False))
+    results = _stops(monkeypatch, capsys, tmp_path, 1)
+    assert _is_episode_ask(results[-1])
+
+
+def test_a_record_made_in_the_continuation_covers_the_landings_before_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    assert _stop(monkeypatch, capsys, _claude_turn(tmp_path, "Pushed.", PUSH, name="early.jsonl")) is not None
+    _stop(monkeypatch, capsys, _recorded_transcript(tmp_path, "rec.jsonl"), active=True)
+
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k + 2, landed=False))
+
+
+def test_a_revision_recorded_through_the_rest_door_covers_the_landings_before_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    count = _counting_door(monkeypatch)
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    count["n"] = 1  # another door recorded; the hook has not seen it yet
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k))  # re-base on the due check
+
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k + 2, landed=False))
