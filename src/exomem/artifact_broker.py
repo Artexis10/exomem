@@ -180,7 +180,7 @@ class ArtifactBroker:
             raise _refusal()
         try:
             parsed = json.loads(body)
-        except (ValueError, UnicodeError) as error:
+        except (ValueError, UnicodeError, RecursionError) as error:
             raise _refusal() from error
         if not isinstance(parsed, dict):
             raise _refusal()
