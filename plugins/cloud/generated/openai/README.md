@@ -1,10 +1,18 @@
 # Exomem
 
-Exomem gives assistants governed long-term memory across conversations through its hosted service. It keeps original sources and evidence separate from compiled conclusions, and connects related knowledge without treating a summary as its source. The bundled skills explain recall, continuity, capture and review. Connect the remote MCP server through your provider's authorization flow. The live bootstrap response determines available tools and current policy.
+Keep what matters from your conversations and find it again when you need it. Exomem lets you save useful information, pick up a project in a new chat, and revisit what you decided and why. Ask in your own words; you do not need to organise folders or learn special commands. Connect your Exomem account to use the same saved knowledge across supported assistants. Answers can point back to the notes and sources they draw on, and you control how actively Exomem helps.
 
 ## Getting started
 
-Connect your existing Exomem Cloud account through OAuth. Use the bundled Exomem skill to call `bootstrap`, then `activate_context` with the raw user turn when context is needed. Reuse context already supplied for this turn; do not activate twice. The same canonical skills govern recall, capture and review on every supported surface. Workflow skills are user-invocable; separate commands and agents are not required copies of those workflows.
+Install the plugin and connect your Exomem account. Check the account shown on the sign-in page before approving access. Then chat normally. When something is worth keeping, ask Exomem to remember it; in a new chat, ask about what you saved or where you left off.
+
+For example:
+
+- "Remember this for next time."
+- "Where did we leave off with my project?"
+- "What did we decide, and why?"
+
+Give the assistant the information to save or name the project you mean. Exomem can also help during ordinary work according to your chosen settings. It does not automatically import every old conversation.
 
 ## Data handling
 
