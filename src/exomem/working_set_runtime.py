@@ -854,7 +854,12 @@ def ensure_index(
                     log.warning("activation index inline build failed", exc_info=True)
                     return UNAVAILABLE, None, False
         return READY, index, False
-    if freshness_stamp and index.freshness_stamp() != freshness_stamp:
+    from . import project_keys
+
+    registry_changed = (
+        index.project_registry_hash() != project_keys.load_project_registry(root).content_hash
+    )
+    if registry_changed or (freshness_stamp and index.freshness_stamp() != freshness_stamp):
         refreshed = refresh_index(index, freshness_stamp=freshness_stamp)
         return READY, index, not refreshed
     if _managed():
@@ -1642,11 +1647,11 @@ def refresh_index(index: working_set_index.WorkingSetIndex, *, freshness_stamp: 
         _schedule_build(index.vault_root, freshness_stamp=freshness_stamp)
         return False
     try:
-        index.update(freshness_stamp=freshness_stamp or None)
+        result = index.update(freshness_stamp=freshness_stamp or None)
     except Exception:  # noqa: BLE001 - staleness is reported, never raised
         log.debug("activation index refresh failed", exc_info=True)
         return False
-    return True
+    return not (result.get("unavailable") or result.get("disabled"))
 
 
 def _managed() -> bool:
@@ -1888,7 +1893,9 @@ def serve(
     from .governance import egress
 
     cacheable = (
-        egress.restricted_release_filter(root, purpose=purpose) is None and not with_conversation
+        egress.restricted_release_filter(root, purpose=purpose) is None
+        and not with_conversation
+        and not index_stale
     )
     with _CACHE_LOCK:
         cached = _PACKET_CACHE.get(cache_identity) if cacheable else None
