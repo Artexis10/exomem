@@ -8,6 +8,9 @@ from pathlib import Path
 from .. import semantic_contract, semantic_language_registry, vault
 from . import catalog_publication, projected_graph
 
+EXTRACTOR_VERSION = "projected-graph-v1"
+MODEL_VERSION = "graph-schema-v1"
+
 
 class GraphProducerError(RuntimeError):
     """A planned Markdown batch cannot produce an exact graph successor."""

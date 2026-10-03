@@ -283,6 +283,22 @@ and interruption semantics, without promising cross-file power-loss atomicity.
 - **THEN** public page, raw, unit-context and projection output do not disclose that block's input references, versions, counts, attribution or reasons
 - **AND** the canonical page and its drift guard remain unchanged, while a redacted response does not claim exact raw content
 
+#### Scenario: A projector upgrade refreshes stored origin representations
+
+- **WHEN** the owner explicitly proposes an empty document mapping through the existing governance proposal operation against an obsolete active projector
+- **THEN** preparation reads the exact active immutable policy and every canonical catalog item, including low-only and zero-variant items, and stages the running projector's complete namespace and required vector, CLIP and graph measurement families
+- **AND** commit publishes through the existing tuple owner with a new policy-generation identity, unchanged policy fingerprint and unchanged catalog generation when the descriptor is unchanged
+- **AND** canonical bytes, pending authoring workspace, unchanged grant identities/status/expiry/applicability, concurrent grant lifecycle and historical receipts remain intact
+- **AND** omitted documents are invalid, while an already-current empty-document refresh reports no refresh required and publishes nothing
+
+#### Scenario: Obsolete stored representations cannot be served during refresh
+
+- **WHEN** an upgrade starts or a warm runtime encounters an obsolete projector, or a committed refresh awaits runtime installation
+- **THEN** content serving remains unavailable with content-free pending readiness, without crashing the service, rebuilding in a query or substituting predecessor fields
+- **AND** the authorized owner refresh operation remains reachable and runtime activation occurs outside the query after publication acknowledgement
+- **AND** missing required measurements leave the predecessor tuple unchanged; interruption recovers only an exact receipt-proven publication without rerunning pinned measurements
+- **AND** old uncommitted projector proposals require fresh preparation, while committed historical receipts retain exact replay and recovery
+
 #### Scenario: An earlier input changes during a multi-input carrier read
 
 - **WHEN** an earlier retained input changes or loses permission while a later input is being resolved

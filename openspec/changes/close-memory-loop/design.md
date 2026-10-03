@@ -293,6 +293,46 @@ content: omit the raw representation and retain existing exact-read refusal
 rules and canonical drift guards. Source capture text is still raw evidence,
 not a designated managed origin block.
 
+##### Origin-aware projector refresh
+
+A projector change requires fresh canonical search fields for every active
+catalog item, including items with only low-disclosure or no serving variants.
+Do not derive the new fields from a predecessor excerpt. Reuse the existing
+catalog preparation and vector, CLIP and graph measurement owners; retain all
+required measurement families under the new variant identities. Managed origin
+comments are not ordinary graph links. Immutable historical namespace schemas
+remain readable for preparation and receipt recovery, but obsolete projector
+versions are not eligible for current serving or fresh content publication.
+
+An owner explicitly proposing `documents={}` through `govern_memory` prepares a
+representation-only refresh from the exact active immutable policy; omitted
+documents remain invalid. This does not overlay or mirror pending workspace
+policy. Commit uses the existing policy-generation publisher and complete tuple
+CAS: a new policy-generation identity, the same policy fingerprint, the running
+projector version, and the same catalog generation when its descriptor is
+unchanged. An already-current representation reports that no refresh is needed,
+without a new proposal or generation. Ordinary policy proposals also prepare
+fresh fields under the running projector. No new mutation executor is added.
+
+Representation-only refresh preserves grants through an explicit bound proposal
+mode, not by reinterpreting legacy missing grant-transition data. This is allowed
+only for unchanged policy bytes/fingerprint and catalog authority bindings;
+concurrent grant lifecycle changes remain authoritative. Changed policy or
+membership retains ordinary dependent-grant review. Commit verifies the complete
+staged namespace and measurement roots without rerunning models. A committed
+predecessor receipt recovers its exact original publication; an uncommitted old
+projector proposal requires fresh preparation rather than silent conversion.
+
+Runtime installation happens outside queries after publication and registry
+acknowledgement. Until a compatible representation is installed, content serving
+reports content-free pending readiness while the owner refresh operation remains
+reachable; startup must not crash or silently use old fields. This prevents stale
+origin metadata from being served. A wrong firing costs temporary content
+unavailability to the reader and bounded refresh work to the owner, never a
+human reapproval of unchanged grants. Release compatible writers first, refresh
+through this owner, then activate the runtime; rollback does not relabel old
+derived data as current.
+
 Retain the complete bounded set of input proofs through a carrier read. After
 initial resolution, run one final sweep through the shared snapshot release and
 exact-text checks, requiring unchanged full frontmatter; then refresh a verified

@@ -108,7 +108,11 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     log.info("vault=%s source_types=%s", vault_root, source_schema.source_types)
 
     project_keys_hint = project_keys.keys_hint(vault_root)
-    projection_runtime.preactivate_projection_runtime(vault_root)
+    try:
+        projection_runtime.preactivate_projection_runtime(vault_root)
+    except projection_runtime.ProjectionRuntimeUnavailable:
+        # The projected content boundary stays closed while owner repair serves.
+        log.warning("governed projected retrieval is unavailable")
     _start_metrics_persistence()
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     return ServerRuntime(
@@ -362,8 +366,8 @@ class LocalRuntimeActivation:
             name="exomem-vocabulary-recovery",
             daemon=True,
         )
-        self.vocabulary_recovery = thread
         thread.start()
+        self.vocabulary_recovery = thread
 
     def _start_recall_reembed(self, vault_root: Path) -> None:
         """Bring the recall sidecar into the recall encoder's space, off-request.
@@ -496,7 +500,10 @@ def _initialize_locked_hosted_runtime(
 
     source_schema = schema.load_source_schema(vault_root)
     project_keys_hint = project_keys.keys_hint(vault_root)
-    projection_runtime.preactivate_projection_runtime(vault_root)
+    try:
+        projection_runtime.preactivate_projection_runtime(vault_root)
+    except projection_runtime.ProjectionRuntimeUnavailable:
+        log.warning("governed projected retrieval is unavailable")
     log.info(
         "hosted_cell=%s source_types=%s",
         config.cell_id,

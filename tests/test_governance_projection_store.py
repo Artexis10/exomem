@@ -101,6 +101,26 @@ def test_stage_replay_verify_and_load_exact_projection_row(tmp_path: Path) -> No
     )
 
 
+def test_prepared_namespace_evidence_requires_the_exact_key_and_canonical_bytes() -> None:
+    key = _key()
+    manifest = projection_store.preview_variant_store(key=key, items=_items())
+    raw = projection_store.projection_namespace_evidence_bytes(manifest)
+
+    decoded = projection_store.decode_projection_namespace_evidence(raw, expected_key=key)
+
+    assert decoded.manifest == manifest
+    assert decoded.required_measurement_roots == ()
+    with pytest.raises(projection_store.ProjectionStoreMismatch):
+        projection_store.decode_projection_namespace_evidence(raw + b"\n", expected_key=key)
+    with pytest.raises(projection_store.ProjectionStoreMismatch):
+        projection_store.decode_projection_namespace_evidence(
+            raw,
+            expected_key=projections.ProjectionNamespaceKey(
+                key.policy_fingerprint, key.projector_schema_version + 1, key.catalog_generation
+            ),
+        )
+
+
 def test_store_round_trips_exact_catalog_membership(tmp_path: Path) -> None:
     key = _key()
     variant = _variant("member", "9" * 64, notice="member")
