@@ -11,6 +11,9 @@
 - name: Validate the K3s inputs for this node role
   ansible.builtin.import_tasks: validate.yml
 
+- name: Configure the independently adopted node memory policy
+  ansible.builtin.import_tasks: memory_qos.yml
+
 - name: Create the K3s configuration directory
   ansible.builtin.file:
     path: /etc/rancher/k3s

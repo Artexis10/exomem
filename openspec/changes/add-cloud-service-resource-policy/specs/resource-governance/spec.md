@@ -33,6 +33,20 @@ Release verification SHALL measure the persistent service separately from transi
 
 ## ADDED Requirements
 
+### Requirement: Node memory policy is an explicit deployment dependency
+
+The operator SHALL declare MemoryQoS adoption separately from cell image selection. The pinned K3s configuration SHALL preserve cell requests and limits, default to disabled, and expose its effective throttling and protection settings in deployment evidence. Promotion SHALL use exact-source real-model acceptance under the intended effective controls and sufficient physical headroom; an outcome materially assisted by unrelated host reclaim SHALL NOT establish production headroom. Adoption and rollback SHALL account for all affected sibling workloads and actual container controls, not only the owner image. A cell SHALL NOT obtain authority to change cgroups or node configuration.
+
+#### Scenario: Successful treatment does not enable the shared node
+- **WHEN** an isolated MemoryQoS treatment meets numerical gates
+- **THEN** node adoption still requires production-equivalent outcome and sibling-capacity evidence
+- **AND** default-disabled source delivery and a per-cell image change do not enable MemoryQoS on other workloads
+
+#### Scenario: Node rollback verifies effective controls
+- **WHEN** the operator disables an adopted node memory configuration
+- **THEN** the ordinary node and container lifecycle verifies effective memory controls and readiness
+- **AND** canonical writes and unfinished durable work are preserved
+
 ### Requirement: Service-policy allocator release is bounded and shared
 
 Existing completed-work allocator release callers SHALL share one process-wide minimum interval of five seconds under the validated service-v1 profile. Local and legacy profiles SHALL retain the sixty-second interval. Calls suppressed by that allowance SHALL retain the existing pending-release retry behavior. The policy SHALL NOT add a per-request trim, periodic release worker or core unload. Eligibility for an allocator release SHALL NOT be represented as proof of passing memory or latency acceptance.

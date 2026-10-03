@@ -105,6 +105,16 @@ A second measured attribution identifies roughly 90–105 MiB in parsed bodies a
 
 ## Risks / Trade-offs
 
+### Measured kernel-cache dependency and node adoption
+
+The isolated import workflow still breached the fixed memory gate without early kernel reclamation after bounded application caches and allocator release were implemented. A matched MemoryQoS treatment passed save/query/shutdown and the unchanged lifetime memory gate, but concurrent host reclaim could have supplied its narrow remaining margin. This is evidence to test the complete deployment configuration, not a proved causal effect or production acceptance.
+
+Use the existing pinned K3s node role to declare an opt-in MemoryQoS configuration with `memoryThrottlingFactor: 0.625`; the default remains disabled. On the pinned v1.35.6 release, a 1 GiB request and 3 GiB limit produce container `memory.min=1 GiB`, `memory.high=2.25 GiB`, and unchanged `memory.max=3 GiB`. The hard protection is part of this version's bundle: do not describe it as throttling-only, substitute newer-version defaults, or write cgroup controls from a cell. Require cgroup v2 and a kernel with the memory.high livelock fix (5.9 or later). Ordinary service and compute authority remain unchanged.
+
+This setting applies to every affected pod on the selected node. It is not an image-only or per-cell canary. First exercise the exact integrated source and complete intended memory configuration on an isolated node with ample physical headroom, using the existing real-model workloads and lifetime measurements. Retain host reclaim/swap and leaf high/reclaim counters: global reclaim must be absent or too small to plausibly supply the measured margin. Nonzero hierarchical PSI alone does not invalidate the result, and no additional matched negative control or scientific causal claim is required. Keep the original memory, latency, idle, restart, alternative-layout and shutdown gates unchanged.
+
+Adopt on a dedicated staged node before relocating the authorized owner cell through the existing node/volume lifecycle. Inventory all planned sibling requests and warmed usage, including platform workloads, before adoption; retain the existing 20% node headroom rule. Do not silently enable the option on the shared production node or roll QA/reviewer images as collateral. Default-disabled source publication does not activate a node. Rollback removes the owned configuration through Ansible, restarts the affected node service and recreates affected containers through the ordinary lifecycle; verify actual `memory.min/high/max` and readiness because old containers may retain controls. Preserve all canonical writes and durable debt; no pre-upgrade data restore is part of rollback.
+
 - Always-resident core increases idle running-cell cost → measure simultaneous warmed cells and reserve headroom before each new admission; use existing lifecycle stop when applicable, not an invented cheap floor.
 - Native inference is not preemptible within a batch → cap actual batch size, preserve thread budgets, and prove foreground outcomes under realistic import load.
 - More frequent debt replay can contend with canonical/graph work → hint-only coalesced wakeups after durable receipt insertion, short turns, durable retry/backoff and unchanged generation fences.

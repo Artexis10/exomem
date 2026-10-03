@@ -589,6 +589,29 @@ OOM. For node capacity, charge each cell the greater of its memory request and
 measured warm peak, add measured platform usage, and retain at least 20% warm
 headroom before admitting more cells. Pod readiness alone does not prove capacity.
 
+Kernel-cache control is a separate node adoption. The existing K3s role defaults
+`k3s_memory_qos_enabled` to false; enable it only for a dedicated staged node
+after exact-source acceptance and sibling-capacity verification. On the pinned
+K3s 1.35.6, the owned kubelet drop-in enables MemoryQoS with a 0.625 throttling
+factor. A 1 GiB request / 3 GiB limit produces `memory.min=1 GiB` and
+`memory.high=2.25 GiB`, with the same hard limit. This protects requested memory
+as well as throttling allocations; it affects every pod on that node. It requires
+cgroup v2 and kernel 5.9 or later. Image selection does not enable the setting.
+
+Record effective leaf and pod controls, lifetime peak, host reclaim/swap, actual
+save/query/shutdown outcomes and warmed sibling capacity. A result materially
+assisted by unrelated global reclaim does not prove the required headroom;
+nonzero hierarchical PSI alone is not a failure. Use the role's canonical
+drop-in in isolated acceptance rather than copying its policy values.
+
+To undo node adoption, disable the inventory option and apply the same role to
+remove only its owned drop-in and restart the selected K3s service. Recreate
+affected containers through the controlled node/cell lifecycle, preserving
+canonical data and queued work, and verify effective `memory.min/high/max`
+and readiness: existing containers may retain old settings. Do not restart or
+recreate QA/reviewer workloads outside their coordinated windows. A legacy
+image rollback alone does not undo node memory policy.
+
 Canary the owner vault first with verified identity, current backup and preserved
 source/preferences. Hold fleet and friends on a latency, freshness, memory or
 preference miss. Roll back through the existing image-pin procedure to a verified
