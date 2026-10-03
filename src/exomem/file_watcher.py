@@ -1424,7 +1424,16 @@ class FileWatcher:
             if self._startup_recovery_started:
                 return
             self._startup_recovery_started = True
-        if not self._validate_existing_graph_on_seed():
+        from . import foreground_priority
+
+        try:
+            with foreground_priority.bulk(stop=self._stop):
+                if not self._validate_existing_graph_on_seed():
+                    return
+        except foreground_priority.BulkCancelled:
+            log.info("file watcher: startup graph recovery cancelled")
+            return
+        if self._stop.is_set():
             return
         policy = self._watcher_policy()
         full_limit = _background_deferred_limit(
@@ -1525,9 +1534,12 @@ class FileWatcher:
         withdrawal step uses, and a boundary that is free (or belongs to another
         process we cannot see) is answered on the first pass exactly as before.
         """
+        from . import foreground_priority
+
         deadline = time.monotonic() + GRAPH_WITHDRAWAL_RETRY_SECONDS
         waited = False
         while True:
+            foreground_priority.check_cancelled()
             if graph.durable_checkpoint_is_coherent() and graph.available():
                 if waited:
                     log.info(
@@ -1543,7 +1555,7 @@ class FileWatcher:
             if not busy or remaining <= 0:
                 return False
             waited = True
-            time.sleep(max(0.01, min(remaining, 0.25)))
+            foreground_priority.wait_for_retry(max(0.01, min(remaining, 0.25)))
 
     def _validate_existing_graph_on_seed(self) -> bool:
         """Validate an existing graph after startup's exact disk baselines.
@@ -1740,11 +1752,13 @@ class FileWatcher:
         contention is a different condition from losing one race and should not
         look like it in a log.
         """
+        from . import foreground_priority
         from .cli_ops import OpError
 
         deadline = time.monotonic() + GRAPH_WITHDRAWAL_RETRY_SECONDS
         attempts = 0
         while True:
+            foreground_priority.check_cancelled()
             attempts += 1
             try:
                 candidate.suspend_reads()
@@ -1777,7 +1791,7 @@ class FileWatcher:
                     if isinstance(advised_ms, (int, float))
                     else 0.25
                 )
-                time.sleep(max(0.01, min(remaining, advised)))
+                foreground_priority.wait_for_retry(max(0.01, min(remaining, advised)))
 
     def _dispatch_batch(
         self,

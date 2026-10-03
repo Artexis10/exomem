@@ -968,6 +968,7 @@ def _best_cosine_per_file(
                 return _skip_overlap("empty_text", strict=strict)
             idx = embeddings.get_embedding_index(vault_root)
             # The draft is encoded for the sidecar it is scored against.
+            encoded_for = idx.identity
             in_space.enter_context(recall_space.encoding_for(idx))
             if not embeddings.advisory_passages_fit(chunks):
                 raise OverlapAdvisorySkipped("text_truncated")
@@ -1021,7 +1022,7 @@ def _best_cosine_per_file(
             # the matrix and hydrated text this discards, and the allowed-path
             # set was a walk of the whole corpus on every write.
             admits = _index_admitter(vault_root)
-            for hits in idx.search_many(vecs, k, admits=admits):
+            for hits in idx.search_many(vecs, k, admits=admits, encoded_for=encoded_for):
                 for fp, _cidx, score in hits:
                     if fp not in best_per_file or score > best_per_file[fp]:
                         best_per_file[fp] = score
@@ -1100,6 +1101,9 @@ def pairwise_best_cosine_from_sidecar(
         # encoded nothing, and `pages` how many packed pages had exact rows.
         with call_spans.span("advisory.best_cosine", {}) as measured:
             idx = embeddings.get_embedding_index(vault_root)
+            from . import cloud_cell
+            if cloud_cell.resource_policy() == "service-v1":
+                return idx.pairwise_current_chunks(wanted)
             metadata, matrix = idx.all_vectors()
             rows_by_page: dict[str, list[tuple[int, int]]] = {}
             for row, (file_path, chunk_index) in enumerate(metadata):
@@ -1181,7 +1185,7 @@ def best_cosine_per_file_for_vectors(
             idx = embeddings.get_embedding_index(vault_root)
             # There are no possible matches in an empty corpus. search_many
             # reshapes before checking emptiness, so do not hand it rows here.
-            if not idx.all_vectors()[0]:
+            if idx.chunk_count() == 0:
                 return {}
             if encoded_for is not _UNSPECIFIED_VECTOR_SPACE:
                 recall_space.require_same_space(idx, encoded_for, rows[0])
@@ -1191,7 +1195,8 @@ def best_cosine_per_file_for_vectors(
             # The same scoring and eligibility as the inline sweep, so a
             # deferred advisory ranks exactly what the synchronous one would.
             admits = _index_admitter(vault_root)
-            for hits in idx.search_many(rows, k, admits=admits):
+            kwargs = {} if encoded_for is _UNSPECIFIED_VECTOR_SPACE else {"encoded_for": encoded_for}
+            for hits in idx.search_many(rows, k, admits=admits, **kwargs):
                 for fp, _cidx, score in hits:
                     if self_canon and _canon(fp) == self_canon:
                         continue

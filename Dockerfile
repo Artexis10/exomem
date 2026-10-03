@@ -144,7 +144,10 @@ print('offline load verified', MODEL_NAME, v.shape)"
 ########################################################################
 FROM builder-hosted AS builder-cloud-model
 ENV EXOMEM_RECALL_MODEL=BAAI/bge-m3
-RUN EXOMEM_EMBED_BACKEND=onnx /app/.venv/bin/python -c "\
+# The pinned multilingual export may need int8 quantization. ONNX's graph
+# builder stays in this build stage; the cloud runtime copies only its models.
+RUN uv pip install --python /app/.venv/bin/python "onnx>=1.17" \
+ && EXOMEM_EMBED_BACKEND=onnx /app/.venv/bin/python -c "\
 from exomem.embeddings import MODEL_NAME; \
 from exomem import embedding_backend as backend; \
 backend.load_encoder(MODEL_NAME, backend=backend.ONNX); \
@@ -331,6 +334,7 @@ RUN usermod --home /data/host exomem
 # EXOMEM_RECALL_MODEL: a cloud cell encodes recall with the multilingual model
 # a personal server runs; a hosted cell keeps the English one.
 ENV EXOMEM_CONTAINER_VARIANT=cloud \
+    EXOMEM_CLOUD_RESOURCE_POLICY=service-v1 \
     EXOMEM_RECALL_MODEL=BAAI/bge-m3 \
     EXOMEM_LOG_DIR=/tmp/exomem-logs \
     FASTMCP_CHECK_FOR_UPDATES=off \

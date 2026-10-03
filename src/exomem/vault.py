@@ -6286,12 +6286,16 @@ def walk_vault_md(vault_root: Path):
     wikilink scans and move/delete safety checks.
     """
 
+    from . import foreground_priority
+
     def walk(d: Path):
+        foreground_priority.check_cancelled()
         try:
             children = list(d.iterdir())
         except OSError:
             return
         for child in children:
+            foreground_priority.check_cancelled()
             try:
                 relative = child.relative_to(vault_root).as_posix()
             except ValueError:

@@ -17,6 +17,92 @@ import pytest
 from exomem import mode
 
 
+def _service_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+
+
+def test_cloud_service_policy_does_not_inherit_stored_quiet_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stored workstation choice must not defer managed Cloud indexing."""
+    _service_profile(monkeypatch)
+    mode.write_mode("quiet")
+    original = mode.config_path().read_bytes()
+    assert mode.defer_expensive_indexes() is False
+    assert mode.preload_cpu_caches() is False
+    assert mode.bulk_gpu_opted() is False
+    assert mode.resolved()["resource_profile"] == "service-v1"
+    assert mode.config_path().read_bytes() == original
+
+
+def test_cloud_service_policy_does_not_inherit_performance_caches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _service_profile(monkeypatch)
+    mode.write_mode("performance")
+    assert mode.preload_models() is False  # optional model groups stay lazy
+    assert mode.preload_cpu_caches() is False
+    assert mode.retain_cpu_caches() is False
+    assert mode.bulk_gpu_opted() is False
+
+
+@pytest.mark.parametrize("cloud_enabled,selection", [(False, "service-v1"), (True, "unknown-profile")])
+def test_invalid_cloud_resource_profile_is_rejected_without_echoing_value(
+    monkeypatch: pytest.MonkeyPatch, cloud_enabled: bool, selection: str,
+) -> None:
+    from exomem.cloud_cell import CloudConfigError
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1" if cloud_enabled else "0")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", selection)
+    with pytest.raises(CloudConfigError) as caught:
+        mode.resolved()
+    assert selection not in str(caught.value)
+
+
+@pytest.mark.parametrize("name,value", [
+    ("EXOMEM_PRELOAD_MODELS", "1"),
+    ("EXOMEM_RELEASE_GPU_WHEN_IDLE", "0"),
+    ("EXOMEM_EMBED_BATCH", "9"),
+    ("EXOMEM_CPU_THREADS", "3"),
+    ("EXOMEM_SYNC_WORKERS", "2"),
+    ("EXOMEM_ALLOW_NATIVE_THREAD_OVERRIDES", "1"),
+    ("EXOMEM_EMBED_DEVICE", "cuda"),
+])
+def test_cloud_service_profile_rejects_overrides_outside_budget(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str,
+) -> None:
+    from exomem.cloud_cell import CloudConfigError
+
+    _service_profile(monkeypatch)
+    monkeypatch.setenv(name, value)
+    with pytest.raises(CloudConfigError):
+        mode.resolved()
+
+
+def test_cloud_service_live_mode_change_preserves_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_runtime(monkeypatch)
+    _service_profile(monkeypatch)
+    mode.write_mode("quiet")
+    policy = mode.apply_live()
+    assert calls["unload"] == 0
+    assert policy["defer_expensive_indexes"] is False
+    assert mode.read_config()["mode"] == "quiet"
+
+
+def test_service_profile_refuses_hosted_runtime_before_initialization(monkeypatch) -> None:
+    from exomem import server_runtime
+    from exomem.cloud_cell import CloudConfigError
+
+    _service_profile(monkeypatch)
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "1")
+    monkeypatch.setattr(server_runtime, "_initialize_hosted_runtime", lambda: pytest.fail("Hosted runtime must not start"))
+    with pytest.raises(CloudConfigError):
+        server_runtime.initialize_runtime(load_dotenv_func=lambda **kwargs: None)
+
+
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Point the config file at a controllable tmp path and clear ambient mode env."""
@@ -266,6 +352,8 @@ def test_resolved_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_MODE", "quiet")
     snap = mode.resolved()
     assert snap == {
+        "resource_profile": "legacy",
+        "resource_profile_source": "default",
         "mode": "quiet",
         "preload_models": False,
         "preload_cpu_caches": False,

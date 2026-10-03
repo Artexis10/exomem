@@ -1098,9 +1098,13 @@ def test_reconcile_creates_baseline_only_when_not_dry_run_and_never_refreshes_it
     assert not activation_manifest.is_grandfathered(vault, later)
 
 
-def test_reconcile_clears_deferred_semantic_work_after_embedding_refresh(
-    vault: Path, monkeypatch
+@pytest.mark.parametrize("service", [False, True])
+def test_reconcile_only_clears_semantic_work_after_completed_embedding_refresh(
+    vault: Path, monkeypatch, service: bool
 ) -> None:
+    if service:
+        monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+        monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
     monkeypatch.setenv("EXOMEM_MODE", "quiet")
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     index_sync.clear_deferred_work(vault)
@@ -1147,9 +1151,9 @@ def test_reconcile_clears_deferred_semantic_work_after_embedding_refresh(
 
     rep = reconcile_module.reconcile(vault)
 
-    assert rep.embeddings_status == "refreshed"
-    assert calls == [[target]]
-    assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 0
+    assert rep.embeddings_status == ("deferred" if service else "refreshed")
+    assert calls == ([] if service else [[target]])
+    assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == int(service)
 
 
 def test_reconcile_preserves_deferred_work_after_embedding_failure(

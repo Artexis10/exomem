@@ -58,6 +58,17 @@ def _set_hw(monkeypatch: pytest.MonkeyPatch, *, cuda: bool, mps: bool, free_gb: 
 
 # ---- steady-state default policy: CPU-first, CUDA never auto-selected ----
 
+
+def test_cloud_service_uses_cpu_even_with_stored_performance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_hw(monkeypatch, cuda=True, mps=True)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    assert accel.select_device() == "cpu"
+    assert accel.cuda_if_performance() == "cpu"  # diarizer uses this separate route
+
 def test_normal_mode_stays_cpu_even_with_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
     """The core VRAM-kill: the default (normal) mode never grabs CUDA at idle."""
     _set_hw(monkeypatch, cuda=True, mps=False)
