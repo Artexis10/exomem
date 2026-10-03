@@ -281,10 +281,9 @@ def test_the_hook_table_matches_the_canonical_one() -> None:
     }
 
 
-def test_the_capture_reminder_bytes_are_untouched() -> None:
-    """The ask is its own constant; the pinned reminder does not move."""
-    assert hook.EPISODE_ASK != hook.REMINDER
-    assert hook.REMINDER.startswith("[Exomem capture check]")
+def test_the_episode_ask_is_its_own_text_with_a_key_slot() -> None:
+    assert hook.EPISODE_ASK != hook.REMINDER_SHORT
+    assert hook.EPISODE_ASK.startswith("[Exomem episode check]")
     assert "{key}" in hook.EPISODE_ASK
 
 

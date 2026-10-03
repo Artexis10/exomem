@@ -779,8 +779,8 @@ def test_fresh_mcp_codex_capture_checks_live_capabilities_without_restart_wait(
         check=True,
     )
     reason = json.loads(result.stdout)["reason"]
-    assert "bootstrap" in reason and "capabilities" in reason
-    assert "not connected" in reason and "unavailable" in reason
+    assert "bootstrap first" in reason and "cannot capture" in reason
+    assert "not connected" in reason
     assert marker.read_text() == "old-marker"
 
 
@@ -814,7 +814,7 @@ def test_non_mcp_installs_keep_restart_gate(tmp_path, monkeypatch, mode):
     assert capture._restart_pending([])
 
 
-@pytest.mark.parametrize("reason", [capture.REMINDER, capture.EPISODE_ASK, capture.COVERAGE_ASK])
+@pytest.mark.parametrize("reason", [capture.REMINDER_SHORT, capture.EPISODE_ASK, capture.COVERAGE_ASK])
 def test_all_mcp_capture_reasons_guard_live_capabilities(monkeypatch, capsys, reason):
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "mcp")
     monkeypatch.setattr(capture, "_episode_ask", lambda *args: reason)
@@ -832,8 +832,8 @@ def test_all_mcp_capture_reasons_guard_live_capabilities(monkeypatch, capsys, re
     )
     assert capture.main() == 0
     output = json.loads(capsys.readouterr().out)["reason"]
-    assert "bootstrap" in output and "live capture capabilities" in output
-    assert "not connected" in output and "unavailable" in output
+    assert "bootstrap first" in output and "not connected" in output
+    assert "cannot capture" in output
     assert reason in output
 
 

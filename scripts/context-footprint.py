@@ -73,7 +73,7 @@ def main() -> None:
     retrieve = load("exomem_retrieve_nudge")
     key = "ep-" + "0" * 32
     sizes = {
-        "capture check (Stop)": len(json.dumps({"decision": "block", "reason": capture.REMINDER})),
+        "capture check (Stop)": len(json.dumps({"decision": "block", "reason": capture.REMINDER_SHORT})),
         "episode check (Stop)": len(
             json.dumps({"decision": "block", "reason": capture.EPISODE_ASK.replace("{key}", key)})
         ),
@@ -91,7 +91,6 @@ def main() -> None:
         "working-set ceiling (opt-in)": retrieve._WORKING_SET_MAX_CHARS,
     }
     short = {
-        "capture short (Stop)": len(json.dumps({"decision": "block", "reason": capture.REMINDER_SHORT})),
         "retrieval pointer (maximal)": len(
             json.dumps(
                 {
@@ -113,13 +112,10 @@ def main() -> None:
         stop = cap * sizes["capture check (Stop)"] + ep * sizes["episode check (Stop)"]
         prompt = ret * sizes["retrieval check (UserPromptSubmit)"]
         print(f"  {level:9} capture={cap:<3} episode={ep:<3} retrieve={ret:<3} stop={stop:>7} B  prompt={prompt:>7} B")
-        # After `shrink-bootstrap`: the full capture check once (and once more after a
-        # compaction), then the short one; the retrieval reminder once per session and
-        # after a compaction, plus a pointer on every other prompt at maximal.
+        # After `shrink-bootstrap`: the retrieval reminder once per session and after a
+        # compaction, plus a pointer on every other prompt at maximal. Every Stop check
+        # is already the short one (`shorten-stop-hook-blocks`), so `stop` stands as is.
         compactions = 1
-        fulls = min(cap, 1 + compactions)
-        stop_after = fulls * sizes["capture check (Stop)"] + (cap - fulls) * short["capture short (Stop)"]
-        stop_after += ep * sizes["episode check (Stop)"]
         prompts = args.turns - args.turns // 10
         full_reminders = 1 + compactions
         pointers = prompts - full_reminders if level == "maximal" else 0
@@ -127,7 +123,7 @@ def main() -> None:
             full_reminders * sizes["retrieval check (UserPromptSubmit)"]
             + pointers * short["retrieval pointer (maximal)"]
         )
-        print(f"  {'':9} after: stop={stop_after:>7} B  prompt={prompt_after:>7} B (one compaction)")
+        print(f"  {'':9} prompt after: {prompt_after:>7} B (one compaction)")
 
     schemas = json.loads((ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json").read_text())
     description = sum(len(t["description"]) for t in schemas.values())
