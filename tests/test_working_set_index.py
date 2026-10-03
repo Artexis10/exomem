@@ -734,6 +734,34 @@ def test_a_managed_runtime_abstains_with_index_warming_and_warms_once(
     assert working_set_index.WorkingSetIndex(seeded).anchors() == ()
 
 
+def test_a_transient_lane_failure_recovers_without_a_vault_edit(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A temporary lookup outage must not poison a warm packet until the next write."""
+    from exomem import lexstore, working_set, working_set_runtime
+
+    lexstore.ensure_fresh(seeded)
+    working_set_runtime.reset_caches_for_tests()
+    request = {
+        "turn": "Cargo Sled constraints",
+        "max_chars": 2000,
+        "freshness_key": "unchanged-vault",
+        "anchor": "Knowledge Base/Products/Cargo Sled.md",
+    }
+
+    def unavailable_lane(*args, **kwargs):
+        raise OSError("temporary catalogue read failure")
+
+    with monkeypatch.context() as outage:
+        outage.setattr(working_set, "_lane", unavailable_lane)
+        failed = working_set_runtime.serve(seeded, **request)
+    assert any(entry["reason"] == "lane_failed" for entry in failed["missing"])
+
+    recovered = working_set_runtime.serve(seeded, **request)
+    assert not any(entry["reason"] == "lane_failed" for entry in recovered["missing"])
+    assert recovered["generation"]["index_generation"] == failed["generation"]["index_generation"]
+
+
 def test_cold_activation_abstains_before_starting_retrieval(
     seeded: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

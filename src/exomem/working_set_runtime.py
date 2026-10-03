@@ -1979,6 +1979,10 @@ def serve(
         "unavailable",
     } or lexical_state not in {"available", "not_requested", "agent_choice"}:
         return packet
+    # A lane can recover without changing the vault or its catalogue token.
+    # Retain this request's coverage, but never cache a transient lookup failure.
+    if any(entry.get("reason") == "lane_failed" for entry in packet.get("missing", ())):
+        return packet
     if not cacheable:
         return packet
     with _CACHE_LOCK:
