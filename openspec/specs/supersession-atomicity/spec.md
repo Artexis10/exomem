@@ -1,7 +1,7 @@
 # supersession-atomicity Specification
 
 ## Purpose
-TBD - created by archiving change harden-supersession-atomicity. Update Purpose after archive.
+Make supersession all-or-nothing: the new page, source back-references, navigation indexes and the old page's superseded status commit together or not at all. Concurrent supersessions of the same active page cannot both succeed.
 ## Requirements
 ### Requirement: Atomic Supersession
 

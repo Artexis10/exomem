@@ -1,7 +1,7 @@
 # structured-retrieval-filters Specification
 
 ## Purpose
-TBD - created by archiving change add-epistemic-loop-primitives. Update Purpose after archive.
+Accept the governed unit metadata `unit.verdict` as a closed string filter field and `unit.check_by` as a typed date field, so ordered comparisons answer due-by questions and non-date operands are rejected.
 ## Requirements
 ### Requirement: Governed Unit Metadata Is Filterable
 The structured-filter field registry SHALL accept `unit.verdict` as a closed string field and `unit.check_by` as a closed typed-date field. Both SHALL be evaluated against the same parsed semantic unit as the other `unit.*` fields, and a filter that names any other `unit.*` field SHALL still be rejected as unknown. `unit.verdict` operands SHALL be canonicalized by trimming and casefolding, and SHALL be rejected when they are not strings for the exact and collection operators.

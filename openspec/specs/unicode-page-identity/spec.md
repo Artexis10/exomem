@@ -1,7 +1,7 @@
 # unicode-page-identity Specification
 
 ## Purpose
-TBD - created by archiving change support-unicode-titles-and-vault-integrity. Update Purpose after archive.
+Store a page's exact Unicode display title losslessly in frontmatter and keep it independent of an optional explicit ASCII filename slug. Every read and presentation surface resolves titles by one rule (frontmatter title, first H1, humanized filename stem), and imported frontmatter is serialized as YAML-safe scalars.
 ## Requirements
 ### Requirement: Unicode Display Titles Are Lossless
 

@@ -1,7 +1,7 @@
 # portable-category-authoring Specification
 
 ## Purpose
-TBD - created by archiving change teach-portable-category-core. Update Purpose after archive.
+Provide a versioned immutable core category vocabulary and an authoring contract that prefers a meaningful epistemic or operational category, with a domain escape for open vocabulary. Semantic writes return bounded advisory category feedback, and reviewed corpus inference proposes registering recurring unregistered categories.
 ## Requirements
 ### Requirement: Portable Core Category Vocabulary
 

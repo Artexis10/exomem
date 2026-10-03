@@ -1,7 +1,7 @@
 # terminal-ui Specification
 
 ## Purpose
-TBD - created by archiving change add-terminal-ui. Update Purpose after archive.
+Provide a terminal UI behind the explicit `exomem tui` subcommand as a thin client over the unified command registry. It covers home status, ask, capture, review, adoption dry run and settings, with governed write-back, honest receipts and failure states, keyboard-first navigation, and deterministic headless testing.
 ## Requirements
 ### Requirement: Explicit TUI Entry Point
 

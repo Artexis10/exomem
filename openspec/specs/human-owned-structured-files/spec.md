@@ -1,7 +1,7 @@
 # human-owned-structured-files Specification
 
 ## Purpose
-TBD - created by archiving change make-structured-collections-human-owned. Update Purpose after archive.
+Keep structured items readable as human-owned Markdown while canonical identity stays `collection_id` plus item ID. It defines filename recipes from stable natural-key fields, a bounded managed presentation block, governed typed wikilinks, explicit-only filename moves, and exact preview-first atomic migration.
 ## Requirements
 ### Requirement: Structured item identity is independent of its human-readable path
 

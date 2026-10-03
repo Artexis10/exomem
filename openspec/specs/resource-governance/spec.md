@@ -1,7 +1,7 @@
 # resource-governance Specification
 
 ## Purpose
-TBD - created by archiving change add-resource-bounded-multimodal-workers. Update Purpose after archive.
+Bound Exomem's host footprint through resource modes (`quiet` and others) that avoid startup preloads and reclaim idle model and cache residency. It provides a no-allocation resource status surface, degrades GPU use to CPU on unsupported hosts, and sets a measured acceptance envelope for the persistent service.
 
 ## Requirements
 

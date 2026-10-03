@@ -1,7 +1,7 @@
 # graph-semantic-integrity Specification
 
 ## Purpose
-TBD - created by archiving change fix-graph-semantic-integrity. Update Purpose after archive.
+Keep graph relation semantics honest: resolved authored relations participate in memory contracts, similarity-only and co-participation suggestions stay semantically neutral as `relates_to`, and structural methods only lift relation kinds already authored on the page and never propose causality. All suggestions remain proposal-only.
 
 ## Requirements
 

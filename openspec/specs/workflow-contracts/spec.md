@@ -1,7 +1,7 @@
 # workflow-contracts Specification
 
 ## Purpose
-TBD - created by archiving change add-user-authored-workflow-contracts. Update Purpose after archive.
+Let users author workflow contracts as human-owned structured Markdown under `_Schema/contracts/workflow/`, over code-owned contract families. Resolution from an explicit `project`, `domain` and `activity` context is deterministic and provenance-bearing, code-owned invariants outrank every contract, and writes are reviewed, guarded and auditable.
 
 ## Requirements
 

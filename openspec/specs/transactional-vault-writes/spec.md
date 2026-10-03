@@ -1,7 +1,7 @@
 # transactional-vault-writes Specification
 
 ## Purpose
-TBD - created by archiving change support-unicode-titles-and-vault-integrity. Update Purpose after archive.
+Make multi-file vault writes behave transactionally: batch Markdown writes are all-or-nothing, and a move and its inbound wikilink rewrites roll back together. Graph-relevant writes keep fail-closed ordering unless a media caller explicitly requests deferred graph completion.
 ## Requirements
 ### Requirement: Multi-File Markdown Batches Roll Back
 

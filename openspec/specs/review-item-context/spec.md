@@ -1,7 +1,7 @@
 # review-item-context Specification
 
 ## Purpose
-TBD - created by archiving change add-epistemic-review-studio. Update Purpose after archive.
+Provide one read-only `review_item_context` command that resolves a review item by stable identity across the attention and corpus-activation queues and composes a deterministic, bounded context for it: target, related pages, references, provenance and path-specific supersession history. It uses no reasoning model, tolerates partial availability, and applies access policy before including content.
 ## Requirements
 ### Requirement: Consistent Review Item Context Command
 

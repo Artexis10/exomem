@@ -1,7 +1,7 @@
 # adoption-studio Specification
 
 ## Purpose
-TBD - created by archiving change add-adoption-studio. Update Purpose after archive.
+Provide a durable, resumable, governed workflow for bringing an existing folder of material into the knowledge base: read-only scan, server-materialized selection, exact preview bound to plan identity, apply with write-time re-validation, and reviewable agent proposals. Originals are never modified, and interrupted, partial or stale runs are visible and recoverable.
 ## Requirements
 ### Requirement: Deterministic read-only scan and candidate inventory
 

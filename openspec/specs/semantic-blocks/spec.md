@@ -1,7 +1,7 @@
 # semantic-blocks Specification
 
 ## Purpose
-TBD - created by archiving change add-epistemic-graph. Update Purpose after archive.
+Extract semantic block nodes from ordinary Markdown deterministically, each with source-spanned identity, so existing files remain searchable without adopting new syntax. Unrecognized content degrades to searchable text, and any model-backed block suggestion is default-off and soft-fails.
 ## Requirements
 ### Requirement: Structural Semantic Block Extraction
 The system SHALL extract semantic block nodes from ordinary Markdown files using deterministic structure, including frontmatter, page type, recognized headings, recognized list labels, wikilinks, and existing media metadata. The initial block kind vocabulary SHALL include `source`, `evidence`, `claim`, `finding`, `decision`, `assumption`, `constraint`, `risk`, `failure`, `experiment`, `result`, `pattern`, `requirement`, `action`, `entity`, `project`, `case`, `timeline_event`, and `media_segment`.

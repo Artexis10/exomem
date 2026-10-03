@@ -1,7 +1,7 @@
 # governance-kernel Specification
 
 ## Purpose
-TBD - created by archiving change add-governance-kernel. Update Purpose after archive.
+Define the governance kernel: policy authored as strict YAML under `Knowledge Base/_Governance/`, compiled with fingerprints, with scope membership evaluated at query time and a pure, order-free evaluator mapping item scopes, audience, purpose and grants to a disclosure ceiling. Records and Planning authorization precedes reduction, egress and receipts are content-safe, and sync conflict copies refuse policy compilation.
 
 ## Requirements
 

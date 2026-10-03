@@ -1,7 +1,7 @@
 # product-command-surface Specification
 
 ## Purpose
-TBD - created by archiving change redesign-product-command-surface. Update Purpose after archive.
+Expose a product command set that is easier for humans and agents to understand while keeping the full governed capability of the underlying operations. Commands collapse common multi-step workflows, make destructive or heavy behavior explicit, use concept-based names, and are covered by a tested mapping to canonical leaves.
 
 ## Requirements
 
