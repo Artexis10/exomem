@@ -51,6 +51,8 @@ trap cleanup EXIT
 chmod 0600 -- "${plan_path}"
 "${terraform_bin}" -chdir="${root}" show -json "${plan_path}" >"${json_path}"
 chmod 0600 -- "${json_path}"
-"${python_bin}" "${script_dir}/inspect_terraform_plan.py" "${json_path}"
+"${python_bin}" "${script_dir}/inspect_terraform_plan.py" "${json_path}" \
+  --review-output "${plan_path}.review.json"
 
-echo "saved plan ready for review: ${plan_path}"
+echo "value-free resource action summary: ${plan_path}.review.json"
+echo "secret-bearing saved apply plan (do not print or send to reviewers): ${plan_path}"
