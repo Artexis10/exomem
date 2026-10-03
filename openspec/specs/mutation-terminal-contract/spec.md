@@ -1,7 +1,7 @@
 # mutation-terminal-contract Specification
 
 ## Purpose
-TBD - created by archiving change clear-agent-facing-friction. Update Purpose after archive.
+Persist one versioned canonical terminal record for each committed mutation and project a compact default success response from it. Pre-commit and uncertain outcomes are never reported as success, and completed idempotency rows from before terminal versioning stay replayable.
 
 ## Requirements
 

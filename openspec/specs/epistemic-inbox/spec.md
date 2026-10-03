@@ -1,7 +1,7 @@
 # epistemic-inbox Specification
 
 ## Purpose
-TBD - created by archiving change add-epistemic-inbox. Update Purpose after archive.
+Give the review queue stable, addressable items and portable, fingerprint-bound dismiss, snooze and reopen state in `Knowledge Base/.review-state.json`. It defines the `triage_memory` command and the human `exomem review` daily view, with explicit failure on malformed state.
 ## Requirements
 ### Requirement: Stable addressable review items
 Every attention item SHALL carry a deterministic item ID, an `exomem://review/<id>` reference, a canonical target reference, canonical related references, and a signal fingerprint. Item identity SHALL be independent of rank, age counters, and rendered detail text.

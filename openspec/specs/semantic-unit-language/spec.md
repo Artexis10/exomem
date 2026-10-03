@@ -1,7 +1,7 @@
 # semantic-unit-language Specification
 
 ## Purpose
-TBD - created by archiving change enforce-semantic-authoring-contract. Update Purpose after archive.
+Define how rich semantic blocks are parsed: they follow heading hierarchy, empty units are diagnosed and excluded, and unit spans never overlap. It also governs `prediction` as a core kind and the `verdict` and `check_by` unit-metadata keys, with hierarchy changes rebuilding only derived state.
 ## Requirements
 ### Requirement: Rich Semantic Blocks Follow Heading Hierarchy
 

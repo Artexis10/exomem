@@ -1,7 +1,7 @@
 # compiled-source-lineage Specification
 
 ## Purpose
-TBD - created by archiving change require-source-capture-before-derived-citation. Update Purpose after archive.
+Require every explicit `sources` entry on a newly created or fully replaced compiled note to resolve to an authorized governed source before commit, while an absent or empty `sources` remains a valid statement of no external source. External locators are provenance rather than citations, closure does not disclose unauthorized identity, and back-references publish atomically with the note.
 ## Requirements
 ### Requirement: Every explicit compiled source citation closes before commit
 

@@ -1,7 +1,7 @@
 # markdown-relations Specification
 
 ## Purpose
-TBD - created by archiving change add-epistemic-inbox. Update Purpose after archive.
+Recognize a canonical note-level `## Relations` section of typed `- relation_type [[Target]]` bullets alongside block-level semantic relations, sharing one governed relation vocabulary. Valid relations are indexed as typed graph edges without redundant generic edges, and compiled-note writes report relation quality counts.
 ## Requirements
 ### Requirement: Canonical note-level Markdown relations
 The system SHALL recognize a canonical `## Relations` section whose list items have the form `- relation_type [[Target]]`, where `relation_type` is lower `snake_case`, the target is one wikilink, and each item represents a directional note-to-note edge. The Markdown SHALL remain valid and useful in Obsidian without Exomem.

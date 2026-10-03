@@ -1,7 +1,7 @@
 # benchmark-protocol Specification
 
 ## Purpose
-TBD - created by archiving change amend-epistemic-bench-families. Update Purpose after archive.
+Govern amendments to the benchmark pre-registration: a receipt contract mirroring the ratification receipt, amendment lineage recorded in the run manifest, and rules for pending acknowledgment and deferred revision. It also registers the utility action episode as an operational family enforced by its release.
 
 ## Requirements
 

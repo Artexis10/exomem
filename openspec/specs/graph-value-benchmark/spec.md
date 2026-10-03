@@ -1,7 +1,7 @@
 # graph-value-benchmark Specification
 
 ## Purpose
-TBD - created by archiving change add-graph-value-benchmark. Update Purpose after archive.
+Define a deterministic, product-neutral graph benchmark comparing Exomem with Basic Memory on independent metrics such as reachability, distractor precision and relation-type fidelity, under a falsifiable dominance contract. It has a fast model-free Exomem gate and privacy-safe reproducible reports, and ties runtime graph changes to a failed criterion.
 ## Requirements
 ### Requirement: Product-Neutral Graph Task Corpus
 

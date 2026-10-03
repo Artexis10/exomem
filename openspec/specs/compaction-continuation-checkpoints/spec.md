@@ -1,7 +1,7 @@
 # compaction-continuation-checkpoints Specification
 
 ## Purpose
-TBD - created by archiving change add-compaction-continuation-checkpoints. Update Purpose after archive.
+Checkpoint structural continuation evidence at Claude Code and Codex CLI compaction through local, non-destructive lifecycle hooks, and reinject bounded advisory context afterward. Checkpoints hold no conversation content, state paths are client-aware and symlink-safe, writes are concurrency-safe, and installation fails closed.
 ## Requirements
 ### Requirement: Lifecycle checkpointing is local-first and non-destructive
 

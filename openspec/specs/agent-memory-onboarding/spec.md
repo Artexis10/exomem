@@ -1,7 +1,7 @@
 # agent-memory-onboarding Specification
 
 ## Purpose
-TBD - created by archiving change clarify-agent-memory-boundaries. Update Purpose after archive.
+Define what agent-facing documentation and the shipped scaffold must say so an agent can use Exomem correctly: how it differs from native assistant memory, which action fits which user intent, a first-run path for non-CLI users, and concrete workflow examples, all kept generic.
 ## Requirements
 ### Requirement: Native Memory Boundary
 Agent-facing documentation SHALL distinguish native assistant memory from Exomem

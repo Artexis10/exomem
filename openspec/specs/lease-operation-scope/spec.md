@@ -1,7 +1,7 @@
 # lease-operation-scope Specification
 
 ## Purpose
-TBD - created by archiving change scope-lease-to-write-operations. Update Purpose after archive.
+Make the writer lease gate a command invocation only when the specific operation being invoked writes to the vault, so read-only operations of a write-capable command are not gated.
 ## Requirements
 ### Requirement: Lease Gates Only Writing Operations
 
