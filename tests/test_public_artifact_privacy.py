@@ -35,7 +35,9 @@ from exomem.public_artifact_privacy import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VAULT_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures"
-SYNTHETIC_FIXTURES = REPO_ROOT / "tests" / "privacy_fixtures" / "public_artifact_privacy"
+SYNTHETIC_FIXTURES = (
+    REPO_ROOT / "tests" / "privacy_fixtures" / "public_artifact_privacy"
+)
 
 
 def test_inventory_names_every_public_input_and_output_class() -> None:
@@ -83,7 +85,8 @@ def test_committed_privacy_corpus_is_public_but_not_a_vault_fixture() -> None:
 
     assert SYNTHETIC_FIXTURES.is_dir()
     assert not any(
-        path.is_file() for path in (VAULT_FIXTURE_ROOT / "public_artifact_privacy").rglob("*")
+        path.is_file()
+        for path in (VAULT_FIXTURE_ROOT / "public_artifact_privacy").rglob("*")
     )
     assert {
         f"{relative_root}/generic-note.md",
@@ -260,14 +263,10 @@ def test_account_sid_rule_admits_well_known_and_obviously_synthetic_sids(
     """
     artifact = tmp_path / "sids.md"
     artifact.write_text(
-        "system: S-1-5-18"
-        "\n"
-        "administrators: S-1-5-32-544"
-        "\n"
-        "owner-rights: S-1-3-4"
-        "\n"
-        "synthetic-account: S-1-5-21-1-2-3-1001"
-        "\n",
+        "system: S-1-5-18" "\n"
+        "administrators: S-1-5-32-544" "\n"
+        "owner-rights: S-1-3-4" "\n"
+        "synthetic-account: S-1-5-21-1-2-3-1001" "\n",
         encoding="utf-8",
     )
 
@@ -362,9 +361,9 @@ def test_openspec_generator_marker_is_scanned_as_text(tmp_path: Path) -> None:
     marker = tmp_path / ".openspec-target"
     marker.write_text("codex\n", encoding="utf-8")
 
-    assert [
-        item.rule for item in scan_artifact(marker, label=".agents/skills/.openspec-target")
-    ] == []
+    findings = scan_artifact(marker, label=".agents/skills/.openspec-target")
+
+    assert [item.rule for item in findings] == []
 
 
 def test_patch_artifacts_are_scanned_as_text(tmp_path: Path) -> None:
@@ -450,7 +449,9 @@ def test_nested_member_name_content_is_scanned_without_rendering_the_name(
     tmp_path: Path,
 ) -> None:
     archive_path = tmp_path / "generic-skill.zip"
-    private_member = "prefix/C:" + "/Users/" + "SyntheticOperator/Private-Notebook.md"
+    private_member = (
+        "prefix/C:" + "/Users/" + "SyntheticOperator/Private-Notebook.md"
+    )
     with zipfile.ZipFile(archive_path, "w") as archive:
         archive.writestr(private_member, "generic body\n")
 
@@ -576,7 +577,9 @@ def test_nested_archive_text_rejects_unc_share_names_with_spaces_without_echo(
     "entry_mode",
     [stat.S_IFLNK, stat.S_IFIFO, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFSOCK],
 )
-def test_zip_rejects_every_nonregular_entry_type(tmp_path: Path, entry_mode: int) -> None:
+def test_zip_rejects_every_nonregular_entry_type(
+    tmp_path: Path, entry_mode: int
+) -> None:
     archive_path = tmp_path / "special.zip"
     special = zipfile.ZipInfo("private-special-entry")
     special.create_system = 3
@@ -744,10 +747,9 @@ def test_generic_public_builds_never_read_configured_live_vault(
     schema_generator = runpy.run_path(str(REPO_ROOT / "scripts" / "dump-tool-schemas.py"))
 
     assert "forbidden-canary" not in rendered_docs
-    assert (
-        Path(schema_generator["FIXTURE_VAULT"]).resolve()
-        == (REPO_ROOT / "tests" / "fixtures").resolve()
-    )
+    assert Path(schema_generator["FIXTURE_VAULT"]).resolve() == (
+        REPO_ROOT / "tests" / "fixtures"
+    ).resolve()
     for artifact in archives.glob("*.zip"):
         with zipfile.ZipFile(artifact) as archive:
             assert all(b"forbidden-canary" not in archive.read(name) for name in archive.namelist())
@@ -800,12 +802,16 @@ def test_explicit_personalized_output_stays_outside_public_release_roots(tmp_pat
     except ValueError:
         relative = None
     if relative is not None:
-        assert relative.parts[0].startswith(".pytest-") or relative.parts[0] == (".exomem-private")
+        assert relative.parts[0].startswith(".pytest-") or relative.parts[0] == (
+            ".exomem-private"
+        )
     with zipfile.ZipFile(output / "exomem.zip") as archive:
         assert b"synthetic-private" in archive.read("project-keys.yaml")
         assert package_skills.PRIVATE_OUTPUT_MARKER in archive.namelist()
     findings = scan_artifact(output / "exomem.zip", label="dist/copied-personalized.zip")
-    assert [item.rule for item in findings] == ["personalized_artifact_in_public_build"]
+    assert [item.rule for item in findings] == [
+        "personalized_artifact_in_public_build"
+    ]
     assert findings[0].file.startswith("dist/copied-personalized.zip!member-")
     assert package_skills.PRIVATE_OUTPUT_MARKER not in findings[0].file
 
