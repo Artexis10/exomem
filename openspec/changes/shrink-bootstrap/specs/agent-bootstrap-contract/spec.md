@@ -50,7 +50,7 @@ The compact core SHALL stay at or under its ruled byte ceiling at every engageme
 
 ### Requirement: Injected agent context stays inside a per-item byte budget
 
-Every text Exomem injects into a coding agent's context without the agent asking for it, namely the Stop-hook capture and episode checks, the `UserPromptSubmit` retrieval reminder and the continuation checkpoint, SHALL stay at or under a ruled byte ceiling per item, asserted by test. The capture check and the retrieval reminder SHALL send their full text once per session and again after a session lifecycle event (a compaction rewrites the context the text lived in), and a short line on later fires; at `balanced` the retrieval reminder SHALL be silent between, and at `maximal` it SHALL be a short pointer on every later prompt. A short nudge SHALL keep the rule it exists to carry (the capture trigger with the live-policy pointer, the `episode_memory` record call with its key and its do-nothing escape, and the `ask_memory` recall with its skip escape and its not-found-in-scope reading). The retrieval reminder SHALL also keep the rules not to repeat a search because the reminder recurs and that the KB is the source of truth for prior conclusions, and the maximal pointer SHALL keep the already-covered escape. The capture and retrieval hooks SHALL resolve their state home exactly as the continuation checkpoint does (`EXOMEM_HOOK_HOME`, then `CLAUDE_CONFIG_DIR` or `CODEX_HOME`), so a compaction re-arms them wherever the client keeps its configuration. The hook scripts under `src/exomem/_hooks/` and their plugin mirrors SHALL remain byte-identical.
+Every text Exomem injects into a coding agent's context without the agent asking for it, namely the Stop-hook capture and episode checks, the `UserPromptSubmit` retrieval reminder and the continuation checkpoint, SHALL stay at or under a ruled byte ceiling per item, asserted by test. The retrieval reminder SHALL send its full text once per session and again after a session lifecycle event (a compaction rewrites the context the text lived in), and a short line on later fires (the Stop capture check is short on every fire, per `shorten-stop-hook-blocks`); at `balanced` the retrieval reminder SHALL be silent between, and at `maximal` it SHALL be a short pointer on every later prompt. A short nudge SHALL keep the rule it exists to carry (the capture trigger with the live-policy pointer, the `episode_memory` record call with its key and its do-nothing escape, and the `ask_memory` recall with its skip escape and its not-found-in-scope reading). The retrieval reminder SHALL also keep the rules not to repeat a search because the reminder recurs and that the KB is the source of truth for prior conclusions, and the maximal pointer SHALL keep the already-covered escape. The capture and retrieval hooks SHALL resolve their state home exactly as the continuation checkpoint does (`EXOMEM_HOOK_HOME`, then `CLAUDE_CONFIG_DIR` or `CODEX_HOME`), so a compaction re-arms them wherever the client keeps its configuration. The hook scripts under `src/exomem/_hooks/` and their plugin mirrors SHALL remain byte-identical.
 
 #### Scenario: A nudge cannot regrow into the old text
 
@@ -59,9 +59,9 @@ Every text Exomem injects into a coding agent's context without the agent asking
 
 #### Scenario: The full text is sent once, then a short line
 
-- **WHEN** the Stop capture check fires three times in one session
-- **THEN** the first fire carries the full text and the next two carry the short check
-- **AND** after a compaction the next fire carries the full text again
+- **WHEN** the retrieval reminder is due on three prompts in one session at `balanced`
+- **THEN** the first carries the full text and the next two are silent
+- **AND** after a compaction the next carries the full text again
 
 ## MODIFIED Requirements
 

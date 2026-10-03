@@ -2431,18 +2431,6 @@ def test_capture_still_fires_after_failed_edit(tmp_path: Path) -> None:
     assert '"decision": "block"' in r.stdout
 
 
-def test_capture_reminder_routes_entities_conservatively() -> None:
-    script = CAPTURE_SCRIPT.read_text(encoding="utf-8")
-
-    assert "active entity registry" in script
-    assert "selected knowledge packs" in script
-    assert 'connect_memory(operation="resolve-entity"' in script
-    assert "edit_memory" in script
-    assert 'connect_memory(operation="create-entity")' in script
-    assert "single incidental mention" in script
-    assert "person, organization" not in script
-
-
 def test_capture_silent_when_stop_hook_active(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
@@ -2692,9 +2680,7 @@ def test_capture_reminder_names_the_lifecycle_classes() -> None:
     """The reminder that fires must name the classes it wants routed."""
     from exomem._hooks import exomem_capture_nudge as capture_hook
 
-    reminder = capture_hook.REMINDER.lower()
+    reminder = capture_hook.REMINDER_SHORT.lower()
 
-    assert "stated intent" in reminder
-    assert "plan_memory" in reminder
-    assert "observed outcome" in reminder
-    assert "record_memory" in reminder
+    assert "intent->planning/plan_memory" in reminder
+    assert "outcome->records/record_memory" in reminder
