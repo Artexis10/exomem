@@ -172,6 +172,11 @@ def init_vault(
     product_owned = {source.relative_to(_SCAFFOLD) for source in shipped_schema_sources()}
     for src in sorted(_SCAFFOLD.rglob("*")):
         scaffold_rel = src.relative_to(_SCAFFOLD)
+        # Packaged conventions are the base registry, not the add/drop grammar
+        # accepted at this vault-owned override path. Absence uses those defaults;
+        # even a force overlay must leave an owner's override intact.
+        if scaffold_rel == Path("_Schema/activation-conventions.yaml"):
+            continue
         if scaffold_rel in product_owned:
             dest = shipped_schema_target(vault_root) / scaffold_rel.as_posix().split("/", 1)[1]
         else:

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import activation_manifest, state_migration
+from exomem import activation_conventions, activation_manifest, state_migration
 from exomem import init as init_module
 from exomem import vault as vault_module
 
@@ -34,6 +34,11 @@ def test_init_scaffolds_a_fresh_vault(tmp_path: Path) -> None:
     assert semantic_registry.exists()
     assert semantic_registry.read_text(encoding="utf-8") == (
         "schema_version: 1\ncategories: {}\nkinds: {}\n"
+    )
+    conventions = activation_conventions.load_conventions(tmp_path)
+    assert conventions.findings == ()
+    assert (
+        conventions.conventions_hash == activation_conventions.load_conventions().conventions_hash
     )
     assert (shipped / "workflow-skills" / "exomem-capture" / "SKILL.md").exists()
 
@@ -81,6 +86,19 @@ def test_force_overlay_of_existing_vault_does_not_assert_fresh_state_authority(
     init_module.init_vault(tmp_path, force=True)
 
     assert called is False
+
+
+def test_force_init_preserves_activation_conventions_override(tmp_path: Path) -> None:
+    override = tmp_path / "Knowledge Base/_Schema/activation-conventions.yaml"
+    override.parent.mkdir(parents=True)
+    override.write_text("schema_version: 1\nstopwords:\n  add: [sampleword]\n", encoding="utf-8")
+    before = activation_conventions.load_conventions(tmp_path)
+
+    init_module.init_vault(tmp_path, force=True, initialize_state=False)
+
+    after = activation_conventions.load_conventions(tmp_path)
+    assert after.findings == ()
+    assert after.conventions_hash == before.conventions_hash
 
 
 def test_force_init_snapshots_existing_compiled_pages_once_without_editing_them(
@@ -243,7 +261,7 @@ def test_refresh_rewrites_a_stale_shipped_doc(tmp_path: Path) -> None:
     refreshed = init_module.refresh_shipped_schema(vault)
 
     assert ".exomem/schema/SKILL.md" in refreshed
-    packaged = (Path(init_module.__file__).parent / "_scaffold" / "_Schema" / "SKILL.md")
+    packaged = Path(init_module.__file__).parent / "_scaffold" / "_Schema" / "SKILL.md"
     assert _shipped(kb).read_bytes() == packaged.read_bytes()
 
 
