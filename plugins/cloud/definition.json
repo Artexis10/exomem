@@ -1,8 +1,8 @@
 {
   "name": "exomem-cloud",
-  "display_name": "Exomem Cloud",
-  "description": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through Exomem Cloud.",
-  "release_notes": "Introduces the unified Exomem Cloud plugin with shared memory workflows, OAuth account connection, context activation and grounded recall. Claude Code includes profile-local lifecycle hooks; ChatGPT uses the same Skill and MCP operating contract without hooks.",
+  "display_name": "Exomem",
+  "description": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through the hosted Exomem service.",
+  "release_notes": "Introduces the unified Exomem plugin with shared memory workflows, OAuth account connection, context activation and grounded recall. Claude Code includes profile-local lifecycle hooks; ChatGPT uses the same Skill and MCP operating contract without hooks.",
   "resource": "https://exomem.substratesystems.io/mcp",
   "profile": "product-cloud",
   "author": {

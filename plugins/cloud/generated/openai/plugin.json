@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "exomem-cloud",
   "version": "0.102.6",
-  "description": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through Exomem Cloud.",
+  "description": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through the hosted Exomem service.",
   "author": {
     "name": "Substrate Systems OÜ",
     "url": "https://substratesystems.io"
@@ -19,9 +19,9 @@
   "extensions": {
     "com.openai": {
       "interface": {
-        "displayName": "Exomem Cloud",
+        "displayName": "Exomem",
         "shortDescription": "Memory across conversations",
-        "longDescription": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through Exomem Cloud.",
+        "longDescription": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through the hosted Exomem service.",
         "developerName": "Substrate Systems OÜ",
         "category": "Productivity",
         "capabilities": [
@@ -89,7 +89,7 @@
       },
       "publication": {
         "countries": [],
-        "release_notes": "Introduces the unified Exomem Cloud plugin with shared memory workflows, OAuth account connection, context activation and grounded recall. Claude Code includes profile-local lifecycle hooks; ChatGPT uses the same Skill and MCP operating contract without hooks."
+        "release_notes": "Introduces the unified Exomem plugin with shared memory workflows, OAuth account connection, context activation and grounded recall. Claude Code includes profile-local lifecycle hooks; ChatGPT uses the same Skill and MCP operating contract without hooks."
       }
     }
   }
