@@ -5,7 +5,7 @@
 Under `service-v1`, the owning service SHALL receive a prompt bounded wake hint after durable semantic receipt insertion commits, without waiting for caller terminal/advisory completion or depending on a full reconcile scan or unrelated graph/full-refresh work. The hint MUST NOT execute work inline or convey additional canonical, lease or derived-custody authority. Notifications SHALL be coalesced hints; durable receipt state SHALL remain authoritative across missed notifications, failure, shutdown and restart. Existing successful inline indexing SHALL remain available. Exact-source generation and publication fences SHALL be preserved: partial or superseded work MUST NOT clear newer debt or be advertised as current. Poisoned work SHALL be retained and retried with bounded backoff without preventing other eligible work from progressing.
 
 #### Scenario: Semantic receipt arrives between reconcile cycles
-- **WHEN** a service-profile canonical write records durable semantic debt and releases its writer lease
+- **WHEN** durable semantic receipt insertion commits while the service-profile caller's terminal is still pending
 - **THEN** its owning service attempts bounded semantic recovery promptly without waiting for the next full reconcile interval
 - **AND** completion retires only the matching published generation
 

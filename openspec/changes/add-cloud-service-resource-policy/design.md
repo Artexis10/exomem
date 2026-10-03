@@ -107,7 +107,7 @@ A second measured attribution identifies roughly 90–105 MiB in parsed bodies a
 
 - Always-resident core increases idle running-cell cost → measure simultaneous warmed cells and reserve headroom before each new admission; use existing lifecycle stop when applicable, not an invented cheap floor.
 - Native inference is not preemptible within a batch → cap actual batch size, preserve thread budgets, and prove foreground outcomes under realistic import load.
-- More frequent debt replay can contend with canonical/graph work → coalesced in-service wakeups after lease release, short turns, durable retry/backoff and unchanged generation fences.
+- More frequent debt replay can contend with canonical/graph work → hint-only coalesced wakeups after durable receipt insertion, short turns, durable retry/backoff and unchanged generation fences.
 - Corpus caches may still dominate memory → block promotion and complete the already-owned byte-bound/disk-first work instead of silently raising limits.
 - Operational status can overstate success → distinguish canonical, derived, encoder and Kubernetes readiness; require exact fresh reads and projection evidence.
 

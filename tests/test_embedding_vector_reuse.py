@@ -260,7 +260,7 @@ def test_cold_publication_refuses_malformed_semantic_unit_metadata(live, monkeyp
     assert owner.publication_ready(PAGE)
     with sqlite3.connect(embeddings.get_embedding_index(vault).path) as connection:
         connection.execute(
-            "UPDATE semantic_unit_vectors SET unit_ref = 'wrong-ref', unit_source_hash = 'wrong-hash' "
+            "UPDATE semantic_unit_vectors SET unit_ref = '!' || substr(unit_ref, 2) "
             "WHERE parent_path = ?", (PAGE,),
         )
     assert not owner.publication_ready(PAGE)
