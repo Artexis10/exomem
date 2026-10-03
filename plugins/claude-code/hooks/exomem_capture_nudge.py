@@ -38,11 +38,16 @@ names are still accepted for back-compat (aliased to the EXOMEM_* names at start
 
 Episode ask. Every K substantive turns (K and a cooldown by prominence,
 `_EPISODE_ASK_PRESETS`; EXOMEM_EPISODE_ASK_TURNS / EXOMEM_EPISODE_ASK_COOLDOWN_SEC
-override) the hook asks for one `episode_memory` record under a key derived from
+override), and only once work has LANDED since the last ask or record
+(`landed_since_ask`, set by the same `_successful_landing` the capture reminder
+uses), the hook asks for one `episode_memory` record under a key derived from
 the client and session id alone (`episode_key`), so the key survives compaction
-without the hook reading a transcript record. Only a SUCCESSFUL record resets the
-count: an unrelated write, a `Saved ->` marker or a failed record leaves the
-episode pending. When the ask is due it takes that Stop; on every other Stop the
+without the hook reading a transcript record. A session that never lands work is
+never asked, and an ask answered without a record is not repeated until the next
+landing: an autonomous run with no record would otherwise be blocked at every
+cooldown for as long as it ran. Only a SUCCESSFUL record resets the turn count:
+an unrelated write, a `Saved ->` marker or a failed record leaves the episode
+pending. When the ask is due it takes that Stop; on every other Stop the
 per-turn capture reminder behaves exactly as before. The hook never records
 anything itself — hooks trigger, agents author.
 
@@ -769,6 +774,8 @@ _EPISODE_STATE_DEFAULT = {
     "substantive_since_record": 0,
     "last_ask_ts": 0.0,
     "last_seen_revisions": 0,
+    # A landing since the last episode ask or record. The ask needs one.
+    "landed_since_ask": False,
     # The candidate ledger, mirrored from the door (task 4.1): which episode
     # this session prepared candidates for, its next step (`unknown` until
     # read, and again once the session moves its workflow), what it attempted,
@@ -799,6 +806,7 @@ def _read_episode_state(path: Path) -> dict:
             "substantive_since_record": max(0, int(data.get("substantive_since_record") or 0)),
             "last_ask_ts": float(data.get("last_ask_ts") or 0.0),
             "last_seen_revisions": max(-1, int(data.get("last_seen_revisions") or 0)),
+            "landed_since_ask": data.get("landed_since_ask") is True,
             "workflow_episode": (
                 workflow
                 if isinstance(workflow, str) and _EPISODE_KEY_RE.fullmatch(workflow)
@@ -1018,7 +1026,8 @@ def _episode_ask(
 
     Coverage is hook-local: covered through the last successful record,
     pending while substantive turns accrue after it. Asking never resets the
-    count — only a record does — so an ignored ask repeats after its cooldown.
+    count — only a record does — but it does spend the landing the ask needs
+    (`landed_since_ask`), so an ignored ask is not repeated until work lands again.
 
     Before an ask that is otherwise due actually fires, one bounded REST
     `inspect` call (`_episode_revision_count`) checks whether some other door
@@ -1035,15 +1044,20 @@ def _episode_ask(
     recorded = any(_successful_episode_record(tool) for tool in tools)
     if recorded:
         state["substantive_since_record"] = 0
+        state["landed_since_ask"] = False
         state["last_seen_revisions"] = _REVISIONS_UNKNOWN
-    elif substantive:
-        state["substantive_since_record"] += 1
+    else:
+        if substantive:
+            state["substantive_since_record"] += 1
+        if any(_successful_landing(tool) for tool in tools):
+            state["landed_since_ask"] = True
     _note_workflow(state, tools, recorded)
     now = time.time()
     client = _EPISODE_CLIENT_LABELS.get(_hook_client(), _hook_client())
     key = episode_key(client, session_id)
     about_due = (
         turns > 0
+        and state["landed_since_ask"]
         and state["substantive_since_record"] >= turns
         and now - state["last_ask_ts"] >= cooldown
     )
@@ -1058,11 +1072,13 @@ def _episode_ask(
             baseline = state["last_seen_revisions"]
             if baseline != _REVISIONS_UNKNOWN and revisions > baseline:
                 state["substantive_since_record"] = 0
+                state["landed_since_ask"] = False
                 about_due = False
             state["last_seen_revisions"] = revisions
     due = about_due
     if due:
         state["last_ask_ts"] = now
+        state["landed_since_ask"] = False
     coverage_ask = None if due else _coverage_ask(state, now, cooldown)
     _write_episode_state(path, state)
     if due:
@@ -1115,6 +1131,8 @@ def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
     The ask blocks a Stop, and the agent answers it in the continuation that
     follows, which Stops again with `stop_hook_active`. That record is the
     coverage the ask asked for; dropping it would repeat the ask every cooldown.
+    A landing is not counted here: the continuation re-reads the whole turn, so
+    it would see the landing the ask already spent.
     """
     recorded = any(_successful_episode_record(tool) for tool in tools)
     if not session_id or not (recorded or _workflow_episode(tools)):
@@ -1123,6 +1141,7 @@ def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
     state = _read_episode_state(path)
     if recorded:
         state["substantive_since_record"] = 0
+        state["landed_since_ask"] = False
         state["last_seen_revisions"] = _REVISIONS_UNKNOWN
     _note_workflow(state, tools, recorded)
     _write_episode_state(path, state)
