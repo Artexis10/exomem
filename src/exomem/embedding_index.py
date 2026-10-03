@@ -808,7 +808,7 @@ class EmbeddingIndex:
         """
         if not self.path.exists() or self.path != index_paths.sidecar_path(self.vault_root):
             return None
-        units = {unit.unit_ref: unit.content for unit in state.document.units if unit.unit_ref is not None}
+        units = {row[0]: row for row in self._semantic_unit_metadata_rows(state)}
         conn = self._connect()
         try:
             conn.execute("BEGIN")
@@ -816,10 +816,11 @@ class EmbeddingIndex:
             if stored != identity and (chunks or units or stored is not None):
                 return None
             chunk_size = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(length(CAST(chunk_text AS BLOB))), 0) "
+                "SELECT COUNT(*), COALESCE(SUM(length(CAST(chunk_text AS BLOB))), 0), "
+                "COALESCE(SUM(typeof(chunk_idx) != 'integer'), 0) "
                 "FROM chunks WHERE file_path = ?", (state.path,),
             ).fetchone()
-            if chunk_size != (len(chunks), sum(len(text.encode("utf-8")) for text in chunks)):
+            if chunk_size != (len(chunks), sum(len(text.encode("utf-8")) for text in chunks), 0):
                 return None
             width = identity.dim * 4
             for number, row in enumerate(conn.execute(
@@ -828,19 +829,32 @@ class EmbeddingIndex:
             )):
                 if row != (number, chunks[number], width):
                     return None
+            columns = (
+                "unit_key", "record_type", "unit_ref", "parent_path", "parent_ref",
+                "parent_generation", "parent_source_hash", "parser_version", "form",
+                "category", "kind", "content", "unit_source_hash", "source_order",
+            )
+            text_size = " + ".join(
+                f"COALESCE(length(CAST({column} AS BLOB)), 0)"
+                for column in columns if column not in {"parser_version", "source_order"}
+            )
             unit_size = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(length(CAST(unit_key AS BLOB)) + "
-                "length(CAST(content AS BLOB))), 0) FROM semantic_unit_vectors WHERE parent_path = ?",
-                (state.path,),
+                f"SELECT COUNT(*), COALESCE(SUM({text_size}), 0), "
+                "COALESCE(SUM(typeof(parser_version) != 'integer' OR "
+                "typeof(source_order) != 'integer'), 0) "
+                "FROM semantic_unit_vectors WHERE parent_path = ?", (state.path,),
             ).fetchone()
-            if unit_size != (len(units), sum(len(key.encode("utf-8")) + len(text.encode("utf-8")) for key, text in units.items())):
+            expected_size = sum(
+                len(value.encode("utf-8")) for row in units.values()
+                for value in row if isinstance(value, str)
+            )
+            if unit_size != (len(units), expected_size, 0):
                 return None
-            for key, text, current, vector_width in conn.execute(
-                "SELECT unit_key, content, parent_generation = ? AND parent_source_hash = ? "
-                "AND parser_version = ?, length(vector) FROM semantic_unit_vectors WHERE parent_path = ?",
-                (state.parent_generation, state.parent_source_hash, state.parser_version, state.path),
+            for row in conn.execute(
+                f"SELECT {', '.join(columns)}, length(vector) "
+                "FROM semantic_unit_vectors WHERE parent_path = ?", (state.path,),
             ):
-                if not current or units.get(key) != text or vector_width != width:
+                if units.get(row[0]) != row[:-1] or row[-1] != width:
                     return None
             return self._build_token(conn)
         finally:
@@ -998,21 +1012,10 @@ class EmbeddingIndex:
             conn.close()
 
     @staticmethod
-    def _semantic_unit_rows(
+    def _semantic_unit_metadata_rows(
         state: semantic_index.SemanticParentIndexState,
-        vectors: np.ndarray,
-        mtime: float,
     ) -> list[tuple]:
-        units = [
-            (source_order, unit)
-            for source_order, unit in enumerate(state.document.units)
-            if unit.unit_ref is not None
-        ]
-        if len(units) != len(vectors):
-            raise ValueError(
-                f"semantic-unit/vector length mismatch for {state.path}: "
-                f"{len(units)} vs {len(vectors)}"
-            )
+        """The shared exact metadata for publication and cold validation."""
         return [
             (
                 unit.unit_ref,
@@ -1029,10 +1032,27 @@ class EmbeddingIndex:
                 unit.content,
                 unit.source_hash,
                 source_order,
-                vectors[vector_order].astype(np.float32).tobytes(),
-                mtime,
             )
-            for vector_order, (source_order, unit) in enumerate(units)
+            for source_order, unit in enumerate(state.document.units)
+            if unit.unit_ref is not None
+        ]
+
+    @classmethod
+    def _semantic_unit_rows(
+        cls,
+        state: semantic_index.SemanticParentIndexState,
+        vectors: np.ndarray,
+        mtime: float,
+    ) -> list[tuple]:
+        metadata = cls._semantic_unit_metadata_rows(state)
+        if len(metadata) != len(vectors):
+            raise ValueError(
+                f"semantic-unit/vector length mismatch for {state.path}: "
+                f"{len(metadata)} vs {len(vectors)}"
+            )
+        return [
+            (*row, vectors[number].astype(np.float32).tobytes(), mtime)
+            for number, row in enumerate(metadata)
         ]
 
     def _patch_cache(

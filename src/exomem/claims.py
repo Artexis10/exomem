@@ -993,8 +993,16 @@ def publication_current(vault_root: Path, rel_path: str, checksum: str | None, d
             with reserved_paths._sqlite_owner_target_scope(vault_root, path, "claims-store", create=False) as retained:
                 conn = _sqlite_connect_owned(f"{retained.as_uri()}?mode=ro", uri=True)
                 try:
+                    conn.execute("BEGIN")
                     row = conn.execute("SELECT checksum, length(vector) FROM claims WHERE file_path = ?", (rel_path,)).fetchone()
-                    return row is None if checksum is None else row is not None and row[0] == checksum and row[1] == dim * 4
+                    if checksum is None:
+                        return row is None
+                    identity = recall_space.read_identity(conn, tables=("claims",))
+                    model = recall_space.recall_model()
+                    return (
+                        row is not None and row[0] == checksum and row[1] == dim * 4
+                        and (identity is None or identity.accepts(model, recall_space.resident_fingerprint(model)))
+                    )
                 finally:
                     conn.close()
 

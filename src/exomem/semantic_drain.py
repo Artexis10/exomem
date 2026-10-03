@@ -109,9 +109,7 @@ def status(root: Path | None) -> dict[str, Any]:
 
 
 def request(root: Path, paths: list[Path], *, edited: bool, claims_required: bool = False) -> int:
-    """Durable handoff, then a coalesced wake beyond the canonical writer lease."""
-    from . import writer_lease
-
+    """Durable handoff, then a coalesced hint to the existing recovery owner."""
     rels = []
     for path in paths:
         try:
@@ -125,11 +123,10 @@ def request(root: Path, paths: list[Path], *, edited: bool, claims_required: boo
         else deferred_index.ensure_receipts(root, rels)
     )
     if receipts:
-        hints = tuple(receipt.rel_path for receipt in receipts)
-        def wake():
-            signal(root, hints)
-        if not writer_lease.defer_housekeeping_until_terminal_persisted(wake):
-            wake()
+        # This only sets bounded hints/Event: it executes no work inline.
+        # The owner already polls these durable rows while a terminal is
+        # pending, so delaying the hint changes latency, not admission.
+        signal(root, tuple(receipt.rel_path for receipt in receipts))
     return len(receipts)
 
 

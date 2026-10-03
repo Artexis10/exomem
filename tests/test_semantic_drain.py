@@ -54,6 +54,30 @@ def test_small_receipt_publishes_while_bulk_parent_is_still_running(vault: Path,
             owner.stop(timeout=5)
 
 
+def test_durable_small_receipt_wakes_without_waiting_for_terminal(vault: Path, monkeypatch) -> None:
+    """Slow terminal/advisory work must not leave published debt unhinted."""
+    from exomem import semantic_drain, writer_lease
+
+    target = vault / "Knowledge Base/small.md"
+    target.write_text("# Small\n\nA new fact.\n", encoding="utf-8")
+    rel = target.relative_to(vault).as_posix()
+    notified = []
+
+    def signal(root, paths):
+        # Wake-up carries only a hint for rows already durably committed.
+        assert [row.rel_path for row in deferred_index.snapshot(root)] == [rel]
+        notified.extend(paths)
+
+    monkeypatch.setattr(semantic_drain, "signal", signal)
+    monkeypatch.setattr(embeddings, "upsert_after_write_status", lambda *a, **kw: pytest.fail("inline encode"))
+    token = writer_lease._ACTIVE_POST_TERMINAL_HOUSEKEEPING.set([])
+    try:
+        assert semantic_drain.request(vault, [target], edited=True) == 1
+        assert notified == [rel]
+    finally:
+        writer_lease._ACTIVE_POST_TERMINAL_HOUSEKEEPING.reset(token)
+
+
 def test_stopped_attempt_cannot_retire_or_delay_a_superseding_edit(vault: Path, monkeypatch) -> None:
     """Shutdown during encoding leaves exact newer custody intact for restart."""
     from exomem import semantic_drain

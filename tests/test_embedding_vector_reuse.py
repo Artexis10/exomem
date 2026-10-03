@@ -229,6 +229,43 @@ def test_service_claims_need_their_own_publication_after_being_enabled(live, mon
     assert cold is not None and not cold.current(vault, claims_required=True)
 
 
+def test_cold_claim_publication_refuses_another_encoder_space(live, monkeypatch) -> None:
+    """A matching checksum/width cannot complete claims rejected by recall."""
+    from exomem import claims, recall_space
+
+    vault, target, _encoder = live
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    cold = embeddings.reconstruct_publication(vault, target)
+    assert cold is not None and cold.current(vault, claims_required=True)
+    with sqlite3.connect(claims.sidecar_path(vault)) as connection:
+        connection.execute("UPDATE meta SET value = 'other-model' WHERE key = ?", (recall_space.META_MODEL,))
+    cold = embeddings.reconstruct_publication(vault, target)
+    assert cold is not None and not cold.current(vault, claims_required=True)
+
+
+def test_cold_publication_refuses_malformed_semantic_unit_metadata(live, monkeypatch) -> None:
+    """A row with current text/generation must still identify its exact unit."""
+    from exomem import semantic_drain
+
+    vault, target, _encoder = live
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    owner = semantic_drain.SemanticDrain(vault)
+    assert owner.publication_ready(PAGE)
+    with sqlite3.connect(embeddings.get_embedding_index(vault).path) as connection:
+        connection.execute(
+            "UPDATE semantic_unit_vectors SET unit_ref = 'wrong-ref', unit_source_hash = 'wrong-hash' "
+            "WHERE parent_path = ?", (PAGE,),
+        )
+    assert not owner.publication_ready(PAGE)
+
+
 def test_a_stored_vector_of_another_width_is_not_reused(live, monkeypatch) -> None:
     vault, target, encoder = live
     monkeypatch.setattr(embeddings, "_chunks_for_page", lambda *_a, **_k: ["alpha", "beta"])
