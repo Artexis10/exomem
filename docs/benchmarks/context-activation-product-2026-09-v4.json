@@ -132,7 +132,7 @@
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
           "gold recall 0.50 below the 0.9 floor",
-          "precision 0.00 below the 0.8 floor"
+          "precision 0.50 below the 0.8 floor"
         ],
         "gold": {
           "hit": 1,
@@ -144,7 +144,7 @@
           "hit": 0,
           "total": 2
         },
-        "precision": 0.0
+        "precision": 0.5
       },
       {
         "case_id": "T4",
@@ -459,7 +459,7 @@
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
           "gold recall 0.50 below the 0.9 floor",
-          "precision 0.00 below the 0.8 floor"
+          "precision 0.50 below the 0.8 floor"
         ],
         "gold": {
           "hit": 1,
@@ -471,7 +471,7 @@
           "hit": 0,
           "total": 2
         },
-        "precision": 0.0
+        "precision": 0.5
       },
       {
         "case_id": "T4",
@@ -1115,7 +1115,7 @@
           "hit": 0,
           "total": 2
         },
-        "precision": 0.0
+        "precision": 0.5
       },
       {
         "case_id": "T4",
@@ -1457,7 +1457,7 @@
         "capacity ceiling"
       ],
       "observed_status": "resolved",
-      "packet_chars": 410,
+      "packet_chars": 453,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -1508,7 +1508,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "unresolved",
-      "packet_chars": 79,
+      "packet_chars": 122,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -1754,7 +1754,7 @@
       "failure_reasons": [
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.50 below the 0.9 floor",
-        "precision 0.00 below the 0.8 floor"
+        "precision 0.50 below the 0.8 floor"
       ],
       "gold": {
         "hit": 1,
@@ -1765,13 +1765,13 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "unresolved",
-      "packet_chars": 109,
+      "packet_chars": 187,
       "passed": false,
       "poison": {
         "hit": 0,
         "total": 2
       },
-      "precision": 0.0,
+      "precision": 0.5,
       "status_match": false,
       "twin_false_activation": false
     },
@@ -1861,7 +1861,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "resolved",
-      "packet_chars": 391,
+      "packet_chars": 481,
       "passed": true,
       "poison": {
         "hit": 0,
@@ -1974,7 +1974,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "unresolved",
-      "packet_chars": 156,
+      "packet_chars": 199,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -2088,7 +2088,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "unresolved",
-      "packet_chars": 68,
+      "packet_chars": 111,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -2129,7 +2129,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "unresolved",
-      "packet_chars": 69,
+      "packet_chars": 112,
       "passed": false,
       "poison": {
         "hit": 0,
