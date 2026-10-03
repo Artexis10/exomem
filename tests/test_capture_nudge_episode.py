@@ -1364,3 +1364,23 @@ def test_a_record_covers_the_landings_before_it(
     results = _stops(monkeypatch, capsys, tmp_path, 1)
     assert _is_episode_ask(results[-1])
 
+
+def test_a_record_made_in_the_continuation_covers_the_landings_before_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    assert _stop(monkeypatch, capsys, _claude_turn(tmp_path, "Pushed.", PUSH, name="early.jsonl")) is not None
+    _stop(monkeypatch, capsys, _recorded_transcript(tmp_path, "rec.jsonl"), active=True)
+
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k + 2, landed=False))
+
+
+def test_a_revision_recorded_through_the_rest_door_covers_the_landings_before_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    count = _counting_door(monkeypatch)
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    count["n"] = 1  # another door recorded; the hook has not seen it yet
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k))  # re-base on the due check
+
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k + 2, landed=False))
