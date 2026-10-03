@@ -206,6 +206,7 @@ _TEXT_BASENAMES = frozenset(
         ".gitkeep",
         "Dockerfile",
         "env.example",
+        ".openspec-target",
         "LICENSE",
         "METADATA",
         "PKG-INFO",

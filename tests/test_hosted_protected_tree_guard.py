@@ -1500,21 +1500,22 @@ def test_the_governed_save_writes_only_the_override_file_a_hosted_cell_would_see
     assert saved_conventions["valid"] is True
     assert activation_conventions_module.override_path(root).is_file()
 
-    # `_cell` already seeds a starter copy of both files (mirroring every other
-    # scaffolded `_Schema` document, as a customisation starting point), so the
-    # governed save changes their CONTENT -- exactly the two expected keys
-    # changed -- and adds only the history of what each save replaced.
+    # Roles replace the starter override; conventions start from packaged
+    # defaults and create their first override only through the governed save.
+    # Both saves retain the previous effective registry in history.
     trees_after = _protected_tree_state(root)
     assert set(trees_before) <= set(trees_after)
     added = set(trees_after) - set(trees_before)
     history_root = f"{_kb()}/_Schema/history"
-    assert added and all(key.startswith(history_root) for key in added)
+    conventions_key = f"{_kb()}/_Schema/{activation_conventions_module.REGISTRY_FILENAME}"
+    assert conventions_key not in trees_before
+    assert conventions_key in added
+    assert all(key == conventions_key or key.startswith(history_root) for key in added)
     changed = {key for key in trees_before if trees_after[key] != trees_before[key]}
     assert changed == {
         f"{_kb()}/_Schema/{context_roles_module.REGISTRY_FILENAME}",
-        f"{_kb()}/_Schema/{activation_conventions_module.REGISTRY_FILENAME}",
     }
-    snapshots = sorted(key for key in added if key.endswith(".yaml"))
+    snapshots = sorted(key for key in added if key.startswith(history_root) and key.endswith(".yaml"))
     assert len(snapshots) == 2
 
     # The same cell's direct file tools remain refused for both new files and

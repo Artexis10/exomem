@@ -1,8 +1,13 @@
 {
   "name": "exomem-cloud",
-  "display_name": "Exomem Cloud",
-  "description": "Governed long-term memory for sources, evidence, decisions and reusable conclusions across conversations through Exomem Cloud.",
-  "release_notes": "Introduces the unified Exomem Cloud plugin with shared memory workflows, OAuth account connection, context activation and grounded recall. Claude Code includes profile-local lifecycle hooks; ChatGPT uses the same Skill and MCP operating contract without hooks.",
+  "display_name": "Exomem",
+  "description": "Keep what matters from your conversations and find it again when you need it. Exomem lets you save useful information, pick up a project in a new chat, and revisit what you decided and why. Ask in your own words; you do not need to organise folders or learn special commands. Connect your Exomem account to use the same saved knowledge across supported assistants. Answers can point back to the notes and sources they draw on, and you control how actively Exomem helps.",
+  "release_notes": "Connect your Exomem account to keep useful knowledge across conversations. Save something for later, return to a project in a fresh chat, or ask about a past decision. Includes memory workflows for supported assistants and lifecycle hooks for supported Claude Code and Cowork installations.",
+  "default_prompts": [
+    "Remember this for next time.",
+    "Where did we leave off with my project?",
+    "What did we decide, and why?"
+  ],
   "resource": "https://exomem.substratesystems.io/mcp",
   "profile": "product-cloud",
   "author": {

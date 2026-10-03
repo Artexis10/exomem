@@ -152,20 +152,18 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
         shutil.copyfile(root / "plugins/cloud/assets/icon.svg", assets / "icon.svg")
         shutil.copyfile(root / "LICENSE", target / "LICENSE")
         readme = (
-            "# Exomem Cloud\n\n"
-            "Exomem Cloud gives assistants governed long-term memory across conversations. "
-            "It keeps original sources and evidence separate from compiled conclusions, "
-            "and connects related knowledge without treating a summary as its source. "
-            "The bundled skills explain recall, continuity, capture and review. "
-            "Connect the remote MCP server through your provider's authorization flow. "
-            "The live bootstrap response determines available tools and current policy.\n\n"
+            f"# {definition['display_name']}\n\n"
+            f"{definition['description']}\n\n"
             "## Getting started\n\n"
-            "Connect your existing Exomem Cloud account through OAuth. Use the bundled "
-            "Exomem skill to call `bootstrap`, then `activate_context` with the raw user "
-            "turn when context is needed. Reuse context already supplied for this turn; "
-            "do not activate twice. The same canonical skills govern recall, capture and "
-            "review on every supported surface. Workflow skills are user-invocable; "
-            "separate commands and agents are not required copies of those workflows.\n\n"
+            "Install the plugin and connect your Exomem account. Check the account "
+            "shown on the sign-in page before approving access. Then chat normally. "
+            "When something is worth keeping, ask Exomem to remember it; in a new chat, "
+            "ask about what you saved or where you left off.\n\n"
+            "For example:\n\n"
+            + "".join(f'- "{prompt}"\n' for prompt in definition["default_prompts"])
+            + "\nGive the assistant the information to save or name the project you mean. "
+            "Exomem can also help during ordinary work according to your chosen settings. "
+            "It does not automatically import every old conversation.\n\n"
             "## Data handling\n\n"
             "MCP tool arguments, including user turns sent to `activate_context`, reach "
             "the authenticated Exomem Cloud service. Reads return authorized account "
@@ -240,6 +238,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 "longDescription": definition["description"],
                 "developerName": definition["author"]["name"],
                 "category": "Productivity",
+                "defaultPrompt": definition["default_prompts"],
                 "capabilities": ["Read", "Write"],
                 "websiteURL": definition["homepage"],
                 "supportURL": definition["support"],

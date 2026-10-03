@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.102.6](https://github.com/Artexis10/exomem/compare/v0.102.5...v0.102.6) (2026-10-03)
+
+
+### Bug Fixes
+
+* **activation:** qualify complete titles per named occurrence ([#1520](https://github.com/Artexis10/exomem/issues/1520)) ([e82c7bb](https://github.com/Artexis10/exomem/commit/e82c7bb25046f4adeedfe901578faf4e9f371f2d))
+* **hooks:** fire the capture nudge on landings, not reply length ([#1525](https://github.com/Artexis10/exomem/issues/1525)) ([417ccea](https://github.com/Artexis10/exomem/commit/417cceaa1de8ab356bc13f97f49726734ff20907))
+* **mcp:** clarify context activation input scope ([#1522](https://github.com/Artexis10/exomem/issues/1522)) ([f402cd3](https://github.com/Artexis10/exomem/commit/f402cd3aa4445eec3d0bfa018735b5951821f462))
+* **recall:** resolve private identity evidence only when needed ([#1523](https://github.com/Artexis10/exomem/issues/1523)) ([ac4a91e](https://github.com/Artexis10/exomem/commit/ac4a91e9850f01cb669bbee5ab275dc7f95046bf))
+
 ## [0.102.5](https://github.com/Artexis10/exomem/compare/v0.102.4...v0.102.5) (2026-10-02)
 
 
