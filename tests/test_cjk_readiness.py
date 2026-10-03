@@ -877,7 +877,9 @@ def _create_sharing(vault: Path, name: str, alias: str, **kwargs) -> dict:
     )
 
 
-def _patch_aliases(vault: Path, path: str, aliases: list[str], **decision) -> dict:
+def _patch_aliases(
+    vault: Path, path: str, aliases: list[str], *, field: str = "aliases", **decision
+) -> dict:
     text = (vault / path).read_text(encoding="utf-8")
     return writer_lease.invoke_command(
         _command("edit_memory"),
@@ -886,7 +888,7 @@ def _patch_aliases(vault: Path, path: str, aliases: list[str], **decision) -> di
         why="the name is genuinely shared",
         operation={
             "kind": "patch_frontmatter",
-            "field": "aliases",
+            "field": field,
             "value": aliases,
             "expected_hash": content_hash(text),
         },
@@ -955,11 +957,12 @@ def test_a_title_decision_cannot_authorize_an_alias_claim(ja_vault: Path) -> Non
     assert not (ja_vault / CORVANE).exists()
 
 
-def test_edit_memory_takes_the_same_alias_decision(ja_vault: Path) -> None:
+@pytest.mark.parametrize("field", ["aliases", "learned_aliases"])
+def test_edit_memory_takes_the_same_alias_decision(ja_vault: Path, field: str) -> None:
     _create_entity(ja_vault, "Tessary Works", "The tool shop.", aliases=["テッサリー"])
     corvane = _create_entity(ja_vault, "Corvane Motors", "The carmaker.")
     with pytest.raises(ValueError, match="ENTITY_EXISTS") as refused:
-        _patch_aliases(ja_vault, corvane, ["テッサリー"])
+        _patch_aliases(ja_vault, corvane, ["テッサリー"], field=field)
     found = _FINGERPRINT.search(str(refused.value))
     assert found, str(refused.value)
     fingerprint = found.group(1)
@@ -970,6 +973,7 @@ def test_edit_memory_takes_the_same_alias_decision(ja_vault: Path) -> None:
             ja_vault,
             corvane,
             ["テッサリー"],
+            field=field,
             identity_decision={"outcome": "distinct", "candidate_fingerprint": "f" * 64},
         )
 
@@ -977,6 +981,7 @@ def test_edit_memory_takes_the_same_alias_decision(ja_vault: Path) -> None:
         ja_vault,
         corvane,
         ["テッサリー"],
+        field=field,
         identity_decision={"outcome": "distinct", "candidate_fingerprint": fingerprint},
     )
     assert "テッサリー" in (ja_vault / corvane).read_text(encoding="utf-8")

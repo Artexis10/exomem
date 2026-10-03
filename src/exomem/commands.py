@@ -4440,8 +4440,26 @@ def op_edit(
                 relation_review_reason=relation_review_reason,
             )
         elif field is not None:
-            if field == "aliases":
-                _refuse_claimed_aliases(vault_root, path, value, identity_decision)
+            patch_fields: dict[str, Any] = {}
+
+            def _validate_names(before_source: str, after_source: str) -> None:
+                # Only the full rendered document determines root field names
+                # and scalar types; a fragment can belong to nested metadata.
+                before, _, _ = vault.parse_frontmatter(before_source)
+                after, _, _ = vault.parse_frontmatter(after_source, strict=True)
+                for name_field in ("aliases", working_set_index_module.LEARNED_ALIASES_FIELD):
+                    if name_field not in after:
+                        continue
+                    if name_field != field and before.get(name_field) == after[name_field]:
+                        continue
+                    patch_fields[name_field] = after[name_field]
+                    claimed_value = after[name_field]
+                    if name_field == working_set_index_module.LEARNED_ALIASES_FIELD:
+                        verdicts = _learned_alias_verdicts(vault_root, claimed_value)
+                        if verdicts is not None:
+                            claimed_value = list(verdicts[0])
+                    _refuse_claimed_aliases(vault_root, path, claimed_value, identity_decision)
+
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root,
                 path=path,
@@ -4455,6 +4473,7 @@ def op_edit(
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
                 relation_review_reason=relation_review_reason,
+                _validate_frontmatter=_validate_names,
             )
         else:
             result = edit_module.edit(
@@ -4486,7 +4505,12 @@ def op_edit(
         if getattr(e, "candidates", None):
             msg += f" (candidates: {e.candidates})"
         raise ValueError(msg) from e
-    return result.as_dict()
+    payload = result.as_dict()
+    if field is not None and working_set_index_module.LEARNED_ALIASES_FIELD in patch_fields:
+        _warn_on_skipped_learned_aliases(
+            vault_root, patch_fields[working_set_index_module.LEARNED_ALIASES_FIELD], payload
+        )
+    return payload
 
 
 def op_replace(
@@ -7465,7 +7489,7 @@ def op_remember(
 def _refuse_claimed_aliases(
     vault_root: Path, path: str, value: object, identity_decision: dict | None = None
 ) -> None:
-    """Refuse an `aliases` patch naming what another page already answers to.
+    """Refuse an owner or learned alias naming what another page already answers to.
 
     The same guard `create-entity` runs (`entity_candidates.claimed_names`):
     an alias another page holds would make a turn naming it resolve both. The
@@ -7552,7 +7576,7 @@ def op_edit_memory(
             as `operation.validate_only`; giving it in both places is fine when
             they agree. Same meaning as on `remember` and `replace_memory`.
         identity_decision: `{outcome: "distinct", candidate_fingerprint}` for an
-            `aliases` patch naming a name another page already answers to, when
+            `aliases` or `learned_aliases` patch naming a name another page already answers to, when
             the name is genuinely shared; the fingerprint comes from that
             refusal. Not needed for names only withheld pages answer to.
 
@@ -7568,28 +7592,33 @@ def op_edit_memory(
     if validate_only:
         arguments["validate_only"] = True
     normalized = edit_operations_module.normalize_edit_arguments(arguments)
-    result = op_edit(vault_root, **normalized)
-    if normalized.get("field") == working_set_index_module.LEARNED_ALIASES_FIELD:
-        _warn_on_skipped_learned_aliases(vault_root, normalized.get("value"), result)
-    return result
+    return op_edit(vault_root, **normalized)
 
 
-def _warn_on_skipped_learned_aliases(vault_root: Path, value: Any, result: Any) -> None:
-    """Tell the agent now about a `learned_aliases` entry the activation index
-    will skip, with the index's own rules (`learned_alias_verdicts`). Never
-    blocks: the page write stands, the entry simply does nothing."""
-    if not isinstance(result, dict):
-        return
+def _learned_alias_verdicts(
+    vault_root: Path, value: Any
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]] | None:
+    """Use the index's admission rules for both claim checks and write advice."""
     try:
         conventions = activation_conventions_module.load_conventions(vault_root).conventions
-        _accepted, rejected = working_set_index_module.learned_alias_verdicts(
+        return working_set_index_module.learned_alias_verdicts(
             value,
             stopwords=conventions.stopwords,
             filler=activation_conventions_module.shipped_conventions().conventions.referential_filler,
         )
-    except Exception:  # noqa: BLE001 - advice about a write must never fail it
+    except Exception:  # noqa: BLE001 - unavailable advice cannot disable the claim guard
         log.debug("learned_aliases verdict unavailable", exc_info=True)
+        return None
+
+
+def _warn_on_skipped_learned_aliases(vault_root: Path, value: Any, result: Any) -> None:
+    """Tell the agent about entries the activation index skips without blocking."""
+    if not isinstance(result, dict):
         return
+    verdicts = _learned_alias_verdicts(vault_root, value)
+    if verdicts is None:
+        return
+    _accepted, rejected = verdicts
     if not rejected:
         return
     warnings = result.get("warnings")
