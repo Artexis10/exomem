@@ -939,12 +939,16 @@ def test_inspect_takes_nothing_but_the_episode(vault: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _rest_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def _door_server(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     for leaky in ("EXOMEM_UPLOAD_TOKEN", "EXOMEM_CF_ACCESS_TEAM_DOMAIN", "EXOMEM_CF_ACCESS_AUD"):
         monkeypatch.delenv(leaky, raising=False)
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
-    return TestClient(server.build_server(require_auth=False).http_app())
+    return server.build_server(require_auth=False)
+
+
+def _rest_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    return TestClient(_door_server(monkeypatch).http_app())
 
 
 def _payload(key: str) -> dict:
@@ -961,7 +965,8 @@ def test_three_doors_record_through_one_leaf(
     vault: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
-    client = _rest_client(monkeypatch)
+    mcp = _door_server(monkeypatch)
+    client = TestClient(mcp.http_app())
     rest = client.post(
         "/api/episode_memory",
         json=_payload("ep-" + "b2" * 16),
@@ -970,7 +975,6 @@ def test_three_doors_record_through_one_leaf(
     assert rest.status_code == 200, rest.text
     rest_result = rest.json()["data"]
 
-    mcp = server.build_server(require_auth=False)
     with request_scope(owner_principal(surface="mcp")):
         called = asyncio.run(
             mcp.call_tool("episode_memory", _payload("ep-" + "c3" * 16), run_middleware=False)
