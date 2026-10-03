@@ -47,6 +47,12 @@ The operator SHALL declare MemoryQoS adoption separately from cell image selecti
 - **THEN** the ordinary node and container lifecycle verifies effective memory controls and readiness
 - **AND** canonical writes and unfinished durable work are preserved
 
+#### Scenario: Privileged physical-headroom experiment stays outside production
+- **WHEN** an operator prepares a disposable host to run the isolated real-model experiment
+- **THEN** the host has no production private-network membership, fleet inventory entry or production credentials
+- **AND** reviewed provisioning and cleanup affect only its named disposable compute, firewall and address resources
+- **AND** the experiment preserves the same cell limits and outcome gates
+
 ### Requirement: Service-policy allocator release is bounded and shared
 
 Existing completed-work allocator release callers SHALL share one process-wide minimum interval of five seconds under the validated service-v1 profile. Local and legacy profiles SHALL retain the sixty-second interval. Calls suppressed by that allowance SHALL retain the existing pending-release retry behavior. The policy SHALL NOT add a per-request trim, periodic release worker or core unload. Eligibility for an allocator release SHALL NOT be represented as proof of passing memory or latency acceptance.
