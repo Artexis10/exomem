@@ -611,6 +611,25 @@ a deciding-alone kind now sorts ahead of every anchor that does not, so
 MAX_CANDIDATES/MAX_ANCHORS truncation can no longer drop the one anchor a
 turn actually named in favour of several weaker multi-kind candidates.
 
+The task 6.16 compound-name correction keeps the existing name-run scan and its
+longest-run summary, but also retains comparable occurrences: runs with at least
+two name words where one exists, otherwise the one-word runs the existing rule
+uses. A shorter sense is narrowed only when all those occurrences lie strictly
+inside wider same-kind name runs. A separately stated shorter name therefore
+survives regardless of mention order; a detached generic word does not create
+a second multi-word mention, and repeated complete names still narrow normally.
+Internal spans never enter the packet or add contact evidence. Occurrence
+containment remains local to one turn/focus segment. The existing
+conversation projection marks newly focus-only candidates' spans as focus-local;
+numeric containment across segments cannot remove an unrelated focus lead.
+An already turn-reached candidate retains its turn occurrence authority.
+Literal separators
+are exempted only inside complete title or alias spellings already admitted to
+the audience-visible index. Persisted aliases are deduplicated and do not carry
+authorship provenance, so equality with a potential derived key cannot justify
+discarding an admitted spelling. Keep index admission, rarity, namesake and
+audience rules unchanged rather than add an authorship field or second matcher.
+
 Correction round 1's independent review found two further gaps in the same
 five rules. **C1**: the possessive fold (R4) could itself manufacture a
 false `exact_alias`/`rare_term` from an ordinary contraction of a common
