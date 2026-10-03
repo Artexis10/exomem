@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 from test_governance_egress import _external, _reset_caches, write_rule, write_scope
@@ -27,7 +28,7 @@ from exomem import (
     writer_lease,
 )
 from exomem.governance.principal import request_scope
-from exomem.vault import content_hash
+from exomem.vault import content_hash, parse_frontmatter, render_frontmatter_document
 
 SLED = "Knowledge Base/Products/Cargo Sled.md"
 LEDGER = "Knowledge Base/Systems/Depot Ledger.md"
@@ -47,7 +48,9 @@ def _command(name: str):
     return next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
 
 
-def _learn(vault: Path, rel: str, names: list[str]) -> dict:
+def _learn(
+    vault: Path, rel: str, names: list[Any], *, field: str = "learned_aliases"
+) -> dict:
     """The advisory's `name` option, exactly as an agent carries it out."""
     text = (vault / rel).read_text(encoding="utf-8")
     return writer_lease.invoke_command(
@@ -57,7 +60,7 @@ def _learn(vault: Path, rel: str, names: list[str]) -> dict:
         why="the user calls it this",
         operation={
             "kind": "patch_frontmatter",
-            "field": "learned_aliases",
+            "field": field,
             "value": names,
             "expected_hash": content_hash(text),
         },
@@ -170,12 +173,64 @@ def test_guest_generation_omits_rejections_on_a_withheld_page(anchor_vault: Path
 
 
 def test_edit_memory_warns_about_a_learned_alias_the_index_will_skip(anchor_vault: Path) -> None:
+    # A spelling the index ignores cannot steal this page's name or require
+    # a distinct-identity decision; the accepted spelling still takes effect.
+    page = anchor_vault / "Knowledge Base/Products/It.md"
+    page.write_text("---\ntype: resource\ntitle: it\n---\nAn ordinary resource.\n", encoding="utf-8")
+    working_set_index.WorkingSetIndex(anchor_vault).update()
     result = _learn(anchor_vault, SLED, ["it", "Schlitten"])
 
     warnings = " ".join(str(item) for item in result.get("warnings") or ())
     assert "learned_aliases" in warnings
     assert "'it'" in warnings
     assert "Schlitten" not in warnings
+
+
+@pytest.mark.parametrize(
+    "field,names,claimed",
+    [
+        ("learned_aliases", [31415, "Schlitten"], "31415"),
+        ("learned_aliases ", ["Depot Ledger"], "Depot Ledger"),
+    ],
+)
+def test_serialized_learned_names_cannot_claim_another_page(
+    anchor_vault: Path, field: str, names: list[Any], claimed: str
+) -> None:
+    # These inputs change spelling or type during YAML rendering; checking
+    # only the request would let a correction silently steal an existing name.
+    if claimed == "31415":
+        page = anchor_vault / "Knowledge Base/Products/Numbered Resource.md"
+        page.write_text("---\ntype: resource\ntitle: '31415'\n---\nA numbered resource.\n", encoding="utf-8")
+    _update(anchor_vault)
+    before = _resolved(commands.op_activate_context(anchor_vault, turn=claimed))
+    assert before and SLED not in before
+    original = (anchor_vault / SLED).read_bytes()
+
+    with pytest.raises(ValueError, match="ENTITY_EXISTS"):
+        _learn(anchor_vault, SLED, names, field=field)
+
+    assert (anchor_vault / SLED).read_bytes() == original
+    _update(anchor_vault)
+    assert _resolved(commands.op_activate_context(anchor_vault, turn=claimed)) == before
+
+
+def test_nested_metadata_does_not_claim_a_root_learned_name(anchor_vault: Path) -> None:
+    # A rendered fragment looks like a root key, but in the actual document
+    # this indented field belongs to metadata and cannot change activation.
+    page = anchor_vault / SLED
+    _frontmatter, body, block = parse_frontmatter(page.read_text(encoding="utf-8"))
+    page.write_text(render_frontmatter_document(block + "\nmetadata:", body), encoding="utf-8")
+    _update(anchor_vault)
+    before = _resolved(commands.op_activate_context(anchor_vault, turn="Depot Ledger"))
+
+    result = _learn(anchor_vault, SLED, ["Depot Ledger"], field="  learned_aliases")
+
+    frontmatter, _, _ = parse_frontmatter(page.read_text(encoding="utf-8"), strict=True)
+    assert frontmatter["metadata"]["learned_aliases"] == ["Depot Ledger"]
+    assert "learned_aliases" not in frontmatter
+    assert not any("learned_aliases" in warning for warning in result.get("warnings", []))
+    _update(anchor_vault)
+    assert _resolved(commands.op_activate_context(anchor_vault, turn="Depot Ledger")) == before
 
 
 def test_added_turn_filler_does_not_change_learned_name_soundness(anchor_vault: Path) -> None:

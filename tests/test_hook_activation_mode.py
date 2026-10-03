@@ -89,7 +89,8 @@ def test_mcp_capture_does_not_resolve_personal_service_credentials(monkeypatch, 
         capture, "_resolve_rest_key", lambda: reads.append("service") or ("", "file")
     )
     if branch == "due":
-        assert capture._episode_ask("s", [], True, "balanced") is not None
+        landing = [{"name": "Bash", "input": {"command": "git push"}}]
+        assert capture._episode_ask("s", landing, True, "balanced") is not None
     elif branch == "coverage":
         state = capture._read_episode_state(capture._episode_state_path("s"))
         state["workflow_episode"] = "candidate-episode"

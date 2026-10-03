@@ -314,8 +314,23 @@ cells:
     - 100.64.0.0/10
     - 169.254.0.0/16
 
+# Stage the broker before activating explicit cells with its verified Service IP.
+artifactBroker:
+  enabled: false
+  image: ""
+  endpoint: ""
+  cellIds: []
+  publicKeySecretName: exomem-artifact-broker-public-key
+  publicKeySecretKey: public-key
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
 cloudGateway:
   enabled: false
+  artifactTransportEnabled: false
+  artifactSigningKeySecretName: exomem-cloud-artifact-signing-key
+  artifactSigningKeySecretKey: signing-key
   # Enable only after the matched web/gateway release, reviewer schema/grants,
   # and dedicated complimentary sample account are verified. Ordinary Cloud
   # accounts do not require this separate reviewer authority.

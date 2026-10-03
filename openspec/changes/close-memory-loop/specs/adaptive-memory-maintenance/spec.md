@@ -23,6 +23,15 @@ The sensor for an activation correction SHALL be the agent's admitted `anchor` p
 - **THEN** a fresh session's turn containing the word resolves the page on `exact_alias`
 - **AND** removing the entry restores the earlier abstention
 
+#### Scenario: A learned name respects existing visible name claims
+
+- **WHEN** `edit_memory` saves a `learned_aliases` spelling admitted by the activation index that another visible page already claims
+- **THEN** the existing claimed-name guard refuses it unless the write carries a matching explicit distinct-identity decision
+- **AND** admission and advice use the persisted YAML field and value, not their request spelling or scalar type
+- **AND** an entry the index skips remains warning-only and does not claim a name
+- **AND** a withheld claimant has the same effect as an absent one
+- **AND** learned names remain activation-only and do not enter link resolution or identity
+
 #### Scenario: A cue is learned in another language
 
 - **WHEN** the agent saves a referential cue in the user's language through `schema_memory save-conventions` with the advisory's conventions hash

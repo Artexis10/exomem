@@ -164,6 +164,12 @@ spec:
               value: {{ .Values.cells.backupWindow | quote }}
             - name: CELLCTL_BACKUP_CONCURRENCY
               value: {{ .Values.cells.backupConcurrency | quote }}
+            {{- if .Values.artifactBroker.enabled }}
+            - name: CELLCTL_ARTIFACT_BROKER_URL
+              value: {{ .Values.artifactBroker.endpoint | quote }}
+            - name: CELLCTL_ARTIFACT_BROKER_CELL_IDS
+              value: {{ .Values.artifactBroker.cellIds | toJson | quote }}
+            {{- end }}
             {{- if .Values.cells.jobEgressExcept }}
             - name: CELLCTL_JOB_EGRESS_EXCEPT
               value: {{ join "," .Values.cells.jobEgressExcept | quote }}
@@ -507,8 +513,24 @@ spec:
           variables.np.podSelector.matchLabels ==
             {'app.kubernetes.io/name': 'exomem-cell', 'exomem.io/cell': variables.namespaceName.substring(9)} &&
           !has(variables.np.podSelector.matchExpressions) &&
-          (!has(variables.np.egress) || size(variables.np.egress) == 0) &&
-          size(variables.np.ingress) == 1 &&
+          ((!has(variables.np.egress) || size(variables.np.egress) == 0)
+          {{- if .Values.artifactBroker.enabled }}
+            || (variables.namespaceName.substring(9) in {{ .Values.artifactBroker.cellIds | toJson }} &&
+              size(variables.np.egress) == 1 &&
+              size(variables.np.egress[0].to) == 1 &&
+              !has(variables.np.egress[0].to[0].ipBlock) &&
+              variables.np.egress[0].to[0].namespaceSelector.matchLabels ==
+                {'kubernetes.io/metadata.name': {{ .Values.cellctl.namespace | quote }}} &&
+              !has(variables.np.egress[0].to[0].namespaceSelector.matchExpressions) &&
+              variables.np.egress[0].to[0].podSelector.matchLabels ==
+                {'app.kubernetes.io/name': 'exomem-artifact-broker'} &&
+              !has(variables.np.egress[0].to[0].podSelector.matchExpressions) &&
+              size(variables.np.egress[0].ports) == 1 &&
+              variables.np.egress[0].ports[0].protocol == 'TCP' &&
+              variables.np.egress[0].ports[0].port == 8767 &&
+              !has(variables.np.egress[0].ports[0].endPort))
+          {{- end }}
+          ) && size(variables.np.ingress) == 1 &&
           size(variables.np.ingress[0].from) == 1 &&
           !has(variables.np.ingress[0].from[0].ipBlock) &&
           variables.np.ingress[0].from[0].namespaceSelector.matchLabels ==
@@ -521,7 +543,7 @@ spec:
           variables.np.ingress[0].ports[0].protocol == 'TCP' &&
           variables.np.ingress[0].ports[0].port == 8765 &&
           !has(variables.np.ingress[0].ports[0].endPort))
-      message: cellctl may write runtime-ingress only as gateway-to-cell ingress on TCP 8765 with no egress.
+      message: cellctl may write runtime-ingress only as gateway-to-cell ingress on TCP 8765 and configured selected-cell broker egress on TCP 8767.
     - expression: >-
         request.resource.resource != 'networkpolicies' || request.operation == 'DELETE' ||
         variables.target.metadata.name != 'job-egress' ||
