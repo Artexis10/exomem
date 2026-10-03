@@ -811,6 +811,8 @@ class DeferredReceipt:
     failure_code: str | None = field(default=None, compare=False)
     refused_input: str | None = field(default=None, compare=False)
     refused_policy: str | None = field(default=None, compare=False)
+    # Disposable pagination metadata, never receipt identity or clearing authority.
+    scan_rowid: int | None = field(default=None, compare=False)
 
 
 def semantic_receipt_eligible(
@@ -1493,12 +1495,25 @@ def list_full_paths(vault_root: Path, *, limit: int | None = None) -> list[str]:
     return [receipt.rel_path for receipt in snapshot_full(vault_root, limit=limit)]
 
 
+def semantic_scan_ceiling(vault_root: Path) -> int:
+    """Freeze the current scan tail; arrivals cannot extend this sweep."""
+    if not store_path(vault_root).exists():
+        return 0
+    conn = _connect(vault_root, create=False)
+    try:
+        return int(conn.execute("SELECT coalesce(max(rowid), 0) FROM semantic_upserts").fetchone()[0])
+    finally:
+        conn.close()
+
+
 def snapshot(
     vault_root: Path,
     *,
     limit: int | None = None,
     paths: set[str] | None = None,
     after_path: str | None = None,
+    after_rowid: int | None = None,
+    through_rowid: int | None = None,
 ) -> list[DeferredReceipt]:
     path = store_path(vault_root)
     if not path.exists():
@@ -1512,7 +1527,7 @@ def snapshot(
         revision = "revision" if "revision" in columns else "1 AS revision"
         retry_columns = set(_SEMANTIC_RETRY_COLUMNS) <= columns
         retry_select = ", " + ", ".join(_SEMANTIC_RETRY_COLUMNS) if retry_columns else ""
-        sql = f"SELECT rel_path, {revision}{retry_select} FROM semantic_upserts "
+        sql = f"SELECT rel_path, {revision}{retry_select}, rowid FROM semantic_upserts "
         params: list[Any] = []
         clauses: list[str] = []
         if paths is not None:
@@ -1524,9 +1539,16 @@ def snapshot(
         if after_path is not None:
             clauses.append("rel_path > ?")
             params.append(after_path)
+        if after_rowid is not None:
+            clauses.append("rowid > ?")
+            params.append(after_rowid)
+        if through_rowid is not None:
+            clauses.append("rowid <= ?")
+            params.append(through_rowid)
         if clauses:
             sql += "WHERE " + " AND ".join(clauses) + " "
-        sql += "ORDER BY " + ("rel_path" if after_path is not None else "updated_at, rel_path")
+        order = "rowid" if after_rowid is not None or through_rowid is not None else "rel_path" if after_path is not None else "updated_at, rel_path"
+        sql += "ORDER BY " + order
         if limit is not None:
             sql += " LIMIT ?"
             params.append(max(0, limit))
@@ -1535,7 +1557,7 @@ def snapshot(
             metadata = {}
             if retry_columns and int(row[7]) == int(row[1]):
                 metadata = dict(zip(tuple(_SEMANTIC_RETRY_COLUMNS)[:-1], row[2:7], strict=True))
-            receipts.append(DeferredReceipt(str(row[0]), int(row[1]), **metadata))
+            receipts.append(DeferredReceipt(str(row[0]), int(row[1]), scan_rowid=int(row[-1]), **metadata))
     finally:
         conn.close()
     valid: list[DeferredReceipt] = []

@@ -1662,7 +1662,7 @@ class EmbeddingPublication:
             self.guard.recheck(vault_root)
             if claims_required and (
                 not self.claims_enabled
-                or not claims.publication_current(vault_root, self.guard.target, self.claim_checksum, self.identity.dim)
+                or not claims.publication_current(vault_root, self.guard.target, self.claim_checksum)
             ):
                 return False
             return (

@@ -147,7 +147,8 @@ class SemanticDrain:
         self._bulk_thread: threading.Thread | None = None
         self._bulk_path: str | None = None
         self._hints: set[str] = set()
-        self._cursor = ""
+        self._scan_after = 0
+        self._scan_through: int | None = None
         self._proofs: OrderedDict[str, Any] = OrderedDict()
 
     def start(self) -> SemanticDrain:
@@ -210,23 +211,44 @@ class SemanticDrain:
             hints = self._hints
             self._hints = set()
         hinted = deferred_index.snapshot(self.root, paths=hints, limit=SCAN_LIMIT) if hints else []
-        page = deferred_index.snapshot(self.root, after_path=self._cursor, limit=SCAN_LIMIT)
+        if self._scan_through is None:
+            self._scan_through = deferred_index.semantic_scan_ceiling(self.root)
+        page = deferred_index.snapshot(
+            self.root, after_rowid=self._scan_after, through_rowid=self._scan_through, limit=SCAN_LIMIT,
+        )
         if not page:
-            self._cursor = ""
-            page = deferred_index.snapshot(self.root, after_path="", limit=SCAN_LIMIT)
+            self._scan_after = 0
+            self._scan_through = deferred_index.semantic_scan_ceiling(self.root)
+            page = deferred_index.snapshot(
+                self.root, after_rowid=0, through_rowid=self._scan_through, limit=SCAN_LIMIT,
+            )
         seen: set[str] = set()
         attempted = 0
         overhead = 0.0
         progressed = False
         policy = preparation_policy(self.root)
-        for receipt in (*hinted, *page):
+        def candidates():
+            # Reserve one execution for the finite sweep before hints. The
+            # frozen rowid tail prevents arrivals from postponing old debt or
+            # revisits of work skipped while the bulk slot was occupied.
+            scanned = iter(page)
+            for receipt in scanned:
+                yield receipt, True
+                if attempted:
+                    break
+            for receipt in hinted:
+                yield receipt, False
+            for receipt in scanned:
+                yield receipt, True
+
+        for receipt, scanned in candidates():
             if self._stop.is_set() or attempted >= TURN_LIMIT or overhead >= TURN_OVERHEAD_SECONDS:
                 break
+            if scanned:
+                self._scan_after = receipt.scan_rowid
             if receipt.rel_path in seen:
                 continue
             seen.add(receipt.rel_path)
-            if receipt not in hinted:
-                self._cursor = receipt.rel_path
             began = time.monotonic()
             path = self.root / receipt.rel_path
             signature = _input_signature(path)

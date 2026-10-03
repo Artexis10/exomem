@@ -434,7 +434,7 @@ class ClaimIndex:
             recall_space.clear_identity(conn)
         self._identity = recall_space.admit(conn, recorded, dim)
 
-    def checksums(self, *, paths: list[str] | None = None, dim: int | None = None) -> dict[str, str]:
+    def checksums(self, *, paths: list[str] | None = None) -> dict[str, str]:
         """`{file_path: checksum}` — the incremental-skip map for a re-index.
 
         Empty while the stored vectors are in another space than the recall
@@ -444,24 +444,24 @@ class ClaimIndex:
             return {}
         conn = self._connect()
         try:
+            conn.execute("BEGIN")
+            identity = recall_space.read_identity(conn, tables=("claims",))
+            model = recall_space.recall_model()
+            if identity is None or not identity.accepts(model, recall_space.resident_fingerprint(model)):
+                return {}
             query = "SELECT file_path, checksum FROM claims"
-            filters = []
-            params: list[Any] = []
+            filters = ["length(vector) = ?"]
+            params: list[Any] = [identity.dim * 4]
             if paths is not None:
                 if not paths:
                     return {}
                 filters.append(f"file_path IN ({','.join('?' for _ in paths)})")
                 params.extend(paths)
-            if dim is not None:
-                filters.append("length(vector) = ?")
-                params.append(dim * 4)
             if filters:
                 query += " WHERE " + " AND ".join(filters)
             rows = conn.execute(query, params).fetchall()
         finally:
             conn.close()
-        if not self._space_current():
-            return {}
         return {fp: cs for fp, cs in rows}
 
     def get_row(
@@ -983,7 +983,7 @@ def claim_checksum_for_page(page: Any) -> str | None:
     return _checksum(claim) if claim else None
 
 
-def publication_current(vault_root: Path, rel_path: str, checksum: str | None, dim: int) -> bool:
+def publication_current(vault_root: Path, rel_path: str, checksum: str | None) -> bool:
     """Prove one expected claim projection without reading text or vector blobs."""
     path = sidecar_path(vault_root)
     if not path.exists():
@@ -1000,8 +1000,9 @@ def publication_current(vault_root: Path, rel_path: str, checksum: str | None, d
                     identity = recall_space.read_identity(conn, tables=("claims",))
                     model = recall_space.recall_model()
                     return (
-                        row is not None and row[0] == checksum and row[1] == dim * 4
-                        and (identity is None or identity.accepts(model, recall_space.resident_fingerprint(model)))
+                        identity is not None and identity.dim > 0
+                        and row is not None and row[0] == checksum and row[1] == identity.dim * 4
+                        and identity.accepts(model, recall_space.resident_fingerprint(model))
                     )
                 finally:
                     conn.close()
@@ -1043,7 +1044,6 @@ def upsert_claims_after_write(vault_root: Path, written_paths: list[Path], *, pa
     idx = get_claim_index(vault_root)
     existing = idx.checksums() if pages is None else idx.checksums(
         paths=[page.rel_path for page, _signature in pages.values()],
-        dim=embeddings.get_embedding_index(vault_root).dim,
     )
     claim_types = _claim_types()
     identity = recall_policy.recall_policy_identity(vault_root)

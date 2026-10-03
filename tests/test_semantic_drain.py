@@ -174,3 +174,110 @@ def test_occupied_bulk_receipts_do_not_consume_small_execution_slots(vault: Path
     monkeypatch.setattr(owner, "_execute", lambda receipt, *_args: executed.append(receipt.rel_path))
     owner._turn()
     assert executed == [paths[-1]]
+
+
+@pytest.mark.parametrize("bulk_name, save_prefix", [("a-import", "z-save"), ("z-import", "a-save")])
+def test_continuous_small_hints_cannot_starve_older_durable_bulk(vault: Path, monkeypatch, bulk_name, save_prefix) -> None:
+    """Fresh saves must leave an admission opportunity for unhinted import debt."""
+    from exomem import semantic_drain
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    bulk = vault / f"Knowledge Base/{bulk_name}.md"
+    bulk.write_text("# Import\n\n" + "bulk text\n" * 200, encoding="utf-8")
+    bulk_rel = bulk.relative_to(vault).as_posix()
+    deferred_index.add_receipts(vault, [bulk_rel])
+    owner = semantic_drain.SemanticDrain(vault)
+    completed = set()
+
+    def execute(_root, paths, **_kwargs):
+        completed.add(paths[0].relative_to(vault).as_posix())
+        return SimpleNamespace(status="completed", code="embedding_upsert_completed", publication=SimpleNamespace(current=lambda _root: True))
+
+    monkeypatch.setattr(embeddings, "upsert_after_write_status", execute)
+    try:
+        for turn in range(3):
+            rels = []
+            for number in range(semantic_drain.TURN_LIMIT):
+                path = vault / f"Knowledge Base/{save_prefix}-{turn}-{number}.md"
+                path.write_text("# Save\n\nA new fact.\n", encoding="utf-8")
+                rels.append(path.relative_to(vault).as_posix())
+            deferred_index.add_receipts(vault, rels)
+            owner.signal(rels)
+            owner._turn()
+            if owner._bulk_thread is not None:
+                owner._bulk_thread.join(timeout=5)
+        assert bulk_rel in completed
+        assert any(rel != bulk_rel for rel in completed)
+        assert not deferred_index.snapshot(vault, paths={bulk_rel})
+    finally:
+        owner.stop(timeout=5)
+
+
+def test_scan_revisits_skipped_bulk_despite_refusals_and_continuous_arrivals(vault: Path, monkeypatch) -> None:
+    """Hint overflow and a tied clock must not strand bulk behind a moving tail."""
+    from exomem import semantic_drain
+
+    monkeypatch.setattr(deferred_index.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(semantic_drain, "preparation_policy", lambda _root: "policy")
+    owner = semantic_drain.SemanticDrain(vault)
+    owner._bulk_path = "occupied"
+    bulk_rel = "Knowledge Base/z-bulk.md"
+    bulk_examined = threading.Event()
+    completed = []
+    arrivals = set()
+
+    def queue(rel):
+        path = vault / rel
+        path.write_text("# Input\n\nA fact.\n", encoding="utf-8")
+        [receipt] = deferred_index.add_receipts(vault, [rel])
+        return receipt
+
+    for number in range(semantic_drain.SCAN_LIMIT):
+        receipt = queue(f"Knowledge Base/a-refused-{number:03d}.md")
+        deferred_index.retry_semantic(
+            vault, receipt, failure_code="resource_budget_exceeded",
+            input_signature=semantic_drain._input_signature(vault / receipt.rel_path),
+            policy="policy",
+        )
+    initial = [f"Knowledge Base/a-save-0000-{number:03d}.md" for number in range(semantic_drain.SCAN_LIMIT)]
+    for rel in initial:
+        queue(rel)
+    queue(bulk_rel)
+    owner.signal(initial)
+
+    def classify(_root, path):
+        if path.relative_to(vault).as_posix() == bulk_rel:
+            bulk_examined.set()
+            return False
+        return True
+
+    def execute(receipt, *_args):
+        completed.append(receipt.rel_path)
+        assert deferred_index.clear_receipts(vault, [receipt]) == 1
+
+    monkeypatch.setattr(semantic_drain, "_small_parent", classify)
+    monkeypatch.setattr(owner, "_execute", execute)
+    try:
+        for turn in range(1, 65):
+            fresh = [f"Knowledge Base/a-save-{turn:04d}-{number:03d}.md" for number in range(semantic_drain.TURN_LIMIT)]
+            arrivals.update(fresh)
+            for rel in fresh:
+                queue(rel)
+            owner.signal(fresh)
+            before = len(completed)
+            owner._turn()
+            if owner._bulk_thread is not None:
+                owner._bulk_thread.join(timeout=5)
+            assert len(completed) - before <= semantic_drain.TURN_LIMIT
+            assert any(rel != bulk_rel for rel in completed[before:])
+            if bulk_examined.is_set():
+                owner._bulk_path = None
+            if bulk_rel in completed:
+                break
+        assert bulk_examined.is_set()
+        assert bulk_rel in completed
+        assert arrivals.intersection(completed)
+        assert not deferred_index.snapshot(vault, paths={bulk_rel})
+    finally:
+        owner.stop(timeout=5)

@@ -247,6 +247,48 @@ def test_cold_claim_publication_refuses_another_encoder_space(live, monkeypatch)
     assert cold is not None and not cold.current(vault, claims_required=True)
 
 
+def test_claim_publication_and_reuse_follow_their_own_space_during_migration(live, monkeypatch) -> None:
+    """A current new-space claim must complete while chunks still serve the old space."""
+    from exomem import claims, freshness, recall_space
+
+    vault, target, _encoder = live
+    old_model = "test/previous-384"
+    new_model = "test/current-768"
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.setattr(embeddings, "MODEL_NAME", old_model)
+    calls = []
+
+    def encode(texts, *, is_query=False):
+        model = recall_space.encoding_model()
+        calls.append(model)
+        return np.ones((len(texts), 384 if model == old_model else 768), dtype=np.float32)
+
+    monkeypatch.setattr(embeddings, "embed_texts", encode)
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    original = embeddings.upsert_after_write_status(vault, [target]).publication
+    assert original is not None
+    monkeypatch.setattr(embeddings, "MODEL_NAME", new_model)
+    monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
+    page = find_module._CACHE.get(target, vault)
+    pages = {target: (page, freshness.stat_signature(target))}
+    claims.upsert_claims_after_write(vault, [target], pages=pages)
+    assert embeddings.get_embedding_index(vault).dim == 384
+    proof = dataclasses.replace(original, claims_enabled=True, claim_checksum=claims.claim_checksum_for_page(page))
+    assert proof.current(vault, claims_required=True)
+    cold = embeddings.reconstruct_publication(vault, target)
+    assert cold is not None and cold.current(vault, claims_required=True)
+    calls.clear()
+    claims.upsert_claims_after_write(vault, [target], pages=pages)
+    assert calls == []  # The claim's own current space controls reuse.
+    with sqlite3.connect(claims.sidecar_path(vault)) as connection:
+        connection.execute("UPDATE claims SET vector = ? WHERE file_path = ?", (np.ones(384, dtype=np.float32).tobytes(), PAGE))
+    assert not proof.current(vault, claims_required=True)
+    claims.upsert_claims_after_write(vault, [target], pages=pages)
+    assert calls == [new_model]
+    assert proof.current(vault, claims_required=True)
+
+
 def test_cold_publication_refuses_malformed_semantic_unit_metadata(live, monkeypatch) -> None:
     """A row with current text/generation must still identify its exact unit."""
     from exomem import semantic_drain
