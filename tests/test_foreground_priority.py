@@ -14,6 +14,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -384,6 +385,34 @@ def test_a_lone_request_mid_pass_still_holds_the_pass() -> None:
         waited = foreground_priority.yield_to_foreground(max_wait=5.0)
         worker.join(5.0)
     assert 0.2 <= waited < 2.0
+
+
+def test_costlier_bulk_units_cannot_extend_the_foreground_work_grant(monkeypatch) -> None:
+    """A cheap walk must not buy an unbounded burst of later page parsing."""
+    clock = [0.0]
+    waits: list[float] = []
+
+    def capped_wait(predicate, *, timeout):
+        waits.append(timeout)
+        clock[0] += timeout
+        return False
+
+    monkeypatch.setattr(
+        foreground_priority, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setattr(foreground_priority._condition, "wait_for", capped_wait)
+    monkeypatch.setattr(foreground_priority, "_in_flight", 0)
+    with foreground_priority.bulk():
+        for _ in range(100):
+            foreground_priority.yield_to_foreground()
+            clock[0] += 0.001
+        monkeypatch.setattr(foreground_priority, "_in_flight", 1)
+        assert foreground_priority.yield_to_foreground() > 0
+        for _ in range(2):
+            foreground_priority.yield_to_foreground()
+            clock[0] += 0.03
+        assert foreground_priority.yield_to_foreground() > 0
+    assert len(waits) == 2
 
 
 def test_nested_bulk_stop_interrupts_without_traffic_and_restores_scope() -> None:

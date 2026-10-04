@@ -18,7 +18,6 @@ two would wait on each other until the bound.
 
 from __future__ import annotations
 
-import math
 import threading
 import time
 from collections.abc import Iterable, Iterator
@@ -36,10 +35,13 @@ MAX_YIELD_SECONDS = 2.0
 #: `_in_flight` above zero indefinitely, and every unit then waited the full cap:
 #: three units took 6 s. A pass may wait at most `MAX_WAIT_SHARE` of its elapsed
 #: time, beyond one grace wait of `MAX_YIELD_SECONDS` so a request that arrives
-#: early still gets priority. After a wait that ran into its cap, the pass runs
-#: a batch of units without yielding, sized from its own measured unit cost to
-#: take about as long as that wait.
+#: early still gets priority.
 MAX_WAIT_SHARE = 0.5
+
+#: Bound each progress turn by elapsed time, not an estimated number of units:
+#: cheap directory walks and expensive page parsing share the same pass.
+#: Checked between complete units; an individual unit remains indivisible.
+MAX_BULK_WORK_SECONDS = 0.05
 
 _condition = threading.Condition()
 _in_flight = 0
@@ -94,13 +96,12 @@ def wait_for_retry(seconds: float) -> None:
 class _PassBudget:
     """How long one `bulk()` pass has run, waited, and may still run unyielded."""
 
-    __slots__ = ("started", "waited", "units", "free_units")
+    __slots__ = ("started", "waited", "work_until")
 
     def __init__(self) -> None:
         self.started = time.monotonic()
         self.waited = 0.0
-        self.units = 0
-        self.free_units = 0
+        self.work_until = 0.0
 
     def allowance(self, now: float) -> float:
         """Seconds this pass may still wait without breaking the floor."""
@@ -108,12 +109,7 @@ class _PassBudget:
         return MAX_YIELD_SECONDS + MAX_WAIT_SHARE * elapsed - self.waited
 
     def after_capped_wait(self, now: float, waited: float) -> None:
-        worked = max(0.0, now - self.started - self.waited)
-        per_unit = worked / self.units if self.units else 0.0
-        if per_unit <= 0.0:
-            self.free_units = 1
-            return
-        self.free_units = max(1, math.ceil(waited / per_unit))
+        self.work_until = now + min(waited, MAX_BULK_WORK_SECONDS)
 
 
 def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
@@ -124,18 +120,17 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     """
     check_cancelled()
     budget: _PassBudget | None = getattr(_local, "budget", None)
-    if budget is not None:
-        budget.units += 1
-        if budget.free_units:
-            budget.free_units -= 1
-            return 0.0
     if not _in_flight:  # unlocked read: the common case costs one load
+        if budget is not None:
+            budget.work_until = 0.0
         return 0.0
     if getattr(_local, "depth", 0) or _holds_a_boundary():
         return 0.0
     started = time.monotonic()
     limit = max(0.0, max_wait)
     if budget is not None:
+        if started < budget.work_until:
+            return 0.0
         limit = min(limit, max(0.0, budget.allowance(started)))
         if limit <= 0.0:
             return 0.0

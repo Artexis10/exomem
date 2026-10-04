@@ -39,6 +39,11 @@ The aggregate preparation budget SHALL reserve capacity for small work and inclu
 - **THEN** bounded aging gives bulk/recovery work execution turns without consuming the reserved non-model request workers
 - **AND** both workloads retain durable progress and truthful refusal/degradation reporting
 
+#### Scenario: Bulk unit costs change between phases
+- **WHEN** a foreground read outlasts a cooperative bulk yield and cheap traversal is followed by more expensive page work
+- **THEN** the bulk progress grant is bounded by elapsed time at complete-unit boundaries rather than an unchecked unit count estimated from the earlier phase
+- **AND** sustained foreground traffic still permits bulk progress without pausing a held mutation boundary
+
 #### Scenario: Excess model requests
 - **WHEN** simultaneous model requests exceed admitted capacity
 - **THEN** excess requests refuse promptly rather than waiting outside the admitted budget
