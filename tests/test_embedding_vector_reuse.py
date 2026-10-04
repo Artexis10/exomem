@@ -151,6 +151,46 @@ def test_an_append_encodes_only_the_new_chunk_and_the_new_unit(live, monkeypatch
     assert stamps[new_units[0]] == 4.0
 
 
+def test_service_publication_proves_source_and_both_projections(live, monkeypatch) -> None:
+    """Queue absence/mtime cannot acknowledge a missing projection or new source."""
+    vault, target, _encoder = live
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    result = embeddings.upsert_after_write_status(vault, [target])
+    proof = result.publication
+    assert proof is not None and proof.current(vault)
+
+    # Unrelated publication must not force this completed parent to re-encode.
+    other = target.with_name("other.md")
+    other.write_text(_source([]).replace(PAGE_ID, "00000000-0000-4000-8000-0000000000a2"), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [other]).status == "completed"
+    assert proof.current(vault)
+
+    index = embeddings.get_embedding_index(vault)
+    with sqlite3.connect(index.path) as connection:
+        connection.execute("DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (PAGE,))
+    assert not proof.current(vault)
+    proof = embeddings.upsert_after_write_status(vault, [target]).publication
+    assert proof is not None and proof.current(vault)
+    with sqlite3.connect(index.path) as connection:
+        connection.execute("DELETE FROM chunks WHERE file_path = ?", (PAGE,))
+    assert not proof.current(vault)
+    proof = embeddings.upsert_after_write_status(vault, [target]).publication
+    assert proof is not None and proof.current(vault)
+    # Registry edits invalidate semantic units even when the parent is unchanged.
+    from exomem import semantic_language_registry
+
+    registry = semantic_language_registry.registry_path(vault)
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text("schema_version: 1\ncategories: {}\nkinds: {}\n", encoding="utf-8")
+    assert not proof.current(vault)
+    proof = embeddings.upsert_after_write_status(vault, [target]).publication
+    assert proof is not None and proof.current(vault)
+    target.write_text(_source([]), encoding="utf-8")
+    assert not proof.current(vault)
+
+
 def test_a_rewrite_with_no_new_text_encodes_nothing(live, monkeypatch) -> None:
     vault, target, encoder = live
     monkeypatch.setattr(embeddings, "_chunks_for_page", lambda *_a, **_k: ["alpha", "beta"])
@@ -163,6 +203,109 @@ def test_a_rewrite_with_no_new_text_encodes_nothing(live, monkeypatch) -> None:
     assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
     assert encoder.calls == []
     assert [(i, t) for i, t, _ in _chunk_rows(vault)] == [(0, "beta"), (1, "alpha"), (2, "beta")]
+
+
+def test_service_claims_need_their_own_publication_after_being_enabled(live, monkeypatch) -> None:
+    """A vector proof cannot acknowledge optional claims that were never indexed."""
+    from exomem import claims
+
+    vault, target, _encoder = live
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.delenv("EXOMEM_CLAIM_LEVEL", raising=False)
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    proof = embeddings.upsert_after_write_status(vault, [target]).publication
+    assert proof is not None and proof.current(vault)
+    monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
+    assert not proof.current(vault, claims_required=True)
+    cold = embeddings.reconstruct_publication(vault, target)
+    assert cold is not None and not cold.current(vault, claims_required=True)
+    proof = embeddings.upsert_after_write_status(vault, [target]).publication
+    assert proof is not None and proof.current(vault, claims_required=True)
+    with sqlite3.connect(claims.sidecar_path(vault)) as connection:
+        connection.execute("DELETE FROM claims")
+    assert not proof.current(vault, claims_required=True)
+    cold = embeddings.reconstruct_publication(vault, target)
+    assert cold is not None and not cold.current(vault, claims_required=True)
+
+
+def test_cold_claim_publication_refuses_another_encoder_space(live, monkeypatch) -> None:
+    """A matching checksum/width cannot complete claims rejected by recall."""
+    from exomem import claims, recall_space
+
+    vault, target, _encoder = live
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    cold = embeddings.reconstruct_publication(vault, target)
+    assert cold is not None and cold.current(vault, claims_required=True)
+    with sqlite3.connect(claims.sidecar_path(vault)) as connection:
+        connection.execute("UPDATE meta SET value = 'other-model' WHERE key = ?", (recall_space.META_MODEL,))
+    cold = embeddings.reconstruct_publication(vault, target)
+    assert cold is not None and not cold.current(vault, claims_required=True)
+
+
+def test_claim_publication_and_reuse_follow_their_own_space_during_migration(live, monkeypatch) -> None:
+    """A current new-space claim must complete while chunks still serve the old space."""
+    from exomem import claims, freshness, recall_space
+
+    vault, target, _encoder = live
+    old_model = "test/previous-384"
+    new_model = "test/current-768"
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.setattr(embeddings, "MODEL_NAME", old_model)
+    calls = []
+
+    def encode(texts, *, is_query=False):
+        model = recall_space.encoding_model()
+        calls.append(model)
+        return np.ones((len(texts), 384 if model == old_model else 768), dtype=np.float32)
+
+    monkeypatch.setattr(embeddings, "embed_texts", encode)
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    original = embeddings.upsert_after_write_status(vault, [target]).publication
+    assert original is not None
+    monkeypatch.setattr(embeddings, "MODEL_NAME", new_model)
+    monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
+    page = find_module._CACHE.get(target, vault)
+    pages = {target: (page, freshness.stat_signature(target))}
+    claims.upsert_claims_after_write(vault, [target], pages=pages)
+    assert embeddings.get_embedding_index(vault).dim == 384
+    proof = dataclasses.replace(original, claims_enabled=True, claim_checksum=claims.claim_checksum_for_page(page))
+    assert proof.current(vault, claims_required=True)
+    cold = embeddings.reconstruct_publication(vault, target)
+    assert cold is not None and cold.current(vault, claims_required=True)
+    calls.clear()
+    claims.upsert_claims_after_write(vault, [target], pages=pages)
+    assert calls == []  # The claim's own current space controls reuse.
+    with sqlite3.connect(claims.sidecar_path(vault)) as connection:
+        connection.execute("UPDATE claims SET vector = ? WHERE file_path = ?", (np.ones(384, dtype=np.float32).tobytes(), PAGE))
+    assert not proof.current(vault, claims_required=True)
+    claims.upsert_claims_after_write(vault, [target], pages=pages)
+    assert calls == [new_model]
+    assert proof.current(vault, claims_required=True)
+
+
+def test_cold_publication_refuses_malformed_semantic_unit_metadata(live, monkeypatch) -> None:
+    """A row with current text/generation must still identify its exact unit."""
+    from exomem import semantic_drain
+
+    vault, target, _encoder = live
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    owner = semantic_drain.SemanticDrain(vault)
+    assert owner.publication_ready(PAGE)
+    with sqlite3.connect(embeddings.get_embedding_index(vault).path) as connection:
+        connection.execute(
+            "UPDATE semantic_unit_vectors SET unit_ref = '!' || substr(unit_ref, 2) "
+            "WHERE parent_path = ?", (PAGE,),
+        )
+    assert not owner.publication_ready(PAGE)
 
 
 def test_a_stored_vector_of_another_width_is_not_reused(live, monkeypatch) -> None:
@@ -182,6 +325,114 @@ def test_a_stored_vector_of_another_width_is_not_reused(live, monkeypatch) -> No
 
     embeddings.upsert_after_write_status(vault, [target])
     assert encoder.calls[0] == ["alpha"]
+
+
+def test_reuse_budget_skips_large_old_projection_without_losing_new_write(live, monkeypatch) -> None:
+    vault, target, encoder = live
+    monkeypatch.setattr(embeddings, "_chunks_for_page", lambda *_a, **_k: ["alpha", "beta"])
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    index = embeddings.get_embedding_index(vault)
+
+    # A replacement can be small even when its previous projections exceeded
+    # the caller's preparation allowance. Reuse may be skipped, never required.
+    chunks, units, space = index.stored_text_vectors_with_space(PAGE, max_bytes=1)
+    assert chunks == units == {}
+    assert space is not None
+    chunks, units, _space = index.stored_text_vectors_with_space(PAGE, max_bytes=1024 * 1024)
+    assert set(chunks) == {"alpha", "beta"}
+    assert len(units) == 1
+    encoder.calls.clear()
+    monkeypatch.setattr(index, "stored_text_vectors", lambda rel, **_kwargs: (
+        index.stored_text_vectors_with_space(rel, max_bytes=1)[:2]
+    ))
+    monkeypatch.setattr(embeddings, "_chunks_for_page", lambda *_a, **_k: ["alpha"])
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    assert encoder.calls[0] == ["alpha"]
+    assert [text for _i, text, _stamp in _chunk_rows(vault)] == ["alpha"]
+
+
+def test_service_refuses_title_expansion_before_encoding_or_publication(live, monkeypatch) -> None:
+    vault, target, encoder = live
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    old_rows = _chunk_rows(vault)
+    encoder.calls.clear()
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    replacement = _source([]).replace("title: Reuse", "title: " + "t" * 12000)
+    replacement += "a\n\n" * 600
+    target.write_text(replacement, encoding="utf-8")
+
+    status = embeddings.upsert_after_write_status(vault, [target])
+    assert status.code == "embedding_preparation_budget_exceeded"
+    assert status.status != "completed"
+    assert encoder.calls == []
+    assert _chunk_rows(vault) == old_rows
+    assert target.read_text(encoding="utf-8") == replacement
+    assert runtime_resources.status()["semantic_preparation"]["reserved_bytes"] == 0
+
+
+@pytest.mark.parametrize("claims_enabled", [False, True])
+def test_service_snapshot_parse_stays_bounded_during_cache_reload_race(live, monkeypatch, claims_enabled) -> None:
+    from exomem import find_corpus
+
+    vault, target, _encoder = live
+    original = _source(["- [config_rule] Bound the input #sqlite ^obs-aaaa1111"])
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    if claims_enabled:
+        monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
+    else:
+        monkeypatch.delenv("EXOMEM_CLAIM_LEVEL", raising=False)
+    cache_get = find_module._CACHE.get
+    parse_page = find_corpus.parse_page
+    parsed_bytes: list[int] = []
+
+    def racing_reload(path, root):
+        path.write_text(_source([]) + "large prose " * 450000, encoding="utf-8")
+        return cache_get(path, root)
+
+    def observe_parse(*args, **kwargs):
+        parsed_bytes.append(len(kwargs.get("content") or b""))
+        return parse_page(*args, **kwargs)
+
+    monkeypatch.setattr(find_module._CACHE, "get", racing_reload)
+    monkeypatch.setattr(find_corpus, "parse_page", observe_parse)
+    embeddings.upsert_after_write_status(vault, [target])
+    assert parsed_bytes
+    assert max(parsed_bytes) <= len(original.encode("utf-8"))
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_service_bounds_dense_yaml_before_constructing_nodes(live, monkeypatch) -> None:
+    vault, target, encoder = live
+    source = _source([]).replace("status: active", "status: active\ntags: [" + "a," * 75000 + "a]")
+    target.write_text(source, encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    status = embeddings.upsert_after_write_status(vault, [target])
+    assert status.code == "embedding_preparation_budget_exceeded"
+    assert encoder.calls == []
+    assert runtime_resources.status()["semantic_preparation"]["reserved_bytes"] == 0
+
+
+def test_service_bounds_yaml_alias_expansion_before_construction(live, monkeypatch) -> None:
+    vault, target, encoder = live
+    nodes = ["base: &a0 {x: y}"]
+    nodes.extend(f"level{i}: &a{i} {{<<: [*a{i - 1}, *a{i - 1}]}}" for i in range(1, 21))
+    source = _source([]).replace("status: active", "status: active\n" + "\n".join(nodes))
+    target.write_text(source, encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    status = embeddings.upsert_after_write_status(vault, [target])
+    assert status.code == "embedding_preparation_budget_exceeded"
+    assert encoder.calls == []
+
+    # Ordinary bounded alias reuse is still a supported input, not an alias ban.
+    target.write_text(_source([]).replace("status: active", "status: active\nshared: &tags [one, two]\ntags: *tags"), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
 
 
 def test_stored_text_vectors_never_creates_the_sidecar(tmp_path, monkeypatch) -> None:
@@ -643,3 +894,68 @@ def test_the_stamp_names_the_resident_encoder_s_own_identity(lifecycle) -> None:
     embeddings._MODEL.profile = dataclasses.replace(profile, artifact_digest="fedcba9876543210")
 
     assert embeddings.recall_passage_vectors(["alpha"], stamp=embeddings.passage_memo_stamp()) == {}
+
+
+def test_small_multiline_parent_uses_actual_projection_reservation(live, monkeypatch) -> None:
+    """Line-count estimates must not refuse an ordinary sub-KiB, few-chunk save."""
+    from exomem import semantic_drain
+
+    vault, target, _encoder = live
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    source = _source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"])
+    source = source.replace("# Reuse\n\n", "").replace("Existing prose.", "x\n" * 60)
+    assert len(source.encode("utf-8")) <= 1024
+    target.write_text(source, encoding="utf-8")
+    assert semantic_drain._small_parent(vault, target)
+    result = embeddings.upsert_after_write_status(vault, [target])
+    assert result.status == "completed"
+    assert result.publication is not None and result.publication.current(vault)
+    assert runtime_resources.semantic_preparation_status()["reserved_bytes"] == 0
+
+
+def test_derived_batch_larger_than_proof_cache_finishes_without_reencoding(live, monkeypatch) -> None:
+    """A governed multi-path change must not loop when its first proof is evicted."""
+    from exomem import deferred_index, index_sync, semantic_drain
+    from exomem import vault as vault_module
+    from exomem.derived_receipts import DerivedComponent
+
+    vault, target, encoder = live
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.delenv("EXOMEM_CLAIM_LEVEL", raising=False)
+    owner = semantic_drain.SemanticDrain(vault)
+    monkeypatch.setitem(semantic_drain._ACTIVE, str(vault.resolve()), owner)
+    paths = []
+    for number in range(semantic_drain.PROOF_LIMIT + 1):
+        path = target.with_name(f"batch-{number}.md")
+        source = _source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"])
+        source = source.replace(PAGE_ID, f"00000000-0000-4000-8000-{number + 1:012d}")
+        path.write_text(source, encoding="utf-8")
+        rel = path.relative_to(vault).as_posix()
+        [receipt] = deferred_index.add_receipts(vault, [rel])
+        owner._execute(receipt, "foreground", "signature", "policy")
+        paths.append(SimpleNamespace(rel_path=rel, before_hash=None, after_hash=vault_module.content_hash(source)))
+    assert not deferred_index.snapshot(vault)
+    assert len(owner._proofs) == semantic_drain.PROOF_LIMIT
+    encoder.calls.clear()
+    batch = SimpleNamespace(batch_id="multi-path", canonical_generation="exact-after", paths=paths)
+    assert index_sync.converge_derived_component(vault, batch, DerivedComponent.EMBEDDINGS) is True
+    assert encoder.calls == []
+    assert not deferred_index.snapshot(vault)
+
+    # Cold proof still refuses changed text or a missing projection with the
+    # same row count elsewhere; no queue or cached acknowledgement substitutes.
+    first = vault / paths[0].rel_path
+    owner._proofs.clear()
+    index = embeddings.get_embedding_index(vault)
+    with sqlite3.connect(index.path) as connection:
+        connection.execute("UPDATE chunks SET chunk_text = 'stale' WHERE file_path = ?", (paths[0].rel_path,))
+    assert not owner.publication_ready(paths[0].rel_path, expected_hash=paths[0].after_hash)
+    assert embeddings.upsert_after_write_status(vault, [first]).status == "completed"
+    with sqlite3.connect(index.path) as connection:
+        connection.execute("DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (paths[0].rel_path,))
+    assert not owner.publication_ready(paths[0].rel_path, expected_hash=paths[0].after_hash)
+    assert embeddings.upsert_after_write_status(vault, [first]).status == "completed"
+    first.write_text(_source([]), encoding="utf-8")
+    assert not owner.publication_ready(paths[0].rel_path, expected_hash=paths[0].after_hash)

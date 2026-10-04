@@ -127,6 +127,12 @@ def register_activation(activation: Any) -> None:
         _activation = activation
 
 
+def graph_cleanup_attempted() -> bool:
+    """Whether this process's managed lifecycle consumed its graph exit wait."""
+    with _lock:
+        return bool(getattr(_activation, "graph_cleanup_attempted", False))
+
+
 def _preload_allowed() -> bool:
     try:
         return bool(warmup.model_preload_allowed())

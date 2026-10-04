@@ -929,17 +929,186 @@ def test_the_cli_drains_before_it_exits(monkeypatch: pytest.MonkeyPatch) -> None
     pass with the call site missing.
     """
     from exomem import __main__ as cli
+    from exomem import service_standby
 
-    drained: list[bool] = []
+    drained: list[float] = []
+    monkeypatch.setattr(service_standby, "_activation", SimpleNamespace(graph_cleanup_attempted=True))
     monkeypatch.setattr(
         graph_sync,
         "drain_active_rebuilds",
-        lambda *_args, **_kwargs: (drained.append(True), True)[1],
+        lambda *_args, **kwargs: (drained.append(kwargs.get("timeout", 300)), True)[1],
     )
 
     cli.main(["--version", "--json"])
 
-    assert drained == [True], "the CLI exited without draining in-flight rebuilds"
+    assert drained == [300], "one-shot commands must retain their completion budget"
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_server_exit_preserves_unmanaged_completion_wait(monkeypatch, managed):
+    """Only managed cleanup consumes the exit wait; Hosted keeps its budget."""
+    from exomem import __main__ as cli
+    from exomem import service_standby
+
+    budgets = []
+    monkeypatch.setattr(service_standby, "_activation", SimpleNamespace(graph_cleanup_attempted=managed))
+    monkeypatch.setattr(cli, "_run_cli", lambda _argv: 1)
+    monkeypatch.setattr(
+        graph_sync, "drain_active_rebuilds",
+        lambda *args, **kwargs: budgets.append(kwargs.get("timeout", 300)) or True,
+    )
+    assert cli.main(["--transport", "http"]) == 1
+    assert budgets == ([0] if managed else [300])
+
+
+def test_service_shutdown_stops_registered_private_build_and_late_successor(vault, monkeypatch):
+    """Service exit must release real private graph work and keep recovery owed."""
+    import asyncio
+
+    from exomem import foreground_priority, server_runtime
+    from exomem.writer_lease import active_manager
+
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60)
+    state = active_manager()._mutation_coordinator_for(vault).state_root
+    graph = EpistemicGraphIndex(vault)
+    graph.suspend_reads()
+    deferred_index.mark_graph_full_rebuild(vault, generation=1)
+    entered = threading.Event()
+    release = threading.Event()
+    rows = []
+    real_index = EpistemicGraphIndex._index_path
+
+    def indexed(self, conn, path, **kwargs):
+        result = real_index(self, conn, path, **kwargs)
+        rows.append(path)
+        entered.set()
+        while not release.wait(0.01):
+            foreground_priority.check_cancelled()
+        return result
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_index_path", indexed)
+
+    def build(required):
+        graph.rebuild_all()
+        return graph_sync.GraphBuildOutcome.covering(required)
+
+    async def exercise():
+        async with activation.lifespan()(SimpleNamespace()):
+            registration = graph_sync.register_rebuild(vault, _checkpoint(1), build, state_root=state)
+            assert registration.start().builder_started
+            assert await asyncio.to_thread(entered.wait, 5)
+            graph_sync.register_rebuild(vault, _checkpoint(2), build, state_root=state).start()
+
+    try:
+        asyncio.run(exercise())
+        assert activation.graph_cleanup_attempted
+        assert graph_sync.drain_active_rebuilds(timeout=0), "service left its graph worker alive"
+        assert len(rows) == 1
+        assert deferred_index.graph_full_rebuild_pending(vault) is not None
+        assert not graph.available()
+        assert not freshness.external_pending(vault)
+        assert not graph_sync.live_temporary_paths()
+        assert not list(graph.path.parent.glob(".graph-rebuild-*.sqlite*"))
+        temporary = graph.path.with_name("stopped-owner-check.sqlite")
+        assert graph_sync.claim_rebuild_owner(vault, temporary, state_root=state)
+        graph_sync.release_rebuild_owner(vault, temporary, state_root=state)
+        with pytest.raises(graph_sync.GraphRebuildStopped):
+            graph_sync.await_active_rebuild(vault, state_root=state, timeout=0)
+        late = graph_sync.register_rebuild(vault, _checkpoint(3), build, state_root=state)
+        assert not late.start().builder_started
+        assert len(rows) == 1
+    finally:
+        release.set()
+        graph_sync.drain_active_rebuilds(timeout=10)
+
+
+def test_service_shutdown_stops_warming_and_its_coalesced_followup(vault, monkeypatch):
+    """Query-triggered warming shares shutdown even without a registration."""
+    import asyncio
+
+    from exomem import foreground_priority, server_runtime
+    from exomem.writer_lease import active_manager
+
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60)
+    mutation = active_manager()._mutation_coordinator_for(vault)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def build(_self):
+        calls.append(True)
+        entered.set()
+        while not release.wait(0.01):
+            foreground_priority.check_cancelled()
+
+    monkeypatch.setattr(EpistemicGraphIndex, "rebuild_all", build)
+
+    async def exercise():
+        async with activation.lifespan()(SimpleNamespace()):
+            assert epistemic_graph.schedule_background_rebuild(vault, mutation_coordinator=mutation)
+            assert await asyncio.to_thread(entered.wait, 5)
+            assert not epistemic_graph.schedule_background_rebuild(vault, mutation_coordinator=mutation)
+            with pytest.raises(RuntimeError, match="prior lifetime"):
+                graph_sync.rebuild_coordinator(vault, state_root=mutation.state_root).bind_shutdown(
+                    threading.Event()
+                )
+
+    try:
+        asyncio.run(exercise())
+        assert graph_sync.drain_active_rebuilds(timeout=0)
+        assert calls == [True]
+        assert not epistemic_graph.schedule_background_rebuild(vault, mutation_coordinator=mutation)
+        assert not freshness.external_pending(vault)
+    finally:
+        release.set()
+        graph_sync.drain_active_rebuilds(timeout=10)
+
+
+@pytest.mark.parametrize("late_demand", [False, True])
+def test_shutdown_retains_completed_publication_and_stops_newer_pass(vault, late_demand):
+    """Finishing an admitted publication is success for its covered waiter."""
+    import asyncio
+
+    from exomem import server_runtime
+    from exomem.writer_lease import active_manager
+
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60)
+    state = active_manager()._mutation_coordinator_for(vault).state_root
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    first = _checkpoint(1)
+
+    def publish(required):
+        calls.append(required.generation)
+        entered.set()
+        assert release.wait(5)
+        return graph_sync.GraphBuildOutcome.covering(required)
+
+    registration = graph_sync.register_rebuild(vault, first, publish, state_root=state)
+
+    async def exercise():
+        async with activation.lifespan()(SimpleNamespace()):
+            assert registration.start().builder_started
+            assert await asyncio.to_thread(entered.wait, 5)
+            if not late_demand:
+                graph_sync.register_rebuild(vault, _checkpoint(2), publish, state_root=state).start()
+            activation._shutdown.set()
+            if late_demand:
+                assert not graph_sync.register_rebuild(
+                    vault, _checkpoint(2), publish, state_root=state
+                ).start().builder_started
+            release.set()
+
+    try:
+        asyncio.run(exercise())
+        assert calls == [1]
+        with pytest.raises(graph_sync.GraphRebuildStopped):
+            graph_sync.await_active_rebuild(vault, state_root=state, timeout=0)
+        assert registration.wait(timeout=0).covers(first)
+    finally:
+        release.set()
+        graph_sync.drain_active_rebuilds(timeout=10)
 
 
 # --- 4. The standalone join is bounded too ------------------------------------

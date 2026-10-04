@@ -28,6 +28,19 @@ def _k3s_tasks() -> str:
     )
 
 
+def test_node_memory_qos_is_opt_in_and_renders_the_measured_kubelet_configuration() -> None:
+    # Catch accidental shared-node activation and a misrendered runtime bundle;
+    # the live isolated gate separately proves effective kernel controls.
+    import yaml
+    defaults = yaml.safe_load(_read("roles/k3s/defaults/main.yml"))
+    assert defaults["k3s_memory_qos_enabled"] is False
+    config = yaml.safe_load(_read("roles/k3s/files/20-exomem-memoryqos.conf"))
+    assert config["apiVersion"] == "kubelet.config.k8s.io/v1beta1"
+    assert config["kind"] == "KubeletConfiguration"
+    assert config["featureGates"] == {"MemoryQoS": True}
+    assert config["memoryThrottlingFactor"] == 0.625
+
+
 def test_site_playbook_is_idempotent_by_construction_and_never_fetches_admin_state() -> None:
     site = _read("site.yml")
     base = _read("roles/base/tasks/main.yml")

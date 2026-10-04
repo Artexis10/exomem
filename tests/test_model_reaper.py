@@ -34,6 +34,21 @@ class _Clock:
         return self.now
 
 
+def test_cloud_idle_reap_retains_only_the_core_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    loaded = {name: True for name in ("embeddings", "reranker", "cache")}
+    slots = [model_reaper.ResourceSlot(
+        name, lambda name=name: loaded[name], lambda: 0, lambda: 0,
+        lambda name=name: loaded.__setitem__(name, False) or True,
+        is_model=name != "cache",
+    ) for name in loaded]
+    model_reaper._reap_once(slots, now=1000, threshold=900)
+    assert loaded == {"embeddings": True, "reranker": False, "cache": False}
+
+
 def _slot(clock: _Clock, activity=None, *, refilled: bool = True):
     unloads: list[float] = []
     state = {"loaded": True}

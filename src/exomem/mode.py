@@ -188,6 +188,8 @@ def preload_models(mode_name: str | None = None) -> bool:
     `status.policy` — reports what warm-up will actually do; a process could
     otherwise preload while reporting `preload_models: false`, or the reverse.
     """
+    if service_profile_enabled():
+        return False  # the serving core is selected separately from optional groups
     override = os.environ.get(_PRELOAD_ENV)
     if override is not None and override.strip() != "":
         return _truthy(override)
@@ -196,17 +198,24 @@ def preload_models(mode_name: str | None = None) -> bool:
 
 def preload_cpu_caches() -> bool:
     """Whether startup warm-up may materialize O(vault) CPU caches."""
-    return resolve_mode() == "performance"
+    return not service_profile_enabled() and resolve_mode() == "performance"
 
 
 def retain_cpu_caches() -> bool:
     """Whether large CPU caches may stay resident after use."""
-    return resolve_mode() == "performance"
+    return not service_profile_enabled() and resolve_mode() == "performance"
 
 
 def defer_expensive_indexes() -> bool:
     """Whether semantic/visual indexing should be queued or capped."""
-    return resolve_mode() == "quiet"
+    return not service_profile_enabled() and resolve_mode() == "quiet"
+
+
+def service_profile_enabled() -> bool:
+    """Whether deployment policy, rather than workstation mode, owns compute."""
+    from . import cloud_cell
+
+    return cloud_cell.resource_policy() == "service-v1"
 
 
 def watcher_policy() -> WatcherPolicy:
@@ -236,6 +245,8 @@ def release_when_idle() -> bool:
     `EXOMEM_RELEASE_GPU_WHEN_IDLE` (truthy/falsy) overrides; otherwise enabled in
     every mode. Process exit/reaping is the default product resource contract.
     """
+    if service_profile_enabled():
+        return True  # optional models/caches still reclaim even with a pinned core
     override = os.environ.get(_RELEASE_ENV)
     if override is not None and override.strip() != "":
         return _truthy(override)
@@ -272,13 +283,18 @@ def bulk_gpu_opted() -> bool:
     in-server rebuilds on CPU; the separate `exomem index` CLI process is where
     normal-mode onboarding gets the GPU (it frees the context on exit).
     """
-    return resolve_mode() == "performance"
+    return not service_profile_enabled() and resolve_mode() == "performance"
 
 
 def resolved() -> dict:
     """Diagnostic snapshot of the effective policy (for `exomem mode` / logs)."""
+    from . import cloud_cell
+
+    profile = cloud_cell.resource_policy()
     m = resolve_mode()
     return {
+        "resource_profile": profile,
+        "resource_profile_source": "environment" if os.environ.get(cloud_cell.RESOURCE_POLICY_ENV, "").strip() else "default",
         "mode": m,
         "preload_models": preload_models(),
         "preload_cpu_caches": preload_cpu_caches(),
@@ -339,6 +355,11 @@ def apply_live() -> dict:
     global _applied_mode
     _applied_mode = resolve_mode()
     from . import embeddings, model_reaper
+
+    if service_profile_enabled():
+        # A stored workstation selection changes no deployment-owned resources.
+        model_reaper.start()
+        return resolved()
 
     for unload in (
         embeddings.unload_model,

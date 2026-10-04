@@ -107,6 +107,23 @@ def test_plan_inspector_accepts_nondestructive_changes_without_echoing_values(
     assert "provider-secret-looking-value" not in result.stdout + result.stderr
 
 
+def test_plan_review_artifact_omits_all_values_even_without_sensitive_markers(tmp_path: Path) -> None:
+    # Terraform's machine-readable plan includes plaintext in several sections;
+    # a reviewer needs actions, never a blacklist that can miss an unknown field.
+    sentinel = "private-fixture-value-not-for-review"
+    plan = _plan(("hcloud_server.acceptance[0]", ["create"]))
+    plan.update(variables={"provider_token": {"value": sentinel}}, prior_state={"opaque": sentinel})
+    plan["resource_changes"][0]["change"].update(before={"unknown": sentinel}, after={"unknown": sentinel})
+    review = tmp_path / "review.json"
+    result = _inspect(tmp_path, plan, "--review-output", str(review))
+    assert result.returncode == 0, result.stderr
+    assert json.loads(review.read_text()) == {
+        "values_included": False,
+        "resource_changes": [{"address": "hcloud_server.acceptance[0]", "actions": ["create"]}],
+    }
+    assert sentinel not in review.read_text() + result.stdout + result.stderr
+
+
 def test_plan_inspector_rejects_destroy_replace_and_unredacted_secret_output(
     tmp_path: Path,
 ) -> None:

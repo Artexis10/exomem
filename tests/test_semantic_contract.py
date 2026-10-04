@@ -463,6 +463,28 @@ def test_tag_only_exemption_cannot_hide_noncompiled_type(tmp_path: Path) -> None
     assert finding.code == "COMPILED_TYPE_MISMATCH"
 
 
+def test_configured_kb_root_preserves_compiled_destination_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Archive")
+    valid = _state(
+        tmp_path, "Archive/Notes/Experiments/Workflow/page.md",
+        _source(page_type="experiment", body="## Observations\n\n- [constraint] Preserve the boundary.\n"),
+    )
+    assert semantic_contract.compiled_structure_finding(valid) is None
+    assert semantic_contract.requires_semantic_unit(valid) is True
+
+    wrong_type = replace(valid, page_type="insight")
+    finding = semantic_contract.compiled_structure_finding(wrong_type)
+    assert finding is not None
+    assert finding.code == "COMPILED_TYPE_MISMATCH"
+
+    outside = replace(valid, path="Knowledge Base/Notes/Experiments/page.md")
+    finding = semantic_contract.compiled_structure_finding(outside)
+    assert finding is not None
+    assert finding.code == "COMPILED_DESTINATION_MISMATCH"
+
+
 @pytest.mark.parametrize(
     ("path", "page_type", "code"),
     (

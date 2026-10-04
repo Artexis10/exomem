@@ -2169,8 +2169,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     # cannot show it is serving semantically (docs/benchmark-fairness-contract.md),
     # and until now an ONNX install had no way to show that from doctor.
     try:
-        metadata, _matrix = index.all_vectors()
-        vector_count: int | None = len(metadata)
+        vector_count: int | None = index.chunk_count()
     except Exception:  # noqa: BLE001 — the probe already proved the lane serves
         vector_count = None
     counted = f"{vector_count} vector(s)" if vector_count is not None else "vectors present"

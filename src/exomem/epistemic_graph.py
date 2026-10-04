@@ -3326,6 +3326,7 @@ class EpistemicGraphIndex:
         published: dict[str, int] | None = None
         paid_marker: tuple[int, int] | None = None
         while attempts < REBUILD_PUBLICATION_ATTEMPTS:
+            foreground_priority.check_cancelled()
             attempts += 1
             # Read before this attempt samples its epoch: whole-vault debt that
             # already exists now is paid by the publication this attempt makes.
@@ -3457,6 +3458,7 @@ class EpistemicGraphIndex:
                     except Exception:  # noqa: BLE001 - the refusal is the outcome
                         log.debug("graph Class C mark reconcile failed", exc_info=True)
                     raise
+                foreground_priority.check_cancelled()
                 ticket = self._prepare_publication_ticket(
                     temporary,
                     epoch=graph_sync.GraphPublicationEpoch(
@@ -3486,9 +3488,11 @@ class EpistemicGraphIndex:
                     )
                     if ticket is None:
                         continue
+                foreground_priority.check_cancelled()
                 with self._mutation_coordinator.hold(
                     operation="epistemic_graph_publish_rebuild", holder_kind="graph"
                 ):
+                    foreground_priority.check_cancelled()
                     if not self._publication_ticket_matches(ticket):
                         continue
                     try:
@@ -3498,6 +3502,7 @@ class EpistemicGraphIndex:
                     try:
                         if not self._publication_ticket_matches(ticket):
                             continue
+                        foreground_priority.check_cancelled()
                         try:
                             graph_sync.replace_sidecar(
                                 temporary,
@@ -3595,7 +3600,9 @@ class EpistemicGraphIndex:
             vault_module.evict_inbound_index(self.vault_root)
         entries = (
             (str(path), freshness.stat_signature(path))
-            for path in vault_module.walk_vault_md(self.vault_root)
+            for path in foreground_priority.yielding_in_bulk(
+                vault_module.walk_vault_md(self.vault_root)
+            )
         )
         result = freshness.reconcile(
             self.vault_root,
@@ -4144,6 +4151,7 @@ class EpistemicGraphIndex:
         started = time.monotonic()
         try:
             while _may_restabilize(attempts, retarget=retarget, started=started):
+                foreground_priority.check_cancelled()
                 attempts += 1
                 retarget = False
                 attempt_started = time.monotonic()
@@ -9460,6 +9468,9 @@ def schedule_background_rebuild(
 
         mutation_coordinator = active_manager()._mutation_coordinator_for(vault_root)
     key = f"{Path(vault_root).resolve()}\0{mutation_coordinator.state_root.resolve(strict=False)}"
+    coordinator = graph_sync.rebuild_coordinator(
+        vault_root, state_root=mutation_coordinator.state_root
+    )
     with _REBUILD_LOCK:
         if key in _REBUILDING:
             # D5: coalesce, do not drop. The in-flight pass sampled its corpus
@@ -9469,14 +9480,17 @@ def schedule_background_rebuild(
             return False
         _REBUILDING.add(key)
 
-    def _run() -> None:
+    def _run(shutdown: threading.Event | None) -> None:
         try:
             from .foreground_activity import background_scope
 
-            with background_scope(vault_root):
-                EpistemicGraphIndex(
-                    vault_root, mutation_coordinator=mutation_coordinator
-                ).rebuild_all()
+            with foreground_priority.cancellable(shutdown):
+                with background_scope(vault_root):
+                    EpistemicGraphIndex(
+                        vault_root, mutation_coordinator=mutation_coordinator
+                    ).rebuild_all()
+        except foreground_priority.BulkCancelled:
+            log.info("background graph rebuild cancelled; recovery remains pending")
         except graph_sync.GraphRebuildInProgress:
             # Another process owns the kernel-backed rebuild claim.  That is a
             # healthy coalescing state, not a failed publication requiring a
@@ -9500,8 +9514,15 @@ def schedule_background_rebuild(
                     vault_root, mutation_coordinator=mutation_coordinator
                 )
 
-    threading.Thread(target=_run, name="exomem-graph-rebuild", daemon=True).start()
-    return True
+    started = False
+    try:
+        started = coordinator.start_worker(_run)
+        return started
+    finally:
+        if not started:
+            with _REBUILD_LOCK:
+                _REBUILDING.discard(key)
+                _REBUILD_FOLLOWUP.discard(key)
 
 
 def _record_graph_repair_demand(
@@ -9799,7 +9820,8 @@ def _logged_whole_vault_rebuild(generation: int | None) -> Iterator[None]:
     except BaseException as error:
         log.info(
             "graph rebuild finished outcome=%s reason=%s elapsed_ms=%.1f generation=%s",
-            "coalesced" if isinstance(error, graph_sync.GraphRebuildInProgress) else "failed",
+            "cancelled" if isinstance(error, foreground_priority.BulkCancelled)
+            else "coalesced" if isinstance(error, graph_sync.GraphRebuildInProgress) else "failed",
             _rebuild_failure_reason(error),
             (time.monotonic() - started) * 1000.0,
             generation,

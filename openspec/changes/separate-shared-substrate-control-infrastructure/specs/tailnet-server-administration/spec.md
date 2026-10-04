@@ -36,6 +36,12 @@ The administration role MUST NOT advertise subnet or exit-node routes, accept un
 - **WHEN** the control host is enrolled for administration
 - **THEN** its existing database clients keep their selected endpoints and private routes and no new subnet route is advertised
 
+#### Scenario: Owner mobile clients resolve private peer names
+- **WHEN** an explicitly selected owner mobile device adopts NetBird
+- **THEN** the shared infrastructure policy supplies its primary DNS resolver so private peer names resolve through NetBird
+- **AND** DNS distribution grants no additional service access and does not change concurrent workstation or client-owned DNS
+- **AND** an actual named phone connection proves acceptance before the old Tailscale entry is retired
+
 ### Requirement: Ingress restriction follows verified recovery
 Adoption SHALL preserve existing narrow SSH access until a second managed connection over the intended tailnet succeeds. Provider and guest firewall changes SHALL be made through their respective owning configuration only after allowed/denied connectivity checks and provider-console recovery are verified. Disposable-host acceptance SHALL demonstrate service recovery after reboot. A failed prerequisite MUST leave the existing route available and rollout incomplete. Recovery policy MUST NOT depend on a remembered home IP.
 
@@ -46,3 +52,29 @@ Adoption SHALL preserve existing narrow SSH access until a second managed connec
 #### Scenario: An enrolled host restarts
 - **WHEN** a disposable acceptance host reboots with the selected configuration
 - **THEN** authorised managed tailnet SSH resumes without a new enrollment or a public SSH opening
+
+### Requirement: Concurrent user transport retains existing authentication
+A client-owned native daemon SHALL remain unchanged while owner services use
+a separate user-owned company instance. Incoming company traffic SHALL use
+explicit owner-device to owner-service port grants and an opted-in loopback
+listener for the existing authenticated service. Network membership alone
+MUST NOT permit all service ports. A workstation installer SHALL retain a live
+legacy listener during staged migration and SHALL work after its retirement.
+The company instance SHALL advertise only address families supported by that
+listener. Reconnection SHALL leave outbound proxy traffic using the active
+company network stack without restarting a client-owned native daemon.
+
+#### Scenario: Userspace VPN reaches workstation SSH
+- **WHEN** an enrolled owner device reaches the owner-service TCP2222 grant
+- **THEN** the separate VPN forwards to the existing key-only loopback SSH listener and other service ports remain denied
+- **AND** fresh inbound and outbound connections pass after transport reconnection; management connectivity alone does not prove the service path
+
+#### Scenario: Existing peer identity survives userspace forwarding
+- **WHEN** the workstation topology opts into the separate userspace VPN
+- **THEN** the source-managed peer wiring retains its existing key, admits loopback ingress for that key, and pins the host identity observed through the prior trusted route
+- **AND** a selected loopback SOCKS path cannot reuse an ambient SSH master or another host-key provider to bypass the enrolled transport or pin
+- **AND** the shared Bitwarden topology drives both workstations while legacy entries retain their current behavior
+
+#### Scenario: Migration retains legacy access
+- **WHEN** the operator opts into the loopback listener while the legacy VPN address is live
+- **THEN** the source-managed installer retains that address and adds only loopback, without a wildcard listener or authentication replacement

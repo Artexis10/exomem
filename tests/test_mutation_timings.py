@@ -846,11 +846,12 @@ def test_a_governed_edit_records_the_advisory_sweep_with_what_it_encoded(
 
     class _Index:
         dim = 4
+        identity = None
 
         def search(self, _vector, *, k=15, allowed_paths=None):
             return []
 
-        def search_many(self, _vectors, _k, *, admits):
+        def search_many(self, _vectors, _k, *, admits, encoded_for=None):
             return []
 
     monkeypatch.setattr(

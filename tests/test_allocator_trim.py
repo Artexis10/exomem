@@ -101,6 +101,20 @@ def test_the_reaper_and_the_drain_share_one_allowance(
     assert calls == [0]
 
 
+def test_service_releases_freed_heap_between_adjacent_disk_heavy_turns(monkeypatch):
+    """The legacy minute-long throttle lets freed heap overlap later file reads."""
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    calls = []
+    monkeypatch.setattr(process_memory, "_MALLOC_TRIM", lambda pad: calls.append(pad) or 1)
+    assert process_memory.trim_allocator(clock=lambda: 100.0)
+    assert not process_memory.trim_allocator(clock=lambda: 104.999)
+    assert process_memory.trim_pending()
+    assert process_memory.trim_allocator(clock=lambda: 105.0)
+    assert not process_memory.trim_pending()
+    assert calls == [0, 0]
+
+
 def test_a_throttled_release_is_trimmed_by_a_later_idle_tick(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -78,6 +78,10 @@ def _should_unload(slot: ResourceSlot, now: float, threshold: float) -> bool:
     """Pure decision: unload iff policy allows it and the slot is loaded, quiet, and stale."""
     if readiness.is_warming():
         return False
+    from . import mode
+
+    if slot.is_model and slot.name == "embeddings" and mode.service_profile_enabled():
+        return False
     if slot.is_model and not _model_reaping_allowed():
         return False
     if not slot.is_loaded():

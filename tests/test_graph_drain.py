@@ -51,6 +51,30 @@ def _wait_for(predicate, timeout: float = 5.0) -> bool:
     return predicate()
 
 
+def test_stopping_drain_refuses_replacement_until_owned_work_exits(tmp_path, monkeypatch):
+    """A second start must not clear the stop event of a still-live worker."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def work(_root):
+        entered.set()
+        release.wait(5)
+
+    monkeypatch.delenv("EXOMEM_DISABLE_GRAPH_DRAIN", raising=False)
+    monkeypatch.setattr(graph_drain, "_run", work)
+    thread = graph_drain.start(tmp_path)
+    assert entered.wait(5)
+    try:
+        graph_drain.stop(timeout=0)
+        with pytest.raises(RuntimeError, match="stopping"):
+            graph_drain.start(tmp_path)
+        assert graph_drain._stop.is_set()
+        assert graph_drain._thread is thread
+    finally:
+        release.set()
+        thread.join(5)
+
+
 def _page(title: str, body: str) -> str:
     return f"---\ntype: insight\nstatus: active\n---\n# {title}\n\n## Claim\n\n{body}\n"
 

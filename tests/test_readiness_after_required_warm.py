@@ -105,6 +105,81 @@ def test_warm_all_finishes_the_required_warm_before_any_model_preload(
     assert seen and all(seen)
 
 
+@pytest.mark.parametrize("core_fails", [False, True])
+def test_cloud_service_warms_core_independent_of_stored_quiet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, core_fails: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from exomem import embedding_backend, embeddings, recall_migration, semantic_contract
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True)
+    monkeypatch.setattr(warmup, "warm_graph_handoff", lambda _root: {})
+    monkeypatch.setattr(semantic_contract, "build_corpus_context", lambda _root: None)
+    monkeypatch.setattr(warmup, "warm_caches", lambda *_a, **_k: {})
+    monkeypatch.setattr(embedding_backend, "served_artifact", lambda _model: None)
+    monkeypatch.setattr(recall_migration, "preload_serving_encoder", lambda _root: False)
+    monkeypatch.setattr(embeddings, "_MODEL", None)
+
+    def load_core():
+        if core_fails:
+            raise RuntimeError("unavailable test encoder")
+        embeddings._MODEL = SimpleNamespace(encode=lambda *_a, **_k: None)
+        return embeddings._MODEL
+
+    monkeypatch.setattr(embeddings, "get_model", load_core)
+    for loader in ("get_reranker", "get_clip_model", "get_activation_model"):
+        monkeypatch.setattr(embeddings, loader, lambda: pytest.fail("optional model preloaded"))
+    readiness.begin_warm()
+    warmup.warm_all(tmp_path)
+    assert (embeddings._MODEL is not None) is not core_fails
+    assert readiness.is_ready("embeddings") is not core_fails
+
+
+def test_service_profile_respects_explicitly_disabled_embeddings(tmp_path, monkeypatch):
+    from exomem import embeddings, semantic_contract
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True)
+    monkeypatch.setattr(warmup, "warm_graph_handoff", lambda _root: {})
+    monkeypatch.setattr(semantic_contract, "build_corpus_context", lambda _root: None)
+    monkeypatch.setattr(warmup, "warm_caches", lambda *_a, **_k: {})
+    monkeypatch.setattr(embeddings, "get_model", lambda: pytest.fail("disabled encoder loaded"))
+    readiness.begin_warm()
+    warmup.warm_all(tmp_path)
+    assert readiness.required_warm_finished()
+
+
+def test_service_core_is_unready_when_its_serving_space_cannot_preload(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from exomem import embeddings, recall_migration, resource_status, semantic_contract
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True)
+    monkeypatch.setattr(warmup, "warm_graph_handoff", lambda _root: {})
+    monkeypatch.setattr(semantic_contract, "build_corpus_context", lambda _root: None)
+    monkeypatch.setattr(warmup, "warm_caches", lambda *_a, **_k: {})
+    configured = SimpleNamespace(encode=lambda *_a, **_k: None)
+    monkeypatch.setattr(embeddings, "_MODEL", configured)
+    monkeypatch.setattr(embeddings, "get_model", lambda: configured)
+    def failed_serving_preload(_root):
+        raise RuntimeError("required previous encoder unavailable")
+    monkeypatch.setattr(recall_migration, "preload_serving_encoder", failed_serving_preload)
+    readiness.begin_warm()
+    warmup.warm_all(tmp_path)
+    assert readiness.is_ready("embeddings") is False
+    assert resource_status._model_residency()["core_ready"] is False
+
+
 def test_the_readiness_probe_does_not_block_the_event_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
