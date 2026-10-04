@@ -21,7 +21,7 @@ from pathlib import Path
 from datetime import date
 from typing import Any
 
-from .collection_store.preview import bound_writer, canonical_read
+from .collection_store.preview import bound_writer, canonical_read, selected_projection_writer
 from .working_set_index import normalize, terms_of
 
 log = logging.getLogger(__name__)
@@ -518,7 +518,7 @@ def _profile_data(vault_root: Path, rel: str) -> tuple[Mapping[str, Any], str] |
     """Read collection-owned profiles canonically; ordinary knowledge stays Markdown."""
     from . import find_corpus, recall_policy
 
-    writer = bound_writer(vault_root)
+    writer = selected_projection_writer(vault_root, rel)
     if writer is not None and recall_policy.is_structured_only_path(vault_root, rel):
         from . import record_formats, structured_collections
 

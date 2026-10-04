@@ -664,9 +664,9 @@ def load_adapter(
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
 ) -> CollectionAdapter:
     """Return the declared canonical adapter without inferring domain grammar."""
-    from .collection_store.preview import bound_writer
+    from .collection_store.preview import selected_writer
 
-    writer = bound_writer(vault_root)
+    writer = selected_writer(vault_root, manifest)
     if writer is not None:
         from .collection_store.reader import StoreAdapter
 

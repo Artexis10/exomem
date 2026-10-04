@@ -94,7 +94,7 @@ from typing import Any, Literal
 
 import yaml
 
-from .collection_store.preview import bound_writer, canonical_read
+from .collection_store.preview import canonical_read, selected_writer
 
 from . import (
     access,
@@ -4301,7 +4301,7 @@ def declared_bindings(vault_root: Path, manifest: Any) -> list[dict[str, Any]]:
     for link in getattr(getattr(manifest, "links", None), "plans", ()) or ():
         if not link.join:
             continue
-        writer = bound_writer(vault_root)
+        writer = selected_writer(vault_root, str(link.reference))
         if writer is not None:
             from . import due_state
 

@@ -388,9 +388,9 @@ def query(
     authorize_path: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """Run the shared bounded query evaluator over current Planning files."""
-    from .collection_store.preview import bound_writer
+    from .collection_store.preview import selected_writer
 
-    writer = bound_writer(vault_root)
+    writer = selected_writer(vault_root, collection)
     if writer is not None and include_agent_history:
         raise CollectionError(
             "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "store audit history belongs to a later slice"

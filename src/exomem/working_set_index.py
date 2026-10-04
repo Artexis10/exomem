@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from . import find_corpus, sidecar_store
-from .collection_store.preview import bound_writer, canonical_read
+from .collection_store.preview import bound_writer, canonical_read, selected_writer
 from .kbdir import kb_dirname
 from .state_paths import vault_state_dir
 
@@ -1281,7 +1281,7 @@ def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Ca
                     terms=terms_of(" ".join((title, *fields, *claims))),
                     categories=("fact",),
                     source_signature=(manifest.manifest_version.hash
-                                      if bound_writer(vault_root) is not None
+                                      if selected_writer(vault_root, manifest) is not None
                                       else _source_signature(absolute)),
                 )
             )
@@ -1307,7 +1307,7 @@ def _planning_candidates(vault_root: Path, manifest: Any, rel: str) -> list[_Can
     if not isinstance(rows, list):
         return []
     item_pages = _planning_item_pages(vault_root, manifest)
-    writer = bound_writer(vault_root)
+    writer = selected_writer(vault_root, manifest)
     signature = manifest.manifest_version.hash if writer is not None else _source_signature(Path(vault_root) / rel)
     out: list[_Candidate] = []
     for row in rows:

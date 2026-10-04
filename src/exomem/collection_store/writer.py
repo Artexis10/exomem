@@ -297,15 +297,22 @@ class CollectionWriter:
             yield self._collection(selector, facade_profile=facade_profile)[1]
 
     def discover_collections(self, *, authorize_path=None, max_candidates=512, max_raw_candidates=512):
+        from . import authority
+
         with self.read_snapshot():
+            marker = authority.routing_marker(self)
+            entries = ([(entry["collection_id"], entry["manifest_path"]) for entry in marker["collections"]]
+                       if marker is not None else self.connection.execute(
+                           "SELECT collection_id,manifest_path FROM collections ORDER BY manifest_path"
+                       ).fetchall())
             manifests = []
-            for cid, path in self.connection.execute(
-                "SELECT collection_id,manifest_path FROM collections ORDER BY manifest_path"
-            ).fetchall():
+            for cid, path in sorted(entries, key=lambda entry: entry[1]):
+                if authorize_path is not None and not authorize_path(path):
+                    continue
+                if marker is not None:
+                    authority.require_selected(self.connection, marker, authority.selected_entry(self.root, marker, cid))
                 catalog = self._operation.catalog(cid)
                 if self._operation.decision(catalog[0]).level < 6:
-                    continue
-                if authorize_path is not None and not authorize_path(path):
                     continue
                 if len(manifests) >= min(max_candidates, max_raw_candidates):
                     raise collections.CollectionError(

@@ -47,7 +47,7 @@ from typing import Any
 
 from filelock import FileLock, Timeout
 
-from .collection_store.preview import bound_writer, canonical_read
+from .collection_store.preview import canonical_read, selected_writer
 
 log = logging.getLogger(__name__)
 
@@ -328,7 +328,7 @@ def _occurrence_call(
         if manifest.storage.strategy == "markdown-log"
         else snapshot.snapshot
     )
-    writer = bound_writer(vault_root)
+    writer = selected_writer(vault_root, manifest)
     if writer is not None:
         row = writer._collection(manifest)[0]
         catalog = writer._operation.catalog(manifest.collection_id)

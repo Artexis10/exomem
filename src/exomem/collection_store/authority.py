@@ -85,6 +85,32 @@ def parse_marker(root, raw):
     return marker
 
 
+def routing_marker(writer):
+    raw = read_marker(writer.root)
+    return None if raw is None else parse_marker(writer.root, raw)
+
+
+def selected_entry(root, marker, selector):
+    if isinstance(selector, collections.CollectionManifest):
+        selector = selector.path
+    raw = str(selector).strip()
+    identity = memory_refs.parse_memory_ref(raw) or memory_refs.normalize_id(raw)
+    path = collections._reference_key(Path(root), raw) if identity is None else None
+    return next((entry for entry in marker["collections"]
+                 if entry["collection_id"] == identity or (
+                     path is not None and collections._portable_path_key(entry["manifest_path"])
+                     == collections._portable_path_key(path))), None)
+
+
+def require_selected(conn, marker, entry):
+    sid = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()
+    row = conn.execute(
+        "SELECT manifest_path FROM collections WHERE collection_id=?", (entry["collection_id"],),
+    ).fetchone()
+    if sid is None or sid[0] != marker["store_id"] or (row is not None and row[0] != entry["manifest_path"]):
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "store differs from authority marker")
+
+
 def pending_create(conn):
     row = conn.execute("SELECT value FROM store_meta WHERE key=?", (PENDING_CREATE,)).fetchone()
     if row is None:

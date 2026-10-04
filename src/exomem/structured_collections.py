@@ -1002,9 +1002,9 @@ class SavedView:
 def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
     """Parse one explicit collection contract without touching canonical items."""
     root = Path(vault_root)
-    from .collection_store.preview import bound_writer
+    from .collection_store.preview import selected_writer
 
-    writer = bound_writer(root)
+    writer = selected_writer(root, path)
     if writer is not None:
         with writer.read_collection(path) as manifest:
             return manifest
@@ -1183,27 +1183,34 @@ def discover_collections_with_errors(
             "INVALID_DISCOVERY_LIMIT", "discovery limit is outside supported bounds"
         )
     root = Path(vault_root)
+    from .collection_store import authority
     from .collection_store.preview import bound_writer
 
     writer = bound_writer(root)
+    marker = authority.routing_marker(writer) if writer is not None else None
     if writer is not None:
-        return writer.discover_collections(
+        stored, store_errors = writer.discover_collections(
             authorize_path=authorize_path, max_candidates=max_candidates,
             max_raw_candidates=max_raw_candidates,
         )
+        if marker is None:
+            return stored, store_errors
+    else:
+        stored, store_errors = (), ()
     kb = vault.kb_root(root)
     if not kb.is_dir():
-        return (), ()
+        return stored, store_errors
     authorize = authorize_path or (lambda _path: True)
-    manifests: list[CollectionManifest] = []
-    unreadable: list[UnreadableManifest] = []
+    manifests: list[CollectionManifest] = list(stored)
+    unreadable: list[UnreadableManifest] = list(store_errors)
     candidates = []
     for candidate in kb.rglob("_collection.md"):
         safe = _safe_candidate_rel(root, candidate)
-        if safe is None or not authorize(safe[1]):
+        if (safe is None or (marker is not None and authority.selected_entry(root, marker, safe[1]) is not None)
+                or not authorize(safe[1])):
             continue
         candidates.append(candidate)
-        if len(candidates) > max_raw_candidates:
+        if len(candidates) + len(stored) + len(store_errors) > max_raw_candidates:
             raise CollectionError(
                 "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
             )
@@ -1278,9 +1285,9 @@ def resolve_collection(
     raw = str(selector).strip()
     if not raw:
         raise CollectionError("INVALID_COLLECTION_REFERENCE", "collection selector is required")
-    from .collection_store.preview import bound_writer
+    from .collection_store.preview import selected_writer
 
-    writer = bound_writer(vault_root)
+    writer = selected_writer(vault_root, selector)
     if writer is not None:
         with writer.read_collection(selector) as manifest:
             if authorize_path is not None and not authorize_path(manifest.path):
@@ -1289,6 +1296,14 @@ def resolve_collection(
     authorize = authorize_path or (lambda _path: True)
     identity = memory_refs.parse_memory_ref(raw) or memory_refs.normalize_id(raw)
     if identity is not None:
+        from .collection_store import authority
+        from .collection_store.preview import bound_writer
+
+        binding = bound_writer(vault_root)
+        marker = authority.routing_marker(binding) if binding is not None else None
+        if marker is not None:
+            allowed = authorize
+            authorize = lambda path: authority.selected_entry(vault_root, marker, path) is None and allowed(path)
         matches = [
             manifest
             for manifest in discover_collections(
