@@ -46,6 +46,23 @@ SURFACES = (None, "claude-code", "hosted-alpha-agent-v5")
 CARRYING = ("balanced", "maximal")
 
 
+@pytest.mark.parametrize("surface", (None, "hosted-alpha-agent-v4"))
+def test_full_bootstrap_exposes_public_references_without_growing_compact(
+    monkeypatch, surface
+) -> None:
+    """Current clients find moved manuals; released bootstrap payloads stay unchanged."""
+    full = _bootstrap(monkeypatch, "balanced", surface, profile="full")
+    if surface is not None:
+        assert "references" not in full
+        return
+    sources = dict(workflow_skills.contract_sources())
+    assert full["references"]
+    for name, url in full["references"].items():
+        assert name.startswith("references/") and name in sources
+        assert url.endswith("/src/exomem/_scaffold/_Schema/" + name)
+    assert "references" not in _bootstrap(monkeypatch, "balanced", surface)
+
+
 def _root() -> pathlib.Path:
     root = pathlib.Path(tempfile.mkdtemp())
     (root / "Knowledge Base").mkdir()

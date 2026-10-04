@@ -67,7 +67,7 @@ def test_mcp_fixture_and_capability_contract_have_matching_bounded_arguments() -
     )
     properties = fixture["record_memory"]["inputSchema"]["properties"]
 
-    assert properties["expand_child"]["anyOf"][0] == {"type": "string"}
+    assert properties["expand_child"]["type"] == "string"
     assert "declared child" in properties["expand_child"]["description"]
-    assert properties["refresh_presentation"]["anyOf"][0] == {"type": "boolean"}
+    assert properties["refresh_presentation"]["type"] == "boolean"
     assert "managed Markdown" in properties["refresh_presentation"]["description"]

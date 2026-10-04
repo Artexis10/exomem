@@ -88,3 +88,27 @@ exact bridge bytes, audience, source snapshots, relevant restrictions, and
 provenance-strip targets. Editing the bridge or a dependency makes that approval
 stale until a fresh exact approval is reviewed. A due review appears in the
 ordinary review queue; dismissing or snoozing that item never renews approval.
+
+## review_memory mode notes
+
+Read-only. Repairs belong to `maintain_memory`.
+
+- **write-advisory-result**: resolves exactly one opaque `exomem://write-advisory-result/<id>` (from a committed write; `ref` required) and reports only that job's state: `pending`, `ready`, `failed` or `superseded`. There is no list, browse, search, rank, count, continuation or implicit-current form; a malformed, unknown, unauthorized or expired reference returns the shared not-found outcome.
+- **item**: `ref` is a stable `exomem://review/<id>`; an `exomem://review/upkeep/<id>` ref revalidates that one upkeep item.
+- **plan-progress**: for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; derived, read-only, scores nothing.
+- **dispositions**: every signal family set to `quiet` or `off` through `triage_memory`, with reason code, why, timestamp, origin and per-family manual dismissal count. A quiet family is silent on the carriers, not clean.
+- **relation-queue**: batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters). Accept via `connect_memory(operation="accept-relation")`, reject via `triage_memory`. Link items carry a relation-queue ref and source path.
+- **adoption**: Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints). Approve via `adoption_studio(action="apply-proposal")`, dismiss via `triage_memory`.
+- **upkeep**: the background worker's bounded proposals (default 10), each with evidence, the governed route that would act on it, and triage verbs; a proposal authorizes nothing. `categories` filters by upkeep family.
+- **evolution**: without `path`, `query` selects the topic route and returns `{query, timelines, truncation}`; `limit` caps timelines. With `path`, one chain is returned as `{target_path, timelines, truncation}` and `limit` is unused. `chain_id` is always the active head; `topic_anchor` is the retrieval hit (topic route) or the requested page (path route).
+- **vocabulary**: `state` is `open` for actionable work or `all` for decision history; each response is a non-exhaustive bounded pass (default four items). A meaning question needs `path` (a source page for a new meaning, the existing entity page for reuse or enrichment), `query` and `family`, and creates only a review consideration with no mutation authority. A relation-candidate question uses the candidate's `source_path` with its `ref`; an edge requires `family="relation-type/v1"` and the relation-queue candidate `ref` so the decision covers both endpoints. Read its context, record the typed decision, then use the returned `application_route` with that choice.
+- **attention / activation**: `state` is open (default), all, snoozed or dismissed.
+- **audit**: `detail` is actionable or full; `legacy_sample_limit` 0 to 50.
+
+## govern_memory notes
+
+`operation` is one of the schema enum values; `session` needs `session_action`. `ttl_seconds`, `target_ceiling` and `duration` shape a proposal (lifetime, disclosure ceiling, duration label); `grant_id`, `scope_ids` and `ceiling` describe a standing grant (`scope="standing"` only for a durable policy grant); `duration_seconds` is a session grant or purpose-declaration lifetime. After a refused write, `vocabulary-request` inspects a pending additive request by `vocabulary_request_id` and `vocabulary-status` inspects activation; approval belongs to the separate authenticated user control surface.
+
+## triage_memory notes
+
+`quiet` drops a signal family from the default review union, every due-state carrier and the write-path advisories while it stays reachable on explicit request; `off` additionally drops it from explicit category review; `normal` restores it. Audit measurement is never affected. `adoption/<id>` refs triage an Adoption Studio proposal (keyed `review_id:fingerprint`); `upkeep/<id>` refs dismiss, snooze or reopen one upkeep proposal bound to its current fingerprint; legacy relation requests without `source_path` use only the bounded compatibility prefix.

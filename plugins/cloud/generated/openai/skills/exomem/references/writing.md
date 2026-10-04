@@ -421,3 +421,47 @@ file inventories, command lines copied verbatim). Mirroring guarantees drift.
   confirmed write.
 - Resolving obvious wikilink targets when the entity exists exactly.
 - Continuing a previously-approved batch.
+
+## Source citations and write-tool details
+
+- **Citations.** Every non-empty `sources` entry must resolve to authorized
+  governed Source or Evidence material. A URL, connector or remote file ID,
+  working script or derivative summary is not the original: capture it first
+  (`capture_source`, `preserve_evidence`, `preserve_artifacts`) and cite its
+  governed path or stable ref. With no external source, pass an honest empty
+  list. An unresolved citation returns `UNRESOLVED_SOURCE_CITATION` and writes
+  nothing. Brackets and the leading `Knowledge Base/` are tolerated in paths.
+- **Back-references.** Each cited source gets the new note's wikilink appended
+  to its `ingested_into:` frontmatter, atomically with the citation, which takes
+  it out of the unprocessed backlog. Omitting `sources` on a research-note,
+  insight, failure or pattern only warns.
+- **Edits.** A source-changing `edit_memory` validates the complete final
+  `sources` list and updates back-references atomically. An unrelated edit may
+  leave a legacy unresolved citation; list that debt with
+  `review_memory(mode="audit", categories=["unresolved_source_citation"])`.
+- **Frontmatterless pages.** Body and section edits work on ordinary Markdown
+  without synthesizing YAML. Frontmatter and take-row operations still require
+  frontmatter.
+- **Suggestions.** `remember(suggestions=true)` adds a `suggestions` block of
+  existing pages the note should probably link to (read it with
+  `response_detail="full"`). It costs one retrieval pass over the corpus, so it
+  is off by default; duplicate and overlap warnings run either way, and
+  `write_feedback.suggestions.computed` says which happened.
+- **Relation recovery.** When `RELATION_DISPOSITION_STALE` or
+  `RELATION_DISPOSITION_MISSING` blocks an `edit_memory`, replay the identical
+  operation with `validate_only=true`, then commit with the returned
+  `transition_token` and `relation_review_hash`, `relation_disposition="reviewed_none"`
+  and a `relation_review_reason`. The hash is the relation review's, never the
+  page content hash. The alternative is a typed `## Relations` entry
+  (`- supports [[...]]`); Dataview `supports:: [[...]]` is not relation syntax.
+
+### Updating one unit with `observe_memory`
+
+An update rebuilds the whole unit. `verdict`, `check_by` and `id` are
+preserve-on-omit (pass an empty string to clear `verdict` or `check_by`), and
+metadata rows the tool does not own are carried through. `tags`, `context` and
+`relations` are replace-on-omit: omitting one clears it, so resend what should
+stay. `verdict` is a categorical lifecycle state (abandoned, confirmed,
+inconclusive, qualified, refuted), never a confidence score. `update` and
+`remove` need `expected_fingerprint` and `expected_hash`; `after_hash` from the
+result is the next call's `expected_hash`.

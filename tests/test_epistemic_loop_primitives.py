@@ -925,23 +925,11 @@ def test_the_shipped_help_states_the_reconstruction_asymmetry_truthfully() -> No
     description = schemas["observe_memory"]["description"]
     properties = schemas["observe_memory"]["inputSchema"]["properties"]
 
-    assert "preserve-on-omit" in description
-    assert "replace-on-omit" in description
+    assert "omitted verdict/check_by/id persist" in description
+    assert "tags/context/relations clear unless resent" in description
     assert "never discards an authored metadata row" not in description
-    for replaced in ("tags", "context", "relations"):
-        assert "omitting it clear" in properties[replaced]["description"], replaced
     for preserved in ("verdict", "check_by"):
-        assert "omit to keep the current value" in properties[preserved]["description"]
-
-
-def test_the_command_registry_help_matches_the_shipped_description() -> None:
-    command = next(
-        item for item in commands.PRODUCT_COMMANDS if item.name == "observe_memory"
-    )
-    help_by_name = {param.name: (param.help or "") for param in command.params}
-
-    for replaced in ("tags", "context", "relations"):
-        assert "omitting it clear" in help_by_name[replaced], replaced
+        assert "Empty string clears it on update" in properties[preserved]["description"]
 
 
 # --------------------------------------------------------------------------

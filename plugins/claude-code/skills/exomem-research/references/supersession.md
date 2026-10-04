@@ -123,3 +123,12 @@ checks (orphan detection, etc.).
 - Creating a page with `supersedes` pointing to a page that hasn't been marked `superseded`
 
 These conditions are checked by audit. Violations are reported.
+
+## Tool: `replace_memory`
+
+`replace_memory` performs the steps above in one call. Replacement is a new
+source claim: every non-empty `sources` entry must resolve to authorized
+governed Source or Evidence material even when the old page carried an
+unresolved citation (`UNRESOLVED_SOURCE_CITATION`). Capture the original first
+or pass an honest empty list; a derivative is never promoted into the missing
+original. `validate_only` previews the draft without writing either page.

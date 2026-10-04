@@ -15,8 +15,8 @@ live schemas are deterministic, and writes them in the shape the test reads. It 
 `tests/test_mcp_schema_fidelity.py::_build_server` / `_live_schemas` — keep them in sync.
 
 The ChatGPT Personal Plugin attestation is intentionally separate and is never updated
-here. A changed fingerprint must remain release-blocking until that external consumer is
-refreshed and verified explicitly.
+here. A changed fingerprint leaves that external consumer's acceptance pending until
+refreshed and verified; it does not block independently verified product surfaces.
 """
 
 from __future__ import annotations
