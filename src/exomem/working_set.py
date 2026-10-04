@@ -2857,6 +2857,7 @@ def _compile_packet(
             bands, semantic_state = signature_evidence(index, turn)
     generation["semantic_evidence"] = semantic_state
 
+    row_lexicons = None
     if budget_exhausted("working_set.resolve"):
         raise BudgetExhausted("working_set.resolve")
     with _span(timings, "working_set.resolve"):
@@ -2915,6 +2916,12 @@ def _compile_packet(
             routing_targets = _routing_targets(
                 root, index_token[1], index_token=index_token, visible=visible
             )
+            if segments is not None:
+                # All segments read the same audience-filtered rows. Derive
+                # their words once for this request, including the turn.
+                row_lexicons = {
+                    row.anchor_id: working_set_resolve.row_lexicon(row) for row in rows
+                }
             def _candidates(rows: tuple[working_set_resolve.AnchorFacts, ...]) -> tuple:
                 nonlocal hot
                 # Computed once per request, like `used_paths`, and for the
@@ -2954,6 +2961,7 @@ def _compile_packet(
                     eligible_categories=working_set_resolve.eligible_categories(
                         analysis, registry.roles.values()
                     ),
+                    row_lexicons=row_lexicons,
                 )
 
             candidates = _candidates(rows)
@@ -2974,6 +2982,7 @@ def _compile_packet(
                 conversation,
                 rows=rows,
                 routing_targets=routing_targets,
+                row_lexicons=row_lexicons,
                 term_anchor_counts=term_counts,
                 stopwords=conventions.stopwords,
                 rare_term_max_anchors=conventions.rare_term_max_anchors,
