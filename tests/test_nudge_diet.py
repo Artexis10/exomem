@@ -1,11 +1,10 @@
-"""The hook nudges send their full text once and stay short after (`shrink-bootstrap`).
+"""The hook nudges stay short (`shrink-bootstrap`, `shorten-stop-hook-blocks`).
 
-The Stop capture check and the retrieval reminder used to repeat their full doctrine
-on every fire, dozens of times in one session, against a contract the agent had
-already read. Now each sends the full text on the session's first fire (and again
-after a compaction, which rewrites the context it lived in) and a short line after;
-the retrieval reminder is silent between at `balanced`. The short forms keep the rule
-by name, and every text has a byte ceiling.
+The Stop capture check never carries the capture doctrine: every fire is one short line
+that names the incident rules and points at where the full rules live. The retrieval
+reminder sends its full text on the session's first fire (and again after a compaction,
+which rewrites the context it lived in) and is silent between at `balanced`. The short
+forms keep the rule by name, and every text has a byte ceiling.
 """
 
 from __future__ import annotations
@@ -36,8 +35,8 @@ checkpoint = _load("exomem_continuation_checkpoint")
 
 #: Byte ceilings for what a hook injects (served-JSON is a few bytes larger).
 CEILINGS = {
-    "capture short": (capture.REMINDER_SHORT, 320),
-    "episode ask": (capture.EPISODE_ASK, 340),
+    "capture short": (capture.REMINDER_SHORT, 285),
+    "episode ask": (capture.EPISODE_ASK, 195),
     # 300 -> 332 (was 272 in use): the two rules the diet dropped (no repeat searches on a recurring
     # reminder, the KB is the source of truth) are restored for at most 60 bytes.
     "retrieval reminder": (retrieve.REMINDER, 332),
@@ -50,6 +49,47 @@ def test_each_short_nudge_stays_under_its_ceiling(name):
     text, ceiling = CEILINGS[name]
     assert len(text.encode("utf-8")) <= ceiling
     assert text.isascii()
+
+
+def _mcp_fire(text: str) -> str:
+    """What the agent reads when the hook blocks in MCP mode (the preamble included)."""
+    os.environ["EXOMEM_RETRIEVE_INJECT"] = "mcp"
+    try:
+        return capture._capture_reason(text)
+    finally:
+        del os.environ["EXOMEM_RETRIEVE_INJECT"]
+
+
+def test_a_whole_mcp_block_stays_one_short_paragraph():
+    """The client prints the whole reason in its block box, so the sum is the budget."""
+    key = capture.episode_key("claude", "s-size")
+    fires = {
+        "capture": (_mcp_fire(capture.REMINDER_SHORT), 370),
+        "episode": (_mcp_fire(capture.EPISODE_ASK.replace("{key}", key)), 310),
+    }
+    for name, (reason, ceiling) in fires.items():
+        assert len(reason.encode("utf-8")) <= ceiling, (name, len(reason.encode("utf-8")))
+    preamble = _mcp_fire("").strip()
+    assert len(preamble.encode("utf-8")) <= 90
+    for word in ("Skip", "not connected", "cannot capture", "bootstrap first"):
+        assert word in preamble
+
+
+def test_the_short_capture_check_points_at_rules_an_mcp_only_agent_can_read():
+    """The full capture rules are not in the hook; the pointer is the way to them. It must
+    be the vault path `exomem init` deploys the shipped engagement reference to, which
+    `read_memory` opens."""
+    from exomem import init as init_module
+    from exomem import vault as vault_module
+
+    deployed = vault_module.shipped_schema_target(Path("/vault")) / "references" / "engagement.md"
+    pointer = deployed.relative_to("/vault").as_posix()
+    assert pointer == ".exomem/schema/references/engagement.md"
+    assert f"read_memory {pointer}" in capture.REMINDER_SHORT
+    assert any(
+        source.name == "engagement.md" and source.parent.name == "references"
+        for source in init_module.shipped_schema_sources()
+    )
 
 
 def test_the_checkpoint_context_is_capped_at_two_kib():
@@ -75,6 +115,25 @@ def test_the_episode_ask_keeps_the_record_call_the_key_and_the_escape():
     assert 'action="record"' in text and "episode_memory" in text
     assert "{key}" in text
     assert "Otherwise do nothing." in text
+
+
+def test_the_episode_ask_names_enough_fields_for_a_valid_record():
+    """An ask that names too few fields yields a call the server refuses (`EPISODE_EMPTY`)."""
+    import datetime as dt
+    import re
+
+    from exomem import episode_capture
+
+    named = set(re.findall(r"\b(subject|summary|worked_on|decided|open|said)\b", capture.EPISODE_ASK))
+    call = {name: [f"a {name} item"] if name in {"worked_on", "decided", "open"} else f"a {name}" for name in named}
+    recap = episode_capture.prepare(
+        episode=None,
+        when=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+        audience="owner",
+        **{"subject": "s", "summary": "s", **call},
+    )
+    assert recap.body
+    assert {"subject", "summary"} <= named
 
 
 def test_the_retrieval_texts_keep_recall_the_miss_reading_and_the_skip():
@@ -134,8 +193,25 @@ def _context(out: str) -> str:
 PROMPT = "Please look at how the depot ledger reconciles and tell me what changed."
 
 
-def test_the_capture_check_is_full_once_then_short(tmp_path):
-    event = {"session_id": "s-cap", "last_assistant_message": "x" * 400}
+def _landing_event(tmp_path: Path, session: str) -> dict:
+    """A Stop event whose turn pushed: below `maximal` only a landing is nudged."""
+    rows = [
+        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "q"}]}},
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "git push"}}],
+            },
+        },
+    ]
+    transcript = tmp_path / f"{session}.jsonl"
+    transcript.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    return {"session_id": session, "transcript_path": str(transcript), "last_assistant_message": "Pushed."}
+
+
+def test_every_capture_fire_is_the_short_check(tmp_path):
+    event = _landing_event(tmp_path, "s-cap")
     env = {
         "EXOMEM_PROMINENCE": "balanced",
         "EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC": "0",
@@ -143,11 +219,7 @@ def test_the_capture_check_is_full_once_then_short(tmp_path):
     }
     replies = [json.loads(_run("exomem_capture_nudge.py", event, tmp_path, **env)) for _ in range(3)]
 
-    assert [r["reason"] for r in replies] == [
-        capture.REMINDER,
-        capture.REMINDER_SHORT,
-        capture.REMINDER_SHORT,
-    ]
+    assert [r["reason"] for r in replies] == [capture.REMINDER_SHORT] * 3
 
 
 def test_the_retrieval_reminder_is_once_per_session_at_balanced(tmp_path):
@@ -199,7 +271,7 @@ def test_a_lifecycle_event_rearms_both_full_texts(tmp_path):
     )
     _run(
         "exomem_capture_nudge.py",
-        {"session_id": session, "last_assistant_message": "x" * 400},
+        _landing_event(tmp_path, session),
         tmp_path,
         EXOMEM_PROMINENCE="balanced",
         EXOMEM_EPISODE_ASK_TURNS="0",

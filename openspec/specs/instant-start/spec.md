@@ -1,7 +1,7 @@
 # instant-start Specification
 
 ## Purpose
-TBD - created by archiving change add-instant-start-boot. Update Purpose after archive.
+Let the server begin serving before any model preload or cache warm-up completes: warm-up is lexical-first and `find` skips lanes that are not ready, marking the response with a `warming` object. Writes made during warm-up defer embedding, `EXOMEM_EAGER_BOOT` restores synchronous boot, and retrieval readiness stays observable and admitted across repair and worker replacement.
 
 ## Requirements
 

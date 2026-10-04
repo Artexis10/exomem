@@ -43,6 +43,23 @@ def _anchor(
     return path
 
 
+def test_meaning_question_cannot_write_in_a_read_only_cloud_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.cli_ops import OpError
+
+    path = _anchor(tmp_path)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "review_memory")
+    monkeypatch.setenv("EXOMEM_CLOUD_READ_ONLY", "1")
+    with library_scope(), pytest.raises(OpError) as raised:
+        writer_lease.invoke_command(
+            command, tmp_path, mode="vocabulary", path=path,
+            query="Does this need a more specific meaning?", family="entity-type/v1",
+        )
+    assert raised.value.code == "CLOUD_CELL_READ_ONLY"
+    assert commands.op_review_memory(tmp_path, mode="vocabulary")["items"] == []
+
+
 @pytest.mark.parametrize(
     "family",
     ["entity-instance/v1", "entity-type/v1", "relation-type/v1"],

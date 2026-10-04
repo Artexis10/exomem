@@ -4627,6 +4627,18 @@ _DATA_REPRESENTATION_ADAPTER: dict[str, str] = {
 }
 
 _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
+    ("review_memory", "mode"): {
+        **dict.fromkeys(
+            (
+                "attention", "activation", "item", "audit", "dispositions",
+                "provenance", "evolution", "compilation", "stale", "contradiction",
+                "unprocessed-sources", "relation-debt", "relation-queue", "adoption",
+                "upkeep", "plan-progress", "write-advisory-result",
+            ),
+            "structure",
+        ),
+        "vocabulary": "question-conditional",
+    },
     ("configure_memory", "action"): {
         "inspect": "structure",
         "set": "mutation",

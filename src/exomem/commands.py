@@ -738,6 +738,8 @@ def op_configure_memory(
 ) -> dict:
     """Inspect, set or clear your saved Exomem engagement level for this vault.
 
+    Use set or clear only for an explicit user request to change saved engagement.
+    Recall, capture, installation and missing hooks are not setting-change requests.
     Inspect first, then set off, light, balanced or maximal with the returned
     revision as expected_revision. The choice follows this authenticated identity
     on later requests without a restart. It changes recall/capture eagerness, never
@@ -746,7 +748,7 @@ def op_configure_memory(
     alone, leaving the identity-wide value untouched, and use clear with that
     context and expected_revision to remove it again. The context that applies to
     a request is detected from the calling client, never chosen by an argument.
-    Adopt the returned engagement contract in the current conversation.
+    The response reports the effective engagement for the current conversation.
 
     Args:
         action: "inspect" reads the saved state, "set" writes a level, and
@@ -4438,8 +4440,26 @@ def op_edit(
                 relation_review_reason=relation_review_reason,
             )
         elif field is not None:
-            if field == "aliases":
-                _refuse_claimed_aliases(vault_root, path, value, identity_decision)
+            patch_fields: dict[str, Any] = {}
+
+            def _validate_names(before_source: str, after_source: str) -> None:
+                # Only the full rendered document determines root field names
+                # and scalar types; a fragment can belong to nested metadata.
+                before, _, _ = vault.parse_frontmatter(before_source)
+                after, _, _ = vault.parse_frontmatter(after_source, strict=True)
+                for name_field in ("aliases", working_set_index_module.LEARNED_ALIASES_FIELD):
+                    if name_field not in after:
+                        continue
+                    if name_field != field and before.get(name_field) == after[name_field]:
+                        continue
+                    patch_fields[name_field] = after[name_field]
+                    claimed_value = after[name_field]
+                    if name_field == working_set_index_module.LEARNED_ALIASES_FIELD:
+                        verdicts = _learned_alias_verdicts(vault_root, claimed_value)
+                        if verdicts is not None:
+                            claimed_value = list(verdicts[0])
+                    _refuse_claimed_aliases(vault_root, path, claimed_value, identity_decision)
+
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root,
                 path=path,
@@ -4453,6 +4473,7 @@ def op_edit(
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
                 relation_review_reason=relation_review_reason,
+                _validate_frontmatter=_validate_names,
             )
         else:
             result = edit_module.edit(
@@ -4484,7 +4505,12 @@ def op_edit(
         if getattr(e, "candidates", None):
             msg += f" (candidates: {e.candidates})"
         raise ValueError(msg) from e
-    return result.as_dict()
+    payload = result.as_dict()
+    if field is not None and working_set_index_module.LEARNED_ALIASES_FIELD in patch_fields:
+        _warn_on_skipped_learned_aliases(
+            vault_root, patch_fields[working_set_index_module.LEARNED_ALIASES_FIELD], payload
+        )
+    return payload
 
 
 def op_replace(
@@ -6282,12 +6308,21 @@ def op_activate_context(
     workspace: str | None = None,
     conversation: dict[str, Any] | None = None,
 ) -> dict:
-    """Compile durable context for a raw conversational turn, without a query.
+    """Retrieve authorized stored context relevant to the user's current message.
+
+    This read-only operation resolves the subjects in that message and returns
+    a bounded packet of relevant knowledge from the connected vault. The current
+    message is needed to resolve those subjects accurately; it is not a request
+    for additional personal information. Do not ask the user for unrelated data
+    or send full conversation history. Optional earlier excerpts are only for
+    resolving a reference the current message cannot identify on its own.
 
     Get or reuse `bootstrap` live engagement and capabilities first. Call this
     ONCE when that policy warrants recall, before deciding what to search for.
     Pass the user's current turn verbatim — this is not a search query and
-    must not be rewritten into one. It returns a bounded working-memory packet:
+    must not be rewritten into one. Do not send full conversation history;
+    optional context is limited to relevant earlier excerpts. It returns a bounded
+    working-memory packet:
     which durable anchors the turn is about (entities, resources, hubs, Records
     collections, active plans, projects), the context roles it filled, short
     provenance-bearing units, pointers to what did not fit the budget, and the
@@ -6332,7 +6367,8 @@ def op_activate_context(
     earlier `{role, text}` turns, never full history. Anchors report `origin`.
     Bounds: the skill's engagement reference.
 
-    Call again with `focus` for a subject the hook missed.
+    For a subject the hook missed, call again with `conversation.focus`; there
+    is no top-level `focus` parameter. Use `anchor` for an already known page.
 
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
@@ -6433,8 +6469,10 @@ def op_activate_context(
             that names nothing is answered from this conversation's
             `continuity` thread alone, never from other conversations' work.
         conversation: Optional: `{focus?: str, recent?: [{role:
-            "user"|"assistant", text: str}], refs?: [str]}`. Anything else is
-            ignored, never an error.
+            "user"|"assistant", text: str}], refs?: [str]}`. Send only relevant
+            earlier excerpts, never full history: at most six entries and
+            2,400 characters total. Focus is capped at 240 characters, refs at
+            twelve. Omit when the current turn suffices. Unknown fields are ignored.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
@@ -7451,7 +7489,7 @@ def op_remember(
 def _refuse_claimed_aliases(
     vault_root: Path, path: str, value: object, identity_decision: dict | None = None
 ) -> None:
-    """Refuse an `aliases` patch naming what another page already answers to.
+    """Refuse an owner or learned alias naming what another page already answers to.
 
     The same guard `create-entity` runs (`entity_candidates.claimed_names`):
     an alias another page holds would make a turn naming it resolve both. The
@@ -7538,7 +7576,7 @@ def op_edit_memory(
             as `operation.validate_only`; giving it in both places is fine when
             they agree. Same meaning as on `remember` and `replace_memory`.
         identity_decision: `{outcome: "distinct", candidate_fingerprint}` for an
-            `aliases` patch naming a name another page already answers to, when
+            `aliases` or `learned_aliases` patch naming a name another page already answers to, when
             the name is genuinely shared; the fingerprint comes from that
             refusal. Not needed for names only withheld pages answer to.
 
@@ -7554,28 +7592,33 @@ def op_edit_memory(
     if validate_only:
         arguments["validate_only"] = True
     normalized = edit_operations_module.normalize_edit_arguments(arguments)
-    result = op_edit(vault_root, **normalized)
-    if normalized.get("field") == working_set_index_module.LEARNED_ALIASES_FIELD:
-        _warn_on_skipped_learned_aliases(vault_root, normalized.get("value"), result)
-    return result
+    return op_edit(vault_root, **normalized)
 
 
-def _warn_on_skipped_learned_aliases(vault_root: Path, value: Any, result: Any) -> None:
-    """Tell the agent now about a `learned_aliases` entry the activation index
-    will skip, with the index's own rules (`learned_alias_verdicts`). Never
-    blocks: the page write stands, the entry simply does nothing."""
-    if not isinstance(result, dict):
-        return
+def _learned_alias_verdicts(
+    vault_root: Path, value: Any
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]] | None:
+    """Use the index's admission rules for both claim checks and write advice."""
     try:
         conventions = activation_conventions_module.load_conventions(vault_root).conventions
-        _accepted, rejected = working_set_index_module.learned_alias_verdicts(
+        return working_set_index_module.learned_alias_verdicts(
             value,
             stopwords=conventions.stopwords,
             filler=activation_conventions_module.shipped_conventions().conventions.referential_filler,
         )
-    except Exception:  # noqa: BLE001 - advice about a write must never fail it
+    except Exception:  # noqa: BLE001 - unavailable advice cannot disable the claim guard
         log.debug("learned_aliases verdict unavailable", exc_info=True)
+        return None
+
+
+def _warn_on_skipped_learned_aliases(vault_root: Path, value: Any, result: Any) -> None:
+    """Tell the agent about entries the activation index skips without blocking."""
+    if not isinstance(result, dict):
         return
+    verdicts = _learned_alias_verdicts(vault_root, value)
+    if verdicts is None:
+        return
+    _accepted, rejected = verdicts
     if not rejected:
         return
     warnings = result.get("warnings")
@@ -8772,6 +8815,10 @@ def op_read_media(
     )
 
 
+def _review_question_submission(path: Any, query: Any, family: Any) -> bool:
+    return path is not None or bool(query) or family is not None
+
+
 def op_review_memory(
     vault_root: Path,
     mode: str = "attention",
@@ -8794,7 +8841,9 @@ def op_review_memory(
     """Review memory health, provenance, drift, or source backlog.
 
     Default mode is read-only attention review. Write-capable repairs are in
-    `maintain_memory`, not here.
+    `maintain_memory`, not here. Vocabulary mode with `path`, `query` and
+    `family` saves a meaning question in review state. That submission requires
+    write access, but grants no permission to change a page or vocabulary.
 
     `mode="audit", categories=["unresolved_source_citation"]` finds compiled
     pages whose explicit sources do not resolve to authorized governed Source
@@ -8880,7 +8929,7 @@ def op_review_memory(
         requested page.
     """
     if mode == "vocabulary":
-        question_submission = path is not None or bool(query) or family is not None
+        question_submission = _review_question_submission(path, query, family)
         unrelated = any(
             item is not None
             for item in (categories, sources, suggested_title, tag, key, value)
@@ -12523,6 +12572,10 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             return kwargs.get("dry_run") is True
         if adapter == "apply-conditional":
             return kwargs.get("apply") is not True
+        if adapter == "question-conditional":
+            return not _review_question_submission(
+                kwargs.get("path"), kwargs.get("query", ""), kwargs.get("family")
+            )
         return adapter != "mutation"
     if command.name == "edit_memory":
         if kwargs.get("validate_only") is True:
@@ -13033,7 +13086,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "review_memory",
         op_review_memory,
         1,
-        False,
+        True,
         False,
         None,
         _MCRC,
@@ -13206,7 +13259,10 @@ def _build_product_commands() -> tuple[Command, ...]:
     cmds: list[Command] = []
     for name, leaf, tier, writes, needs_schema, positional, surfaces, routes, meta in _PRODUCT_SPEC:
         skip = 2 if needs_schema else 1
-        desc = leaf.__doc__ or ""
+        # Python 3.13 dedents compiled docstrings; older supported interpreters
+        # retain their source indentation. Normalize before inserting a line so
+        # every renderer and runtime publishes the same tool contract.
+        desc = inspect.cleandoc(leaf.__doc__ or "")
         params = _derive_params(leaf, skip=skip, positional=positional)
         response_detail = "full" if name == "govern_memory" else "compact" if writes else None
         if name == "edit_memory":
@@ -13301,6 +13357,15 @@ def _build_product_commands() -> tuple[Command, ...]:
                 )
                 for param in params
             )
+        # Keep the reference in the description, before any Args/Returns
+        # sections that MCP's docstring parser consumes as schema metadata.
+        introduction, separator, details = desc.partition("\n\n")
+        desc = (
+            introduction.rstrip()
+            + "\n\n    API reference: "
+            "https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md"
+            + (separator + details if separator else "\n")
+        )
         cmds.append(
             Command(
                 name=name,
@@ -13869,14 +13934,31 @@ def apply_legacy_profile_pin(
     if contract is None and current == names:
         return command
     if contract is not None:
+        properties = contract.input_schema.get("properties")
+        if not isinstance(properties, Mapping):
+            raise RuntimeError(f"{command.name}: pinned input schema has no properties")
+        if command.name == "review_memory":
+            historical_modes = next(
+                (
+                    _legacy_param(param, properties["mode"]).choices
+                    for param in contract.params if param["name"] == "mode"
+                ),
+                (),
+            )
+            # The published wrapper enforces these finite modes and rejects
+            # extra arguments. It cannot reach question submission, unlike
+            # the current write-capable tool. Never relax the general pin guard.
+            if (
+                historical_modes
+                and "vocabulary" not in historical_modes
+                and "family" not in keep
+            ):
+                command = dataclass_replace(command, cli_writes=False, response_detail=None)
         # Historical metadata is fixed by its published descriptor, not today's
         # hint classification. A changed write capability still breaks the pin.
         if contract.annotations.get("readOnlyHint") is not command.read_only:
             raise RuntimeError(f"{command.name}: pinned read-only classification changed")
         published = {str(param["name"]): param for param in contract.params}
-        properties = contract.input_schema.get("properties")
-        if not isinstance(properties, Mapping):
-            raise RuntimeError(f"{command.name}: pinned input schema has no properties")
         params = tuple(
             _legacy_param(published[param.name], properties[param.name])
             for param in command.params

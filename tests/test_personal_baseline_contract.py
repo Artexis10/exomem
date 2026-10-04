@@ -12,7 +12,6 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from exomem import commands, envelope, prominence
-from exomem._hooks import exomem_capture_nudge as capture_hook
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 from exomem.edit_operations import (
     normalize_edit_surface_arguments,
@@ -602,7 +601,6 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
             ROOT / "docs" / "ai-assistant-guide.md",
             "## Copyable instruction block",
         ),
-        "structural reminder": capture_hook.REMINDER.lower(),
         "prominence balanced": prominence.CONTRACTS["balanced"].capture,
         "prominence maximal": prominence.CONTRACTS["maximal"].capture,
         "maximal docs": _markdown_block(ROOT / "docs" / "prominence.md", "### Maximal", "### Balanced"),
@@ -620,11 +618,9 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
     assert "when torn between saving and letting it pass, save" in blocks["maximal docs"]
     assert "not mid-thought exploration" in blocks["balanced docs"]
     # The generic "records" marker above is satisfied by the Planning/Records
-    # routing line, so it cannot tell whether the reminder still carries the
-    # Records-compatibility rule or the distilled-notes rule. Pin both.
-    reminder = blocks["structural reminder"]
-    assert "records only" in reminder
-    assert "transcripts" in reminder
+    # routing line, so it cannot tell whether the engagement reference still carries the
+    # Records-compatibility rule. Pin it.
+    assert "records only" in " ".join(blocks["scaffold"].lower().split())
 
 
 def test_executed_method_cases_remain_a_separate_predicate() -> None:
@@ -727,4 +723,3 @@ def test_capture_reminder_is_structural_bounded_and_model_free() -> None:
         for alias in node.names
     }
     assert not imports & {"openai", "anthropic", "transformers", "requests", "httpx"}
-    assert "stable preference" in source

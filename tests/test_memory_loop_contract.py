@@ -27,7 +27,7 @@ from epistemic.memory_loop.contract import (
     VaultState,
 )
 
-SEMANTICS_FINGERPRINT = "2124a0d37e1d12a60156a655fdf3fa03a63f9d72f5445ba73b98b75abd98341f"
+SEMANTICS_FINGERPRINT = "bfc576bb38c138e9b6fd6d1cd08d317c10ead0dc735ddcfb3c4cada944a4f787"
 
 #: Every declared default of every contract type. A changed default changes
 #: meaning without moving any fixture digest on its own, so it is pinned here

@@ -16,7 +16,6 @@ def test_repository_uses_openspec_as_its_only_specification_system() -> None:
         for phrase in (
             "sole specification system",
             "routine restorative fixes",
-            "migrate any unique durable contract",
         ):
             assert phrase in normalized, f"{instruction_file} lost policy: {phrase}"
 

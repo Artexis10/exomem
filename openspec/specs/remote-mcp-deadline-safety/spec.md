@@ -1,7 +1,7 @@
 # remote-mcp-deadline-safety Specification
 
 ## Purpose
-TBD - created by archiving change keep-remote-mcp-under-client-deadline. Update Purpose after archive.
+Keep the HA edge safe for long MCP tool calls: a dedicated tool-call timeout, no cross-replica replay while a writer lease holder is active, a single healthy origin chosen when no holder exists, and fast fallback only for non-`tools/call` and OAuth or discovery traffic. Admitted replicas must run a restart-safe stateless release.
 ## Requirements
 ### Requirement: MCP tool calls use a dedicated execution deadline
 The HA edge SHALL use a separately configurable MCP tool-call timeout whose default accommodates the supported Exomem execution envelope without changing the short connectivity timeout.

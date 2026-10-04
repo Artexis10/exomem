@@ -93,3 +93,13 @@ Directory materials SHALL derive supported cases and identity from the shared re
 #### Scenario: Submission is not publication
 - **WHEN** both providers accept submissions for review
 - **THEN** the recorded outcome is submitted and never automatically approved or public
+
+#### Scenario: Review questions require write admission
+- **WHEN** a current client submits an explicit vocabulary meaning question through review_memory
+- **THEN** the tool advertises write capability and the submission passes the existing mutation admission checks
+- **AND** ordinary review modes remain read-only and immutable historical profiles cannot invoke question submission
+
+#### Scenario: Directory recommendations preserve the shared contract
+- **WHEN** provider scans recommend documentation or clearer tool presentation
+- **THEN** descriptions link the shared API reference and display titles clarify intent without provider-specific behavior or tool renaming
+- **AND** unsupported automatic hook analysis is recorded as requiring provider review, never reported as locally approved

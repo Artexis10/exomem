@@ -16,14 +16,19 @@ with the context-activation benchmark corpus:
   run are not listed. A word of the wider name said elsewhere in the turn
   narrows nothing.
 
-Pure logic over facts: no vault, no index.
+Resolver facts, with one persisted-index check for an admitted alias.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
+
 import pytest
 
+from exomem import working_set_conversation as conversation_module
 from exomem import working_set_resolve as resolve_module
+from exomem.working_set_index import WorkingSetIndex
 
 
 def _row(
@@ -382,6 +387,153 @@ def test_an_unpunctuated_run_with_a_hyphenated_word_still_narrows() -> None:
     )
 
     assert resolution.status == "resolved"
+
+
+@pytest.mark.parametrize("separator", [" and ", ", "])
+def test_a_complete_authored_name_keeps_its_internal_separator(separator: str) -> None:
+    """An authored compound name is one mention, not two competing hubs."""
+    title = f"Tide model{separator}weather hub"
+    compound = _row("hubs/tide-model-weather.md", title, kind="hub")
+    resolution = _resolve(
+        f"Could you check the {title} for me?",
+        (ROLLOUT, compound),
+        counts={"tide": 2, "model": 2, "rollout": 1, "weather": 1, "hub": 2},
+        retrieved=(ROLLOUT.path, compound.path),
+    )
+
+    assert resolution.status == "resolved"
+    assert [anchor.path for anchor in resolution.resolved_anchors] == [compound.path]
+
+
+@pytest.mark.parametrize("separator", [" and ", ", "])
+def test_a_compound_name_does_not_consume_a_later_separate_mention(separator: str) -> None:
+    compound = _row("hubs/tide-model-weather.md", f"Tide model{separator}weather hub", kind="hub")
+    resolution = _resolve(
+        f"Check the {compound.title}. Separately check the tide model.",
+        (ROLLOUT, compound),
+        counts={"tide": 2, "model": 2, "rollout": 1, "weather": 1, "hub": 2},
+        retrieved=(ROLLOUT.path, compound.path),
+    )
+
+    assert resolution.status == "ambiguous"
+    assert {anchor.path for anchor in resolution.anchors} == {ROLLOUT.path, compound.path}
+
+
+def test_a_generic_word_after_a_compound_name_is_not_a_separate_name() -> None:
+    compound = _row("hubs/tide-model-weather.md", "Tide model and weather hub", kind="hub")
+    resolution = _resolve(
+        "Check the tide model and weather hub. That hub is ready.",
+        (ROLLOUT, compound),
+        counts={"tide": 2, "model": 2, "rollout": 1, "weather": 1, "hub": 2},
+        retrieved=(ROLLOUT.path, compound.path),
+    )
+
+    assert resolution.status == "resolved"
+    assert [anchor.path for anchor in resolution.resolved_anchors] == [compound.path]
+
+
+def test_repeating_a_compound_name_does_not_name_its_weaker_competitor() -> None:
+    compound = _row("hubs/tide-model-weather.md", "Tide model and weather hub", kind="hub")
+    resolution = _resolve(
+        "Check the tide model and weather hub. Again, check the tide model and weather hub.",
+        (ROLLOUT, compound),
+        counts={"tide": 2, "model": 2, "rollout": 1, "weather": 1, "hub": 2},
+        retrieved=(ROLLOUT.path, compound.path),
+    )
+
+    assert resolution.status == "resolved"
+    assert [anchor.path for anchor in resolution.resolved_anchors] == [compound.path]
+
+
+@pytest.mark.parametrize("focus", [
+    "Check the copper crane harbour ship.",
+    "Check copper crane harbour ship.",
+])
+def test_turn_name_narrowing_preserves_a_disjoint_focus_only_lead(focus: str) -> None:
+    """Segment-local coordinates cannot make an unrelated focus lead a free rider."""
+    compound = _row("hubs/tide-model-weather.md", "Tide model and weather hub", kind="hub")
+    other = _row("hubs/copper-crane.md", "Copper crane harbour ship archive", kind="hub")
+    rows = (ROLLOUT, compound, other)
+    counts = {"tide": 2, "model": 2, "rollout": 1, "weather": 1, "hub": 2}
+    analysis = resolve_module.analyze_turn("Check the tide model and weather hub.")
+    conversation = conversation_module.bound({"focus": focus})
+    segments = conversation_module.analyze(conversation)
+    candidates, origins, _ = conversation_module.apply(
+        resolve_module.candidates_for(
+            analysis, rows, term_anchor_counts=counts,
+            retrieval_paths=frozenset({ROLLOUT.path, compound.path}),
+        ),
+        segments, conversation, rows=rows, term_anchor_counts=counts,
+    )
+    resolution = resolve_module.resolve(candidates, turn_tokens=segments.turn_tokens(analysis))
+
+    assert resolution.status == "resolved"
+    assert [anchor.path for anchor in resolution.resolved_anchors] == [compound.path]
+    leads = {anchor.path: anchor for anchor in resolution.partial_anchors}
+    assert leads[other.path].status == "partial"
+    assert origins[other.path] == "focus"
+
+
+def test_an_authored_alias_survives_its_derived_spelling_in_the_persisted_index(
+    tmp_path: Path,
+) -> None:
+    hub_dir = tmp_path / "Knowledge Base" / "Notes" / "Insights"
+    hub_dir.mkdir(parents=True)
+    for stem, title, alias in (
+        ("harbour-workstream", "Harbour and wind (workstream)", "harbour and wind"),
+        ("harbour-research", "Harbour wind research", ""),
+    ):
+        (hub_dir / f"{stem}.md").write_text(
+            f"---\ntype: insight\nstatus: active\ntags: [hub]\naliases: [{alias}]\n---\n\n# {title}\n",
+            encoding="utf-8",
+        )
+    index = WorkingSetIndex(tmp_path)
+    index.rebuild()
+    rows = resolve_module.facts_from_rows(index.anchors())
+    resolution = _resolve(
+        "Could you check harbour and wind please?",
+        rows,
+        counts=index.term_anchor_counts(),
+        retrieved=tuple(row.path for row in rows),
+    )
+
+    assert resolution.status == "resolved"
+    assert [anchor.title for anchor in resolution.resolved_anchors] == [
+        "Harbour and wind (workstream)"
+    ]
+
+
+def test_an_authored_comma_is_not_a_sentence_boundary() -> None:
+    compound = _row("hubs/tide-model-weather.md", "Tide model, weather hub", kind="hub")
+    resolution = _resolve(
+        "Could you check the tide model. Weather hub can wait.",
+        (ROLLOUT, compound),
+        counts={"tide": 2, "model": 2, "rollout": 1, "weather": 1, "hub": 2},
+        retrieved=(ROLLOUT.path, compound.path),
+    )
+
+    assert resolution.status == "ambiguous"
+
+
+def test_a_complete_authored_alias_keeps_its_coordinator() -> None:
+    compound = replace(
+        _row(
+            "hubs/tide-weather.md",
+            "Estuary weather review",
+            kind="hub",
+            terms=("estuary", "weather", "review", "tide", "model", "hub"),
+        ),
+        aliases=("tide model and weather hub",),
+    )
+    resolution = _resolve(
+        "Could you check the tide model and weather hub for me?",
+        (ROLLOUT, compound),
+        counts={"tide": 2, "model": 2, "rollout": 1, "weather": 1, "hub": 2},
+        retrieved=(ROLLOUT.path, compound.path),
+    )
+
+    assert resolution.status == "resolved"
+    assert [anchor.path for anchor in resolution.resolved_anchors] == [compound.path]
 
 
 MARK_E = _row("people/mark-ellison.md", "Mark Ellison", kind="entity", entity_type="person")

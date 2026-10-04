@@ -110,3 +110,39 @@ def test_no_hand_registered_tools(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert "mint_download_token" not in ann
     assert "note" not in ann
     assert ann["transfer_artifact"]["readOnlyHint"] is False
+
+
+def test_review_question_is_not_advertised_or_classified_as_a_read() -> None:
+    command = next(c for c in commands_module.PRODUCT_COMMANDS if c.name == "review_memory")
+    assert command.mcp_annotations.read_only_hint is False
+    assert command.mcp_annotations.destructive_hint is False
+    assert commands_module.invocation_is_read_only(command, {"mode": "attention"})
+    assert commands_module.invocation_is_read_only(command, {"mode": "vocabulary"})
+    assert not commands_module.invocation_is_read_only(
+        command,
+        {
+            "mode": "vocabulary", "path": "Knowledge Base/Notes/example.md",
+            "query": "What does this term mean?", "family": "relation-type/v1",
+        },
+    )
+
+
+def test_current_tool_descriptions_link_to_the_shared_api_reference(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tools = asyncio.run(_build_server(monkeypatch, tmp_path).list_tools())
+    reference = "https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md"
+    assert all(reference in tool.to_mcp_tool().description for tool in tools)
+    adoption = next(tool.to_mcp_tool() for tool in tools if tool.name == "adoption_studio")
+    assert adoption.annotations.title == "Adopt Existing Memory"
+
+
+def test_api_reference_contract_is_stable_across_python_docstring_indentation(monkeypatch) -> None:
+    """3.13 dedents compiled docs; a 3.11 renderer must emit the same contract."""
+    command = next(c for c in commands_module.PRODUCT_COMMANDS if c.name == "coordination_status")
+    descriptions = []
+    for doc in ("Summary.\n\n    Details.\n    ", "Summary.\n\nDetails.\n"):
+        monkeypatch.setattr(command.leaf, "__doc__", doc)
+        rebuilt = next(c for c in commands_module._build_product_commands() if c.name == command.name)
+        descriptions.append(rebuilt.doc)
+    assert descriptions[0] == descriptions[1]

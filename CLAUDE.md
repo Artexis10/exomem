@@ -1,9 +1,5 @@
 # exomem — instructions for Claude
 
-For unfamiliar cross-file code paths, optional Graft CLI queries can provide a
-small starting map. Read `docs/code-navigation.md` when using it; verify its
-results in source and use normal search when it misses.
-
 ## Shared-checkout and live-state boundaries
 
 Every new change, including docs and OpenSpec, belongs in its own linked worktree from `origin/main`. Keep the primary on `main`; inspect status and all worktrees before editing. Never discard or overwrite another session's files or processes. Never use `git stash` in any checkout: the stack is repository-global.
@@ -50,18 +46,4 @@ active change is archive debt and CI rejects it.
 
 <!-- spec-system:openspec-only -->
 
-Use `openspec/` for durable change proposals, designs, requirements, and task
-plans. Do not create, read as current authority, or revive
-`docs/superpowers/` or any parallel specification tree. Before deleting legacy
-planning documents, migrate any unique durable contract into the relevant
-existing OpenSpec artifact; leave routine implementation history to code,
-tests, runbooks, and Git. Routine restorative fixes and operational repair do
-not need a new OpenSpec change. New capabilities, contract changes, and
-non-trivial repairs do.
-
-## Memory boundary
-
-Treat Claude, ChatGPT, Codex, and other assistants' native memory as short-term
-or behavioural memory for preferences, routing, and working context. Exomem is
-the long-term governed store for project/domain knowledge, sources, evidence,
-decisions, and reusable conclusions.
+OpenSpec is the sole specification system here; never create or revive `docs/superpowers/` or another parallel tree. New capabilities, contract changes and repairs with a real design decision or revised invariant get a change; routine restorative fixes and operational repair do not.

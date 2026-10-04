@@ -107,4 +107,4 @@ def test_the_scaffold_line_names_conversation_and_attachments_generically() -> N
 
 
 def test_the_tool_allows_focus_when_a_hook_missed_the_subject() -> None:
-    assert "Call again with `focus` for a subject the hook missed." in (commands.op_activate_context.__doc__ or "")
+    assert "`conversation.focus`" in (commands.op_activate_context.__doc__ or "")

@@ -89,7 +89,8 @@ def test_mcp_capture_does_not_resolve_personal_service_credentials(monkeypatch, 
         capture, "_resolve_rest_key", lambda: reads.append("service") or ("", "file")
     )
     if branch == "due":
-        assert capture._episode_ask("s", [], True, "balanced") is not None
+        landing = [{"name": "Bash", "input": {"command": "git push"}}]
+        assert capture._episode_ask("s", landing, True, "balanced") is not None
     elif branch == "coverage":
         state = capture._read_episode_state(capture._episode_state_path("s"))
         state["workflow_episode"] = "candidate-episode"
@@ -742,7 +743,19 @@ def test_fresh_mcp_codex_capture_checks_live_capabilities_without_restart_wait(
                 "payload": {
                     "type": "custom_tool_call",
                     "name": "exec",
-                    "input": 'text(await tools.mcp__exomem__remember({text:"synthetic"}));',
+                    "call_id": "c1",
+                    "input": 'text(await tools.exec_command({cmd:"git push"}));',
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "c1",
+                    "output": '{"exit_code":0,"output":"done"}',
                 },
             }
         )
@@ -766,8 +779,8 @@ def test_fresh_mcp_codex_capture_checks_live_capabilities_without_restart_wait(
         check=True,
     )
     reason = json.loads(result.stdout)["reason"]
-    assert "bootstrap" in reason and "capabilities" in reason
-    assert "not connected" in reason and "unavailable" in reason
+    assert "bootstrap first" in reason and "cannot capture" in reason
+    assert "not connected" in reason
     assert marker.read_text() == "old-marker"
 
 
@@ -801,7 +814,7 @@ def test_non_mcp_installs_keep_restart_gate(tmp_path, monkeypatch, mode):
     assert capture._restart_pending([])
 
 
-@pytest.mark.parametrize("reason", [capture.REMINDER, capture.EPISODE_ASK, capture.COVERAGE_ASK])
+@pytest.mark.parametrize("reason", [capture.REMINDER_SHORT, capture.EPISODE_ASK, capture.COVERAGE_ASK])
 def test_all_mcp_capture_reasons_guard_live_capabilities(monkeypatch, capsys, reason):
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "mcp")
     monkeypatch.setattr(capture, "_episode_ask", lambda *args: reason)
@@ -819,8 +832,8 @@ def test_all_mcp_capture_reasons_guard_live_capabilities(monkeypatch, capsys, re
     )
     assert capture.main() == 0
     output = json.loads(capsys.readouterr().out)["reason"]
-    assert "bootstrap" in output and "live capture capabilities" in output
-    assert "not connected" in output and "unavailable" in output
+    assert "bootstrap first" in output and "not connected" in output
+    assert "cannot capture" in output
     assert reason in output
 
 

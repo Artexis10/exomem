@@ -174,9 +174,9 @@ variable "database_hostname" {
 }
 
 variable "control_db_server_name" {
-  description = "Opaque host name for the dedicated control-database server."
+  description = "Host name for the shared Substrate control server; retained variable name preserves deployment-input compatibility."
   type        = string
-  default     = "exomem-control-db-01"
+  default     = "substrate-control-01"
 }
 
 variable "control_db_server_type" {

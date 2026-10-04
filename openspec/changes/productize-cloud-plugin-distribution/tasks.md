@@ -7,6 +7,8 @@
 
 - [ ] 1.4 Release the shared engagement and annotation correction, refresh actual provider discovery, and verify live bootstrap policy gates activation and episode capture. Preserve verbatim warranted turns, relevant bounded conversation input and immutable historical profile annotations. Source verification does not close the post-release portal acceptance.
 
+- [ ] 1.5 Resolve the audited directory findings in the canonical tool/Skill source: enforce mutation admission for vocabulary-question review, clarify adoption presentation, link shared API documentation and use returned upload credentials only. Independently verify historical profiles and ordinary read behavior; regenerate packages, release, and revalidate both actual provider drafts. Record provider-review holds separately from actionable defects and ignored-field warnings.
+
 ## 2. Behavioural evaluation
 
 - [x] 2.1 Add the shared synthetic corpus and observable trace evaluator with red-first tests for missing calls, wrong arguments, fabricated success, denied writes, absent independent readbacks and drift.
@@ -107,6 +109,17 @@ only an explicit setting-change request authorizes configuration writes. The
 sample's effective setting was restored to balanced. Corrected-package native
 retesting, the remaining cases, Claude acceptance, fresh portal scans and the
 real demo remain open. Neither provider draft has been submitted or published.
+
+The corrected private candidate still attempted an unsolicited engagement
+change during proactive capture. The request was denied, and the separate
+bounded sample observation persisted. A later fresh read after the 0.102.4 roll
+reported Maximal instead of the previously verified Balanced; its cause remains
+unresolved and the original receipts are preserved. The explicit-only rule now
+also appears in the canonical portable core, every standalone workflow, the
+configuration tool description and bootstrap route. Optional activation context
+is described with the existing server bounds, never as full history. This is a
+source correction, not evidence that native behavior or the portal finding is
+resolved. Tasks 1.4 and 3.1–3.4 remain open.
 
 - [x] 4.1 Resolve author-independent review findings, run scoped tests plus completion-boundary full CI and privacy checks, and merge the cohesive verified batch.
 - [ ] 4.2 Verify released packages and production outcome, reconcile prior acceptance debt, sync/archive only completed OpenSpec scope and retire the clean task worktree.

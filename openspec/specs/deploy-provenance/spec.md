@@ -1,7 +1,7 @@
 # deploy-provenance Specification
 
 ## Purpose
-TBD - created by archiving change add-deploy-provenance. Update Purpose after archive.
+Let an operator determine a deployed server's version and install origin without inspecting service configuration, and make deploys verify what is actually running. The public health route omits host-identifying detail, the deploy resolves the interpreter from the service manager, blocks accelerator regressions, and confirms the running version after restart.
 ## Requirements
 ### Requirement: Runtime Reports Its Install Origin
 

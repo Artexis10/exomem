@@ -393,11 +393,13 @@ def activation_token_path(home: Path, client: str, session_id: str) -> Path:
 
 
 def _rearm_nudges(home: Path, session_id: str) -> None:
-    """Re-arm the once-per-session full nudge texts after a lifecycle event.
+    """Re-arm the session nudge stamps after a lifecycle event.
 
-    The capture and retrieve hooks send their full text once per session and a short
-    line afterwards, tracked by a stamp file each. A compaction rewrites the context
-    that text lived in, so the next fire must be the full one again. The names mirror
+    The retrieve hook sends its full text once per session and a short line afterwards,
+    tracked by a stamp file; the capture hook keeps a stamp for its cooldown (its text is
+    always the short check). A compaction rewrites the context the retrieve text lived
+    in, so the next retrieve fire must be the full one again, and the capture cooldown
+    restarts with it. The names mirror
     `_cooldown_ok` in `exomem_capture_nudge.py` and `exomem_retrieve_nudge.py`
     (`tests/test_nudge_diet.py` asserts the derivations agree). Never raises.
     """

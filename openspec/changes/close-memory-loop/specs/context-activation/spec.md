@@ -150,17 +150,30 @@ and lower-case words: an all-lower-case turn, an all-caps turn and a headline wh
 word is capitalised carry no casing signal, so no non-person group forms in them and
 persons keep their all-lower-case behaviour. A single such entity SHALL stay a `partial` lead, and a shared word in the
 names of two anchors of any other kind SHALL NOT form this ambiguity. Second, a
-qualifier: each anchor's contact SHALL be the longest contiguous run of turn tokens that
+qualifier: each anchor's contact SHALL retain the longest contiguous run of turn tokens that
 spells its own authored name words (stopwords may sit inside a run, never at its edges;
 punctuation and coordinators end a contiguous run: a sentence end, comma, colon,
 semicolon, parenthesis, square bracket or dash, and "and" or "or", so "X, Y" and "X and Y" are two things, not one
-run).
+run). A separator inside a complete title or alias already admitted to the caller-visible
+activation index and spelled literally in the
+turn SHALL belong to that name's occurrence, not end its run. This exception SHALL NOT
+add a contact evidence kind, change derived-alias admission, or apply to a token sequence
+whose name punctuation was replaced with a different clause boundary. Equality with a
+possible derived short name SHALL NOT exclude an already admitted alias: indexed aliases
+do not certify whether that spelling was authored or derived.
+Occurrence tracking SHALL also retain every run with at least two name-word tokens when
+such a run exists, and otherwise every one-word name run. An isolated generic word after
+a multi-word name SHALL NOT count as a separately named sense. These internal run counts
+SHALL NOT create contact evidence or appear in the packet.
 When two same-kind anchors resolve without a deciding-alone kind and one's run lies
-strictly inside the other's, the narrower anchor SHALL NOT be listed, and neither SHALL a
+strictly inside the other's, the narrower anchor SHALL NOT be listed only when every
+qualifying occurrence is inside a wider name run. Neither SHALL a
 same-kind `partial` anchor with no retrieved contact whose run lies strictly inside the
-chosen anchor's run. A word of the wider name said outside that run SHALL narrow nothing,
+chosen anchor's runs at every qualifying occurrence. A word of the wider name said outside that run SHALL narrow nothing,
 and where no run strictly contains another every sense the turn reached SHALL stay
-listed. Neither rule SHALL compare anchors of different kinds.
+listed. Neither rule SHALL compare anchors of different kinds or span coordinates
+from different turn/focus segments. An already turn-reached candidate SHALL retain
+its turn occurrence authority when focus also reaches it.
 
 #### Scenario: A bare first name two people share is a question
 - **WHEN** a turn says only a first name that two unlinked person entities share, and
@@ -203,6 +216,32 @@ listed. Neither rule SHALL compare anchors of different kinds.
 - **WHEN** the word only one hub's name carries appears elsewhere in the turn, apart
   from the run that spells the shared words
 - **THEN** the packet is `ambiguous` between the hubs
+
+#### Scenario: A complete authored compound name keeps its separator
+- **WHEN** a turn spells a complete hub title or admitted alias containing a coordinator or
+  comma and otherwise resolves both that hub and a weaker same-kind namesake
+- **THEN** the spelled title is one contiguous name run and its internal separator
+  does not cause a false ambiguity with the weaker namesake
+- **AND** a sentence boundary replacing the authored comma does not qualify that run
+
+#### Scenario: A later independent shorter mention survives qualification
+- **WHEN** a turn spells a complete compound name and separately states a shorter
+  competing multi-word name later in the turn
+- **THEN** the shorter anchor remains listed and the genuine competition stays ambiguous
+- **AND** repeating only the complete compound name does not name its weaker competitor
+
+#### Scenario: An authored alias may share a derived spelling
+- **WHEN** an authored alias equals its title's eligible derived short name and the
+  persisted index admits that spelling once
+- **THEN** a complete literal occurrence receives the same separator handling as any
+  other admitted alias, without requiring authorship metadata or adding an alias
+
+#### Scenario: A turn qualifier does not consume an unrelated focus lead
+- **WHEN** a complete compound name narrows competing hubs in the turn segment and
+  focus independently reaches an unrelated same-kind partial lead
+- **THEN** that lead remains listed with focus origin even when its focus-local
+  span coordinates fit numerically inside the turn's compound span
+- **AND** adding a filler word to focus does not remove the lead
 
 #### Scenario: The shared words alone stay ambiguous
 - **WHEN** a turn says only the words both hub names share
@@ -289,6 +328,51 @@ whatever the turn resolved.
   answering to exactly one page
 - **THEN** both pages are carried, bounded at three by score, and a phrase two pages
   answer to is not carried and is never guessed between
+
+### Requirement: Title qualification is local to each named occurrence
+When the strict two-distinctive-word path names no page, the existing title
+fallback SHALL use a complete current title stated in one sentence to qualify
+that occurrence only. The occurrence SHALL contain a pair already admitted
+under the fallback's word, rarity and proximity rules. A candidate SHALL
+support the whole qualifying title phrase, not merely a shared suffix; equal
+namesakes and longer titles containing that phrase SHALL remain contested.
+
+Nested matches and loose pairs touching a qualifying occurrence SHALL be
+consumed only there. Independently stated full titles and shorter phrases
+elsewhere SHALL remain separate domains; non-contained overlapping titles
+SHALL remain contested. Unqualified occurrences SHALL retain the existing
+partial-title behaviour. Words consumed by a resolved anchor SHALL NOT supply
+a new qualifier. Qualification SHALL NOT use a global best-title ranking or
+infer uniqueness from incomplete or truncated candidate evidence.
+
+The fallback SHALL retain current maintained-catalogue bounds, page eligibility,
+raw-token and sentence semantics, packet budgets, disclosure, continuity and
+named-versus-carried statuses. It SHALL NOT add a foreground corpus scan,
+index repair, model call or second matching system.
+
+#### Scenario: A full title distinguishes shared-suffix siblings
+- **WHEN** the turn states one current page's complete qualifying title and
+  other current pages share only its suffix
+- **THEN** only the page supporting the whole title qualifies that occurrence
+
+#### Scenario: Separate title occurrences remain separate domains
+- **WHEN** the turn states two qualifying titles in disjoint occurrences
+- **THEN** each occurrence retains its own candidate group under the existing
+  concurrently relevant context rules
+
+#### Scenario: A shorter name stated elsewhere is not consumed
+- **WHEN** a longer qualifying title contains a shorter title, and the turn
+  also states the shorter phrase independently
+- **THEN** the longer occurrence consumes its nested match only, while the
+  independent shorter occurrence retains its existing candidate group
+
+#### Scenario: Genuine namesakes do not become a best match
+- **WHEN** equal titles or longer titles support the whole qualifying phrase
+- **THEN** that occurrence remains contested and no candidate wins by score
+
+#### Scenario: Non-contained overlapping titles remain contested
+- **WHEN** qualifying title occurrences overlap and neither contains the other
+- **THEN** qualification does not discard either competing interpretation
 
 ### Requirement: Same-thread pages are candidate anchors for an overlapping turn
 For a caller with its own session or thread, a turn that resolved no anchor and is not

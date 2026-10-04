@@ -1,7 +1,7 @@
 # semantic-write-contract Specification
 
 ## Purpose
-TBD - created by archiving change enforce-semantic-authoring-contract. Update Purpose after archive.
+Require every newly created, replaced or activated active compiled note to contain at least one valid, non-empty semantic unit, enforced by one shared predicate at every compiled commit path. Legacy and out-of-band content is grandfathered, templates default to canonical observations, and relation guidance on writes is advisory.
 
 ## Requirements
 

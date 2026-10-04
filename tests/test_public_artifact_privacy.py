@@ -357,6 +357,15 @@ def test_registry_publication_artifacts_are_scanned_as_text(
     assert [item.rule for item in findings] == ([expected_rule] if expected_rule else [])
 
 
+def test_openspec_generator_marker_is_scanned_as_text(tmp_path: Path) -> None:
+    marker = tmp_path / ".openspec-target"
+    marker.write_text("codex\n", encoding="utf-8")
+
+    findings = scan_artifact(marker, label=".agents/skills/.openspec-target")
+
+    assert [item.rule for item in findings] == []
+
+
 def test_patch_artifacts_are_scanned_as_text(tmp_path: Path) -> None:
     artifact = tmp_path / "registration.patch"
     private_path = "C:" + "\\Users\\" + "SyntheticOperator\\private-vault"

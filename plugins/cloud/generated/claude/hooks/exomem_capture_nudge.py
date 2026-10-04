@@ -3,18 +3,27 @@
 
 The KB skill already says to auto-capture at stepping-stones, but skill prose is
 *passive* — over a long thread the model forgets to check, so "auto-save" quietly
-never fires. This hook re-arms the check: when an agent finishes a substantial turn
-that hasn't already written to the KB, it blocks the stop with a one-line reminder
-so the agent evaluates whether a capture is warranted before ending. A substantial
-turn alone does not require a write.
+never fires. This hook re-arms the check: when a turn lands durable work and
+hasn't already written to the KB, it blocks the stop with a one-line reminder
+so the agent evaluates whether a capture is warranted before ending. A landing
+alone does not require a write.
 
 LANGUAGE-AGNOSTIC by design. It does NOT gate on English keywords — that would
-miss Japanese and every other language. The gate is structural: a turn is a
-candidate if the assistant's reply is substantial (>= a char threshold) and the
-KB wasn't already written this turn. A per-session cooldown bounds how often it
-can fire, so cost stays low while the agent — which judges "is this really a
-stepping-stone?" well in any language — makes the actual call (the reminder tells
-it to do nothing if it isn't one).
+miss Japanese and every other language. The gate is structural, and every
+extra fire costs a full-context model turn, so below the most aggressive
+prominence ("maximal") a turn is a candidate only if it contains a LANDING: a
+shell command that commits, pushes, merges, tags or opens/merges a pull request
+or release (`_LANDING_COMMANDS`; Claude `Bash` and Codex shell/exec calls) and
+did not fail. A command counts unless its output reports an explicit non-zero
+exit code (Claude: `is_error`); a Codex cell that returned while the command was
+still running carries no exit code and counts. Q&A, reading and CI-watching turns stay silent however long the reply.
+Measured over 14 days a length gate fired on ~76% of prompts and only 20% of
+those turns wrote anything. At "maximal" the older gate stays: the reply is
+substantial (>= a char threshold). Either way the KB must not already have been
+written this turn, and a per-session cooldown bounds how often it can fire, while
+the agent — which judges "is this really a stepping-stone?" well in any language —
+makes the actual call (the reminder tells it to do nothing if it isn't one).
+Conversation-level decisions with no landing are covered by the episode ask below.
 
 Cheap and safe: the script itself is free (stdlib only), but reminder context also
 consumes tokens. Self-disarms via `stop_hook_active` (no loops); the
@@ -22,17 +31,23 @@ cooldown caps frequency; every trigger is logged under the active client home fo
 tuning.
 
 Tunables (env): EXOMEM_CAPTURE_NUDGE_DISABLE=1 (off), EXOMEM_CAPTURE_NUDGE_MIN_CHARS
-(default 300 — lower it for a dense script like Japanese, which packs more meaning
-per char), EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC (default 300). The legacy KB_CAPTURE_NUDGE_*
+(default 300 — the "maximal" length gate and the episode ask's "substantive turn"; lower
+it for a dense script like Japanese, which packs more meaning per char),
+EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC (default 300). The legacy KB_CAPTURE_NUDGE_*
 names are still accepted for back-compat (aliased to the EXOMEM_* names at startup).
 
 Episode ask. Every K substantive turns (K and a cooldown by prominence,
 `_EPISODE_ASK_PRESETS`; EXOMEM_EPISODE_ASK_TURNS / EXOMEM_EPISODE_ASK_COOLDOWN_SEC
-override) the hook asks for one `episode_memory` record under a key derived from
+override), and only once work has LANDED since the last ask or record
+(`landed_since_ask`, set by the same `_successful_landing` the capture reminder
+uses), the hook asks for one `episode_memory` record under a key derived from
 the client and session id alone (`episode_key`), so the key survives compaction
-without the hook reading a transcript record. Only a SUCCESSFUL record resets the
-count: an unrelated write, a `Saved ->` marker or a failed record leaves the
-episode pending. When the ask is due it takes that Stop; on every other Stop the
+without the hook reading a transcript record. A session that never lands work is
+never asked, and an ask answered without a record is not repeated until the next
+landing: an autonomous run with no record would otherwise be blocked at every
+cooldown for as long as it ran. Only a SUCCESSFUL record resets the turn count:
+an unrelated write, a `Saved ->` marker or a failed record leaves the episode
+pending. When the ask is due it takes that Stop; on every other Stop the
 per-turn capture reminder behaves exactly as before. The hook never records
 anything itself — hooks trigger, agents author.
 
@@ -87,6 +102,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import sys
 import threading
 import time
@@ -115,52 +131,22 @@ _KB_WRITE = re.compile(
     re.I,
 )
 
-REMINDER = (
-    "[Exomem capture check] Reuse evidence; skip transient code/test/CI. "
-    "Capture durable outcomes per live policy. "
-    "Decompose before routing; open notes have no priority. Keep hypotheses attributed/uncertain. "
-    "Check coverage once/episode. Stable preference/recurring routine/historical baseline/"
-    "durable affiliation needs stability or recurrence plus reusable comparison/interpretation/decision value; "
-    "fleeting/one-off/incidental/trivial/tentative: quiet. At balanced/maximal, "
-    "after primary work, before the final response, "
-    'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once per session; '
-    "no local scan; no model. Active agent uses active entity registry/selected knowledge packs: "
-    'connect_memory(operation="resolve-entity"); stop on ambiguity; single incidental mention stays '
-    "in context. Uniquely resolved Entity: narrow additive entity facet, else concise compiled "
-    "observation/proactive_capture; "
-    "affiliation relation/link_acceptance; compatible Records only. Hydrate: edit_memory first; else "
-    'connect_memory(operation="create-entity") only for identity stable, and central or recurring: '
-    "proactive_capture. Merge/substantial curation: confirmed "
-    "restructure_execution. Recheck on confirmed batch terminal receipt; closure-only eighth recheck. "
-    "Distil; no transcripts. replace_memory supersedes contradicted "
-    "conclusions, not corrections beside them. Stated intent -> "
-    "Planning/plan_memory; observed outcome -> Records/record_memory. Generated draft stays "
-    "ephemeral; selected is not write consent: proactive_capture keeps exact Source/Evidence bytes "
-    "by role, not MIME. No handle: non-committing handoff; delivery needs Evidence receipt/Record; "
-    "no remote byte inference. No schema: "
-    "structural_suggestions/restructure_execution; relations: link_acceptance. Else/no "
-    "Knowledge Base: stop."
-)
-
-
-#: The short capture check, sent on every fire after a session's first (which carries
-#: the full `REMINDER`, once, and again after a compaction). The full doctrine is in
-#: the served core and in `REMINDER`; a fire that repeats it dozens of times in one
-#: session only spends context. Keeps the incident rules by name.
+#: The capture check, one short line on every fire. It names the rules that prevent known
+#: incidents and points at where the full capture rules live: the shipped engagement
+#: reference, which `read_memory` opens from the vault (`exomem init` deploys it there).
+#: The hook is structural; it does not carry the doctrine.
 REMINDER_SHORT = (
-    "[Exomem capture check] Capture a durable decision, outcome or stable fact per live "
-    "policy: distil, no transcripts; replace_memory supersedes a contradicted conclusion; "
-    "stated intent -> Planning/plan_memory, observed outcome -> Records/record_memory; "
-    "transient code/test/CI stays out. Nothing durable: stop."
+    "[Exomem capture check] Per live policy: no transcripts; replace_memory supersedes a "
+    "contradicted conclusion; intent->Planning/plan_memory, outcome->Records/record_memory; "
+    "no transient code/test/CI; nothing durable: stop. "
+    "Rules: read_memory .exomem/schema/references/engagement.md"
 )
 
-#: The episode ask. Its own constant, so `REMINDER`'s bytes (and every pin on
-#: them) stay exactly as they were. `{key}` is the session's episode key.
+#: The episode ask. `{key}` is the session's episode key.
 EPISODE_ASK = (
-    "[Exomem episode check] If the conversation reached a decision or a stopping point, "
-    'call episode_memory once: action="record", episode="{key}", a one-line subject and '
-    "summary, short worked_on, decided and open items; said only for a user statement worth "
-    "keeping verbatim. Distil; no transcript. Otherwise do nothing."
+    "[Exomem episode check] Decision or stopping point reached? episode_memory once: "
+    'action="record", episode="{key}", subject, summary, short worked_on/decided/open items. '
+    "Otherwise do nothing."
 )
 #: The candidate-coverage ask (task 4.1), with its own prefix. `{key}` is the
 #: episode whose candidates the session prepared, `{next}` its ledger's next step.
@@ -378,6 +364,7 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
     tools: list[dict] = []
     failed_tool_ids: set[str] = set()
     completed_codex_tool_ids: set[str] = set()
+    shell_failed_ids: set[str] = set()
     for line in reversed([ln for ln in raw.splitlines() if ln.strip()]):
         try:
             obj = json.loads(line)
@@ -396,8 +383,21 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
         )
         role = msg.get("role") if isinstance(msg, dict) else None
         typ = record.get("type") if isinstance(record, dict) else None
-        if typ == "function_call_output":
+        if typ == "custom_tool_call":
+            # Current Codex runs shell commands as `exec` cells of JavaScript.
+            tools.append(
+                {
+                    "id": str(record.get("call_id") or ""),
+                    "name": str(record.get("name") or ""),
+                    "operation": "",
+                    "input": {"source": record.get("input")},
+                    "requires_confirmed_output": True,
+                }
+            )
+        elif typ in {"function_call_output", "custom_tool_call_output"}:
             call_id = str(record.get("call_id") or "")
+            if call_id and _exit_code_failed(record.get("output")):
+                shell_failed_ids.add(call_id)
             if call_id and _codex_call_output_succeeded(record.get("output")):
                 completed_codex_tool_ids.add(call_id)
             elif call_id:
@@ -454,6 +454,11 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
                 break  # reached the human prompt that began this turn
     for tool in tools:
         tool_id = tool["id"]
+        if tool.get("requires_confirmed_output") and _tool_commands(tool):
+            # Shell output carries exit codes, not the connector `Output:` JSON,
+            # and no code means the command was still running: not a failure.
+            tool["failed"] = tool_id in shell_failed_ids
+            continue
         tool["failed"] = bool(
             tool_id
             and (
@@ -484,6 +489,193 @@ def _successful_kb_write(tool: dict) -> bool:
     if "edit_memory" in name.lower() and tool_input.get("validate_only") is True:
         return False
     return True
+
+
+#: Command words whose success lands durable work. Matched structurally on the
+#: parsed command (see `_landing_command`), never as a substring of prose.
+_LANDING_COMMANDS = (
+    ("git", "commit"),
+    ("git", "push"),
+    ("git", "merge"),
+    ("git", "tag"),
+    ("yadm", "commit"),
+    ("yadm", "push"),
+    ("gh", "pr", "create"),
+    ("gh", "pr", "merge"),
+    ("gh", "release", "create"),
+)
+_SHELL_TOOLS = frozenset(
+    {"bash", "exec", "exec_command", "shell", "shell_command", "local_shell"}
+)
+_SHELL_WRAPPERS = frozenset({"sudo", "command", "time", "nohup", "exec"})
+#: Shell keywords that may precede a command in a segment (`if git push; then`).
+_SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!"})
+#: Options of `env` / `timeout` that take a value.
+_ENV_VALUE_OPTIONS = frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"})
+_TIMEOUT_VALUE_OPTIONS = frozenset({"-k", "--kill-after", "-s", "--signal"})
+#: Arguments that make an otherwise-landing command a non-landing: a dry run, an
+#: abandoned merge, a deleted remote ref. `git commit -n` is `--no-verify`, which
+#: still commits, so only `--dry-run` rules a commit out.
+_NON_LANDING_ARGS = {
+    ("git", "commit"): frozenset({"--dry-run"}),
+    ("git", "push"): frozenset({"--dry-run", "-n", "--delete", "-d"}),
+    ("git", "merge"): frozenset({"--abort", "--quit"}),
+}
+#: `git tag` lands only when it creates a tag; these list, verify or delete.
+_TAG_READ_LONG = frozenset(
+    {"list", "contains", "delete", "verify", "points-at", "merged", "no-merged"}
+)
+_TAG_READ_SHORT = frozenset("lndv")
+_TAG_CREATE_LONG = frozenset({"annotate", "sign", "message", "force", "local-user"})
+_TAG_CREATE_SHORT = frozenset("asmfu")
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
+#: Global options that take a value, which must not be read as the subcommand.
+_VALUE_OPTIONS = {
+    "git": frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}),
+    "yadm": frozenset({"-Y", "--yadm-dir", "--yadm-data", "-C", "-c"}),
+    "gh": frozenset({"-R", "--repo", "--hostname"}),
+}
+_SEPARATORS = frozenset({"&&", "||", ";", "&", "|", "(", ")", "\n", ";;", "|&"})
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_EXIT_CODE = re.compile(
+    r"(?:exit_code\W+|exited with code\s+|exit code:?\s+)(-?\d+)", re.I
+)
+#: `cmd: "..."` literals in the source a Codex `exec` cell runs.
+_EXEC_CMD_LITERAL = re.compile(
+    r"""\bcmd\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`)"""
+)
+
+
+def _command_tokens(command: str) -> list[str] | None:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:  # unbalanced quotes: not a command we can read
+        return None
+
+
+def _landing_command(command: str, depth: int = 0) -> bool:
+    """Whether a shell command line runs one of `_LANDING_COMMANDS`.
+
+    The command words are matched at the start of each `&&`/`;`/`|`/newline
+    segment, after env assignments and a few wrappers, so `git commit -m "git
+    push later"` and `echo git push` do not count while `CI=1 git -C repo push`
+    and `bash -lc "make && git push"` do.
+    """
+    tokens = _command_tokens(command) if depth < 3 else None
+    if not tokens:
+        return False
+    segment: list[str] = []
+    for token in [*tokens, ";"]:
+        if token not in _SEPARATORS:
+            segment.append(token)
+            continue
+        words, segment = segment, []
+        words = _strip_prefixes(words)
+        if not words:
+            continue
+        program = Path(words[0]).name
+        if program in _SHELLS:
+            script = next(
+                (words[i + 1] for i, w in enumerate(words[:-1]) if re.fullmatch(r"-[a-z]*c[a-z]*", w)),
+                None,
+            )
+            if script and _landing_command(script, depth + 1):
+                return True
+            continue
+        if program not in _VALUE_OPTIONS:
+            continue
+        rest = words[1:]
+        while rest and rest[0].startswith("-"):
+            skip = 2 if rest[0] in _VALUE_OPTIONS[program] else 1
+            rest = rest[skip:]
+        for spec in _LANDING_COMMANDS:
+            if spec[0] == program and rest[: len(spec) - 1] == list(spec[1:]):
+                if _lands(spec, rest[len(spec) - 1 :]):
+                    return True
+    return False
+
+
+def _strip_prefixes(words: list[str]) -> list[str]:
+    """Drop env assignments, wrappers (`env -u X`, `timeout 5m`) and shell keywords."""
+    while words:
+        word = words[0]
+        if _ENV_ASSIGNMENT.match(word) or word in _SHELL_WRAPPERS or word in _SHELL_KEYWORDS:
+            words = words[1:]
+        elif word == "env":
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[2 if words[0] in _ENV_VALUE_OPTIONS else 1 :]
+        elif word == "timeout":
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[2 if words[0] in _TIMEOUT_VALUE_OPTIONS else 1 :]
+            if words and words[0][:1].isdigit():
+                words = words[1:]
+        else:
+            break
+    return words
+
+
+def _lands(spec: tuple[str, ...], args: list[str]) -> bool:
+    """Whether the arguments after a landing command's words keep it a landing."""
+    if spec == ("git", "tag"):
+        created = False
+        for arg in args:
+            if arg.startswith("--"):
+                name = arg[2:].split("=", 1)[0]
+                if name in _TAG_READ_LONG:
+                    return False
+                created = created or name in _TAG_CREATE_LONG
+            elif arg.startswith("-") and len(arg) > 1:
+                if _TAG_READ_SHORT & set(arg[1:]):
+                    return False
+                created = created or bool(_TAG_CREATE_SHORT & set(arg[1:]))
+            else:
+                created = True  # a positional tag name
+        return created
+    return not (_NON_LANDING_ARGS.get(spec, frozenset()) & set(args))
+
+
+def _tool_commands(tool: dict) -> list[str]:
+    """The shell command lines a Claude `Bash` or Codex shell/exec call ran."""
+    if str(tool.get("name") or "").lower() not in _SHELL_TOOLS:
+        return []
+    tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
+    if tool.get("name") == "exec" and isinstance(tool_input.get("source"), str):
+        found = []
+        for literal in _EXEC_CMD_LITERAL.findall(tool_input["source"]):
+            try:
+                found.append(json.loads(literal) if literal[0] == '"' else literal[1:-1])
+            except ValueError:
+                continue
+        return found
+    command = tool_input.get("command") or tool_input.get("cmd")
+    if isinstance(command, list):
+        command = shlex.join(str(part) for part in command)
+    return [command] if isinstance(command, str) else []
+
+
+def _exit_code_failed(output: object) -> bool:
+    """Whether a shell call's output reports an explicit non-zero exit code.
+
+    No code at all is not a failure: a Codex cell can return while the command
+    is still running, and a slow commit or push is still a landing.
+    """
+    if isinstance(output, list):
+        output = "\n".join(str(b.get("text", "")) for b in output if isinstance(b, dict))
+    if not isinstance(output, str):
+        return False
+    return any(int(code) != 0 for code in _EXIT_CODE.findall(output))
+
+
+def _successful_landing(tool: dict) -> bool:
+    """Whether one observed tool call completed a landing command."""
+    if tool.get("failed"):
+        return False
+    return any(_landing_command(command) for command in _tool_commands(tool))
 
 
 #: Written by `install-hook`, cleared once an exomem MCP tool is observed. The
@@ -552,6 +744,8 @@ _EPISODE_STATE_DEFAULT = {
     "substantive_since_record": 0,
     "last_ask_ts": 0.0,
     "last_seen_revisions": 0,
+    # A landing since the last episode ask or record. The ask needs one.
+    "landed_since_ask": False,
     # The candidate ledger, mirrored from the door (task 4.1): which episode
     # this session prepared candidates for, its next step (`unknown` until
     # read, and again once the session moves its workflow), what it attempted,
@@ -582,6 +776,7 @@ def _read_episode_state(path: Path) -> dict:
             "substantive_since_record": max(0, int(data.get("substantive_since_record") or 0)),
             "last_ask_ts": float(data.get("last_ask_ts") or 0.0),
             "last_seen_revisions": max(-1, int(data.get("last_seen_revisions") or 0)),
+            "landed_since_ask": data.get("landed_since_ask") is True,
             "workflow_episode": (
                 workflow
                 if isinstance(workflow, str) and _EPISODE_KEY_RE.fullmatch(workflow)
@@ -801,7 +996,8 @@ def _episode_ask(
 
     Coverage is hook-local: covered through the last successful record,
     pending while substantive turns accrue after it. Asking never resets the
-    count — only a record does — so an ignored ask repeats after its cooldown.
+    count — only a record does — but it does spend the landing the ask needs
+    (`landed_since_ask`), so an ignored ask is not repeated until work lands again.
 
     Before an ask that is otherwise due actually fires, one bounded REST
     `inspect` call (`_episode_revision_count`) checks whether some other door
@@ -818,15 +1014,20 @@ def _episode_ask(
     recorded = any(_successful_episode_record(tool) for tool in tools)
     if recorded:
         state["substantive_since_record"] = 0
+        state["landed_since_ask"] = False
         state["last_seen_revisions"] = _REVISIONS_UNKNOWN
-    elif substantive:
-        state["substantive_since_record"] += 1
+    else:
+        if substantive:
+            state["substantive_since_record"] += 1
+        if any(_successful_landing(tool) for tool in tools):
+            state["landed_since_ask"] = True
     _note_workflow(state, tools, recorded)
     now = time.time()
     client = _EPISODE_CLIENT_LABELS.get(_hook_client(), _hook_client())
     key = episode_key(client, session_id)
     about_due = (
         turns > 0
+        and state["landed_since_ask"]
         and state["substantive_since_record"] >= turns
         and now - state["last_ask_ts"] >= cooldown
     )
@@ -841,11 +1042,13 @@ def _episode_ask(
             baseline = state["last_seen_revisions"]
             if baseline != _REVISIONS_UNKNOWN and revisions > baseline:
                 state["substantive_since_record"] = 0
+                state["landed_since_ask"] = False
                 about_due = False
             state["last_seen_revisions"] = revisions
     due = about_due
     if due:
         state["last_ask_ts"] = now
+        state["landed_since_ask"] = False
     coverage_ask = None if due else _coverage_ask(state, now, cooldown)
     _write_episode_state(path, state)
     if due:
@@ -898,6 +1101,8 @@ def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
     The ask blocks a Stop, and the agent answers it in the continuation that
     follows, which Stops again with `stop_hook_active`. That record is the
     coverage the ask asked for; dropping it would repeat the ask every cooldown.
+    A landing is not counted here: the continuation re-reads the whole turn, so
+    it would see the landing the ask already spent.
     """
     recorded = any(_successful_episode_record(tool) for tool in tools)
     if not session_id or not (recorded or _workflow_episode(tools)):
@@ -906,6 +1111,7 @@ def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
     state = _read_episode_state(path)
     if recorded:
         state["substantive_since_record"] = 0
+        state["landed_since_ask"] = False
         state["last_seen_revisions"] = _REVISIONS_UNKNOWN
     _note_workflow(state, tools, recorded)
     _write_episode_state(path, state)
@@ -985,12 +1191,7 @@ def _log(text: str) -> None:
 
 def _capture_reason(reason: str) -> str:
     if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
-        return (
-            "Through the admitted Exomem native MCP, bootstrap if the live operating "
-            "contract is absent and check live capture capabilities first. "
-            "If not connected or capture is unavailable, skip this reminder; "
-            "do not assume writes are available.\n\n" + reason
-        )
+        return "Skip if Exomem is not connected or cannot capture; bootstrap first if no contract.\n" + reason
     return reason
 
 
@@ -1073,19 +1274,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     if attempted:  # capture was attempted this turn; coverage is the checks above
         return 0
-    if len(assistant_text.strip()) < min_chars:  # trivial turn, not a landing
-        return 0
+    if level == "maximal":  # the most aggressive level keeps the length gate
+        if len(assistant_text.strip()) < min_chars:
+            return 0
+    elif not any(_successful_landing(tool) for tool in tools):
+        return 0  # nothing landed: Q&A, reading and watching turns stay silent
 
     ok, stamp = _cooldown_ok(session_id, cooldown)
     if not ok:  # fired recently this session — keep cost bounded
         return 0
 
-    # The full doctrine once per session (the stamp is cleared on compaction, which
-    # rewrites the context it lived in); every later fire is the short check.
-    first_fire = not stamp.exists()
     _touch(stamp)
     _log(assistant_text)
-    print(json.dumps({"decision": "block", "reason": _capture_reason(REMINDER if first_fire else REMINDER_SHORT)}))
+    print(json.dumps({"decision": "block", "reason": _capture_reason(REMINDER_SHORT)}))
     return 0
 
 

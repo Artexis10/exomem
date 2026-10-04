@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: d9f4c374c5d02bc422ba6839387a910c327370ec3a7afa30b81958e363a1146f
+  skill_contract: a5d29d4ef4e6ac49b6134523794169196964505954c25e464e53ee49c487b01f
   version: "0.1.0"
 ---
 
@@ -19,6 +19,10 @@ Use when the user asks to ingest, add, import, process, or preserve an external 
 Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Do not invoke tools absent from `available_product_tools`; use the live capability list even when a bundled workflow mentions a withheld operation.
+
+Use `configure_memory` set/clear only for an explicit user request to change saved engagement.
+Recall, capture, installation and missing hooks use the existing preference;
+none authorizes changing it. Inspect first when the user requests a change.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
 is read-only. Before a compiled write: reuse current relevant search/read results,

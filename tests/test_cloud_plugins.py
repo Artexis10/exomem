@@ -15,6 +15,18 @@ from exomem.public_artifact_privacy import assert_public_artifacts_clean
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_directory_starters_ship_from_the_shared_product_definition(tmp_path: Path) -> None:
+    # Catch a generator dropping the public starters while its source looks complete.
+    cloud_plugins.build_packages(ROOT, tmp_path)
+    definition = json.loads((ROOT / "plugins/cloud/definition.json").read_text())
+    manifest = json.loads((tmp_path / "openai/plugin.json").read_text())
+    assert manifest["extensions"]["com.openai"]["interface"]["defaultPrompt"] == definition["default_prompts"]
+    for provider in ("claude", "openai"):
+        readme = (tmp_path / provider / "README.md").read_text()
+        for prompt in definition["default_prompts"]:
+            assert prompt in readme
+
+
 def test_claude_directory_manifest_declares_privacy_policy(tmp_path: Path) -> None:
     cloud_plugins.build_packages(ROOT, tmp_path)
     definition = json.loads((ROOT / "plugins/cloud/definition.json").read_text())
