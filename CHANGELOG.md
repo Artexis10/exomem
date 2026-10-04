@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.105.0](https://github.com/Artexis10/exomem/compare/v0.104.0...v0.105.0) (2026-10-04)
+
+
+### Features
+
+* **mcp:** reduce tool metadata and clarify guarded workflows ([bf293c5](https://github.com/Artexis10/exomem/commit/bf293c55320b1e40549696efe857f5dd59ca7353))
+
+
+### Bug Fixes
+
+* **cloud:** prioritize inline advisory disk scans ([#1558](https://github.com/Artexis10/exomem/issues/1558)) ([706191e](https://github.com/Artexis10/exomem/commit/706191e801185082b4f1d510a83461ff34afe4db))
+* **cloud:** reduce advisory token checks and exclude unavailable capacity ([#1557](https://github.com/Artexis10/exomem/issues/1557)) ([14bf0a8](https://github.com/Artexis10/exomem/commit/14bf0a87b75fa5207c12ee6e9e284b951c571d88))
+* **compiler:** keep implicit carry relevant to the requested subject ([#1553](https://github.com/Artexis10/exomem/issues/1553)) ([315dca1](https://github.com/Artexis10/exomem/commit/315dca1daf8ca8aec920c6c556952acc23b61358))
+
 ## [0.104.0](https://github.com/Artexis10/exomem/compare/v0.103.0...v0.104.0) (2026-10-04)
 
 
