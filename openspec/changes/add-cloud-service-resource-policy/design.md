@@ -66,6 +66,8 @@ Retain CPU batch size eight as the maximum service-v1 batch, with the existing t
 
 Fair admission is necessary but not itself proof of latency: native CPU thread budgets still constrain competition between the ONNX query and bulk lanes. The under-load outcome gate decides whether the batch/thread budget is adequate. Baseline measurement comes before changing an already-working gate; skip any proposed gate change whose required behavior is already demonstrated by a deterministic boundary test and measured acceptance.
 
+The bounded read-only disk scan used by an inline write advisory receives the same existing foreground priority as a query scan. Use the existing exact-vault/current-thread request registration to distinguish it from a receipt-owned background advisory; another thread's active writer cannot promote background work. Scope priority only around scoring, never around inference, component execution or waiting for bulk work. Existing bounded bulk progress and mutation-boundary yield rules remain unchanged. An exact-index reproduction showed a roughly half-second scan taking over ten seconds beside cooperative Python bulk work without this distinction; that reproduction identifies a scheduling omission, not a complete live save-latency or capacity proof.
+
 ### 5. Report actual state without warming it
 
 Extend the existing resource/status surface with deployment profile/source, core loaded/readiness state, semantic pending count and oldest outstanding receipt creation time, and bulk activity/budget. Compute ages from immutable debt creation time, not retry timestamps. Unsupported/expensive metrics stay unknown. No model load, corpus matrix read, new sidecar or CUDA context is created by status.

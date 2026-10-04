@@ -26,6 +26,7 @@ import numpy as np
 from . import (
     call_spans,
     cloud_cell,
+    foreground_activity,
     foreground_priority,
     index_paths,
     recall_space,
@@ -1383,7 +1384,7 @@ class EmbeddingIndex:
         if cloud_cell.resource_policy() == "service-v1":
             # SQLite row fetches release the GIL; cooperative bulk graph work
             # must yield during this read-only scan, which never waits on it.
-            # Leave background advisory search_many outside foreground scope.
+            # Batched advisory scoring marks only its actual foreground caller.
             with foreground_priority.foreground():
                 return self._disk_score(
                     [query_vec], k, admits=lambda path: allowed_paths is None or path in allowed_paths,
@@ -1467,10 +1468,18 @@ class EmbeddingIndex:
         `search`'s guarded selection leaves it.
         """
         if cloud_cell.resource_policy() == "service-v1":
-            return [
-                [(path, chunk, score) for path, chunk, _text, score in hits]
-                for hits in self._disk_score(query_vecs, k, admits=admits, encoded_for=encoded_for)
-            ]
+            # An advisory may be inline in a save or receipt-owned background
+            # work. Prioritize only this vault's foreground caller, and only
+            # the read-only scan: never a model wait or a component drain.
+            with (
+                foreground_priority.foreground()
+                if foreground_activity.foreground_active_on_this_thread(self.vault_root)
+                else contextlib.nullcontext()
+            ):
+                return [
+                    [(path, chunk, score) for path, chunk, _text, score in hits]
+                    for hits in self._disk_score(query_vecs, k, admits=admits, encoded_for=encoded_for)
+                ]
         metadata, matrix = self.all_vectors()
         queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, matrix.shape[1])
         if not len(queries):
