@@ -146,6 +146,65 @@ def test_material_rank_survives_packet_recency_order(material_vault: Path):
     assert material[0]["provenance"]["path"].endswith("strong-old.md")
 
 
+def test_long_turn_keeps_useful_material_for_separate_topics(material_vault: Path):
+    # Earlier rare incidental words used to consume the query before either need.
+    incidental = (
+        "calendar inspection invoice notebook equipment procedure monthly routine "
+        "maintenance report reach earlier perform important excellent functional "
+        "rain sunshine seeds roots soil garden water seasonal ledger purchase "
+        "journal bench archive deadline schedule checklist"
+    )
+    _note(material_vault, "incidental", f"- [observation] {incidental}. ^incidental")
+    gauge = _note(material_vault, "gauge-choice",
+        "- [observation] Turbine calibration uses the violet worksheet. ^gauge-choice")
+    harvest = _note(material_vault, "harvest-choice",
+        "- [observation] Orchard harvest uses shaded crates against heat damage. ^harvest-choice",
+        project="orchard-survey")
+    lexstore.ensure_fresh(material_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(material_vault).rebuild()
+    topics = (
+        "In harbor-study, what guides turbine calibration and the violet worksheet?",
+        "In orchard-survey, what guides harvest crates against heat damage?",
+    )
+    for order in (topics, topics[::-1]):
+        working_set_runtime.reset_caches_for_tests()
+        packet = working_set.compile_packet(material_vault,
+            turn=f"I have been thinking about {incidental}. {' '.join(order)}")
+        paths = {unit["provenance"]["path"] for unit in packet["units"]
+            if unit["role"] == "material"}
+        assert {gauge, harvest} <= paths
+        assert len(paths) <= 3
+
+
+def test_wider_material_query_still_filters_common_background(material_vault: Path):
+    # Expanding the allowance must not turn off existing common-word filtering.
+    common = (
+        "calendar inspection invoice notebook equipment procedure monthly routine "
+        "maintenance report rain sunshine seeds roots soil garden water seasonal "
+        "ledger purchase journal bench archive deadline schedule checklist"
+    )
+    for number in range(20):
+        _note(material_vault, f"incidental-{number}",
+            f"- [observation] {common}. ^incidental-{number}")
+    for number in range(100):
+        _note(material_vault, f"other-{number}",
+            f"- [observation] Distinct fauna species specimen sample {number}. ^other-{number}")
+    target = _note(material_vault, "violet-decision",
+        "- [observation] Turbine calibration uses violet worksheets. ^violet-decision")
+    lexstore.ensure_fresh(material_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(material_vault).rebuild()
+    packet = working_set.compile_packet(material_vault, turn=(
+        f"I finished thinking about {common}. "
+        "In harbor-study, what guides turbine calibration violet worksheets?"
+    ))
+    paths = {unit["provenance"]["path"] for unit in packet["units"]
+        if unit["role"] == "material"}
+    assert target in paths
+    assert not any("incidental-" in path for path in paths)
+
+
 def test_role_ceiling_reports_material_omission(material_vault: Path):
     # Six higher-priority lanes cannot silently look like material was searched.
     packet = working_set.compile_packet(material_vault, turn="harbor-study who is currently turbine calibration")

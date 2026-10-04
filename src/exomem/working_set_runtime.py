@@ -932,6 +932,18 @@ def lexical_term_budget():
     )
 
 
+def material_term_budget():
+    """Bound relevant-claim lookup independently of anchor resolution.
+
+    A long turn may discuss several admitted contexts. The resolver's small
+    query is not enough to retain their useful claims; the same tokenizer and
+    ranker can consume a larger finite query without widening admission or the
+    packet. Extra stems leave room for unspaced runs beside spaced topics.
+    """
+    budget = lexical_term_budget()
+    return replace(budget, max_units=96, max_stems=128, common_after_units=budget.max_units)
+
+
 def lexical_evidence(
     vault_root: Path,
     turn: str,
