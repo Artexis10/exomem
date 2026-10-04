@@ -11,7 +11,8 @@ import json
 import sqlite3
 import time
 from collections import Counter, OrderedDict
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -211,6 +212,15 @@ def _seal_inspection_projection(value, evidence):
 
 def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
              view_path=None) -> tuple[CanonicalSubject, ...]:
+    return tuple(iter_subjects(conn, cid, logical_vault_id, identity=identity, view_path=view_path))
+
+
+def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
+                  view_path=None, include_held=True, batch_size=128,
+                  query_order=False) -> Iterator[CanonicalSubject]:
+    """Stream canonical metadata, yielding the manifest before opening row cursors."""
+    if type(batch_size) is not int or not 1 <= batch_size <= 128:
+        raise ValueError("canonical subject batches must contain 1 to 128 rows")
     if identity is not None and view_path is not None:
         raise ValueError("canonical subject lookup must have one selector")
     row = conn.execute(
@@ -241,7 +251,8 @@ def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, ident
                                     name, type_version, declaration_hash, domain)
         return CanonicalSubject(cid, row_id, basis)
 
-    result = [make(path, None, path, "collection", metadata, version, content_hash, "manifest")] if identity in (None, path) else []
+    if identity in (None, path):
+        yield make(path, None, path, "collection", metadata, version, content_hash, "manifest")
     item_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://{declared.item_type}/{cid}/") else None
     held_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://collection-held/{cid}/") else None
     item_filter, held_filter, item_args, held_args = "", "", (), ()
@@ -251,26 +262,34 @@ def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, ident
     elif view_path is not None:
         item_filter = held_filter = " AND view_path=?"
         item_args = held_args = (view_path,)
-    for row_id, key, row_version, payload, view_path, raw_metadata in conn.execute(
+    # Admission needs no result ordering; item keys follow the existing index
+    # without a sorter whose spill files escape the private TEMP-table quota.
+    item_order = "item_key" if query_order else "row_id"
+    with closing(conn.execute(
         "SELECT row_id,item_key,row_version,payload_hash,view_path,governance_json "
-        "FROM items WHERE collection_id=?" + item_filter + " ORDER BY row_id",
+        "FROM items WHERE collection_id=?" + item_filter + " ORDER BY " + item_order,
         (cid, *item_args),
-    ):
-        # Projects are inherited from the exact current manifest contract.
-        meta = _metadata(raw_metadata)
-        if meta["projects"] != manifest_meta["projects"]:
-            raise ValueError("canonical row project differs from its manifest")
-        policy_path = source_path if layout == "markdown-log" else view_path
-        result.append(make(f"exomem://{declared.item_type}/{cid}/{key}", row_id, policy_path,
-                           declared.item_type, raw_metadata, row_version, payload, "row"))
-    for held_id, path, raw_metadata, payload in conn.execute(
+    )) as cursor:
+        while batch := cursor.fetchmany(batch_size):
+            for row_id, key, row_version, payload, view_path, raw_metadata in batch:
+                # Projects are inherited from the exact current manifest contract.
+                meta = _metadata(raw_metadata)
+                if meta["projects"] != manifest_meta["projects"]:
+                    raise ValueError("canonical row project differs from its manifest")
+                policy_path = source_path if layout == "markdown-log" else view_path
+                yield make(f"exomem://{declared.item_type}/{cid}/{key}", row_id, policy_path,
+                           declared.item_type, raw_metadata, row_version, payload, "row")
+    if not include_held:
+        return
+    with closing(conn.execute(
         "SELECT held_id,view_path,governance_json,governance_hash FROM held_candidates "
         "WHERE collection_id=?" + held_filter + " ORDER BY held_id",
         (cid, *held_args),
-    ):
-        result.append(make(f"exomem://collection-held/{cid}/{held_id}", held_id, path,
-                           "held-record", raw_metadata, 1, payload, "held"))
-    return tuple(result)
+    )) as cursor:
+        while batch := cursor.fetchmany(batch_size):
+            for held_id, path, raw_metadata, payload in batch:
+                yield make(f"exomem://collection-held/{cid}/{held_id}", held_id, path,
+                           "held-record", raw_metadata, 1, payload, "held")
 
 
 def _bound(subject: CanonicalSubject, logical_vault_id: str) -> CanonicalSubject:
@@ -549,10 +568,13 @@ class OperationAuthorization:
         return tuple(current.values())
 
     def _resolve(self, identity):
-        if identity not in self.points:
+        if identity in self.points:
+            subject = self.points[identity]
+        else:
             subject = self.cache.point(identity)
-            self.points[identity] = _bound(subject, self.logical_vault_id) if subject else None
-        subject = self.points[identity]
+            subject = _bound(subject, self.logical_vault_id) if subject else None
+            if getattr(self.cache, "retain_points", True):
+                self.points[identity] = subject
         return self.membership(subject) if subject else None
 
     def _load_grants(self):
