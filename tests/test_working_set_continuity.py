@@ -297,12 +297,13 @@ def test_a_forged_token_reaches_the_rest_door_as_a_served_packet(
     works. The delta says an undecodable token is ignored and reported."""
     from starlette.testclient import TestClient
 
-    from exomem import server
+    from exomem import graph_sync, server
 
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     for leaky in ("EXOMEM_UPLOAD_TOKEN", "EXOMEM_CF_ACCESS_TEAM_DOMAIN", "EXOMEM_CF_ACCESS_AUD"):
         monkeypatch.delenv(leaky, raising=False)
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
+    assert graph_sync.drain_active_rebuilds(timeout=5)
     client = TestClient(server.build_server(require_auth=False).http_app())
 
     response = client.post(
@@ -1068,12 +1069,14 @@ def test_the_refusal_reaches_a_door_as_a_structured_client_error(
     anchor", and an agent would retry the same ref forever."""
     from starlette.testclient import TestClient
 
-    from exomem import server
+    from exomem import graph_sync, server
 
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     for leaky in ("EXOMEM_UPLOAD_TOKEN", "EXOMEM_CF_ACCESS_TEAM_DOMAIN", "EXOMEM_CF_ACCESS_AUD"):
         monkeypatch.delenv(leaky, raising=False)
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
+    # Fixture publication must finish before the server binds its lifetime.
+    assert graph_sync.drain_active_rebuilds(timeout=5)
     client = TestClient(server.build_server(require_auth=False).http_app())
 
     response = client.post(

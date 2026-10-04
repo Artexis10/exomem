@@ -30,6 +30,7 @@ from . import (
     find_policy,
     find_results,
     find_types,
+    foreground_priority,
     freshness,
     recall_policy,
     recall_space,
@@ -5814,7 +5815,7 @@ def recall_resolver_snapshot(
                     status="temporarily_unavailable",
                 )
             entries = []
-            for path in walk_vault_md(root):
+            for path in foreground_priority.yielding_in_bulk(walk_vault_md(root)):
                 if not recall_policy.is_recall_candidate(root, path):
                     continue
                 page = _CACHE.get(path, root)

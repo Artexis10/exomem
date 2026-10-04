@@ -1,0 +1,47 @@
+---
+- name: Validate the explicit node memory-policy selection
+  ansible.builtin.assert:
+    that:
+      - k3s_memory_qos_enabled is boolean
+    fail_msg: k3s_memory_qos_enabled must be a boolean node adoption choice.
+
+- name: Inspect the node cgroup filesystem for MemoryQoS
+  ansible.builtin.command: /usr/bin/stat -fc %T /sys/fs/cgroup
+  register: k3s_memory_qos_cgroup
+  changed_when: false
+  check_mode: false
+  when: k3s_memory_qos_enabled
+
+- name: Validate the supported MemoryQoS kernel and cgroup interface
+  ansible.builtin.assert:
+    that:
+      - k3s_memory_qos_cgroup.stdout == 'cgroup2fs'
+      - ansible_kernel.split('-')[0] is version('5.9', '>=')
+    fail_msg: MemoryQoS adoption requires cgroup v2 and the kernel 5.9 memory.high fix.
+  when: k3s_memory_qos_enabled
+
+- name: Create the kubelet drop-in directory for node memory policy
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/agent/etc/kubelet.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: k3s_memory_qos_enabled
+
+- name: Install the adopted node memory policy
+  ansible.builtin.copy:
+    src: 20-exomem-memoryqos.conf
+    dest: /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/20-exomem-memoryqos.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart K3s
+  when: k3s_memory_qos_enabled
+
+- name: Remove only the owned node memory policy when disabled
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/20-exomem-memoryqos.conf
+    state: absent
+  notify: Restart K3s
+  when: not k3s_memory_qos_enabled

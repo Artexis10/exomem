@@ -912,6 +912,13 @@ def op_bootstrap(
     frozen_profile = (
         active_descriptor.profile in hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS
     )
+    if frozen_profile:
+        # Released Hosted payloads predate service resource diagnostics.
+        compute_policy = {
+            key: value
+            for key, value in compute_policy.items()
+            if key not in {"resource_profile", "resource_profile_source"}
+        }
     if frozen_profile and section is not None:
         raise ValueError("bootstrap: section is not available on this surface profile")
     # Where the compact core points for the vocabulary workflow's full contract: it is

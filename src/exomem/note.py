@@ -1754,7 +1754,14 @@ def note(
         destination = token_value.destination
         note_path = root / destination
         encoded_token = draft_token or ""
-    resolver = find_module.writer_resolver_snapshot(root)
+    # Link-free preparation has no consumer for a vault-wide title snapshot.
+    # Keep the detached pending destination and normalizers, but do not read
+    # the corpus merely to resolve an empty set of links.
+    resolver = (
+        find_module.writer_resolver_snapshot(root)
+        if sources or bridge_of or find_body_wikilinks(content)
+        else WikilinkResolver.from_entries(root, ())
+    )
     rel_note_no_ext = destination.removesuffix(".md")
     resolver.add_pending(rel_note_no_ext, title=title)
     sources_norm, source_warnings = _normalize_sources(sources, vault_root=root, resolver=resolver)

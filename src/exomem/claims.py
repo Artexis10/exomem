@@ -434,7 +434,7 @@ class ClaimIndex:
             recall_space.clear_identity(conn)
         self._identity = recall_space.admit(conn, recorded, dim)
 
-    def checksums(self) -> dict[str, str]:
+    def checksums(self, *, paths: list[str] | None = None) -> dict[str, str]:
         """`{file_path: checksum}` — the incremental-skip map for a re-index.
 
         Empty while the stored vectors are in another space than the recall
@@ -444,11 +444,24 @@ class ClaimIndex:
             return {}
         conn = self._connect()
         try:
-            rows = conn.execute("SELECT file_path, checksum FROM claims").fetchall()
+            conn.execute("BEGIN")
+            identity = recall_space.read_identity(conn, tables=("claims",))
+            model = recall_space.recall_model()
+            if identity is None or not identity.accepts(model, recall_space.resident_fingerprint(model)):
+                return {}
+            query = "SELECT file_path, checksum FROM claims"
+            filters = ["length(vector) = ?"]
+            params: list[Any] = [identity.dim * 4]
+            if paths is not None:
+                if not paths:
+                    return {}
+                filters.append(f"file_path IN ({','.join('?' for _ in paths)})")
+                params.extend(paths)
+            if filters:
+                query += " WHERE " + " AND ".join(filters)
+            rows = conn.execute(query, params).fetchall()
         finally:
             conn.close()
-        if not self._space_current():
-            return {}
         return {fp: cs for fp, cs in rows}
 
     def get_row(
@@ -962,7 +975,40 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
     return True
 
 
-def upsert_claims_after_write(vault_root: Path, written_paths: list[Path]) -> None:
+def claim_checksum_for_page(page: Any) -> str | None:
+    """Expected claim row from an already-bounded parse; None means no row."""
+    if page.page_type not in _claim_types():
+        return None
+    claim = extract_claim_for_page(page)
+    return _checksum(claim) if claim else None
+
+
+def publication_current(vault_root: Path, rel_path: str, checksum: str | None) -> bool:
+    """Prove one expected claim projection without reading text or vector blobs."""
+    path = sidecar_path(vault_root)
+    if not path.exists():
+        return checksum is None
+    with reserved_paths._subsystem_authority_scope("claims"):
+        with reserved_paths._identity_coordination_scope(vault_root, descriptor_ids=("claims-store",), identity_may_change=False):
+            with reserved_paths._sqlite_owner_target_scope(vault_root, path, "claims-store", create=False) as retained:
+                conn = _sqlite_connect_owned(f"{retained.as_uri()}?mode=ro", uri=True)
+                try:
+                    conn.execute("BEGIN")
+                    row = conn.execute("SELECT checksum, length(vector) FROM claims WHERE file_path = ?", (rel_path,)).fetchone()
+                    if checksum is None:
+                        return row is None
+                    identity = recall_space.read_identity(conn, tables=("claims",))
+                    model = recall_space.recall_model()
+                    return (
+                        identity is not None and identity.dim > 0
+                        and row is not None and row[0] == checksum and row[1] == identity.dim * 4
+                        and identity.accepts(model, recall_space.resident_fingerprint(model))
+                    )
+                finally:
+                    conn.close()
+
+
+def upsert_claims_after_write(vault_root: Path, written_paths: list[Path], *, pages: dict[Path, tuple[Any, Any]] | None = None) -> None:
     """Refresh the claim sidecar for each written compiled page (incremental).
 
     Rides the SAME write seam as `embeddings.upsert_after_write` (called from it
@@ -996,7 +1042,9 @@ def upsert_claims_after_write(vault_root: Path, written_paths: list[Path]) -> No
     if not admitted:
         return
     idx = get_claim_index(vault_root)
-    existing = idx.checksums()
+    existing = idx.checksums() if pages is None else idx.checksums(
+        paths=[page.rel_path for page, _signature in pages.values()],
+    )
     claim_types = _claim_types()
     identity = recall_policy.recall_policy_identity(vault_root)
 
@@ -1005,13 +1053,13 @@ def upsert_claims_after_write(vault_root: Path, written_paths: list[Path]) -> No
     ] = []
     for md in admitted:
         try:
-            signature = freshness.stat_signature(md)
+            signature = pages[md][1] if pages is not None and md in pages else freshness.stat_signature(md)
         except OSError:
             rel = _vault_relative(vault_root, md)
             if rel is not None:
                 idx.delete(rel)
             continue
-        page = find_module._CACHE.get(md, vault_root)
+        page = (pages[md][0] if md in pages else None) if pages is not None else find_module._CACHE.get(md, vault_root)
         if page is None:
             continue
         # Only compiled conclusions in an indexable tree carry a claim.

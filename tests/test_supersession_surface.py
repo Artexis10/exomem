@@ -211,7 +211,10 @@ def _call(mcp, name: str, args: dict) -> dict:
 def test_get_include_history_surfaces_why(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from exomem import graph_sync
+
     _edit_with_why(vault, "WHY_GET_marker", "x")
+    assert graph_sync.drain_active_rebuilds(timeout=5)
     mcp = _build_server(monkeypatch)
 
     out = _call(mcp, "read_memory", {"path": EXISTING, "include_history": True})

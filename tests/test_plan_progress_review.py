@@ -1149,7 +1149,7 @@ def test_plan_progress_round_trips_over_rest(
     """Surface parity: the generated command carries the mode to REST too."""
     from starlette.testclient import TestClient
 
-    from exomem import commands, server
+    from exomem import commands, graph_sync, server
 
     initialize_vault_state_offline(tmp_path, source="plan progress REST fixture")
     _build_vault(tmp_path)
@@ -1175,6 +1175,8 @@ def test_plan_progress_round_trips_over_rest(
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
     monkeypatch.delenv("EXOMEM_CF_ACCESS_TEAM_DOMAIN", raising=False)
     monkeypatch.delenv("EXOMEM_CF_ACCESS_AUD", raising=False)
+    # Direct fixture mutations precede this service lifetime.
+    assert graph_sync.drain_active_rebuilds(timeout=5)
     client = TestClient(server.build_server(require_auth=False).http_app())
 
     response = client.post(

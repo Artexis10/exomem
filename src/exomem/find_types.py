@@ -184,11 +184,16 @@ class ParsedPage:
     def title_norm(self) -> str:
         return self.title.lower()
 
-    @cached_property
+    @property
     def stem_set(self) -> frozenset[str]:
         from . import bm25
 
-        return frozenset(bm25.tokenize(self.title + " " + self.body))
+        if not self.__dict__.get("_byte_bounded_cache") and "stem_set" in self.__dict__:
+            return self.__dict__["stem_set"]
+        words = frozenset(bm25.tokenize(self.title + " " + self.body))
+        if not self.__dict__.get("_byte_bounded_cache"):
+            self.__dict__["stem_set"] = words
+        return words
 
     @cached_property
     def letter_script(self) -> str | None:

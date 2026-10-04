@@ -51,6 +51,7 @@ _MALLOC_TRIM: Any = _UNRESOLVED
 #: A trim walks every arena, so reap ticks and back-to-back drain passes share
 #: one allowance: at most one trim per interval per process.
 TRIM_INTERVAL_SECONDS = 60.0
+SERVICE_TRIM_INTERVAL_SECONDS = 5.0
 _LAST_TRIM: float | None = None
 #: A trim was asked for inside the interval and skipped; the reaper's next tick
 #: retries it, so freed memory is still returned once the interval passes.
@@ -80,17 +81,25 @@ def trim_allocator(*, clock: Callable[[], float] | None = None) -> bool:
     """Ask glibc to return freed heap to the OS: ``malloc_trim(0)``.
 
     Freed heap otherwise stays in the allocator's arenas as resident high-water
-    after a model reap or a drain batch. Runs at most once per
-    `TRIM_INTERVAL_SECONDS`; a call inside the interval is skipped and marked
+    after a model reap or a drain batch. The validated Cloud service profile
+    shares a five-second allowance; local/legacy callers retain sixty seconds.
+    A call inside the interval is skipped and marked
     pending (see `trim_pending`) for the reaper to retry. Off glibc this is a
     no-op, and it never raises: its callers are background threads that must
     keep running. Returns whether glibc reported releasing memory.
     """
     global _MALLOC_TRIM, _LAST_TRIM, _TRIM_PENDING
     try:
+        from .cloud_cell import resource_policy
+
+        interval = (
+            SERVICE_TRIM_INTERVAL_SECONDS
+            if resource_policy() == "service-v1"
+            else TRIM_INTERVAL_SECONDS
+        )
         now = (clock or _clock)()
         with _TRIM_LOCK:
-            if _LAST_TRIM is not None and now - _LAST_TRIM < TRIM_INTERVAL_SECONDS:
+            if _LAST_TRIM is not None and now - _LAST_TRIM < interval:
                 _TRIM_PENDING = True
                 return False
             _LAST_TRIM = now

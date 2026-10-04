@@ -558,3 +558,63 @@ listed, and the control line (both hit counts at least 2) in the operator
 channel, with the date and the image digests of the cell, cellctl and the
 gateway. Remove the canary note through the connector if you do not want it
 kept.
+
+## Cloud compute policy and capacity
+
+The `cloud` image selects `EXOMEM_CLOUD_RESOURCE_POLICY=service-v1`; local and
+Hosted images retain their existing policy. This profile governs CPU residency,
+thread and recovery budgets. A vault's stored mode and engagement preference
+remain user settings and must match their pre-roll values after deployment.
+It supports the ordinary vault/schema resolvers; no operator-vault path belongs
+in the image or chart.
+
+Inspect the existing resource status before and after a roll. Its policy reports
+`resource_profile`, the actual stored `mode`, core residency/readiness, preparation
+budgets and durable semantic debt. `semantic_execution` reports whether its single
+recovery owner is running and whether a small or bulk parent is active. Unknown
+counts or ages remain unknown. A resource refusal retains canonical bytes and
+exact queued custody; unchanged refused input is not repeatedly prepared.
+
+Service overrides accept `EXOMEM_EMBED_BATCH` from 1 to 8, `EXOMEM_CPU_THREADS`
+from 1 to 2 and `EXOMEM_SYNC_WORKERS` from 4 to 8. Device overrides require CPU.
+The core recall encoder stays resident; optional models and large caches retain
+idle reclamation. Whole-model preload and unsafe native-thread overrides are
+rejected. Keep the `model_env` forbidden-prefix checks: that tenant-facing map
+must not select `EXOMEM_CLOUD_*` policy or change state placement. Offline jobs
+using the Cloud image retain `EXOMEM_CLOUD_CELL=1`, as the existing init job does.
+
+At the unchanged 2 CPU / 3 GiB cell limit, measure cgroup peak during warmup,
+saves, import competition and restart; require at most 80% of the limit and no
+OOM. For node capacity, charge each cell the greater of its memory request and
+measured warm peak, add measured platform usage, and retain at least 20% warm
+headroom before admitting more cells. Pod readiness alone does not prove capacity.
+
+Kernel-cache control is a separate node adoption. The existing K3s role defaults
+`k3s_memory_qos_enabled` to false; enable it only for a dedicated staged node
+after exact-source acceptance and sibling-capacity verification. On the pinned
+K3s 1.35.6, the owned kubelet drop-in enables MemoryQoS with a 0.625 throttling
+factor. A 1 GiB request / 3 GiB limit produces `memory.min=1 GiB` and
+`memory.high=2.25 GiB`, with the same hard limit. This protects requested memory
+as well as throttling allocations; it affects every pod on that node. It requires
+cgroup v2 and kernel 5.9 or later. Image selection does not enable the setting.
+
+Record effective leaf and pod controls, lifetime peak, host reclaim/swap, actual
+save/query/shutdown outcomes and warmed sibling capacity. A result materially
+assisted by unrelated global reclaim does not prove the required headroom;
+nonzero hierarchical PSI alone is not a failure. Use the role's canonical
+drop-in in isolated acceptance rather than copying its policy values.
+
+To undo node adoption, disable the inventory option and apply the same role to
+remove only its owned drop-in and restart the selected K3s service. Recreate
+affected containers through the controlled node/cell lifecycle, preserving
+canonical data and queued work, and verify effective `memory.min/high/max`
+and readiness: existing containers may retain old settings. Do not restart or
+recreate QA/reviewer workloads outside their coordinated windows. A legacy
+image rollback alone does not undo node memory policy.
+
+Canary the owner vault first with verified identity, current backup and preserved
+source/preferences. Hold fleet and friends on a latency, freshness, memory or
+preference miss. Roll back through the existing image-pin procedure to a verified
+legacy Cloud image; additive queue metadata remains compatible and custody stays
+on disk. Do not delete derived state or drain beside the running service. A
+rollback does not close an unresolved preference-preservation incident.

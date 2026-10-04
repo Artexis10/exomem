@@ -36,6 +36,7 @@ from . import (
 )
 from . import find as find_module
 from .cli_ops import OpError
+from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 
@@ -801,7 +802,7 @@ def _structural_compiled_destination(path: str) -> str | None:
     if _path_excluded_from_compiled_destination(path):
         return None
     parts = _path_parts(path)
-    if len(parts) < 3 or parts[:2] != ("knowledge base", "notes"):
+    if len(parts) < 3 or parts[:2] != (kb_dirname().casefold(), "notes"):
         return None
     return _COMPILED_ROOT_TYPES.get(parts[2])
 

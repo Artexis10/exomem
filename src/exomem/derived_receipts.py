@@ -2737,6 +2737,52 @@ def retry_component(
         connection.close()
 
 
+def defer_component(
+    vault_root: Path,
+    status: DerivedComponentStatus,
+    *,
+    now: float | None = None,
+) -> DerivedComponentStatus:
+    """Release an exact claim awaiting execution, without spending a failure.
+
+    Reuse the existing due state and lease CAS. No new queue or schema is
+    needed; a short eligibility delay prevents re-claiming in the same pass.
+    The execution owner signals the drain after publication.
+    """
+    deferred_at = _timestamp(now)
+    connection = deferred_index._connect(vault_root, create=True)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            changed = connection.execute(
+                "UPDATE derived_batch_components SET state = 'retryable', "
+                "claim_owner = NULL, claim_expires_at = NULL, failure_code = NULL, "
+                "next_attempt_at = ?, updated_at = ? "
+                "WHERE batch_id = ? AND component = ? AND revision = ? "
+                "AND lease_revision = ? AND state = 'claimed' AND claim_owner = ?",
+                (
+                    deferred_at + 0.1,
+                    deferred_at,
+                    status.batch_id,
+                    status.component.value,
+                    status.revision,
+                    status.lease_revision,
+                    status.claim_owner,
+                ),
+            ).rowcount
+            if not changed:
+                raise RuntimeError("component claim is no longer current")
+        except Exception:
+            connection.rollback()
+            raise
+        connection.commit()
+        return _component_status_from_connection(
+            connection, status.batch_id, status.component
+        )
+    finally:
+        connection.close()
+
+
 def complete_component(
     vault_root: Path,
     status: DerivedComponentStatus,

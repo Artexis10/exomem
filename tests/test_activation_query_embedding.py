@@ -9,13 +9,14 @@ import time
 import numpy as np
 import pytest
 
-from exomem import embedding_backend, embeddings, runtime_resources
+from exomem import cloud_cell, embedding_backend, embeddings, runtime_resources
 
 
 def _install_gate(monkeypatch: pytest.MonkeyPatch) -> runtime_resources.ModelAdmissionGate:
     gate = runtime_resources.ModelAdmissionGate(4)
     monkeypatch.setattr(runtime_resources, "_gate", gate)
     monkeypatch.setattr(runtime_resources, "_gate_capacity", 4)
+    monkeypatch.setattr(runtime_resources, "_gate_profile", cloud_cell.resource_policy())
     return gate
 
 
