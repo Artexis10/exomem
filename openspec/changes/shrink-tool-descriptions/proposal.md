@@ -12,6 +12,8 @@ Roughly 60% of that is not guidance an agent needs on every turn:
 
 ## What Changes
 
+- Reconcile the existing candidate with current main before delivery, preserving the newer API-scope, saved-engagement, source-preservation and file-handle rules. Historical size results are not measurements of the reconciled surface.
+- Make the existing names usable without private harness instructions: distinguish current-turn context compilation from targeted retrieval, and teach action-specific Planning guards at the call site. Keep names unchanged in this delivery; `search_memory`/`get_context` are evaluation candidates, not approved renames or extra advertised aliases.
 - Cut the complete local tool surface from 184,208 B to a ruled budget of **at most 90,000 B (-51%)** without removing any tool, parameter, enum value or refusal code.
 - Replace the ten copies of the semantic-authoring contract with one ~740 B rule per authoring tool (five copies) and no copy in parameter descriptions. The contract digest is unchanged because the digest derives from the contract, not from its projection.
 - Replace `ask_memory`'s typed output union with the wrapped loose object it would have if it were declared like `read_memory`, keeping the `result` wrap so structured-content shape does not move.
@@ -19,7 +21,8 @@ Roughly 60% of that is not guidance an agent needs on every turn:
 - Shorten shared parameter descriptions once, in one place each, and stop restating enums and types in prose.
 - Rewrite each remaining description around what a tool does, when to pick it over its neighbours, and the behaviour-critical rules the incidents depend on. Long lifecycle and mode catalogues move to `references/*.md` in the skill scaffold and to on-demand bootstrap sections.
 - Add a test that pins the total wire bytes (and a per-tool ceiling) under the ruled budget, so the surface cannot silently regrow.
-- Regenerate the schema fixture, the packaged tool-surface fingerprint, the hosted v5 candidate and `docs/capabilities.md`. One connector refresh is owed to the owner afterwards.
+- Regenerate the schema fixture, the packaged tool-surface fingerprint, the hosted v5 candidate and `docs/capabilities.md`. Refresh cached external adapters through their supported paths afterwards; adapter-specific pending acceptance does not block independently verified product surfaces.
+- Verify useful tool selection and legal calls through the installed public interface, separately from compiler relevance. A smaller schema is a measured property, not evidence by itself of better agent behaviour.
 
 ## Capabilities
 

@@ -1,6 +1,20 @@
 ## Status
 
-Phase 2 (implemented, awaiting release). The owner's rulings on the five open points are recorded at the end of this document; the results are in "Outcome".
+Phase 2 candidate implemented, not delivered. Its earlier results below are historical. Reconciliation with current main, independent review and current installed-interface acceptance remain required; checked historical implementation work does not establish current readiness.
+
+## Agent-independent usability reconciliation (2026-10-04)
+
+Exomem is an evolving epistemic system for agents through its public interfaces, not a feature that requires one provider or private coding harness. Skills may improve workflows, but minimum valid-call guidance must remain discoverable from tools and on-demand public bootstrap/schema reads. This does not promise equal performance from every model.
+
+Reuse this existing change and its size budget. Preserve the newer API-scope, engagement, capture/disclosure, file-handle and authoring contracts from main when shortening descriptions. Keep `PRODUCT_COMMANDS` and canonical leaves as the single source for generated MCP/REST/CLI surfaces. No new routing model, executable nine-action mega-tools or duplicate facade.
+
+Clarify two read entry points: `activate_context` compiles relevant prior context for the current verbatim turn, with bounded conversation context when needed; `ask_memory` retrieves evidence for a known information gap and `read_memory` opens selected results. Neither generates the user's answer. Remove contradictory first-call wording without forcing recall contrary to the saved engagement policy. Retain tool names in this batch. A later rename, split or exposure change needs its own evidence-backed OpenSpec decision and synchronized versioned compatibility; do not advertise synonyms speculatively.
+
+Planning's action-dependent arguments need concise meanings and an inspect/query → guarded update/triage recipe using the actual returned identities and versions. Keep optimistic concurrency guards intact; never invent their values or make them optional to avoid teaching them. Keep raw Sources/Evidence, compiled conclusions, Records observations and Planning intent distinct while explaining that distinction in ordinary language.
+
+Acceptance separates interface failures from compiler failures. Reuse existing isolated task/observation infrastructure for mixed-topic activation, explicit and ambiguous follow-ups, raw preservation, conclusion capture, a structured subscription query, a Planning update and a Planning transition. First verify these workflows and necessary parameter guidance without changing runtime semantics; then retain bounded ordinary-agent traces through the installed public surface, with no private harness hints. Record actual tool selection, arguments/results, retries, answer/source correctness and available usage/latency separately. A forced invocation proves transport, not spontaneous initiation. A rename experiment and paid multi-arm comparison remain separate, not delivery prerequisites. No new benchmark framework or test merely pinning prose bytes.
+
+The outcome is correct, understandable use at lower measured schema size—not a new claim that fewer tools or shorter descriptions alone improve reasoning. Restore any essential guidance a real workflow loses rather than weakening its assertion to meet the byte budget. Record unresolved usability failures explicitly.
 
 ## Method
 
@@ -104,7 +118,7 @@ Moves land in the hand-authored generic scaffold (`src/exomem/_scaffold/_Schema/
 
 Proposed budget: total wire bytes at most **90,000** (-51.1%), per-tool ceilings as in the table (they sum to 87,950 B, leaving about 2 KB of slack for the shared blocks). Without item 3 the same prose cuts land at about 106,600 B (-42%); reaching -50% without it needs about 14.6 KB more prose removed, which starts cutting rules. That is why item 3 is a ruling, not a default.
 
-The tool-surface fingerprint (`src/exomem/tool_surface_contract.json`, hashed over name, title, description, inputSchema, outputSchema, icons, annotations, meta, execution) moves once, in the final Phase 2 commit, so an intermediate commit never carries a half-changed hash. `deploy/chatgpt/personal-plugin-contract.json` is not edited: its registered digest is an external attestation, and `scripts/dump-tool-schemas.py` prints that it must stay release-blocking until the owner refreshes the connector. **Owner action after release: one connector refresh** (recreate or refresh the app action so the new schema is cached, then verify a live `ask_memory` and a `remember` call, then update the attested digest).
+The tool-surface fingerprint (`src/exomem/tool_surface_contract.json`, hashed over name, title, description, inputSchema, outputSchema, icons, annotations, meta, execution) moves once, in the final Phase 2 commit, so an intermediate commit never carries a half-changed hash. `deploy/chatgpt/personal-plugin-contract.json` records an external attestation, not the locally generated surface: never replace its registered digest without fresh connector evidence. A cached external adapter remains refresh/verification-pending until it exposes the released surface and passes its own acceptance; that state does not block independently verified MCP, CLI or REST delivery. Reconcile any generator message or gate that incorrectly makes the external refresh a product-release prerequisite. Refresh automatically through the supported adapter mechanism where available; request an owner action only when the provider offers no authorized automation. After release, verify discovery, retrieval and an authorized isolated capture through that adapter before updating its attested digest. Do not create a production write merely to smoke the description change.
 
 ## Frozen and derived artifacts
 
@@ -127,7 +141,7 @@ Behavioural check for cut guidance: the hosted behaviour fixtures and `test_host
 
 - Hosted agents without skills lose reference prose. Mitigation: refusal codes and guard fields stay in place; the pointer and the reference index cover the rest; the behaviour fixtures gate it.
 - A client that validates strictly against published output schemas loses typed `ask_memory` results. Mitigation: runtime payload is unchanged; ruling 2 offers the middle option.
-- One connector refresh for the owner. It is the same cost as any fingerprint move, taken once.
+- Cached external adapters need a supported refresh and their own acceptance after a fingerprint move. Automate it where supported; remaining owner-only provider steps do not hold independently verified product surfaces.
 
 ## Rulings
 
@@ -185,4 +199,3 @@ Implementation notes that differ from the proposal:
 - `hosted-alpha-agent-v4-command-binding-v1` reuses the v4 profile, whose gateway contract now carries the released `ask_memory` output schema from `hosted_legacy_ask_output_schema.json`. Its compatibility bytes and its command-binding contract digest are therefore unchanged. Only v5 follows the shortened live schema.
 - REST/OpenAPI and CLI `--help` no longer repeat the semantic-authoring contract on parameters (the write tools' MCP descriptions carry it once); `bootstrap(profile="full")` remains the full source.
 - A rule the trim once dropped and the tests caught was restored: `edit_memory`'s `relation_review_hash=<returned relation_review_hash>` recipe and `## Relations` example, `manage_memory_file`'s `draft_token` pairing, the open-vocabulary note on `source_type`, `suggestions=true`, and the `rebuild_graph` quarantine wording.
-

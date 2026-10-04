@@ -23,3 +23,17 @@ The generated MCP tool surface SHALL stay within a committed byte budget so that
 
 - **WHEN** a client sends an explicit null for a nullable optional parameter of any tool
 - **THEN** argument validation accepts it, because validation is built from the function signature and the published schema omits the null arm and the null default
+
+### Requirement: Compact tools remain usable through the public interface
+
+The compact surface SHALL preserve enough public guidance to choose an operation and construct a legal call without a provider-specific skill or private harness instruction. Current-turn activation and targeted retrieval SHALL have distinct descriptions consistent with saved engagement. Action-dependent Planning arguments SHALL explain the returned identity/version guards and the inspect/query-to-update/triage sequence. Runtime concurrency, authorization, source preservation and confirmation rules SHALL remain unchanged. This delivery SHALL retain existing tool names; shortening schemas SHALL NOT by itself establish a claim of improved agent performance.
+
+#### Scenario: An unfamiliar agent updates a plan
+
+- **WHEN** an agent uses the published tool/schema guidance to inspect a plan and update or transition it
+- **THEN** it can identify and supply the returned guards, and a stale guard still refuses without overwriting newer state
+
+#### Scenario: Interface and compiler failures are distinguished
+
+- **WHEN** an ordinary-agent workflow selects activation or retrieval and receives a result
+- **THEN** acceptance retains the actual invocation, result and subsequent answer, distinguishing wrong selection or arguments from wrong compiled context and never treating a forced call as proof of spontaneous initiation
