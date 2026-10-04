@@ -118,6 +118,7 @@ def compile_rows(query: ir.Query, projection: ProjectionPlan, *, as_of: str,
     dependencies = dict.fromkeys(field.path for field in query.select.fields)
     scalars = {scalar.field: scalar for scalar in projection.scalars}
     residual = False
+    seek_direction = None
 
     def columns(field):
         dependencies[field.path] = None
@@ -152,9 +153,13 @@ def compile_rows(query: ir.Query, projection: ProjectionPlan, *, as_of: str,
             key_tag, key = scalar_key(value, kind)
             if key_tag < 2:
                 raise ScalarValueError("ordinary comparisons require a non-null value")
+            # On a matching continuation, the cursor replaces the interval's
+            # start. Keep its end indexable so an exhausted page stops there.
+            operand = "+" + payload if ((seek_direction == "ASC" and operator in {">", ">="})
+                                         or (seek_direction == "DESC" and operator in {"<", "<="})) else payload
             if tag is None:
-                return f"{payload}{operator}{bind(value)}"
-            return f"({tag}={bind(key_tag)} AND {payload}{operator}{bind(key)})"
+                return f"{operand}{operator}{bind(value)}"
+            return f"({tag}={bind(key_tag)} AND {operand}{operator}{bind(key)})"
 
         if node.op in {"is_null", "is_missing", "is_not_null"}:
             return f"({rank}={ {'is_null': 1, 'is_missing': 2, 'is_not_null': 0}[node.op]})"
@@ -183,7 +188,6 @@ def compile_rows(query: ir.Query, projection: ProjectionPlan, *, as_of: str,
             raise QueryError("QUERY_UNSUPPORTED", "unsupported typed row predicate")
         return f"({present} AND {expression})"
 
-    where = predicate(query.where)
     terms = []
     for key in query.order_by.keys:
         rank, tag, payload, _ = columns(key.field)
@@ -196,17 +200,61 @@ def compile_rows(query: ir.Query, projection: ProjectionPlan, *, as_of: str,
     if after is not None:
         if len(after) != len(terms) or any(type(value) not in {int, str} for value in after):
             raise QueryError("QUERY_VALUE_INVALID", "continuation does not match the scalar order")
-        directions = {direction for _, direction in terms}
-        if len(directions) == 1:
-            operator = ">" if terms[0][1] == "ASC" else "<"
-            continuation = "(" + ",".join(column for column, _ in terms) + ")" + operator
-            continuation += "(" + ",".join(bind(value) for value in after) + ")"
+        fixed = {}
+        boundary_values = dict(zip((column for column, _ in terms), after, strict=True))
+        if page_bound:
+            for leaf in _leaves(query.where) or ():
+                rank, tag, payload, kind = columns(leaf.field)
+                value = leaf.value.lower if leaf.op == "between" else leaf.value
+                value = _relative(value, kind, instant)
+                key_tag, key = scalar_key(value, kind)
+                if tag is not None:
+                    fixed.update({rank: 0, tag: key_tag})
+                if leaf.op == "eq":
+                    fixed[payload] = value if tag is None else key
+                elif payload in boundary_values:
+                    actual = boundary_values[payload]
+                    lower = value if tag is None else key
+                    if type(actual) is not type(lower):
+                        page_bound = False
+                        continue
+                    if leaf.op == "between":
+                        upper_value = _relative(leaf.value.upper, kind, instant)
+                        upper_tag, upper_key = scalar_key(upper_value, kind)
+                        upper = upper_value if tag is None else upper_key
+                        page_bound &= (key_tag == upper_tag
+                                       and (actual >= lower if leaf.value.include_lower else actual > lower)
+                                       and (actual <= upper if leaf.value.include_upper else actual < upper))
+                    else:
+                        page_bound &= {"gt": actual > lower, "gte": actual >= lower,
+                                       "lt": actual < lower, "lte": actual <= lower}[leaf.op]
+        # A constant inside a row tuple prevents SQLite from using the cursor
+        # as its index seek. Omit only constants proved by the conjunction and
+        # matching this boundary; keep the full ordering for boundary recovery.
+        if all(column not in fixed or fixed[column] == value
+               for (column, _), value in zip(terms, after, strict=True)):
+            continuation_terms = [(term, value) for term, value in zip(terms, after, strict=True)
+                                  if term[0] not in fixed]
+        else:
+            page_bound = False
+            continuation_terms = list(zip(terms, after, strict=True))
+        directions = {term[1] for term, _ in continuation_terms}
+        if page_bound and len(directions) == 1:
+            seek_direction = next(iter(directions))
+    where = predicate(query.where)
+    if after is not None:
+        if not continuation_terms:
+            continuation = "0"
+        elif len(directions) == 1:
+            operator = ">" if continuation_terms[0][0][1] == "ASC" else "<"
+            continuation = "(" + ",".join(term[0] for term, _ in continuation_terms) + ")" + operator
+            continuation += "(" + ",".join(bind(value) for _, value in continuation_terms) + ")"
         else:
             page_bound = False
             branches = []
-            for position, (column, direction) in enumerate(terms):
-                prefix = [f"{terms[n][0]}={bind(after[n])}" for n in range(position)]
-                prefix.append(f"{column}{'>' if direction == 'ASC' else '<'}{bind(after[position])}")
+            for position, ((column, direction), value) in enumerate(continuation_terms):
+                prefix = [f"{term[0]}={bind(previous)}" for term, previous in continuation_terms[:position]]
+                prefix.append(f"{column}{'>' if direction == 'ASC' else '<'}{bind(value)}")
                 branches.append("(" + " AND ".join(prefix) + ")")
             continuation = "(" + " OR ".join(branches) + ")"
         where = f"({where} AND {continuation})"

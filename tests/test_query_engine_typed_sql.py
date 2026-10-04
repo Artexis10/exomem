@@ -167,6 +167,54 @@ def test_continuations_are_exact_and_never_implicitly_authorized(db):
         compile_rows(replace(logical, page=replace(logical.page, after="opaque")), plan, as_of=AS_OF)
 
 
+@pytest.mark.parametrize("operator", ["gte", "eq", "between"])
+def test_filtered_deep_pages_seek_the_boundary_without_visiting_skipped_rows(operator):
+    """Fixed rank/type prefixes must not make continuation a linear residual."""
+    fields = {"value": {"type": "integer"}}
+    work = []
+    for size in (1024, 8192):
+        with closing(sqlite3.connect(":memory:")) as conn:
+            conn.execute("BEGIN")
+            plan = install(conn, fields, (
+                {"value": 7 if operator == "eq" else number} for number in range(size)
+            ))
+            boundary_id = size // 2 if operator == "between" else size - 9
+            value = (7 if operator == "eq" else
+                     {"lower": 250, "upper": boundary_id + 4} if operator == "between" else 250)
+            logical = query(fields, where={"field": "value", "op": operator,
+                                          "value": value},
+                            order_by=[{"field": "value"}])
+            first = compile_rows(logical, plan, as_of=AS_OF)
+            terms = ",".join(column for column, _ in first.order_terms)
+            boundary = conn.execute(f"SELECT {terms} FROM {plan.table_name} p WHERE row_id=?",
+                                    (boundary_id,)).fetchone()
+            compiled = compile_rows(logical, plan, as_of=AS_OF, after=boundary)
+            assert compiled.page_bound
+            instructions = []
+            conn.set_progress_handler(lambda instructions=instructions: instructions.append(None) or 0, 1)
+            sql = (f"SELECT row_id FROM {plan.table_name} p INDEXED BY {compiled.usable_index} "
+                   f"WHERE {compiled.where_sql} ORDER BY {compiled.order_sql} LIMIT 7")
+            stop = boundary_id + (5 if operator == "between" else 8)
+            assert [row[0] for row in conn.execute(sql, compiled.params)] == list(range(boundary_id + 1, stop))
+            conn.set_progress_handler(None, 0)
+            work.append(len(instructions))
+    assert work[1] <= work[0] * 2, work
+
+
+def test_nonmatching_boundary_keeps_its_full_order_and_scan_cost(db):
+    """A null boundary must not be discarded as a query-fixed present value."""
+    fields = {"value": {"type": "integer"}}
+    plan = install(db, fields, [{"value": None}, {"value": 1}, {"value": 2}])
+    logical = query(fields, where={"field": "value", "op": "gte", "value": 1},
+                    order_by=[{"field": "value"}])
+    first = compile_rows(logical, plan, as_of=AS_OF)
+    boundary = db.execute(f"SELECT {','.join(column for column, _ in first.order_terms)} "
+                          f"FROM {plan.table_name} p WHERE row_id=0").fetchone()
+    compiled = compile_rows(logical, plan, as_of=AS_OF, after=boundary)
+    assert run(db, plan, compiled) == []
+    assert not compiled.page_bound
+
+
 def test_unsupported_operators_and_unindexed_filters_never_fall_back(db):
     """Q3 nodes and unavailable scalar keys cannot silently become collection scans."""
     fields = {"value": {"type": "integer"}, "other": {"type": "integer"}}
