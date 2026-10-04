@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.104.0](https://github.com/Artexis10/exomem/compare/v0.103.0...v0.104.0) (2026-10-04)
+
+
+### Features
+
+* **activation:** serve bounded category material with fresh registry context ([#1544](https://github.com/Artexis10/exomem/issues/1544)) ([c09cc9c](https://github.com/Artexis10/exomem/commit/c09cc9c2d47ba96a434186c3f773cd721ef10d51))
+* **cloud:** keep recall warm and recover indexed writes within service budgets ([#1533](https://github.com/Artexis10/exomem/issues/1533)) ([c1472fb](https://github.com/Artexis10/exomem/commit/c1472fb70f50115079c0f51de359c9749c30874a))
+* **cloud:** reserve dedicated agents for selected cells ([#1549](https://github.com/Artexis10/exomem/issues/1549)) ([9f1863e](https://github.com/Artexis10/exomem/commit/9f1863ef54c7ecaef3d86a6915cfb1d69967546e))
+* **coordination:** fence collection-store writers and retain committed heads ([#1547](https://github.com/Artexis10/exomem/issues/1547)) ([d9e86c3](https://github.com/Artexis10/exomem/commit/d9e86c3ca5636e86f9541b25f0fe50198316a4f1))
+* **query:** add the dark shared query foundation ([#1546](https://github.com/Artexis10/exomem/issues/1546)) ([84a075b](https://github.com/Artexis10/exomem/commit/84a075be5d27fac9a86887c4ff4d3e4f0a00226a))
+* **state:** check optional compatibility before managed upgrades ([#1550](https://github.com/Artexis10/exomem/issues/1550)) ([ec2f46f](https://github.com/Artexis10/exomem/commit/ec2f46f8c008075d0ce7934b40afad56ed1ac123))
+
+
+### Bug Fixes
+
+* **cloud:** deliver artifact keys and inspect rollout isolation ([#1542](https://github.com/Artexis10/exomem/issues/1542)) ([961dbf4](https://github.com/Artexis10/exomem/commit/961dbf42cf352b6dd7364f5a5550ae61f120c2b5))
+* **cloud:** let the operator observe capacity metrics ([#1548](https://github.com/Artexis10/exomem/issues/1548)) ([c1757d9](https://github.com/Artexis10/exomem/commit/c1757d9e03229fd0ba24e9fdff885032ad05ecf9))
+* **mcp:** scope bootstrap guidance to the Exomem API ([#1543](https://github.com/Artexis10/exomem/issues/1543)) ([f955829](https://github.com/Artexis10/exomem/commit/f955829bddb8b1a763aae49ba99836871dae772c))
+
 ## [0.103.0](https://github.com/Artexis10/exomem/compare/v0.102.6...v0.103.0) (2026-10-03)
 
 
