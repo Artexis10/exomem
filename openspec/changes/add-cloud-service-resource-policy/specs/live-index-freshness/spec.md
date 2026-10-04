@@ -44,6 +44,11 @@ The aggregate preparation budget SHALL reserve capacity for small work and inclu
 - **THEN** the bulk progress grant is bounded by elapsed time at complete-unit boundaries rather than an unchecked unit count estimated from the earlier phase
 - **AND** sustained foreground traffic still permits bulk progress without pausing a held mutation boundary
 
+#### Scenario: Overlapping foreground requests remain active
+- **WHEN** foreground requests overlap throughout a cooperative bulk pass
+- **THEN** that pass receives one initial two-second grace wait
+- **AND** additional foreground waiting is at most 50% of elapsed time after that grace, so previous waits cannot buy another grace allowance
+
 #### Scenario: Excess model requests
 - **WHEN** simultaneous model requests exceed admitted capacity
 - **THEN** excess requests refuse promptly rather than waiting outside the admitted budget
