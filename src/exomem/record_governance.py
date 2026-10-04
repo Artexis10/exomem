@@ -24,7 +24,7 @@ from . import (
     vault,
 )
 from . import structured_collections as collections
-from .collection_store.preview import bound_writer, canonical_read
+from .collection_store.preview import bound_writer, canonical_read, selected_writer
 from .governance import egress
 from .governance.principal import OWNER_AUDIENCE, effective_principal
 
@@ -1315,9 +1315,7 @@ def query_collection(
     preconditions that must hold before that request is actually honoured.
     """
     root = Path(vault_root)
-    from .collection_store.preview import bound_writer
-
-    writer = bound_writer(root)
+    writer = selected_writer(root, collection)
     if writer is not None and writer._operation is None:
         with writer.read_collection(collection, facade_profile=semantic_profile) as manifest:
             return query_collection(
@@ -1718,7 +1716,7 @@ def _inventory_coverage(
     """
     from . import due_state
 
-    writer = bound_writer(root)
+    writer = selected_writer(root, manifest)
     if writer is not None:
         items, _, held = writer._operation.authorized_rows(manifest.collection_id)
         observations = due_state.collection_observation_coverage(
@@ -1794,7 +1792,7 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
             manifest
             for manifest in discovered
             if manifest.semantic_profile == semantic_profile
-            and (bound_writer(root) is not None or authorize(manifest.storage.source))
+            and (selected_writer(root, manifest) is not None or authorize(manifest.storage.source))
         ]
         legacy: tuple[collections.LegacyCollection, ...] = ()
         legacy_truncated = False

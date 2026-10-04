@@ -95,7 +95,7 @@ from typing import Any
 
 from . import call_spans
 from . import review_state as review_state_module
-from .collection_store.preview import bound_writer, canonical_read
+from .collection_store.preview import bound_writer, canonical_read, selected_projection_writer, selected_writer
 
 log = logging.getLogger(__name__)
 
@@ -725,7 +725,7 @@ def _survivors_only(
             return None
         matched = {str(term) for term in advisory.get("matched_terms") or ()}
         previous = {str(term) for term in component.get("matched_terms") or ()}
-        writer = bound_writer(vault_root)
+        writer = selected_writer(vault_root, collection)
         for record in component.get("reflecting_records") or ():
             if (
                 not isinstance(record, Mapping)
@@ -763,7 +763,7 @@ def _survivors_only(
     ]
     if not stored:
         return entry
-    writer = bound_writer(vault_root)
+    writer = selected_writer(vault_root, str(component.get("records_collection_id") or ""))
     survivors = [pair for pair in stored if (
         writer._allows_item(str(component.get("records_collection_id") or ""), pair[1])
         if writer is not None and component.get("records_collection_id")
@@ -847,7 +847,7 @@ def _page_exists(vault_root: Path, rel_path: str) -> bool:
     remove: patching `Path.exists` wholesale also breaks reading the projection,
     which would make the removal test pass for the wrong reason.
     """
-    writer = bound_writer(vault_root)
+    writer = selected_projection_writer(vault_root, rel_path)
     if writer is not None:
         with writer.read_snapshot():
             if writer._projection_path_exists(rel_path):
@@ -1030,7 +1030,7 @@ def _recompute_claims(
         if (
             manifest.semantic_profile != "records"
             or (authorize_path is not None and not authorize_path(manifest.path))
-            or (bound_writer(vault_root) is None and authorize_path is not None
+            or (selected_writer(vault_root, manifest) is None and authorize_path is not None
                 and not authorize_path(manifest.storage.source))
         ):
             continue
@@ -1121,6 +1121,7 @@ def routing_targets(
             manifest = collections_module.load_manifest(root, root / manifest_path)
         except Exception:  # noqa: BLE001 -- stale projections heal on reconcile
             continue
+        writer = selected_writer(root, manifest)
         if (
             manifest.semantic_profile != "records"
             or manifest.manifest_version.hash != row.get("manifest_hash")
@@ -1178,7 +1179,7 @@ def visible_claim_items(vault_root: Path, manifest_path: str) -> list[dict[str, 
     from .governance import egress as egress_module
 
     root = Path(vault_root)
-    if bound_writer(root) is not None:
+    if selected_writer(root, manifest_path) is not None:
         return _recompute_claims(root).get(manifest_path, {}).get("items", [])
     row = ((load(root) or {}).get("claims") or {}).get(manifest_path)
     if not isinstance(row, Mapping) or not isinstance(row.get("items"), list):
@@ -1876,7 +1877,7 @@ def _unfiltered_snapshot(vault_root: Path, manifest: Any) -> Any | None:
     from . import structured_collections as collections_module
 
     try:
-        writer = bound_writer(vault_root)
+        writer = selected_writer(vault_root, manifest)
         if writer is not None:
             return writer._projection_snapshot(manifest)
         return record_formats.load_adapter(vault_root, manifest).read()
@@ -1894,7 +1895,7 @@ def _load_manifest(vault_root: Path, path: str) -> Any | None:
 
 
 def _load_projection_manifest(vault_root: Path, path: str) -> Any | None:
-    writer = bound_writer(vault_root)
+    writer = selected_writer(vault_root, path)
     if writer is None:
         return _load_manifest(vault_root, path)
     try:

@@ -51,6 +51,32 @@ def bound_writer(vault_root: Path) -> CollectionWriter | None:
     return binding[1] if binding is not None and binding[0] == Path(vault_root).resolve() else None
 
 
+def selected_writer(vault_root, selector):
+    from . import authority
+
+    writer = bound_writer(vault_root)
+    if writer is None:
+        return None
+    marker = authority.routing_marker(writer)
+    if marker is None:
+        return writer
+    entry = authority.selected_entry(vault_root, marker, selector)
+    if entry is None:
+        return None
+    authority.require_selected(writer.connection, marker, entry)
+    return writer
+
+
+def selected_projection_writer(vault_root, path):
+    from . import authority
+
+    writer = bound_writer(vault_root)
+    if writer is None or authority.routing_marker(writer) is None:
+        return writer
+    with writer.read_snapshot():
+        return writer if writer._operation.projection_subjects(path) is not None else None
+
+
 def canonical_read(function):
     """Keep a structured consumer's canonical reads under one request snapshot."""
     @wraps(function)
@@ -110,6 +136,15 @@ def dispatch(
         )
     writer = binding[1]
     args = {name: value for name, value in values.items() if value is not None}
+    from . import authority
+
+    marker = authority.routing_marker(writer)
+    if marker is not None:
+        selector = args.get("collection", args.get("manifest_path"))
+        if selector is None or selected_writer(vault_root, selector) is None:
+            return False, None
+        if action == "create":
+            raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "store creation requires admission")
     if action == "describe":
         if profile == "records":
             from ..record_memory import _bulk_upsert_contract

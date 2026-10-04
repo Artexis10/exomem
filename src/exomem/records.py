@@ -955,9 +955,9 @@ def bulk_upsert_records(
     still reports every row's would-be outcome; `skip` commits the accepted rows.
     """
     root = Path(vault_root)
-    from .collection_store.preview import bound_writer
+    from .collection_store.preview import selected_writer
 
-    writer = bound_writer(root)
+    writer = selected_writer(root, collection)
     if writer is not None:
         return writer.bulk_upsert_records(collection, rows=rows, why=why,
                                           expected_container_hash=expected_container_hash,
