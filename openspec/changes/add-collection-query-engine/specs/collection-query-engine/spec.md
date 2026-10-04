@@ -73,6 +73,14 @@ Version 1 SHALL support all existing operators, boolean composition, inclusive/e
 - **WHEN** rows contain an absent field, present null and a present empty string
 - **THEN** `is_missing`, `is_null` and `is_not_null` select their defined distinct cohorts without changing legacy `exists`/`missing`
 
+#### Scenario: Boolean complement does not redefine inequality
+- **WHEN** a caller compares `not(eq(...))` with explicit `ne` on present, null and missing values
+- **THEN** boolean NOT complements the false comparison for null/missing, while `ne` and `nin` continue excluding those values
+
+#### Scenario: Typed instants never silently lose precision
+- **WHEN** a typed literal or indexed value supplies nonzero sub-microsecond precision, a basic date/time form or a second-resolution offset
+- **THEN** it is refused without rewriting canonical bytes; extended ISO seconds with `Z` or minute-resolution offsets and microseconds (including extra zero digits) remain exact
+
 #### Scenario: Relative range is frozen across pages
 - **WHEN** a caller continues a query with an as-of-relative date range after the clock crosses midnight or a month boundary
 - **THEN** the same frozen instant/window and declared source-local bucket basis apply to every page

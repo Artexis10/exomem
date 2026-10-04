@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..structured_collections import CollectionError, FieldSpec, validate_field_value
+from .scalars import ScalarValueError, parse_instant
 from .ir import (
     Aggregate,
     Field,
@@ -194,12 +195,9 @@ def _bounded_json(value: Any, at: str) -> None:
 
 def _instant(value: Any, at: str) -> str:
     try:
-        instant = dt.datetime.fromisoformat(value) if isinstance(value, str) else None
-        if instant is None or instant.utcoffset() is None:
-            raise ValueError
-        return instant.astimezone(dt.UTC).isoformat()
-    except (ValueError, OverflowError):
-        _fail("QUERY_VALUE_INVALID", at, "ISO datetime with UTC offset")
+        return parse_instant(value).isoformat()
+    except ScalarValueError:
+        _fail("QUERY_VALUE_INVALID", at, "extended ISO seconds with exact microseconds and UTC/minute offset")
 
 
 def _value(value: Any, field: Field, at: str) -> Any:

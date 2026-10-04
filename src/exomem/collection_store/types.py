@@ -30,6 +30,7 @@ from typing import Any
 import yaml
 
 from .. import structured_collections as collections
+from ..query_engine.indexes import IndexDeclarationError, IndexSpec, normalize_indexes
 
 PACKAGE_DIRECTORY = "_collection_types"
 BUILTIN_TYPE_NAMES = ("records", "planning")
@@ -48,6 +49,7 @@ _DECLARATION_KEYS = frozenset(
         "placement",
         "description",
         "fields",
+        "indexes",
         "natural_key",
         "extensible",
         "lifecycle",
@@ -113,6 +115,7 @@ class CollectionType:
     views: tuple[Mapping[str, Any], ...] = ()
     validators: tuple[str, ...] = ()
     wire: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    indexes: tuple[IndexSpec, ...] = ()
     declaration: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
 
@@ -209,6 +212,10 @@ def parse_declaration(data: object, *, builtin: bool) -> CollectionType:
     views = data.get("views") or []
     if not isinstance(views, list) or not all(isinstance(view, Mapping) for view in views):
         raise CollectionTypeError("INVALID_DECLARATION", "views must be a list of mappings")
+    try:
+        indexes = normalize_indexes(raw_fields, data.get("indexes"))
+    except IndexDeclarationError as error:
+        raise CollectionTypeError(error.code, error.reason, error.at) from error
     return CollectionType(
         name=_string(data["name"], "name"),
         version=version,
@@ -225,6 +232,7 @@ def parse_declaration(data: object, *, builtin: bool) -> CollectionType:
         views=tuple(_frozen(view) for view in views),
         validators=validators,
         wire=_frozen(wire or {}),
+        indexes=indexes,
         declaration=_frozen(data),
     )
 
