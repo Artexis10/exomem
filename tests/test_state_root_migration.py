@@ -1230,6 +1230,161 @@ def test_complete_manifest_descriptor_upgrade_migrates_new_family_first(
     assert not legacy.exists()
 
 
+def test_collection_compatibility_enrollment_requires_live_authority_and_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    ready = state_migration.require_vault_state_ready(vault)
+    path = ready.state_dir / state_migration.MANIFEST_NAME
+    original = json.loads(path.read_text())
+    original["extension"] = {"preserve": "this"}
+    path.write_text(json.dumps(original))
+    before = path.read_bytes()
+    enroll = state_migration.record_collection_store_compatibility
+    with pytest.raises(TypeError):
+        enroll(vault)
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        enroll(vault, authority_check=lambda: False)
+    authority = iter((True, False))
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        enroll(vault, authority_check=lambda: next(authority))
+    assert path.read_bytes() == before
+
+    enroll(vault, authority_check=lambda: True)
+    enrolled = json.loads(path.read_text())
+    assert enrolled == {
+        **original,
+        "descriptors": sorted([*original["descriptors"], "collections-store-v1"]),
+    }
+    replay = path.read_bytes()
+    enroll(vault, authority_check=lambda: True)
+    assert path.read_bytes() == replay
+    assert state_migration.supported_state_compatibility_ids() == ()
+    assert state_migration.migration_status(vault) == "unsupported"
+    with pytest.raises(state_migration.StateMigrationOfflineRequired, match="compatible runtime"):
+        state_migration.require_vault_state_ready(vault)
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        _migrate(vault)
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        _migrate(vault, adopt="external")
+    with pytest.raises(state_migration.StateMigrationOfflineRequired, match="export before downgrading"):
+        _migrate(vault, adopt="vault")
+    assert path.read_bytes() == replay
+
+    # Conditional contract: a future trusted adapter supplies actual support.
+    monkeypatch.setattr(state_migration, "supported_state_compatibility_ids", lambda: ("collections-store-v1",))
+    assert state_migration.require_vault_state_ready(vault).state_dir == ready.state_dir
+    assert state_migration.migration_status(vault) == "complete"
+
+
+def test_interrupted_enrollment_retains_fence_and_invalidates_cached_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    ready = state_migration.require_vault_state_ready(vault)
+    sentinel = ready.state_dir / "canonical-store"
+    sentinel.write_bytes(b"retained")
+    write = state_migration._write_manifest
+
+    def interrupt_after_publication(directory, value):
+        write(directory, value)
+        raise OSError("interrupted after publication")
+
+    monkeypatch.setattr(state_migration, "_write_manifest", interrupt_after_publication)
+    with pytest.raises(OSError, match="interrupted"):
+        state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+    assert state_migration.migration_status(vault) == "unsupported"
+    monkeypatch.setattr(state_migration, "_write_manifest", write)
+    state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+    manifest = (ready.state_dir / state_migration.MANIFEST_NAME).read_bytes()
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        _migrate(vault, adopt="vault")
+    assert sentinel.read_bytes() == b"retained"
+    assert (ready.state_dir / state_migration.MANIFEST_NAME).read_bytes() == manifest
+
+
+def test_enrollment_rereads_manifest_under_authority_instead_of_cached_readiness(tmp_path: Path) -> None:
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    ready = state_migration.require_vault_state_ready(vault)
+    path = ready.state_dir / state_migration.MANIFEST_NAME
+    manifest = json.loads(path.read_text())
+    manifest["state"] = "in-progress"
+
+    def authority_check():
+        path.write_text(json.dumps(manifest))
+        return True
+
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        state_migration.record_collection_store_compatibility(vault, authority_check=authority_check)
+    assert json.loads(path.read_text()) == manifest
+
+
+def test_optional_compatibility_survives_family_upgrade_interruption_and_adoption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import state_migration
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    (vault / kb_dirname()).mkdir(parents=True)
+    state_dir, path = _remove_descriptor_from_complete_manifest(vault, "claims-store")
+    manifest = json.loads(path.read_text())
+    manifest["descriptors"] = sorted([*manifest["descriptors"], "collections-store-v1"])
+    path.write_text(json.dumps(manifest))
+    # Conditional contract, not a claim that the current runtime has an adapter.
+    monkeypatch.setattr(state_migration, "supported_state_compatibility_ids", lambda: ("collections-store-v1",))
+    legacy = vault / kb_dirname() / ".claims.sqlite"
+    legacy.write_bytes(b"new-family")
+    write = state_migration._write_manifest
+
+    def interrupt_after_publication(directory, value):
+        write(directory, value)
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(state_migration, "_write_manifest", interrupt_after_publication)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        _migrate(vault)
+    assert "collections-store-v1" in json.loads(path.read_text())["descriptors"]
+    monkeypatch.setattr(state_migration, "_write_manifest", write)
+    _reset_resolution_cache()
+    _migrate(vault)
+    assert (state_dir / legacy.name).read_bytes() == b"new-family"
+    assert not legacy.exists()
+    legacy.write_bytes(b"discarded-duplicate")
+    _migrate(vault, adopt="external")
+    _reset_resolution_cache()
+    assert state_migration.require_vault_state_ready(vault).state_dir == state_dir
+    adopted = json.loads(path.read_text())
+    assert adopted["descriptors"] == sorted([*state_migration.declared_descriptor_ids(), "collections-store-v1"])
+    assert set(adopted["families"]) == set(state_migration.declared_descriptor_ids())
+    assert (state_dir / legacy.name).read_bytes() == b"new-family"
+
+
+def test_unknown_compatibility_prefix_is_not_an_optional_descriptor(tmp_path: Path) -> None:
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    ready = state_migration.require_vault_state_ready(vault)
+    path = ready.state_dir / state_migration.MANIFEST_NAME
+    manifest = json.loads(path.read_text())
+    manifest["descriptors"] = sorted([*manifest["descriptors"], "collections-store-v2"])
+    path.write_text(json.dumps(manifest))
+    _reset_resolution_cache()
+    assert state_migration.migration_status(vault) == "invalid"
+    with pytest.raises(state_migration.StateMigrationManifestError):
+        state_migration.require_vault_state_ready(vault)
+
+
 def _remove_descriptor_from_complete_manifest(
     vault: Path,
     descriptor_id: str,

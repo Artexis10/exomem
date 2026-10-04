@@ -18,7 +18,7 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -41,6 +41,7 @@ _ROLLBACK_OPERATIONS = frozenset({
 _LOCK_NAME = ".state-migration.lock"
 _COPY_CHUNK = 4 * 1024 * 1024
 _BOOTSTRAP_LOCK_TIMEOUT_SECONDS = 5.0
+_OPTIONAL_COMPATIBILITY_IDS = frozenset({"collections-store-v1"})
 
 
 class _MigrationLockBusy(TimeoutError):
@@ -109,6 +110,19 @@ class StateMigrationOfflineRequired(RuntimeError):
             "STATE_MIGRATION_OFFLINE_REQUIRED: machine-local state is not ready; "
             "stop every legacy writer and run `exomem maintain --migrate-state "
             "--offline` before starting Exomem"
+        )
+
+
+class StateCompatibilityUnsupported(StateMigrationOfflineRequired):
+    """Recorded canonical state cannot be used or discarded by this operation."""
+
+    code = "STATE_COMPATIBILITY_UNSUPPORTED"
+
+    def __init__(self) -> None:
+        RuntimeError.__init__(
+            self,
+            "STATE_COMPATIBILITY_UNSUPPORTED: recorded state compatibility requires "
+            "a compatible runtime; use that runtime to export before downgrading",
         )
 
 
@@ -208,6 +222,64 @@ def recorded_descriptor_ids(vault_root: Path) -> tuple[str, ...] | None:
     if not isinstance(descriptors, (list, tuple)):
         return None
     return tuple(str(entry) for entry in descriptors)
+
+
+def supported_state_compatibility_ids() -> tuple[str, ...]:
+    """Optional state formats this runtime can use, not merely parse."""
+
+    return ()
+
+
+def partition_state_descriptor_ids(
+    descriptors: Iterable[str],
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Separate physical families from the closed optional compatibility catalog."""
+
+    recorded = frozenset(descriptors)
+    return recorded - _OPTIONAL_COMPATIBILITY_IDS, recorded & _OPTIONAL_COMPATIBILITY_IDS
+
+
+def _require_supported_compatibility(optional: frozenset[str]) -> None:
+    if optional - set(supported_state_compatibility_ids()):
+        raise StateCompatibilityUnsupported()
+
+
+def record_collection_store_compatibility(
+    vault_root: Path, *, authority_check: Callable[[], bool],
+) -> None:
+    """Enroll the future store adapter's compatibility requirement durably.
+
+    The trusted caller must prove its mutation authority by returning True on
+    each check. It owns store custody, fencing, durable recovery intent and
+    old-process exclusion; this seam establishes none of those boundaries.
+    """
+
+    if not callable(authority_check):
+        raise StateMigrationOfflineRequired("collection-store authority is absent")
+    state_dir = state_paths.vault_state_dir(vault_root)
+    with _migration_lock(state_dir):
+        if authority_check() is not True:
+            raise StateMigrationOfflineRequired("collection-store authority is absent")
+        manifest = _load_manifest(state_dir, vault_root=vault_root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired("collection-store enrollment requires complete state")
+        physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
+        if (
+            physical != set(_descriptor_ids())
+            or manifest.get("governance_rollback") is not None
+            or manifest.get("governance_adoption") is not None
+        ):
+            raise StateMigrationOfflineRequired("collection-store enrollment requires ready families")
+        if authority_check() is not True:
+            raise StateMigrationOfflineRequired("collection-store authority was lost")
+        try:
+            if "collections-store-v1" not in optional:
+                manifest["descriptors"] = sorted([*manifest["descriptors"], "collections-store-v1"])
+                _write_manifest(state_dir, manifest)
+        finally:
+            # Publication can succeed before a final durability check raises.
+            with _RESOLUTION_LOCK:
+                _RESOLUTION_CACHE.pop(_cache_key(vault_root, state_dir), None)
 
 
 def scan_vault_state(vault_root: Path) -> dict[str, tuple[Path, ...]]:
@@ -337,7 +409,10 @@ def migration_status(vault_root: Path) -> str:
     if manifest is None:
         return "absent"
     state = str(manifest["state"])
-    if state == "complete" and tuple(manifest["descriptors"]) != _descriptor_ids():
+    physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
+    if optional - set(supported_state_compatibility_ids()):
+        return "unsupported"
+    if state == "complete" and physical != set(_descriptor_ids()):
         return "stale"
     return state
 
@@ -381,7 +456,9 @@ def require_vault_state_ready(
         raise StateMigrationOfflineRequired("governance rollback marker requires explicit adoption")
     if manifest["state"] != "complete":
         raise StateMigrationOfflineRequired("migration manifest is in progress")
-    if tuple(manifest["descriptors"]) != _descriptor_ids():
+    physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
+    _require_supported_compatibility(optional)
+    if physical != set(_descriptor_ids()):
         raise StateMigrationOfflineRequired("migration manifest descriptor set is stale")
     if scan_vault_state(vault_root):
         raise StateMigrationOfflineRequired("legacy in-vault state is still present")
@@ -540,8 +617,9 @@ def _resolve_locked(vault_root: Path, state_dir: Path) -> StateResolution:
     else:
         if manifest.get("governance_rollback") is not None or manifest.get("governance_adoption") is not None:
             raise StateMigrationOfflineRequired("rollback marker requires its governance coordinator")
-        recorded = tuple(manifest["descriptors"])
-        unknown = sorted(set(recorded) - set(descriptor_ids))
+        recorded, optional = partition_state_descriptor_ids(manifest["descriptors"])
+        _require_supported_compatibility(optional)
+        unknown = sorted(recorded - set(descriptor_ids))
         if unknown:
             raise StateMigrationManifestError(
                 _manifest_path(state_dir), "manifest names unknown descriptors"
@@ -564,7 +642,7 @@ def _resolve_locked(vault_root: Path, state_dir: Path) -> StateResolution:
                 families.setdefault(descriptor_id, {"status": "complete"})
             for descriptor_id in missing:
                 families[descriptor_id] = {"status": "pending"}
-            manifest["descriptors"] = list(descriptor_ids)
+            manifest["descriptors"] = sorted(set(descriptor_ids) | optional)
             manifest["state"] = "in-progress"
             _write_manifest(state_dir, manifest)
 
@@ -587,7 +665,8 @@ def _resolve_locked(vault_root: Path, state_dir: Path) -> StateResolution:
 
     manifest = _load_manifest(state_dir, vault_root=vault_root)
     assert manifest is not None
-    manifest["descriptors"] = list(descriptor_ids)
+    _, optional = partition_state_descriptor_ids(manifest["descriptors"])
+    manifest["descriptors"] = sorted(set(descriptor_ids) | optional)
     manifest["state"] = "complete"
     _write_manifest(state_dir, manifest)
     remaining = scan_vault_state(vault_root)
@@ -1038,8 +1117,9 @@ def _validate_manifest(
     families = payload.get("families")
     if not isinstance(families, dict):
         raise StateMigrationManifestError(path, "family states are invalid")
+    physical, _ = partition_state_descriptor_ids(descriptors)
     for descriptor_id, family in families.items():
-        if descriptor_id not in descriptors or not isinstance(family, dict):
+        if descriptor_id not in physical or not isinstance(family, dict):
             raise StateMigrationManifestError(path, "family descriptor is invalid")
         status_value = family.get("status")
         if status_value not in _FAMILY_STATES:
@@ -1056,7 +1136,7 @@ def _validate_manifest(
             ):
                 raise StateMigrationManifestError(path, "published member proof is invalid")
     if payload["state"] == "complete" and (
-        set(families) != set(descriptors)
+        set(families) != physical
         or any(family.get("status") != "complete" for family in families.values())
     ):
         raise StateMigrationManifestError(path, "complete manifest has incomplete families")
@@ -1543,6 +1623,9 @@ def _adopt_state_offline(vault_root: Path, keep: str) -> dict[str, Any]:
     if keep == "external":
         state_paths.ensure_vault_state_dir(vault_root)
         with _migration_lock(state_dir):
+            existing = _load_manifest(state_dir, vault_root=vault_root)
+            _, optional = partition_state_descriptor_ids(existing["descriptors"] if existing else ())
+            _require_supported_compatibility(optional)
             leftovers = scan_vault_state(vault_root)
             acquired = held_fs.acquire(vault_root)
             if not acquired.ok:
@@ -1562,12 +1645,17 @@ def _adopt_state_offline(vault_root: Path, keep: str) -> dict[str, Any]:
             }
             manifest["state"] = "complete"
             manifest["adopted"] = "external"
+            manifest["descriptors"] = sorted(set(manifest["descriptors"]) | optional)
             _write_manifest(state_dir, manifest)
     else:
         import shutil
 
         state_paths.ensure_vault_state_dir(vault_root)
         with _migration_lock(state_dir):
+            existing = _load_manifest(state_dir, vault_root=vault_root)
+            _, optional = partition_state_descriptor_ids(existing["descriptors"] if existing else ())
+            if optional:
+                raise StateCompatibilityUnsupported()
             with os.scandir(state_dir) as entries:
                 for entry in entries:
                     if entry.name == _LOCK_NAME:
