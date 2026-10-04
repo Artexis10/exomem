@@ -48,6 +48,20 @@ Required CI acceptance SHALL create the synthetic corpus through supported write
 - **WHEN** an oracle packet passes but real canonical entity or collection prerequisites are absent from the generated corpus
 - **THEN** product-path acceptance fails before a compiler success can be reported
 
+### Requirement: Ordinary-use acceptance retains the observable journey
+
+Required ordinary-use evidence SHALL include rich-turn capture/readback and publication followed by a useful fresh-session answer through the installed public interface. It SHALL retain actual activation arguments, returned packets, subsequent retrieval and the first answer, distinguishing delivery, selection, argument construction, compiler relevance and agent-use failures. The journey SHALL not depend on private harness hints or a reminder naming the expected memory. Multi-topic and negative/ambiguous controls SHALL preserve relevance, abstention and disclosure contracts. Existing observation tooling SHALL be reused. This evidence SHALL supplement, not replace or rescore, the unchanged deterministic corpus.
+
+#### Scenario: Correct call returns unhelpful context
+
+- **WHEN** the retained invocation is appropriate but its packet lacks task-relevant material
+- **THEN** the result is a compiler finding rather than proof that renaming or merging tools would fix it
+
+#### Scenario: Reconstructed incident lacks its original packet
+
+- **WHEN** a retained conversation is replayed without the original activation request and response
+- **THEN** the result is labelled a reconstructed reproduction, not verified diagnosis or closure of the original invocation
+
 ### Requirement: Derived references retain independent scoring identities
 
 Every distinct reference surfaced in a precision-bearing channel SHALL remain a

@@ -4,6 +4,40 @@ Compile substantive conversational episodes into complete, supported durable cha
 
 ## ADDED Requirements
 
+### Requirement: Multimodal originals and structured interpretations remain distinct
+
+The episode workflow SHALL accept supported unstructured and multimodal inputs without requiring a user-authored schema. It SHALL reuse the existing authorized preservation routes for original material and the existing typed writers for derived rows, claims, entities, relations, Notes, Records and expressed Planning. Interpretation SHALL remain the active agent's responsibility; deterministic validation SHALL NOT certify semantic truth. Source-bound derived effects SHALL retain attributable input/version bindings and available media/row locators, with absent or incomplete evidence explicit. Original bytes SHALL NOT be replaced by transcripts, extractions or corrected interpretations. A suggested declared type SHALL follow its existing schema authority. Multi-destination compilation SHALL preserve origin accounting and bounded partial recovery.
+
+#### Scenario: An image and dataset support different canonical destinations
+
+- **WHEN** an authorized mixed episode contains an image-derived observation, tabular measurements and a supported reusable conclusion
+- **THEN** the agent can preserve the available originals and route the derived effects through their appropriate public writers without requiring the user to model the input first
+- **AND** receipts/readback distinguish retained originals, derived interpretation, committed effects and pending publication
+- **AND** several projections of one source do not become independent corroboration
+
+#### Scenario: Only a transcript is available
+
+- **WHEN** an episode has a transcript but cannot access the corresponding audio or video
+- **THEN** the transcript may be retained and interpreted under its existing authority with the original media explicitly unavailable
+- **AND** neither product receipts nor evaluation reports claim the original media was preserved or interpreted
+
+### Requirement: Conversational correction updates knowledge without erasing provenance
+
+An authorized conversational correction SHALL revise affected episode candidates and canonical projections through current guarded writers while retaining original evidence and historical interpretation. The workflow SHALL distinguish interpretation errors, new events, disputed evidence and expressed changes of intent. It SHALL reconcile known affected effects/publications, report pending or unavailable work, and prevent a stale replay from restoring the corrected interpretation. Later query/context SHALL use current corrected knowledge or visibly qualify unavailable/pending currency. A reusable alias, schema or routing lesson SHALL be a separate scoped, evidence-bound and reversible proposal through its existing owner, not an automatic generalization from one correction. Routine permitted correction SHALL NOT require an extra confirmation or background learner.
+
+#### Scenario: The agent misread a unit in an image
+
+- **WHEN** the user corrects an image-derived value after it has reached a row and a compiled note
+- **THEN** the corrected value is applied through each affected writer with source and interpretation history preserved, or the unresolved effect is reported pending
+- **AND** after publication a fresh-session question uses the corrected value and cites its evidence
+- **AND** replaying the original extraction does not silently restore the old value
+
+#### Scenario: A local correction is not a universal convention
+
+- **WHEN** a user corrects one supplier, date, destination or entity reading
+- **THEN** that correction can take effect without installing a global alias or schema rule
+- **AND** any proposed reusable convention requires its own scoped evidence and authority and remains reversible
+
 ### Requirement: Episode decomposition precedes destination selection
 
 At a supported substantive episode boundary the active agent SHALL consider the original input for durable observations, outcomes, entity creation/hydration, facets, relationships, Records events, expressed Planning changes, Source/Evidence preservation and structural-routing candidates before choosing write destinations. It SHALL first partition independently reusable objects by retrieval question, subject/domain, temporal episode and epistemic role. A currently open note is an inspected alternative, not a preferred default. A meaningful stable cluster SHALL receive a canonical home when it answers a distinct future question or supports independent continuation, while details within an existing cluster SHALL remain in scope rather than manufacture a new destination. Each candidate SHALL be resolved against current knowledge and receive an attributable disposition. Capture sweep SHALL NOT be the sole trigger or completeness check. No-op, uncertain, rejected, deferred and awaiting-authority outcomes SHALL be legitimate and distinct.

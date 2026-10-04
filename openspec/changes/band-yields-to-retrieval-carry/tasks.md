@@ -6,3 +6,9 @@
 - [x] 1.4 Review round: red-first, an incidental note the carry names beside M1-de and M1-ru cost the gold and served nothing. Core-tier tests pin the name gate (a capitalised name is not asked about) and the build check (an unbuildable carried page keeps the band's page); the embeddings file adds the incidental notes and M1-de, M1-ru and M5-ja keep resolving.
 - [x] 1.5 Verified on bge-m3: the multilingual embeddings file passes 12/12 (T6 on equals off, M1-de, M1-ru and M5-ja keep resolving their gold, English set 18/18 with no exclusion); the real-compiler corpus stays 9/18 and continuity 4/4.
 - [ ] 1.6 After merge, sync the delta into `openspec/specs/context-activation/spec.md` and archive this change.
+
+## 2. Task-relevant carry refinement
+
+- [ ] 2.1 Red-first on actual packets: reject unrelated property-body-contact units and prose pointers on both evidence arms; preserve an independently named shared-word page occurrence and possessive authored page titles.
+- [ ] 2.2 Demote only the affected ordinary-word band candidate before branching, without empty-carry resurrection or interference from a separately resolved anchor; preserve the existing multilingual name/casing protection.
+- [ ] 2.3 Verify rich subject/category context versus an unrelated sibling, existing standing/body-only routes, unchanged corpus/scorer and scoped completion tests; obtain independent review and report remaining grammar/quality limits before ordinary delivery.

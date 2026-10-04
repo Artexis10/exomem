@@ -440,6 +440,8 @@ Blockers are duplicate or ambiguous identities, schema violations, unsupported v
 
 ### 12. Performance
 
+**Owner ruling, 2026-10-04 — S1 only.** The first NEW owner-only Records summary collection may pass its independent S1 release gate before full public inspect p95 <15 ms and guarded append p95 <20 ms are met. Continue measuring and reporting both as optimisation targets, with scope, actual paths, data size and environment; do not mark the parent performance gate passed or claim those latencies. The general phase/GA targets below remain unchanged. All S1 correctness, permissions, integrity, crash/retry, compatibility, publication/recovery, portability and other applicable bounds remain prerequisites. This allows the necessary parent foundation to be delivered dark before its full P1a phase gate; it does not authorize existing-collection migration, arbitrary-type rollout or renewed CPU tuning instead of the product outcomes.
+
 **Targets**, in the release acceptance harness, as extensions of `scripts/measure-records-append-latency.py` from #1457:
 
 | Operation | Target | Today on `main` (#1457) | Spike (storage engine only) |
