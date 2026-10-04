@@ -7,6 +7,11 @@ node-ip: {{ private_node_ip | to_json }}
 flannel-iface: {{ k3s_resolved_private_interface | to_json }}
 node-label:
   - {{ k3s_agent_node_label | to_json }}
+{% if k3s_agent_dedicated_cell %}
+  - {{ ("exomem.io/dedicated-cell=" ~ k3s_agent_dedicated_cell) | to_json }}
+node-taint:
+  - {{ ("exomem.io/dedicated-cell=" ~ k3s_agent_dedicated_cell ~ ":NoSchedule") | to_json }}
+{% endif %}
 protect-kernel-defaults: true
 kubelet-arg:
   - image-gc-high-threshold=75

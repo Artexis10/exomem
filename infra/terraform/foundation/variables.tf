@@ -93,22 +93,12 @@ variable "server_name" {
 }
 
 variable "server_type" {
-  # Still cx33, but no longer by choice: as of 2026-08-03 Hetzner lists no cx
-  # type as available or available_for_migration in ANY datacenter, EU or
-  # otherwise. The line is retired. Existing cx servers keep running; none can
-  # be placed or resized into. An attempted cx33 -> cx43 resize failed with
-  # `resource_unavailable` and left the node powered off until restarted.
-  #
-  # The alpha therefore sizes the fleet to this node instead of the node to the
-  # fleet: an embedding-capable cell measures 918 MiB peak at the CPU encode
-  # batch the runtime uses, so the capacity contract caps USER cells at four
-  # rather than six. The binding unknown is platform overhead, which is still
-  # estimated because the platform has never been installed.
-  #
-  # The successor families cost roughly four times as much for the same memory
-  # (cpx42 8/16 at EUR 69.49, ccx23 4/16 at EUR 85.99, against cx33's EUR 8.49),
-  # so moving is a pricing decision, not a maintenance one. Make it deliberately.
-  description = "Legacy shared-x86 Hetzner instance; the cx line is retired and cannot be re-placed."
+  # The existing alpha remains pinned. Historical same-location CX stock
+  # failures do not establish permanent retirement; verify current availability
+  # and an approved saved plan before any new server purchase or resize.
+  # Capacity acceptance uses measured warm platform/cell usage, not old cold
+  # memory estimates or volume-attachment counts alone.
+  description = "Existing shared-x86 alpha instance, intentionally pinned to CX33."
   type        = string
   default     = "cx33"
 
@@ -217,10 +207,20 @@ variable "k3s_agent_nodes" {
   # or removing an entry is the whole Terraform change; the module validates
   # addresses against the subnet and the two reserved node addresses. Run
   # infra/ansible/remove-agent.yml BEFORE removing an entry.
-  description = "K3s agent nodes keyed by a short DNS-label suffix: { private_ip, server_type }."
+  description = "K3s agent nodes keyed by a short DNS-label suffix: { private_ip, server_type, optional dedicated_cell_id }."
   type = map(object({
-    private_ip  = string
-    server_type = string
+    private_ip        = string
+    server_type       = string
+    dedicated_cell_id = optional(string, "")
   }))
   default = {}
+  validation {
+    condition = alltrue([
+      for node in values(var.k3s_agent_nodes) :
+      node.dedicated_cell_id == "" ||
+      (length(node.dedicated_cell_id) == 16 && can(regex("^[a-z2-7]{16}$", node.dedicated_cell_id)))
+    ])
+    error_message = "dedicated_cell_id must be empty or an exact sixteen-character lowercase base32 cell identifier."
+  }
+
 }

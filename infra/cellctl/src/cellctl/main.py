@@ -90,6 +90,9 @@ def build_cluster_config() -> ClusterConfig:
     artifact_cell_ids = json.loads(os.environ.get("CELLCTL_ARTIFACT_BROKER_CELL_IDS", "[]"))
     if not isinstance(artifact_cell_ids, list):
         raise ValueError("artifact broker cell IDs must be a JSON array")
+    dedicated_cell_ids = json.loads(os.environ.get("CELLCTL_DEDICATED_CELL_IDS", "[]"))
+    if not isinstance(dedicated_cell_ids, list):
+        raise ValueError("dedicated cell IDs must be a JSON array")
     # A bad chart value fails cellctl at startup, not on every render.
     check_model_env(model_env)
     return ClusterConfig(
@@ -102,6 +105,7 @@ def build_cluster_config() -> ClusterConfig:
             memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", "3Gi"),
         ),
         model_env=model_env,
+        dedicated_cell_ids=tuple(dedicated_cell_ids),
         artifact_broker_url=os.environ.get("CELLCTL_ARTIFACT_BROKER_URL", ""),
         artifact_broker_cell_ids=tuple(artifact_cell_ids),
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),

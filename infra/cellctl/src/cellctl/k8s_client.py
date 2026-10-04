@@ -397,9 +397,9 @@ class ClusterClient:
 
     def capacity_inputs(
         self, *, csi_driver: str
-    ) -> tuple[dict[str, int | None], dict[str, int], dict[str, int]]:
+    ) -> tuple[dict[str, int | None], dict[str, int], dict[str, int], set[str]]:
         """Returns (allocatable_by_node, attachments_used_by_node,
-        non_cell_attachments_by_node), all keyed by Kubernetes node name."""
+        non_cell_attachments_by_node, reserved_nodes), keyed by Kubernetes node name."""
 
         # Read CSINodes as raw JSON: a node with no CSI driver at all (K3s
         # without Hetzner CSI) serves `spec.drivers: null`, which the client's
@@ -412,6 +412,16 @@ class ClusterClient:
                 if driver_info.get("name") == csi_driver:
                     allocatable_count = (driver_info.get("allocatable") or {}).get("count")
             allocatable[csi_node["metadata"]["name"]] = allocatable_count
+
+        # Observe Nodes after CSI coordinates: registration can otherwise add
+        # a reserved CSINode between reads and briefly inflate general slots.
+        # Unknown Nodes also contribute zero slots until positively observed
+        # unreserved. Existing attachment counts remain visible below.
+        general_nodes = {
+            node.metadata.name for node in self._core.list_node().items
+            if "exomem.io/dedicated-cell" not in (node.metadata.labels or {})
+            and not any(taint.key == "exomem.io/dedicated-cell" for taint in (node.spec.taints or []))
+        }
 
         pv_namespace: dict[str, str] = {}
         for pv in self._core.list_persistent_volume().items:
@@ -436,7 +446,8 @@ class ClusterClient:
             if namespace is None or not namespace.startswith(NAMESPACE_PREFIX):
                 non_cell_attachments[node] = non_cell_attachments.get(node, 0) + 1
 
-        return allocatable, attachments_used, non_cell_attachments
+        reserved_nodes = (set(allocatable) | set(attachments_used)) - general_nodes
+        return allocatable, attachments_used, non_cell_attachments, reserved_nodes
 
 
 def _pod_ready(pod) -> bool:

@@ -276,8 +276,17 @@ class ClusterConfig:
     isolation_binding_name: str = DEFAULT_ISOLATION_BINDING_NAME
     artifact_broker_url: str = ""
     artifact_broker_cell_ids: tuple[str, ...] = ()
+    dedicated_cell_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        cell_ids = self.dedicated_cell_ids
+        if (
+            not isinstance(cell_ids, tuple)
+            or len(cell_ids) > 1024
+            or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
+            or len(set(cell_ids)) != len(cell_ids)
+        ):
+            raise ValueError("dedicated placement requires at most 1024 unique base32 cell IDs")
         check_artifact_broker_url(self.artifact_broker_url)
         cell_ids = self.artifact_broker_cell_ids
         if (
@@ -310,7 +319,7 @@ class ClusterGateway:
     def list_cell_namespaces(self) -> dict[str, str]: ...  # pragma: no cover
     def capacity_inputs(
         self, *, csi_driver: str
-    ) -> tuple[dict[str, int | None], dict[str, int], dict[str, int]]: ...  # pragma: no cover
+    ) -> tuple[dict[str, int | None], dict[str, int], dict[str, int], set[str]]: ...  # pragma: no cover
 
 
 def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
@@ -643,6 +652,8 @@ def _compute_render_digest(row: CellRow, cluster_config: ClusterConfig, secrets_
         "backup_key_version": row.backup_key_version,
         "b2_key_version": row.b2_key_version,
     }
+    if row.cell_id in cluster_config.dedicated_cell_ids:
+        material["dedicated_node"] = True
     endpoint = cluster_config.artifact_broker_for_cell(row.cell_id)
     if endpoint:
         material["artifact_broker_url"] = endpoint
@@ -891,7 +902,7 @@ async def reconcile_once(
     # the previous `exomem_cloud_capacity` rows in place, and must never turn
     # a pass whose rows all succeeded into a failed one.
     try:
-        allocatable, attachments_used, non_cell_attachments = cluster.capacity_inputs(
+        allocatable, attachments_used, non_cell_attachments, reserved_nodes = cluster.capacity_inputs(
             csi_driver=cluster_config.capacity.csi_driver
         )
     except Exception as error:  # noqa: BLE001 - capacity must not take the pass down
@@ -910,7 +921,7 @@ async def reconcile_once(
         await db.write_capacity(
             connection,
             node=node,
-            cell_slots=capacity.cell_slots,
+            cell_slots=0 if node in reserved_nodes else capacity.cell_slots,
             attachments_used=capacity.attachments_used,
             observed_at=now,
         )
@@ -1086,6 +1097,7 @@ async def _reconcile_row(
             storage_gib=row.storage_gib,
             resources=cluster_config.resources,
             model_env=cluster_config.model_env or {},
+            dedicated_node=row.cell_id in cluster_config.dedicated_cell_ids,
             hold_kind=decision.hold_kind,
             hold_started_at=decision.hold_started_at.isoformat() if decision.hold_started_at else None,
             previous_image=decision.previous_image,

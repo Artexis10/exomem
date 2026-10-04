@@ -23,6 +23,7 @@ k3s_service_name: "{{ 'k3s-agent' if k3s_node_role == 'agent' else 'k3s' }}"
 # is inventoried; see tasks/validate.yml.
 k3s_agent_token: ""
 k3s_agent_node_label: exomem.io/node-pool=agent
+k3s_agent_dedicated_cell: ""
 
 # A join completes only once the node's CSINode publishes an attachment
 # limit for this driver: that count is what cellctl turns into cell_slots.

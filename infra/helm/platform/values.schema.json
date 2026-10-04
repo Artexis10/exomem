@@ -223,6 +223,10 @@
       "additionalProperties": false,
       "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2AccountId", "b2Endpoint", "initDeadlineMinutes", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2KeyManagementSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
+        "dedicatedCellIds": {
+          "type": "array", "maxItems": 1024, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}
+        },
         "enabled": {"type": "boolean"},
         "image": {"type": "string"},
         "cellImageRepository": {"type": "string"},

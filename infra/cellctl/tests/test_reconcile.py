@@ -96,8 +96,8 @@ class FakeClusterGateway:
 
     def capacity_inputs(
         self, *, csi_driver: str
-    ) -> tuple[dict[str, int | None], dict[str, int], dict[str, int]]:
-        return {}, {}, {}
+    ) -> tuple[dict[str, int | None], dict[str, int], dict[str, int], set[str]]:
+        return {}, {}, {}, set()
 
 
 def _secrets_config() -> reconcile.SecretsConfig:
@@ -843,7 +843,7 @@ class _RaisingObserveGateway(FakeClusterGateway):
 
     def capacity_inputs(self, *, csi_driver: str):
         self.capacity_written = True
-        return {"node-1": 10}, {"node-1": 2}, {"node-1": 0}
+        return {"node-1": 10}, {"node-1": 2}, {"node-1": 0}, set()
 
 
 async def test_one_rows_observe_failure_does_not_abort_the_other_rows_or_capacity(
@@ -2244,9 +2244,10 @@ class _NodesGateway(FakeClusterGateway):
     def __init__(self) -> None:
         super().__init__()
         self.allocatable: dict[str, int | None] = {}
+        self.reserved_nodes: set[str] = set()
 
     def capacity_inputs(self, *, csi_driver: str):
-        return dict(self.allocatable), {node: 1 for node in self.allocatable}, {}
+        return dict(self.allocatable), {node: 1 for node in self.allocatable}, {}, self.reserved_nodes
 
 
 async def test_a_vanished_node_gets_zero_slots_and_a_rejoining_node_its_count_back(cell_db: CellDatabase) -> None:
@@ -2326,7 +2327,7 @@ class _LeakyGateway(FakeClusterGateway):
     def capacity_inputs(self, *, csi_driver: str):
         if self.where == "capacity":
             raise _leaky_api_exception()
-        return {}, {}, {}
+        return {}, {}, {}, set()
 
     def list_cell_namespaces(self) -> dict[str, str]:
         if self.where == "orphans":
@@ -2792,3 +2793,27 @@ def test_the_rollout_gate_reads_readiness_observed_this_pass() -> None:
     not_ready = dataclasses.replace(ready, pod_ready=False, ready_pod_image=None)
     # The row still says ready from an earlier pass; the pod does not.
     assert not should_attempt_upgrade(row, RolloutRow(), not_ready, IMAGE_B, now=now)
+
+
+def test_dedicated_selection_changes_only_the_selected_render_digest() -> None:
+    row = CellRow(cell_id="aaaaaaaaaaaaaaaa", tenant_id=tenant_uuid("a"), storage_gib=10,
+                  rollout_priority=1, desired_state="running", desired_image=None, generation=1)
+    baseline = reconcile._compute_render_digest(row, _cluster_config(), _secrets_config())
+    other = dataclasses.replace(_cluster_config(), dedicated_cell_ids=("bbbbbbbbbbbbbbbb",))
+    selected = dataclasses.replace(_cluster_config(), dedicated_cell_ids=(row.cell_id,))
+    assert reconcile._compute_render_digest(row, other, _secrets_config()) == baseline
+    assert reconcile._compute_render_digest(row, selected, _secrets_config()) != baseline
+
+
+async def test_reserved_node_publishes_zero_general_slots_with_real_attachment_count(cell_db: CellDatabase) -> None:
+    cluster = _NodesGateway()
+    cluster.allocatable = {"shared": 16, "reserved": 16}
+    cluster.reserved_nodes = {"reserved"}
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        await _pass(connection, cluster, datetime(2026, 1, 1, 12, tzinfo=UTC))
+        rows = await connection.fetch("SELECT node, cell_slots, attachments_used FROM exomem_cloud_capacity")
+        assert {r["node"]: (r["cell_slots"], r["attachments_used"]) for r in rows} == {
+            "shared": (16, 1), "reserved": (0, 1)}
+    finally:
+        await connection.close()

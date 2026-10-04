@@ -1251,6 +1251,77 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     print("[3.10] all scenarios passed")
 
 
+def test_dedicated_cell_admission_allows_only_own_exact_pair(k3s: K3sCluster) -> None:
+    from cellctl.manifests import (
+        CellManifestSpec,
+        render_backup_job,
+        render_namespace,
+        render_network_policies,
+        render_restore_job,
+        render_statefulset,
+    )
+
+    selected_id, other_id = _cell_id(), _cell_id()
+    documents = _render_platform("templates/cellctl.yaml", settings=(
+        "--set-json", f'cellctl.dedicatedCellIds=["{selected_id}"]',
+        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+    ))
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
+    selected = CellManifestSpec(cell_id=selected_id, image=STANDIN_REPOSITORY + "@sha256:" + "a" * 64,
+                                replicas=0, read_only=False, dedicated_node=True,
+                                hold_started_at="2026-01-01T00:00:00+00:00")
+    other = CellManifestSpec(cell_id=other_id, image=selected.image, replicas=0, read_only=False,
+                            dedicated_node=True)
+    for spec in (selected, other):
+        _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
+
+    def dry_run(document: dict):
+        return _kubectl(k3s.name, ["create", "--dry-run=server", "--filename=-",
+                                  "--as=system:serviceaccount:exomem-cloud:cellctl"],
+                        documents=[document], check=False)
+
+    def policy_ready():
+        policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy",
+                                              "exomem-cellctl-scope", "-o=json"]).stdout)
+        status = policy.get("status", {})
+        if status.get("observedGeneration") != policy["metadata"]["generation"]:
+            return False
+        assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        # Type-check status can precede enforcement of an updated policy.
+        # Probe its exact allowed pair before exercising unchanged denials.
+        return dry_run(render_statefulset(selected)).returncode == 0
+
+    _wait_for(policy_ready, timeout=30, description="dedicated placement policy admission")
+    refused_other = dry_run(render_statefulset(other))
+    assert "exomem-cellctl-scope" in refused_other.stderr, refused_other.stderr
+    for document in (
+        render_statefulset(selected),
+        render_backup_job(selected, bucket_name="bucket", endpoint="https://s3.example"),
+        render_restore_job(selected, bucket_name="bucket", endpoint="https://s3.example", snapshot_id="a" * 64),
+    ):
+        admitted = dry_run(document)
+        assert admitted.returncode == 0, admitted.stderr
+        absent = copy.deepcopy(document)
+        absent["spec"]["template"]["spec"].pop("nodeSelector")
+        absent["spec"]["template"]["spec"].pop("tolerations")
+        assert dry_run(absent).returncode == 0
+
+    for mutate in (
+        lambda pod: pod["nodeSelector"].update({"extra": "value"}),
+        lambda pod: pod["nodeSelector"].update({"exomem.io/dedicated-cell": other_id}),
+        lambda pod: pod["tolerations"].append({"operator": "Exists"}),
+        lambda pod: pod["tolerations"][0].update(value=other_id),
+        lambda pod: pod["tolerations"][0].update(operator="Exists", value=""),
+        lambda pod: pod.pop("tolerations"),
+        lambda pod: pod.update(affinity={}),
+        lambda pod: pod.update(nodeName=k3s.name),
+    ):
+        attack = render_statefulset(selected)
+        mutate(attack["spec"]["template"]["spec"])
+        denied = dry_run(attack)
+        assert denied.returncode != 0 and "exomem-cellctl-scope" in denied.stderr, denied.stderr
+
+
 # === Artifact transport: exact optional admission and a reviewer-only edge. ===
 
 

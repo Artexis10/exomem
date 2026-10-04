@@ -25,6 +25,7 @@ The existing CPU ONNX recall encoder is a pure-substrate ranking model: this cha
 
 - `resource-governance`: Scope workstation residency requirements independently of an explicit Cloud service profile and report effective policy truthfully.
 - `live-index-freshness`: Prompt in-service consumption of existing durable semantic debt under the Cloud profile without weakening publication or recovery fences.
+- `cloud-node-pool`: Declare a selected-cell agent reservation through Terraform and generated Ansible inventory, permit an 8 GiB x86 agent only for that reservation, and exclude reserved nodes from general admission/removal capacity.
 
 ## Impact
 
