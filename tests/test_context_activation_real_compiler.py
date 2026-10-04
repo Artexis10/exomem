@@ -117,8 +117,9 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
         "expected status 'resolved', observed 'unresolved'",
         "gold recall 0.50 below the 0.9 floor",
     ),
-    # The carry reaches an ordinary note on temperature conversions.
-    "T6": ("twin surfaced a ref outside its own gold", "precision 0.00 below the 0.8 floor"),
+    # Scoped carry omits unrelated settings, but the ordinary unresolved menu
+    # retains the partial equipment candidate, which the scorer counts as poison.
+    "T6": ("1 poison anchor(s) surfaced",),
     # The carried page now serves its current-state unit (a carried page is
     # read through the lenses its own units answer), so the gold page arrives
     # and the required fact is present; the raw score still reads a carried
