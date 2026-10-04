@@ -13,11 +13,12 @@ negative control all ran on the Cloud node as written.
 Exomem Cloud has three cluster identities. Use the least one that does the job.
 
 - **Everyday operator (`exomem-operator`).** The default for every procedure.
-  It reads workload status, events, endpoint and isolation-policy metadata,
+  It reads workload status, current node/pod CPU and memory usage, events, endpoint and isolation-policy metadata,
   and the content-free logs cells and controllers emit. It cannot read any Secret, and it cannot exec, attach,
   port-forward, proxy or add an ephemeral container. The platform chart's
   `exomem-operator-read` ClusterRole grants this to group `exomem:operators`.
   The certificate lasts 30 days.
+
 - **Deploy (the K3s admin kubeconfig, `/etc/rancher/k3s/k3s.yaml`).** Root
   only. Use it for scripted Helm and apply procedures, and for approving the
   CSRs below. Those procedures name it explicitly; nothing uses it by default.
@@ -26,6 +27,10 @@ Exomem Cloud has three cluster identities. Use the least one that does the job.
   `cluster-admin`, and cell admission admits connect subresources only for this
   group. No file for it outlives the task, and client certificates cannot be
   revoked, so the one-hour expiry is the control.
+
+The metrics API grant is read-only (`get`/`list` for `metrics.k8s.io` nodes and
+pods). Use its observations with declared reservations for capacity checks;
+one sample reports current usage, not a warmed-workload or lifetime peak.
 
 Every block runs on the node as root with shell tracing off. `kubectl` is not
 on the node's PATH, so the blocks use `k3s kubectl`. A private key never

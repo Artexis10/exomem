@@ -928,7 +928,10 @@ def test_the_everyday_operator_reads_status_events_and_logs_but_no_secret_or_con
         ("networking.k8s.io", "networkpolicies"),
         ("admissionregistration.k8s.io", "validatingadmissionpolicies"),
         ("admissionregistration.k8s.io", "validatingadmissionpolicybindings"),
+        ("metrics.k8s.io", "nodes"), ("metrics.k8s.io", "pods"),
     }
+    for resource in ("nodes", "pods"):
+        assert granted[("metrics.k8s.io", resource)] == {"get", "list"}
 
     (binding,) = _group_bindings(documents, OPERATOR_GROUP)
     assert binding["kind"] == "ClusterRoleBinding"
