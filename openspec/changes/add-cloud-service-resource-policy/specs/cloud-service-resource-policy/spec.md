@@ -22,6 +22,12 @@ Cloud SHALL support explicit `legacy` and `service-v1` deployment profiles. A mi
 - **THEN** that cell resolves the service policy while cells on legacy deployments retain their previous policy
 - **AND** tenant configuration cannot switch or override the service policy
 
+#### Scenario: Reviewer canary precedes owner adoption
+- **WHEN** the operator separately authorizes one reviewer-only service-profile canary on existing infrastructure before dedicated owner adoption
+- **THEN** it preserves its PVC, placement and tenant resources, shared-node memory controls and unselected cell images
+- **AND** it requires its own verified identity, backup, source/preferences, measured warmed capacity, lifetime peak and workflow outcomes under the existing numeric gates
+- **AND** its evidence governs that reviewer deployment only, leaving owner acceptance, fleet promotion and friend-admission gates open
+
 #### Scenario: Invalid deployment selection
 - **WHEN** the selection is unknown or `service-v1` is selected outside valid Cloud deployment
 - **THEN** startup reports a configuration error without echoing credentials or arbitrary supplied values
