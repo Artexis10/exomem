@@ -52,6 +52,9 @@ def test_optional_conversation_is_relevant_context_not_full_history() -> None:
     doc = commands.op_activate_context.__doc__ or ""
     assert "only relevant" in doc
     assert "never full history" in doc
+    # Clients may review initialize instructions without expanding the tool.
+    assert "relevant excerpts" in server.SERVER_INSTRUCTIONS
+    assert "never full history" in server.SERVER_INSTRUCTIONS
 
 
 ENGAGEMENT = SCAFFOLD_SKILL.parent / "references" / "engagement.md"
