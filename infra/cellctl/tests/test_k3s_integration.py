@@ -1280,16 +1280,18 @@ def test_dedicated_cell_admission_allows_only_own_exact_pair(k3s: K3sCluster) ->
                                   "--as=system:serviceaccount:exomem-cloud:cellctl"],
                         documents=[document], check=False)
 
-    def type_checked():
+    def policy_ready():
         policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy",
                                               "exomem-cellctl-scope", "-o=json"]).stdout)
         status = policy.get("status", {})
         if status.get("observedGeneration") != policy["metadata"]["generation"]:
             return False
         assert not status.get("typeChecking", {}).get("expressionWarnings"), status
-        return True
+        # Type-check status can precede enforcement of an updated policy.
+        # Probe its exact allowed pair before exercising unchanged denials.
+        return dry_run(render_statefulset(selected)).returncode == 0
 
-    _wait_for(type_checked, timeout=30, description="dedicated placement policy type check")
+    _wait_for(policy_ready, timeout=30, description="dedicated placement policy admission")
     refused_other = dry_run(render_statefulset(other))
     assert "exomem-cellctl-scope" in refused_other.stderr, refused_other.stderr
     for document in (
