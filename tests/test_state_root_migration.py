@@ -1943,6 +1943,61 @@ def test_fresh_deployment_admits_without_offline_migration(tmp_path: Path) -> No
     assert state_migration.require_vault_state_ready(vault) == resolution
 
 
+@pytest.mark.parametrize("existing_state", [False, True])
+def test_mixed_marker_requires_support_before_bootstrap_or_cached_admission(
+    tmp_path: Path, existing_state: bool,
+) -> None:
+    from exomem import state_migration, state_paths
+    from exomem.collection_store import authority
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    state_dir = state_paths.vault_state_dir(vault)
+    if existing_state:
+        state_migration.require_vault_state_ready(vault)
+    sid = "123e4567-e89b-42d3-a456-426614174000"
+    marker = authority.marker_path(vault)
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({
+        "version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
+        "authority_epoch": 1,
+        "collections": [{"collection_id": "123e4567-e89b-42d3-a456-426614174001",
+                         "manifest_path": "Knowledge Base/Records/Work/_collection.md",
+                         "authority": "store", "store_id": sid}],
+        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
+    }))
+    before = {path.name: path.read_bytes() for path in state_dir.iterdir()} if existing_state else {}
+
+    with pytest.raises(state_migration.StateCompatibilityUnsupported):
+        state_migration.require_vault_state_ready(vault)
+
+    assert state_migration.supported_state_compatibility_ids() == ()
+    if existing_state:
+        assert {path.name: path.read_bytes() for path in state_dir.iterdir()} == before
+        assert "collections-store-v1" not in state_migration.recorded_descriptor_ids(vault)
+    else:
+        assert not state_dir.exists()
+        assert state_migration.recorded_descriptor_ids(vault) is None
+
+
+def test_malformed_mixed_marker_refuses_without_bootstrapping(tmp_path: Path) -> None:
+    from exomem import state_migration, state_paths
+    from exomem.collection_store import authority
+    from exomem.collection_store.connection import CollectionStoreError
+
+    vault = tmp_path / "vault"
+    marker = authority.marker_path(vault)
+    marker.parent.mkdir(parents=True)
+    marker.write_bytes(b"{invalid")
+
+    with pytest.raises(CollectionStoreError) as error:
+        state_migration.require_vault_state_ready(vault)
+
+    assert error.value.code == "COLLECTION_STORE_MARKER_CONFLICT"
+    assert marker.read_bytes() == b"{invalid"
+    assert not state_paths.vault_state_dir(vault).exists()
+
+
 def test_admission_still_refuses_legacy_vault_state_without_manifest(tmp_path: Path) -> None:
     """Legacy in-vault bytes without a manifest keep the offline-required refusal."""
     from exomem import state_migration

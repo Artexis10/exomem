@@ -99,6 +99,13 @@ def _raw_zip(
         ("Knowledge Base/log.md", "canonical"),
         ("Knowledge Base/_Schema/project-keys.yaml", "canonical"),
         ("Knowledge Base/_trash/2026-07-12/note.md", "canonical"),
+        ("Knowledge Base/_Collections/mode.json", "canonical"),
+        ("Knowledge Base/_Collections/collections.sqlite", "canonical"),
+        ("Knowledge Base/_Collections/collections.sqlite-wal", "disposable-runtime"),
+        ("Knowledge Base/_Collections/.exomem-collection-replica-work-" + "a" * 32
+         + "/shared-predecessor", "disposable-runtime"),
+        ("Knowledge Base/_Collections/unknown.json", "disposable-runtime"),
+        ("Knowledge Base/collections.sqlite", "disposable-runtime"),
         ("Knowledge Base/.review-state.json", "portable-derived"),
         (
             "Knowledge Base/.graph-commit-receipts/0123456789abcdef01234567.json",

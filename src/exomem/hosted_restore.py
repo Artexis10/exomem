@@ -751,7 +751,7 @@ def _publish_staging(
     staging: Path,
     manifest: Mapping[str, Any],
 ) -> None:
-    _require_restore_admission(binding.vault_root)
+    _require_restore_admission(binding.vault_root, restored_root=staging)
     target = binding.vault_root
     if staging.parent != target.parent:
         raise OperatorFailure("HOSTED_RESTORE_TARGET_CONFLICT")
@@ -780,9 +780,21 @@ def _publish_staging(
     _verify_published(binding, manifest)
 
 
-def _require_restore_admission(vault_root: Path) -> None:
+def _require_restore_admission(vault_root: Path, *, restored_root: Path | None = None) -> None:
+    from . import held_fs, state_migration
+    from .collection_store import authority
+    from .collection_store.connection import CollectionStoreError
     from .vocabulary_admission import VocabularyAdmissionError, require_restore_admission
 
+    marker_root = vault_root if restored_root is None else restored_root
+    try:
+        if os.path.lexists(marker_root):
+            state_migration._require_supported_compatibility(
+                authority.required_state_compatibility_ids(marker_root)
+            )
+    except (state_migration.StateMigrationOfflineRequired, CollectionStoreError,
+            held_fs.HeldFsError, OSError) as exc:
+        raise OperatorFailure("HOSTED_RESTORE_TARGET_CONFLICT") from exc
     try:
         require_restore_admission(vault_root)
     except VocabularyAdmissionError as exc:
