@@ -285,3 +285,19 @@ def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite
         conn.close()
         raise
     return conn
+
+
+def open_query_reader(path: Path, *, busy_timeout_ms: int = 200) -> sqlite3.Connection:
+    """A dedicated read-only main database with private, disk-backed TEMP."""
+    # This is a new connection, never a pooled reader whose protection changes.
+    conn = open_reader(path, busy_timeout_ms=busy_timeout_ms)
+    try:
+        conn.execute("PRAGMA query_only=OFF")
+        conn.execute("PRAGMA cache_size=-8192")
+        conn.execute("PRAGMA mmap_size=0")
+        conn.execute("PRAGMA temp_store=FILE")
+        conn.execute("PRAGMA temp.cache_size=-1024")
+    except BaseException:
+        conn.close()
+        raise
+    return conn
