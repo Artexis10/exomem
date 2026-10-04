@@ -11,7 +11,7 @@ import re
 import stat
 import unicodedata
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Container, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -1002,6 +1002,12 @@ class SavedView:
 def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
     """Parse one explicit collection contract without touching canonical items."""
     root = Path(vault_root)
+    from .collection_store.preview import selected_writer
+
+    writer = selected_writer(root, path)
+    if writer is not None:
+        with writer.read_collection(path) as manifest:
+            return manifest
     manifest_path, rel = _safe_existing_path(root, path)
     if manifest_path.name != "_collection.md":
         raise CollectionError(
@@ -1177,19 +1183,34 @@ def discover_collections_with_errors(
             "INVALID_DISCOVERY_LIMIT", "discovery limit is outside supported bounds"
         )
     root = Path(vault_root)
+    from .collection_store import authority
+    from .collection_store.preview import bound_writer
+
+    writer = bound_writer(root)
+    marker = authority.routing_marker(writer) if writer is not None else None
+    if writer is not None:
+        stored, store_errors = writer.discover_collections(
+            authorize_path=authorize_path, max_candidates=max_candidates,
+            max_raw_candidates=max_raw_candidates,
+        )
+        if marker is None:
+            return stored, store_errors
+    else:
+        stored, store_errors = (), ()
     kb = vault.kb_root(root)
     if not kb.is_dir():
-        return (), ()
+        return stored, store_errors
     authorize = authorize_path or (lambda _path: True)
-    manifests: list[CollectionManifest] = []
-    unreadable: list[UnreadableManifest] = []
+    manifests: list[CollectionManifest] = list(stored)
+    unreadable: list[UnreadableManifest] = list(store_errors)
     candidates = []
     for candidate in kb.rglob("_collection.md"):
         safe = _safe_candidate_rel(root, candidate)
-        if safe is None or not authorize(safe[1]):
+        if (safe is None or (marker is not None and authority.selected_entry(root, marker, safe[1]) is not None)
+                or not authorize(safe[1])):
             continue
         candidates.append(candidate)
-        if len(candidates) > max_raw_candidates:
+        if len(candidates) + len(stored) + len(store_errors) > max_raw_candidates:
             raise CollectionError(
                 "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
             )
@@ -1264,9 +1285,25 @@ def resolve_collection(
     raw = str(selector).strip()
     if not raw:
         raise CollectionError("INVALID_COLLECTION_REFERENCE", "collection selector is required")
+    from .collection_store.preview import selected_writer
+
+    writer = selected_writer(vault_root, selector)
+    if writer is not None:
+        with writer.read_collection(selector) as manifest:
+            if authorize_path is not None and not authorize_path(manifest.path):
+                raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+            return manifest
     authorize = authorize_path or (lambda _path: True)
     identity = memory_refs.parse_memory_ref(raw) or memory_refs.normalize_id(raw)
     if identity is not None:
+        from .collection_store import authority
+        from .collection_store.preview import bound_writer
+
+        binding = bound_writer(vault_root)
+        marker = authority.routing_marker(binding) if binding is not None else None
+        if marker is not None:
+            allowed = authorize
+            authorize = lambda path: authority.selected_entry(vault_root, marker, path) is None and allowed(path)
         matches = [
             manifest
             for manifest in discover_collections(
@@ -1414,8 +1451,9 @@ def render_item_path(
     item_key: str,
     *,
     occupied_paths: Iterable[str] = (),
+    occupied_path_keys: Container[str] | None = None,
 ) -> str:
-    """Render one deterministic human path without changing item identity."""
+    """Render one human path, optionally using trusted normalized occupancy."""
     recipe = manifest.item_filename
     if recipe is None:
         raise CollectionError("ITEM_FILENAME_NOT_CONFIGURED", "item_filename is not configured")
@@ -1440,20 +1478,35 @@ def render_item_path(
             "item_filename values do not form a portable human filename",
         )
 
-    occupied = {_portable_path_key(path) for path in occupied_paths}
+    occupied = occupied_path_keys if occupied_path_keys is not None else {
+        _portable_path_key(path) for path in occupied_paths
+    }
 
-    def candidate(candidate_stem: str) -> str:
-        relative = f"{manifest.storage.source.rstrip('/')}/{candidate_stem}.md"
-        if len(relative.encode("utf-8")) > _MAX_PATH_BYTES:
-            raise CollectionError(
-                "UNRENDERABLE_ITEM_FILENAME", "rendered item path exceeds the path byte limit"
-            )
-        return relative
+    initial = _item_path_candidate(manifest, stem)
+    return disambiguate_item_path(manifest, initial, item_key, occupied_path_keys=occupied)
 
-    initial = candidate(stem)
-    if _portable_path_key(initial) not in occupied:
+
+def _item_path_candidate(manifest: CollectionManifest, stem: str) -> str:
+    relative = f"{manifest.storage.source.rstrip('/')}/{stem}.md"
+    if len(relative.encode("utf-8")) > _MAX_PATH_BYTES:
+        raise CollectionError(
+            "UNRENDERABLE_ITEM_FILENAME", "rendered item path exceeds the path byte limit"
+        )
+    return relative
+
+
+def disambiguate_item_path(
+    manifest: CollectionManifest,
+    initial: str,
+    item_key: str,
+    *,
+    occupied_path_keys: Container[str],
+) -> str:
+    """Disambiguate an already-rendered path against trusted normalized occupancy."""
+    if _portable_path_key(initial) not in occupied_path_keys:
         return initial
 
+    stem = initial.rsplit("/", 1)[-1].removesuffix(".md")
     normalized_id = memory_refs.normalize_id(item_key)
     identity = (
         normalized_id.replace("-", "")
@@ -1468,8 +1521,8 @@ def render_item_path(
         )
         if not bounded:
             break
-        rendered = candidate(f"{bounded} — {suffix}")
-        if _portable_path_key(rendered) not in occupied:
+        rendered = _item_path_candidate(manifest, f"{bounded} — {suffix}")
+        if _portable_path_key(rendered) not in occupied_path_keys:
             return rendered
     raise CollectionError(
         "ITEM_FILENAME_COLLISION", "item_filename cannot be disambiguated portably"

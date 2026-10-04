@@ -94,6 +94,8 @@ from typing import Any, Literal
 
 import yaml
 
+from .collection_store.preview import canonical_read, selected_writer
+
 from . import (
     access,
     contradiction_stance,
@@ -4163,6 +4165,7 @@ def _release_filter(vault_root: Path) -> Any:
     return memoized
 
 
+@canonical_read
 def _outcome_bindings(
     vault_root: Path, *, authorize: Any = None
 ) -> tuple[list[_OutcomeBinding], list[dict[str, Any]]]:
@@ -4297,6 +4300,16 @@ def declared_bindings(vault_root: Path, manifest: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for link in getattr(getattr(manifest, "links", None), "plans", ()) or ():
         if not link.join:
+            continue
+        writer = selected_writer(vault_root, str(link.reference))
+        if writer is not None:
+            from . import due_state
+
+            planning = due_state._load_projection_manifest(vault_root, str(link.reference))
+            if planning is not None and planning.semantic_profile == "planning" and all(
+                str(name) in planning.schema.fields for name in link.join.values()
+            ):
+                rows.append({"planning": planning.path, "join": dict(link.join)})
             continue
         memory_id = memory_refs.parse_memory_ref(str(link.reference))
         target: str | None = None
@@ -5337,6 +5350,7 @@ def _unreflected_finding(
     )
 
 
+@canonical_read
 def _check_unreflected_outcomes(
     vault_root: Path,
 ) -> tuple[list[AuditFinding], dict[str, Any]]:

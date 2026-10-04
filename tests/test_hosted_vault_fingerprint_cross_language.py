@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 from exomem import hosted_portability, reserved_paths
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,14 +53,20 @@ def test_provisioner_fingerprint_matches_the_runtime_classification_contract(
     )
 
 
-def test_provisioner_fingerprint_matches_a_custom_kb_directory(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Memory")
+@pytest.mark.parametrize("kb_dir", ["Memory", ".kb", "models"])
+def test_provisioner_fingerprint_matches_a_custom_kb_directory(
+    tmp_path: Path, monkeypatch, kb_dir: str,
+) -> None:
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", kb_dir)
     provisioner = _provisioner_module()
     vault = tmp_path / "vault"
     for relative in (
-        "Memory/index.md",
-        "Memory/.review-state.json",
-        "Memory/.graph-commit-receipts/0123456789abcdef01234567.json",
+        f"{kb_dir}/index.md",
+        f"{kb_dir}/.review-state.json",
+        f"{kb_dir}/.graph-commit-receipts/0123456789abcdef01234567.json",
+        f"{kb_dir}/_Collections/mode.json",
+        f"{kb_dir}/_Collections/collections.sqlite",
+        f"{kb_dir}/_Collections/candidate.sqlite",
         "Knowledge Base/.review-state.json",
     ):
         _write(vault, relative, relative)
@@ -95,14 +103,28 @@ def test_provisioner_classifier_covers_every_reserved_descriptor_family(tmp_path
         "graph-rebuild": ".graph-rebuild-" + "c" * 64 + "-" + "d" * 24 + ".sqlite",
         "graph-reset": ".graph-reset-" + "e" * 24 + "/state.json",
         "authorization-projections": ".authorization-projections/state.json",
+        "collection-store": "collections.sqlite",
+        "collection-replica": "_Collections/candidate.sqlite",
         "batch-workspace": "Projects/.exomem-batch-" + "f" * 32 + "/state.json",
         "held-publication": "Projects/.exomem-held-publish-" + "0" * 32,
+        "collection-publication": "Records/.exomem-collection-aside-" + "1" * 32 + "-0",
+        "collection-snapshot": "_Collections/.exomem-collection-snapshot-" + "2" * 32 + ".sqlite",
+        "collection-audit-spool": "Records/.exomem-collection-audit-" + "3" * 32 + ".sqlite",
     }
     assert set(samples) == {descriptor.id for descriptor in reserved_paths._REGISTRY}
     vault = tmp_path / "vault"
     _write(vault, "Knowledge Base/index.md", "canonical")
     for descriptor_id, relative in samples.items():
         _write(vault, f"Knowledge Base/{relative}", descriptor_id)
+    for relative in (
+        "_Collections/mode.json",
+        "_Collections/collections.sqlite",
+        "_Collections/collections.sqlite-wal",
+        "Records/.exomem-collection-stage-" + "4" * 32,
+        "Records/.exomem-collection-snapshot-" + "5" * 32 + ".sqlite-journal",
+        "Records/.exomem-collection-audit-" + "6" * 32 + ".sqlite-shm",
+    ):
+        _write(vault, f"Knowledge Base/{relative}", relative)
 
     provisioner = _provisioner_module()
     assert provisioner.canonical_vault_fingerprint(vault) == (

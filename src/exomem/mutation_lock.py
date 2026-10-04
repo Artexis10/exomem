@@ -2086,6 +2086,10 @@ class VaultMutationCoordinator:
         self.poll_interval_seconds = poll_interval_seconds
         self.long_holder_seconds = long_holder_seconds
 
+    def current_thread_holds_boundary(self) -> bool:
+        """Whether this thread owns this vault/cell's exact mutation boundary."""
+        return _state_for(self.lock_path).owner_thread == threading.get_ident()
+
     @contextmanager
     def hold(
         self,
@@ -2630,7 +2634,8 @@ def _atomic_write_holder_metadata(path: Path, holder: dict[str, object]) -> None
         with temporary.open("x", encoding="utf-8", newline="\n") as stream:
             stream.write(payload)
             stream.flush()
-            os.fsync(stream.fileno())
+            # OS locks own authority; the current-holder record need not
+            # survive power loss. Close and replace still publish whole bytes.
         os.replace(temporary, path)
     finally:
         try:

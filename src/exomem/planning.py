@@ -388,7 +388,29 @@ def query(
     authorize_path: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """Run the shared bounded query evaluator over current Planning files."""
-    if authorize_path is None:
+    from .collection_store.preview import selected_writer
+
+    writer = selected_writer(vault_root, collection)
+    if writer is not None and include_agent_history:
+        raise CollectionError(
+            "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "store audit history belongs to a later slice"
+        )
+    if writer is not None and writer._operation is None:
+        with writer.read_collection(collection, facade_profile="planning") as manifest:
+            return query(
+                vault_root, manifest, filters=filters, columns=columns,
+                sort_by=sort_by, descending=descending, limit=limit,
+                aggregate=aggregate, date_from=date_from, date_to=date_to,
+                date_column=date_column, continuation=continuation,
+                output_format=output_format, view=view, hierarchy_mode=hierarchy_mode,
+                hierarchy_depth=hierarchy_depth, hierarchy_limit=hierarchy_limit,
+                lifecycle=lifecycle, include_agent_history=include_agent_history,
+                authorize_path=authorize_path,
+            )
+    if writer is not None:
+        manifest = writer._collection(collection, facade_profile="planning")[1]
+        adapter_authorize_path = writer._operation.allows_file
+    elif authorize_path is None:
         manifest = record_governance.resolve_collection(vault_root, collection)
         adapter_authorize_path = record_governance.full_release_filter(vault_root)
     else:
@@ -416,7 +438,7 @@ def query(
         vault_root,
         manifest,
         adapter_authorize_path,
-        validate_relationships=authorize_path is None,
+        validate_relationships=authorize_path is None and writer is None,
     )
     effective_filters = None if view is not None else list(filters or [])
     if view is None and lifecycle != "all":
@@ -1497,6 +1519,20 @@ def _validate_relationships(
         plans[record.identity.key] = values
     if plan_id is not None and candidate is not None:
         plans[plan_id] = dict(candidate)
+    validate_hierarchy(manifest, plans)
+
+
+def validate_hierarchy(
+    manifest: collections.CollectionManifest, plans: Mapping[str, Mapping[str, Any]]
+) -> None:
+    """Planning's typed hierarchy over one complete set of plans, keyed by plan id.
+
+    Areas carry no parent; an initiative's parent is an outcome and a work
+    item's is an initiative; active plans point only at active targets; a
+    child's area agrees with its parent's; there are no cycles; and nothing
+    archived keeps an active child. This is the named validator
+    ``planning.hierarchy.v1``.
+    """
     parents: dict[str, str] = {}
     for key, values in plans.items():
         kind = values["kind"]

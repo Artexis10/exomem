@@ -52,6 +52,7 @@ _RESERVED_EXACT = {
             ".media-jobs.sqlite",
             ".media_jobs.sqlite",
             ".idempotency.sqlite",
+            "collections.sqlite",
         )
         for suffix in ("", "-wal", "-shm", "-journal")
     ),
@@ -73,6 +74,7 @@ _RESERVED_TREES = {
     ".graph-commit-receipts",
     ".graph-coordination",
     ".authorization-projections",
+    "_collections",
 }
 _RESERVED_ROOT_PATTERNS = (
     re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$"),
@@ -83,7 +85,11 @@ _RESERVED_ROOT_PATTERNS = (
 )
 _RESERVED_TREE_ROOT_PATTERNS = (re.compile(r"^\.graph-reset-[0-9a-f]{24}$"),)
 _RESERVED_COMPONENT_TREE_PATTERNS = (re.compile(r"^\.exomem-batch-[0-9a-f]{32}$"),)
-_RESERVED_LEAF_PATTERNS = (re.compile(r"^\.exomem-held-publish-[0-9a-f]{32}$"),)
+_RESERVED_LEAF_PATTERNS = (
+    re.compile(r"^\.exomem-held-publish-[0-9a-f]{32}$"),
+    re.compile(r"^\.exomem-collection-(?:stage-[0-9a-f]{32}|aside-[0-9a-f]{32}-[01])$"),
+    re.compile(r"^\.exomem-collection-(?:snapshot|audit)-[0-9a-f]{32}\.sqlite(?:-(?:wal|shm|journal))?$"),
+)
 
 
 class FingerprintError(ValueError):
@@ -148,7 +154,11 @@ def _classification(path: str) -> str | None:
         return "portable-derived"
     if re.fullmatch(rf"{re.escape(kb_dir)}/\.graph-commit-receipts/[0-9a-f]{{24}}\.json", path):
         return "portable-derived"
-    if _is_registered_internal_state(lowered, kb_dir):
+    published_collection = path in {
+        f"{kb_dir}/_Collections/mode.json",
+        f"{kb_dir}/_Collections/collections.sqlite",
+    }
+    if not published_collection and _is_registered_internal_state(lowered, kb_dir):
         return None
     if lowered and lowered[0] in {"logs", ".logs", "runtime-logs"}:
         return None

@@ -15,6 +15,8 @@ The claim holds only if the foundations ship first: reliable service on every cl
 
 ## What Changes
 
+The S1 slice inherits the owner-approved supported-client admission boundary in `move-structured-collections-to-sqlite`: supported launches reject incompatible readers even with fresh external state, verified supported adapters establish sync custody, and unknown custody leaves store activation pending without disabling file collections or knowledge. This is a support-policy boundary, not evidence that public admission is already implemented.
+
 - Preserve the round-one structured query, legacy parity, declared indexes, keyset pages, grouped aggregates, exact percentile, declared joins and optional FTS5 contracts.
 - Add an engine-neutral structured query IR with one admission path for documents, collection rows and graph references. SQLite remains the only backend delivered here; future hosted engines compile the same governed IR.
 - Make agents first-class consumers through compose, explain, cost preview, dry-run, execution, incremental refinement and saved views on existing MCP tools, with repairable errors and on-demand skill/bootstrap guidance.
