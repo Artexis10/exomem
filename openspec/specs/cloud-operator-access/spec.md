@@ -31,12 +31,17 @@ The component that terminates public TLS for the Cloud MCP hostname SHALL run in
 
 ### Requirement: Routine operator access cannot reach tenant content
 
-The operator's everyday cluster identity SHALL be able to read workload status, events and the content-free logs that cells and controllers emit. It SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers in any cell namespace. The documented operator procedures SHALL use this identity by default.
+The operator's everyday cluster identity SHALL be able to read workload status, events, endpoint and isolation-policy metadata, and the content-free logs that cells and controllers emit. It SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers in any cell namespace. The documented operator procedures SHALL use this identity by default.
 
 #### Scenario: Operator inspects a failing cell
 
 - **WHEN** the operator uses the everyday identity to view a cell's pod status, events or logs
 - **THEN** the request succeeds and returns no vault content
+
+#### Scenario: Operator verifies artifact isolation
+
+- **WHEN** the operator reads EndpointSlices, NetworkPolicies, ValidatingAdmissionPolicies and their bindings to verify a selected cell’s broker route
+- **THEN** metadata inspection succeeds through the everyday identity, which retains no Secret, connect-subresource or mutation permission
 
 #### Scenario: Logs stay content-free under real use
 

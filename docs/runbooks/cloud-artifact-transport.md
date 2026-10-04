@@ -17,8 +17,16 @@ normal signed release process. `artifactBroker.image` must be digest-pinned and
 contain `python -m exomem.artifact_broker`; do not use a tag or an older runtime
 image that lacks the broker entry point.
 
-Provision a dedicated Ed25519 key pair through the established secret-management
-path. The gateway alone receives the private PEM from
+The dedicated Ed25519 pair is held by the exact BWS entries in
+`infra/contracts/bws-cloud-artifact-v1.json`. Read and deliver it through
+`secret_handoff.py` using the `cloud_artifact_signing_key` and
+`cloud_artifact_public_key` routes in `secret-destinations-v1.json`, source `bws`,
+and the next unused destination version. The PEM values use file shape; the
+private half goes only to the gateway and the public half only to the broker.
+Seal their separate SOPS artifacts, verify the pair in memory, and apply only
+those destinations through the existing static-secret deployment procedure.
+Refreshing this matrix also requires refreshing its signed active-secret
+registry before any subsequent registry-based apply. The gateway alone receives the private PEM from
 `cloudGateway.artifactSigningKeySecretName` / `artifactSigningKeySecretKey`
 (defaults: `exomem-cloud-artifact-signing-key` / `signing-key`), exposed as
 `EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY`. The broker receives only the public PEM from
