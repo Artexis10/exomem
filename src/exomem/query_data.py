@@ -30,13 +30,17 @@ import io
 import itertools
 import json
 import logging
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from . import access, reserved_paths
+from .query_compat import (
+    DATE_LIKE as _DATE_LIKE, OPS as _OPS, QueryDataError,
+    coerce_num as _coerce_num, get_field as _get_field, match as _match, sort_key,
+    distinct_key, group_key, latest_aggregate, numeric_aggregate, profile_kind,
+)
 from .vault import VaultPathError, resolve_under_vault
 
 log = logging.getLogger(__name__)
@@ -49,36 +53,6 @@ PROFILE_MAX_DISTINCT = 20  # categorical/text columns expose up to this many dis
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_PARSED_ROWS = 10_000
 _COMMON_RECORD_KEYS = ("result", "results", "data", "rows", "items", "entries")
-_OPS = frozenset(
-    {
-        "eq",
-        "ne",
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-        "contains",
-        "icontains",
-        "startswith",
-        "in",
-        "nin",
-        "exists",
-        "missing",
-    }
-)
-_NUM_PREFIX = re.compile(r"^[<>≤≥=~\s]+")
-_DATE_LIKE = re.compile(r"\d{1,4}[-/]\d")  # 2024-07, 9/2024 → not a number
-_LEADING_NUM = re.compile(r"[+-]?\d+(?:[.,]\d+)?")  # leading number, comma or dot decimal
-_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-
-
-@dataclass
-class QueryDataError(Exception):
-    code: str
-    reason: str
-
-    def as_dict(self) -> dict:
-        return {"code": self.code, "reason": self.reason}
 
 
 @dataclass
@@ -139,42 +113,6 @@ def _bounded_aggregate(value: Any) -> tuple[Any, bool]:
     if len(encoded) <= MAX_RESPONSE_BYTES:
         return value, False
     return {"truncated": True, "reason": "aggregate exceeds response size cap"}, True
-
-
-def _get_field(row: Any, dotted: str) -> Any:
-    """Nested access via dotted key — dicts by key, lists by integer index."""
-    cur = row
-    for part in str(dotted).split("."):
-        if isinstance(cur, dict):
-            cur = cur.get(part)
-        elif isinstance(cur, list):
-            try:
-                cur = cur[int(part)]
-            except (ValueError, IndexError):
-                return None
-        else:
-            return None
-    return cur
-
-
-def _coerce_num(v: Any) -> float | None:
-    """Best-effort numeric coercion; tolerant of comma decimals and lab operators."""
-    if isinstance(v, bool):
-        return None
-    if isinstance(v, (int, float)):
-        return float(v)
-    if not isinstance(v, str):
-        return None
-    s = _NUM_PREFIX.sub("", v.strip())
-    if not s or _DATE_LIKE.match(s) or _UUID.fullmatch(s):
-        return None
-    m = _LEADING_NUM.match(s)
-    if not m:
-        return None
-    try:
-        return float(m.group(0).replace(",", "."))
-    except ValueError:
-        return None
 
 
 def _locate_array(data: Any, record_path: str | None, warnings: list[str]) -> list:
@@ -294,68 +232,6 @@ def load_rows_bytes(
     )
 
 
-def _match(row: dict, filt: dict) -> bool:
-    col = filt["column"]
-    op = filt.get("op", "eq")
-    val = filt.get("value")
-    actual = _get_field(row, col)
-
-    if op == "exists":
-        return actual not in (None, "")
-    if op == "missing":
-        return actual in (None, "")
-    if op in ("in", "nin"):
-        vals = val if isinstance(val, list) else [val]
-        hit = str(actual) in {str(x) for x in vals}
-        return hit if op == "in" else not hit
-    if op in ("contains", "icontains", "startswith"):
-        a = "" if actual is None else str(actual)
-        b = "" if val is None else str(val)
-        if op == "contains":
-            return b in a
-        if op == "icontains":
-            return b.lower() in a.lower()
-        return a.lower().startswith(b.lower())
-
-    # eq / ne / gt / gte / lt / lte — numeric when both coerce; string otherwise.
-    an, bn = _coerce_num(actual), _coerce_num(val)
-
-    if op in ("eq", "ne"):
-        if an is not None and bn is not None:
-            return (an == bn) if op == "eq" else (an != bn)
-        a = "" if actual is None else str(actual)
-        b = "" if val is None else str(val)
-        return (a == b) if op == "eq" else (a != b)
-
-    # Ordering (gt/gte/lt/lte): compare numerically when both coerce, or as
-    # strings when NEITHER does (e.g. ISO dates). If exactly one side is
-    # numeric the values aren't comparable — exclude the row rather than fall
-    # back to a misleading lexicographic compare (e.g. "100,2 nmol/l" < 50).
-    if an is not None and bn is not None:
-        if op == "gt":
-            return an > bn
-        if op == "gte":
-            return an >= bn
-        if op == "lt":
-            return an < bn
-        if op == "lte":
-            return an <= bn
-    elif an is None and bn is None:
-        string_actual = "" if actual is None else str(actual)
-        string_value = "" if val is None else str(val)
-        if op == "gt":
-            return string_actual > string_value
-        if op == "gte":
-            return string_actual >= string_value
-        if op == "lt":
-            return string_actual < string_value
-        if op == "lte":
-            return string_actual <= string_value
-    else:
-        return False
-    raise QueryDataError("BAD_OP", f"unknown filter op {op!r}; allowed: {sorted(_OPS)}")
-
-
 def _aggregate(matched: list[dict], spec: str, date_col: str | None) -> dict:
     spec = spec.strip()
     if spec == "count":
@@ -372,11 +248,7 @@ def _aggregate(matched: list[dict], spec: str, date_col: str | None) -> dict:
         total = 0
         for r in matched:
             v = _get_field(r, col)
-            key = (
-                json.dumps(v, sort_keys=True, ensure_ascii=False)
-                if isinstance(v, (dict, list))
-                else str(v)
-            )
+            key = distinct_key(v)
             if key not in seen:
                 seen.add(key)
                 total += 1
@@ -387,7 +259,7 @@ def _aggregate(matched: list[dict], spec: str, date_col: str | None) -> dict:
         counts: dict[str, tuple[Any, int]] = {}
         for row in matched:
             value = _get_field(row, col)
-            key = json.dumps(value, sort_keys=True, ensure_ascii=False)
+            key = group_key(value)
             prior = counts.get(key)
             counts[key] = (value, 1 if prior is None else prior[1] + 1)
         ordered = sorted(counts.values(), key=lambda pair: json.dumps(pair[0], ensure_ascii=False))
@@ -396,26 +268,9 @@ def _aggregate(matched: list[dict], spec: str, date_col: str | None) -> dict:
         ]
         return {"groups": groups, "n": len(counts), "truncated": len(counts) > len(groups)}
     if func == "latest":
-        order_col = date_col or col
-        best, best_key = None, None
-        for r in matched:
-            k = _get_field(r, order_col)
-            if k is None:
-                continue
-            if best_key is None or str(k) > str(best_key):
-                best_key, best = k, r
-        return {"latest_by": order_col, "row": best}
+        return latest_aggregate(matched, date_col or col)
     if func in ("min", "max", "sum", "avg"):
-        nums = [n for r in matched if (n := _coerce_num(_get_field(r, col))) is not None]
-        if not nums:
-            return {func: None, "n": 0, "note": f"no numeric values in {col!r}"}
-        value = {
-            "min": min(nums),
-            "max": max(nums),
-            "sum": sum(nums),
-            "avg": sum(nums) / len(nums),
-        }[func]
-        return {func: value, "n": len(nums)}
+        return numeric_aggregate(matched, func, col)
     raise QueryDataError("BAD_AGGREGATE", f"unknown aggregate func {func!r}")
 
 
@@ -478,11 +333,11 @@ def _profile_column(
 
     nums = [x for v in non_null if (x := _coerce_num(v)) is not None]
     date_like = sum(1 for v in non_null if _DATE_LIKE.search(str(v)))
-    name_l = name.lower()
+    kind = profile_kind(name, n, len(nums), date_like, distinct, max_distinct)
 
     # Date when the name says so or values look date-shaped — but never when the
     # column is predominantly plain numbers (guards a numeric col named "...date").
-    if n and ("date" in name_l or date_like >= 0.6 * n) and len(nums) < 0.6 * n:
+    if kind == "date":
         svals = [str(v) for v in non_null]
         return ColumnProfile(
             name,
@@ -493,7 +348,7 @@ def _profile_column(
             latest=max(svals),
             distinct_truncated=distinct_truncated,
         )
-    if n and len(nums) >= 0.6 * n:
+    if kind == "numeric":
         return ColumnProfile(
             name,
             "numeric",
@@ -505,7 +360,6 @@ def _profile_column(
             avg=sum(nums) / len(nums),
             distinct_truncated=distinct_truncated,
         )
-    kind = "categorical" if distinct <= max_distinct else "text"
     return ColumnProfile(
         name,
         kind,
@@ -734,13 +588,7 @@ def evaluate_rows(
         )
 
     if sort_by:
-
-        def _key(r: dict):
-            v = _get_field(r, sort_by)
-            n = _coerce_num(v)
-            return (0, n, "") if n is not None else (1, 0.0, "" if v is None else str(v))
-
-        matched.sort(key=_key, reverse=descending)
+        matched.sort(key=lambda row: sort_key(_get_field(row, sort_by)), reverse=descending)
 
     limit = _bounded_limit(limit)
     offset = max(0, int(offset))
