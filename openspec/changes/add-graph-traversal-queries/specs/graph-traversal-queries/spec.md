@@ -129,19 +129,28 @@ this extension SHALL NOT add a competing expansion stage or widen any budget.
 - **WHEN** freshness/admission/traversal cannot complete within the shared activation stage limit
 - **THEN** path-derived output abstains with an explicit availability reason and no false complete/zero state, and an independent ready collection unit can still be served
 
+### Requirement: A useful graph preview has bounded acceptance
+
+After the independent first collection slice, the system MAY release a capability-versioned document evidence-chain/reverse-impact preview through the shared admitted engine and proven combined-store placement before full ontology authoring, patterns, mixed declared-type queries or comparative benchmarks. Its applicable admission, ontology identity, currentness, direction, ordered witness, exactness/refusal, disclosure and absolute resource/latency contracts SHALL pass independent reference/hidden-absent checks and installed public-interface agent journeys. Portability and rollback SHALL be verified; private harness hints SHALL NOT substitute for agent reachability. Unsupported later operations SHALL remain unavailable. No new engine or unproved alternate placement SHALL bypass these prerequisites. The comparative benchmark requirement below SHALL gate parity/superiority claims and complete-capability acceptance, not this separately proven subset.
+
+#### Scenario: Useful evidence path passes before comparison
+
+- **WHEN** the bounded preview's correctness, disclosure, freshness, absolute bounds and installed-agent gates pass while the Neo4j comparison or later ontology authoring is pending
+- **THEN** the declared subset may be released with those claims explicitly unproved and unsupported operations unavailable
+
 ### Requirement: Graph benchmark proves the personal-scale baseline
 
-Release SHALL require a deterministic invented 100,000-node/500,000-edge corpus, independent reference/rows-absent correctness, 3-hop typed traversal warm p95≤50 ms and matched multi-hop/path/pattern p95 no greater than a pinned Neo4j baseline with equivalent corpus, semantics, release/work bounds, indexes and output. Governance/cold/setup/transport SHALL be reported separately and equivalent Neo4j application-governance comparison SHALL be included. At least 99% admitted moderate-degree requests SHALL finish. The versioned capability matrix SHALL honestly identify matched/beaten/deferred capabilities, including PageRank/community/centrality and server/distributed limits; unrestricted Cypher/GDS parity SHALL NOT be claimed.
+The complete capability and comparative claims SHALL require a deterministic invented 100,000-node/500,000-edge corpus, independent reference/rows-absent correctness, 3-hop typed traversal warm p95≤50 ms and matched multi-hop/path/pattern p95 no greater than a pinned Neo4j baseline with equivalent corpus, semantics, release/work bounds, indexes and output. Governance/cold/setup/transport SHALL be reported separately and equivalent Neo4j application-governance comparison SHALL be included. At least 99% admitted moderate-degree requests SHALL finish. The versioned capability matrix SHALL honestly identify matched/beaten/deferred capabilities, including PageRank/community/centrality and server/distributed limits; unrestricted Cypher/GDS parity SHALL NOT be claimed. A separately proved bounded preview SHALL follow its own acceptance requirement above; comparative failure SHALL restrict the claim rather than suppress that useful subset.
 
 Real-MCP graph/mixed/ontology tasks SHALL meet ≥95% correct answers, ≥90% first executable queries, ≥90% fixable-error recovery within 2 revisions and zero governance failures. Provenance/currency/context correctness SHALL improve ≥15 percentage points over bare Neo4j and remain at least equal to an application-equivalent baseline. Activation continuity/corpus gates, ≤1% irrelevant-unit rate and sub-second p95 SHALL remain passing. Numerical targets SHALL be measured gates, not asserted achievements.
 
 #### Scenario: Dedicated engine is faster on a required task
-- **WHEN** a matched required personal multi-hop/path/pattern cell misses the absolute or comparative p95 gate
-- **THEN** graph capability remains preview and no “better”/latency parity claim is published until the failing gate is met
+- **WHEN** a matched required personal multi-hop/path/pattern cell misses the comparative p95 gate but a separately declared preview meets its absolute bounds and other prerequisites
+- **THEN** that preview remains available, the comparison remains failed and no “better”/latency parity claim is published; missing absolute prerequisites still block the affected operation
 
 #### Scenario: Baseline or real agent path is missing
 - **WHEN** internal graph tests pass but Neo4j baseline or a required MCP journey has not run
-- **THEN** comparative/delivery evidence is pending, not synthesized or treated as complete
+- **THEN** the corresponding comparative or agent-delivery evidence remains pending, not synthesized or treated as complete; a missing required agent journey still blocks its operation, while a missing baseline alone does not block an independently proved preview
 
 ### Requirement: Scale tiers preserve engine-independent governance
 

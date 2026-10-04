@@ -4,6 +4,15 @@ Let users query and analyze their declared structured collections through govern
 
 ## ADDED Requirements
 
+### Requirement: First owner slice has a narrow performance exception
+
+The first NEW owner-only Records summary collection MAY pass S1 before the parent's 15 ms full-public-inspect, 20 ms guarded-append and supporting append-stage timing targets are met. Required parent writer/registry/governance/parity foundation SHALL be independently delivered; actual latency SHALL be measured and reported, and the full parent phase/GA performance gate SHALL remain open. Every applicable integrity, permissions, recovery, compatibility, portability and other S1 bound SHALL remain mandatory. This exception SHALL NOT migrate existing Records/Planning, enable another audience or establish a performance claim; all later general-release/index/FTS absolute-budget requirements retain their existing scope.
+
+#### Scenario: First owner collection is usable before final latency optimisation
+
+- **WHEN** the mandatory S1 workflow and safety evidence pass but either optimisation target is unmet
+- **THEN** only that NEW owner-only collection may be enabled with its actual measurements, no existing-collection migration and no full-phase completion claim
+
 ### Requirement: Structured queries compile without user SQL
 
 The system SHALL accept a closed version-1 structured query over Records, Planning and declared collection types, validating fields, aliases, types and operations before execution. It SHALL compile only approved operations to parameterized SQL. User strings SHALL never be interpolated into SQL or schema DDL. SQL, expression strings, arbitrary join keys, cross-vault references and user-defined executable functions SHALL be refused. Queries SHALL execute no mutations or collection audit effects.

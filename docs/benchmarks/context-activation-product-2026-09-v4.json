@@ -209,8 +209,7 @@
       {
         "case_id": "T6",
         "failure_reasons": [
-          "twin surfaced a ref outside its own gold",
-          "precision 0.00 below the 0.8 floor"
+          "1 poison anchor(s) surfaced"
         ],
         "gold": {
           "hit": 0,
@@ -219,10 +218,10 @@
         "hedged": false,
         "passed": false,
         "poison": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
-        "precision": 0.0
+        "precision": null
       },
       {
         "case_id": "C7",
@@ -536,8 +535,7 @@
       {
         "case_id": "T6",
         "failure_reasons": [
-          "twin surfaced a ref outside its own gold",
-          "precision 0.00 below the 0.8 floor"
+          "1 poison anchor(s) surfaced"
         ],
         "gold": {
           "hit": 0,
@@ -546,10 +544,10 @@
         "hedged": false,
         "passed": false,
         "poison": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
-        "precision": 0.0
+        "precision": null
       },
       {
         "case_id": "C7",
@@ -860,8 +858,7 @@
       {
         "case_id": "T6",
         "failure_reasons": [
-          "twin surfaced a ref outside its own gold",
-          "precision 0.00 below the 0.8 floor"
+          "1 poison anchor(s) surfaced"
         ],
         "gold": {
           "hit": 0,
@@ -870,10 +867,10 @@
         "hedged": false,
         "passed": false,
         "poison": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
-        "precision": 0.0
+        "precision": null
       },
       {
         "case_id": "C7",
@@ -1180,8 +1177,7 @@
       {
         "case_id": "T6",
         "failure_reasons": [
-          "twin surfaced a ref outside its own gold",
-          "precision 0.00 below the 0.8 floor"
+          "1 poison anchor(s) surfaced"
         ],
         "gold": {
           "hit": 0,
@@ -1190,10 +1186,10 @@
         "hedged": false,
         "passed": false,
         "poison": {
-          "hit": 0,
+          "hit": 1,
           "total": 1
         },
-        "precision": 0.0
+        "precision": null
       },
       {
         "case_id": "C7",
@@ -1383,6 +1379,7 @@
       "passing_cases": [
         "T2",
         "C6",
+        "T6",
         "T9"
       ],
       "removes": "anchor resolution: no candidate resolves, so no anchor, lane or current state is served"
@@ -1954,7 +1951,7 @@
           },
           "kind": "equipment",
           "poison": {
-            "hit": 0,
+            "hit": 1,
             "total": 1
           }
         }
@@ -1962,8 +1959,7 @@
       "case_id": "T6",
       "expected_status": "unresolved",
       "failure_reasons": [
-        "twin surfaced a ref outside its own gold",
-        "precision 0.00 below the 0.8 floor"
+        "1 poison anchor(s) surfaced"
       ],
       "gold": {
         "hit": 0,
@@ -1974,15 +1970,15 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "unresolved",
-      "packet_chars": 199,
+      "packet_chars": 235,
       "passed": false,
       "poison": {
-        "hit": 0,
+        "hit": 1,
         "total": 1
       },
-      "precision": 0.0,
+      "precision": null,
       "status_match": true,
-      "twin_false_activation": true
+      "twin_false_activation": false
     },
     {
       "blocked": false,

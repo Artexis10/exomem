@@ -11,7 +11,8 @@
 
 Each phase is one or more independently reviewable PRs that leave `main` releasable.
 
-- **Store mode stays dark.** It is off per vault, and file mode is untouched, until the GA gate at the end of P3. Until then a vault can be migrated only with `EXOMEM_COLLECTION_STORE_PREVIEW=1` on a disposable copy.
+- **General store mode stays dark.** File collections are untouched until proven migration/GA. The separately owner-approved S1 in `add-collection-query-engine` may create only a NEW owner-only summary collection after its own mandatory safety/outcome gate; it does not migrate existing Records or Planning. Other pre-GA migration remains limited to disposable preview copies.
+- **S1 performance exception (owner, 2026-10-04).** The 15 ms full-inspect and 20 ms guarded-append targets remain measured optimisation goals, but do not block the first owner-only S1 collection. Deliver required parent foundation dark with independent evidence while leaving unmet P1a.15 items open. All correctness, permissions, integrity, recovery, compatibility, portability and other applicable bounds remain mandatory; no full-phase or GA completion is implied.
 - **Follow-up change (A11).** Version-pinned links and the compiler-lane rewrite are a separate follow-up change, opened after P4.
 - **Order.** P4 and P5 may start once P1a is merged, and may merge before or after GA. P6 starts two minor releases after GA (R7).
 - **Prerequisites.** #1457 (the interim file fixes) and #1452 (bulk upsert on files, with its per-call cap) land before P1 and are not part of this change.
@@ -62,6 +63,7 @@ Every phase also re-runs the existing Records and Planning test modules in file 
 - [ ] P1a.13b Release-decision cache per `(audience, policy fingerprint, collection)`, with per-row decisions keyed by row version (A7). Red first: a policy change invalidates it, and a row change re-evaluates only that row.
 - [ ] P1a.14 Collection resolution from the `collections` row, plus a contract cache keyed by `(collection_id, manifest_version)`. Index fan-out moves to the derived drain.
 - [ ] P1a.15 **Phase gate.**
+  - This remains the full phase gate. The narrow S1 exception above permits its first owner-only collection without the two 15/20 ms targets or their supporting append-stage timing targets; all remain measured optimisation goals for S1. It does not permit checking this phase complete or waiving bulk/query/resource bounds or any integrity, authorization, recovery, compatibility or portability gate.
   - Extend `scripts/measure-records-append-latency.py` (#1457) to store mode with per-stage timers for the §12 budget table.
   - Guarded append p95 < 20 ms at 1,000 and 10,000 items through the real dispatcher, with no stage over its budget, including a 10,000-row collection with 10% of rows ref-withheld, on Linux and on a Windows/NTFS runner (A7).
   - No second commit or fsync on the acknowledgement path (the pending hash is written in the main transaction).

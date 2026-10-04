@@ -13,6 +13,8 @@ The owner has decided: **knowledge stays Markdown** (Notes, Entities, Sources, E
 
 ## What Changes
 
+**First-owner release ruling (2026-10-04).** The first NEW owner-only summary collection uses the S1 gate in `add-collection-query-engine`. Its measured 15 ms public-inspect, 20 ms guarded-append and supporting append-stage timing targets remain optimisation goals, not release blockers for that slice; missed targets stay visible and P1a performance acceptance stays open. Data integrity, permissions, recoverability, compatibility, portability, parity and the other applicable gates remain mandatory. This exception neither migrates existing Records/Planning nor authorizes general store rollout.
+
 - **One collection mechanism; types are data.** Records and Planning become two built-in *collection types* of one generic mechanism.
   - A user or agent can declare a new type in conversation through `schema_memory(subject="collection-types")`, without code: kind, fields, natural key, lifecycle, surfacing rule and default audience. Its collections immediately get storage, keys and guards, audit, row-level governance, views with edit-back, and context-compiler surfacing.
   - The **kind** (`observed`, `intended`, `procedural`, `reference`) is the only semantic switch. It selects version semantics (correction, replan, revision, edit) and the compiler roles that serve the items. Everything else is identical code.
