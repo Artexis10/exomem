@@ -13,8 +13,8 @@ negative control all ran on the Cloud node as written.
 Exomem Cloud has three cluster identities. Use the least one that does the job.
 
 - **Everyday operator (`exomem-operator`).** The default for every procedure.
-  It reads workload status, events and the content-free logs cells and
-  controllers emit. It cannot read any Secret, and it cannot exec, attach,
+  It reads workload status, events, endpoint and isolation-policy metadata,
+  and the content-free logs cells and controllers emit. It cannot read any Secret, and it cannot exec, attach,
   port-forward, proxy or add an ephemeral container. The platform chart's
   `exomem-operator-read` ClusterRole grants this to group `exomem:operators`.
   The certificate lasts 30 days.

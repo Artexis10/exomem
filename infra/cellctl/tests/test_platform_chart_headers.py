@@ -924,6 +924,10 @@ def test_the_everyday_operator_reads_status_events_and_logs_but_no_secret_or_con
         ("", "pods"), ("", "pods/log"), ("", "events"), ("", "namespaces"),
         ("", "persistentvolumeclaims"), ("", "services"), ("", "nodes"),
         ("apps", "deployments"), ("apps", "statefulsets"), ("batch", "jobs"),
+        ("discovery.k8s.io", "endpointslices"),
+        ("networking.k8s.io", "networkpolicies"),
+        ("admissionregistration.k8s.io", "validatingadmissionpolicies"),
+        ("admissionregistration.k8s.io", "validatingadmissionpolicybindings"),
     }
 
     (binding,) = _group_bindings(documents, OPERATOR_GROUP)
