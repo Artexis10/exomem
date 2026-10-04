@@ -4418,30 +4418,30 @@ def post_commit_batch_fanout(
             from . import graph_sync
 
             with call_spans.span("index.graph_epoch_handoff"):
-                required = graph_sync.read_checkpoint(vault_root)
-                handoff_missing = required is not None and (
-                    (
-                        graph.outcome == "completed"
-                        and graph_sync.status(vault_root).get("state") != "current"
-                    )
-                    or (
-                        graph.outcome in {"registered", "deferred", "failed"}
-                        and not graph_sync.repair_is_provisioned(
-                            vault_root, required, outcome=graph.outcome
-                        )
+                # Post-terminal fanout permits a sibling commit before this
+                # check. Its newer epoch is not evidence about this dispatch.
+                required = graph.graph_checkpoint
+                handoff_missing = (
+                    required is None and graph.outcome in {"registered", "deferred"}
+                ) or (
+                    required is not None
+                    and graph.outcome in {"completed", "registered", "deferred", "failed"}
+                    and not graph_sync.repair_is_provisioned(
+                        vault_root, required, outcome=graph.outcome
                     )
                 )
             if handoff_missing:
-                assert required is not None
-                graph_sync.register_failure(
-                    vault_root,
-                    required,
-                    code="GRAPH_SYNC_HANDOFF_MISSING",
-                )
+                if required is not None:
+                    graph_sync.register_failure(
+                        vault_root,
+                        required,
+                        code="GRAPH_SYNC_HANDOFF_MISSING",
+                    )
                 report = index_sync.with_component(
                     report,
                     index_sync.IndexComponentOutcome(
-                        "epistemic_graph", "failed", "GRAPH_SYNC_HANDOFF_MISSING"
+                        "epistemic_graph", "failed", "GRAPH_SYNC_HANDOFF_MISSING",
+                        graph_checkpoint=required,
                     ),
                 )
         if index_reports is not None:
@@ -6291,12 +6291,16 @@ def walk_vault_md(vault_root: Path):
     wikilink scans and move/delete safety checks.
     """
 
+    from . import foreground_priority
+
     def walk(d: Path):
+        foreground_priority.check_cancelled()
         try:
             children = list(d.iterdir())
         except OSError:
             return
         for child in children:
+            foreground_priority.check_cancelled()
             try:
                 relative = child.relative_to(vault_root).as_posix()
             except ValueError:

@@ -24,6 +24,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("plan_json", type=Path)
     parser.add_argument(
+        "--review-output", type=Path,
+        help="write resource addresses/actions only; never variables, state or resource values",
+    )
+    parser.add_argument(
         "--allow-destructive",
         action="append",
         default=[],
@@ -93,6 +97,22 @@ def main(argv: list[str] | None = None) -> int:
         for error in errors:
             print(f"plan policy rejected: {error}", file=sys.stderr)
         return 2
+    if args.review_output is not None:
+        if args.review_output.resolve() == args.plan_json.resolve():
+            print("plan policy rejected: review output must differ from raw input", file=sys.stderr)
+            return 2
+        review = {
+            "values_included": False,
+            "resource_changes": [
+                {"address": item["address"], "actions": item["change"]["actions"]}
+                for item in plan.get("resource_changes", [])
+            ],
+        }
+        try:
+            args.review_output.write_text(json.dumps(review, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            print("plan policy rejected: review artifact could not be written", file=sys.stderr)
+            return 2
     change_count = len(plan.get("resource_changes", []))
     print(f"plan policy accepted: {change_count} resource changes")
     return 0

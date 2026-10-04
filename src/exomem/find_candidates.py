@@ -292,6 +292,7 @@ def collect_candidates(
                         query_vec,
                         k=candidate_k * 3,
                         allowed_paths=semantic_paths,
+                        **({"encoded_for": encoded_for} if isinstance(idx, embeddings.EmbeddingIndex) else {}),
                     )
                 best_per_file: dict[str, tuple[float, str]] = {}
                 for fp, _idx, ctext, score in chunk_hits:
@@ -307,7 +308,7 @@ def collect_candidates(
                     lane_statuses["vector"] = {
                         "status": "participated" if vector_ranking else "available_nonmatching",
                         "backend": type(idx).__name__,
-                        "model": recall_space.serving_model(idx),
+                        "model": encoded_for.model if isinstance(encoded_for, recall_space.SpaceIdentity) else recall_space.serving_model(idx),
                         "metric": {
                             "name": "cosine_similarity",
                             "direction": "higher",

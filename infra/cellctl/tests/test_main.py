@@ -135,3 +135,12 @@ def test_a_cell_token_key_that_is_not_64_hex_fails_at_settings_load(monkeypatch,
     _secrets_env(monkeypatch, bad)
     with pytest.raises(ValueError):
         main.build_secrets_config()
+
+
+@pytest.mark.parametrize("selection", [{}, "aaaaaaaaaaaaaaaa", ["bad"], [1],
+                                     ["aaaaaaaaaaaaaaaa"] * 2, ["aaaaaaaaaaaaaaaa"] * 1025])
+def test_invalid_dedicated_selection_fails_at_startup(monkeypatch, selection) -> None:
+    _settings_env(monkeypatch, {})
+    monkeypatch.setenv("CELLCTL_DEDICATED_CELL_IDS", json.dumps(selection))
+    with pytest.raises(ValueError, match="dedicated"):
+        main.build_cluster_config()

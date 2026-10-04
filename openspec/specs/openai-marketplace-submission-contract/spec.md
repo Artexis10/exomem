@@ -1,7 +1,7 @@
 # openai-marketplace-submission-contract Specification
 
 ## Purpose
-TBD - created by archiving change fix-openai-marketplace-submission-contract. Update Purpose after archive.
+Define the repository contract for an OpenAI Plugin Directory submission: public fields within current provider limits, a complete deterministic review packet, a versioned reviewer fixture, fresh signed reviewer-access evidence, and staged readiness distinct from broad-public activation. One universal package identity is kept for ChatGPT and Codex.
 ## Requirements
 ### Requirement: Current OpenAI listing limits
 The system SHALL reject an OpenAI Plugin Directory candidate whose public fields exceed the current provider limits or contain release-stage language that represents the production plugin as a private alpha, trial, demo, hypothetical product, or not-yet-built service.

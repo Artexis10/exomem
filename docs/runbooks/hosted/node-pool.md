@@ -6,6 +6,7 @@ Add or remove an Exomem Cloud K3s agent node (openspec
 `add-cloud-node-provisioning`). One `k3s_agent_nodes` entry is one agent
 server. cellctl needs no change: it counts a node once the node's CSINode
 publishes a volume-attachment limit, and zeroes it once the Node is deleted.
+Reserved agents publish zero general cell slots, retaining actual attachment counts.
 
 ## Preconditions
 
@@ -16,7 +17,10 @@ publishes a volume-attachment limit, and zeroes it once the Node is deleted.
   Schedule it in a maintenance window; running cells ride through the restart.
 - Pick an unused private address in the subnet (not `10.50.1.10` or
   `10.50.1.20`), and a type from the allow-list: `cpx42`, `ccx23`, `ccx33`
-  or `ccx43`.
+  or `ccx43`. A `cx33` (4 CPU / 8 GiB) is permitted only with a nonempty
+  exact `dedicated_cell_id`, reserving the node for that one cell and zero
+  general slots. Check actual same-location availability and obtain saved-plan
+  cost authority before purchase; a list price does not prove stock.
 - Before a removal, confirm that no cell row carries a hold. The playbook sees
   holds on StatefulSets, but not a hold recorded only on a row whose
   StatefulSet is gone:
@@ -51,11 +55,58 @@ infra/scripts/ansible_with_sops.sh \
   --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
 ```
 
+## Reserve an agent for one selected cell
+
+Before any reserved agent joins, deploy the signed reservation-aware cellctl
+controller and its node-read permissions through the ordinary platform release,
+leaving `cellctl.dedicatedCellIds` empty. Verify reserved nodes publish zero
+general slots; an older controller counts CSI attachment slots without the
+reservation and must not observe a restricted 8 GiB node as general capacity.
+
+Dedicated placement is disabled by default. For an authorized relocation, set
+that agent's `k3s_agent_dedicated_cell` inventory variable to the cell's exact
+16-character base32 ID before its first join. The role registers and converges
+`exomem.io/dedicated-cell=<cell ID>` as both a label and a `NoSchedule` taint,
+preserving the node-pool label and unrelated labels/taints. MemoryQoS is a
+separate host opt-in. Inspect the existing PV's actual topology and stage the
+agent in that location; the encrypted RWO PVC remains the same.
+
+Relocation and rollback both use stop/change/start:
+
+1. Request `desired_state=stopped` through the existing cell lifecycle. Wait for
+   stopped state, completed maintenance holds and Jobs, and release of every
+   volume user. Checking for no hold while still serving races scheduled backup.
+2. Add the cell ID to `cellctl.dedicatedCellIds` through the platform chart's
+   source-managed release. Its serving and backup/restore templates select only
+   that reservation. Do not change selection during an active hold: Job templates
+   are immutable. Unselected cells retain their templates and render digests.
+3. Resume the cell and verify readiness, selected node, the original PVC/PV and
+   successful backup. No restore or alternate vault is part of this move.
+4. To roll back, stop and wait again, remove the chart selection, then resume
+   and verify relocation away. Keep the agent taint until that verification;
+   only then clear the Terraform entry's `dedicated_cell_id`, regenerate inventory
+   and converge the role to remove its owned reservation. A CX33 cannot become
+   an unreserved general agent: remove it or use an allowed general type before
+   clearing that host reservation. Unrelated node labels and taints remain intact.
+
+A label or taint with the reservation key excludes a node from general admission
+and removal-capacity calculations. Selected cells still count against shared
+slots: this is deliberately conservative attachment capacity, not evidence of
+warm-memory headroom. Before adoption, account for sibling requests and warmed
+usage including platform workloads, retaining 20% node headroom. Source defaults
+neither create a paid host nor authorize a join or relocation.
+
+The Terraform entry's optional `dedicated_cell_id` supplies the generated
+inventory host variable `k3s_agent_dedicated_cell`. Do not maintain a second
+manual host reservation that can drift from that declaration.
+
 ## Remove a node
 
 Run the removal playbook first, while the entry and its inventory host still
 exist. It refuses while any cell holds a maintenance hold, and when the cluster's
 cell volumes would not fit the remaining nodes' slots (add a node first). It
+also refuses while any desired cell template selects the target reservation,
+including a stopped cell; relocate and clear that selection first. It
 cordons, drains without force, stops K3s and every container, deletes the Node,
 and revokes the node's inter-node firewall rules. Remove nodes when no
 invitations are pending: rows admitted during the drain are not yet visible as

@@ -1,0 +1,19 @@
+{"type": "user", "message": {"role": "user", "content": "Plan the spring rounds of the Marlow Quay Survey."}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "The survey has two rounds left."}]}}
+{"type": "user", "message": {"role": "user", "content": "<bash-input>cat ~/.config/example/credentials</bash-input>"}}
+{"type": "user", "message": {"role": "user", "content": "<bash-stdout>aws_secret_access_key = FAKE-SECRET-LEAK-SENTINEL\nBASH-STDOUT-SENTINEL</bash-stdout><bash-stderr>BASH-STDERR-SENTINEL</bash-stderr>"}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "<bash-stdout>BLOCK-STDOUT-SENTINEL</bash-stdout>"}]}}
+{"type": "user", "message": {"role": "user", "content": "<task-notification>\n<task-id>t1</task-id>\n<result>TASK-NOTIFICATION-SENTINEL subagent report</result>\n</task-notification>"}}
+{"type": "user", "message": {"role": "user", "content": "<system-reminder>STRING-REMINDER-SENTINEL</system-reminder>"}}
+{"type": "user", "message": {"role": "user", "content": "<command-name>/example</command-name>\n<command-message>COMMAND-MESSAGE-SENTINEL</command-message>\n<command-args></command-args>"}}
+{"type": "user", "message": {"role": "user", "content": "<local-command-stdout>LOCAL-COMMAND-SENTINEL</local-command-stdout>"}}
+{"type": "user", "isCompactSummary": true, "isVisibleInTranscriptOnly": true, "message": {"role": "user", "content": "This session is being continued from a previous conversation. COMPACT-SUMMARY-SENTINEL"}}
+{"type": "user", "isVisibleInTranscriptOnly": true, "message": {"role": "user", "content": "VISIBLE-ONLY-SENTINEL a transcript-only note"}}
+{"type": "user", "isMeta": true, "message": {"role": "user", "content": "META-SENTINEL caveat text"}}
+{"type": "user", "isSidechain": true, "message": {"role": "user", "content": "SIDECHAIN-USER-SENTINEL a subagent prompt"}}
+{"type": "assistant", "isSidechain": true, "message": {"role": "assistant", "content": [{"type": "text", "text": "SIDECHAIN-ASSISTANT-SENTINEL a subagent answer"}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_9", "content": "TOOL-RESULT-SENTINEL"}]}}
+{"type": "user", "toolUseResult": {"stdout": "x"}, "message": {"role": "user", "content": "TOOL-USE-RESULT-SENTINEL plain text carried by a tool result record"}}
+{"type": "user", "isSomethingNew": true, "message": {"role": "user", "content": "FUTURE-FLAG-SENTINEL a record with an unknown true flag"}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "And who owns the rota now?"}, {"type": "text", "text": "<system-reminder>TRAILING-REMINDER-SENTINEL</system-reminder>"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Bram Quillfeather owns the rota."}]}}

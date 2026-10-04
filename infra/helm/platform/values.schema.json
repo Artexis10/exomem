@@ -102,12 +102,37 @@
     },
     "scheduler": {
       "type": "object",
-      "required": ["contractVersion", "contractSha256", "secretName", "secretKey"],
+      "required": ["contractVersion", "contractSha256", "secretName", "secretKey", "jobs"],
       "properties": {
         "contractVersion": {"const": 1},
         "contractSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
         "secretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
-        "secretKey": {"type": "string", "minLength": 1}
+        "secretKey": {"type": "string", "minLength": 1},
+        "jobs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["exomem-access-delivery", "exomem-reconcile", "exomem-export-gc"],
+          "properties": {
+            "exomem-access-delivery": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["servesCloud"],
+              "properties": {"servesCloud": {"const": true}}
+            },
+            "exomem-reconcile": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["servesCloud"],
+              "properties": {"servesCloud": {"const": true}}
+            },
+            "exomem-export-gc": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["servesCloud"],
+              "properties": {"servesCloud": {"const": false}}
+            }
+          }
+        }
       }
     },
     "observability": {
@@ -198,6 +223,10 @@
       "additionalProperties": false,
       "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2AccountId", "b2Endpoint", "initDeadlineMinutes", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2KeyManagementSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
+        "dedicatedCellIds": {
+          "type": "array", "maxItems": 1024, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}
+        },
         "enabled": {"type": "boolean"},
         "image": {"type": "string"},
         "cellImageRepository": {"type": "string"},
@@ -250,12 +279,37 @@
         "databaseEgressCidrs": {"minItems": 1}
       }}
     },
+    "artifactBroker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "image", "endpoint", "cellIds", "publicKeySecretName", "publicKeySecretKey", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"type": "string"},
+        "endpoint": {"type": "string", "pattern": "^(?:|http://(?:10\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|172\\.(?:1[6-9]|2[0-9]|3[01])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|192\\.168\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])):8767/?)$"},
+        "cellIds": {"type": "array", "uniqueItems": true, "maxItems": 1024, "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}},
+        "publicKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "publicKeySecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "resources": {
+          "type": "object", "additionalProperties": false, "required": ["requests", "limits"],
+          "properties": {"requests": {"type": "object"}, "limits": {"type": "object"}}
+        }
+      },
+      "allOf": [
+        {"if": {"properties": {"enabled": {"const": true}}}, "then": {"properties": {"image": {"pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"}}}},
+        {"if": {"properties": {"cellIds": {"minItems": 1}}}, "then": {"properties": {"enabled": {"const": true}, "endpoint": {"minLength": 1}}}}
+      ]
+    },
     "cloudGateway": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "image", "replicas", "hostname", "publicBaseUrl", "mcpPath", "cellProtocolVersion", "databaseSecretName", "databaseSecretKey", "controlPlaneKeySecretName", "controlPlaneKeySecretKey", "cellTokenKeySecretName", "trustedIngressSourceHeader", "trustedIngressSourceValue", "databaseEgressCidrs"],
+      "required": ["enabled", "marketplaceReviewerAccessEnabled", "image", "replicas", "hostname", "publicBaseUrl", "mcpPath", "cellProtocolVersion", "databaseSecretName", "databaseSecretKey", "controlPlaneKeySecretName", "controlPlaneKeySecretKey", "cellTokenKeySecretName", "trustedIngressSourceHeader", "trustedIngressSourceValue", "databaseEgressCidrs"],
       "properties": {
         "enabled": {"type": "boolean"},
+        "marketplaceReviewerAccessEnabled": {"type": "boolean"},
+        "artifactTransportEnabled": {"type": "boolean"},
+        "artifactSigningKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "artifactSigningKeySecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
         "image": {"type": "string"},
         "replicas": {"type": "integer", "minimum": 1, "maximum": 2},
         "hostname": {"type": "string"},

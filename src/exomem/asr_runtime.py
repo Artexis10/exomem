@@ -64,6 +64,8 @@ class ASRSelection:
 
 
 def _requested_device() -> tuple[str, bool]:
+    if mode_module.service_profile_enabled():
+        return "cpu", True
     raw = os.environ.get(ASR_DEVICE_ENV, "").strip().lower()
     if raw in {"cpu", "cuda"}:
         return raw, True

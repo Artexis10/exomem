@@ -842,6 +842,174 @@ def test_coordinator_schema_admission_uses_the_external_gate(monkeypatch) -> Non
     assert result.schema_fence_generation == 8
 
 
+def test_store_client_round_trips_heads_and_keeps_operator_release_headless(
+    monkeypatch, tmp_path
+) -> None:
+    """Typed reports reach the HTTP store, while an operator never publishes its own head."""
+    from io import BytesIO
+
+    from starlette.testclient import TestClient
+
+    from exomem.lease_coordinator import create_app
+    from exomem.writer_lease import CollectionStoreHead, LeaseCoordinatorClient
+
+    app = create_app(
+        database=tmp_path / "coordinator.sqlite", bearer_token="lease", operator_token="operator"
+    )
+    seen = []
+    with TestClient(app) as transport:
+
+        def urlopen(request, timeout):
+            body = json.loads(request.data) if request.data else None
+            seen.append((request.method, body))
+            response = transport.request(
+                request.method,
+                request.full_url,
+                content=request.data,
+                headers=dict(request.header_items()),
+            )
+            assert response.status_code == 200
+            return BytesIO(response.content)
+
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+        config = LeaseConfig(
+            url="https://lease.example", vault_id="main", replica_id="desktop", token="operator"
+        )
+        operator = LeaseCoordinatorClient(config)
+        probe = operator.collection_store_fence()
+        assert probe.enrolled is False
+        assert probe.capability == "collections-store-v1"
+        head = CollectionStoreHead(
+            "a9d3d366-2509-46ca-bc29-3f318ef9d78d",
+            "6044a9ed-b2d4-4c50-b65f-af08c7504dbb",
+            1,
+            "a" * 64,
+        )
+        fence = operator.transition_collection_store_fence(
+            expected_generation=0, store_id=head.store_id
+        )
+        assert fence.generation == 1
+        assert (
+            operator.transition_collection_store_fence(
+                expected_generation=1, store_id=head.store_id
+            )
+            == fence
+        )
+        client = LeaseCoordinatorClient(replace(config, token="lease"))
+        acquired = client.acquire(collection_store_capability=probe.capability)
+        renewed = client.renew(
+            acquired.fencing_token,
+            collection_store_capability=probe.capability,
+            collection_store_head=head,
+        )
+        assert renewed.collection_store_head == head
+        released = client.release(acquired.fencing_token, collection_store_head=head)
+        assert released.collection_store_head == head
+        assert seen[-1][1]["collection_store_head"] == head.as_dict()
+        acquired = client.acquire(collection_store_capability=probe.capability)
+        released = client.release_holder("desktop", acquired.fencing_token)
+        assert released.collection_store_head == head
+        assert seen[-1][1] == {"replica_id": "desktop", "fencing_token": acquired.fencing_token}
+        assert client.status().collection_store_head == head
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"store_id": "A9D3D366-2509-46CA-BC29-3F318EF9D78D"},
+        {"instance_id": "6044a9edb2d44c50b65faf08c7504dbb"},
+        {"commit_seq": True},
+        {"commit_seq": -1},
+        {"commit_seq": 2**63},
+        {"commit_seq": 1.0},
+        {"commit_seq": 0},
+        {"head_hash": None},
+        {"head_hash": "A" * 64},
+        {"head_hash": "a" * 63},
+        {"extra": 1},
+    ],
+)
+def test_collection_store_head_rejects_noncanonical_metadata(changed) -> None:
+    """Invalid identities, sequences and digests must not become coordination authority."""
+    from exomem.writer_lease import CollectionStoreHead
+
+    data = {
+        "store_id": "a9d3d366-2509-46ca-bc29-3f318ef9d78d",
+        "instance_id": "6044a9ed-b2d4-4c50-b65f-af08c7504dbb",
+        "commit_seq": 1,
+        "head_hash": "a" * 64,
+    }
+    with pytest.raises(ValueError):
+        CollectionStoreHead.from_json({**data, **changed})
+    assert CollectionStoreHead.from_json({**data, "commit_seq": 2**63 - 1}).commit_seq == 2**63 - 1
+    assert (
+        CollectionStoreHead.from_json({**data, "commit_seq": 0, "head_hash": None}).head_hash
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"collection_store_head": None},
+        {
+            "required_collection_store_capability": "collections-store-v1",
+            "collection_store_fence_generation": 1,
+        },
+        {
+            "required_collection_store_capability": "unknown",
+            "collection_store_fence_generation": 1,
+            "collection_store_head": None,
+        },
+        {
+            "required_collection_store_capability": "collections-store-v1",
+            "collection_store_fence_generation": True,
+            "collection_store_head": None,
+        },
+        {
+            "required_collection_store_capability": "collections-store-v1",
+            "collection_store_fence_generation": 0,
+            "collection_store_head": None,
+        },
+    ],
+)
+def test_lease_record_rejects_inconsistent_store_metadata(payload) -> None:
+    """An incomplete fence response cannot be mistaken for a store-aware lease grant."""
+    with pytest.raises(ValueError, match="collection store fence metadata"):
+        LeaseRecord.from_json(payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"capability": "unknown", "enrolled": False, "store_id": None, "generation": 0},
+        {
+            "capability": "collections-store-v1",
+            "enrolled": False,
+            "store_id": None,
+            "generation": 1,
+        },
+        {"capability": "collections-store-v1", "enrolled": True, "store_id": None, "generation": 1},
+    ],
+)
+def test_store_probe_requires_explicit_consistent_capability(monkeypatch, payload) -> None:
+    """An old coordinator's ignored fields or generic success is not capability proof."""
+    from io import BytesIO
+
+    from exomem.writer_lease import LeaseCoordinatorClient
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda request, timeout: BytesIO(json.dumps(payload).encode())
+    )
+    client = LeaseCoordinatorClient(
+        LeaseConfig(url="https://lease.example", vault_id="main", replica_id="desktop")
+    )
+    with pytest.raises(OpError) as raised:
+        client.collection_store_fence()
+    assert raised.value.code == "WRITER_COORDINATOR_UNAVAILABLE"
+
+
 def test_coordinator_schema_fence_operator_reads_and_advances_exact_generation(
     monkeypatch,
 ) -> None:

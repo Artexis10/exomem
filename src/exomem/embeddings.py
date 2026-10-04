@@ -1,7 +1,7 @@
 """Local vector embeddings for hybrid search.
 
 Loads the recall encoder lazily (`MODEL_NAME`: `BAAI/bge-m3` on a personal
-server, `BAAI/bge-base-en-v1.5` on a hosted or cloud cell; the heavy import
+server and a cloud cell, `BAAI/bge-base-en-v1.5` on a hosted cell; the heavy import
 stays off the keyword-mode hot path). Chunks each
 KB page paragraph-wise with title prepended, normalizes vectors so
 cosine = dot product, and persists to a per-machine sqlite sidecar
@@ -27,8 +27,9 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, BinaryIO, NamedTuple
 
@@ -1143,25 +1144,107 @@ def _encode_caller() -> str:
     return "unknown"
 
 
+_PREPARED_SPACES: ContextVar[list[recall_space.SpaceIdentity] | None] = ContextVar(
+    "embedding_prepared_spaces", default=None
+)
+
+
+def _record_producer(model: object, model_name: str, vectors: np.ndarray) -> None:
+    captured = _PREPARED_SPACES.get()
+    if captured is None or not len(vectors):
+        return
+    profile = getattr(model, "profile", None)
+    fingerprint = None
+    if isinstance(profile, embedding_backend.EncoderProfile):
+        model_name = profile.model
+        fingerprint = profile.fingerprint()
+    captured.append(recall_space.SpaceIdentity(model_name, fingerprint, int(vectors.shape[1])))
+
+
+def _encode_prepared(
+    encode: Callable[[], np.ndarray], *, fallback: recall_space.SpaceIdentity | None = None
+) -> tuple[np.ndarray, recall_space.SpaceIdentity]:
+    """Retain actual producer identities across a prepared vector group's encodes."""
+    spaces: list[recall_space.SpaceIdentity] = []
+    marker = _PREPARED_SPACES.set(spaces)
+    model_name = recall_space.encoding_model()
+    try:
+        vectors = np.asarray(encode(), dtype=np.float32)
+    finally:
+        _PREPARED_SPACES.reset(marker)
+    if vectors.ndim != 2:
+        raise ValueError("prepared encoder returned an invalid vector shape")
+    if spaces:
+        identity = spaces[0]
+        if any(space != identity for space in spaces) or vectors.shape[1] != identity.dim:
+            raise recall_space.VectorSpaceMismatch("prepared vectors have different producers")
+    else:
+        # No new encode (all texts reused), or the historical substituted encoder seam.
+        identity = fallback or recall_space.current_identity(vectors.shape[1], model=model_name)
+        if len(vectors) and vectors.shape[1] != identity.dim:
+            raise recall_space.VectorSpaceMismatch("prepared vectors differ from the reused space")
+    return vectors, identity
+
+
 def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     if not texts:
         return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
     selected = recall_space.selected_model()
-    if selected is not None and selected != MODEL_NAME:
-        # A sidecar still in another encoder's space, served by that encoder.
-        return recall_space.encode_with_previous(selected, texts, is_query=is_query)
+    model_name = MODEL_NAME
+    if selected is not None and selected != model_name:
+        # Keep the actual previous encoder alive through identity capture too.
+        with recall_space._in_flight():
+            model = recall_space.previous_resident(selected)
+            if model is None:
+                raise recall_space.ServingEncoderCold(f"{selected} is not resident")
+            vectors = recall_space.encode_with_previous(
+                selected, texts, is_query=is_query, encoder=model
+            )
+            _record_producer(model, selected, vectors)
+            return vectors
     model = get_model()
-    query_prefix, passage_prefix = _prefixes(model, MODEL_NAME)
+    query_prefix, passage_prefix = _prefixes(model, model_name)
     prefix = query_prefix if is_query else passage_prefix
     if prefix:
         texts = [prefix + t for t in texts]
     with BGE_GUARD.active():
-        return _encode_in_turns(
+        vectors = _encode_in_turns(
             model,
             texts,
             admission=runtime_resources.model_admission,
             execution=runtime_resources.model_execution,
         )
+        _record_producer(model, model_name, vectors)
+        return vectors
+
+
+def advisory_passages_fit(texts: list[str]) -> bool:
+    """Prove passages fit the resident selected encoder; never load or wait."""
+    selected = recall_space.selected_model()
+    model_name = selected or MODEL_NAME
+    previous = selected is not None and selected != MODEL_NAME
+    with contextlib.ExitStack() as stack:
+        if previous:
+            stack.enter_context(recall_space._in_flight())
+            model = recall_space.previous_resident(selected)
+        else:
+            if not _MODEL_LOCK.acquire(blocking=False):
+                raise runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+            try:
+                stack.enter_context(BGE_GUARD.active())
+                model = _MODEL
+            finally:
+                _MODEL_LOCK.release()
+        if model is None:
+            raise recall_space.ServingEncoderCold("advisory encoder is not resident")
+        _query_prefix, prefix = _prefixes(model, model_name)
+        passages = [prefix + text for text in texts] if prefix else texts
+        # ONNX counts on a private tokenizer clone. Torch reconfigures its
+        # shared tokenizer, so it must refuse if the encoder's slot is busy.
+        if not getattr(model, "concurrent_encodes", False):
+            execution = recall_space._previous_gate().execution if previous else runtime_resources.model_execution
+            stack.enter_context(execution(wait=False))
+        return model.texts_fit(passages)
 
 
 def _prefixes(model, model_name: str) -> tuple[str, str]:
@@ -1184,7 +1267,17 @@ def _encode_in_turns(model, texts: list[str], *, admission, execution) -> np.nda
     sentence-transformers forms them, so they pad no more than one call did;
     rows come back in input order.
     """
+    from . import mode
+
     size = encode_batch_size(model)
+    if (
+        mode.service_profile_enabled()
+        and getattr(model, "backend", None) == embedding_backend.ONNX
+        and getattr(getattr(model, "profile", None), "quantization", None) == embedding_backend.ORT_DYNAMIC_INT8
+    ):
+        # Dynamic-int8 already encodes serially inside the backend. Yield the
+        # execution slot after each actual inference, preserving admission.
+        size = 1
     order = np.argsort([-len(text) for text in texts]) if len(texts) > size else np.arange(len(texts))
     parts: list[np.ndarray] = []
     with admission():
@@ -1546,6 +1639,88 @@ def index_cache_status() -> dict:
 
 
 @dataclass(frozen=True, slots=True)
+class EmbeddingPublication:
+    """Volatile proof of both projections published from one guarded source."""
+
+    guard: Any
+    index: Any
+    identity: recall_space.SpaceIdentity
+    token: tuple[int, int, int, int]
+    chunk_count: int
+    unit_count: int
+    parent_generation: str
+    parent_source_hash: str
+    policy_identity: tuple[str, str]
+    registry_identity: tuple[int, str, str]
+    claims_enabled: bool = False
+    claim_checksum: str | None = None
+
+    def current(self, vault_root: Path, *, claims_required: bool = False) -> bool:
+        from . import claims, semantic_index, vault
+
+        try:
+            self.guard.recheck(vault_root)
+            if claims_required and (
+                not self.claims_enabled
+                or not claims.publication_current(vault_root, self.guard.target, self.claim_checksum)
+            ):
+                return False
+            return (
+                recall_policy.recall_policy_identity(vault_root) == self.policy_identity
+                and semantic_index.current_registry_identity(vault_root) == self.registry_identity
+                and self.index.parent_publication_current(
+                    self.guard.target, token=self.token, identity=self.identity,
+                    chunk_count=self.chunk_count, unit_count=self.unit_count,
+                    parent_generation=self.parent_generation,
+                    parent_source_hash=self.parent_source_hash,
+                )
+            )
+        except (OSError, sqlite3.Error, vault.PathGuardError):
+            return False
+
+
+def reconstruct_publication(vault_root: Path, path: Path) -> EmbeddingPublication | None:
+    """Recheck an evicted/restarted proof from one bounded current parent."""
+    from . import claims, find_corpus, runtime_resources, semantic_index, vault
+
+    index = get_embedding_index(vault_root)
+    if not index.path.exists() or not recall_policy.is_recall_candidate(vault_root, path):
+        return None
+    try:
+        with runtime_resources.semantic_preparation(vault_root, path) as prepared:
+            policy = recall_policy.recall_policy_identity(vault_root)
+            page = find_corpus.parse_page(
+                path, path.stat().st_mtime, vault_root,
+                content=prepared.source.encode("utf-8"),
+                resolved_relative=path.relative_to(vault_root).as_posix(),
+            )
+            if page is None:
+                return None
+            identity = index.identity or recall_space.current_identity(recall_space.current_dim())
+            prepared.check_page(page, vector_dim=0 if prepared.source_bytes <= 1024 else identity.dim)
+            chunks = _chunks_for_page(vault_root, page, allow_encode=False)
+            if chunks is None:
+                return None  # The existing segmenter needs inference: replay instead.
+            state = semantic_index.current_parent_index_state(vault_root, path, source=prepared.source)
+            units = [unit for unit in state.document.units if unit.unit_ref is not None]
+            prepared.check_projections(chunks, units, vector_dim=identity.dim)
+            token = index.parent_publication_from_source(chunks, state, identity=identity)
+            if token is None:
+                return None
+            proof = EmbeddingPublication(
+                prepared.guard, index, identity, token, len(chunks), len(units),
+                state.parent_generation, state.parent_source_hash, policy,
+                (state.parser_version, state.language_registry_hash, state.relation_registry_hash),
+                claims_enabled=claims.claim_level_enabled(),
+                claim_checksum=claims.claim_checksum_for_page(page) if claims.claim_level_enabled() else None,
+            )
+            return proof if proof.current(vault_root) else None
+    except (OSError, UnicodeError, ValueError, sqlite3.Error, vault.PathGuardError,
+            runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
+        return None
+
+
+@dataclass(frozen=True, slots=True)
 class EmbeddingSyncStatus:
     """Bounded outcome from one embedding-sidecar dispatch.
 
@@ -1557,6 +1732,9 @@ class EmbeddingSyncStatus:
     status: str
     code: str
     eligible_count: int
+    # Internal only: public receipts remain bounded and content-free. A
+    # restarted dispatcher replays rather than inventing this volatile proof.
+    publication: EmbeddingPublication | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.status) is not str or self.status not in {
@@ -1584,6 +1762,62 @@ def upsert_after_write_status(
     written_paths: list[Path],
     *,
     defer_during_warm: bool = True,
+    batch_size: int = 256,
+) -> EmbeddingSyncStatus:
+    """Prepare service parents individually within the shared peak allowance."""
+    from . import mode, runtime_resources, vault
+
+    if not mode.service_profile_enabled() or os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return _upsert_after_write_status(
+            vault_root, written_paths, defer_during_warm=defer_during_warm, batch_size=batch_size
+        )
+    eligible = [
+        path for path in written_paths
+        if index_paths.is_embeddable_path(path)
+        and index_paths.rel_to_vault(vault_root, path) is not None
+        and recall_policy.is_recall_candidate(vault_root, path)
+    ]
+    if not eligible:
+        return _upsert_after_write_status(
+            vault_root, written_paths, defer_during_warm=defer_during_warm, batch_size=batch_size
+        )
+    suppressed = [path for path in written_paths if path not in eligible]
+    if suppressed:
+        _upsert_after_write_status(vault_root, suppressed, defer_during_warm=defer_during_warm)
+    failure: EmbeddingSyncStatus | None = None
+    publication: EmbeddingPublication | None = None
+    for path in eligible:
+        try:
+            with runtime_resources.semantic_preparation(vault_root, path) as preparation:
+                status = _upsert_after_write_status(
+                    vault_root, [path], defer_during_warm=defer_during_warm,
+                    batch_size=1, preparation=preparation,
+                )
+                if len(eligible) == 1:
+                    publication = status.publication
+        except runtime_resources.PreparationBudgetExceeded:
+            status = EmbeddingSyncStatus("degraded", "embedding_preparation_budget_exceeded", 1)
+        except runtime_resources.PreparationCapacityBusy:
+            status = EmbeddingSyncStatus("degraded", "embedding_preparation_busy", 1)
+        except (OSError, UnicodeError, vault.PathGuardError):
+            status = EmbeddingSyncStatus("degraded", "embedding_input_unavailable", 1)
+        if status.status != "completed":
+            failure = failure or status
+    return EmbeddingSyncStatus(
+        failure.status if failure else "completed",
+        failure.code if failure else "embedding_upsert_completed",
+        len(eligible),
+        publication=publication if failure is None else None,
+    )
+
+
+def _upsert_after_write_status(
+    vault_root: Path,
+    written_paths: list[Path],
+    *,
+    defer_during_warm: bool = True,
+    batch_size: int = 256,
+    preparation: Any = None,
 ) -> EmbeddingSyncStatus:
     """Re-embed eligible files and return an observable bounded outcome."""
     global _IMPORT_FAILED
@@ -1610,15 +1844,11 @@ def upsert_after_write_status(
     # Test runs disable the heavy embedding path to keep the suite fast.
     # Production servers leave EXOMEM_DISABLE_EMBEDDINGS unset.
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return EmbeddingSyncStatus(
-            "disabled", "embeddings_disabled", eligible_count
-        )
+        return EmbeddingSyncStatus("disabled", "embeddings_disabled", eligible_count)
     if not md_paths:
         return EmbeddingSyncStatus("completed", "no_eligible_paths", 0)
     if _IMPORT_FAILED:
-        return EmbeddingSyncStatus(
-            "disabled", "embeddings_import_unavailable", eligible_count
-        )
+        return EmbeddingSyncStatus("disabled", "embeddings_import_unavailable", eligible_count)
 
     # While the background warm-up is loading the model, don't block this
     # write on the singleton lock — park the batch; the warm thread drains it
@@ -1639,9 +1869,7 @@ def upsert_after_write_status(
             except (OSError, sqlite3.Error):
                 log.warning("durable warm defer failed; deferring in memory only")
                 race_receipts = []
-            if readiness.defer(
-                "embeddings", (vault_root, tuple(md_paths), tuple(race_receipts))
-            ):
+            if readiness.defer("embeddings", (vault_root, tuple(md_paths), tuple(race_receipts))):
                 log.info(
                     "write-embed deferred until the embedding model is warm (%d file(s))",
                     len(md_paths),
@@ -1674,16 +1902,12 @@ def upsert_after_write_status(
             )
             _IMPORT_FAILED = True
         return finish(
-            EmbeddingSyncStatus(
-                "disabled", "embeddings_import_unavailable", eligible_count
-            )
+            EmbeddingSyncStatus("disabled", "embeddings_import_unavailable", eligible_count)
         )
     except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
         log.warning("embedding model load failed: %s; skipping upsert", e)
         return finish(
-            EmbeddingSyncStatus(
-                "degraded", "embedding_model_load_failed", eligible_count
-            )
+            EmbeddingSyncStatus("degraded", "embedding_model_load_failed", eligible_count)
         )
 
     from . import find as find_module
@@ -1693,19 +1917,19 @@ def upsert_after_write_status(
     except Exception as e:  # noqa: BLE001 - derived index open is best-effort
         log.warning("could not open embedding sidecar for upsert: %s", e)
         return finish(
-            EmbeddingSyncStatus(
-                "degraded", "embedding_index_open_failed", eligible_count
-            )
+            EmbeddingSyncStatus("degraded", "embedding_index_open_failed", eligible_count)
         )
-    from . import freshness
+    from . import freshness, vault
 
     captured_policy_identity = recall_policy.recall_policy_identity(vault_root)
-    per_file: list[tuple[Path, Any, list[str], float, freshness.FileSignature]] = []
+    per_file: list[tuple[Path, Any, list[str], float, freshness.FileSignature, Any]] = []
     failure_code: str | None = None
     for md in md_paths:
         try:
             stat = md.stat()
             signature = freshness.stat_signature(md)
+            if preparation is not None and signature != preparation.signature:
+                raise OSError("semantic input changed during preparation")
             mtime = stat.st_mtime
         except FileNotFoundError:
             # File was just written then disappeared — treat as a delete.
@@ -1723,7 +1947,16 @@ def upsert_after_write_status(
             failure_code = "embedding_input_unavailable"
             continue
         try:
-            page = find_module._CACHE.get(md, vault_root)
+            if preparation is None:
+                page = find_module._CACHE.get(md, vault_root)
+            else:
+                from . import find_corpus
+
+                page = find_corpus.parse_page(
+                    md, mtime, vault_root,
+                    content=preparation.source.encode("utf-8"),
+                    resolved_relative=md.relative_to(vault_root).as_posix(),
+                )
         except Exception as e:  # noqa: BLE001 - parsing/cache failures are observable
             log.warning("embedding input could not be parsed: %s", e)
             failure_code = "embedding_input_unavailable"
@@ -1731,13 +1964,34 @@ def upsert_after_write_status(
         if page is None:
             failure_code = "embedding_input_unavailable"
             continue
+        if preparation is not None:
+            identity = getattr(index, "identity", None)
+            width = identity.dim if identity else recall_space.current_dim()
+            preparation.check_page(page, vector_dim=0 if preparation.source_bytes <= 1024 else width)
         try:
-            chunks = _chunks_for_page(vault_root, page)
+            chunks = _chunks_for_page(vault_root, page, allow_encode=False) if preparation is not None else None
+            if chunks is None:
+                # Timed segmentation performs inference while chunking. Keep
+                # its conservative vector reservation ahead of that work.
+                if preparation is not None:
+                    preparation.check_page(page, vector_dim=width)
+                chunks = _chunks_for_page(vault_root, page)
         except Exception as e:  # noqa: BLE001 - chunk extraction is best-effort
             log.warning("embedding chunks could not be prepared: %s", e)
             failure_code = "embedding_chunking_failed"
             continue
-        per_file.append((md, page, chunks, mtime, signature))
+        prepared_state = None
+        if preparation is not None:
+            from . import semantic_index
+
+            prepared_state = semantic_index.current_parent_index_state(
+                vault_root, md, source=preparation.source,
+            )
+            preparation.check_projections(
+                chunks or [], [unit for unit in prepared_state.document.units if unit.unit_ref is not None],
+                vector_dim=identity.dim if identity else recall_space.current_dim(),
+            )
+        per_file.append((md, page, chunks, mtime, signature, prepared_state))
 
     if not per_file:
         return finish(
@@ -1751,87 +2005,152 @@ def upsert_after_write_status(
     from . import semantic_index
 
     published_paths: list[Path] = []
-    for md, page, chunks, mtime, signature in per_file:
+    prepared: list[tuple] = []
+    prepared_count = 0
+    batch_identity: recall_space.SpaceIdentity | None = None
+    publication: EmbeddingPublication | None = None
+
+    def flush_prepared() -> None:
+        nonlocal prepared_count, batch_identity, failure_code, publication
+        if not prepared:
+            return
+        current = []
+        for item in prepared:
+            md, replacement, unit_replacement, validator = item
+            if validator():
+                current.append(item)
+            else:
+                failure_code = failure_code or "embedding_input_drifted"
+                try:
+                    index.purge_paths_if_present([replacement[0]])
+                except Exception as error:  # noqa: BLE001
+                    log.warning("embedding drift purge failed: %s", error)
+        if current:
+            try:
+                publish = getattr(index, "upsert_batch", None)
+                if callable(publish):
+                    publication_token = publish(
+                        [item[1] for item in current],
+                        [item[2] for item in current if item[2] is not None],
+                        identity=batch_identity,
+                        validate=lambda: all(item[3]() for item in current),
+                    )
+                    if preparation is not None and len(current) == 1 and publication_token is not None:
+                        _md, replacement, unit, _validator = current[0]
+                        if unit is not None:
+                            state, unit_vectors, _mtime = unit
+                            publication = EmbeddingPublication(
+                                preparation.guard, index, batch_identity, publication_token,
+                                len(replacement[1]), len(unit_vectors), state.parent_generation,
+                                state.parent_source_hash, captured_policy_identity,
+                                (state.parser_version, state.language_registry_hash,
+                                 state.relation_registry_hash),
+                            )
+                else:
+                    # Keep the historical narrow index-adapter seam.
+                    for _md, (rel, chunks, vectors, mtime), unit, _validate in current:
+                        if chunks:
+                            index.upsert_file(rel, chunks, vectors, mtime)
+                        else:
+                            index.delete_file(rel)
+                        if unit is not None:
+                            state, unit_vectors, unit_mtime = unit
+                            if len(unit_vectors):
+                                index.upsert_semantic_units(state, unit_vectors, unit_mtime)
+                            else:
+                                index.delete_semantic_units(rel)
+                published_paths.extend(item[0] for item in current)
+            except Exception as error:  # noqa: BLE001 - failed batches retain receipts
+                drifted = not all(item[3]() for item in current)
+                failure_code = failure_code or (
+                    "embedding_input_drifted" if drifted else "embedding_encode_failed"
+                )
+                log.warning("embedding batch publication failed: %s", error)
+                if drifted:
+                    try:
+                        index.purge_paths_if_present([item[1][0] for item in current])
+                    except Exception as purge_error:  # noqa: BLE001
+                        log.warning("embedding drift purge failed: %s", purge_error)
+        prepared.clear()
+        prepared_count = 0
+        batch_identity = None
+
+    for md, page, chunks, mtime, signature, prepared_state in per_file:
         rel_path = page.rel_path
+
         def still_current(path: Path = md, expected: freshness.FileSignature = signature) -> bool:
             try:
+                if preparation is not None:
+                    preparation.guard.recheck(vault_root)
                 return (
                     recall_policy.is_recall_candidate(vault_root, path)
                     and freshness.stat_signature(path) == expected
-                    and recall_policy.recall_policy_identity(vault_root)
-                    == captured_policy_identity
+                    and recall_policy.recall_policy_identity(vault_root) == captured_policy_identity
                 )
-            except OSError:
+            except (OSError, vault.PathGuardError):
                 return False
 
         if not still_current():
             try:
                 index.purge_paths_if_present([rel_path])
-            except Exception as e:  # noqa: BLE001
-                log.warning("embedding drift purge failed for %s: %s", rel_path, e)
+            except Exception as error:  # noqa: BLE001
+                log.warning("embedding drift purge failed for %s: %s", rel_path, error)
             failure_code = failure_code or "embedding_input_drifted"
             continue
-        stored_chunks, stored_units = _stored_text_vectors(index, rel_path)
-        if chunks:
-            try:
-                with recall_space.encoding_for(index):
-                    vectors = _embed_live_chunks_reusing(chunks, stored_chunks)
-                if not still_current():
-                    index.purge_paths_if_present([rel_path])
-                    failure_code = failure_code or "embedding_input_drifted"
-                    continue
-                index.upsert_file(rel_path, chunks, vectors, mtime)
-            except Exception as e:  # noqa: BLE001 - one bad encode must not fail the writer
-                log.warning(
-                    "embedding encode failed for %s: %s; sidecar left stale",
-                    rel_path,
-                    e,
-                )
-                failure_code = failure_code or "embedding_encode_failed"
-        else:
-            # Page has no embeddable chunks — drop stale page rows. Unit rows
-            # are rebuilt independently below from the normalized unit parse.
-            try:
-                index.delete_file(rel_path)
-            except Exception as e:  # noqa: BLE001 - stale-row cleanup is observable
-                log.warning("embedding stale-row cleanup failed: %s", e)
-                failure_code = failure_code or "embedding_delete_failed"
-
-        # The page vector write can take long enough for a direct edit or a
-        # policy transition to occur.  Never publish a semantic-unit vector for
-        # bytes we did not capture, and purge the just-published page if that
-        # happened between the two derived writes.
-        if not still_current():
-            try:
-                index.purge_paths_if_present([rel_path])
-            except Exception as e:  # noqa: BLE001
-                log.warning("embedding drift purge failed for %s: %s", rel_path, e)
-            failure_code = failure_code or "embedding_input_drifted"
-            continue
-
+        stored_chunks, stored_units = _stored_text_vectors(
+            index, rel_path, max_bytes=preparation.reuse_allowance if preparation else None
+        )
         try:
-            state = semantic_index.current_parent_index_state(vault_root, md)
+            with recall_space.encoding_for(index):
+                vectors, producer = _encode_prepared(
+                    lambda chunks=chunks, stored_chunks=stored_chunks: (
+                        _embed_live_chunks_reusing(chunks, stored_chunks)
+                        if chunks
+                        else np.zeros((0, recall_space.current_dim()), dtype=np.float32)
+                    ),
+                    fallback=getattr(index, "identity", None),
+                )
+        except Exception as error:  # noqa: BLE001
+            log.warning("embedding encode failed for %s: %s; sidecar left stale", rel_path, error)
+            failure_code = failure_code or "embedding_encode_failed"
+            continue
+        unit_replacement = None
+        try:
+            state = prepared_state or semantic_index.current_parent_index_state(vault_root, md)
             units = [unit for unit in state.document.units if unit.unit_ref is not None]
-            if units:
-                with recall_space.encoding_for(index):
-                    unit_vectors = _embed_live_chunks_reusing(
-                        [unit.content for unit in units], stored_units
+            with recall_space.encoding_for(index):
+                unit_vectors, unit_producer = _encode_prepared(
+                    lambda units=units, stored_units=stored_units, producer=producer: (
+                        _embed_live_chunks_reusing([unit.content for unit in units], stored_units)
+                        if units
+                        else np.zeros((0, producer.dim), dtype=np.float32)
+                    ),
+                    fallback=getattr(index, "identity", None),
+                )
+            if len(unit_vectors):
+                if chunks and (
+                    producer.dim != unit_producer.dim
+                    or not producer.accepts(unit_producer.model, unit_producer.fingerprint)
+                ):
+                    raise recall_space.VectorSpaceMismatch(
+                        "parent encoders changed during preparation"
                     )
-                if not still_current():
-                    index.purge_paths_if_present([rel_path])
-                    failure_code = failure_code or "embedding_input_drifted"
-                    continue
-                index.upsert_semantic_units(state, unit_vectors, mtime)
-            else:
-                index.delete_semantic_units(rel_path)
-        except Exception as e:  # noqa: BLE001 - optional unit vectors soft-fail
-            log.warning(
-                "semantic-unit embedding update failed for %s: %s; sidecar left stale",
-                rel_path,
-                e,
-            )
+                if not chunks or unit_producer.fingerprint is not None:
+                    producer = unit_producer
+            unit_replacement = (state, unit_vectors, mtime)
+        except Exception as error:  # noqa: BLE001 - optional unit vectors soft-fail
+            log.warning("semantic-unit embedding update failed for %s: %s", rel_path, error)
             failure_code = failure_code or "semantic_unit_embedding_encode_failed"
-        published_paths.append(md)
+        if batch_identity is not None and batch_identity != producer:
+            flush_prepared()
+        batch_identity = producer
+        prepared.append(
+            (md, (rel_path, chunks or [], vectors, mtime), unit_replacement, still_current)
+        )
+        prepared_count += len(vectors) + (len(unit_replacement[1]) if unit_replacement else 0)
+        if prepared_count >= max(1, int(batch_size)) or len(prepared) >= max(1, int(batch_size)):
+            flush_prepared()
+    flush_prepared()
 
     # Claim-level sidecar (.claims.sqlite) rides the same write seam — opt-in via
     # EXOMEM_CLAIM_LEVEL, no-op otherwise. Local import avoids a module cycle
@@ -1841,7 +2160,16 @@ def upsert_after_write_status(
         from . import claims
 
         if claims.claim_level_enabled() and published_paths:
-            claims.upsert_claims_after_write(vault_root, published_paths)
+            if preparation is None:
+                claims.upsert_claims_after_write(vault_root, published_paths)
+            else:
+                pages = {md: (page, signature) for md, page, _chunks, _mtime, signature, _state in per_file}
+                claims.upsert_claims_after_write(vault_root, published_paths, pages=pages)
+                if publication is not None:
+                    publication = replace(publication, claims_enabled=True,
+                                          claim_checksum=claims.claim_checksum_for_page(pages[published_paths[0]][0]))
+                    if not publication.current(vault_root, claims_required=True):
+                        failure_code = failure_code or "embedding_auxiliary_failed"
     except Exception as e:  # noqa: BLE001
         log.debug("claim sidecar upsert skipped (%s)", e)
         failure_code = failure_code or "embedding_auxiliary_failed"
@@ -1850,6 +2178,7 @@ def upsert_after_write_status(
             "completed" if failure_code is None else "degraded",
             failure_code or "embedding_upsert_completed",
             eligible_count,
+            publication=publication if failure_code is None else None,
         )
     )
 
@@ -1873,14 +2202,17 @@ def _live_embed_max_chunks() -> int:
 
 
 def _stored_text_vectors(
-    index: Any, rel_path: str
+    index: Any, rel_path: str, *, max_bytes: int | None = None
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     """The page's published vectors by text, or nothing when they cannot be read.
 
     Reuse is an economy, never a dependency: a sidecar that cannot answer costs
     this write a full encode, which is what it cost before."""
     try:
-        chunks, units = index.stored_text_vectors(rel_path)
+        chunks, units = (
+            index.stored_text_vectors(rel_path)
+            if max_bytes is None else index.stored_text_vectors(rel_path, max_bytes=max_bytes)
+        )
     except Exception as e:  # noqa: BLE001 - fall back to encoding everything
         log.debug("stored vectors unavailable for reuse (%s)", type(e).__name__)
         return {}, {}
@@ -2069,6 +2401,7 @@ class GenerationVectors:
     sidecar rows rather than a fresh encode.  It is the observable a caller
     needs to prove that two consumers of one generation did not both pay for
     it, and it is content-free.
+    ``space`` binds these vectors to the source sidecar across model cutover.
     """
 
     rel_path: str
@@ -2078,6 +2411,7 @@ class GenerationVectors:
     chunks: tuple[str, ...]
     vectors: np.ndarray
     reused: bool
+    space: recall_space.SpaceIdentity | None
 
 
 def published_generation_vectors(
@@ -2089,31 +2423,24 @@ def published_generation_vectors(
     count: a page whose current chunking differs by one character is a
     different generation and must not borrow the previous one's vectors.
     """
+    published = _published_generation_vectors_with_space(vault_root, rel_path, chunks=chunks)
+    return published[0] if published is not None else None
+
+
+def _published_generation_vectors_with_space(
+    vault_root: Path, rel_path: str, *, chunks: list[str]
+) -> tuple[np.ndarray, recall_space.SpaceIdentity | None] | None:
     if not chunks:
-        return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
+        return np.zeros((0, recall_space.current_dim()), dtype=np.float32), None
     try:
         index = get_embedding_index(vault_root)
-        metadata, matrix = index.all_vectors()
+        stored, _units, space = index.stored_text_vectors_with_space(rel_path)
+        if any(chunk not in stored for chunk in chunks):
+            return None
+        return np.asarray([stored[chunk] for chunk in chunks], dtype=np.float32), space
     except Exception as e:  # noqa: BLE001 - sidecar reuse is an optimisation
-        log.debug("published generation vectors unavailable for %s: %s", rel_path, e)
+        log.debug("published generation reuse unavailable (%s)", type(e).__name__)
         return None
-    rows = sorted(
-        (
-            (chunk_index, row)
-            for row, (file_path, chunk_index) in enumerate(metadata)
-            if file_path == rel_path
-        )
-    )
-    if [chunk_index for chunk_index, _row in rows] != list(range(len(chunks))):
-        return None
-    try:
-        texts = index._texts_for([(rel_path, chunk_index) for chunk_index, _row in rows])
-    except Exception as e:  # noqa: BLE001 - sidecar reuse is an optimisation
-        log.debug("published chunk text unavailable for %s: %s", rel_path, e)
-        return None
-    if [texts.get((rel_path, chunk_index)) for chunk_index, _row in rows] != list(chunks):
-        return None
-    return np.asarray([matrix[row] for _chunk_index, row in rows], dtype=np.float32)
 
 
 def prepare_generation_vectors(
@@ -2155,25 +2482,27 @@ def prepare_generation_vectors(
             return None
         chunks = _chunks_for_page(Path(vault_root), page)
     except Exception as e:  # noqa: BLE001 - chunk extraction is best-effort
-        log.debug("generation chunks could not be prepared for %s: %s", rel_path, e)
+        log.debug("generation chunk preparation failed (%s)", type(e).__name__)
         return None
 
-    published = published_generation_vectors(vault_root, rel_path, chunks=chunks)
-    if published is not None and len(published) == len(chunks):
-        vectors, reused = published, True
+    published = _published_generation_vectors_with_space(vault_root, rel_path, chunks=chunks)
+    if published is not None and len(published[0]) == len(chunks):
+        (vectors, space), reused = published, True
     elif not allow_encode:
         return None
     else:
         try:
             get_model()
         except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
-            log.debug("generation vectors need a model that did not load: %s", e)
+            log.debug("generation model load failed (%s)", type(e).__name__)
             return None
         try:
-            with recall_space.encoding_for(get_embedding_index(vault_root)):
+            index = get_embedding_index(vault_root)
+            with recall_space.encoding_for(index):
+                space = index.identity
                 vectors, reused = _embed_live_chunks(chunks), False
         except Exception as e:  # noqa: BLE001 - one bad encode must not fail a worker
-            log.debug("generation vectors could not be encoded for %s: %s", rel_path, e)
+            log.debug("generation encode failed (%s)", type(e).__name__)
             return None
     # The page can move under a slow encode; re-prove before handing it on.
     try:
@@ -2189,6 +2518,7 @@ def prepare_generation_vectors(
         chunks=tuple(chunks),
         vectors=np.asarray(vectors, dtype=np.float32),
         reused=reused,
+        space=space,
     )
 
 
@@ -2324,9 +2654,7 @@ def index_incremental(
         if unit_state is not None:
             unit_seen_on_disk.add(page.rel_path)
             expected_refs = frozenset(
-                unit.unit_ref
-                for unit in unit_state.document.units
-                if unit.unit_ref is not None
+                unit.unit_ref for unit in unit_state.document.units if unit.unit_ref is not None
             )
             stored = unit_parent_states.get(page.rel_path)
             expected_stored = (
@@ -2384,17 +2712,18 @@ def index_incremental(
         for _rp, chs, _m in group:
             flat.extend(chs)
         with recall_space.encoding_for(index, load=True):
-            vectors = embed_texts(flat, is_query=False)
+            vectors, producer = _encode_prepared(lambda: embed_texts(flat, is_query=False))
         offset = 0
+        replacements = []
         for rp, chs, m in group:
             n = len(chs)
-            index.upsert_file(rp, chs, vectors[offset:offset + n], m)
+            replacements.append((rp, chs, vectors[offset : offset + n], m))
             offset += n
-            done_files += 1
+        index.upsert_batch(replacements, identity=producer)
+        done_files += len(group)
         stats["chunks_embedded"] += len(flat)
         log_fn(
-            f"  …{done_files}/{total_files} file(s) embedded "
-            f"({stats['chunks_embedded']} chunk(s))"
+            f"  …{done_files}/{total_files} file(s) embedded ({stats['chunks_embedded']} chunk(s))"
         )
 
     batch: list[tuple[str, list[str], float]] = []
@@ -2423,29 +2752,25 @@ def index_incremental(
             if unit.unit_ref is not None
         ]
         with recall_space.encoding_for(index, load=True):
-            vectors = (
-                embed_texts(texts, is_query=False)
-                if texts
-                else np.zeros((0, index.dim), dtype=np.float32)
+            vectors, producer = _encode_prepared(
+                lambda: (
+                    embed_texts(texts, is_query=False)
+                    if texts
+                    else np.zeros((0, index.dim), dtype=np.float32)
+                )
             )
         offset = 0
+        replacements = []
         for state, mtime in group:
-            count = sum(
-                unit.unit_ref is not None for unit in state.document.units
-            )
-            index.upsert_semantic_units(
-                state,
-                vectors[offset : offset + count],
-                mtime,
-            )
+            count = sum(unit.unit_ref is not None for unit in state.document.units)
+            replacements.append((state, vectors[offset : offset + count], mtime))
             offset += count
+        index.upsert_batch([], replacements, identity=producer)
         stats["unit_vectors_embedded"] += len(texts)
 
     for item in pending_units:
         unit_batch.append(item)
-        unit_batch_size += sum(
-            unit.unit_ref is not None for unit in item[0].document.units
-        )
+        unit_batch_size += sum(unit.unit_ref is not None for unit in item[0].document.units)
         if unit_batch_size >= batch_size:
             _flush_units(unit_batch)
             unit_batch = []

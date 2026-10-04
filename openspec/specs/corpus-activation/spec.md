@@ -1,7 +1,7 @@
 # corpus-activation Specification
 
 ## Purpose
-TBD - created by archiving change activate-existing-corpus. Update Purpose after archive.
+Report deterministic coverage of an existing corpus and structural activation signals such as relation debt, with next-action routes into existing governed operations. It needs no embedding, reranking, media or reasoning model, and one unreadable page does not fail the scan.
 ## Requirements
 ### Requirement: Deterministic Existing-Corpus Coverage
 

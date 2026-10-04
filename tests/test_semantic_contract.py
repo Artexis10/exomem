@@ -463,6 +463,28 @@ def test_tag_only_exemption_cannot_hide_noncompiled_type(tmp_path: Path) -> None
     assert finding.code == "COMPILED_TYPE_MISMATCH"
 
 
+def test_configured_kb_root_preserves_compiled_destination_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Archive")
+    valid = _state(
+        tmp_path, "Archive/Notes/Experiments/Workflow/page.md",
+        _source(page_type="experiment", body="## Observations\n\n- [constraint] Preserve the boundary.\n"),
+    )
+    assert semantic_contract.compiled_structure_finding(valid) is None
+    assert semantic_contract.requires_semantic_unit(valid) is True
+
+    wrong_type = replace(valid, page_type="insight")
+    finding = semantic_contract.compiled_structure_finding(wrong_type)
+    assert finding is not None
+    assert finding.code == "COMPILED_TYPE_MISMATCH"
+
+    outside = replace(valid, path="Knowledge Base/Notes/Experiments/page.md")
+    finding = semantic_contract.compiled_structure_finding(outside)
+    assert finding is not None
+    assert finding.code == "COMPILED_DESTINATION_MISMATCH"
+
+
 @pytest.mark.parametrize(
     ("path", "page_type", "code"),
     (
@@ -2514,3 +2536,49 @@ def test_remediation_leads_with_the_fix_and_says_the_fallback_re_triggers(
     assert finding.remediation.startswith("Fix: add a qualifying typed relation.")
     assert "Retriggers:" in finding.remediation
     assert finding.remediation.index("Fix:") < finding.remediation.index("reviewed_none")
+
+
+def test_identity_census_consumes_text_before_reading_next_page(tmp_path, monkeypatch):
+    for name in ("a", "b"):
+        path = tmp_path / f"Knowledge Base/{name}.md"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(_source(title=name), encoding="utf-8")
+    consumed = []
+    original = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path.name == "b.md":
+            assert consumed == ["Knowledge Base/a.md"]
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    census, sources = semantic_contract._build_identity_census(
+        tmp_path, consume=lambda rel, source: consumed.append(rel)
+    )
+    assert len(census.entries) == 2
+    assert sources == {}
+    assert consumed == ["Knowledge Base/a.md", "Knowledge Base/b.md"]
+
+
+def test_streaming_corpus_reads_outside_kb_once_and_skips_scan_exclusions(tmp_path, monkeypatch):
+    paths = (
+        tmp_path / 'Knowledge Base/Notes/Insights/a.md',
+        tmp_path / 'Knowledge Base/Notes/Insights/b.md',
+        tmp_path / 'outside.md',
+    )
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_source(), encoding='utf-8')
+    excluded = tmp_path / 'Knowledge Base/_trash/hidden.md'
+    excluded.parent.mkdir(parents=True)
+    excluded.write_text('invalid: [', encoding='utf-8')
+    reads = []
+    original = Path.read_text
+    def read(path, *args, **kwargs):
+        if path.suffix == '.md':
+            reads.append(path)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'read_text', read)
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    assert sorted(reads) == sorted(paths)
+    assert set(corpus.pages) == {path.relative_to(tmp_path).as_posix() for path in paths}

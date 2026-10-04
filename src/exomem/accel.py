@@ -163,6 +163,8 @@ def select_device(
             CPU (e.g. ECAPA voiceprints, for cross-machine numeric parity) while an
             explicit override to ``"mps"`` is still honored.
     """
+    if mode_module.service_profile_enabled():
+        return "cpu"
     for env in (override_env, GLOBAL_OVERRIDE_ENV, LEGACY_OVERRIDE_ENV):
         if not env:
             continue
@@ -213,7 +215,7 @@ def cuda_if_performance() -> str:
     performance mode with a capable GPU, CPU otherwise (the default) — so a
     normal/quiet server doesn't preload a ~3 GB Whisper model onto the GPU at boot.
     """
-    if mode_module.resolve_mode() == "performance" and gpu_usable():
+    if mode_module.bulk_gpu_opted() and gpu_usable():
         return "cuda"
     return "cpu"
 

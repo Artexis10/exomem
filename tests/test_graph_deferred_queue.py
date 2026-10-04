@@ -692,6 +692,7 @@ def test_a_stale_receipt_does_not_bless_a_fresh_batch(vault: Path, monkeypatch) 
     vault_module.batch_atomic_write(
         [vault_module.PlannedWrite(target, _page("A", "A claims against [[queue-b]]."))],
         vault_root=root,
+        post_commit_fanout=False,
     )
 
     checkpoint = graph_sync.read_checkpoint(root)
@@ -708,7 +709,8 @@ def test_a_stale_receipt_does_not_bless_a_fresh_batch(vault: Path, monkeypatch) 
             index_sync.IndexComponentOutcome("semantic_purge", "completed", "ok"),
             index_sync.IndexComponentOutcome("lexstore", "completed", "ok"),
             index_sync.IndexComponentOutcome(
-                "epistemic_graph", "deferred", "graph_repair_queued"
+                "epistemic_graph", "deferred", "graph_repair_queued",
+                graph_checkpoint=checkpoint,
             ),
             index_sync.IndexComponentOutcome("embeddings", "completed", "ok"),
         ),

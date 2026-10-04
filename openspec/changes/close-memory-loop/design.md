@@ -193,6 +193,31 @@ Advisory overlap can reduce repeat work but cannot guarantee exclusive action. I
 
 Task-conditioned roles, anchor resolution, bounded typed expansion and current-state qualification produce provenance-bearing packets. Partial or ambiguous anchor resolution cannot masquerade as a complete current context. Evaluate rare anchors, unfamiliar vocabulary, multilingual names, cross-kind relationships, supersession, Records state, distractor padding, negative twins and unavailable publication. Keep existing budgets and false-positive thresholds; embeddings-on smoke is required in addition to deterministic lexical fixtures.
 
+#### Open-category material without changing standing role knowledge
+
+Open semantic categories are valid knowledge, but the current categorical role filters can exclude every unit on a compiled page. Naming that page or resolving its project does not remove the exclusion. Preserve the earlier categorical-lane decision: standing constraints, preferences, current state and methods are not re-ranked by resemblance to the turn. Add one explicit `material` role with its own lane for query-matched knowledge no effective categorical role owns.
+
+Declare material after `active_plans` and before `methods`, with defaults for project, hub and the existing transient carried-page context; it has no shipped cues and counts within the six-role ceiling. A pathless project contributes no default to an effective entity lane, which cannot read a page there; the anchor header already identifies the project. Keep the declared defaults intact: an owner override switching identity to a units lane can still use its project default. Cue selection and page-bearing defaults remain unchanged. With shipped configuration this frees an empty slot without displacing project precedents, current state or active plans. Mixed-kind or heavily cued turns may exhaust the existing ceiling before material; report that limitation rather than adding a seventh lane. Ordinary notes do not become indexed anchors. Owner-authored overrides retain their authority to narrow material defaults and assign categories to their own roles.
+
+Exclude categories owned by any effective non-material role, selected or not, so an unselected contact or owner-defined role cannot be bypassed. Compare effective category identities in each candidate parent's attached-project/page-type registry view, including accepted aliases in that scope and literal identity for unregistered labels. The maintained catalogue already stores resolved unit categories and parent eligibility metadata; do not infer semantic equivalence from a label or construct a global project-alias expansion.
+
+Material searches only already admitted, caller-visible neighbourhoods or explicitly carried pages. It never supplies resolution evidence or runs on a recency-only context. Reuse existing lexical tokenisation, query-term bounds and internal ranking; require content evidence beyond the resolved name. Apply parent and category predicates before the bounded candidate limit and retain relevance order through assembly. Do not pass a nonempty query to the ordinary semantic-find branch: that branch does not preserve this lane's read ceiling, parent restriction and repair prohibition. Extend the existing ready-catalogue query seam instead, with no new sidecar, model acquisition or foreground walk.
+
+Relevant authored prose lacking semantic coverage is a page pointer requiring a read, not a fabricated semantic unit or an arbitrary excerpt presented as compiled knowledge. Prose-only and mixed pages remain eligible for this bounded pointer path. Reuse the 200-unit candidate ceiling with its sentinel, at most three served material items, the shared character budget and request deadline; bound pointer candidates separately to three pages plus one sentinel for detecting truncation. Check coverage only on the selected current page bodies, using exact spans from the existing semantic parser on that same input, not approximate line removal or a parser inside a pre-limit SQL predicate. Covered-only candidates can exhaust the bounded window; preserve its truncation rather than retrying across the corpus. Preserve no-material, unavailable/failed, truncated and budget outcomes, including carried-page attempts. Existing lifecycle, source-currentness and final egress checks remain mandatory. A filtering correction is not proof of the original client incident or full-corpus quality; the existing benchmark, negative controls and ordinary later-response journey remain acceptance.
+
+Long, multi-topic material selection remains open independently of category reachability. A selected-page diagnostic shows the existing twelve-term, forty-stem query budget can favour earlier equal-frequency words over relevant later topics. A short focused query proves the knowledge is retrievable, not that an automatic allocator works. Do not remove ordinary resolution's latency protection, increase packet limits or implicitly prioritise conversation focus over the current turn. Before changing the material-only query-preparation seam, compare unchanged long turns and sentence-order permutations, relevant and irrelevant focus with separate origin attribution, and a larger synthetic distractor corpus; retain selected terms, requested-topic coverage and warm latency. This limitation does not block a verified category/freshness repair or establish the original client incident's cause.
+
+The larger-copy diagnostic separates context admission, candidate generation and
+final claim selection. Title-supported term preference recovers omitted topic
+candidates but not the required conclusions; marginal query-word coverage selects
+a broad prose pointer and incidental receipt instead. Neither prototype is accepted
+for production. Project representation and word coverage are not substitutes for
+downstream usefulness. A fresh active agent can inspect named candidates through
+the existing governed read path; one successful recovery of useful context does
+not establish automatic first-packet quality or close the multi-topic gate.
+
+Project keys are live vault configuration: normal writers load them freshly, but a YAML-only edit is absent from Markdown freshness and can leave a warm activation catalogue unchanged. Include the effective project-registry state in activation invalidation through the existing index refresh path, not a second watcher or a synchronous corpus rebuild. The request never acquires an encoder; background refresh retains the existing resource/model policy rather than introducing a stronger prohibition. A managed request may report the existing stale/warming state while background refresh runs; it must not label the old catalogue current. Tool-description key lists remain non-exhaustive snapshots, not validation authority.
+
 Working continuity must reconnect an interrupted topic with its relevant recent changes, unresolved episode work and older dependencies without requiring the user to identify the earlier conversation. Reuse the existing continuity, `recent_change`, `current_state`, active Planning and pending-episode carriers. The carrier for that reconnection is the always-on `recent_context` packet block: bounded, provenance-bearing, first in the packet and present whether the turn resolved an anchor or abstained, so a turn that names nothing still arrives with what was recently worked on. The block reads the hot profile's signals the way the profile does (§8): an edit inside a write burst, or older than the latest burst, is not offered as recent work (a captured session is, since it records what was spoken about rather than an edit), and only the latest burst is looked for, newest first, so no turn sorts the whole registry; a page offered for its reads is ranked by its reads rather than its last edit, and the most-read one keeps a slot the way the newest open Planning item does; and a retired or superseded page is never offered, checked against the offered pages only through the request's page cache. An entry's statement is the page's authored `summary` before its `status`, and never a lifecycle word: "status: active" says where a page is in its life, not what it says. This requirement does not depend on the later cross-client live-activity feed, and does not infer a commitment from conversation alone.
 
 Episode recaps enter that block with their own `episode` reason, taken from the freshness map the block already copies, so they cost no extra enumeration. The revisions of one episode are grouped by the filename's audience-and-key digest and only the newest appears, so one conversation is one entry. Recaps share the block's reservation with active Planning, at most four of them, and unused reserved slots backfill with ordinary recent entries. Each entry shows the recap's authored title, its one-line summary and its episode key, read from the page's frontmatter under the same egress checks as every other entry; a recap is recent context, not a recently edited Source.
@@ -358,9 +383,11 @@ the window counts only rows that can be candidates. Counting corroboration over 
 turn's stems asks whether several of its words occurred on a page, which is
 co-occurrence: a two-line stub titled "Meeting notes" whose one unit read
 "Decision pending" passed that test for an ordinary turn about a meeting and
-a pending decision, and was served as durable memory. A turn with fewer than
-two distinctive stems cannot carry anything, so the ranking query is not run
-at all.
+a pending decision, and was served as durable memory. The strict phrase path
+requires two distinctive stems. When that path names no page, the existing
+title fallback may pair one distinctive word with an ordinary title word;
+ordinary words alone never qualify. Both paths retain the same corpus floor,
+raw-word proximity, sentence boundaries and current-page eligibility.
 
 Rarity says a word is name-shaped; it cannot say the turn used it to NAME
 this page. A page qualifies on a PHRASE and on nothing else: two of its
@@ -468,6 +495,24 @@ crosses `guard_working_set` like any other reference; it is the packet's only
 anchor, so an audience that may not see it gets the abstention the existing
 every-anchor-withheld rule already produces, never the runner-up. Cost falls only
 on turns that would have returned an empty packet.
+
+Within that existing title fallback, a complete current title stated in one
+sentence qualifies only its own occurrence, provided it contains an already
+admissible distinctive-word pair. Retain token positions through the shared
+tokenizer; do not reconstruct mentions from deduplicated stem sets. A candidate
+must support the whole qualifying title phrase, not merely a shared suffix.
+Equal namesakes and longer titles containing that phrase remain contested.
+Consume nested matches and loose pairs touching that occurrence only:
+independent titles and a shorter phrase stated elsewhere remain separate
+domains, non-contained overlaps stay contested, and unmatched occurrences keep
+the partial-title fallback. Words a resolved anchor consumed cannot qualify a
+new domain. This is not a global best-match ranking.
+
+Use only bounded maintained-catalogue candidates and cached title reads;
+incomplete or truncated evidence cannot prove a unique qualified page. Keep
+the strict path, rarity, request budgets, page eligibility, packet statuses,
+egress, continuity and release gates unchanged. Task 6.17 owns the refinement;
+the interrupted capture journey retains its full-title turn.
 
 The agent may also name that same page itself: `anchor` no longer requires a
 row of the activation index. Where the ref names no such row, activation
@@ -590,6 +635,25 @@ authored the same way. **R5, named anchors order first**: an anchor holding
 a deciding-alone kind now sorts ahead of every anchor that does not, so
 MAX_CANDIDATES/MAX_ANCHORS truncation can no longer drop the one anchor a
 turn actually named in favour of several weaker multi-kind candidates.
+
+The task 6.16 compound-name correction keeps the existing name-run scan and its
+longest-run summary, but also retains comparable occurrences: runs with at least
+two name words where one exists, otherwise the one-word runs the existing rule
+uses. A shorter sense is narrowed only when all those occurrences lie strictly
+inside wider same-kind name runs. A separately stated shorter name therefore
+survives regardless of mention order; a detached generic word does not create
+a second multi-word mention, and repeated complete names still narrow normally.
+Internal spans never enter the packet or add contact evidence. Occurrence
+containment remains local to one turn/focus segment. The existing
+conversation projection marks newly focus-only candidates' spans as focus-local;
+numeric containment across segments cannot remove an unrelated focus lead.
+An already turn-reached candidate retains its turn occurrence authority.
+Literal separators
+are exempted only inside complete title or alias spellings already admitted to
+the audience-visible index. Persisted aliases are deduplicated and do not carry
+authorship provenance, so equality with a potential derived key cannot justify
+discarding an admitted spelling. Keep index admission, rarity, namesake and
+audience rules unchanged rather than add an authorship field or second matcher.
 
 Correction round 1's independent review found two further gaps in the same
 five rules. **C1**: the possessive fold (R4) could itself manufacture a

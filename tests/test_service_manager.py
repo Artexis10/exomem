@@ -1337,6 +1337,29 @@ def _slow_supervisor(tmp_path, *, ready_after=0.6, transition_timeout=0.3, cold=
     return manager, ingress, runtime, target
 
 
+@pytest.fixture
+def replacement_timeout_clock(monkeypatch):
+    """Reach replacement failure without racing durable records against wall time."""
+    module = _manager()
+    now = [0.0]
+
+    def clock():
+        return now[0]
+
+    deadline = module.Deadline
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(module, "Deadline", lambda seconds: deadline(seconds, clock=clock))
+
+    async def never_ready(runtime, timeout):
+        runtime.replacement_timeouts.append(timeout)
+        runtime.replacement_waiting = "retrieval_unavailable (repair: rebuilding)"
+        now[0] += timeout
+        raise TimeoutError("replacement readiness budget expired")
+
+    monkeypatch.setattr(_SlowReplacementRuntime, "_await_readiness", never_ready)
+    return clock
+
+
 def test_a_cold_replacement_is_awaited_under_the_cold_start_budget(tmp_path):
     """Once the old worker is stopped there is no rollback left to protect.
 
@@ -1421,17 +1444,18 @@ def test_resume_awaits_the_same_slow_replacement_under_the_cold_start_budget(tmp
     asyncio.run(scenario())
 
 
-def test_a_replacement_that_never_reports_ready_still_fails_terminally(tmp_path):
+def test_a_replacement_that_never_reports_ready_still_fails_terminally(
+    tmp_path, replacement_timeout_clock
+):
     """Later, not never: the terminal behaviour is unchanged, only its timing."""
-    import time as _time
 
     async def scenario():
         manager, ingress, runtime, target = _slow_supervisor(
             tmp_path, ready_after=30.0, transition_timeout=0.25, cold=0.6
         )
-        started = _time.monotonic()
+        started = replacement_timeout_clock()
         result = await manager.upgrade(target)
-        elapsed = _time.monotonic() - started
+        elapsed = replacement_timeout_clock() - started
         assert result["ok"] is False
         assert elapsed >= 0.45, (
             f"the replacement wait ended after {elapsed:.3f}s; it was cut short by "
@@ -1442,11 +1466,14 @@ def test_a_replacement_that_never_reports_ready_still_fails_terminally(tmp_path)
         assert manager.records.pending()["phase"] == "failed"
         assert manager.records.active() is None
         assert result["handoff"]["promotion"]["snapshot"] == "advanced"
+        assert runtime.replacement_timeouts == [0.6]
 
     asyncio.run(scenario())
 
 
-def test_a_failed_handoff_records_the_window_it_burned_and_what_it_waited_on(tmp_path):
+def test_a_failed_handoff_records_the_window_it_burned_and_what_it_waited_on(
+    tmp_path, replacement_timeout_clock
+):
     """A failure at two seconds and one at the whole window need different answers.
 
     Neither field gates anything; they exist so the record says which of the
@@ -1459,17 +1486,17 @@ def test_a_failed_handoff_records_the_window_it_burned_and_what_it_waited_on(tmp
         )
         result = await manager.upgrade(target)
         assert result["ok"] is False
+        assert runtime.replacement_timeouts == [0.6]
         assert result["handoff"]["ready_after_ms"] >= 450, result["handoff"]
         assert (
-            result["handoff"]["replacement_waiting"]
-            == "retrieval_unavailable (repair: rebuilding)"
+            result["handoff"]["replacement_waiting"] == "retrieval_unavailable (repair: rebuilding)"
         )
 
     asyncio.run(scenario())
 
 
 def test_a_discarded_standby_and_a_failed_replacement_each_keep_their_own_field(
-    tmp_path,
+    tmp_path, replacement_timeout_clock
 ):
     """The incident shape: a candidate discarded, then its replacement stuck.
 
@@ -1485,16 +1512,14 @@ def test_a_discarded_standby_and_a_failed_replacement_each_keep_their_own_field(
         runtime.standby_failure = "budget"
         result = await manager.upgrade(target)
         assert result["ok"] is False
+        assert runtime.replacement_timeouts == [0.6]
         handoff = result["handoff"]
         # The candidate was discarded for missing its warm budget...
         assert handoff["standby"] == "discarded"
         assert handoff["reason"] == "warm budget expired"
         assert handoff["waiting"] == "graph_snapshot"
         # ...and the one-worker replacement it fell back to never came up.
-        assert (
-            handoff["replacement_waiting"]
-            == "retrieval_unavailable (repair: rebuilding)"
-        )
+        assert handoff["replacement_waiting"] == "retrieval_unavailable (repair: rebuilding)"
         assert runtime.events == [
             "inspect",
             "start-standby",

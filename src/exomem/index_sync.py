@@ -25,15 +25,19 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from . import call_spans, deferred_index, semantic_index
 from .derived_receipts import DerivedComponent, DerivedComponentStatus
+
+if TYPE_CHECKING:
+    from .graph_sync import GraphSyncCheckpoint
 
 log = logging.getLogger(__name__)
 
@@ -137,6 +141,10 @@ def derived_acknowledgement_snapshot(
             return "not_required" if advisory else "completed"
         if status.state == "completed":
             return "completed"
+        if status.state == "retryable" and status.failure_code is None:
+            # Delegated execution still owns durable pending work; releasing
+            # a claim while it runs did not record a failed attempt.
+            return "pending"
         if status.state in _FAST_ACK_FAILED_STATES:
             return "failed"
         if status.state in _FAST_ACK_PENDING_STATES:
@@ -328,6 +336,7 @@ class IndexComponentOutcome:
     component: str
     outcome: str
     code: str
+    graph_checkpoint: GraphSyncCheckpoint | None = None
 
     def __post_init__(self) -> None:
         if type(self.component) is not str or self.component not in {
@@ -594,7 +603,9 @@ def _graph_component(callback, *, items: int | None = None) -> IndexComponentOut
     if not isinstance(result, GraphDispatchResult):
         log.warning("epistemic graph dispatch returned no exact outcome")
         return IndexComponentOutcome("epistemic_graph", "failed", "graph_outcome_missing")
-    return IndexComponentOutcome("epistemic_graph", result.outcome, result.code)
+    return IndexComponentOutcome(
+        "epistemic_graph", result.outcome, result.code, graph_checkpoint=result.checkpoint
+    )
 
 
 def _resolver_component(callback, *, items: int | None = None) -> IndexComponentOutcome:
@@ -747,6 +758,11 @@ def replay_deferred_embedding(
     """Replay one durable embedding batch and clear only its completed revisions."""
     from . import embeddings
 
+    from . import mode, semantic_drain
+
+    if mode.service_profile_enabled():
+        count = semantic_drain.request(vault_root, paths, edited=False)
+        return embeddings.EmbeddingSyncStatus("deferred", "deferred_durable", count)
     if receipts is None:
         rels = set(_rel_md_paths(vault_root, paths))
         receipts = [
@@ -760,8 +776,12 @@ def replay_deferred_embedding(
 
 def deferred_work_status(vault_root: Path | None = None) -> dict:
     """No-allocation summary of durable expensive index work."""
+    from . import semantic_drain
+
     return {
         "semantic_upserts": deferred_index.status(vault_root),
+        "semantic_debt": deferred_index.semantic_debt_status(vault_root),
+        "semantic_execution": semantic_drain.status(vault_root),
         "full_upserts": deferred_index.full_status(vault_root),
     }
 
@@ -798,6 +818,11 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
         if rel.endswith(".md"):
             replaced_rels.add(rel)
     for component in report.components:
+        if component.component == "epistemic_graph" and component.outcome == "completed":
+            if component.graph_checkpoint is not None and not graph_sync.repair_is_provisioned(
+                vault_root, component.graph_checkpoint, outcome="completed"
+            ):
+                return False
         if component.outcome in {"completed", "not_required"}:
             continue
         if (
@@ -810,11 +835,10 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
             "registered",
             "deferred",
         }:
-            checkpoint = graph_sync.read_checkpoint(vault_root)
-            if (
-                checkpoint is not None
-                and graph_sync.registered_checkpoint(vault_root) == checkpoint
-            ):
+            checkpoint = component.graph_checkpoint
+            if checkpoint is None:
+                return False
+            if graph_sync.repair_is_provisioned(vault_root, checkpoint, outcome="registered"):
                 continue
             if component.outcome == "deferred" and component.code in _GRAPH_COVERAGE_CODES:
                 # Mirror of the embeddings warm-up carve-out above: per-path
@@ -842,18 +866,11 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
                         # changed. An unknown generation cannot clear that bar
                         # either: a receipt that cannot say what it owes proves
                         # nothing about this checkpoint.
-                        # With no checkpoint there is no lineage to be stale
-                        # against, and every receipt is equally uninformative;
-                        # the older, weaker claim -- "these paths are queued" --
-                        # is still true and still the honest answer.
-                        required_generation = (
-                            int(checkpoint.generation) if checkpoint is not None else None
-                        )
+                        required_generation = checkpoint.generation
                         graph_receipt_rels = {
                             receipt.rel_path
                             for receipt in deferred_index.snapshot_graph(vault_root)
-                            if required_generation is None
-                            or (
+                            if (
                                 receipt.graph_generation is not None
                                 and receipt.graph_generation >= required_generation
                             )
@@ -1288,7 +1305,13 @@ def drain_deferred_work(
         semantic_receipts = []
     else:
         full_receipts = deferred_index.snapshot_full(vault_root)
-        semantic_receipts = deferred_index.snapshot(vault_root)
+        from . import mode, semantic_drain
+
+        if mode.service_profile_enabled():
+            semantic_drain.signal(vault_root)
+            semantic_receipts = []
+        else:
+            semantic_receipts = deferred_index.snapshot(vault_root)
     if limit is not None:
         budget = max(0, limit)
         if full_receipts and semantic_receipts and budget > 1:
@@ -1350,6 +1373,10 @@ def drain_deferred_work(
                     continue
                 processed += deferred_index.clear_full_receipts(vault_root, [receipt])
 
+    from . import mode
+
+    if mode.service_profile_enabled():
+        return processed
     if limit is None and requested is None and full_receipts:
         # A full refresh performed under a deferring mode can create or revise
         # semantic receipts. The unbounded operator drain must reconcile that
@@ -1450,6 +1477,7 @@ def _dispatch_upsert_components(
     watcher_lexical_paths: list[Path] | None = None,
     watcher_lexical_suppressed_rels: list[str] | None = None,
     replayed: bool = False,
+    semantic_edited: bool = True,
 ) -> list[IndexComponentOutcome]:
     from . import epistemic_graph, find, lexstore, memory_refs, mode
 
@@ -1525,7 +1553,19 @@ def _dispatch_upsert_components(
         if semantic_paths
         else IndexComponentOutcome("epistemic_graph", "not_required", "no_graph_input")
     )
-    if defer_semantic or mode.defer_expensive_indexes():
+    if mode.service_profile_enabled():
+        from . import semantic_drain
+
+        try:
+            if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+                components.append(IndexComponentOutcome("embeddings", "accepted", "embeddings_disabled"))
+            else:
+                semantic_drain.request(vault_root, semantic_paths, edited=semantic_edited and not replayed)
+                components.append(IndexComponentOutcome("embeddings", "deferred" if semantic_paths else "accepted", "deferred_durable" if semantic_paths else "no_eligible_paths"))
+        except Exception:  # noqa: BLE001 - other projections retain their outcomes
+            log.warning("service semantic handoff failed", exc_info=True)
+            components.append(IndexComponentOutcome("embeddings", "degraded", "durable_defer_failed"))
+    elif defer_semantic or mode.defer_expensive_indexes():
         try:
             # The durable-defer arm had no span at all, so a write that took the
             # cheap path looked, in the ledger, like a write that did nothing:
@@ -1630,6 +1670,7 @@ def upsert_after_write(
     created_paths: Iterable[Path] = (),
     watcher_deleted_rel_paths: Iterable[str] | None = None,
     replayed: bool = False,
+    semantic_edited: bool = True,
 ) -> IndexSyncReport:
     """Fan a writer's markdown change out to every index sidecar.
 
@@ -1808,8 +1849,10 @@ def upsert_after_write(
     # Resolving or rebuilding one parent index state per admitted path, which
     # reads and parses the page when the caller did not supply one. Another
     # step that ran before any component and had no span of its own.
+    from . import mode
+
     with call_spans.span("index.semantic_states", {"paths": len(semantic_paths)}):
-        for path, rel in zip(semantic_paths, semantic_rels, strict=True):
+        for path, rel in (() if mode.service_profile_enabled() else zip(semantic_paths, semantic_rels, strict=True)):
             if rel in states:
                 continue
             active = semantic_index.parent_state_for_path(vault_root, path)
@@ -1837,6 +1880,7 @@ def upsert_after_write(
             watcher_lexical_paths=watcher_lexical_paths,
             watcher_lexical_suppressed_rels=watcher_lexical_suppressed_rels,
             replayed=replayed,
+            semantic_edited=semantic_edited,
         )
     finally:
         semantic_index.reset_parent_states(token)
@@ -2096,7 +2140,7 @@ def converge_derived_component(
     vault_root: Path,
     receipt: Any,
     component: DerivedComponent,
-) -> bool:
+) -> bool | Literal["pending"]:
     """Converge one non-advisory component of an exactly proven batch.
 
     This is the existing writer fan-out, re-owned by the receipt rather than by
@@ -2114,6 +2158,24 @@ def converge_derived_component(
     if key not in _DERIVED_COMPONENT_REPORT_KEY:
         return False
     root = Path(vault_root)
+    from . import claims, mode, recall_policy, semantic_drain
+
+    service = mode.service_profile_enabled()
+    if service:
+        paths = [root / path.rel_path for path in receipt.paths if path.after_hash is not None]
+        if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+            semantic_drain.request(root, paths, edited=False, claims_required=key == DerivedComponent.CLAIMS.value and claims.claim_level_enabled())
+        if key in {DerivedComponent.EMBEDDINGS.value, DerivedComponent.CLAIMS.value}:
+            if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+                return True
+            if key == DerivedComponent.CLAIMS.value and not claims.claim_level_enabled():
+                return True
+            for path in receipt.paths:
+                if path.after_hash is None or not recall_policy.is_recall_candidate(root, root / path.rel_path):
+                    continue
+                if not semantic_drain.publication_ready(root, path.rel_path, expected_hash=path.after_hash, claims_required=key == DerivedComponent.CLAIMS.value):
+                    return "pending"
+            return True
     memo_key = (
         str(root),
         str(receipt.batch_id),
@@ -2145,6 +2207,7 @@ def converge_derived_component(
                 written,
                 created_paths=created,
                 publish_corpus_change=True,
+                semantic_edited=not service,
             )
         if report.reconcile_required:
             return False

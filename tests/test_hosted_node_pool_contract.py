@@ -55,8 +55,8 @@ def test_foundation_adds_agents_from_one_map_variable_defaulting_to_empty() -> N
 
     block = variables.split('variable "k3s_agent_nodes"', 1)[1].split("\nvariable ", 1)[0]
     assert "map(object({" in block
-    assert "private_ip  = string" in block
-    assert "server_type = string" in block
+    assert re.search(r"private_ip\s*= string", block)
+    assert re.search(r"server_type\s*= string", block)
     assert "default = {}" in block
 
     module = compute.split('module "k3s_agents"', 1)[1]
@@ -214,6 +214,7 @@ def test_inventory_generator_emits_agents_without_sensitive_values(tmp_path: Pat
                             "name": "exomem-agent-02",
                             "ipv4": "192.0.2.32",
                             "private_ip": "10.50.1.32",
+                            "dedicated_cell_id": "aaaaaaaaaaaaaaaa",
                         },
                     },
                 },
@@ -250,6 +251,7 @@ def test_inventory_generator_emits_agents_without_sensitive_values(tmp_path: Pat
             "ansible_host": "192.0.2.32",
             "ansible_user": "ops",
             "private_node_ip": "10.50.1.32",
+            "k3s_agent_dedicated_cell": "aaaaaaaaaaaaaaaa",
         },
     }
 
@@ -260,6 +262,7 @@ def test_inventory_generator_emits_agents_without_sensitive_values(tmp_path: Pat
         {"01": {"name": "exomem-agent-01", "ipv4": "not-an-ip", "private_ip": "10.50.1.31"}},
         {"01": {"name": "exomem-alpha", "ipv4": "192.0.2.31", "private_ip": "10.50.1.31"}},
         {"01": {"name": "Bad Name", "ipv4": "192.0.2.31", "private_ip": "10.50.1.31"}},
+        {"01": {"name": "exomem-agent-01", "ipv4": "192.0.2.31", "private_ip": "10.50.1.31", "dedicated_cell_id": "aaaaaaaaaaaaaaaa\n"}},
     ],
 )
 def test_inventory_generator_refuses_malformed_agents(tmp_path: Path, agents: dict) -> None:
@@ -628,3 +631,96 @@ def test_agent_module_terraform_tests_pass_offline() -> None:
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("reserved_by", ["label", "taint", "selected-template"])
+def test_removal_excludes_reserved_capacity_and_requires_relocation(tmp_path: Path, reserved_by: str) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    key = "exomem.io/dedicated-cell"
+    nodes = [{"metadata": {"name": name, "labels": {}}, "spec": {},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+             for name in ("target", "shared", "reserved")]
+    target = nodes[0] if reserved_by == "selected-template" else nodes[2]
+    if reserved_by == "taint":
+        target["spec"]["taints"] = [{"key": key, "value": "aaaaaaaaaaaaaaaa", "effect": "NoSchedule"}]
+    else:
+        target["metadata"]["labels"][key] = "aaaaaaaaaaaaaaaa"
+    statefulsets = [] if reserved_by != "selected-template" else [{
+        "metadata": {"namespace": "exo-cell-aaaaaaaaaaaaaaaa"},
+        "spec": {"replicas": 0, "template": {"spec": {"nodeSelector": {key: "aaaaaaaaaaaaaaaa"}}}},
+    }]
+    variables = {
+        "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
+        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
+        "k3s_remove_nodes_doc": {"items": nodes},
+        "k3s_remove_csinodes_doc": {"items": [{"metadata": {"name": n["metadata"]["name"]},
+            "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}
+            for n in nodes]},
+        "k3s_remove_statefulsets_doc": {"items": statefulsets},
+        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("attachments", "pvs", "pvcs")},
+    }
+    play = tmp_path / "preflight.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False,
+        "vars": variables, "tasks": [
+            {"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")},
+            {"ansible.builtin.assert": {"that": ["k3s_remove_remaining_slots | int == 11"]}},
+        ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+    if reserved_by == "selected-template":
+        assert result.returncode != 0 and "still selects" in result.stdout, result.stdout + result.stderr
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("cell_id", ["", "aaaaaaaaaaaaaaaa"])
+def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: Path, cell_id: str) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    key = "exomem.io/dedicated-cell"
+    unrelated = {"key": "other", "value": "keep", "effect": "NoExecute"}
+    node = {"metadata": {"resourceVersion": "12", "labels": {"other": "keep", key: "bbbbbbbbbbbbbbbb"}},
+            "spec": {"taints": [unrelated, {"key": key, "value": "bbbbbbbbbbbbbbbb", "effect": "NoSchedule"}]}}
+    expected = [unrelated] + ([{"key": key, "value": cell_id, "effect": "NoSchedule"}] if cell_id else [])
+    tasks = {task["name"]: task for task in _yaml(K3S_ROLE / "tasks/agent.yml")}
+    rendered = tmp_path / "agent.yaml"
+    play = tmp_path / "reservation.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": {
+        "k3s_agent_dedicated_cell": cell_id, "k3s_node_role": "agent",
+        "k3s_agent_node_result": {"stdout": json.dumps(node)},
+        "k3s_server_private_ip": "10.0.0.1", "k3s_agent_join_token": "test-token",
+        "private_node_ip": "10.0.0.2", "k3s_resolved_private_interface": "eth0",
+        "k3s_agent_node_label": "exomem.io/node-pool=agent", "expected_taints": expected,
+    }, "tasks": [
+        _yaml(K3S_ROLE / "tasks/validate.yml")[0],
+        {"ansible.builtin.template": {"src": str(K3S_ROLE / "templates/agent-config.yaml.j2"),
+                                       "dest": str(rendered), "mode": "0600"}},
+        tasks["Compute the agent reservation"],
+        {"ansible.builtin.debug": {"msg": tasks["Converge the agent reservation"]["ansible.builtin.command"]["argv"][-1]},
+         "register": "patch"},
+        {"ansible.builtin.assert": {"that": [
+            "(patch.msg | from_json).spec.taints == expected_taints",
+            "(patch.msg | from_json).metadata.labels == {'exomem.io/dedicated-cell': k3s_agent_dedicated_cell or none}",
+            "(patch.msg | from_json).metadata.resourceVersion == '12'",
+        ]}},
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    config = _yaml(rendered)
+    assert config["node-label"] == ["exomem.io/node-pool=agent"] + ([f"{key}={cell_id}"] if cell_id else [])
+    assert config.get("node-taint", []) == ([f"{key}={cell_id}:NoSchedule"] if cell_id else [])
+
+
+@pytest.mark.parametrize("role,cell_id", [("server", "aaaaaaaaaaaaaaaa"), ("agent", "a" * 16 + "\n")])
+def test_agent_reservation_rejects_wrong_role_or_inexact_id(tmp_path: Path, role: str, cell_id: str) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    play = tmp_path / "validation.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False,
+        "vars": {"k3s_node_role": role, "k3s_agent_dedicated_cell": cell_id},
+        "tasks": [_yaml(K3S_ROLE / "tasks/validate.yml")[0]]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+    assert result.returncode != 0 and "exact 16-character" in result.stdout

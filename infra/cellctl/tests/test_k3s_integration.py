@@ -291,7 +291,10 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
     minio_volume = f"cellctl-minio-data-{suffix}"
     work = tmp_path_factory.mktemp("cellctl-k3s")
 
-    _run(["docker", "network", "create", network])
+    network_args = ["docker", "network", "create"]
+    if subnet := os.environ.get("CELLCTL_K3S_NETWORK_SUBNET"):
+        network_args += ["--subnet", subnet]
+    _run([*network_args, network])
     try:
         # k3s's embedded NetworkPolicy controller is on by default (D5/D11's
         # production k3s config in infra/ansible/roles/k3s/templates/
@@ -1246,6 +1249,201 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     _kubectl(k3s.name, ["delete", "namespace", namespace_2, "--ignore-not-found"])
 
     print("[3.10] all scenarios passed")
+
+
+def test_dedicated_cell_admission_allows_only_own_exact_pair(k3s: K3sCluster) -> None:
+    from cellctl.manifests import (
+        CellManifestSpec,
+        render_backup_job,
+        render_namespace,
+        render_network_policies,
+        render_restore_job,
+        render_statefulset,
+    )
+
+    selected_id, other_id = _cell_id(), _cell_id()
+    documents = _render_platform("templates/cellctl.yaml", settings=(
+        "--set-json", f'cellctl.dedicatedCellIds=["{selected_id}"]',
+        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+    ))
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
+    selected = CellManifestSpec(cell_id=selected_id, image=STANDIN_REPOSITORY + "@sha256:" + "a" * 64,
+                                replicas=0, read_only=False, dedicated_node=True,
+                                hold_started_at="2026-01-01T00:00:00+00:00")
+    other = CellManifestSpec(cell_id=other_id, image=selected.image, replicas=0, read_only=False,
+                            dedicated_node=True)
+    for spec in (selected, other):
+        _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
+
+    def dry_run(document: dict):
+        return _kubectl(k3s.name, ["create", "--dry-run=server", "--filename=-",
+                                  "--as=system:serviceaccount:exomem-cloud:cellctl"],
+                        documents=[document], check=False)
+
+    def policy_ready():
+        policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy",
+                                              "exomem-cellctl-scope", "-o=json"]).stdout)
+        status = policy.get("status", {})
+        if status.get("observedGeneration") != policy["metadata"]["generation"]:
+            return False
+        assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        # Type-check status can precede enforcement of an updated policy.
+        # Probe its exact allowed pair before exercising unchanged denials.
+        return dry_run(render_statefulset(selected)).returncode == 0
+
+    _wait_for(policy_ready, timeout=30, description="dedicated placement policy admission")
+    refused_other = dry_run(render_statefulset(other))
+    assert "exomem-cellctl-scope" in refused_other.stderr, refused_other.stderr
+    for document in (
+        render_statefulset(selected),
+        render_backup_job(selected, bucket_name="bucket", endpoint="https://s3.example"),
+        render_restore_job(selected, bucket_name="bucket", endpoint="https://s3.example", snapshot_id="a" * 64),
+    ):
+        admitted = dry_run(document)
+        assert admitted.returncode == 0, admitted.stderr
+        absent = copy.deepcopy(document)
+        absent["spec"]["template"]["spec"].pop("nodeSelector")
+        absent["spec"]["template"]["spec"].pop("tolerations")
+        assert dry_run(absent).returncode == 0
+
+    for mutate in (
+        lambda pod: pod["nodeSelector"].update({"extra": "value"}),
+        lambda pod: pod["nodeSelector"].update({"exomem.io/dedicated-cell": other_id}),
+        lambda pod: pod["tolerations"].append({"operator": "Exists"}),
+        lambda pod: pod["tolerations"][0].update(value=other_id),
+        lambda pod: pod["tolerations"][0].update(operator="Exists", value=""),
+        lambda pod: pod.pop("tolerations"),
+        lambda pod: pod.update(affinity={}),
+        lambda pod: pod.update(nodeName=k3s.name),
+    ):
+        attack = render_statefulset(selected)
+        mutate(attack["spec"]["template"]["spec"])
+        denied = dry_run(attack)
+        assert denied.returncode != 0 and "exomem-cellctl-scope" in denied.stderr, denied.stderr
+
+
+# === Artifact transport: exact optional admission and a reviewer-only edge. ===
+
+
+def test_artifact_broker_selected_cell_edge_and_admission(k3s: K3sCluster) -> None:
+    from cellctl.manifests import CellManifestSpec, render_namespace, render_network_policies
+
+    selected_id, other_id = _cell_id(), _cell_id()
+    image = _import_image(k3s.name, _build_standin_image(IMAGE_DIR), repository=STANDIN_REPOSITORY)
+    endpoint = "http://10.43.0.25:8767"
+    settings = (
+        "--set", "artifactBroker.enabled=true",
+        "--set-string", f"artifactBroker.image={image}",
+        "--set-string", f"artifactBroker.endpoint={endpoint}",
+        "--set-json", f'artifactBroker.cellIds=["{selected_id}"]',
+        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+    )
+    documents = _render_platform("templates/cellctl.yaml", "templates/artifact-broker.yaml", settings=settings)
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
+    broker_template = next(doc for doc in documents if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "exomem-artifact-broker")["spec"]["template"]
+    broker_pod = {
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "artifact-broker-security-check", "namespace": "exomem-cloud", **broker_template["metadata"]},
+        "spec": broker_template["spec"],
+    }
+    admitted_broker = _kubectl(k3s.name, ["create", "--dry-run=server", "--filename=-"], documents=[broker_pod], check=False)
+    assert admitted_broker.returncode == 0, admitted_broker.stderr
+    username = "system:serviceaccount:exomem-cloud:cellctl"
+
+    def _type_checked() -> bool:
+        policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy", "exomem-cellctl-scope", "-o=json"]).stdout)
+        status = policy.get("status", {})
+        if status.get("observedGeneration") != policy["metadata"]["generation"]:
+            return False
+        assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        return True
+
+    _wait_for(_type_checked, timeout=30, description="artifact broker CEL to type-check")
+    specs = [CellManifestSpec(cell_id=cell_id, image=image, replicas=1, read_only=False,
+                             artifact_broker_url=endpoint if cell_id == selected_id else "")
+             for cell_id in (selected_id, other_id)]
+    for spec in specs:
+        _apply_server_side(k3s.name, [render_namespace(spec)])
+    policies = [policy for spec in specs for policy in render_network_policies(spec)]
+    selected = next(p for p in policies if p["metadata"]["namespace"] == specs[0].namespace and p["metadata"]["name"] == "runtime-ingress")
+
+    def _dry_run(policy: dict) -> subprocess.CompletedProcess[str]:
+        return _kubectl(k3s.name, ["apply", "--dry-run=server", "--filename=-", f"--as={username}"],
+                        documents=[policy], check=False)
+
+    forged = copy.deepcopy(selected)
+    forged["spec"]["egress"][0]["ports"][0]["port"] = 8768
+    _wait_for(lambda: "exomem-cellctl-scope" in _dry_run(forged).stderr, timeout=30,
+              description="artifact broker admission binding to enforce")
+    allowed = _dry_run(selected)
+    assert allowed.returncode == 0, allowed.stderr
+    mutations = [forged]
+    for selector, key, value in (
+        ("namespaceSelector", "kubernetes.io/metadata.name", "kube-system"),
+        ("podSelector", "app.kubernetes.io/name", "exomem-cloud-gateway"),
+    ):
+        changed = copy.deepcopy(selected)
+        changed["spec"]["egress"][0]["to"][0][selector]["matchLabels"][key] = value
+        mutations.append(changed)
+    unselected = copy.deepcopy(selected)
+    unselected["metadata"]["namespace"] = specs[1].namespace
+    unselected["spec"]["podSelector"]["matchLabels"]["exomem.io/cell"] = other_id
+    mutations.append(unselected)
+    dns = copy.deepcopy(selected)
+    dns["spec"]["egress"].append({"ports": [{"protocol": "UDP", "port": 53}]})
+    mutations.append(dns)
+    for policy in mutations:
+        refused = _dry_run(policy)
+        assert refused.returncode != 0 and "exomem-cellctl-scope" in refused.stderr, refused.stderr
+    _apply_server_side(k3s.name, policies)
+
+    server = (
+        "import http.server, threading, time; "
+        "[threading.Thread(target=http.server.ThreadingHTTPServer(('0.0.0.0', p), "
+        "http.server.SimpleHTTPRequestHandler).serve_forever, daemon=True).start() "
+        "for p in (8767, 8768)]; time.sleep(3600)"
+    )
+    broker = _probe_pod("artifact-broker-probe", "exomem-cloud", image,
+                        labels={"app.kubernetes.io/name": "exomem-artifact-broker"},
+                        command=["python3", "-c", server], port=8767)
+    decoy = _probe_pod("artifact-decoy", specs[1].namespace, image,
+                       labels={"app.kubernetes.io/name": "exomem-artifact-broker"},
+                       command=["python3", "-c", server])
+    decoy_allow = {
+        "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+        "metadata": {"name": "artifact-decoy-ingress", "namespace": specs[1].namespace},
+        "spec": {"podSelector": {"matchLabels": decoy["metadata"]["labels"]}, "policyTypes": ["Ingress"], "ingress": [{}]},
+    }
+    clients = [_probe_pod("artifact-client", spec.namespace, image,
+                          labels={"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell": spec.cell_id}) for spec in specs]
+    job = _probe_pod("artifact-job-client", specs[0].namespace, image,
+                     labels={**clients[0]["metadata"]["labels"], "exomem.io/cell-job": "backup"})
+    _apply_server_side(k3s.name, [broker, decoy, decoy_allow, *clients, job])
+    _wait_pods_ready(k3s.name, "exomem-cloud", "artifact-broker-probe")
+    for spec in specs:
+        _wait_pods_ready(k3s.name, spec.namespace, "artifact-client")
+    _wait_pods_ready(k3s.name, specs[0].namespace, "artifact-job-client")
+    _wait_pods_ready(k3s.name, specs[1].namespace, "artifact-decoy")
+    decoy_ip = _kubectl(k3s.name, ["get", "pod", "artifact-decoy", "-n", specs[1].namespace, "-o=jsonpath={.status.podIP}"]).stdout
+    assert _tcp_probe(k3s.name, "exomem-cloud", "artifact-broker-probe", "127.0.0.1", 8768)
+    _wait_for(lambda: _tcp_probe(k3s.name, specs[0].namespace, "artifact-client", "10.43.0.25", 8767),
+              timeout=30, description="selected runtime to broker")
+    for namespace, name, address, port in (
+        (specs[1].namespace, "artifact-client", "10.43.0.25", 8767),
+        (specs[0].namespace, "artifact-job-client", "10.43.0.25", 8767),
+        (specs[0].namespace, "artifact-client", "10.43.0.25", 8768),
+        (specs[0].namespace, "artifact-client", decoy_ip, 8767),
+        (specs[0].namespace, "artifact-client", "1.1.1.1", 443),
+        (specs[0].namespace, "artifact-client", "169.254.169.254", 80),
+    ):
+        assert not _tcp_probe(k3s.name, namespace, name, address, port), (namespace, name, address, port)
+    dns_result = _exec_py(k3s.name, specs[0].namespace, "artifact-client",
+                          "import socket; socket.setdefaulttimeout(3); socket.gethostbyname('kubernetes.default.svc.cluster.local')", check=False)
+    assert dns_result.returncode != 0
+    disabled = _render_platform("templates/cellctl.yaml")
+    _apply_server_side(k3s.name, [doc for doc in disabled if doc["kind"] == "ValidatingAdmissionPolicy"])
+    _wait_for(lambda: "exomem-cellctl-scope" in _dry_run(selected).stderr, timeout=30,
+              description="disabled admission to refuse even the exact broker edge")
 
 
 # === harden-exomem-cloud-operator-access: the edge, the Cloud issuer and cell

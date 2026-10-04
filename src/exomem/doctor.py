@@ -2088,6 +2088,16 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     from . import index_paths
 
     sidecar = index_paths.sidecar_path(vault_root)
+    if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and (
+        not sidecar.exists() or _vector_stack_available(_resolved_embedding_backend())
+    ):
+        initial_build = _check_recall_reembed(vault_root)
+        if (
+            initial_build is not None
+            and initial_build.details is not None
+            and initial_build.details.get("serving") is None
+        ):
+            return None  # embeddings.reembed reports this progress once.
     if not sidecar.exists():
         return _check(
             "embeddings.sidecar",
@@ -2159,8 +2169,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     # cannot show it is serving semantically (docs/benchmark-fairness-contract.md),
     # and until now an ONNX install had no way to show that from doctor.
     try:
-        metadata, _matrix = index.all_vectors()
-        vector_count: int | None = len(metadata)
+        vector_count: int | None = index.chunk_count()
     except Exception:  # noqa: BLE001 — the probe already proved the lane serves
         vector_count = None
     counted = f"{vector_count} vector(s)" if vector_count is not None else "vectors present"
@@ -2202,9 +2211,51 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
     except Exception as e:  # noqa: BLE001 — diagnostic boundary
         return _check("embeddings.reembed", "warn", f"Recall sidecars could not be read: {e}")
     serving = state.get("serving")
-    if serving is None:
-        return None
     building = state.get("building")
+    from . import recall_space
+
+    recall = recall_space.recall_model()
+    if serving is None:
+        if state.get("paths_total", 0) == 0:
+            return _check(
+                "embeddings.reembed", "pass", "No eligible pages need a dense index.", details=state,
+            )
+        if state.get("reembed") == "off":
+            return None
+        built = building["paths_done"] if building else 0
+        phase = "in progress" if building else "pending"
+        return _check(
+            "embeddings.reembed",
+            "warn",
+            f"The initial dense index build for {recall} is {phase}: "
+            f"{built}/{state.get('paths_total', 0)} pages built; lexical recall serves "
+            "until the service cuts over.",
+            details=state,
+        )
+    if recall_space.cell_mode() and serving["model"] != recall:
+        # A cell holds one encoder, so the sidecar another model wrote is
+        # refused until the re-embed cuts over, not served.
+        built = (
+            f"{building['paths_done']}/{state['paths_total']} pages built"
+            if building
+            else "not started"
+        )
+        if state.get("reembed") == "off":
+            return _check(
+                "embeddings.reembed",
+                "warn",
+                f"This cell encodes with {recall} and refuses its {serving['model']} sidecar; "
+                "dense recall is off and EXOMEM_RECALL_REEMBED=off keeps it off.",
+                "Unset EXOMEM_RECALL_REEMBED to let the cell re-embed and cut over.",
+                details=state,
+            )
+        return _check(
+            "embeddings.reembed",
+            "warn",
+            f"This cell encodes with {recall} and refuses its {serving['model']} sidecar; "
+            f"dense recall is off until the re-embed cuts over ({built}).",
+            details=state,
+        )
     if not building:
         return _check(
             "embeddings.reembed",

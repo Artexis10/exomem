@@ -1,0 +1,634 @@
+# Page Types
+
+Eight page types in the Knowledge Base. Each has a required location, naming
+convention, and content shape. See `frontmatter.md` for the YAML spec per type.
+
+For every active compiled-note type below, the fenced content shape includes a
+canonical `## Observations` example. The fence keeps documentation examples from
+becoming indexable units. Observation category is open vocabulary, page `tags`
+remain secondary retrieval labels, and a valid non-empty block headed by a
+governed rich kind is the alternative when richer semantics are intended.
+
+## source
+
+**Location:** `Sources/<Kind>/` — the directory is a *projection* of `source_type`, with `domain` adding one level below it when present, e.g. `Sources/Articles/`, `Sources/Papers/`, `Sources/Reports/Travel/`, `Sources/Invoices/Equipment/`, `Sources/Other/`. The semantic metadata is authoritative; the folder is derived from it and is never deeper than `Sources/<Kind>/<Domain>/`.
+**Naming:** `YYYY-MM-DD-<slug>.md` (e.g., `2026-05-09-retrieval-patterns.md`)
+**Mutability:** Append-only in body. Never edit the captured content. The classification is a capture-time judgement and stays correctable: `manage_memory_file(operation='reclassify', …)` rewrites `source_type`/`domain`, moves the file to the location the corrected classification projects to, and rewrites every inbound reference, all with the body byte-identical and a stated reason recorded. Nothing reclassifies a source automatically.
+**Required frontmatter:** `type: source`, `source_type`, `captured`, `url` (if applicable), `tags`, `ingested_into` (initially empty list, updated when compiled into notes). `domain` and `projects` are optional.
+
+**Content shape:**
+
+```markdown
+---
+type: source
+source_type: article
+domain: software
+projects: [project-alpha]
+captured: 2026-05-09
+url: https://example.com/retrieval-patterns
+tags: [retrieval, knowledge-base]
+ingested_into: []
+---
+
+# <Title>
+
+> Brief one-line description of what this source is.
+
+## Capture
+
+<full text or substantive excerpt here>
+
+## Why captured
+
+<one or two sentences on why this is in the KB>
+```
+
+For long sources, capture an excerpt + URL rather than full text. For Sessions,
+dump the conversation verbatim under `## Capture`.
+
+## research-note
+
+**Location:** `Notes/Research/<scope>/` where scope is a registered project key
+(see SKILL.md § Research scope keys and `_Schema/project-keys.yaml`) — an open
+set, **not a closed enum**: new scopes auto-register on first use when you write
+with a new `project:` slug.
+**Naming:** `<topic-slug>.md` — concise, dash-separated, lowercase. No date prefix (research notes evolve).
+**Mutability:** Editable. Replace via supersession when a major rewrite is needed.
+**Required frontmatter:** `type: research-note`, `project`, `status`, `created`, `updated`, `sources`, `tags`. Optional: `supersedes`, `superseded_by`.
+
+**Content shape:**
+
+```markdown
+---
+type: research-note
+project: project-alpha
+status: active
+created: 2026-05-09
+updated: 2026-05-09
+sources:
+  - "[[Knowledge Base/Sources/Articles/2026-05-09-retrieval-patterns]]"
+tags: [agentic-rag, retrieval, knowledge-graph]
+---
+
+# <Topic>
+
+## Question
+
+What problem or topic this note addresses.
+
+## Findings
+
+The substance. Multiple subsections OK.
+
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
+
+## Relations
+
+- relates_to [[Knowledge Base/Entities/Concepts/Agentic RAG]]
+
+## Open threads
+
+- Things still uncertain
+- Things to dig into next
+```
+
+## insight
+
+**Location:** `Notes/Insights/`
+**Naming:** `<insight-slug>.md` — phrased as a claim or a noun phrase, not a question.
+**Mutability:** Editable; supersession preferred for substantial rewrites.
+**Required frontmatter:** `type: insight`, `status`, `created`, `updated`, `sources`, `tags`. Optional: `projects` (list of projects this insight applies to).
+
+**Content shape:**
+
+```markdown
+---
+type: insight
+status: active
+created: 2026-05-09
+updated: 2026-05-09
+sources:
+  - "[[Knowledge Base/Notes/Research/Project Alpha/agentic-rag-retrieval-budget]]"
+projects: [project-alpha, project-beta]
+tags: [retrieval, evaluation]
+---
+
+# <Insight as a claim>
+
+## Claim
+
+One paragraph stating the insight cleanly.
+
+## Why it holds
+
+The reasoning, evidence, examples.
+
+## Where it applies
+
+Concrete domains, projects, decisions this should influence.
+
+## Counter-considerations
+
+What could weaken or invalidate this insight.
+
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
+
+## Relations
+
+- relates_to [[...]]
+```
+
+## failure
+
+**Location:** `Notes/Failures/`
+**Naming:** `<failure-slug>.md`
+**Required frontmatter:** `type: failure`, `status`, `created`, `updated`, `sources`, `tags`. Optional: `projects`, `severity` (minor / moderate / serious / critical — qualitative, not numeric).
+
+**Content shape:**
+
+```markdown
+---
+type: failure
+status: active
+created: 2026-05-09
+updated: 2026-05-09
+sources: [...]
+projects: [project-alpha]
+severity: moderate
+tags: [...]
+---
+
+# <Failure mode as a name>
+
+## What happened
+
+The concrete event or pattern.
+
+## Mechanism
+
+Root cause. Why it happened, not just what.
+
+## Detection
+
+How it was noticed (or how it would be noticed earlier next time).
+
+## Mitigation
+
+What changed (or should change) to prevent recurrence.
+
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
+
+## Relations
+
+- relates_to [[...]]
+```
+
+## pattern
+
+**Location:** `Notes/Patterns/`
+**Naming:** `<pattern-name>.md`
+**Required frontmatter:** `type: pattern`, `status`, `created`, `updated`, `sources`, `tags`. Optional: `projects`, `pattern_type` (e.g., architectural, workflow, prompting, pedagogical).
+
+**Content shape:**
+
+```markdown
+---
+type: pattern
+status: active
+created: 2026-05-09
+updated: 2026-05-09
+sources: [...]
+projects: [project-alpha, project-beta]
+pattern_type: architectural
+tags: [...]
+---
+
+# <Pattern name>
+
+## Problem
+
+What this pattern is solving.
+
+## Solution
+
+How the pattern works.
+
+## When to use
+
+Conditions where it fits.
+
+## When NOT to use
+
+Conditions where it's a regression.
+
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
+
+## Relations
+
+- relates_to [[...]]
+```
+
+## experiment
+
+**Location:** `Notes/Experiments/<domain>/` where domain is `Workflow`, or another
+sub-domain that emerges (`Research`, `Ops`, etc.). Add a new sub-domain only
+when the first experiment in that domain is being written.
+**Naming:** `YYYY-MM-<slug>.md` — date-prefixed because experiments are time-bounded events, not evolving notes. Use the **start month**.
+**Mutability:** Editable while ongoing; once concluded, body is read-only except for supersession or follow-up notes that link back.
+**Required frontmatter:** `type: experiment`, `domain`, `status`, `created`, `updated`, `started`, `duration`, `tags`. Optional: `n` (sample size, default 1), `concluded`, `outcome`, `hypothesis`, `sources`, `supersedes`, `superseded_by`.
+
+**Status values for experiments:** `draft`, `active`, `concluded`, `archived`.
+`concluded` says the run finished and its result stands; pair it with
+`concluded:` (the date) and `outcome:` (one of `confirmed`, `refuted`,
+`qualified`, `inconclusive`, `abandoned`).
+
+**Content shape:**
+
+```markdown
+---
+type: experiment
+domain: workflow
+status: active
+created: 2026-05-09
+updated: 2026-05-09
+started: 2026-05-09
+duration: "30 days"
+n: 1
+hypothesis: "Batching code review into one daily slot cuts context-switching"
+sources:
+  - "[[Knowledge Base/Sources/Books/2026-04-deep-work]]"
+tags: [workflow, batching, focus]
+---
+
+# <Experiment name>
+
+## Hypothesis
+
+What you expected to happen, and why.
+
+## Protocol
+
+How the experiment is run. Specific enough that someone could repeat it.
+
+## Baseline
+
+Starting state. Measurements, observations, qualitative descriptions.
+
+## Intervention
+
+What's actually being changed. The independent variable.
+
+## Results
+
+What happened. Updated as the experiment runs; finalized at conclusion.
+
+## Conclusion
+
+What you learned. May be inconclusive — that's a valid result.
+
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
+
+## Relations
+
+- relates_to [[...]]
+```
+
+### Closing the loop: predictions, check dates, and verdicts
+
+An experiment is worth much more when it recorded what you *expected* before it
+ran. Write that as a rich semantic unit with the governed `prediction` kind, and
+give it the two governed metadata rows that make it checkable:
+
+```markdown
+## Prediction
+- id: batching-cuts-switches
+- check_by: 2026-08-01
+- verdict: refuted
+
+Batching review into one daily slot will cut context switches by half.
+
+## Evidence
+- relations: contradicts: [[Knowledge Base/Notes/Experiments/Workflow/2026-05-batching]]
+
+Switch count fell 12%, well short of the predicted halving.
+```
+
+The verdict introduces no new relation kind. Attach the refuting material with
+the governed vocabulary you already have — `contradicts`, `evidenced_by`,
+`supports` — and let `verdict:` carry the judgment itself.
+
+- `check_by:` is one exact ISO calendar date (`YYYY-MM-DD`) naming the day the
+  claim should be revisited. It is a due date, not a deadline, and nothing
+  expires when it passes — it just becomes findable as overdue.
+- `verdict:` is exactly one of `confirmed`, `refuted`, `qualified`,
+  `inconclusive`, or `abandoned` — the same five words as an experiment's
+  `outcome:`, one altitude down. It is categorical state, never a number: this
+  vault stores no confidence score, so `verdict: 0.7` is rejected outright.
+
+Both rows are rich-form only; a compact `- [category] ...` observation carries no
+metadata. Both are also preserved across edits — correcting the wording of a
+prediction never costs you its verdict.
+
+**A refuted prediction stays active and stays ranked.** Refuted is not
+superseded: nothing replaced it, the question simply got an answer. Leave it in
+place with the evidence that refuted it. A vault that quietly retires its
+negative results loses the expensive half of what it learned.
+
+### Experiments are not research notes
+
+A research note synthesizes secondary sources (papers, articles, conversations)
+to compile understanding. An experiment runs a protocol and captures primary
+data. They have different epistemic status: an experiment's `n=1` self-data is
+direct evidence; a research note is filtered through somebody else's frame.
+
+When in doubt, ask: did I just *do* something and observe results, or did I *read
+about* something and synthesize? First → experiment. Second → research-note.
+
+## production-log
+
+**Location:** `Notes/Productions/<medium>/` where medium is `Posts`, `Articles`,
+`PDFs`, `Episodes`, or another medium that emerges. Add a new medium subfolder only
+when the first production in that medium is being written.
+**Naming:** `YYYY-MM-<slug>.md` — date-prefixed by start month.
+**Mutability:** Editable across the production lifecycle (planned → recorded → edited → published → reflected). Once complete and reflection is logged, treat as read-only except for supersession.
+**Required frontmatter:** `type: production-log`, `medium`, `status`, `created`, `updated`, `tags`. Optional but typically present: `projects`, `host`, `editor`, `recorded`, `published`, `sources`, `related`, `supersedes`, `superseded_by`.
+
+**Status values for production-logs:**
+
+- `planned` — design / outline phase
+- `recorded` — primary capture done, edit pending
+- `edited` — production assets finalized
+- `published` — live; outcomes accumulating
+- `reflected` — published + reflection complete; no further updates expected
+- `dropped` — abandoned (use `archived` to step it out of active rotation entirely)
+
+**Content shape:**
+
+```markdown
+---
+type: production-log
+medium: posts
+status: recorded
+created: 2026-05-09
+updated: 2026-05-09
+recorded: 2026-05-09
+published: null
+projects: [project-alpha]
+host: the host
+editor: a teammate
+sources:
+  - "[[Knowledge Base/Sources/Sessions/2026-05-09-launch-planning]]"
+related:
+  - "[[Knowledge Base/Notes/Research/Project Alpha/launch-messaging]]"
+  - "[[Knowledge Base/Notes/Patterns/short-form-post-template]]"
+tags: [posts, launch, batch-01]
+---
+
+# <Production batch name>
+
+## Frame
+
+What this production is, who it's for, why now. The strategic framing.
+
+## Artifact
+
+The actual creative output — scripts, outlines, assets, links to footage.
+
+## Production session
+
+How the capture/recording/writing actually went. Takes, edits, decisions made on the fly.
+
+## Outcomes
+
+To be filled across the lifecycle. Engagement metrics, post-publish observations.
+
+## Reflection
+
+Filled once outcomes have settled. What worked, what to keep / change / drop next time.
+
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
+
+## Relations
+
+- relates_to [[...]]
+```
+
+### Production-log vs experiment
+
+Both are time-bounded with date-prefixed filenames; both have outcomes. The
+difference is the epistemic object:
+
+- **Experiment:** a hypothesis tested under a protocol with primary data.
+  Conclusion confirms / refutes / qualifies the hypothesis. The value is the
+  *finding*.
+- **Production-log:** a creative artifact + the production knowledge around it.
+  Outcomes are engagement metrics, audience response, what to do differently next
+  time. The value is the *thing made*.
+
+### Production-log vs research-note
+
+A research-note is *secondary synthesis* — reading and connecting. A
+production-log captures the production of a primary creative artifact and the
+operational knowledge around making it. The curriculum *informing* a reel batch
+is a research-note; the reel batch itself, with scripts and recording session and
+metrics, is a production-log.
+
+## entity
+
+**Location:** `Entities/<registered-folder>/`, with the folder resolved from the
+active entity registry exposed by bootstrap.
+**Naming:**
+
+- **People:** the working short used in daily reference — typically the first name
+  for people in your working circle, the full name for public figures. The H1
+  carries the full disambiguating name when it differs from the filename.
+  Disambiguate the filename only when two entities would otherwise collide.
+- **Other registered kinds:** Title Case, the entity's canonical name.
+  `Agentic RAG.md`, `pgvector.md`, `Adopt pgvector for the engine.md`.
+
+**Required frontmatter:** `type: entity`, `entity_type`, `status`, `created`, `updated`, `tags`. Optional fields by entity-type.
+
+Vaults extend the five core kinds through the user-owned
+`_Schema/entity-types.yaml` registry. The governed save operation validates the
+whole proposal before writing it; deprecated types stay recorded rather than
+being deleted. An unregistered-type finding supplies `proposal` and
+`expected_hash`; save those exact values with a `why` through
+`schema_memory(operation="save-entity-types")`. Its `proposed_entry` is only a
+description, not a registry payload. For example:
+
+```yaml
+schema_version: 1
+entity_types:
+  place:
+    folder: Places
+    label: Place
+    aliases: [location]
+    cue_nouns: [venue]
+    optional_frontmatter: [domain]
+    capture_guidance: A stable place identity with reusable context or relations.
+    parent: concept
+    status: active
+```
+
+The `parent` is a one-level roll-up to a core type; it does not create a deeper
+type hierarchy.
+
+Extension `optional_frontmatter` may name only fields supported by the entity
+writer: `affiliation`, `relationship`, `domain`, `language`, `repo`, `license`,
+`used_in`, `decided`, `project`, and `decision_status`. Any other field is a
+registry finding rather than silently inert metadata.
+
+### People
+
+Optional frontmatter: `affiliation`, `relationship` (e.g., colleague, public-figure, source-author),
+and `aliases` for reviewed alternate spellings or names.
+
+```markdown
+---
+type: entity
+entity_type: person
+status: active
+created: 2026-05-09
+updated: 2026-05-09
+affiliation: independent researcher
+relationship: public-figure
+tags: [research, methods]
+---
+
+# Jordan Lee
+
+## Summary
+
+One paragraph.
+
+## Why in the KB
+
+What this person is relevant to in your work.
+
+## Contact
+
+- [contact] A phone, address, email or identifier, one per unit.
+
+## Relations
+
+- relates_to [[...]]
+```
+
+`## Contact` is optional. Keep contact details in `[contact]` units there, never in
+the summary or in `fact` units: activation serves them only when the turn asks to reach
+the person.
+
+On a topic page, prefer `about_entity [[Entities/People/...]]` for the canonical
+topic-to-person edge. Entity-side `relates_to` remains valid connective tissue.
+
+### Organizations
+
+Use for a stable company, institution, team, agency, nonprofit, or other
+organization whose facts, history, or relations recur across sources. Keep
+incidental or unresolved names in source/note context instead of creating a
+speculative entity.
+
+### Concepts
+
+Optional frontmatter: `domain` (e.g., retrieval, infrastructure, governance).
+
+### Libraries
+
+Optional frontmatter: `language`, `repo`, `license`, `used_in` (list of projects).
+
+### Decisions
+
+These are essentially lightweight ADRs.
+Optional frontmatter: `decided` (date), `project`, `decision_status` (proposed / accepted / superseded).
+
+```markdown
+---
+type: entity
+entity_type: decision
+status: active
+created: 2026-05-09
+updated: 2026-05-09
+decided: 2026-05-09
+project: project-alpha
+decision_status: accepted
+tags: [retrieval]
+---
+
+# <Decision title>
+
+## Context
+
+What was the situation that forced a decision.
+
+## Decision
+
+What was decided.
+
+## Alternatives considered
+
+Brief; one paragraph each.
+
+## Consequences
+
+What this commits us to and what it forecloses.
+
+## Relations
+
+- relates_to [[...]]
+```
+
+## Naming conventions summary
+
+The filename is a stable machine address; `title:` and the canonical H1 are the
+human display identity. Titles support arbitrary Unicode. Callers may pass an
+explicit lowercase ASCII kebab-case `slug` (maximum 100 characters) for a new
+source, note, or entity without changing the stored title. When omitted, the
+legacy automatic filename policy remains for compatibility. Exomem does not
+attempt language-aware transliteration, and it never renames existing pages on
+upgrade or reconcile.
+
+- Sources: date-prefixed, dash-slug, lowercase: `2026-05-09-retrieval-patterns.md`
+- Notes (research, insight, failure, pattern): no date prefix, dash-slug, lowercase: `agentic-rag-retrieval-budget.md`
+- Experiments: date-prefixed (start month), dash-slug, lowercase: `2026-05-30-day-low-carb.md`
+- Production-logs: date-prefixed (start month), dash-slug, lowercase: `2026-05-launch-recap.md`
+- Entities: the Unicode canonical name is stored in `title:` and the H1; an
+  explicit ASCII slug may be used for the filename.
+
+Sources, experiments, and production-logs are dated because their value is partly
+temporal. Notes are not dated because they evolve. Entities are named after the
+thing they are. Filenames are stable addresses; renaming them churns wikilinks
+across the graph without information gain.
+
+## `_attachments/` convention
+
+Any location holding compiled notes or source captures may have a sibling
+`_attachments/` folder for binary outputs or originals that need to live near the
+parent note. The underscore prefix marks it as not-a-primary-content folder
+(a common convention; Obsidian also treats `_`-prefixed folders this way).
+
+**Discipline:**
+
+- **Append-only.** Binaries are not edited after placement. Revisions go in as new files (e.g., `protocol_v2.docx`).
+- **No frontmatter** on binary files (none possible).
+- **Referenced from the parent note**, never standalone.
+- **Filename = description.** Date prefix where temporal anchoring matters; otherwise descriptive slug.
+- **Not Evidence.** If the artifact came from a third party and must be preserved as-received without analytical processing, it belongs in `Evidence/<scope>/<category>/` instead. See `write-scope.md` § binary placement.
+
+## Research-note scope heuristic
+
+A research-note's `project` field reflects *audience and reuse domain*, not
+*triggering occasion*. When a note feels like it could go in two scopes, that's
+usually a signal it's an insight or pattern (cross-cutting) and should be promoted
+accordingly.

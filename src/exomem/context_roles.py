@@ -65,9 +65,9 @@ _UNRESOLVED_CATEGORY_STATUSES = frozenset({"unregistered", "registry_invalid", "
 
 #: Retrieval lanes a role may map to. A role that named anything else would
 #: select nothing, so an unknown lane is a finding rather than a silent no-op.
-LANES: tuple[str, ...] = ("units", "records", "planning", "entity", "graph", "evidence")
+LANES: tuple[str, ...] = ("units", "records", "planning", "entity", "graph", "evidence", "material")
 
-#: Anchor kinds a role may default for. Kept in step with `working_set_index`.
+#: Indexed anchor kinds, plus the transient carried-page context.
 ANCHOR_KINDS: tuple[str, ...] = (
     "entity",
     "resource",
@@ -75,6 +75,7 @@ ANCHOR_KINDS: tuple[str, ...] = (
     "collection",
     "plan",
     "project",
+    "page",
 )
 
 #: Fields an override may set on a shipped role. `remove`/`id` are deliberately
@@ -763,6 +764,7 @@ def select_roles(
     limit: int = MAX_SELECTED_ROLES,
     anchor_names: frozenset[str] = frozenset(),
     prior_only_kinds: frozenset[str] = frozenset(),
+    omitted: list[str] | None = None,
 ) -> tuple[dict[str, str], ...]:
     """Defaults for each resolved anchor kind, plus cue matches, in registry order.
 
@@ -785,8 +787,15 @@ def select_roles(
             continue
         # Only a role that reads settled conclusions is withheld; the anchor's
         # own identity and facets are still served for a recency referent.
-        concludes = role.lane == "units" and bool(role.categories & CONCLUSION_CATEGORIES)
-        if role.anchor_defaults & (kinds - withheld if concludes else kinds):
+        concludes = role.lane == "material" or (
+            role.lane == "units" and bool(role.categories & CONCLUSION_CATEGORIES)
+        )
+        defaults = kinds - withheld if concludes else kinds
+        if role.lane == "entity":
+            defaults = defaults - {"project"}
+        if role.lane == "material" and kinds <= prior_only_kinds:
+            continue
+        if role.anchor_defaults & defaults:
             source = "anchor_default"
         else:
             # Role selection matches EVERY cue, `cues` and `evidence_cues`
@@ -801,4 +810,7 @@ def select_roles(
             else:
                 continue
         selected.append({"id": role.id, "source": source, "lane": role.lane})
-    return tuple(selected[: max(0, int(limit))])
+    cap = max(0, int(limit))
+    if omitted is not None:
+        omitted.extend(role["id"] for role in selected[cap:])
+    return tuple(selected[:cap])

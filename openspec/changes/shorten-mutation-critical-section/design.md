@@ -266,3 +266,45 @@ prove same-key recap writers still serialize, identical retries do not duplicate
 and concurrent resolver invalidation cannot publish or clear repair debt.
 Release-event timings are the acceptance evidence for the actual outer hold;
 a later reserved-state hold is not evidence that the earlier command was short.
+
+## Availability republication source seal
+
+Availability republication prepares its full source-hash comparison and resolver
+topology proof before taking canonical mutation authority. A successful proof
+retains the exact source PathGuards, resolver and indexed memberships, and policy
+identity. Under authority it repeats those guarded byte reads and membership
+checks, without reparsing pages or reconstructing topology. This preserves the
+existing direct-edit protection, including equal-sized edits with restored
+timestamps. The final seal remains O(source bytes + paths); this change does not
+claim a constant-time hold.
+
+Preparation also binds the live database/WAL no-follow identity, relevant graph
+metadata, prepared recall publication, canonical graph epoch and exact access
+and registry configuration snapshots. Final checks bracket the source seal; a
+changed input, unsafe path, cold registry or unreadable state declines without
+publishing. The published marker keeps the original stored recall checkpoint
+and never advances graph-sync acknowledgement. No expensive preparation falls
+back under the held boundary. Missed external edits remain subject to the
+existing watcher/reconcile contract; arbitrary-editor linearizability is not
+introduced.
+
+## Post-terminal graph receipts retain their dispatch checkpoint
+
+After canonical authority is released, another writer may advance the graph
+checkpoint before the first writer finishes indexing. `IndexComponentOutcome`
+retains the checkpoint returned by `GraphDispatchResult` as internal metadata;
+its public dictionary remains component, outcome and code only. Both the batch
+handoff check and full-upsert completion check use that dispatch identity,
+never a later global checkpoint. Completed work requires acknowledgement
+covering that identity. A registered outcome requires its exact registration
+or covering acknowledgement; a durable queue alone cannot excuse a missing
+flight. Deferred coverage retains its existing claiming-code, affected-path
+and generation checks, measured against the dispatch generation.
+
+Registered or deferred results without an identity fail closed and leave
+durable batch repair demand; they do not install a failure handle for another
+writer's checkpoint. Legacy completed/failed dispatches without a checkpoint
+retain their no-checkpoint behavior. This does not weaken graph read admission:
+availability still requires proof for the exact current canonical checkpoint.
+The repair follows the frozen release separately, alongside the independently
+verified background-hold test clock correction; neither changes 0.102 source.

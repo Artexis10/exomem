@@ -51,6 +51,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,7 @@ from . import (
     context_roles,
     sidecar_store,
     working_set,
+    working_set_conversation,
     working_set_heat,
     working_set_index,
     working_set_resolve,
@@ -561,6 +563,22 @@ MINTED_STATUSES = frozenset({"resolved", working_set_resolve.RETRIEVAL_CARRIED_S
 _MINTED_STATUSES = MINTED_STATUSES
 
 
+def _conversation_only(item: Mapping[str, Any]) -> bool:
+    """An anchor that resolved only because the earlier conversation named it.
+
+    The token never encodes one, or a carried anchor: a conversation that
+    dropped its signal then degrades to today's behaviour, and nothing is
+    laundered into durable client state. An anchor that also resolves without
+    `conversation` is the turn's own and is minted as ever.
+    """
+    if item.get("origin") == "conversation":
+        return True
+    evidence = frozenset(str(kind) for kind in item.get("evidence") or ())
+    if "conversation" not in evidence:
+        return False
+    return working_set_resolve._status_for_evidence(evidence - {"conversation"}) != "resolved"
+
+
 def mint_continuity(
     packet: Mapping[str, Any],
     *,
@@ -601,7 +619,9 @@ def mint_continuity(
     anchors = [
         item
         for item in (() if packet.get("abstained") else packet.get("anchors") or ())
-        if isinstance(item, Mapping) and item.get("status") in _MINTED_STATUSES
+        if isinstance(item, Mapping)
+        and item.get("status") in _MINTED_STATUSES
+        and not _conversation_only(item)
     ]
     refs = [str(item.get("ref") or "") for item in anchors]
     refs = [ref for ref in refs if ref]
@@ -686,9 +706,9 @@ def visible_continuity_refs(
     return frozenset(kept)
 
 
-#: How many of the workspace's other sessions' threads a request considers.
-#: The newest few are all a fresh session can mean; each costs a release
-#: decision per page, so the bound is also a bound on work.
+#: How many of the workspace's other released threads a request considers.
+#: The persisted session table bounds the candidates; each candidate's release
+#: decisions are bounded separately by `CONTINUITY_MAX_REFS`.
 VISIBLE_WORKSPACE_MARKS = 8
 
 
@@ -731,8 +751,9 @@ def visible_marks(
     served to the next audience. A withheld page and a missing one reach the
     ranking as the same nothing. Only the caller's own session and the
 
-    workspace's newest `VISIBLE_WORKSPACE_MARKS` sessions are looked at, and
-    at most `CONTINUITY_MAX_REFS` pages of each; a caller with no keys ranks
+    workspace's newest `VISIBLE_WORKSPACE_MARKS` sessions with released pages
+    enter ranking, with at most `CONTINUITY_MAX_REFS` pages checked per
+    candidate; a caller with no keys ranks
     no thread at all. `released` is the request's one release decision
     (`egress.page_release_filter`, `None` when every page is released): the
     policy is loaded once for every page, never once per page (review F7).
@@ -750,7 +771,7 @@ def visible_marks(
                 if key != who.session and mark.workspace == who.workspace and mark.paths
             ),
             key=lambda mark: (-mark.seen_ns, mark.session),
-        )[:VISIBLE_WORKSPACE_MARKS]
+        )
 
     if released is _UNDECIDED:
         from .governance import egress
@@ -758,7 +779,10 @@ def visible_marks(
         released = egress.page_release_filter(vault_root, purpose=purpose) if wanted else None
 
     out: dict[str, working_set_heat.SessionMark] = {}
+    workspace_marks = 0
     for mark in wanted:
+        if mark.session != who.session and workspace_marks >= VISIBLE_WORKSPACE_MARKS:
+            break
         kept = tuple(
             path
 
@@ -766,6 +790,10 @@ def visible_marks(
             if released is None or released(path)  # type: ignore[operator]
 
         )
+        if mark.session != who.session:
+            if released is not None and not kept:
+                continue
+            workspace_marks += 1
         out[mark.session] = mark._replace(paths=kept)
     return out
 
@@ -826,7 +854,12 @@ def ensure_index(
                     log.warning("activation index inline build failed", exc_info=True)
                     return UNAVAILABLE, None, False
         return READY, index, False
-    if freshness_stamp and index.freshness_stamp() != freshness_stamp:
+    from . import project_keys
+
+    registry_changed = (
+        index.project_registry_hash() != project_keys.load_project_registry(root).content_hash
+    )
+    if registry_changed or (freshness_stamp and index.freshness_stamp() != freshness_stamp):
         refreshed = refresh_index(index, freshness_stamp=freshness_stamp)
         return READY, index, not refreshed
     if _managed():
@@ -1078,6 +1111,60 @@ _SENTENCE_BREAK = re.compile(
 _TOKEN_JOINERS = re.compile(r"['\-]+")
 
 
+def _positioned_words(turn: str) -> tuple[tuple[tuple[int, tuple[str, ...]], ...], ...]:
+    """Word units at their raw token positions, kept apart by sentence.
+
+    Runs keep their place but contribute no pairable stems. A word's index
+    in its sentence is its distinct unit id, including compound parts.
+    """
+    from . import bm25 as bm25_module
+
+    sentences = []
+    for sentence in _SENTENCE_BREAK.split(str(turn)):
+        words = []
+        for index, token in enumerate(
+            working_set_index.tokens_of(working_set_index.normalize(sentence))
+        ):
+            for part in _TOKEN_JOINERS.split(token):
+                for unit in bm25_module.token_units(part, query=True):
+                    words.append((index, () if unit.run else tuple(dict.fromkeys(unit.stems))))
+        sentences.append(tuple(words))
+    return tuple(sentences)
+
+
+def _pair_occurrences(
+    sentences: Sequence[Sequence[tuple[int, tuple[str, ...]]]],
+    rare_terms: Sequence[str],
+    *,
+    window: int | None = None,
+    partners: Sequence[str] = (),
+) -> Iterable[tuple[int, int, int, tuple[str, str]]]:
+    """Admissible pairs with their sentence and distinct word-unit positions."""
+    span = working_set.RETRIEVAL_CARRY_RARE_WINDOW if window is None else int(window)
+    distinctive = {str(term) for term in rare_terms}
+    wanted = distinctive | {str(term) for term in partners}
+    if len(wanted) < 2 or not distinctive:
+        return
+    for sentence_id, words in enumerate(sentences):
+        placed = [
+            (index, unit_id, stem)
+            for unit_id, (index, stems) in enumerate(words)
+            for stem in stems
+            if stem in wanted
+        ]
+        for position, (left_at, left_unit, left) in enumerate(placed):
+            for right_at, right_unit, right in placed[position + 1 :]:
+                if right_at - left_at > span:
+                    break
+                if (
+                    left != right
+                    and left_unit != right_unit
+                    and (left in distinctive or right in distinctive)
+                ):
+                    first, second = sorted((left, right))
+                    yield sentence_id, left_unit, right_unit, (first, second)
+
+
 def adjacent_rare_pairs(
     turn: str,
     rare_terms: Sequence[str],
@@ -1126,43 +1213,16 @@ def adjacent_rare_pairs(
     for `carry_title_groups`, where the page's own TITLE, checked by the
     caller, is what makes an ordinary word part of a name.
     """
-    from . import bm25 as bm25_module
-
-    span = working_set.RETRIEVAL_CARRY_RARE_WINDOW if window is None else int(window)
-    distinctive = {str(term) for term in rare_terms}
-    wanted = distinctive | {str(term) for term in partners}
-    if len(wanted) < 2 or not distinctive:
-        return ()
-    pairs: set[tuple[str, str]] = set()
-    # Split the RAW text: `normalize` folds case and width but keeps the
-    # punctuation, and splitting per sentence is what keeps a window from
-    # reaching across one.
-    unit_id = 0
-    for sentence in _SENTENCE_BREAK.split(str(turn)):
-        placed: list[tuple[int, int, str]] = []
-        for index, token in enumerate(
-            working_set_index.tokens_of(working_set_index.normalize(sentence))
-        ):
-            for part in _TOKEN_JOINERS.split(token):
-                for unit in bm25_module.token_units(part, query=True):
-                    unit_id += 1
-                    if unit.run:
-                        continue
-                    for stem in dict.fromkeys(unit.stems):
-                        if stem in wanted:
-                            placed.append((index, unit_id, stem))
-        for position, (left_at, left_unit, left) in enumerate(placed):
-            for right_at, right_unit, right in placed[position + 1 :]:
-                if right_at - left_at > span:
-                    break
-                if (
-                    left != right
-                    and left_unit != right_unit
-                    and (left in distinctive or right in distinctive)
-                ):
-                    first, second = sorted((left, right))
-                    pairs.add((first, second))
-    return tuple(sorted(pairs))
+    return tuple(
+        sorted(
+            {
+                pair
+                for _sentence, _left, _right, pair in _pair_occurrences(
+                    _positioned_words(turn), rare_terms, window=window, partners=partners
+                )
+            }
+        )
+    )
 
 
 def rare_turn_terms(
@@ -1379,21 +1439,27 @@ def _carry_title_groups(
     distinctive word and neighbour do not both sit in some current page's
     title names nothing, exactly as before; a title made only of ordinary
     words never qualifies, because at least one word of the pair is distinctive.
-    Runs only when the strict phrase rule found no page.
+    A complete title qualifies its own occurrence; equal namesakes and titles
+    containing that whole phrase still compete. Runs only when the strict
+    phrase rule found no page.
     """
     from . import lexstore
 
-    loose = tuple(
-        pair
-        for pair in adjacent_rare_pairs(turn, rare, partners=stems)
-        if pair not in set(pairs)
+    sentences = _positioned_words(turn)
+    strict = set(pairs)
+    occurrences = tuple(
+        occurrence
+        for occurrence in _pair_occurrences(sentences, rare, partners=stems)
+        if occurrence[3] not in strict
     )
+    loose = tuple(sorted({pair for _sentence, _left, _right, pair in occurrences}))
     if not loose:
         return []
+    fetch = working_set.carry_fetch_size(corpus_pages) if limit is None else limit
     result = lexstore.search_bm25_result(
         vault_root,
         content_words(turn),
-        working_set.carry_fetch_size(corpus_pages) if limit is None else limit,
+        fetch,
         scope="kb",
         freshness=freshness,
         allow_delta=False,
@@ -1403,10 +1469,10 @@ def _carry_title_groups(
         exclude_navigation=True,
         exclude_raw_material=True,
     )
-    if not result.readiness.complete:
+    if not result.readiness.complete or len(result.value or ()) >= fetch:
+        # A bounded prefix cannot prove that a namesake was not cut off.
         return []
-    components = phrase_components(loose)
-    by_component: list[list[tuple[str, float]]] = [[] for _ in components]
+    candidates = []
     for path, score in result.value or ():
         path = str(path)
         if (
@@ -1419,10 +1485,89 @@ def _carry_title_groups(
         if not title:
             continue
         title_stems = frozenset(pairable_stems(title))
+        title_sentences = tuple(
+            tuple(word_stems for _position, word_stems in words)
+            for words in _positioned_words(title)
+            if words
+        )
+        candidates.append((path, float(score), title_stems, title_sentences))
+
+    turn_words = [tuple(word_stems for _position, word_stems in words) for words in sentences]
+    matches = set()
+    eligible = set(stems)
+    for _path, _score, title_stems, title_sentences in candidates:
+        if len(title_sentences) != 1 or not title_stems <= eligible:
+            continue
+        title_words = title_sentences[0]
+        if not all(title_words):
+            continue
+        for sentence_id, words in enumerate(turn_words):
+            for start in range(len(words) - len(title_words) + 1):
+                end = start + len(title_words)
+                if words[start:end] == title_words and any(
+                    sentence == sentence_id and start <= left < right < end
+                    for sentence, left, right, _pair in occurrences
+                ):
+                    matches.add((sentence_id, start, end))
+    # A longer stated title consumes its nested matches at this occurrence.
+    matches = sorted(
+        match
+        for match in matches
+        if not any(
+            outer != match
+            and outer[0] == match[0]
+            and outer[1] <= match[1]
+            and match[2] <= outer[2]
+            for outer in matches
+        )
+    )
+    qualified = []
+    for sentence_id, start, end in matches:
+        phrase = turn_words[sentence_id][start:end]
+        supporting = {
+            path
+            for path, _score, _title_stems, title_sentences in candidates
+            if any(
+                title_words[at : at + len(phrase)] == phrase
+                for title_words in title_sentences
+                for at in range(len(title_words) - len(phrase) + 1)
+            )
+        }
+        spans = [(sentence_id, start, end)]
+        rest = []
+        for other_spans, paths in qualified:
+            if any(
+                sentence == sentence_id and left < end and start < right
+                for sentence, left, right in other_spans
+            ):
+                spans.extend(other_spans)
+                supporting.update(paths)
+            else:
+                rest.append((other_spans, paths))
+        qualified = [*rest, (spans, supporting)]
+    groups = [
+        tuple((path, score) for path, score, _stems, _words in candidates if path in supporting)
+        for _spans, supporting in qualified
+    ]
+    remaining = tuple(
+        sorted(
+            {
+                pair
+                for sentence_id, left, right, pair in occurrences
+                if not any(
+                    sentence == sentence_id and (start <= left < end or start <= right < end)
+                    for sentence, start, end in matches
+                )
+            }
+        )
+    )
+    components = phrase_components(remaining)
+    by_component: list[list[tuple[str, float]]] = [[] for _ in components]
+    for path, score, title_stems, _title_words in candidates:
         for index, component in enumerate(components):
             if any(set(pair) <= title_stems for pair in component):
-                by_component[index].append((path, float(score)))
-    return [tuple(group) for group in by_component if group]
+                by_component[index].append((path, score))
+    return groups + [tuple(group) for group in by_component if group]
 
 
 def carry_candidates(
@@ -1502,11 +1647,11 @@ def refresh_index(index: working_set_index.WorkingSetIndex, *, freshness_stamp: 
         _schedule_build(index.vault_root, freshness_stamp=freshness_stamp)
         return False
     try:
-        index.update(freshness_stamp=freshness_stamp or None)
+        result = index.update(freshness_stamp=freshness_stamp or None)
     except Exception:  # noqa: BLE001 - staleness is reported, never raised
         log.debug("activation index refresh failed", exc_info=True)
         return False
-    return True
+    return not (result.get("unavailable") or result.get("disabled"))
 
 
 def _managed() -> bool:
@@ -1575,8 +1720,15 @@ def serve(
     freshness_snapshot: Any = None,
     lexical_seconds: float = 0.0,
     attribution: working_set_heat.Attribution | None = None,
+    conversation: working_set_conversation.Conversation | None = None,
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
+
+    `conversation` is the caller's bounded conversation (request-scoped). A
+    request carrying one is compiled afresh and its packet is never stored:
+    keying the cache on it would keep a digest of the text in process memory
+    and almost never hit. Refs the audience may not see are dropped here, before
+    the compile, exactly as an unknown ref is.
 
     `lexical_seconds` is what this request's own lexical pass measured,
     passed through to the carry so it can ask the budget for a reserve its
@@ -1697,6 +1849,19 @@ def serve(
         ).referential:
             heat_digest = hashlib.sha256(f"{heat_digest}:stranger".encode()).hexdigest()[:16]
 
+    if conversation is not None and conversation.present and conversation.refs:
+        try:
+            seen = visible_continuity_refs(
+                root, index.anchors(), frozenset(conversation.refs), purpose=purpose
+            )
+        except Exception:  # noqa: BLE001 - a ref that cannot be decided is not disclosed
+            log.warning("conversation ref visibility check failed; dropping the refs", exc_info=True)
+            seen = frozenset()
+        conversation = replace(
+            conversation, refs=tuple(ref for ref in conversation.refs if ref in seen)
+        )
+    with_conversation = conversation is not None and conversation.present
+
     key = cache_key(
         freshness_key=freshness_key,
         index_generation=index.generation(),
@@ -1727,7 +1892,11 @@ def serve(
     # The owner's identity and hits are exactly what they were.
     from .governance import egress
 
-    cacheable = egress.restricted_release_filter(root, purpose=purpose) is None
+    cacheable = (
+        egress.restricted_release_filter(root, purpose=purpose) is None
+        and not with_conversation
+        and not index_stale
+    )
     with _CACHE_LOCK:
         cached = _PACKET_CACHE.get(cache_identity) if cacheable else None
         if cached is not None:
@@ -1769,6 +1938,7 @@ def serve(
             heat_profile=heat_profile,
             attribution=attribution,
             marks=marks,
+            conversation=conversation if with_conversation else None,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The
@@ -1808,6 +1978,10 @@ def serve(
         "busy",
         "unavailable",
     } or lexical_state not in {"available", "not_requested", "agent_choice"}:
+        return packet
+    # A lane can recover without changing the vault or its catalogue token.
+    # Retain this request's coverage, but never cache a transient lookup failure.
+    if any(entry.get("reason") == "lane_failed" for entry in packet.get("missing", ())):
         return packet
     if not cacheable:
         return packet

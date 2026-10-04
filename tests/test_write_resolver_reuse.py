@@ -54,6 +54,26 @@ def _warm_resolver(vault: Path) -> None:
     find_module._get_query_resolver(vault)
 
 
+def test_link_free_note_does_not_request_a_vault_resolver(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cold writer must not scan titles when it has no link to resolve."""
+    def unused_resolver(*_args, **_kwargs):
+        raise AssertionError("link-free note requested a vault-wide resolver")
+
+    monkeypatch.setattr(find_module, "writer_resolver_snapshot", unused_resolver)
+    content = "## Claim\n\nKeep `[[example]]` as code.\n\n```text\n[[example]]\n```\n"
+    kwargs = dict(content=content, note_type="insight", title="Link-free note", status="draft")
+    preview = note_module.note(vault, validate_only=True, **kwargs)
+    result = note_module.note(
+        vault, draft_id=preview.draft_id, draft_hash=preview.draft_hash,
+        draft_token=preview.draft_token, **kwargs,
+    )
+
+    assert content in (vault / result.path).read_text(encoding="utf-8")
+    assert result.write_feedback["links"]["body_wikilinks"] == 0
+
+
 def test_note_reuses_cached_resolver(vault: Path, build_counter: list[int]) -> None:
     _warm_resolver(vault)
     warm_builds = len(build_counter)

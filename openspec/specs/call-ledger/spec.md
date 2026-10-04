@@ -1,7 +1,7 @@
 # call-ledger Specification
 
 ## Purpose
-TBD - created by archiving change add-mcp-call-ledger. Update Purpose after archive.
+Record every completed MCP tool call as exactly one tamper-evident ledger row carrying outcome, latency, calling client and argument shape and hash, never argument values or note content. The ledger lives outside the vault so it is written even on a read-only replica, never breaks or slows the call, and is reachable through existing operator tooling.
 
 ## Requirements
 

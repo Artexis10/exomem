@@ -170,7 +170,7 @@ def _observe(vault: Path, content: str, *, response_detail: str | None = None) -
 def _prime(vault: Path) -> None:
     """Build the projection, then start the session that will carry it."""
     _due_state().reconcile(vault)
-    commands.op_bootstrap(vault)
+    commands.op_bootstrap(vault, section="all")
     _fresh_session()
 
 
@@ -205,7 +205,7 @@ def test_an_overdue_check_by_reaches_no_carrier_today(vault: Path) -> None:
     _due_state().reconcile(vault)
 
     _fresh_session()
-    bootstrap_payload = commands.op_bootstrap(vault)
+    bootstrap_payload = commands.op_bootstrap(vault, section="all")
     _fresh_session()
     mutation = _observe(vault, "Reader saturation reproduces on the replica too.")
     _fresh_session()
@@ -385,7 +385,7 @@ def test_the_bootstrap_payload_carries_the_block(vault: Path) -> None:
     _overdue_prediction(vault, check_by=_yesterday())
     _due_state().reconcile(vault)
 
-    payload = commands.op_bootstrap(vault)
+    payload = commands.op_bootstrap(vault, section="all")
 
     block = payload["due_state"]
     assert block["total"] == 1
@@ -394,11 +394,11 @@ def test_the_bootstrap_payload_carries_the_block(vault: Path) -> None:
 
 
 def test_a_quiet_vault_bootstraps_without_the_key(vault: Path) -> None:
-    assert "due_state" not in commands.op_bootstrap(vault)
+    assert "due_state" not in commands.op_bootstrap(vault, section="all")
 
 
 def test_the_bootstrap_guidance_teaches_how_to_read_the_counts(vault: Path) -> None:
-    post_write = commands.op_bootstrap(vault)["authoring_contract"]["post_write"]
+    post_write = commands.op_bootstrap(vault, section="all")["authoring_contract"]["post_write"]
 
     assert "due_state" in post_write
     assert "due_state_handling" in post_write
@@ -430,7 +430,7 @@ def test_the_teaching_lines_survive_a_reduced_surface(vault: Path) -> None:
         product_commands=("bootstrap", "ask_memory"),
     )
     with active_surface(descriptor):
-        payload = commands.op_bootstrap(vault)
+        payload = commands.op_bootstrap(vault, section="all")
 
     post_write = payload["authoring_contract"]["post_write"]
     for key in ("due_state", "due_state_handling", "due_state_authority"):
@@ -467,7 +467,7 @@ def test_post_write_guidance_names_only_fields_the_default_response_carries(
     only if the compact projection can actually put it there, and anything else
     must say how to reach it.
     """
-    post_write = commands.op_bootstrap(vault)["authoring_contract"]["post_write"]
+    post_write = commands.op_bootstrap(vault, section="all")["authoring_contract"]["post_write"]
 
     for field, description in post_write.items():
         root = field.split("_handling")[0].split("_authority")[0]
@@ -757,7 +757,7 @@ def test_a_recall_after_bootstrap_is_quiet_when_the_totals_have_not_moved(
     _due_state().reconcile(vault)
     _fresh_session()
 
-    payload = commands.op_bootstrap(vault)
+    payload = commands.op_bootstrap(vault, section="all")
     recall = commands.op_ask_memory(vault, query="autovacuum", limit=5)
 
     assert "due_state" in payload, "bootstrap always carries a ready block"
@@ -789,7 +789,7 @@ def test_a_write_after_bootstrap_carries_the_block_when_the_totals_move(
     commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="later")
     _fresh_session()
 
-    payload = commands.op_bootstrap(vault)
+    payload = commands.op_bootstrap(vault, section="all")
     assert payload["due_state"]["total"] == 1
 
     commands.op_triage_memory(vault, ref=parked, action="reopen")
@@ -933,8 +933,76 @@ def test_removing_the_bootstrap_carrier_fails_this_module(
     """Mechanism-removal for carrier 3."""
     _overdue_prediction(vault, check_by=_yesterday())
     _due_state().reconcile(vault)
-    assert "due_state" in commands.op_bootstrap(vault)
+    assert "due_state" in commands.op_bootstrap(vault, section="all")
 
     monkeypatch.setattr(_due_state(), "served", lambda *a, **k: None)
 
-    assert "due_state" not in commands.op_bootstrap(vault)
+    assert "due_state" not in commands.op_bootstrap(vault, section="all")
+
+
+# ==========================================================================
+# Bootstrap records a delivery only where the full block is handed over
+# ==========================================================================
+
+
+def _would_emit(vault: Path) -> bool:
+    module = _due_state()
+    return module.would_emit(module.served(vault), vault_root=vault)
+
+
+def test_a_compact_bootstrap_does_not_burn_the_sessions_emission(vault: Path) -> None:
+    """The core serves a counts summary, not the list. Recording that as the delivery
+    made the next recall omit a list nobody had been shown, and let the first-surfaced
+    ledger mark refs as shown. Real due state, nothing patched."""
+    _overdue_prediction(vault, check_by=_yesterday())
+    _due_state().reconcile(vault)
+    _fresh_session()
+    assert _would_emit(vault)
+
+    core = commands.op_bootstrap(vault)
+
+    assert core["due_state"]["total"] == 1 and "top" not in core["due_state"]
+    assert _would_emit(vault), "the summary is not a delivery of the block"
+
+
+def test_another_section_does_not_record_a_delivery_either(vault: Path) -> None:
+    _overdue_prediction(vault, check_by=_yesterday())
+    _due_state().reconcile(vault)
+    _fresh_session()
+
+    commands.op_bootstrap(vault, section="authoring")
+
+    assert _would_emit(vault)
+
+
+@pytest.mark.parametrize("carrier", ["epistemics", "all", "session"])
+def test_serving_the_full_block_records_the_delivery(vault: Path, carrier: str) -> None:
+    from exomem import workflow_skills
+
+    _overdue_prediction(vault, check_by=_yesterday())
+    _due_state().reconcile(vault)
+    _fresh_session()
+    assert _would_emit(vault)
+
+    if carrier == "session":
+        served = commands.op_bootstrap(
+            vault, profile="session", skill_contract=workflow_skills.skill_contract()
+        )
+    else:
+        served = commands.op_bootstrap(vault, section=carrier)
+
+    assert served["due_state"]["top"], "the full block was handed over"
+    assert not _would_emit(vault)
+    recall = commands.op_ask_memory(vault, query="autovacuum", limit=5)
+    assert not (isinstance(recall, dict) and "due_state" in recall)
+
+
+def test_the_recall_after_a_compact_bootstrap_still_carries_the_list(vault: Path) -> None:
+    _overdue_prediction(vault, check_by=_yesterday())
+    _due_state().reconcile(vault)
+    _fresh_session()
+
+    commands.op_bootstrap(vault)
+    recall = commands.op_ask_memory(vault, query="autovacuum", limit=5)
+
+    assert isinstance(recall, dict) and recall["due_state"]["top"]

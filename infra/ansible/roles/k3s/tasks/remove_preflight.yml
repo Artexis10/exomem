@@ -26,6 +26,35 @@
       Cell maintenance is in flight ({{ k3s_remove_holds | join(', ') }}); a drain
       would evict its Job. Retry once no exomem.io/hold annotation remains.
 
+- name: Find desired cell templates selecting the target reservation
+  ansible.builtin.set_fact:
+    k3s_remove_selected_cells: >-
+      {%- set target = k3s_remove_nodes_doc['items']
+            | selectattr('metadata.name', 'equalto', k3s_remove_node) | first | default({}) -%}
+      {%- set labels = (target.metadata | default({})).labels | default({}) -%}
+      {%- set reservations = [labels.get('exomem.io/dedicated-cell')]
+            + ((target.spec | default({})).taints | default([])
+               | selectattr('key', 'equalto', 'exomem.io/dedicated-cell')
+               | map(attribute='value', default='') | list) -%}
+      {%- set cells = [] -%}
+      {%- for workload in k3s_remove_statefulsets_doc['items']
+          if workload.metadata.namespace.startswith(k3s_cell_namespace_prefix) -%}
+        {%- set selector = workload.spec.template.spec.nodeSelector | default({}) -%}
+        {%- if 'exomem.io/dedicated-cell' in selector
+            and selector['exomem.io/dedicated-cell'] in reservations -%}
+          {%- set _ = cells.append(workload.metadata.namespace) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ cells }}
+
+- name: Refuse removal until selected cells relocate
+  ansible.builtin.assert:
+    that:
+      - k3s_remove_selected_cells | length == 0
+    fail_msg: >-
+      A desired cell template still selects {{ k3s_remove_node }}'s reservation
+      ({{ k3s_remove_selected_cells | join(', ') }}); stop, clear placement and verify relocation first.
+
 - name: Classify attached volumes as cell or non-cell by their claim namespace
   ansible.builtin.set_fact:
     k3s_remove_attached: >-
@@ -55,6 +84,9 @@
     k3s_remove_remaining_slots: >-
       {%- set total = namespace(slots=0) -%}
       {%- for node in k3s_remove_nodes_doc['items'] if node.metadata.name != k3s_remove_node
+          and 'exomem.io/dedicated-cell' not in (node.metadata.labels | default({}))
+          and not (node.spec.taints | default([])
+                   | selectattr('key', 'equalto', 'exomem.io/dedicated-cell') | list)
           and not (node.spec.unschedulable | default(false))
           and (node.status.conditions | default([]) | selectattr('type', 'equalto', 'Ready')
                | map(attribute='status') | first | default('False')) == 'True' -%}

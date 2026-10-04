@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from exomem import attention, commands, curation, find
-from exomem._hooks import exomem_capture_nudge
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 from exomem.vault import content_hash
 
@@ -728,7 +727,7 @@ def test_bootstrap_carries_capability_honest_bounded_entity_cadence(
     ordinary_mode: str,
 ) -> None:
     monkeypatch.setenv("EXOMEM_PROMINENCE", level)
-    payload = commands.op_bootstrap(tmp_path)
+    payload = commands.op_bootstrap(tmp_path, section="all")
     lifecycle = payload["entity_registry"]["lifecycle"]
 
     assert lifecycle["available"] is True
@@ -780,7 +779,7 @@ def test_bootstrap_skips_recurrence_when_category_read_is_not_callable(tmp_path:
         product_commands=("bootstrap", "ask_memory"),
     )
     with active_surface(descriptor):
-        payload = commands.op_bootstrap(tmp_path)
+        payload = commands.op_bootstrap(tmp_path, section="all")
 
     lifecycle = payload["entity_registry"]["lifecycle"]
     assert lifecycle == {
@@ -809,7 +808,7 @@ def test_open_registry_projection_reports_leaf_folder_and_family(tmp_path: Path)
 
     community = next(
         item
-        for item in commands.op_bootstrap(tmp_path)["entity_registry"]["types"]
+        for item in commands.op_bootstrap(tmp_path, section="all")["entity_registry"]["types"]
         if item["id"] == "community"
     )
 
@@ -870,32 +869,6 @@ def test_hosted_v5_entity_lifecycle_input_is_generic_and_bounded() -> None:
     assert family_case["entity_type"]["folder"] == "Guilds"
     assert family_case["entity_type"]["family"] == "organization"
     assert family_case["entity_type"]["id"] != family_case["entity_type"]["folder"]
-
-
-def test_hook_rearms_the_exact_ordinary_entity_read_without_becoming_a_decider() -> None:
-    reminder = exomem_capture_nudge.REMINDER
-    folded = reminder.casefold()
-
-    assert "after primary work" in folded
-    assert "before the final response" in folded
-    assert "once per session" in folded
-    assert "entity_recurrence" in reminder
-    assert "review_memory" in reminder
-    assert "limit=3" in reminder
-    assert "active agent" in folded
-    assert "no local scan" in folded
-    assert "no model" in folded
-    assert "terminal receipt" in folded
-    assert "closure-only eighth recheck" in folded
-    assert len(reminder) < 1800
-
-    # The ordinary read is a balanced/maximal behaviour. Unqualified, the hook
-    # tells a light or off session to spend a category read it never opted into,
-    # which is the nudge the prominence levels exist to withhold. The qualifier
-    # has to sit in the cadence sentence itself, not merely somewhere in the
-    # paragraph.
-    cadence = reminder.split("review_memory", 1)[0].rsplit(". ", 1)[-1].casefold()
-    assert "at balanced/maximal" in cadence, cadence
 
 
 def _lifecycle_block(path: Path) -> str:
@@ -1011,7 +984,7 @@ def test_hookless_client_spends_one_ordinary_read_and_one_general_recheck(
     for index, (signal, incidental) in enumerate(zip(positive, twin, strict=True)):
         _note(tmp_path, index, f"{signal}\n\n{incidental}")
 
-    lifecycle = commands.op_bootstrap(tmp_path)["entity_registry"]["lifecycle"]
+    lifecycle = commands.op_bootstrap(tmp_path, section="all")["entity_registry"]["lifecycle"]
     route = lifecycle["ordinary_read"]["route"]["arguments"]
     ordinary_remaining = lifecycle["ordinary_read"]["maximum_per_session"]
     general_remaining = lifecycle["general_mutation_recheck"]["maximum_per_session"]
@@ -1081,7 +1054,7 @@ def test_hookless_client_spends_one_ordinary_read_and_one_general_recheck(
 
 
 def test_three_batch_and_nine_batch_carrier_budgets_are_exact(tmp_path: Path) -> None:
-    lifecycle = commands.op_bootstrap(tmp_path)["entity_registry"]["lifecycle"]
+    lifecycle = commands.op_bootstrap(tmp_path, section="all")["entity_registry"]["lifecycle"]
 
     def journey(total_batches: int) -> tuple[int, int, bool, int]:
         mutations = 0

@@ -1654,7 +1654,7 @@ def test_bootstrap_teaches_routing_candidates_and_collection_confirmation(
 ) -> None:
     from exomem import commands, envelope
 
-    post_write = commands.op_bootstrap(tmp_path, profile="compact")["authoring_contract"][
+    post_write = commands.op_bootstrap(tmp_path, profile="compact", section="all")["authoring_contract"][
         "post_write"
     ]
     routing = post_write["records_routing"] + " " + post_write["records_routing_handling"]
@@ -1708,7 +1708,7 @@ def test_mcp_facing_collection_claims_journey(
             due_state.served_entries(root, now=future, **kwargs)
         ),
     )
-    due_block = commands.op_bootstrap(tmp_path)["due_state"]
+    due_block = commands.op_bootstrap(tmp_path, section="all")["due_state"]
     assert due_block["categories"]["unreflected_observations"] == 1
     monkeypatch.setattr(due_state, "served", original_served)
 
@@ -1740,7 +1740,7 @@ def test_mcp_facing_collection_claims_journey(
 
     _write_candidate_pages(tmp_path)
     due_state.reconcile(tmp_path)
-    candidate_block = commands.op_bootstrap(tmp_path)["due_state"]
+    candidate_block = commands.op_bootstrap(tmp_path, section="all")["due_state"]
     assert candidate_block["categories"]["collection_candidate"] >= 1
 
     candidate_path = "Knowledge Base/Records/Studio Licences/_collection.md"
@@ -1760,7 +1760,7 @@ def test_mcp_facing_collection_claims_journey(
         why="create the confirmed studio licence ledger",
     )
     due_state.reconcile(tmp_path)
-    resolved = commands.op_bootstrap(tmp_path).get("due_state") or {
+    resolved = commands.op_bootstrap(tmp_path, section="all").get("due_state") or {
         "categories": {}
     }
     assert "collection_candidate" not in resolved["categories"]

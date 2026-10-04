@@ -1,7 +1,7 @@
 # epistemic-relation-registry Specification
 
 ## Purpose
-TBD - created by archiving change add-governed-relation-registry. Update Purpose after archive.
+Define every portable core relation in one versioned registry consumed by parsing, graph indexing, validation and suggestions, with governed namespaced extensions loaded from `Knowledge Base/_Schema/`. Raw and canonical relation identity stay distinct, unregistered labels are preserved without semantics, and inference and optional model suggestions only propose.
 ## Requirements
 ### Requirement: One versioned core relation registry
 The system SHALL define every portable core relation in one versioned registry

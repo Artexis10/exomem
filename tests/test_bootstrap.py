@@ -50,7 +50,7 @@ def test_entity_capture_types_include_vault_defined_types(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
-    result = commands.op_bootstrap(tmp_path)
+    result = commands.op_bootstrap(tmp_path, section="all")
 
     assert [item["id"] for item in result["entity_registry"]["types"]] == [
         *entity_types.ENTITY_TYPE_IDS,
@@ -62,7 +62,7 @@ def test_entity_capture_types_include_vault_defined_types(tmp_path: Path) -> Non
 
 
 def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
-    out = commands.op_bootstrap(vault)
+    out = commands.op_bootstrap(vault, section="all")
 
     assert out["contract_version"]
     assert out["profile"] == "compact"
@@ -89,6 +89,11 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert out["simple_actions"]["remember"]["route"]["tool"] == "remember"
     assert out["simple_actions"]["capture"]["evidence_route"]["tool"] == "preserve_evidence"
     assert "durable governed knowledge" in out["memory_model"]["exomem"]
+    # The product comparison must not prescribe another system's memory policy.
+    built_in_memory = out["memory_model"]["built_in_ai_memory"]
+    assert "host-managed" in built_in_memory
+    assert "neither reads nor configures" in built_in_memory
+    assert not built_in_memory.startswith("Use ")
     assert [s["name"] for s in out["workflow_skills"]] == [
         "exomem-continue",
         "exomem-capture",
@@ -185,7 +190,7 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
 
 
 def test_search_guidance_teaches_referents_contract(vault: Path) -> None:
-    out = commands.op_bootstrap(vault, profile="compact")
+    out = commands.op_bootstrap(vault, profile="compact", section="all")
     guidance = out["search_guidance"]["semantic_recall"]["referents"]
     assert "partial" in guidance
     assert "ambiguous" in guidance
@@ -204,7 +209,7 @@ def test_bootstrap_full_teaches_copyable_direct_and_fallback_artifact_calls(vaul
 def test_bootstrap_routes_observed_state_to_records_without_activating_state(
     vault: Path,
 ) -> None:
-    out = commands.op_bootstrap(vault)
+    out = commands.op_bootstrap(vault, section="all")
     contract = out["records"]
 
     assert contract["available"] is True
@@ -281,7 +286,7 @@ def test_bootstrap_does_not_advertise_records_when_surface_omits_command(
     )
 
     with active_surface(descriptor):
-        contract = commands.op_bootstrap(vault)["records"]
+        contract = commands.op_bootstrap(vault, section="all")["records"]
 
     assert contract == {
         "available": False,
@@ -291,7 +296,7 @@ def test_bootstrap_does_not_advertise_records_when_surface_omits_command(
 
 
 def test_bootstrap_reports_governance(vault: Path) -> None:
-    out = commands.op_bootstrap(vault)
+    out = commands.op_bootstrap(vault, section="all")
 
     assert out["contract_version"] > "2026-07-19.1"
     assert out["governance"] == {
@@ -344,7 +349,7 @@ def test_bootstrap_keeps_active_governance_safety_teaching_without_tier_two(
     )
 
     with active_surface(descriptor):
-        governance = commands.op_bootstrap(vault)["governance"]
+        governance = commands.op_bootstrap(vault, section="all")["governance"]
 
     assert governance["enabled"] is True
     assert "provide a purpose only when the applicable policy requires it" in (
@@ -374,7 +379,7 @@ def test_bootstrap_reports_configured_governance(vault: Path) -> None:
         encoding="utf-8",
     )
 
-    out = commands.op_bootstrap(vault)
+    out = commands.op_bootstrap(vault, section="all")
 
     assert out["governance"]["enabled"] is True
     assert re.fullmatch(r"[0-9a-f]{64}", out["governance"]["policy_fingerprint"])
@@ -393,7 +398,7 @@ def test_bootstrap_profiles_project_profile_aware_semantic_authoring_contract(
     vault: Path,
 ) -> None:
     full = commands.op_bootstrap(vault, profile="full")["semantic_authoring"]
-    compact = commands.op_bootstrap(vault, profile="compact")["semantic_authoring"]
+    compact = commands.op_bootstrap(vault, profile="compact", section="all")["semantic_authoring"]
     diagnostics = commands.op_bootstrap(vault, profile="diagnostics")[
         "semantic_authoring"
     ]
@@ -465,7 +470,9 @@ def test_bootstrap_compact_is_compact_through_the_entire_payload(vault: Path) ->
     # superset of full and stays self-contained, so it carries the nested
     # projection in full (minus the rich example, like its top-level one).
     for profile in ("compact", "diagnostics"):
-        payload = commands.op_bootstrap(vault, profile=profile)
+        payload = commands.op_bootstrap(
+            vault, profile=profile, **({"section": "all"} if profile == "compact" else {})
+        )
         assert not contains_exact(payload, rich_example)
         nested = payload["authoring_contract"]["semantic_units"]["contract"]
         if profile == "compact":
@@ -495,8 +502,8 @@ def test_bootstrap_semantic_authoring_projection_is_vault_blind(tmp_path: Path) 
         note.parent.mkdir(parents=True)
         note.write_text(f"# {sentinel}\n\nDo not project this body.\n", encoding="utf-8")
 
-    left = commands.op_bootstrap(first)["semantic_authoring"]
-    right = commands.op_bootstrap(second)["semantic_authoring"]
+    left = commands.op_bootstrap(first, section="all")["semantic_authoring"]
+    right = commands.op_bootstrap(second, section="all")["semantic_authoring"]
 
     assert left == right
     serialized = json.dumps(left, ensure_ascii=False)
@@ -507,7 +514,7 @@ def test_bootstrap_semantic_authoring_projection_is_vault_blind(tmp_path: Path) 
 
 
 def test_bootstrap_teaches_human_readable_memory_citations(vault: Path) -> None:
-    out = commands.op_bootstrap(vault)
+    out = commands.op_bootstrap(vault, section="all")
     guidance = json.dumps(out["workflow"]).lower()
 
     assert out["contract_version"] == "2026-08-17.1"
@@ -545,7 +552,7 @@ def test_bootstrap_profiles_and_validation(vault: Path) -> None:
 
 def test_session_bootstrap_projects_filtered_compact_live_state(vault: Path) -> None:
     """A loaded, current skill receives live state without portable teaching."""
-    compact = commands.op_bootstrap(vault, profile="compact", workflow="research")
+    compact = commands.op_bootstrap(vault, profile="compact", workflow="research", section="all")
     session = commands.op_bootstrap(
         vault,
         profile="session",
@@ -556,9 +563,7 @@ def test_session_bootstrap_projects_filtered_compact_live_state(vault: Path) -> 
     assert session["profile"] == "session"
     for field in (
         "contract_version",
-        "server",
         "active_capabilities",
-        "engagement",
         "governance",
         "workflow_contracts",
         "relation_vocabulary",
@@ -566,6 +571,13 @@ def test_session_bootstrap_projects_filtered_compact_live_state(vault: Path) -> 
         "source_taxonomy",
     ):
         assert session[field] == compact[field]
+    # Rebased on the core (`shrink-bootstrap`): the server block is its digest and the
+    # engagement envelope is the core's digest; the full forms are sections.
+    assert session["server"]["version"] == compact["server"]["version"]
+    assert {k: v for k, v in session["engagement"].items() if k != "envelope"} == {
+        k: v for k, v in compact["engagement"].items() if k != "envelope"
+    }
+    assert set(session["sections"]) >= {"authoring", "entities", "envelope"}
     assert session["knowledge_packs"] == {
         "selected": compact["knowledge_packs"]["selected"],
         "selection_rule": compact["knowledge_packs"]["selection_rule"],
@@ -638,10 +650,17 @@ def test_session_bootstrap_unattested_contract_returns_compact_once(
 
     assert fallback["profile"] == "compact"
     assert fallback["session_profile_unavailable"] == reason
-    assert "semantic_authoring" in fallback
-    assert fallback["due_state"] == block
+    assert "capture_semantics" in fallback and "sections" in fallback
+    # The fallback is the core, which carries a counts summary and points at the list.
+    assert fallback["due_state"] == {
+        "total": 1,
+        "top_category": "prediction",
+        "list": "section=epistemics",
+    }
     assert served == [vault]
-    assert emitted == [block]
+    # A summary is not a delivery of the block: nothing is recorded, so the next
+    # recall still carries the list.
+    assert emitted == []
 
 
 def test_product_front_door_metadata_is_registry_derived() -> None:

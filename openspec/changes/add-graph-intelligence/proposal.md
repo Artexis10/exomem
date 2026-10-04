@@ -12,13 +12,15 @@ hundred pages are disconnected.
 Two quick defects sit beside the missing census. `infer(save=true)` builds its
 observed-deletion guard from raw labels, so one capitalised legacy row such as
 `Supports`, or any unregistered label, blocks every save even though neither is
-vocabulary a registry save can delete. And the graph offers no request-time algorithm
-beyond one-hop expansion, so it cannot answer "how is A connected to B" or "what does
-this decision rest on" without leaking through withheld pages.
+vocabulary a registry save can delete. The existing graph walker already supports
+bounded neighbourhoods up to five hops; it is not an exact path/pattern query interface
+with admitted evidence chains, reverse-impact witnesses and completeness guarantees.
 
-This change makes edge quality measurable first, then adds graph algorithms that run only
-over the caller's visible subgraph, and proves with a benchmark that the graph improves
-answers at realistic edge quality.
+This change makes edge quality measurable first. Request-time algorithms and their
+admission, explanations and acceptance are owned by sibling
+`add-graph-traversal-queries`, sharing `add-collection-query-engine`'s IR and executor.
+Its evidence-chain and reverse-impact workflows test usefulness at realistic edge
+quality; this change does not create another graph engine.
 
 ## What Changes
 
@@ -41,10 +43,10 @@ answers at realistic edge quality.
 - **The `infer(save=true)` guard (group 1).** The observed-deletion guard protects only
   observed labels that resolve to a currently registered extension or alias; core and
   unregistered labels, in any case, no longer block a save.
-- **Later groups.** One admission kernel and the request-time algorithms (connection
-  paths, provenance trace and dependants, stale basis, per-hit support), the dreamer's
-  graph families, and the `graph_reasoning` benchmark family with its acceptance run.
-  Their tasks are listed here and specified when their lanes land.
+- **Later groups.** Request-time connection paths, provenance trace/dependants, stale
+  basis and context explanations are tracked through sibling G1–G5. Existing dreamer
+  families own graph upkeep; hubs/community analytics remain deferred. Graph-quality
+  acceptance reuses sibling G6's benchmark effort and retains sparse/unavailable controls.
 
 ## Capabilities
 
@@ -52,8 +54,8 @@ answers at realistic edge quality.
 
 - `relation-quality-census`: the counts-only census, its surfaces, its egress rule, the
   judged sample, and `infer`'s delegation to it.
-- `graph-intelligence` (later groups): the admission kernel, the egress rule for
-  multi-hop results, and the algorithms and their surfaces.
+The later graph workflows use the sibling `graph-traversal-queries` capability rather
+than introducing a parallel admission/execution capability here.
 
 ### Modified Capabilities
 

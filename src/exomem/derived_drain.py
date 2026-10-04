@@ -12,8 +12,9 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
-from . import call_ledger, call_spans, derived_receipts, mode
+from . import call_ledger, call_spans, derived_receipts, mode, process_memory
 from .derived_receipts import DerivedComponentStatus
 
 log = logging.getLogger(__name__)
@@ -32,7 +33,8 @@ NORMAL_PASS_LIMIT = 16
 QUIET_PASS_LIMIT = 1
 PERFORMANCE_PASS_LIMIT = 32
 
-ComponentDispatcher = Callable[[Path, DerivedComponentStatus], bool]
+ComponentDispatchResult = bool | Literal["pending"]
+ComponentDispatcher = Callable[[Path, DerivedComponentStatus], ComponentDispatchResult]
 CanonicalGenerationObserver = Callable[[Path], str | None]
 PendingVisibilityPublisher = Callable[
     [Path, derived_receipts.DerivedBatchReceipt], bool
@@ -110,7 +112,9 @@ def _key(vault_root: Path) -> str:
 
 def progress_limit(*, mode_name: str | None = None, resource_limit: int | None = None) -> int:
     """Return a bounded pass allowance with one correctness slot minimum."""
-    selected = mode.normalize(mode_name) if mode_name is not None else mode.resolve_mode()
+    selected = "normal" if mode.service_profile_enabled() else (
+        mode.normalize(mode_name) if mode_name is not None else mode.resolve_mode()
+    )
     if selected == "quiet":
         policy_limit = QUIET_PASS_LIMIT
     elif selected == "performance":
@@ -177,7 +181,7 @@ def component_dispatcher() -> ComponentDispatcher:
     executed by a lane that does not own it.
     """
 
-    def dispatch(vault_root: Path, status: DerivedComponentStatus) -> bool:
+    def dispatch(vault_root: Path, status: DerivedComponentStatus) -> ComponentDispatchResult:
         if status.component is derived_receipts.DerivedComponent.WRITE_ADVISORY:
             from . import deferred_write_advisory
 
@@ -289,6 +293,8 @@ def drain_once(
             retire_visibility(vault_root, tuple(dict.fromkeys(completed_batches)))
         except Exception:  # noqa: BLE001 - read-side re-derivation; custody is unchanged
             log.warning("pending visibility retirement re-check failed", exc_info=True)
+    if completed_batches:
+        process_memory.trim_allocator()
     _note_pass_observation(
         vault_root,
         claimed=claimed_total,
@@ -311,6 +317,7 @@ def _dispatch_claims(
     """Prove, dispatch and complete one claimed prefix; return completed batches."""
     completed: list[str] = []
     for status in claims:
+        pending = False
         failure_code = "component_unhandled"
         if observe_current_generation is not None:
             try:
@@ -343,9 +350,9 @@ def _dispatch_claims(
             failure_code = "component_unhandled"
             try:
                 with call_spans.span("derived.component_dispatch"):
-                    handled = (
-                        False if dispatch is None else bool(dispatch(vault_root, status))
-                    )
+                    result = False if dispatch is None else dispatch(vault_root, status)
+                    pending = result == "pending"
+                    handled = not pending and bool(result)
                 if dispatch is not None:
                     failure_code = "dispatch_failed"
             except Exception:  # noqa: BLE001 - exact custody remains retryable
@@ -356,6 +363,13 @@ def _dispatch_claims(
                     status.component.value,
                     exc_info=True,
                 )
+        if pending:
+            try:
+                derived_receipts.defer_component(vault_root, status, now=started_at)
+            except RuntimeError:
+                # A replacement claim has already taken custody.
+                pass
+            continue
         completion_failed = False
         if handled:
             try:

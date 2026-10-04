@@ -1,7 +1,7 @@
 # semantic-block-schema Specification
 
 ## Purpose
-TBD - created by archiving change add-semantic-block-schema. Update Purpose after archive.
+Define the syntax of semantic blocks in plain Markdown: ATX headings of supported block types, optional leading `- key: value` metadata and typed relations, compatibility with ordinary Markdown including code fences, and a validation result with separate errors and warnings. Claim extraction and context packs reuse parsed blocks.
 ## Requirements
 ### Requirement: Markdown Semantic Block Parsing
 

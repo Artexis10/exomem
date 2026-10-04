@@ -370,8 +370,11 @@ def test_a_query_encode_is_never_refused_while_the_recall_gate_is_held(
     """A recall write's bulk encode holds the process-wide gate for seconds; a
     separate activation encoder must not read `busy` behind it."""
     gate = runtime_resources.ModelAdmissionGate(4)
+    from exomem import cloud_cell
+
     monkeypatch.setattr(runtime_resources, "_gate", gate)
     monkeypatch.setattr(runtime_resources, "_gate_capacity", 4)
+    monkeypatch.setattr(runtime_resources, "_gate_profile", cloud_cell.resource_policy())
     calls: list = []
     _separate_resident(monkeypatch, calls)
     entered, release = threading.Event(), threading.Event()

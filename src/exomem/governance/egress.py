@@ -3131,6 +3131,13 @@ def guard_working_set(
                     if isinstance(entry, Mapping)
                 ),
             }
+    from .. import working_set_conversation
+
+    if isinstance(guarded, working_set_conversation.InferredPacket):
+        guarded["budget"]["used_chars"] = (
+            sum(_recent_entry_chars(entry) for entry in guarded.get("recent_context", ()))
+            + working_set_conversation.subject_chars(guarded)
+        )
     return guarded
 
 
@@ -4839,6 +4846,18 @@ _DATA_REPRESENTATION_ADAPTER: dict[str, str] = {
 }
 
 _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
+    ("review_memory", "mode"): {
+        **dict.fromkeys(
+            (
+                "attention", "activation", "item", "audit", "dispositions",
+                "provenance", "evolution", "compilation", "stale", "contradiction",
+                "unprocessed-sources", "relation-debt", "relation-queue", "adoption",
+                "upkeep", "plan-progress", "write-advisory-result",
+            ),
+            "structure",
+        ),
+        "vocabulary": "question-conditional",
+    },
     ("configure_memory", "action"): {
         "inspect": "structure",
         "set": "mutation",

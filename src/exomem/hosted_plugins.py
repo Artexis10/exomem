@@ -2655,6 +2655,34 @@ def check(
         raise ValueError("Hosted generated artifacts are stale; run hosted-plugin.py render")
 
 
+def check_all(repo_root: Path | None = None) -> list[tuple[str, str]]:
+    """Check every candidate on every platform it has generated artifacts for.
+
+    `check` takes one candidate and one platform, so the bare command left the other
+    candidates and the OpenAI platform unverified. This walks each candidate's generated
+    directory, checks each platform directory found there, and names the failing
+    candidate and platform. Returns the (candidate, platform) pairs it checked.
+    """
+    root = _repo_root(repo_root)
+    generated_root = root / PLUGIN_ROOT / "generated"
+    checked: list[tuple[str, str]] = []
+    for candidate in CANDIDATE_PROFILES:
+        directory = (
+            generated_root
+            if candidate == DEFAULT_CANDIDATE
+            else generated_root / "candidates" / candidate
+        )
+        for platform in PLATFORMS:
+            if not (directory / platform).is_dir():
+                continue
+            try:
+                check(root, platform=platform, candidate=candidate)
+            except ValueError as exc:
+                raise ValueError(f"{candidate} on {platform}: {exc}") from exc
+            checked.append((candidate, platform))
+    return checked
+
+
 def regenerate_claude(repo_root: Path | None = None) -> Path:
     """Atomically replace the committed Claude candidate from canonical bytes."""
 

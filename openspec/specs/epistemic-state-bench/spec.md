@@ -1,7 +1,7 @@
 # epistemic-state-bench Specification
 
 ## Purpose
-TBD - created by archiving change amend-epistemic-bench-families. Update Purpose after archive.
+Govern the epistemic-state benchmark pre-registration: the scenario families, assertions and gates registered for it, and amendment only through dated, reasoned entries. A drift check keeps the working pre-registration and frozen registry identical to the ratified base or its receipted amendment chain.
 
 ## Requirements
 

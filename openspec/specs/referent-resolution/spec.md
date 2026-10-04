@@ -1,7 +1,7 @@
 # referent-resolution Specification
 
 ## Purpose
-TBD - created by archiving change add-referent-resolution. Update Purpose after archive.
+Resolve entity references in a turn deterministically: cues are detected from closed noun sets and entity-type vocabulary, and an entity resolves by exact name or two independent categorical evidence kinds. The referent stage never reorders or alters hits, and graph corroboration is optional and ablatable.
 
 ## Requirements
 

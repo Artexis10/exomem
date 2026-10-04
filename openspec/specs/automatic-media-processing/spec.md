@@ -1,7 +1,7 @@
 # automatic-media-processing Specification
 
 ## Purpose
-TBD - created by archiving change automatic-media-processing. Update Purpose after archive.
+Route supported audio and video from every ingress path (upload, filesystem copy, Obsidian, file sync, startup discovery, periodic reconciliation) to durable, idempotent processing that preserves the original artifact. It produces timestamped transcripts, applies conservative speaker attribution, records actionable failure state, and stays pure-substrate and soft-fail.
 ## Requirements
 ### Requirement: Supported Governed Media Is Classified Consistently
 The system SHALL classify `.m4a`, `.mp3`, `.wav`, `.flac`, `.ogg`, and the existing supported video formats through the canonical media registry regardless of whether the artifact arrived through upload or direct filesystem discovery. MIME metadata MAY be recorded but MUST NOT create a divergent dispatch path.

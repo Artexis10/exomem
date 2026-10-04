@@ -251,8 +251,6 @@ def test_the_guard_reads_only_candidates_that_can_reach_the_fused_window(
     # that), and the dense lead holds neither. The guard reads only candidates
     # that can still reach the fused window, and its work is reported as its
     # own timing stage.
-    from functools import cached_property
-
     from exomem import lexstore
     from exomem.find_types import FindTimings, ParsedPage
     from exomem.ranking_config import DEFAULT_RANKING
@@ -282,15 +280,13 @@ def test_the_guard_reads_only_candidates_that_can_reach_the_fused_window(
 
     read: set[str] = set()
     for name in ("stem_set", "letter_script"):
-        original = ParsedPage.__dict__[name].func
+        original = ParsedPage.__dict__[name]
 
         def reading(self, _original=original):
             read.add(self.rel_path)
-            return _original(self)
+            return _original.__get__(self, type(self))
 
-        wrapped = cached_property(reading)
-        wrapped.__set_name__(ParsedPage, name)
-        monkeypatch.setattr(ParsedPage, name, wrapped)
+        monkeypatch.setattr(ParsedPage, name, property(reading))
 
     timings = FindTimings()
     hits = find_module.find(

@@ -1,7 +1,7 @@
 # writer-lease-fencing Specification
 
 ## Purpose
-TBD - created by archiving change harden-writer-lease-fencing. Update Purpose after archive.
+Ensure a vault mutation issued under a writer lease completes only while the issuing replica still holds the fencing token it was authorized under.
 ## Requirements
 ### Requirement: Fenced Vault Mutations
 

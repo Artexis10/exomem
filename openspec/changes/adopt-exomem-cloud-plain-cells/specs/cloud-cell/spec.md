@@ -122,7 +122,7 @@ Each cell SHALL have its own namespace, ResourceQuota, encrypted volume, Secret,
 
 A default-deny network policy SHALL:
 - admit runtime ingress only from the cloud gateway;
-- grant the runtime pod no egress;
+- grant the runtime pod no egress unless explicitly selected for Cloud artifact transport, in which case admit only the designated internal artifact-broker namespace/pod peer on TCP 8767, with no DNS or direct public egress;
 - limit backup and restore pods to object-storage egress.
 
 No request field, path or header SHALL select a cell. An admission policy SHALL confine cellctl's own writes to cell namespaces, restricted namespaces and digest-pinned images from the configured repository.
@@ -134,8 +134,14 @@ No request field, path or header SHALL select a cell. An admission policy SHALL 
 
 #### Scenario: Runtime attempts outbound access
 
-- **WHEN** the runtime process attempts any outbound connection, including DNS
+- **WHEN** an unselected runtime process attempts any outbound connection, including DNS, or a selected runtime attempts a destination other than its designated internal artifact broker on TCP 8767
 - **THEN** the connection is refused by policy
+
+#### Scenario: Selected artifact transport remains confined
+
+- **WHEN** an explicitly selected runtime preserves a client file through Cloud artifact transport
+- **THEN** its only outbound edge is the designated internal artifact broker on TCP 8767, and the broker requires exact-file, account-bound retrieval authority
+- **AND** DNS, direct public HTTPS, metadata, other cells and backup/restore access to the broker remain denied
 
 #### Scenario: Controller attempts an out-of-scope write
 
@@ -276,6 +282,26 @@ For each node, cellctl SHALL publish `cell_slots`, equal to the provider's per-s
 
 - **WHEN** non-deleted cell rows equal the published `cell_slots`
 - **THEN** no further cell is admitted until a node is added or a cell is deleted
+
+### Requirement: The Cloud lifecycle sweep remains scheduled
+
+The platform chart SHALL classify every hosted scheduler job by whether it serves Cloud. While either cellctl or the Cloud gateway is enabled, it SHALL keep Cloud-serving scheduler jobs active and suspend legacy-only scheduler jobs. With Cloud disabled, `legacyHosted.paused` SHALL retain its existing all-jobs pause, and with every pause input disabled no scheduler job SHALL be suspended.
+
+#### Scenario: The lifecycle sweep runs while Cloud is on
+
+- **WHEN** cellctl or the Cloud gateway is enabled
+- **THEN** the `exomem-reconcile` CronJob is not suspended
+- **AND** every legacy-only scheduler CronJob is suspended
+
+#### Scenario: Only the explicit legacy pause is on
+
+- **WHEN** Cloud is disabled and `legacyHosted.paused` is true
+- **THEN** every scheduler CronJob is suspended
+
+#### Scenario: No platform pause is on
+
+- **WHEN** Cloud is disabled and `legacyHosted.paused` is false
+- **THEN** no scheduler CronJob is suspended
 
 ### Requirement: Vault traffic is TLS-terminated only on our own servers
 

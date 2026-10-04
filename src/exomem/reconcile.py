@@ -519,14 +519,18 @@ def reconcile(
                 missing_rels.append(rel)
         refresh_succeeded = True
         if not dry_run:
-            from . import embeddings, index_sync
+            from . import embeddings, index_sync, mode, semantic_drain
 
             if missing_rels:
                 index_sync.delete_after_remove(vault_root, missing_rels)
             if drifted_abs:
-                refresh_succeeded = (
-                    embeddings.upsert_after_write(vault_root, drifted_abs) is not False
-                )
+                if mode.service_profile_enabled():
+                    semantic_drain.request(vault_root, drifted_abs, edited=False)
+                    refresh_succeeded = False
+                else:
+                    refresh_succeeded = (
+                        embeddings.upsert_after_write(vault_root, drifted_abs) is not False
+                    )
                 if refresh_succeeded:
                     index_sync.clear_deferred_work(vault_root, paths=drifted_abs)
         report.embeddings_refreshed = len(drifted_abs) if refresh_succeeded else 0

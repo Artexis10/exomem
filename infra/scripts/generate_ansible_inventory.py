@@ -62,11 +62,18 @@ def _agent_hosts(document: dict[str, Any], user: str) -> dict[str, dict[str, str
             raise ValueError("each K3s agent must be named exomem-agent-<key>")
         if name in hosts:
             raise ValueError("K3s agent names must be unique")
+        reservation = node.get("dedicated_cell_id", "")
+        if not isinstance(reservation, str) or (
+            reservation and re.fullmatch(r"[a-z2-7]{16}", reservation) is None
+        ):
+            raise ValueError("dedicated_cell_id must be empty or an exact cell identifier")
         hosts[name] = {
             "ansible_host": str(ipaddress.ip_address(str(node.get("ipv4")))),
             "ansible_user": user,
             "private_node_ip": str(ipaddress.ip_address(str(node.get("private_ip")))),
         }
+        if reservation:
+            hosts[name]["k3s_agent_dedicated_cell"] = reservation
     return hosts
 
 
@@ -115,7 +122,7 @@ def main() -> int:
     if control_public_ip is not None and control_private_ip is not None:
         children["control_nodes"] = {
             "hosts": {
-                "exomem-control-db": {
+                "substrate-control-01": {
                     "ansible_host": control_public_ip,
                     "ansible_user": args.user,
                     "postgres_private_ip": control_private_ip,

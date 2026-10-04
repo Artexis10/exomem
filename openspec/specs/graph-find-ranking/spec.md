@@ -1,7 +1,7 @@
 # graph-find-ranking Specification
 
 ## Purpose
-TBD - created by archiving change fix-excluded-tier-read-paths. Update Purpose after archive.
+Ensure the graph-context lane and graph expansion feeding `find` respect access tiers and release decisions: excluded-tier pages are filtered, and hits whose only provenance is expansion from a seed released below notice are dropped. Referent corroboration likewise respects release decisions.
 
 ## Requirements
 

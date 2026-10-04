@@ -357,6 +357,15 @@ def test_registry_publication_artifacts_are_scanned_as_text(
     assert [item.rule for item in findings] == ([expected_rule] if expected_rule else [])
 
 
+def test_openspec_generator_marker_is_scanned_as_text(tmp_path: Path) -> None:
+    marker = tmp_path / ".openspec-target"
+    marker.write_text("codex\n", encoding="utf-8")
+
+    findings = scan_artifact(marker, label=".agents/skills/.openspec-target")
+
+    assert [item.rule for item in findings] == []
+
+
 def test_patch_artifacts_are_scanned_as_text(tmp_path: Path) -> None:
     artifact = tmp_path / "registration.patch"
     private_path = "C:" + "\\Users\\" + "SyntheticOperator\\private-vault"
@@ -401,6 +410,16 @@ def test_explicit_binary_provenance_is_narrow_and_auditable(tmp_path: Path) -> N
     )
 
     assert findings == ()
+
+
+def test_cloud_icon_png_provenance_does_not_allow_unrelated_images(tmp_path: Path) -> None:
+    icon = REPO_ROOT / "plugins/cloud/assets/icon.png"
+    assert scan_artifact(icon, label="plugins/cloud/assets/icon.png") == ()
+    assert scan_artifact(icon, label="plugins/cloud/generated/openai/assets/icon.png") == ()
+    assert any(
+        finding.rule == "format_provenance_missing"
+        for finding in scan_artifact(icon, label="private/photo.png")
+    )
 
 
 def test_archive_members_are_scanned_by_name_and_supported_text(tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
 # hosted-agent-surface Specification
 
 ## Purpose
-TBD - created by archiving change add-hosted-agent-surface-profile. Update Purpose after archive.
+Define the least-privilege `hosted-alpha-agent-v1` surface profile for hosted agents: one declarative membership source, a deterministic generated gateway contract, cell enforcement on authenticated private routes, and bootstrap output matching the active surface.
 
 ## Requirements
 

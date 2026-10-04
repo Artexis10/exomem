@@ -53,7 +53,7 @@ rules:
     resources: ["namespaces"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["persistentvolumes"]
+    resources: ["persistentvolumes", "nodes"]
     verbs: ["get", "list"]
   # D9: capacity is read from the CSI driver's own view of each node, never
   # a chart constant or a Hetzner server id.
@@ -142,6 +142,8 @@ spec:
           image: {{ .Values.cellctl.image | quote }}
           imagePullPolicy: IfNotPresent
           env:
+            - name: CELLCTL_DEDICATED_CELL_IDS
+              value: {{ .Values.cellctl.dedicatedCellIds | toJson | quote }}
             - name: CELLCTL_LOG_LEVEL
               value: INFO
             - name: CELLCTL_HEARTBEAT_PATH
@@ -164,6 +166,12 @@ spec:
               value: {{ .Values.cells.backupWindow | quote }}
             - name: CELLCTL_BACKUP_CONCURRENCY
               value: {{ .Values.cells.backupConcurrency | quote }}
+            {{- if .Values.artifactBroker.enabled }}
+            - name: CELLCTL_ARTIFACT_BROKER_URL
+              value: {{ .Values.artifactBroker.endpoint | quote }}
+            - name: CELLCTL_ARTIFACT_BROKER_CELL_IDS
+              value: {{ .Values.artifactBroker.cellIds | toJson | quote }}
+            {{- end }}
             {{- if .Values.cells.jobEgressExcept }}
             - name: CELLCTL_JOB_EGRESS_EXCEPT
               value: {{ join "," .Values.cells.jobEgressExcept | quote }}
@@ -431,18 +439,30 @@ spec:
           'exomem.io/cloud-cell' in namespaceObject.metadata.labels &&
           namespaceObject.metadata.labels['exomem.io/cloud-cell'] == variables.namespaceName.substring(9))
       message: cellctl may run a StatefulSet or Job only in a namespace whose exomem.io/cloud-cell label names its own cell.
-    # 4c. ...and none of them may pick its node, runtime or priority, or
-    # rewrite name resolution. cellctl renders no scheduling constraints. A StatefulSet may not carry its own
-    # volumeClaimTemplates: the cell's one PVC is rendered separately.
+    # 4c. Only chart-selected cells may select their own reserved agent.
+    # Absent placement permits stop/change/start transitions. A StatefulSet
+    # uses the separately rendered PVC, never volumeClaimTemplates.
     - expression: >-
         !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
         (!has(variables.podSpec.nodeName) && !has(variables.podSpec.runtimeClassName) &&
           !has(variables.podSpec.priorityClassName) && !has(variables.podSpec.hostAliases) &&
-          !has(variables.podSpec.tolerations) && !has(variables.podSpec.nodeSelector) &&
+          ((!has(variables.podSpec.tolerations) && !has(variables.podSpec.nodeSelector)) ||
+            (variables.namespaceName.substring(9) in {{ .Values.cellctl.dedicatedCellIds | toJson }} &&
+              has(variables.podSpec.nodeSelector) && variables.podSpec.nodeSelector.size() == 1 &&
+              'exomem.io/dedicated-cell' in variables.podSpec.nodeSelector &&
+              variables.podSpec.nodeSelector['exomem.io/dedicated-cell'] == variables.namespaceName.substring(9) &&
+              has(variables.podSpec.tolerations) && variables.podSpec.tolerations.size() == 1 &&
+              has(variables.podSpec.tolerations[0].key) &&
+              variables.podSpec.tolerations[0].key == 'exomem.io/dedicated-cell' &&
+              variables.podSpec.tolerations[0].operator == 'Equal' &&
+              has(variables.podSpec.tolerations[0].value) &&
+              variables.podSpec.tolerations[0].value == variables.namespaceName.substring(9) &&
+              variables.podSpec.tolerations[0].effect == 'NoSchedule' &&
+              !has(variables.podSpec.tolerations[0].tolerationSeconds))) &&
           !has(variables.podSpec.affinity) &&
           (request.resource.resource != 'statefulsets' || !has(variables.target.spec.volumeClaimTemplates) ||
             size(variables.target.spec.volumeClaimTemplates) == 0))
-      message: cellctl may run only pod templates without nodeName, nodeSelector, affinity, tolerations, runtimeClassName, priorityClassName or hostAliases, and StatefulSets without volumeClaimTemplates.
+      message: cellctl may use only an exact own-cell dedicated selector/toleration pair for chart-selected cells, without nodeName, affinity, runtimeClassName, priorityClassName, hostAliases or volumeClaimTemplates.
     # 5. Every Service cellctl creates or updates must be ClusterIP with no
     # externalIPs.
     - expression: >-
@@ -507,8 +527,24 @@ spec:
           variables.np.podSelector.matchLabels ==
             {'app.kubernetes.io/name': 'exomem-cell', 'exomem.io/cell': variables.namespaceName.substring(9)} &&
           !has(variables.np.podSelector.matchExpressions) &&
-          (!has(variables.np.egress) || size(variables.np.egress) == 0) &&
-          size(variables.np.ingress) == 1 &&
+          ((!has(variables.np.egress) || size(variables.np.egress) == 0)
+          {{- if .Values.artifactBroker.enabled }}
+            || (variables.namespaceName.substring(9) in {{ .Values.artifactBroker.cellIds | toJson }} &&
+              size(variables.np.egress) == 1 &&
+              size(variables.np.egress[0].to) == 1 &&
+              !has(variables.np.egress[0].to[0].ipBlock) &&
+              variables.np.egress[0].to[0].namespaceSelector.matchLabels ==
+                {'kubernetes.io/metadata.name': {{ .Values.cellctl.namespace | quote }}} &&
+              !has(variables.np.egress[0].to[0].namespaceSelector.matchExpressions) &&
+              variables.np.egress[0].to[0].podSelector.matchLabels ==
+                {'app.kubernetes.io/name': 'exomem-artifact-broker'} &&
+              !has(variables.np.egress[0].to[0].podSelector.matchExpressions) &&
+              size(variables.np.egress[0].ports) == 1 &&
+              variables.np.egress[0].ports[0].protocol == 'TCP' &&
+              variables.np.egress[0].ports[0].port == 8767 &&
+              !has(variables.np.egress[0].ports[0].endPort))
+          {{- end }}
+          ) && size(variables.np.ingress) == 1 &&
           size(variables.np.ingress[0].from) == 1 &&
           !has(variables.np.ingress[0].from[0].ipBlock) &&
           variables.np.ingress[0].from[0].namespaceSelector.matchLabels ==
@@ -521,7 +557,7 @@ spec:
           variables.np.ingress[0].ports[0].protocol == 'TCP' &&
           variables.np.ingress[0].ports[0].port == 8765 &&
           !has(variables.np.ingress[0].ports[0].endPort))
-      message: cellctl may write runtime-ingress only as gateway-to-cell ingress on TCP 8765 with no egress.
+      message: cellctl may write runtime-ingress only as gateway-to-cell ingress on TCP 8765 and configured selected-cell broker egress on TCP 8767.
     - expression: >-
         request.resource.resource != 'networkpolicies' || request.operation == 'DELETE' ||
         variables.target.metadata.name != 'job-egress' ||

@@ -22,7 +22,7 @@ The journey, in order:
 3. a follow-up still carries that token, because an abstention mints none;
 4. a `PreCompact` through the shipped CHECKPOINT hook clears the token;
 5. the next call therefore carries none;
-6. with the service gone, the hook degrades to the reminder inside its budget.
+6. with the service gone, the hook requests native-MCP activation inside its budget.
 """
 
 from __future__ import annotations
@@ -355,7 +355,7 @@ def test_the_shipped_hook_walks_a_working_set_session(tmp_path: Path) -> None:
         assert "`anchor`" in lines[3] and "activate_context" in lines[3]
         # The reminder FOLLOWS, because nothing resolved and ordinary recall may
         # still be wanted.
-        assert second.rstrip().endswith("skip silently.")
+        assert second.rstrip().endswith("skip.")
         assert REMINDER_HEAD in second
         assert second.index(HEADER_HEAD) < second.index(REMINDER_HEAD)
         # None of the pages only recall surfaced.
@@ -384,10 +384,11 @@ def test_the_shipped_hook_walks_a_working_set_session(tmp_path: Path) -> None:
         assert "continuity" not in stub.requests[3]["body"]
         assert stub.packets == [], "every scripted packet was consumed"
 
-    # --- 6. with the service gone, the reminder is the floor -----------------
+    # --- 6. with the service gone, request native activation ----------------
     fifth = _prompt(RETRIEVE_SCRIPT, _env(home, tmp_path, stub.port), TURN_FIVE)
 
-    assert fifth.startswith(REMINDER_HEAD)
+    assert fifth.startswith("[Exomem native MCP activation]")
+    assert "activate_context" in fifth
     assert HEADER_HEAD not in fifth
 
 

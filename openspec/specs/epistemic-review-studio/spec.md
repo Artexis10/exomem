@@ -1,7 +1,7 @@
 # epistemic-review-studio Specification
 
 ## Purpose
-TBD - created by archiving change add-epistemic-review-studio. Update Purpose after archive.
+Serve the Epistemic Review Studio at `/studio/` as a packaged, local-first interface for the review loop: ranked worklists, a bounded per-item workspace, belief-evolution view and relation worklists. It reads and writes only through authenticated same-origin commands and routes every action through governed commands.
 ## Requirements
 ### Requirement: Packaged Local-First Studio Entry Point
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from exomem import embeddings, readiness
 from exomem import find as find_module
@@ -78,3 +80,40 @@ def test_encode_batch_size_follows_the_device_and_bounds_peak_memory(monkeypatch
     for bad in ("", "   ", "0", "-8", "many"):
         monkeypatch.setenv("EXOMEM_EMBED_BATCH", bad)
         assert embeddings.encode_batch_size(SimpleNamespace(device="cpu")) == 8
+
+
+@pytest.mark.parametrize("service,quantization,expected_turn_sizes", [
+    (True, "ort-dynamic-int8", [1] * 6),
+    (True, None, [3, 3]),
+    (False, "ort-dynamic-int8", [3, 3]),
+])
+def test_service_int8_releases_execution_between_serial_inferences(
+    monkeypatch, service, quantization, expected_turn_sizes,
+) -> None:
+    """Foreground fairness must apply between the ONNX backend's actual calls."""
+    monkeypatch.setenv("EXOMEM_EMBED_BATCH", "3")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1" if service else "0")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1" if service else "legacy")
+    turns = []
+    active = False
+
+    @contextlib.contextmanager
+    def execution():
+        nonlocal active
+        assert not active
+        active = True
+        try:
+            yield
+        finally:
+            active = False
+
+    def encode(texts, **_kwargs):
+        assert active
+        turns.append(len(texts))
+        return np.array([[float(text)] for text in texts], dtype=np.float32)
+
+    model = SimpleNamespace(backend="onnx", device="cpu", profile=SimpleNamespace(quantization=quantization), encode=encode)
+    result = embeddings._encode_in_turns(model, [str(i) for i in range(6)], admission=contextlib.nullcontext, execution=execution)
+    assert turns == expected_turn_sizes
+    assert result[:, 0].tolist() == list(range(6))
+    assert embeddings.encode_batch_size(model) == 3  # Stored/operator batch policy is unchanged.

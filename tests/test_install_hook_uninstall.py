@@ -17,6 +17,7 @@ reporting success.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,15 @@ FOREIGN = {
     "command": "bash ~/.claude/hooks/somebody-elses-hook.sh",
     "timeout": 7,
 }
+
+
+@pytest.fixture(autouse=True)
+def _pin_install_hook_umask():
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
 
 
 def _install(tmp_path: Path, client: str = "claude") -> tuple[Path, Path]:
@@ -359,3 +369,62 @@ def test_install_after_uninstall_wires_a_clean_config(
     data = json.loads(settings.read_text(encoding="utf-8"))
     expected = len(hook_module._HOOK_SPECS) + len(hook_module._CONTINUATION_EVENTS[client])
     assert len(_ours(data)) == expected
+
+
+def test_a_linked_deployment_reports_the_removal_it_performed(tmp_path: Path) -> None:
+    """A destructive run that lied about failing is worse than the refusal.
+
+    yadm deploys `settings.json` as a link to the source it tracks, and the
+    regular-file guard used to refuse that name -- so the prune reported an
+    error and zero removals while the sibling lane quietly removed all five.
+    A false negative on an uninstall sends the user hunting for entries that
+    are already gone.
+    """
+    hook_dir = tmp_path / "hooks"
+    source = tmp_path / "settings.json##os.WSL"
+    hook_module.install_hook(hook_dir=hook_dir, settings_path=source)
+    settings = tmp_path / "settings.json"
+    try:
+        settings.symlink_to(source.name)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    assert _ours(json.loads(source.read_text(encoding="utf-8")))
+
+    report = hook_module.uninstall_hook(hook_dir=hook_dir, settings_path=settings)
+
+    assert _ours(json.loads(source.read_text(encoding="utf-8"))) == []
+    assert report["settings_error"] is None
+    assert report["config_changed"] is True
+    assert report["removed_entries"] == 5
+    assert report["success"] is True
+    assert settings.is_symlink()
+
+
+def test_the_resolved_target_is_not_backed_up_twice(tmp_path: Path) -> None:
+    """Reaching one file down two lanes must not charge it two backups.
+
+    The link target is both the resolved deployed config and a `##` sibling, so
+    one run visits it twice. The second visit has nothing left to remove, and a
+    prune that rewrote it anyway would leave a second backup of a file that
+    changed once -- churning a yadm-tracked config into a permanent diff, which
+    is the noise this feature exists to end.
+    """
+    hook_dir = tmp_path / "hooks"
+    source = tmp_path / "settings.json##os.WSL"
+    hook_module.install_hook(hook_dir=hook_dir, settings_path=source)
+    settings = tmp_path / "settings.json"
+    try:
+        settings.symlink_to(source.name)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    assert not list(tmp_path.glob(f"{source.name}.backup-*"))
+
+    report = hook_module.uninstall_hook(hook_dir=hook_dir, settings_path=settings)
+
+    revisited = [row for row in report["alternates"] if Path(row["path"]).name == source.name]
+    assert len(revisited) == 1
+    assert revisited[0]["changed"] is False
+    assert revisited[0]["removed"] == 0
+    assert revisited[0]["backup"] is None
+    assert Path(report["backup"]).name.startswith(f"{source.name}.backup-")
+    assert len(list(tmp_path.glob(f"{source.name}.backup-*"))) == 1

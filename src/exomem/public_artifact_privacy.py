@@ -206,6 +206,7 @@ _TEXT_BASENAMES = frozenset(
         ".gitkeep",
         "Dockerfile",
         "env.example",
+        ".openspec-target",
         "LICENSE",
         "METADATA",
         "PKG-INFO",
@@ -231,6 +232,13 @@ _PRIVATE_OUTPUT_MARKER = ".exomem-private-output.json"
 # public binary format requires adding an equally explicit provenance declaration.
 DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
     BinaryProvenance("*.ico", "repository-authored Exomem application icon"),
+    BinaryProvenance(
+        "plugins/cloud/assets/icon.png", "rasterization of the repository-authored Cloud SVG icon"
+    ),
+    BinaryProvenance(
+        "plugins/cloud/generated/openai/assets/icon.png", "generated copy of the Cloud PNG icon"
+    ),
+    BinaryProvenance("assets/icon.png", "Cloud plugin archive copy of its repository-authored icon"),
 )
 
 #: Named in every refusal, because this gate historically only ran on Linux

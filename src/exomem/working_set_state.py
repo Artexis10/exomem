@@ -16,8 +16,9 @@ one reading authored values only.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from datetime import date
 from typing import Any
 
 from .collection_store.preview import bound_writer, canonical_read
@@ -47,18 +48,128 @@ STATEMENT_MAX_CHARS = 200
 STATEFUL_KINDS = frozenset({"resource", "collection", "plan"})
 
 
+#: Anchor kinds whose current state is a page, not a collection row: the
+#: settled facts of an entity or hub live in the current-state page its own page
+#: DECLARES. A project anchor has no page of its own, so it declares none.
+CANONICAL_KINDS = frozenset({"project", "entity", "hub"})
+CANONICAL = "canonical_page"
+#: Frontmatter key on the anchor's own page that names its current-state page.
+#: The only way a page becomes canonical: never "the newest page with a fact".
+CURRENT_PAGE_FIELD = "current_state_page"
+CANONICAL_CATEGORIES = ("fact", "config")
+CANONICAL_UNIT_LIMIT = 64
+
+
+def _named_current_page(
+    vault_root: Path, anchor: Any, *, visible: Callable[[str], bool] | None = None
+) -> str:
+    """The neighbourhood page the anchor's own page declares current, if any."""
+    from . import find_corpus
+
+    rel = str(getattr(anchor, "path", "") or "")
+    if not rel.endswith(".md"):
+        return ""
+    page = find_corpus.CACHE.get(vault_root / rel, vault_root)
+    frontmatter = getattr(page, "frontmatter", None)
+    named = frontmatter.get(CURRENT_PAGE_FIELD) if isinstance(frontmatter, dict) else None
+    if not isinstance(named, str):
+        return ""
+    target = normalize(named.strip().strip("[]").split("|")[0].split("#")[0].removesuffix(".md"))
+    if not target:
+        return ""
+    matches = []
+    for path in sorted(getattr(anchor, "neighbourhood", ()) or ()):
+        if visible is not None and not visible(path):
+            continue
+        stem = path.removesuffix(".md")
+        if target in (normalize(stem), normalize(stem.rsplit("/", 1)[-1])):
+            matches.append(path)
+    # A bare name shared by two pages names neither unambiguously. The author
+    # can use the full path to declare which page holds current state.
+    return matches[0] if len(matches) == 1 else ""
+
+
+def _from_canonical_page(
+    vault_root: Path, anchor: Any, *, visible: Callable[[str], bool] | None = None
+) -> dict[str, Any] | None:
+    """The leading current-state unit of the page the anchor declares current.
+
+    The entry carries the page's `path`, so the egress guard decides it like any
+    other page reference, and the unit's OWN authored time as `as_of`; a unit
+    that authors none is labelled with its page's time instead.
+    """
+    named = _named_current_page(vault_root, anchor, visible=visible)
+    if not named:
+        return None
+    from . import find as find_module
+    from . import ranking_config, structured_filters
+    from . import working_set_currency
+
+    try:
+        snapshot = find_module.FreshnessSnapshot(vault_root)
+        plan = structured_filters.compile_filter(
+            None,
+            shortcuts=structured_filters.FilterShortcuts(categories=CANONICAL_CATEGORIES),
+        )
+        hits = find_module._find_semantic_units(
+            vault_root, query="", limit=CANONICAL_UNIT_LIMIT, scope="kb", plan=plan,
+            snapshot=snapshot, prefer_active=True, config=ranking_config.DEFAULT_RANKING,
+            mode="keyword", degraded_out=None, failed_out=None,
+            allowed_parent_paths={named},
+            recall_checkpoint=snapshot.recall_checkpoint("kb"), repair=False,
+            max_catalog_candidates=CANONICAL_UNIT_LIMIT,
+        )
+    except Exception:  # noqa: BLE001 - an unreadable unit index costs this entry only
+        log.debug("current state: canonical page lookup failed", exc_info=True)
+        return None
+    hits = [
+        hit
+        for hit in hits
+        if str(getattr(hit, "parent_path", "") or "") == named
+        and not getattr(hit, "parent_superseded_by", None)
+    ]
+    if not hits:
+        return None
+
+    def _line(hit: Any) -> int:
+        span = getattr(hit, "source_span", None) or {}
+        return int(span.get("start_line", 0) or 0)
+
+    lead = min(hits, key=_line)
+    content = str(getattr(lead, "content", "") or getattr(lead, "excerpt", "") or "").strip()
+    if not content:
+        return None
+    entry = {
+        "anchor": _anchor_ref(anchor),
+        "source": CANONICAL,
+        "path": named,
+        "as_of": working_set_currency.own_time(getattr(lead, "context", None)),
+        "statement": content[:STATEMENT_MAX_CHARS],
+    }
+    page_updated = str(getattr(lead, "parent_updated", "") or "")
+    if not entry["as_of"] and page_updated:
+        entry["page_updated"] = page_updated
+    return entry
+
+
 @canonical_read
 def current_state_for(
     vault_root: Path,
     *,
     anchors: Sequence[Any],
     purpose: str | None = None,
+    visible: Callable[[str], bool] | None = None,
     index_generation: int | None = None,
     index_token: tuple[int, int, int] | None = None,
     state_fields: Sequence[str] | None = None,
     date_fields: Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Resolve each stateful anchor's current state, Records first.
+
+    `visible` filters canonical candidates before ambiguity resolution and
+    neighbourhood pages before choosing the newest note. `None` retains the
+    owner's unrestricted view. Each entry carries its source page's path for
+    the release guard.
 
     `index_generation` names the activation index generation whose published
     manifests this lookup may route with, and `index_token` the sidecar that
@@ -87,6 +198,11 @@ def current_state_for(
     manifests = _records_manifests(root, index_generation, index_token)
     out: list[dict[str, Any]] = []
     for anchor in anchors:
+        if getattr(anchor, "kind", "") in CANONICAL_KINDS:
+            entry = _from_canonical_page(root, anchor, visible=visible)
+            if entry is not None:
+                out.append(entry)
+            continue
         if getattr(anchor, "kind", "") not in STATEFUL_KINDS:
             continue
         entry = (
@@ -94,10 +210,65 @@ def current_state_for(
                 root, anchor, manifests, purpose=purpose, state_fields=state_fields, date_fields=date_fields
             )
             or _from_profile(root, anchor, state_fields=state_fields)
-            or _from_neighbourhood(root, anchor)
+            or _from_neighbourhood(root, anchor, visible=visible)
         )
         if entry is not None:
             out.append(entry)
+    return temper_weak_entries(out, anchors)
+
+
+#: Evidence that names an anchor by shared WORDS alone. An anchor whose every
+#: evidence kind is in this set resolved on vocabulary, which two unrelated
+#: pages can share; its state is not vouched for by anything else.
+WEAK_EVIDENCE = frozenset(
+    {"lexical_overlap", "rare_term", "recency", "category_match", "usage_prior", "retrieval"}
+)
+#: A state older than this, on a weakly-resolved anchor, is held back rather
+#: than served as current. Younger state is served labelled with its age.
+WEAK_STATE_MAX_AGE_DAYS = 30
+
+
+def temper_weak_entries(
+    entries: Sequence[Mapping[str, Any]],
+    anchors: Sequence[Any],
+    *,
+    today: "date | None" = None,
+) -> tuple[dict[str, Any], ...]:
+    """Hold back or age-label current state from weakly-resolved anchors.
+
+    Strongly-resolved anchors (an alias, a claim, a vector band, corroboration,
+    the agent's own pick) are untouched. A weak one's state older than
+    `WEAK_STATE_MAX_AGE_DAYS` is dropped; recent state says how it was resolved
+    and how old it is; undated state is served saying how it was resolved.
+    """
+    from datetime import date as _date
+
+    now = today or _date.today()
+    weak = {
+        _anchor_ref(anchor)
+        for anchor in anchors
+        if (evidence := frozenset(getattr(anchor, "evidence", ()) or ()))
+        and evidence <= WEAK_EVIDENCE
+    }
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        if entry.get("anchor") not in weak:
+            out.append(dict(entry))
+            continue
+        as_of = str(entry.get("as_of") or "")
+        if not as_of:
+            # Undated is not old: most authored state carries no date of its
+            # own. It is served, saying how it was resolved; a page time it
+            # already carries (`page_updated`) stays beside it.
+            out.append({**entry, "resolved_by": "lexical"})
+            continue
+        try:
+            age = (now - _date.fromisoformat(as_of[:10])).days
+        except ValueError:
+            continue
+        if age > WEAK_STATE_MAX_AGE_DAYS:
+            continue
+        out.append({**entry, "resolved_by": "lexical", "age_days": max(age, 0)})
     return tuple(out)
 
 
@@ -266,6 +437,7 @@ def _from_records(
     return {
         "anchor": _anchor_ref(anchor),
         "source": RECORDS,
+        "path": str(manifest.path),
         "as_of": str(row.get(date_column) or "") if date_column else "",
         "statement": statement,
     }
@@ -305,16 +477,19 @@ def _from_profile(
             return {
                 "anchor": _anchor_ref(anchor),
                 "source": PROFILE,
+                "path": rel,
                 "as_of": str(frontmatter.get("updated") or ""),
                 "statement": f"{name}: {str(value).strip()}"[:STATEMENT_MAX_CHARS],
             }
     return None
 
 
-def _from_neighbourhood(vault_root: Path, anchor: Any) -> dict[str, Any] | None:
-    best: tuple[str, str] | None = None
+def _from_neighbourhood(
+    vault_root: Path, anchor: Any, *, visible: Callable[[str], bool] | None = None
+) -> dict[str, Any] | None:
+    best: tuple[str, str, str] | None = None
     for rel in sorted(getattr(anchor, "neighbourhood", ()) or ()):
-        if not rel.endswith(".md"):
+        if not rel.endswith(".md") or (visible is not None and not visible(rel)):
             continue
         profile = _profile_data(vault_root, rel)
         if profile is None:
@@ -327,12 +502,13 @@ def _from_neighbourhood(vault_root: Path, anchor: Any) -> dict[str, Any] | None:
         if not title:
             continue
         if best is None or updated > best[0]:
-            best = (updated, f"latest active note: {title}")
+            best = (updated, f"latest active note: {title}", rel)
     if best is None:
         return None
     return {
         "anchor": _anchor_ref(anchor),
         "source": NOTE,
+        "path": best[2],
         "as_of": best[0],
         "statement": best[1][:STATEMENT_MAX_CHARS],
     }

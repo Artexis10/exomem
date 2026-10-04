@@ -108,8 +108,16 @@ def _is_episode_ask(result: dict | None) -> bool:
     return bool(result) and result["reason"].startswith("[Exomem episode check]")
 
 
-def _stops(monkeypatch, capsys, tmp_path, count: int) -> list[dict | None]:
-    transcript = _transcript(tmp_path, SUBSTANTIVE)
+def _stops(monkeypatch, capsys, tmp_path, count: int, *, landed: bool = True) -> list[dict | None]:
+    """`count` substantive Stops. By default each turn also lands work (and saves a
+    note, which keeps the per-turn capture reminder out of the way), because the
+    episode ask needs a landing; `landed=False` is the same turns with none."""
+    if landed:
+        transcript = _claude_turn(
+            tmp_path, SUBSTANTIVE, PUSH, ("mcp__exomem__remember", {"text": "note"}, False), name="landed.jsonl"
+        )
+    else:
+        transcript = _transcript(tmp_path, SUBSTANTIVE)
     return [_stop(monkeypatch, capsys, transcript) for _ in range(count)]
 
 
@@ -119,7 +127,8 @@ def test_the_ask_comes_after_k_substantive_turns_with_the_session_key(
     k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
     results = _stops(monkeypatch, capsys, tmp_path, k)
 
-    assert not any(_is_episode_ask(result) for result in results[:-1])
+    # Substantial turns with no landing are silent: the ask is what covers them.
+    assert results[:-1] == [None] * (k - 1)
     assert _is_episode_ask(results[-1])
     key = episode_capture.hook_key("claude-code", SESSION)
     assert key in results[-1]["reason"]
@@ -140,7 +149,9 @@ def test_the_key_survives_a_simulated_compaction(
     k, cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
     first = _stops(monkeypatch, capsys, tmp_path, k)[-1]
     monkeypatch.setattr(hook.time, "time", lambda: 10**12)
-    compacted = _transcript(tmp_path, "Summary of the earlier conversation. " + "y" * 400, name="c.jsonl")
+    compacted = _claude_turn(
+        tmp_path, "Summary of the earlier conversation. " + "y" * 400, PUSH, name="c.jsonl"
+    )
     second = _stop(monkeypatch, capsys, compacted)
 
     assert _is_episode_ask(first) and _is_episode_ask(second)
@@ -270,10 +281,9 @@ def test_the_hook_table_matches_the_canonical_one() -> None:
     }
 
 
-def test_the_capture_reminder_bytes_are_untouched() -> None:
-    """The ask is its own constant; the pinned reminder does not move."""
-    assert hook.EPISODE_ASK != hook.REMINDER
-    assert hook.REMINDER.startswith("[Exomem capture check]")
+def test_the_episode_ask_is_its_own_text_with_a_key_slot() -> None:
+    assert hook.EPISODE_ASK != hook.REMINDER_SHORT
+    assert hook.EPISODE_ASK.startswith("[Exomem episode check]")
     assert "{key}" in hook.EPISODE_ASK
 
 
@@ -1073,3 +1083,303 @@ def test_the_stop_ask_bytes_are_unchanged_from_the_base() -> None:
         == "939a5fcb7ede0e278f5feb70d054862ba8b32470664cc6058c7f93b68fb9424d"
     )
     assert "sink" not in ask and "cluster" not in ask
+
+
+# --- the per-turn capture reminder fires on landings, not on reply length -----
+
+
+def _is_capture_reminder(result: dict | None) -> bool:
+    return bool(result) and result["reason"].startswith("[Exomem capture check]")
+
+
+def _claude_turn(
+    tmp_path: Path, text: str, *calls: tuple[str, dict, bool], name: str = "turn.jsonl"
+) -> Path:
+    """One Claude turn: each call is (tool name, input, failed)."""
+    blocks = [
+        {"type": "tool_use", "id": f"t{i}", "name": tool, "input": tool_input}
+        for i, (tool, tool_input, _failed) in enumerate(calls)
+    ]
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "q"}]}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [*blocks, {"type": "text", "text": text}]}},
+    ]
+    results = [
+        {"type": "tool_result", "tool_use_id": f"t{i}", "is_error": failed, "content": "x"}
+        for i, (_tool, _input, failed) in enumerate(calls)
+    ]
+    if results:
+        lines.append({"type": "user", "message": {"role": "user", "content": results}})
+    path = tmp_path / name
+    path.write_text("\n".join(json.dumps(line) for line in lines), encoding="utf-8")
+    return path
+
+
+def _codex_turn(tmp_path: Path, shape: str, command: str, *, exit_code: int | None = 0) -> Path:
+    """One Codex turn running `command` as an `exec` cell or an `exec_command` call.
+
+    `exit_code=None` is a call that returned while the command was still running."""
+    if shape == "exec-cell":
+        call = {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": "c1",
+            "input": f"text(await tools.exec_command({{cmd:{json.dumps(command)},workdir:\"/repo\"}}));",
+        }
+        chunk = json.dumps(
+            {"chunk_id": "a1", "output": "done\n"}
+            if exit_code is None
+            else {"chunk_id": "a1", "exit_code": exit_code, "output": "done\n"}
+        )
+        output = {
+            "type": "custom_tool_call_output",
+            "call_id": "c1",
+            "output": [
+                {"type": "input_text", "text": "Script completed\nWall time 1.0 seconds\nOutput:\n"},
+                {"type": "input_text", "text": chunk},
+            ],
+        }
+    else:
+        call = {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "c1",
+            "arguments": json.dumps({"cmd": command}),
+        }
+        output = {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": "Wall time: 0.1 seconds\nOutput:\ndone\n"
+            if exit_code is None
+            else f"Wall time: 0.1 seconds\nProcess exited with code {exit_code}\nOutput:\ndone\n",
+        }
+    user = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "q"}]}
+    lines = [{"type": "response_item", "payload": item} for item in (user, call, output)]
+    path = tmp_path / f"codex-{shape}.jsonl"
+    path.write_text("\n".join(json.dumps(line) for line in lines), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def no_episode_ask(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_EPISODE_ASK_TURNS", "0")
+
+
+PUSH = ("Bash", {"command": "git push origin fix/x"}, False)
+
+
+@pytest.mark.usefixtures("no_episode_ask")
+class TestCaptureReminderLandingGate:
+    def test_a_substantial_turn_without_a_landing_stays_silent(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        reading = _claude_turn(tmp_path, SUBSTANTIVE, ("Bash", {"command": "git log --oneline && gh pr view 3"}, False))
+        assert _stop(monkeypatch, capsys, reading) is None
+
+    def test_a_landing_fires_even_with_a_short_reply(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        assert _is_capture_reminder(_stop(monkeypatch, capsys, _claude_turn(tmp_path, "Pushed.", PUSH)))
+
+    def test_a_landing_that_also_wrote_to_the_kb_stays_silent(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        turn = _claude_turn(tmp_path, "Pushed.", PUSH, ("mcp__exomem__remember", {"text": "decision"}, False))
+        assert _stop(monkeypatch, capsys, turn) is None
+
+    @pytest.mark.parametrize("shape", ["exec-cell", "exec-command"])
+    def test_a_codex_landing_fires(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, shape: str
+    ) -> None:
+        turn = _codex_turn(tmp_path, shape, "cd /repo && git commit -am 'fix' && git push")
+        assert _is_capture_reminder(_stop(monkeypatch, capsys, turn))
+
+    @pytest.mark.parametrize("shape", ["exec-cell", "exec-command"])
+    def test_a_landing_still_running_when_the_cell_returned_counts(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, shape: str
+    ) -> None:
+        turn = _codex_turn(tmp_path, shape, "git push", exit_code=None)
+        assert _is_capture_reminder(_stop(monkeypatch, capsys, turn))
+
+    @pytest.mark.parametrize("shape", ["claude", "exec-cell", "exec-command"])
+    def test_a_failed_landing_does_not_count(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, shape: str
+    ) -> None:
+        if shape == "claude":
+            turn = _claude_turn(tmp_path, SUBSTANTIVE, ("Bash", {"command": "git push"}, True))
+        else:
+            turn = _codex_turn(tmp_path, shape, "git push", exit_code=1)
+        assert _stop(monkeypatch, capsys, turn) is None
+
+    def test_the_most_aggressive_level_keeps_the_length_gate(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+        assert _is_capture_reminder(_stop(monkeypatch, capsys, _claude_turn(tmp_path, SUBSTANTIVE)))
+        assert _stop(monkeypatch, capsys, _claude_turn(tmp_path, "Short.", name="short.jsonl")) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -m 'x'",
+        "git commit -n -m 'x'",
+        "git merge --continue",
+        "git tag v1.2",
+        "git tag -a v1 -m release",
+        "git tag -fam v1 note",
+        "git push --force-with-lease origin x",
+        "gh pr merge 7 --auto --squash",
+        "timeout 120 git push",
+        "timeout -k 5 2m git push",
+        "env -u GIT_DIR git push",
+        "if git push origin x; then echo ok; fi",
+        "! git commit -m x",
+        "git -C ../repo push origin main",
+        "CI=1 GIT_TERMINAL_PROMPT=0 git push",
+        "make test && git merge --no-ff topic",
+        "git add -A; git tag -a v1 -m v1",
+        "yadm commit -am sync",
+        "gh pr create --fill",
+        "gh -R owner/repo pr merge 7 --squash",
+        "gh release create v1.0",
+        "bash -lc 'pytest -q && git push'",
+        'git commit -m "$(cat <<\'EOF\'\nsubject\nEOF\n)"',
+    ],
+)
+def test_landing_commands_are_recognised(command: str) -> None:
+    assert hook._landing_command(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git status && git diff",
+        "git commit-graph verify",
+        "git merge-base main HEAD",
+        "echo git push",
+        "git log --grep='git commit'",
+        "gh pr view 3 && gh pr checks 3",
+        "git commit -m 'unbalanced",
+        "git commit --dry-run",
+        "git push --dry-run",
+        "git push -n origin x",
+        "git push --delete origin old",
+        "git push origin -d old",
+        "git merge --abort",
+        "git merge --quit",
+        "git tag",
+        "git tag -l 'v*'",
+        "git tag --list",
+        "git tag -n",
+        "git tag --contains abc123",
+        "git tag -d v1",
+        "git tag -v v1",
+    ],
+)
+def test_other_commands_are_not_landings(command: str) -> None:
+    assert not hook._landing_command(command)
+
+
+# --- the episode ask needs a landing since the last ask or record -------------
+
+
+def _landing_turn(tmp_path: Path, shape: str) -> Path:
+    if shape == "claude":
+        return _claude_turn(tmp_path, "Pushed.", PUSH, name="landing.jsonl")
+    return _codex_turn(tmp_path, shape, "cd /repo && git commit -am 'fix' && git push")
+
+
+def test_a_session_that_never_lands_work_is_never_asked(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(hook.time, "time", lambda: clock["now"])
+    for _ in range(4):
+        assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k + 2, landed=False))
+        clock["now"] += 24 * 3600
+
+
+@pytest.mark.parametrize("shape", ["claude", "exec-cell", "exec-command"])
+def test_a_landing_makes_the_due_ask_fire(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, shape: str
+) -> None:
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k, landed=False))
+
+    assert _is_episode_ask(_stop(monkeypatch, capsys, _landing_turn(tmp_path, shape)))
+
+
+def test_a_landing_before_the_cadence_is_due_waits_for_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    assert _stop(monkeypatch, capsys, _claude_turn(tmp_path, "Pushed.", PUSH, name="early.jsonl")) is not None
+    results = _stops(monkeypatch, capsys, tmp_path, k, landed=False)
+    assert not any(_is_episode_ask(r) for r in results[:-1])
+    assert _is_episode_ask(results[-1])
+
+
+def test_an_ask_answered_without_a_record_waits_for_a_new_landing(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    k, cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(hook.time, "time", lambda: clock["now"])
+    assert _is_episode_ask(_stops(monkeypatch, capsys, tmp_path, k)[-1])
+
+    for _ in range(3):
+        clock["now"] += cooldown
+        assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, 3, landed=False))
+
+    assert _is_episode_ask(_stops(monkeypatch, capsys, tmp_path, 1)[-1])
+
+
+def test_a_landing_on_the_asking_turn_does_not_count_twice(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The continuation that answers the ask re-reads the same turn, landing included."""
+    k, cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(hook.time, "time", lambda: clock["now"])
+    landed = _claude_turn(tmp_path, SUBSTANTIVE, PUSH, ("mcp__exomem__remember", {"text": "n"}, False))
+    _stops(monkeypatch, capsys, tmp_path, k - 1, landed=False)
+    assert _is_episode_ask(_stop(monkeypatch, capsys, landed))
+    assert _stop(monkeypatch, capsys, landed, active=True) is None
+
+    clock["now"] += cooldown
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, 2, landed=False))
+
+
+def test_a_record_covers_the_landings_before_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    _stops(monkeypatch, capsys, tmp_path, k - 1)  # landed, not yet due
+    assert not _is_episode_ask(_stop(monkeypatch, capsys, _recorded_transcript(tmp_path, "rec.jsonl")))
+
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k + 1, landed=False))
+    results = _stops(monkeypatch, capsys, tmp_path, 1)
+    assert _is_episode_ask(results[-1])
+
+
+def test_a_record_made_in_the_continuation_covers_the_landings_before_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    assert _stop(monkeypatch, capsys, _claude_turn(tmp_path, "Pushed.", PUSH, name="early.jsonl")) is not None
+    _stop(monkeypatch, capsys, _recorded_transcript(tmp_path, "rec.jsonl"), active=True)
+
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k + 2, landed=False))
+
+
+def test_a_revision_recorded_through_the_rest_door_covers_the_landings_before_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    count = _counting_door(monkeypatch)
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    count["n"] = 1  # another door recorded; the hook has not seen it yet
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k))  # re-base on the due check
+
+    assert not any(_is_episode_ask(r) for r in _stops(monkeypatch, capsys, tmp_path, k + 2, landed=False))

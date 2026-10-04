@@ -1,0 +1,339 @@
+"""Build and check the public Exomem Cloud provider packages."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+import tempfile
+import tomllib
+import zipfile
+from pathlib import Path
+
+import jsonschema
+
+from . import package_skills, workflow_skills
+
+_SCHEMA_BASE = "https://agent-plugins.org/schemas/1.0.0/"
+
+
+def _definition(root: Path) -> dict:
+    return json.loads((root / "plugins/cloud/definition.json").read_text(encoding="utf-8"))
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def release_identity(root: Path) -> dict:
+    root = Path(root)
+    definition = _definition(root)
+    corpus = root / "plugins/cloud/evals/cases.json"
+    return {
+        "version": tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+            "version"
+        ],
+        "skill_contract": workflow_skills.skill_contract(),
+        "corpus_digest": _sha256(corpus.read_bytes()),
+        "profile": definition["profile"],
+        "resource": definition["resource"],
+    }
+
+
+def _json_bytes(value: dict) -> bytes:
+    return (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _zip_tree(source: Path, target: Path) -> None:
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for path in sorted(source.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(source).as_posix()
+            info = zipfile.ZipInfo(relative, (1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o100644 << 16
+            archive.writestr(
+                info, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9
+            )
+
+
+def _validate_openai(root: Path, package: Path) -> None:
+    # Public submission is narrower than the local/workspace plugin runtime.
+    # https://developers.openai.com/plugins/deploy/submission
+    manifests = [json.loads((package / "plugin.json").read_text(encoding="utf-8"))]
+    for directory in (".codex-plugin", ".claude-plugin"):
+        compatibility = package / directory / "plugin.json"
+        if compatibility.exists():
+            manifests.append(json.loads(compatibility.read_text(encoding="utf-8")))
+
+    def declares(value: object, field: str) -> bool:
+        if isinstance(value, dict):
+            return field in value or any(declares(item, field) for item in value.values())
+        if isinstance(value, list):
+            return any(declares(item, field) for item in value)
+        return False
+
+    if any(declares(manifest, "hooks") for manifest in manifests) or any(
+        package.rglob("hooks.json")
+    ):
+        raise ValueError("OpenAI public submission does not support lifecycle hooks")
+    if any(declares(manifest, "apps") for manifest in manifests) or any(package.rglob(".app.json")):
+        raise ValueError("OpenAI public submission does not support app references")
+    for stem, filename in (("plugin", "plugin.json"), ("mcp", "mcp.json")):
+        schema = json.loads(
+            (root / "plugins/cloud/schemas" / f"{stem}.schema.json").read_text(encoding="utf-8")
+        )
+        value = json.loads((package / filename).read_text(encoding="utf-8"))
+        jsonschema.validate(value, schema)
+
+
+def _claude_hooks(root: Path, target: Path) -> None:
+    """Register release-owned hooks without implementing provider behaviour."""
+    hooks = target / "hooks"
+    hooks.mkdir()
+    for stem in ("retrieve-nudge", "capture-nudge", "continuation-checkpoint"):
+        # The registrations use Python exec form; local-install shell launchers
+        # are unused here and their computed paths block directory validation.
+        filename = f"exomem_{stem.replace('-', '_')}.py"
+        shutil.copyfile(root / "src/exomem/_hooks" / filename, hooks / filename)
+    events = (
+        ("UserPromptSubmit", "retrieve-nudge", None),
+        ("Stop", "capture-nudge", None),
+        ("PreCompact", "continuation-checkpoint", "manual|auto"),
+        ("SessionEnd", "continuation-checkpoint", None),
+        ("SessionStart", "continuation-checkpoint", "compact|resume"),
+    )
+    registrations = {}
+    for event, stem, matcher in events:
+        args = [
+            f"${{CLAUDE_PLUGIN_ROOT}}/hooks/exomem_{stem.replace('-', '_')}.py",
+            "--client",
+            "claude",
+            "--hook-home-env",
+            "CLAUDE_PLUGIN_DATA",
+        ]
+        if stem != "continuation-checkpoint":
+            args.extend(("--activation-mode", "mcp"))
+        group = {"hooks": [{"type": "command", "command": "python3", "args": args, "timeout": 5}]}
+        if matcher:
+            group["matcher"] = matcher
+        registrations[event] = [group]
+    (hooks / "hooks.json").write_bytes(
+        _json_bytes(
+            {
+                "description": "Canonical Exomem MCP activation, governed capture and local continuation.",
+                "hooks": registrations,
+            }
+        )
+    )
+
+
+def build_packages(root: Path, output: Path | None = None) -> dict:
+    root = Path(root)
+    definition = _definition(root)
+    identity = release_identity(root)
+    workflow_skills.validate_skill_contract()
+    destination = Path(output) if output is not None else root / "plugins/cloud/generated"
+    destination.mkdir(parents=True, exist_ok=True)
+    for provider in ("claude", "openai"):
+        target = destination / provider
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir()
+        skills = target / "skills"
+        for name in ("exomem", *(str(item["name"]) for item in workflow_skills.list_skills())):
+            for relative, content in package_skills.skill_payload(name).items():
+                path = skills / name / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8", newline="\n")
+        assets = target / "assets"
+        assets.mkdir()
+        shutil.copyfile(root / "plugins/cloud/assets/icon.svg", assets / "icon.svg")
+        shutil.copyfile(root / "LICENSE", target / "LICENSE")
+        readme = (
+            f"# {definition['display_name']}\n\n"
+            f"{definition['description']}\n\n"
+            "## Getting started\n\n"
+            "Install the plugin and connect your Exomem account. Check the account "
+            "shown on the sign-in page before approving access. Then chat normally. "
+            "When something is worth keeping, ask Exomem to remember it; in a new chat, "
+            "ask about what you saved or where you left off.\n\n"
+            "For example:\n\n"
+            + "".join(f'- "{prompt}"\n' for prompt in definition["default_prompts"])
+            + "\nGive the assistant the information to save or name the project you mean. "
+            "Exomem can also help during ordinary work according to your chosen settings. "
+            "It does not automatically import every old conversation.\n\n"
+            "## Data handling\n\n"
+            "MCP tool arguments, including user turns sent to `activate_context`, reach "
+            "the authenticated Exomem Cloud service. Reads return authorized account "
+            "content; successful writes persist governed memory in that account. OAuth "
+            "selects the account. This package does not import a local vault, read local "
+            "service credentials, or share authorization between accounts. Your AI "
+            "provider also processes the conversation and tool results under its policies.\n\n"
+            "## Surface support\n\n"
+            "Skills and the remote MCP connector carry the portable operating contract. "
+            "Lifecycle hooks run only where the client supports and trusts them; they "
+            "do not run in ordinary Claude Chat or ChatGPT conversations. The public "
+            "OpenAI directory package deliberately contains no lifecycle hooks: current "
+            "submission rules forbid them, although local Codex configurations support "
+            "hooks. Local profile hook installation is a separate release-owned path. "
+            "A delegated MCP activation is not a pre-injected context packet.\n\n"
+            f"Publisher: {definition['author']['name']}.\n\n"
+            f"[Documentation]({definition['documentation']}) · "
+            f"[Privacy policy]({definition['privacy']}) · "
+            f"[Terms of service]({definition['terms']}) · "
+            f"[Support]({definition['support']})\n"
+        )
+        (target / "README.md").write_text(readme, encoding="utf-8", newline="\n")
+        if provider == "claude":
+            _claude_hooks(root, target)
+            with (target / "README.md").open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write(
+                    "\n## Claude lifecycle hooks\n\n"
+                    "On supported Cowork/Claude Code surfaces, trust the plugin's command "
+                    "hooks through the normal client approval flow. They invoke canonical "
+                    "Python scripts directly and require a real `python3` executable on "
+                    "the execution host; Python dependencies are not installed "
+                    "by this package. Hooks use the admitted MCP connection, never a local "
+                    "service credential. Retrieval requests context activation; capture "
+                    "asks the assistant to preserve governed outcomes. Neither bypasses "
+                    "the live server's write policy. Local hooks inspect the client "
+                    "transcript and workspace metadata for cadence and structural "
+                    "continuation, keeping bounded state in `CLAUDE_PLUGIN_DATA`, not "
+                    "inside the versioned package. Hook logs contain metadata only, "
+                    "not prompt or assistant snippets. Hooks do not execute in Claude Chat.\n"
+                )
+            manifest = {
+                "name": definition["name"],
+                "displayName": definition["display_name"],
+                "description": definition["description"],
+                "version": identity["version"],
+                "author": definition["author"],
+                "homepage": definition["homepage"],
+                "repository": definition["repository"],
+                "privacyPolicyUrl": definition["privacy"],
+                "supportUrl": definition["support"],
+                "documentationUrl": definition["documentation"],
+                "termsOfServiceUrl": definition["terms"],
+                "icon": "./assets/icon.svg",
+                "license": definition["license"],
+                "keywords": definition["keywords"],
+            }
+            path = target / ".claude-plugin/plugin.json"
+            path.parent.mkdir()
+            path.write_bytes(_json_bytes(manifest))
+            (target / ".mcp.json").write_bytes(
+                _json_bytes(
+                    {"mcpServers": {"exomem": {"type": "http", "url": definition["resource"]}}}
+                )
+            )
+        else:
+            from .cloud_plugin_evals import directory_cases
+
+            shutil.copyfile(root / "plugins/cloud/assets/icon.png", assets / "icon.png")
+            interface = {
+                "displayName": definition["display_name"],
+                "shortDescription": "Memory across conversations",
+                "longDescription": definition["description"],
+                "developerName": definition["author"]["name"],
+                "category": "Productivity",
+                "defaultPrompt": definition["default_prompts"],
+                "capabilities": ["Read", "Write"],
+                "websiteURL": definition["homepage"],
+                "supportURL": definition["support"],
+                "privacyPolicyURL": definition["privacy"],
+                "termsOfServiceURL": definition["terms"],
+                "composerIcon": "./assets/icon.png",
+                "logo": "./assets/icon.png",
+            }
+            manifest = {
+                "$schema": _SCHEMA_BASE + "plugin.schema.json",
+                "name": definition["name"],
+                "version": identity["version"],
+                "description": definition["description"],
+                "author": definition["author"],
+                "homepage": definition["homepage"],
+                "repository": definition["repository"],
+                "license": definition["license"],
+                "keywords": definition["keywords"],
+                "extensions": {
+                    "com.openai": {
+                        "interface": interface,
+                        "review": {
+                            "test_cases": directory_cases(root),
+                            "commerce": False,
+                            "commerce_description": (
+                                "Connects an existing account. No sales, checkout, "
+                                "subscription initiation or upgrade promotion in the plugin."
+                            ),
+                        },
+                        "publication": {
+                            "countries": [],
+                            "release_notes": definition["release_notes"],
+                        },
+                    }
+                },
+            }
+            (target / "plugin.json").write_bytes(_json_bytes(manifest))
+            (target / "mcp.json").write_bytes(
+                _json_bytes(
+                    {
+                        "$schema": _SCHEMA_BASE + "mcp.schema.json",
+                        "mcpServers": {
+                            "exomem": {"type": "streamable-http", "url": definition["resource"]}
+                        },
+                    }
+                )
+            )
+            _validate_openai(root, target)
+        _zip_tree(target, destination / f"{provider}.zip")
+    files = {
+        path.relative_to(destination).as_posix(): _sha256(path.read_bytes())
+        for path in sorted(destination.rglob("*"))
+        if path.is_file() and path.name != "release.json"
+    }
+    release = {**identity, "files": files}
+    (destination / "release.json").write_bytes(_json_bytes(release))
+    return release
+
+
+def check_packages(root: Path, output: Path | None = None) -> dict:
+    root = Path(root)
+    actual = Path(output) if output is not None else root / "plugins/cloud/generated"
+    issues: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="exomem-cloud-check-") as temporary:
+        expected = Path(temporary)
+        try:
+            build_packages(root, expected)
+        except FileNotFoundError as error:
+            name = Path(error.filename).name if error.filename else "build resource"
+            return {"ok": False, "issues": [f"missing input: {name}"]}
+        actual_entries = list(actual.rglob("*")) if actual.exists() else []
+        expected_directories = {
+            path.relative_to(expected).as_posix() for path in expected.rglob("*") if path.is_dir()
+        }
+        for path in actual_entries:
+            name = path.relative_to(actual).as_posix()
+            if path.is_symlink():
+                issues.append(f"symlink: {name}")
+            elif path.is_dir() and name not in expected_directories:
+                issues.append(f"extra: {name}/")
+        actual_files = {
+            path.relative_to(actual).as_posix(): path
+            for path in actual_entries
+            if path.is_file() and not path.is_symlink()
+        }
+        expected_files = {
+            path.relative_to(expected).as_posix(): path
+            for path in expected.rglob("*")
+            if path.is_file()
+        }
+        for name in sorted(actual_files.keys() | expected_files.keys()):
+            if name not in actual_files:
+                issues.append(f"missing: {name}")
+            elif name not in expected_files:
+                issues.append(f"extra: {name}")
+            elif actual_files[name].read_bytes() != expected_files[name].read_bytes():
+                issues.append(f"drift: {name}")
+    return {"ok": not issues, "issues": issues}

@@ -1,6 +1,6 @@
 """The `write-time-identity-candidates` doctrine, in the carriers that do not
 share the compact-bootstrap byte ceiling: the shipped skill scaffold, the
-`remember`/`replace_memory` tool-schema guidance, and the six capture texts
+`remember`/`replace_memory` tool-schema guidance, and the capture texts
 that today forbid the exact first-mention case this change asks for.
 
 `tests/test_bootstrap_activation_carrier.py` and `tests/test_prominence*.py`
@@ -10,7 +10,6 @@ own the fourth carrier -- the compact bootstrap contract at `balanced` and
 
 from __future__ import annotations
 
-import ast
 import pathlib
 
 import pytest
@@ -24,9 +23,6 @@ SRC_ROOT = pathlib.Path(exomem.__file__).parent
 SCAFFOLD_SKILL = SRC_ROOT / "_scaffold" / "_Schema" / "SKILL.md"
 PLUGIN_SKILL = REPO_ROOT / "plugins" / "claude-code" / "skills" / "exomem" / "SKILL.md"
 
-CAPTURE_NUDGE_SOURCE = SRC_ROOT / "_hooks" / "exomem_capture_nudge.py"
-CAPTURE_NUDGE_PLUGIN = REPO_ROOT / "plugins" / "claude-code" / "hooks" / "exomem_capture_nudge.py"
-
 CAPTURE_SKILL_SOURCE = (
     SRC_ROOT / "_scaffold" / "_Schema" / "workflow-skills" / "exomem-capture" / "SKILL.md"
 )
@@ -39,13 +35,14 @@ OPERATIONS_PLUGIN = (
     REPO_ROOT / "plugins" / "claude-code" / "skills" / "exomem" / "references" / "operations.md"
 )
 
-SIX_CAPTURE_TEXT_PAIRS = (
-    (CAPTURE_NUDGE_SOURCE, CAPTURE_NUDGE_PLUGIN),
+#: The Stop-hook capture check is not a carrier: it names the incident rules and points
+#: here (`tests/test_nudge_diet.py`), so the doctrine lives in exactly these texts.
+CAPTURE_TEXT_PAIRS = (
     (CAPTURE_SKILL_SOURCE, CAPTURE_SKILL_PLUGIN),
     (OPERATIONS_SOURCE, OPERATIONS_PLUGIN),
 )
 
-#: The two phrases the six capture texts forbade the first-mention case with.
+#: The two phrases the capture texts forbade the first-mention case with.
 OLD_PHRASES = ("stable recurring identity", "stable, recurring, central")
 
 
@@ -71,7 +68,10 @@ def _before_writing_section(text: str) -> str:
 
 @pytest.mark.parametrize("skill", [SCAFFOLD_SKILL, PLUGIN_SKILL])
 def test_the_scaffold_teaches_linking_named_identities(skill: pathlib.Path) -> None:
-    section = _before_writing_section(skill.read_text(encoding="utf-8"))
+    # The section moved out of SKILL.md into a reference (`shrink-bootstrap`); the
+    # skill keeps a pointer to it.
+    assert "references/before-writing.md" in skill.read_text(encoding="utf-8")
+    section = (skill.parent / "references" / "before-writing.md").read_text(encoding="utf-8")
 
     assert "Wikilink" in section
     assert "whether or not a page exists yet" in section
@@ -107,46 +107,21 @@ def test_observe_memory_and_edit_memory_are_untouched() -> None:
 # ------------------------------------------------------------------- 3.4, capture texts
 
 
-@pytest.mark.parametrize(("source", "plugin"), SIX_CAPTURE_TEXT_PAIRS)
+@pytest.mark.parametrize(("source", "plugin"), CAPTURE_TEXT_PAIRS)
 def test_each_capture_text_pair_stays_byte_identical(
     source: pathlib.Path, plugin: pathlib.Path
 ) -> None:
     assert source.read_bytes() == plugin.read_bytes()
 
 
-def _reminder_constant(path: pathlib.Path) -> str:
-    """The evaluated `REMINDER` string a capture-nudge hook script assigns.
-
-    Read as source (never imported: these run as bare files under a client's
-    own interpreter, per `CONTRIBUTING.md`) and evaluated with `ast`, so an
-    adjacent-literal line wrap in the source is not mistaken for a gap in the
-    rendered prose the agent actually reads.
-    """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id == "REMINDER"
-        ):
-            return ast.literal_eval(node.value)
-    raise AssertionError(f"no REMINDER assignment found in {path}")
-
-
 def _rendered_prose(path: pathlib.Path) -> str:
-    """This file's text as an agent reads it: a hook's evaluated `REMINDER`
-    constant, or a Markdown file's own text with hard line wraps collapsed."""
-    if path.suffix == ".py":
-        return _reminder_constant(path)
+    """A Markdown file's own text with hard line wraps collapsed."""
     return " ".join(path.read_text(encoding="utf-8").split())
 
 
 @pytest.mark.parametrize(
     "path",
     [
-        CAPTURE_NUDGE_SOURCE,
-        CAPTURE_NUDGE_PLUGIN,
         CAPTURE_SKILL_SOURCE,
         CAPTURE_SKILL_PLUGIN,
         OPERATIONS_SOURCE,

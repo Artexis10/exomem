@@ -22,8 +22,9 @@ import statistics
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, NamedTuple
 
+from . import working_set_anaphora
 from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .text_scripts import JAPANESE_PARTICLES, is_hiragana
 from .working_set_index import (
@@ -49,6 +50,7 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "usage_prior",
     "recency",
     "continuity",
+    "conversation",
     "agent_choice",
 )
 
@@ -112,6 +114,12 @@ TIE_BREAK_KINDS: frozenset[str] = frozenset({"usage_prior"})
 #: the soundness rule's `deciding` set for the same reason, so it can never be
 #: the second kind that promotes somebody else.
 PRIOR_CONTACT_KINDS: frozenset[str] = frozenset({"recency"})
+
+#: The two kinds that say "an earlier packet, or an earlier turn, already named
+#: this subject". Each resolves an anchor the current turn reached by one contact
+#: kind, never alone and never with qualifiers only, and the two together count
+#: once (`_status_for_evidence` reads the set, not a count).
+NAMED_BEFORE_KINDS: frozenset[str] = frozenset({"continuity", "conversation"})
 
 #: Kinds that resolve an anchor by themselves. `exact_alias` because the turn
 #: spelled the anchor's own name; `agent_choice` because the agent IS the
@@ -308,6 +316,20 @@ class TurnAnalysis:
     #: Words the raw turn writes with a capital anywhere, a sentence start
     #: included, folded like the lexical terms. Empty when `cased_turn` is false.
     capitalised_anywhere: frozenset[str] = frozenset()
+    #: Does this turn point back (`working_set_anaphora.points_back`): a
+    #: pronoun or possessive, a demonstrative, a follow-up marker, an ordinal
+    #: plus "one"/"option", a governed pointer or a referential cue?
+    points_back: bool = False
+    #: The turn's content words (`working_set_anaphora.content_words`). The
+    #: conversation carry licenses every one against the subject's own title
+    #: or frozen task vocabulary, never against other earlier-turn words.
+    content_words: tuple[str, ...] = ()
+    #: `points_back` with no content word at all: the verdict without a
+    #: conversation to compare against.
+    anaphoric: bool = False
+    #: Turn-local nominal/value, quotation or supplied alternatives: only the
+    #: conversation carry reads this veto, never ordinary resolution/carries.
+    local_material: str = ""
 
 
 #: A follow-up is short: at most this many tokens. "what about the second
@@ -376,6 +398,31 @@ def is_follow_up(
     )
 
 
+def is_anaphoric(
+    tokens: Sequence[str],
+    *,
+    referential_cue: bool = False,
+    vocabulary: ReferentialVocabulary | None = None,
+) -> bool:
+    """Taken on its own, does the turn lean on something said before? It must
+    point back and bring no content word of its own (`working_set_anaphora`).
+    With a conversation, the carry licenses content against the carried
+    subject's own title/name (`working_set_conversation.may_carry`)."""
+    return working_set_anaphora.points_back(
+        tokens, referential_cue=referential_cue, follow_up_markers=FOLLOW_UP_MARKERS
+    ) and not working_set_anaphora.content_words(tokens, vocabulary=_vocabulary_words(vocabulary))
+
+
+def _vocabulary_words(vocabulary: ReferentialVocabulary | None) -> frozenset[str]:
+    """The vault's referential cue and filler words, which are never content."""
+    return _words_of_vocabulary(vocabulary if vocabulary is not None else shipped_vocabulary())
+
+
+@functools.lru_cache(maxsize=16)
+def _words_of_vocabulary(vocabulary: ReferentialVocabulary) -> frozenset[str]:
+    return frozenset(word for phrase in vocabulary.phrases for word in phrase.split()) | vocabulary.filler
+
+
 @dataclass(frozen=True, slots=True)
 class AnchorFacts:
     """One index row as the resolver sees it — no sqlite types, no scores."""
@@ -428,6 +475,12 @@ class CandidateFacts:
     #: spells this anchor's own name words (stopwords may sit inside it, never
     #: at its edges). `None` when no name word was reached. Never serialised.
     name_span: tuple[int, int] | None = None
+    #: Every qualifying name-word run, retaining clause boundaries. None only
+    #: for callers that supplied the older single-span facts. Never serialised.
+    name_spans: tuple[tuple[int, int], ...] | None = None
+    #: Span coordinates are local to this segment, not to concatenated text.
+    #: Focus-only candidates are partitioned by the conversation projection.
+    name_span_segment: str = "turn"
     entity_type: str = ""
     #: Did the turn capitalise a shared name word away from a sentence start
     #: (`TurnAnalysis.capitalised`)? Never serialised.
@@ -465,6 +518,8 @@ class ResolvedAnchor:
     #: `exact_alias_phrases`, never serialised.
     name_contact: frozenset[str] = frozenset()
     name_span: tuple[int, int] | None = None
+    name_spans: tuple[tuple[int, int], ...] | None = None
+    name_span_segment: str = "turn"
     entity_type: str = ""
     name_capitalised: bool = False
     name_lower_case: bool = False
@@ -488,6 +543,9 @@ class Resolution:
     status: str
     anchors: tuple[ResolvedAnchor, ...]
     ambiguity: tuple[dict[str, Any], ...] = ()
+    #: `conversation` when an ambiguous turn was settled by exactly one
+    #: competitor the earlier conversation had named; empty otherwise.
+    disambiguated_by: str = ""
 
     @property
     def resolved_anchors(self) -> tuple[ResolvedAnchor, ...]:
@@ -973,6 +1031,13 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
     # say what it is about.
     referential_cue = any(f" {phrase} " in token_text for phrase in vocabulary.phrases)
     referential = referential_cue and not _referential_residue(token_text, vocabulary)
+    anaphora_tokens, local_material = working_set_anaphora.surface_analysis(turn)
+    anaphora_text = f" {' '.join(_spell_out_cues(anaphora_tokens, vocabulary))} "
+    anaphora_cue = any(f" {phrase} " in anaphora_text for phrase in vocabulary.phrases)
+    pointing = working_set_anaphora.points_back(
+        anaphora_tokens, referential_cue=anaphora_cue, follow_up_markers=FOLLOW_UP_MARKERS
+    )
+    content = working_set_anaphora.content_words(anaphora_tokens, vocabulary=_vocabulary_words(vocabulary))
     return TurnAnalysis(
         text=text,
         tokens=tokens,
@@ -988,6 +1053,10 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         run_breaks=_run_breaks(text, tokens),
         cased_turn=_casing_signal(turn),
         capitalised_anywhere=_capitalised_terms(turn, anywhere=True),
+        points_back=pointing,
+        content_words=content,
+        anaphoric=pointing and not content,
+        local_material=local_material,
     )
 
 
@@ -1123,6 +1192,30 @@ def eligible_categories(analysis: TurnAnalysis, roles: Iterable[Any]) -> frozens
 # --------------------------------------------------------------------------- #
 
 
+class RowLexicon(NamedTuple):
+    """One row's words as `candidates_for` compares them, derived once."""
+
+    names: frozenset[str]
+    name_terms: frozenset[str]
+    terms: frozenset[str]
+
+
+def row_lexicon(row: AnchorFacts) -> RowLexicon:
+    """`row`'s normalised names, the folded terms of its title and aliases,
+    and the folded terms of its whole vocabulary."""
+    return RowLexicon(
+        names=frozenset({normalize(row.title), *row.aliases} - {""}),
+        name_terms=frozenset(
+            folded
+            for term in tokens_of(" ".join((row.title, *row.aliases)))
+            if (folded := _fold_lexical_term(term)) is not None
+        ),
+        terms=frozenset(
+            folded for term in row.terms if (folded := _fold_lexical_term(term)) is not None
+        ),
+    )
+
+
 def candidates_for(
     analysis: TurnAnalysis,
     rows: Sequence[AnchorFacts],
@@ -1139,8 +1232,13 @@ def candidates_for(
     stopwords: frozenset[str] = _STOPWORDS,
     rare_term_max_anchors: int = RARE_TERM_MAX_ANCHORS,
     eligible_categories: frozenset[str] = frozenset(),
+    row_lexicons: Mapping[str, RowLexicon] | None = None,
 ) -> tuple[CandidateFacts, ...]:
     """Assemble categorical evidence for every anchor this turn can reach.
+
+    `row_lexicons` (anchor id -> `row_lexicon(row)`) lets a caller matching
+    several turns against the same rows derive each row's names once
+    (`candidates_for_each`); without it each row is derived here.
 
     `term_anchor_counts` is the index's title/alias term -> anchor-count table
     (`WorkingSetIndex.term_anchor_counts()`), the structure `rare_term`'s
@@ -1235,6 +1333,15 @@ def candidates_for(
     # (`test_r2_single_token_aliases_consume_nothing`). Linear in
     # rows x phrases, no index read: positions come from the turn's own
     # tokens, already in hand.
+    # Both passes below read each row's lexicon: derive it once per call.
+    lexicons: dict[str, RowLexicon] = dict(row_lexicons or {})
+
+    def lexicon_of(row: AnchorFacts) -> RowLexicon:
+        known = lexicons.get(row.anchor_id)
+        if known is None:
+            known = lexicons[row.anchor_id] = row_lexicon(row)
+        return known
+
     row_exact_phrases: dict[str, frozenset[str]] = {}
     own_covered: dict[str, frozenset[int]] = {}
     covered_positions: set[int] = set()
@@ -1253,7 +1360,7 @@ def candidates_for(
         if _inside_longer_words(word, matched_words, analysis.tokens)
     )
     for row in rows:
-        names = {normalize(row.title), *row.aliases} - {""}
+        names = lexicon_of(row).names
         matched = (names & phrases) - consumed_words
         row_exact_phrases[row.anchor_id] = frozenset(matched)
         positions: set[int] = set()
@@ -1280,6 +1387,8 @@ def candidates_for(
         term_positions.setdefault(folded_term, []).append(index)
 
     contained = _contained_names(analysis, rows, term_counts)
+    # The turn's own folds, once: `_name_span` reads them for every candidate.
+    token_folds = _token_folds(analysis.tokens, stopwords)
 
     # Pass 2 of 2: the ordinary per-row evidence assembly, reusing pass 1's
     # own matched phrases rather than recomputing them.
@@ -1327,14 +1436,9 @@ def candidates_for(
         # uses, so a title "It's Complicated" cannot manufacture the name
         # term "it" any more than a turn saying "it's" can -- one function,
         # both call sites, symmetric by construction.
-        row_terms_folded = frozenset(
-            folded for term in row.terms if (folded := _fold_lexical_term(term)) is not None
-        )
-        name_terms_folded = frozenset(
-            folded
-            for term in tokens_of(" ".join((row.title, *row.aliases)))
-            if (folded := _fold_lexical_term(term)) is not None
-        )
+        lexicon = lexicon_of(row)
+        row_terms_folded = lexicon.terms
+        name_terms_folded = lexicon.name_terms
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
         name_contact: frozenset[str] = frozenset()
@@ -1407,6 +1511,18 @@ def candidates_for(
             evidence.add("category_match")
         if row.path and row.path in used_paths:
             evidence.add("usage_prior")
+        name_span, name_spans = (
+            _name_spans(
+                analysis.tokens,
+                stopwords,
+                name_terms_folded,
+                analysis.run_breaks,
+                token_folds,
+                _literal_separator_spans(analysis, row),
+            )
+            if name_contact and not name_contact & embedded_terms
+            else (None, ())
+        )
         out.append(
             CandidateFacts(
                 anchor_id=row.anchor_id,
@@ -1421,11 +1537,8 @@ def candidates_for(
                 evidence=frozenset(evidence),
                 exact_alias_phrases=matched_phrases,
                 name_contact=name_contact,
-                name_span=_name_span(
-                    analysis.tokens, stopwords, name_terms_folded, analysis.run_breaks
-                )
-                if name_contact and not name_contact & embedded_terms
-                else None,
+                name_span=name_span,
+                name_spans=name_spans,
                 entity_type=row.entity_type,
                 name_capitalised=bool(name_contact & analysis.capitalised),
                 name_lower_case=bool(
@@ -1451,33 +1564,123 @@ def candidates_for(
     return tuple(out[:MAX_CANDIDATES])
 
 
-def _name_span(
+
+#: `candidates_for` arguments that can give an anchor contact without the
+#: turn's own words naming it. `candidates_for_each` may only narrow the rows
+#: when none of them is in play.
+_WORDLESS_CONTACT_ARGUMENTS = (
+    "vectors",
+    "query_vector",
+    "bands",
+    "routing_targets",
+    "retrieval_paths",
+    "hot_paths",
+)
+
+
+def _row_may_be_named(
+    lexicon: RowLexicon, terms: frozenset[str], phrases: frozenset[str], runs: bool
+) -> bool:
+    """Could any analysis whose folded terms and phrases are these reach the
+    row by its words? A superset test: every row `candidates_for` could
+    return, or read another row's consumption from, passes it."""
+    if lexicon.names & phrases or lexicon.name_terms & terms:
+        return True
+    return runs and any(len(name) >= 2 and _continua_class(name) for name in lexicon.names)
+
+
+def candidates_for_each(
+    analyses: Sequence[TurnAnalysis], rows: Sequence[AnchorFacts], **keywords: Any
+) -> tuple[tuple[CandidateFacts, ...], ...]:
+    """`candidates_for` for several analyses in ONE scan over `rows`.
+
+    The earlier entries of a conversation are matched by their words only (no
+    band, recall, routing or recency). Only a row whose own name shares a
+    word or a phrase with SOME entry can be reached, or consume a term for
+    another row, so the full catalogue is scanned once for those, and each
+    entry is then matched over that short list: the result is identical to
+    one `candidates_for` per entry at a fraction of the cost. With any
+    wordless contact source in `keywords` it falls back to one full scan each.
+    """
+    if not analyses:
+        return ()
+    if any(keywords.get(name) for name in _WORDLESS_CONTACT_ARGUMENTS):
+        return tuple(candidates_for(analysis, rows, **keywords) for analysis in analyses)
+    stopwords = keywords.get("stopwords", _STOPWORDS)
+    terms: set[str] = set()
+    phrases: set[str] = set()
+    runs = False
+    for analysis in analyses:
+        for term in frozenset((*analysis.tokens, *analysis.words)) - stopwords:
+            folded = _fold_lexical_term(term)
+            if folded is not None:
+                terms.add(folded)
+        phrases.update(analysis.ngrams, analysis.tokens, analysis.words)
+        phrases.update(
+            folded for token in analysis.tokens if (folded := fold_possessive(token)) not in stopwords
+        )
+        runs = runs or any(_continua_runs(token) for token in analysis.tokens)
+    frozen_terms, frozen_phrases = frozenset(terms), frozenset(phrases)
+    known = keywords.pop("row_lexicons", None) or {}
+    lexicons: dict[str, RowLexicon] = {}
+    named: list[AnchorFacts] = []
+    for row in rows:
+        lexicon = known.get(row.anchor_id) or row_lexicon(row)
+        if _row_may_be_named(lexicon, frozen_terms, frozen_phrases, runs):
+            lexicons[row.anchor_id] = lexicon
+            named.append(row)
+    return tuple(
+        candidates_for(analysis, named, row_lexicons=lexicons, **keywords) for analysis in analyses
+    )
+
+def _token_folds(tokens: Sequence[str], stopwords: frozenset[str]) -> tuple[str | None, ...]:
+    """Each token's lexical fold, `None` for a stopword: what `_name_spans`
+    compares against a name's terms, computed once per turn."""
+    return tuple(None if token in stopwords else _fold_lexical_term(token) for token in tokens)
+
+
+def _name_spans(
     tokens: Sequence[str],
     stopwords: frozenset[str],
     name_terms: frozenset[str],
     breaks: frozenset[int] = frozenset(),
-) -> tuple[int, int] | None:
-    """The longest contiguous run of `tokens` spelling `name_terms` words.
+    folds: Sequence[str | None] | None = None,
+    literal_spans: Sequence[tuple[int, int]] = (),
+) -> tuple[tuple[int, int] | None, tuple[tuple[int, int], ...]]:
+    """The longest name run and every comparably worded occurrence.
 
     Stopwords may sit inside a run ("bank of the north") but never start or
     end one, and any other word breaks it. So does clause punctuation
     (`breaks`: token indices with a boundary just before them) and a
     coordinator ("and", "or"): "the solar array, monitoring" and "the solar
-    array and monitoring" are two things, not one name. Ties go to the
+    array and monitoring" are two things, not one name. A separator inside
+    a complete admitted name spelled literally in the turn belongs to that
+    name, not to the surrounding clauses. Ties go to the
     earliest run, so the span is deterministic. `None` when no token is a
-    name word.
+    name word. `folds` is each token's `_fold_lexical_term` (`None` for a
+    stopword), computed once per turn by a caller that spans many names.
+    Where a run has two name words, an isolated generic word is not a second
+    name mention. Otherwise retain the one-word runs the existing rule uses.
     """
+    if folds is None:
+        folds = _token_folds(tokens, stopwords)
+    literal_interior = frozenset(
+        index for start, end in literal_spans for index in range(start + 1, end)
+    )
+    spans: list[tuple[int, int, int]] = []
     best: tuple[int, int] | None = None
     best_words = 0
     start: int | None = None
     last_name = -1
     words = 0
     for index, token in enumerate(tokens):
-        if index in breaks or token in _RUN_COORDINATORS:
+        if index not in literal_interior and (index in breaks or token in _RUN_COORDINATORS):
+            if start is not None:
+                spans.append((start, last_name + 1, words))
             start = None
             if token in _RUN_COORDINATORS:
                 continue
-        folded = None if token in stopwords else _fold_lexical_term(token)
+        folded = folds[index]
         if folded is not None and folded in name_terms:
             if start is None:
                 start, words = index, 0
@@ -1488,8 +1691,37 @@ def _name_span(
         elif token in stopwords and start is not None:
             continue
         else:
+            if start is not None:
+                spans.append((start, last_name + 1, words))
             start = None
-    return best
+    if start is not None:
+        spans.append((start, last_name + 1, words))
+    return best, tuple((start, end) for start, end, count in spans if count >= min(2, best_words))
+
+
+def _literal_separator_spans(analysis: TurnAnalysis, row: AnchorFacts) -> tuple[tuple[int, int], ...]:
+    """Literal, token-aligned admitted names whose punctuation is part of the name.
+
+    Do not infer a name from its words across a clause boundary: the complete
+    title or indexed alias, including its separator, must occur in the turn.
+    Tokenising both sides as well rejects a name inside a longer word.
+    Indexed aliases do not retain authorship: an authored alias may equal a
+    derived one. Admission and audience filtering remain the index's rules.
+    """
+    spans: set[tuple[int, int]] = set()
+    for spelling in (row.title, *row.aliases):
+        name = normalize(spelling)
+        name_tokens = tokens_of(name)
+        if not name_tokens or not (
+            _RUN_COORDINATORS.intersection(name_tokens) or _CLAUSE_BREAK.search(name)
+        ):
+            continue
+        for offset in _occurrences(analysis.text, name):
+            before = tokens_of(analysis.text[:offset])
+            after = tokens_of(analysis.text[offset + len(name) :])
+            if (*before, *name_tokens, *after) == analysis.tokens:
+                spans.add((len(before), len(before) + len(name_tokens)))
+    return tuple(sorted(spans))
 
 
 def _derived_key(title: str) -> str:
@@ -1559,7 +1791,7 @@ def audience_view(
     def seen(row: AnchorFacts) -> bool:
         verdict = decided.get(row.anchor_id)
         if verdict is None:
-            verdict = not row.path or bool(visible(row.path))
+            verdict = anchor_visible(row, visible)
             decided[row.anchor_id] = verdict
         return verdict
 
@@ -1797,6 +2029,28 @@ def anchor_ref(row: Any) -> str:
     )
 
 
+def anchor_visible(row: AnchorFacts, visible: Callable[[str], bool]) -> bool:
+    """Decide both a Planning item's collection home and its canonical page.
+
+    Its visible manifest is not authority to name a withheld item. Opaque
+    anchor identifiers are not page paths and must not be checked as pages.
+    Resolution and recent-context reservation share this boundary.
+    """
+    from .kbdir import kb_prefix
+
+    if not row.path:
+        return True
+    if not visible(row.path):
+        return False
+    ref = anchor_ref(row)
+    return (
+        row.kind != "plan"
+        or ref == row.path
+        or not ref.startswith(kb_prefix())
+        or bool(visible(ref))
+    )
+
+
 def names_row(refs: frozenset[str] | set[str], row: Any) -> bool:
     """Does a continuity token's ref list name `row`?
 
@@ -1948,7 +2202,7 @@ def _status_for_evidence(evidence: frozenset[str], *, recency_resolves: bool = F
         return "resolved"
     if "rare_term" in deciding and (deciding & CONTACT_KINDS) - {"rare_term"}:
         return "resolved"
-    if "continuity" in deciding and deciding & CONTACT_KINDS:
+    if deciding & NAMED_BEFORE_KINDS and deciding & CONTACT_KINDS:
         return "resolved"
     if recency_resolves and "recency" in evidence:
         return "resolved"
@@ -2175,6 +2429,8 @@ def resolve(
                 exact_alias_phrases=candidate.exact_alias_phrases,
                 name_contact=candidate.name_contact,
                 name_span=candidate.name_span,
+                name_spans=candidate.name_spans,
+                name_span_segment=candidate.name_span_segment,
                 entity_type=candidate.entity_type,
                 name_capitalised=candidate.name_capitalised,
                 name_lower_case=candidate.name_lower_case,
@@ -2200,13 +2456,25 @@ def resolve(
     has_named_anchor = any(DECIDING_ALONE_KINDS & set(anchor.evidence) for anchor in resolved)
     ambiguity: list[dict[str, Any]] = []
     demoted_refs: set[str] = set()
+    disambiguated_by = ""
     for kind, group in groups:
         group_has_named = any(DECIDING_ALONE_KINDS & set(member.evidence) for member in group)
         if group_has_named or not has_named_anchor:
             # A real competing sense (a group the turn itself named two
             # members of), or -- with no named anchor anywhere to carry the
-            # packet instead -- today's unchanged behaviour.
-            ambiguity.extend(_ambiguity_dicts(kind, group))
+            # packet instead -- today's unchanged behaviour. The earlier
+            # conversation breaks the tie only when it is unambiguous:
+            # exactly one competitor carries it. None or several keep the
+            # ambiguity exactly as without a conversation.
+            named_before = {
+                anchor_ref(member) for member in group if "conversation" in member.evidence
+            }
+            if len(named_before) == 1:
+                demoted_refs.update(anchor_ref(member) for member in group)
+                demoted_refs.difference_update(named_before)
+                disambiguated_by = "conversation"
+            else:
+                ambiguity.extend(_ambiguity_dicts(kind, group))
         else:
             # None of this group's members is a named anchor, and a named
             # anchor exists elsewhere to carry the packet: demote the whole
@@ -2224,7 +2492,9 @@ def resolve(
     if ambiguity:
         return Resolution(status="ambiguous", anchors=tuple(anchors), ambiguity=tuple(ambiguity))
     if resolved:
-        return Resolution(status="resolved", anchors=tuple(anchors))
+        return Resolution(
+            status="resolved", anchors=tuple(anchors), disambiguated_by=disambiguated_by
+        )
     bare = [
         entry
         for kind, group in _bare_name_groups(anchors)
@@ -2240,6 +2510,20 @@ def _span_inside(inner: tuple[int, int] | None, outer: tuple[int, int] | None) -
     if inner is None or outer is None or inner == outer:
         return False
     return outer[0] <= inner[0] and inner[1] <= outer[1]
+
+
+def _all_name_spans_inside(inner: ResolvedAnchor, outer: ResolvedAnchor) -> bool:
+    if inner.name_span_segment != outer.name_span_segment:
+        return False
+    inner_spans = inner.name_spans
+    outer_spans = outer.name_spans
+    if inner_spans is None:
+        inner_spans = (inner.name_span,) if inner.name_span is not None else ()
+    if outer_spans is None:
+        outer_spans = (outer.name_span,) if outer.name_span is not None else ()
+    return bool(inner_spans) and all(
+        any(_span_inside(span, wider) for wider in outer_spans) for span in inner_spans
+    )
 
 
 def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedAnchor, ...]:
@@ -2260,11 +2544,15 @@ def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedA
     A word of the wider name said ELSEWHERE in the turn ("I blew my grocery
     budget, and the kitchen renovation is stalled") leaves both runs the same
     and narrows nothing; nor does a turn that names each sense in its own
-    run. With no strict containment the turn is left as it was, and an
+    run. Every qualifying occurrence must be contained: an independent later
+    mention survives even if its earlier equal-length run is inside the name.
+    With no strict containment the turn is left as it was, and an
     ambiguous turn keeps every sense its words touched as the agent's menu. A
     sense the turn spelled by name (`exact_alias`, `agent_choice`) is never
     narrowed out: R1 already decides between spelled names. Cross-kind
-    anchors are complementary and never narrow one another.
+    anchors are complementary and never narrow one another. Span containment
+    stays within one turn/focus segment; equal local coordinates in different
+    segments do not make two mentions overlap.
     """
     resolved = [
         anchor
@@ -2279,7 +2567,7 @@ def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedA
         wider = [
             other
             for other in resolved
-            if other.kind == anchor.kind and _span_inside(anchor.name_span, other.name_span)
+            if other.kind == anchor.kind and _all_name_spans_inside(anchor, other)
         ]
         if wider:
             narrowed.setdefault(anchor.kind, set()).add(anchor.anchor_id)
@@ -2296,7 +2584,7 @@ def _narrowed_by_qualifier(anchors: Sequence[ResolvedAnchor]) -> tuple[ResolvedA
         return (
             anchor.status == "partial"
             and not set(anchor.evidence) & (CONTACT_KINDS - {"rare_term", "lexical_overlap"})
-            and any(_span_inside(anchor.name_span, wide.name_span) for wide in chosen[anchor.kind])
+            and any(_all_name_spans_inside(anchor, wide) for wide in chosen[anchor.kind])
         )
 
     return tuple(anchor for anchor in anchors if not dropped(anchor))

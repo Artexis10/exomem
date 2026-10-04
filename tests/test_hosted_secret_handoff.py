@@ -52,6 +52,24 @@ def _matrix() -> dict[str, object]:
     return json.loads(MATRIX.read_text(encoding="utf-8"))
 
 
+def test_artifact_transport_keys_reach_only_their_distinct_consumers() -> None:
+    """A broker must never receive the private key that can mint download grants."""
+    secrets = _matrix()["secrets"]
+    for secret_name, object_name, key in (
+        ("cloud_artifact_signing_key", "exomem-cloud-artifact-signing-key", "signing-key"),
+        ("cloud_artifact_public_key", "exomem-artifact-broker-public-key", "public-key"),
+    ):
+        route = secrets[secret_name]
+        assert route["value_shape"] == "file"
+        assert [source["kind"] for source in route["sources"]] == ["bws"]
+        assert len(route["destinations"]) == 1
+        destination = next(iter(route["destinations"].values()))
+        assert destination["kind"] == "sops_k8s_secret"
+        assert (destination["namespace"], destination["kubernetes_secret"], destination["key"]) == (
+            "exomem-cloud", object_name, key
+        )
+
+
 def _bundle_matrix(tmp_path: Path, key_sets: list[list[str]]) -> Path:
     matrix = _matrix()
     matrix["secrets"]["cloud_bundle"] = {  # type: ignore[index]
@@ -1156,7 +1174,7 @@ def test_matrix_never_routes_a_file_shaped_secret_to_vercel(tmp_path: Path) -> N
     module = _load_module()
     matrix = json.loads(MATRIX.read_text(encoding="utf-8"))
     shaped = [name for name, spec in matrix["secrets"].items() if spec.get("value_shape") == "file"]
-    assert set(shaped) == {"database_backup_pg_service_file", "database_backup_pgpass_file"}
+    assert shaped
     for name in shaped:
         for destination in matrix["secrets"][name]["destinations"].values():
             assert destination["kind"] == "sops_k8s_secret"

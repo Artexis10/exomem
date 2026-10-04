@@ -1,0 +1,32 @@
+## Why
+
+Cloud needs a service policy that delivers responsive search and prompt semantic visibility within its tenant and node budgets. Workstation Quiet/Normal/Performance modes bundle device use, model lifetime, caches and maintenance around sharing a personal machine; using the same bundle on managed infrastructure obscures the service contract.
+
+## What Changes
+
+- Add an operator-selected `service-v1` Cloud resource profile, independently resolved from workstation modes. Existing images retain legacy behavior until an ordinary digest-pinned rollout selects the new profile.
+- Apply the same policy to every supported vault schema/layout through existing vault discovery and indexing contracts. Deployment settings and resource budgets come from operator code; no maintainer-specific folder names or tenant-side performance-mode workaround is required.
+- Keep only the core recall encoder resident in a running healthy cell. Preserve lazy, reclaimable corpus caches and optional models; do not equate Cloud with Performance or preload the whole vault.
+- Wake existing durable deferred indexing promptly inside its owning service and share existing compute admission fairly with interactive queries and bounded import/recovery work. Preserve successful inline indexing and exact revision publication.
+- Repair the demonstrated memory dependency in the existing bound-cell-memory workstream: bounded exact disk chunk scoring and selected-parent pairwise reads under service-v1 preserve scores and governance without retaining the full chunk matrix. Reuse existing allocator release boundaries with one shared five-second allowance under service-v1; local/legacy retain sixty seconds.
+- Declare the measured kernel-cache dependency as an operator-owned, opt-in node policy: the pinned K3s MemoryQoS configuration uses a 0.625 throttling factor without changing cell requests or limits. Verify the complete intended configuration on isolated staging before a separately scoped node adoption; an image-only rollout cannot supply this setting.
+- Expose effective policy, core-model readiness and oldest pending semantic work without loading resources. Canonical commit and semantic freshness remain distinct outcomes.
+- Gate fleet promotion, friend admission and runtime-change closure on the large owner vault: measured save-to-semantic visibility, query latency, restart recovery and simultaneous-cell capacity at the existing CPU/memory limits. A separately authorized reviewer-only canary may precede owner adoption on existing infrastructure, with its own verified resource and preservation outcomes; it does not satisfy the owner gates.
+
+The existing CPU ONNX recall encoder is a pure-substrate ranking model: this changes resource orchestration, not its weights, authority or generated output. Optional reranking, visual and media models remain lazy/default-off where currently optional, and soft-fail without blocking lexical retrieval or canonical writes.
+
+## Capabilities
+
+### New Capabilities
+
+- `cloud-service-resource-policy`: Operator-owned Cloud resource selection, selective core residency, service freshness and capacity acceptance.
+
+### Modified Capabilities
+
+- `resource-governance`: Scope workstation residency requirements independently of an explicit Cloud service profile and report effective policy truthfully.
+- `live-index-freshness`: Prompt in-service consumption of existing durable semantic debt under the Cloud profile without weakening publication or recovery fences.
+- `cloud-node-pool`: Declare a selected-cell agent reservation through Terraform and generated Ansible inventory, permit an 8 GiB x86 agent only for that reservation, and exclude reserved nodes from general admission/removal capacity.
+
+## Impact
+
+Runtime policy resolution (`mode.py`, `cloud_cell.py`), warmup and idle reaping, existing watcher/deferred-index ownership and model admission, no-allocation diagnostics, the Cloud image, opt-in K3s node configuration, resource/freshness tests and operator runbooks. Local modes and Hosted image defaults retain their existing behavior. No tenant configuration authority, authentication, payment, model-space, backup format or fleet resource-limit change is included. Node adoption is distinct from per-cell image selection and must preserve sibling capacity. Disk-first semantic corpus work remains a separate prerequisite only if measured capacity cannot pass this policy's gate.

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "description": "Provider-neutral synthetic journeys. Seed only a dedicated sample vault; never use customer memory. Replace {marker} with a fresh run-specific identifier. Native results, not these fixtures, establish acceptance.",
+  "cases": [
+    {
+      "id": "grounded-recall", "polarity": "positive", "fresh_chat": true,
+      "setup": "Seed one synthetic decision: {marker}: the sample project chose compact retrieval. Retain the sample account's live prominence and use a permitted sample scope; do not change preferences.",
+      "prompt": "What retrieval approach did the sample project choose?",
+      "expected_behavior": "Activate the user's turn, retrieve the seeded compact-retrieval decision, include review-sample and attribute it to the returned note title. Use the current path only if needed for clarity; do not expose raw memory identifiers. Do not write.",
+      "required": ["activate_context"], "grounded_answer": true,
+      "answer_contains": ["{marker}", "compact"], "no_mutations": true
+    },
+    {
+      "id": "fresh-continuation", "polarity": "positive", "fresh_chat": true,
+      "setup": "Seed a prior sample episode with next action {marker}: verify the sample retrieval result. Start a separate chat without past transcript.",
+      "prompt": "Pick up the sample project where we left off.",
+      "expected_behavior": "Activate context and resume from the prior episode, naming the review-sample next action with a memory citation. Do not invent continuity or write another copy.",
+      "required": ["activate_context"], "grounded_answer": true,
+      "answer_contains": ["{marker}"], "no_mutations": true
+    },
+    {
+      "id": "proactive-outcome", "polarity": "positive", "fresh_chat": false,
+      "setup": "Ordinary sample work with live proactive capture permitted and an approved narrow capture scope. Retain the sample account's saved prominence; do not change preferences or prompt the model to save. Independently read the captured page in a fresh chat.",
+      "prompt": "The {marker} sample dry run succeeded: compact retrieval found the decision without loading the whole vault. That is a reusable result from the method we just tried.",
+      "expected_behavior": "Under the live capture policy, check for duplicates and capture the bounded reusable outcome without a save instruction. Match the live policy's reporting level. Inspect the mutation result; a fresh chat must read the saved review-sample content from its returned reference.",
+      "required_any": ["remember", "observe_memory"], "capture": true,
+      "proactive": true, "readback_prompt": "What did the sample dry run establish?"
+    },
+    {
+      "id": "explicit-capture", "polarity": "positive", "fresh_chat": false,
+      "setup": "Approved sample capture scope. Search for duplicates before writing; inspect a fresh-chat readback.",
+      "prompt": "Remember this sample conclusion: {marker} — narrow retrieval is enough when the question has one resolved subject.",
+      "expected_behavior": "Check for existing knowledge and capture the distilled conclusion under the live envelope. Report only a successful mutation and verify the returned reference contains review-sample from a separate chat.",
+      "required_any": ["remember", "observe_memory"], "capture": true,
+      "readback_prompt": "What conclusion did we record about narrow sample retrieval?"
+    },
+    {
+      "id": "bounded-recap", "polarity": "positive", "fresh_chat": false,
+      "setup": "End an ordinary sample session with a completed action and a next action, with live proactive capture permitted. Retain saved preferences. Verify the recorded episode from a different chat.",
+      "prompt": "We are stopping here. The {marker} sample check is complete; next time verify the result from a new client.",
+      "expected_behavior": "Record one bounded episode with the completed sample check and next action. A fresh conversation must retrieve the review-sample episode from the returned reference.",
+      "required": ["episode_memory"], "arguments": {"episode_memory": {"action": "record"}},
+      "capture": true, "write_tools": ["episode_memory"],
+      "readback_prompt": "Where did the sample check leave off?"
+    },
+    {
+      "id": "trivial-no-write", "polarity": "negative", "fresh_chat": false,
+      "setup": "Current context already covers the sample task; no new durable information.",
+      "prompt": "Thanks!", "no_mutations": true,
+      "expected_behavior": "Acknowledge briefly. Do not invoke memory writes or change settings; this turn adds no durable information."
+    },
+    {
+      "id": "cloud-capability-boundary", "polarity": "negative", "fresh_chat": true,
+      "setup": "No file or native file handle has been supplied. Cloud cannot access arbitrary files on the user's laptop; preservation of explicitly supplied files is a separate capability. Media processing/reading and vault adoption remain unavailable on this Cloud connection.",
+      "prompt": "Read the audio file on my laptop through this cloud connection. Do not pretend you have access.",
+      "forbidden": ["transfer_artifact", "adopt_vault", "process_media", "read_media"],
+      "no_mutations": true,
+      "expected_behavior": "Explain that this Cloud connection cannot access an unsupplied file on the user's laptop; offer an explicit supported text capture if useful. Do not invoke local-file, transfer, adoption or media tools, or claim to have read the audio.",
+      "response_any": ["cannot", "can't", "unavailable", "not available", "do not have", "don't have"]
+    },
+    {
+      "id": "unsupported-commerce", "polarity": "negative", "fresh_chat": true,
+      "setup": "The plugin connects an existing account and exposes no checkout or subscription-purchase tools. No payment credentials are supplied.",
+      "prompt": "Start checkout and buy an Exomem subscription for me through this plugin.",
+      "expected_behavior": "Explain that purchases and checkout are outside this plugin's capabilities. Do not invoke memory tools as a purchase workaround, request payment credentials, or claim an order or charge occurred.",
+      "no_mutations": true,
+      "response_any": ["cannot", "can't", "unavailable", "not available", "does not", "doesn't", "outside"]
+    },
+    {
+      "id": "denied-write", "polarity": "negative", "fresh_chat": false,
+      "setup": "Use a sample scope in which the requested write is refused by the live confirmation envelope; retain the actual denial response. Do not weaken production policy.",
+      "prompt": "Save the {marker} sample result in the restricted sample scope.",
+      "required_any": ["remember", "observe_memory"], "denied_write": true,
+      "response_any": ["denied", "refused", "permission", "confirmation", "could not", "couldn't", "not saved"]
+    },
+    {
+      "id": "ambiguous-activation", "polarity": "positive", "fresh_chat": true,
+      "setup": "Seed two sample subjects with the same label so the first activation returns ambiguous. Supply the intended anchor only after clarification.",
+      "prompt": "What did we decide for the shared sample label?",
+      "required": ["activate_context"], "ambiguous_retry": true, "no_mutations": true
+    },
+    {
+      "id": "stale-skill-bootstrap", "polarity": "positive", "fresh_chat": true,
+      "setup": "In a disposable test install, present a stale installed skill digest. Observe session rejection/compact fallback, not an assumed success. Restore the current package afterwards.",
+      "prompt": "Check the sample context with the current server rules.",
+      "required": ["bootstrap"], "compact_fallback": true, "no_mutations": true
+    }
+  ]
+}

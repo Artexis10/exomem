@@ -52,6 +52,7 @@ from . import append_to_file as append_to_file_module
 from . import attention as attention_module
 from . import audit as audit_module
 from . import audit_fix as audit_fix_module
+from . import bootstrap_core as bootstrap_core_module
 from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
@@ -70,8 +71,8 @@ from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import envelope as envelope_module
 from . import episode_memory as episode_memory_module
-from . import episode_workflow as episode_workflow_module
 from . import episode_nudge as episode_nudge_module
+from . import episode_workflow as episode_workflow_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
@@ -136,6 +137,7 @@ from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
 from . import workflow_skills as workflow_skills_module
 from . import working_set as working_set_module
+from . import working_set_conversation as working_set_conversation_module
 from . import working_set_heat as working_set_heat_module
 from . import working_set_index as working_set_index_module
 from . import working_set_learning as working_set_learning_module
@@ -736,6 +738,8 @@ def op_configure_memory(
 ) -> dict:
     """Inspect, set or clear your saved Exomem engagement level for this vault.
 
+    Use set or clear only for an explicit user request to change saved engagement.
+    Recall, capture, installation and missing hooks are not setting-change requests.
     Inspect first, then set off, light, balanced or maximal with the returned
     revision as expected_revision. The choice follows this authenticated identity
     on later requests without a restart. It changes recall/capture eagerness, never
@@ -744,7 +748,7 @@ def op_configure_memory(
     alone, leaving the identity-wide value untouched, and use clear with that
     context and expected_revision to remove it again. The context that applies to
     a request is detected from the calling client, never chosen by an argument.
-    Adopt the returned engagement contract in the current conversation.
+    The response reports the effective engagement for the current conversation.
 
     Args:
         action: "inspect" reads the saved state, "set" writes a level, and
@@ -822,17 +826,19 @@ def op_bootstrap(
     profile: str = "compact",
     workflow: str | None = None,
     skill_contract: str | None = None,
+    section: str | None = None,
 ) -> dict:
-    """Return Exomem's versioned operating contract and live session state.
+    """Return Exomem's versioned API contract and live account settings.
 
-    Call this when current live state is missing. A client with the installed
-    Exomem skill uses session with its metadata skill-contract digest; generic
-    clients or those missing the rules use compact, full, or diagnostics to
-    learn tool use: when to search, when to save, how to interpret scoped
-    misses, which `find` knobs are cheap vs diagnostic, how compiled notes
-    differ from raw sources/evidence, and how Exomem differs from built-in AI
-    memory. The payload is deterministic instruction plus local compute policy
-    and product-surface metadata; it does not inspect or summarize vault content.
+    Use when the connected account's engagement settings or available
+    capabilities are unknown or have changed. A client with the installed
+    Exomem skill uses session with its metadata skill-contract digest; compact,
+    full, and diagnostics also document Exomem's operations, search defaults,
+    scoped misses, and the distinction between compiled knowledge and raw
+    sources/evidence. The response describes this service's API and configured
+    engagement; it does not configure the host assistant or its built-in memory,
+    inspect vault content, or authorize an operation beyond the user's scope.
+    Compact is a core; its `sections` block lists the rest, fetched with `section`.
 
     Args:
         profile: "compact" (default), "full", "diagnostics", or "session".
@@ -843,6 +849,8 @@ def op_bootstrap(
         skill_contract: Installed skill metadata digest required for the session
             profile. An absent or stale digest returns compact in this call with
             a closed unavailable reason.
+        section: With the compact profile, one named block group of the operating
+            contract ("index" lists them). Absent, compact returns the core.
 
     Returns:
         A structured, versioned contract with workflow, search, save, upload,
@@ -853,6 +861,14 @@ def op_bootstrap(
             "bootstrap: profile must be 'compact', 'full', 'diagnostics', or 'session', "
             f"got {profile!r}"
         )
+    if section is not None:
+        if section not in bootstrap_core_module.accepted_sections():
+            raise ValueError(
+                "bootstrap: section must be one of "
+                f"{', '.join(bootstrap_core_module.accepted_sections())}, got {section!r}"
+            )
+        if profile != "compact":
+            raise ValueError("bootstrap: section requires profile='compact'")
 
     session_requested = profile == "session"
     session_unavailable: str | None = None
@@ -891,7 +907,39 @@ def op_bootstrap(
         capture_gate=engagement_policy["contract"]["effective_capture"],
     )
     active_descriptor = _active_bootstrap_descriptor()
+    # A released hosted profile is a published identity: it keeps the complete
+    # compact payload and its pinned parameter list, which has no `section`.
+    frozen_profile = (
+        active_descriptor.profile in hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS
+    )
+    if frozen_profile:
+        # Released Hosted payloads predate service resource diagnostics.
+        compute_policy = {
+            key: value
+            for key, value in compute_policy.items()
+            if key not in {"resource_profile", "resource_profile_source"}
+        }
+    if frozen_profile and section is not None:
+        raise ValueError("bootstrap: section is not available on this surface profile")
+    # Where the compact core points for the vocabulary workflow's full contract: it is
+    # served on demand in a section, and a released profile keeps its published text.
+    vocabulary_workflow_home = (
+        " (section entities)" if profile == "compact" and not frozen_profile else ""
+    )
     active_product_names = frozenset(active_descriptor.product_commands)
+    # The recall contract opens with a line that names `activate_context`. Where the
+    # surface does not export it (hosted), the filter below would drop the WHOLE recall
+    # contract; carry the same instruction through `ask_memory` instead. A released
+    # profile keeps its published payload.
+    recall = engagement_policy["contract"].get("recall")
+    if (
+        not frozen_profile
+        and isinstance(recall, str)
+        and "activate_context" not in active_descriptor.callable_commands
+    ):
+        engagement_policy["contract"]["recall"] = recall.replace(
+            prominence_module.ACTIVATION_CARRIER_LINE, prominence_module.ASK_MEMORY_CARRIER_LINE
+        )
     # `change_with` is seeded from the CLI string, which is right for a local
     # install and wrong for every served surface. Take it from what this surface
     # actually offers: the agent-accessible control when it is served, and
@@ -1568,12 +1616,24 @@ def op_bootstrap(
         "epistemic_contract": epistemic_contract,
         "memory_model": {
             "built_in_ai_memory": (
-                "Use as short-term or behavioural memory for user preferences, working "
-                "rules, routing instructions, and current working context."
+                (
+                    "Use as short-term or behavioural memory for user preferences, working "
+                    "rules, routing instructions, and current working context."
+                )
+                if frozen_profile
+                else (
+                    "Assistant-native memory is separate, host-managed storage for "
+                    "preferences, working rules, routing, and working context. "
+                    "Exomem neither reads nor configures it."
+                )
             ),
             "exomem": (
-                "Use as long-term governed memory for durable governed knowledge: "
-                "sources, proof/evidence, history, decisions, records, review, and "
+                (
+                    "Use as long-term governed memory for durable governed knowledge: "
+                    if frozen_profile
+                    else "Exomem stores long-term durable governed knowledge: "
+                )
+                + "sources, proof/evidence, history, decisions, records, review, and "
                 "compiled conclusions."
             ),
         },
@@ -1656,7 +1716,7 @@ def op_bootstrap(
                 ),
                 "reason in the agent",
                 (
-                    "before saving, use vocabulary_workflow to resolve recurring identities "
+                    f"before saving, use vocabulary_workflow{vocabulary_workflow_home} to resolve recurring identities "
                     "and useful relationship meanings; enrich existing entities, and define "
                     "a missing type when existing types would distort the evidence. Keep "
                     "incidental names unpromoted; generic/no-edge/defer remain valid."
@@ -2130,20 +2190,18 @@ def op_bootstrap(
     #
     # Inside the command's own disclosure boundary: this aggregates across pages,
     # so the release plane has to decide every path before anything is counted.
+    due_block: dict | None = None
     try:
         from . import due_state as due_state_module
 
         with egress_module.disclosure_boundary(vault_root, "bootstrap"):
             due_block = due_state_module.served(vault_root)
         if due_block is not None:
-            # Attached unconditionally, then RECORDED. The attachment stays
-            # unconditional because a session opening on a reduced surface has no
-            # other way to hear about this at all, so bootstrap is not governed by
-            # emission. But it is still a delivery: without marking it, the first
-            # recall of the session repeats the identical block, which is the exact
-            # nagging the governor exists to prevent.
+            # Attached unconditionally, and RECORDED only where the full block is
+            # actually handed over (see the end of this function): the compact core
+            # serves a counts summary, and recording that as the delivery would burn
+            # the session's one emission, so the next recall would omit the list.
             payload["due_state"] = due_block
-            due_state_module.mark_emitted(due_block, vault_root=vault_root)
     except Exception:  # noqa: BLE001 — a due-state count never breaks a bootstrap
         log.debug("due-state projection unavailable for bootstrap", exc_info=True)
     compact_payload = _filter_bootstrap_payload(payload, active_descriptor)
@@ -2157,19 +2215,49 @@ def op_bootstrap(
         **{key: compact_payload[key] for key in first if key in compact_payload},
         **compact_payload,
     }
-    if session_unavailable is not None:
-        result = compact_payload | {"session_profile_unavailable": session_unavailable}
-    elif session_requested:
-        result = _session_bootstrap_projection(compact_payload)
+    if frozen_profile or profile != "compact":
+        core_payload = None
     else:
-        result = compact_payload
-    # After every projection, so the session profile's key whitelist cannot
-    # drop it: the client on a reduced surface is exactly the one with no other
-    # way to hear that its own recalls have gone slow. Absent when healthy, so a
-    # healthy bootstrap keeps today's shape on every profile.
+        core_payload = bootstrap_core_module.project_core(compact_payload)
+    # The calling client's own recall-latency breaches. The core carries only a pointer
+    # (the figures are bounded only by how many tools breach, and no turn needs them);
+    # they ride in the reference payload, so `diagnostics_reading` serves them and a session
+    # client, which has no other way to hear that its recalls went slow, gets them too.
     latency_block = _bootstrap_latency_block()
-    if latency_block is not None:
+    if latency_block is not None and core_payload is not None:
+        compact_payload = {**compact_payload, "latency": latency_block}
+        # The core carries the fact, not the figures: a client that has gone slow
+        # learns it and where the detail is, at no cost while the service is healthy.
+        core_payload["latency"] = bootstrap_core_module.LATENCY_POINTER
+    if section is not None:
+        result = bootstrap_core_module.section_payload(compact_payload, section)
+    elif session_unavailable is not None:
+        result = (core_payload or compact_payload) | {
+            "session_profile_unavailable": session_unavailable
+        }
+    elif session_requested:
+        result = (
+            bootstrap_core_module.project_session(compact_payload, core_payload)
+            if core_payload is not None
+            else _session_bootstrap_projection(compact_payload)
+        )
+    else:
+        result = core_payload if core_payload is not None else compact_payload
+    # A surface that serves no core (a released hosted profile, `full`, `diagnostics`)
+    # keeps today's shape: absent when healthy, appended after the projection so the
+    # session whitelist cannot drop it.
+    if latency_block is not None and core_payload is None:
         result["latency"] = latency_block
+    # A delivery is recording what was handed over. Without it the first recall of the
+    # session repeats the identical block, the nagging the governor exists to prevent;
+    # with it on a summary, the list is never delivered at all. So: only a response
+    # that carries the full block records it (a session, `all`, `epistemics`, `full`,
+    # `diagnostics` and the released profiles), never the core or another section.
+    if due_block is not None and result.get("due_state") == due_block:
+        try:
+            due_state_module.mark_emitted(due_block, vault_root=vault_root)
+        except Exception:  # noqa: BLE001 — a ledger write never breaks a bootstrap
+            log.debug("due-state emission not recorded for bootstrap", exc_info=True)
     return result
 
 
@@ -4371,8 +4459,26 @@ def op_edit(
                 relation_review_reason=relation_review_reason,
             )
         elif field is not None:
-            if field == "aliases":
-                _refuse_claimed_aliases(vault_root, path, value, identity_decision)
+            patch_fields: dict[str, Any] = {}
+
+            def _validate_names(before_source: str, after_source: str) -> None:
+                # Only the full rendered document determines root field names
+                # and scalar types; a fragment can belong to nested metadata.
+                before, _, _ = vault.parse_frontmatter(before_source)
+                after, _, _ = vault.parse_frontmatter(after_source, strict=True)
+                for name_field in ("aliases", working_set_index_module.LEARNED_ALIASES_FIELD):
+                    if name_field not in after:
+                        continue
+                    if name_field != field and before.get(name_field) == after[name_field]:
+                        continue
+                    patch_fields[name_field] = after[name_field]
+                    claimed_value = after[name_field]
+                    if name_field == working_set_index_module.LEARNED_ALIASES_FIELD:
+                        verdicts = _learned_alias_verdicts(vault_root, claimed_value)
+                        if verdicts is not None:
+                            claimed_value = list(verdicts[0])
+                    _refuse_claimed_aliases(vault_root, path, claimed_value, identity_decision)
+
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root,
                 path=path,
@@ -4386,6 +4492,7 @@ def op_edit(
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
                 relation_review_reason=relation_review_reason,
+                _validate_frontmatter=_validate_names,
             )
         else:
             result = edit_module.edit(
@@ -4417,7 +4524,12 @@ def op_edit(
         if getattr(e, "candidates", None):
             msg += f" (candidates: {e.candidates})"
         raise ValueError(msg) from e
-    return result.as_dict()
+    payload = result.as_dict()
+    if field is not None and working_set_index_module.LEARNED_ALIASES_FIELD in patch_fields:
+        _warn_on_skipped_learned_aliases(
+            vault_root, patch_fields[working_set_index_module.LEARNED_ALIASES_FIELD], payload
+        )
+    return payload
 
 
 def op_replace(
@@ -6213,12 +6325,26 @@ def op_activate_context(
     client: str | None = None,
     session: str | None = None,
     workspace: str | None = None,
+    conversation: dict[str, Any] | None = None,
 ) -> dict:
-    """Compile durable context for a raw conversational turn, without a query.
+    """Retrieve authorized stored context relevant to the user's current message.
 
-    Call this ONCE at the start of a substantive turn, before deciding what to
-    search for. Pass the user's words verbatim — this is not a search query and
-    must not be rewritten into one. It returns a bounded working-memory packet:
+    This read-only operation resolves the subjects in that message and returns
+    a bounded packet of relevant knowledge from the connected vault. The current
+    message is needed to resolve those subjects accurately; it is not a request
+    for additional personal information. Do not ask the user for unrelated data
+    or send full conversation history. Optional earlier excerpts are only for
+    resolving a reference the current message cannot identify on its own.
+
+    Retrieve initial context when the account's live engagement policy calls for
+    recall, including proactive recall without an explicit reference to prior work.
+    `bootstrap` reports those settings when they are unknown or have changed;
+    existing current settings can be reused. One call supplies the initial context
+    for the message before a more specific search is needed.
+    Pass the user's current turn verbatim — this is not a search query and
+    must not be rewritten into one. Do not send full conversation history;
+    optional context is limited to relevant earlier excerpts. It returns a bounded
+    working-memory packet:
     which durable anchors the turn is about (entities, resources, hubs, Records
     collections, active plans, projects), the context roles it filled, short
     provenance-bearing units, pointers to what did not fit the budget, and the
@@ -6257,6 +6383,14 @@ def op_activate_context(
     where that thread holds one page clearly ahead of the rest, it is carried
     as a single `partial` anchor with `generation.carried_by: "follow_up"`;
     where two are close, both are listed under `ambiguity` for `anchor`.
+
+    When needed, also pass `conversation` (optional): `focus` names subjects
+    and attachments; `refs` names read pages; `recent` includes only relevant
+    earlier `{role, text}` turns, never full history. Anchors report `origin`.
+    Bounds: the skill's engagement reference.
+
+    For a subject the hook missed, call again with `conversation.focus`; there
+    is no top-level `focus` parameter. Use `anchor` for an already known page.
 
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
@@ -6356,6 +6490,11 @@ def op_activate_context(
             Only a salted hash of it is stored. Omitting both keys, a turn
             that names nothing is answered from this conversation's
             `continuity` thread alone, never from other conversations' work.
+        conversation: Optional: `{focus?: str, recent?: [{role:
+            "user"|"assistant", text: str}], refs?: [str]}`. Send only relevant
+            earlier excerpts, never full history: at most six entries and
+            2,400 characters total. Focus is capped at 240 characters, refs at
+            twelve. Omit when the current turn suffices. Unknown fields are ignored.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
@@ -6423,6 +6562,7 @@ def op_activate_context(
     # all. `session` has one other reader, the upkeep carrier below, where it
     # names the caller whose session start may carry one upkeep item.
     started = time.perf_counter()
+    bounded = working_set_conversation_module.bound(conversation)
     # A foreground request: in-process bulk passes (a whole-vault graph
     # rebuild) pause at their next unit while this runs, instead of taking the
     # GIL back after every SQLite call the request makes (5-15x per stage,
@@ -6447,6 +6587,7 @@ def op_activate_context(
                 client=client,
                 session=session,
                 workspace=workspace,
+                conversation=bounded,
             )
             # After the guard and outside the packet cache, like `continuity`:
             # at a caller's session start, at most one upkeep item, and only in
@@ -6466,6 +6607,7 @@ def op_activate_context(
                 outcome="refused" if isinstance(error, ValueError) else "error",
                 error_code=type(error).__name__,
                 duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                conversation=bounded.counts,
             )
             raise
         finally:
@@ -6473,12 +6615,17 @@ def op_activate_context(
                 request_budget_module.reset_current(bound_token)
     _carry_thread_through_abstention(packet, continuity)
     _withhold_vault_generation(vault_root, packet, purpose=purpose)
+    # Every packet reports how its conversation was bounded; the compiler has
+    # already said `absent` when it skipped the stage for the request's budget.
+    if isinstance(packet.get("generation"), dict):
+        packet["generation"].setdefault("conversation", bounded.state)
     query_log.log_activation_call(
         vault_root,
         packet=packet,
         client=client,
         session=session,
         duration_ms=round((time.perf_counter() - started) * 1000, 3),
+        conversation=bounded.counts,
     )
     return packet
 
@@ -6542,6 +6689,7 @@ def _op_activate_context_body(
     client: str | None = None,
     session: str | None = None,
     workspace: str | None = None,
+    conversation: working_set_conversation_module.Conversation | None = None,
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
@@ -6914,6 +7062,7 @@ def _op_activate_context_body(
         freshness_snapshot=snapshot,
         lexical_seconds=lexical_seconds,
         attribution=attribution,
+        conversation=conversation,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —
@@ -7362,7 +7511,7 @@ def op_remember(
 def _refuse_claimed_aliases(
     vault_root: Path, path: str, value: object, identity_decision: dict | None = None
 ) -> None:
-    """Refuse an `aliases` patch naming what another page already answers to.
+    """Refuse an owner or learned alias naming what another page already answers to.
 
     The same guard `create-entity` runs (`entity_candidates.claimed_names`):
     an alias another page holds would make a turn naming it resolve both. The
@@ -7449,7 +7598,7 @@ def op_edit_memory(
             as `operation.validate_only`; giving it in both places is fine when
             they agree. Same meaning as on `remember` and `replace_memory`.
         identity_decision: `{outcome: "distinct", candidate_fingerprint}` for an
-            `aliases` patch naming a name another page already answers to, when
+            `aliases` or `learned_aliases` patch naming a name another page already answers to, when
             the name is genuinely shared; the fingerprint comes from that
             refusal. Not needed for names only withheld pages answer to.
 
@@ -7465,28 +7614,33 @@ def op_edit_memory(
     if validate_only:
         arguments["validate_only"] = True
     normalized = edit_operations_module.normalize_edit_arguments(arguments)
-    result = op_edit(vault_root, **normalized)
-    if normalized.get("field") == working_set_index_module.LEARNED_ALIASES_FIELD:
-        _warn_on_skipped_learned_aliases(vault_root, normalized.get("value"), result)
-    return result
+    return op_edit(vault_root, **normalized)
 
 
-def _warn_on_skipped_learned_aliases(vault_root: Path, value: Any, result: Any) -> None:
-    """Tell the agent now about a `learned_aliases` entry the activation index
-    will skip, with the index's own rules (`learned_alias_verdicts`). Never
-    blocks: the page write stands, the entry simply does nothing."""
-    if not isinstance(result, dict):
-        return
+def _learned_alias_verdicts(
+    vault_root: Path, value: Any
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]] | None:
+    """Use the index's admission rules for both claim checks and write advice."""
     try:
         conventions = activation_conventions_module.load_conventions(vault_root).conventions
-        _accepted, rejected = working_set_index_module.learned_alias_verdicts(
+        return working_set_index_module.learned_alias_verdicts(
             value,
             stopwords=conventions.stopwords,
             filler=activation_conventions_module.shipped_conventions().conventions.referential_filler,
         )
-    except Exception:  # noqa: BLE001 - advice about a write must never fail it
+    except Exception:  # noqa: BLE001 - unavailable advice cannot disable the claim guard
         log.debug("learned_aliases verdict unavailable", exc_info=True)
+        return None
+
+
+def _warn_on_skipped_learned_aliases(vault_root: Path, value: Any, result: Any) -> None:
+    """Tell the agent about entries the activation index skips without blocking."""
+    if not isinstance(result, dict):
         return
+    verdicts = _learned_alias_verdicts(vault_root, value)
+    if verdicts is None:
+        return
+    _accepted, rejected = verdicts
     if not rejected:
         return
     warnings = result.get("warnings")
@@ -7988,8 +8142,9 @@ def op_episode_memory(
 ) -> dict:
     """Record what a conversation worked on, decided and left open, for the next session on any client.
 
-    Call `record` once when a conversation reaches a decision or a stopping
-    point, and skip it when nothing durable happened. You write the recap:
+    Get or reuse `bootstrap` live policy first. Call `record` only when requested
+    or the live proactive_capture disposition permits it, once at a decision
+    or stopping point. Skip it when nothing durable happened. You write the recap:
     short one-line items, never a transcript. It is kept as a bounded Source
     under `Sources/Episodes/`, and the newest recap of each conversation leads
     the `recent_context` block `activate_context` serves on every client.
@@ -8682,6 +8837,10 @@ def op_read_media(
     )
 
 
+def _review_question_submission(path: Any, query: Any, family: Any) -> bool:
+    return path is not None or bool(query) or family is not None
+
+
 def op_review_memory(
     vault_root: Path,
     mode: str = "attention",
@@ -8704,7 +8863,9 @@ def op_review_memory(
     """Review memory health, provenance, drift, or source backlog.
 
     Default mode is read-only attention review. Write-capable repairs are in
-    `maintain_memory`, not here.
+    `maintain_memory`, not here. Vocabulary mode with `path`, `query` and
+    `family` saves a meaning question in review state. That submission requires
+    write access, but grants no permission to change a page or vocabulary.
 
     `mode="audit", categories=["unresolved_source_citation"]` finds compiled
     pages whose explicit sources do not resolve to authorized governed Source
@@ -8790,7 +8951,7 @@ def op_review_memory(
         requested page.
     """
     if mode == "vocabulary":
-        question_submission = path is not None or bool(query) or family is not None
+        question_submission = _review_question_submission(path, query, family)
         unrelated = any(
             item is not None
             for item in (categories, sources, suggested_title, tag, key, value)
@@ -12433,6 +12594,10 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             return kwargs.get("dry_run") is True
         if adapter == "apply-conditional":
             return kwargs.get("apply") is not True
+        if adapter == "question-conditional":
+            return not _review_question_submission(
+                kwargs.get("path"), kwargs.get("query", ""), kwargs.get("family")
+            )
         return adapter != "mutation"
     if command.name == "edit_memory":
         if kwargs.get("validate_only") is True:
@@ -12943,7 +13108,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "review_memory",
         op_review_memory,
         1,
-        False,
+        True,
         False,
         None,
         _MCRC,
@@ -13116,7 +13281,10 @@ def _build_product_commands() -> tuple[Command, ...]:
     cmds: list[Command] = []
     for name, leaf, tier, writes, needs_schema, positional, surfaces, routes, meta in _PRODUCT_SPEC:
         skip = 2 if needs_schema else 1
-        desc = leaf.__doc__ or ""
+        # Python 3.13 dedents compiled docstrings; older supported interpreters
+        # retain their source indentation. Normalize before inserting a line so
+        # every renderer and runtime publishes the same tool contract.
+        desc = inspect.cleandoc(leaf.__doc__ or "")
         params = _derive_params(leaf, skip=skip, positional=positional)
         response_detail = "full" if name == "govern_memory" else "compact" if writes else None
         if name == "edit_memory":
@@ -13211,6 +13379,15 @@ def _build_product_commands() -> tuple[Command, ...]:
                 )
                 for param in params
             )
+        # Keep the reference in the description, before any Args/Returns
+        # sections that MCP's docstring parser consumes as schema metadata.
+        introduction, separator, details = desc.partition("\n\n")
+        desc = (
+            introduction.rstrip()
+            + "\n\n    API reference: "
+            "https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md"
+            + (separator + details if separator else "\n")
+        )
         cmds.append(
             Command(
                 name=name,
@@ -13779,19 +13956,31 @@ def apply_legacy_profile_pin(
     if contract is None and current == names:
         return command
     if contract is not None:
-        expected_annotations = {
-            "title": command.name.replace("_", " ").title(),
-            "readOnlyHint": command.read_only,
-            "destructiveHint": False if command.read_only else command.name in DESTRUCTIVE_OPS,
-            "idempotentHint": command.read_only,
-            "openWorldHint": True,
-        }
-        if dict(contract.annotations) != expected_annotations:
-            raise RuntimeError(f"{command.name}: pinned MCP annotations changed")
-        published = {str(param["name"]): param for param in contract.params}
         properties = contract.input_schema.get("properties")
         if not isinstance(properties, Mapping):
             raise RuntimeError(f"{command.name}: pinned input schema has no properties")
+        if command.name == "review_memory":
+            historical_modes = next(
+                (
+                    _legacy_param(param, properties["mode"]).choices
+                    for param in contract.params if param["name"] == "mode"
+                ),
+                (),
+            )
+            # The published wrapper enforces these finite modes and rejects
+            # extra arguments. It cannot reach question submission, unlike
+            # the current write-capable tool. Never relax the general pin guard.
+            if (
+                historical_modes
+                and "vocabulary" not in historical_modes
+                and "family" not in keep
+            ):
+                command = dataclass_replace(command, cli_writes=False, response_detail=None)
+        # Historical metadata is fixed by its published descriptor, not today's
+        # hint classification. A changed write capability still breaks the pin.
+        if contract.annotations.get("readOnlyHint") is not command.read_only:
+            raise RuntimeError(f"{command.name}: pinned read-only classification changed")
+        published = {str(param["name"]): param for param in contract.params}
         params = tuple(
             _legacy_param(published[param.name], properties[param.name])
             for param in command.params
@@ -13804,6 +13993,7 @@ def apply_legacy_profile_pin(
         leaf=_pinned_legacy_leaf(command, keep, contract),
         params=params,
         description=contract.description if contract is not None else command.description,
+        mcp_annotation_pin=contract.annotations if contract is not None else command.mcp_annotation_pin,
     )
 
 

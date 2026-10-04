@@ -1,7 +1,7 @@
 # release-gate Specification
 
 ## Purpose
-TBD - created by archiving change add-release-gate. Update Purpose after archive.
+Define the release plane that decides, per item and audience, how much content a read may disclose along an ordered ladder from none to full. It covers fail-closed audience resolution, single-use content-bound escalation tokens, a terminal secret scrubber on every surface, and release decisions over derived structures, errors, counts, provenance and write targets.
 
 ## Requirements
 

@@ -1305,6 +1305,46 @@ def test_hosted_registered_stop_fails_closed_before_lifecycle_deadline(
     assert drain._ACTIVE.get(drain._key(vault)) is None
 
 
+def test_pending_dispatch_keeps_custody_without_completion_or_failure(vault: Path) -> None:
+    protocol = _protocol()
+    drain = _drain()
+    receipt, target, _before, after = _prepare_one(vault, now=0.0)
+    _commit_and_prove(vault, receipt, target, after)
+
+    assert drain.drain_once(
+        vault,
+        dispatch=lambda _root, _status: "pending",
+        observe_current_generation=lambda _root: "generation-1",
+        limit=1,
+        now=10.0,
+    ) == 0
+    pending = protocol.component_status(
+        vault, receipt, protocol.DerivedComponent.LEXSTORE
+    )
+    assert pending.state != "completed"
+    assert pending.attempt_count == 0
+    assert pending.failure_code is None
+    assert pending.claim_owner is None
+    from exomem import index_sync
+
+    snapshot = index_sync.derived_acknowledgement_snapshot(
+        protocol.component_status(vault, receipt, component)
+        for component in protocol.DerivedComponent
+    )
+    assert snapshot.derived_sync == "pending"
+    assert protocol.claim_ready_components(
+        vault, owner="later", limit=1, lease_seconds=10.0, now=10.0
+    ) == ()
+    [claimed] = protocol.claim_ready_components(
+        vault, owner="later", limit=1, lease_seconds=10.0, now=11.0
+    )
+    assert claimed.revision == pending.revision
+    assert claimed.lease_revision > pending.lease_revision
+    assert protocol.complete_component(
+        vault, claimed, current_generation="generation-1", now=11.0
+    )
+
+
 def test_failed_component_rotates_behind_ready_work(vault: Path) -> None:
     protocol = _protocol()
     drain = _drain()

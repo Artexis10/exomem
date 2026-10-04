@@ -235,6 +235,8 @@ def test_upgrade_result_carries_a_hook_refresh_report_without_failing(tmp_path: 
         "skipped": False,
         "reason": None,
         "profiles": [],
+        "refreshed_profiles": 0,
+        "skipped_profiles": 0,
         "success": True,
     }
 

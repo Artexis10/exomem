@@ -38,8 +38,15 @@ def _model_residency() -> dict[str, Any]:
     policy = {
         "preload_policy": mode.preload_models(),
         "reap_when_idle": mode.reap_models_when_idle(),
+        "core_pinned_policy": mode.service_profile_enabled(),
     }
     embeddings = sys.modules.get("exomem.embeddings")
+    from . import readiness
+
+    policy["core_ready"] = (
+        embeddings is not None and getattr(embeddings, "_MODEL", None) is not None
+        and readiness.is_ready("embeddings")
+    )
     if embeddings is None:
         return {
             "module_loaded": False,
@@ -151,6 +158,8 @@ def asr_runtime_status() -> dict[str, Any]:
         effective = f"bounded CPU {raw_compute or 'int8'}; CUDA is explicitly disabled"
     elif raw_device == "cuda":
         effective = f"CUDA {raw_compute or 'float16'} required; no CPU fallback after refusal or runtime failure"
+    elif mode.service_profile_enabled():
+        effective = f"bounded CPU {raw_compute or 'int8'} (managed Cloud policy)"
     elif resolved_mode == "quiet":
         effective = f"bounded CPU {raw_compute or 'int8'} (quiet automatic policy)"
     elif raw_compute:

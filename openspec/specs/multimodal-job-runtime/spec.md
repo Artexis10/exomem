@@ -1,7 +1,7 @@
 # multimodal-job-runtime Specification
 
 ## Purpose
-TBD - created by archiving change add-resource-bounded-multimodal-workers. Update Purpose after archive.
+Define how multimodal extraction runs: capabilities are on by default without startup model residency, every operation is a durable idempotent job in a rebuildable SQLite ledger, and heavy work runs in one serialized disposable worker per vault. Job status is observable without loading heavy models, and captioning and diarization stay opt-in.
 
 ## Requirements
 

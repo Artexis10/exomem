@@ -165,6 +165,26 @@ An explicit operator transition to a different store identity SHALL use the curr
 
 Each live store SHALL carry an instance identity and lineage. Replica publication SHALL be check-then-swap against the last replica this instance published. Any foreign replica or foreign view stamp SHALL set the divergence state immediately. A service on a copied or moved vault with no local store SHALL adopt the replica as a new lineage entry and be writable. It SHALL refuse collection writes with a divergence error, while serving reads and knowledge writes, when the local store holds transactions the replica lacks. A preview-first operator reconciliation SHALL turn every item changed by the divergent store after the fork point into a held view correction on the surviving store, so divergence never silently loses a write. Running more than one collection writer on one vault without the multi-host writer lease SHALL be explicitly unsupported, and `describe` and the doctor probe SHALL say so. Restore SHALL validate integrity, schema version and store identity, and SHALL surface any difference between the restored rows and existing views as held view corrections rather than overwriting either.
 
+Before admission, a token-bound bootstrap state SHALL preserve the actual acquisition head and prevent ordinary checkout, head replacement and successful release until that evidence is reconciled with the validated local chain and initial publication is durable. Capability-bearing renewal MAY omit the head during this bounded recovery. A dark recovery producer SHALL validate the complete physical manifest and only its exact optional collection-store descriptor without advertising ordinary runtime support.
+
+Mixed-authority marker installation SHALL be durable and no-clobber when absent. Replacement SHALL require established custody of the marker namespace in addition to validating its exact preimage; ordinary atomic replacement alone SHALL NOT count as compare-and-swap against incoming synchronization. Replacement SHALL NOT expose a missing-marker file-authority window. Unsupported custody SHALL preserve the existing routing and pending create. After intent cleanup, projection effects SHALL still require current marker membership, and exact create replay SHALL recheck current governance and the immutable transaction's presence in the current chain without a new business transaction.
+
+#### Scenario: Bootstrap renewal preserves unreconciled acquisition evidence
+- **WHEN** a local create/recovery runtime is attached before its acquired head and durable publication have been reconciled
+- **THEN** lease renewal can continue without reporting a head, ordinary checkout remains unavailable and neither background renewal nor ordinary release replaces the retained coordinator evidence
+
+#### Scenario: Dark restart after descriptor enrollment
+- **WHEN** creation is interrupted after enrolling the optional descriptor and before marker cutover
+- **THEN** a fresh isolated producer validates the complete manifest and exact recovery binding and resumes the same intent without advertising global store support or allowing ordinary startup
+
+#### Scenario: Marker replacement without namespace custody
+- **WHEN** a later create cannot establish exclusive marker-namespace custody
+- **THEN** it leaves the existing marker and pending intent intact and reports pending creation rather than clobbering a concurrent mapping or exposing file authority
+
+#### Scenario: Create retry after intent cleanup retains governed admission
+- **WHEN** an exact create request is retried after its intent was cleared
+- **THEN** current authorization and marker membership guard return of its immutable receipt, no new business transaction is written, and later loss of membership still prevents projection effects
+
 #### Scenario: Backup of the vault is consistent
 - **WHEN** restic or a vault copy captures the vault while agents are writing
 - **THEN** the captured replica opens, passes `integrity_check`, and reflects a committed state

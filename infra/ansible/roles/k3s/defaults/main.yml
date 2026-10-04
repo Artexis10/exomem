@@ -2,6 +2,8 @@
 k3s_version: "v1.35.6+k3s1"
 k3s_sha256_amd64: 2b52a2c1ca6eb502e2a0ffa1a4cf79eef94875926577c1e43347ed292cc92432
 k3s_release_url_amd64: https://github.com/k3s-io/k3s/releases/download/v1.35.6%2Bk3s1/k3s
+# Node-wide opt-in, independently adopted from any cell image rollout.
+k3s_memory_qos_enabled: false
 k3s_private_interface: ""
 k3s_server_token: ""
 k3s_etcd_s3_endpoint: ""
@@ -21,6 +23,7 @@ k3s_service_name: "{{ 'k3s-agent' if k3s_node_role == 'agent' else 'k3s' }}"
 # is inventoried; see tasks/validate.yml.
 k3s_agent_token: ""
 k3s_agent_node_label: exomem.io/node-pool=agent
+k3s_agent_dedicated_cell: ""
 
 # A join completes only once the node's CSINode publishes an attachment
 # limit for this driver: that count is what cellctl turns into cell_slots.

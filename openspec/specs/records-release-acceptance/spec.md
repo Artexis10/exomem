@@ -1,7 +1,7 @@
 # records-release-acceptance Specification
 
 ## Purpose
-TBD - created by archiving change make-records-first-class-and-recoverable. Update Purpose after archive.
+Require deterministic installed-wheel proof for every pull request that changes Records surfaces, and disposable live HTTP/OAuth MCP evidence before promoting a changed Records surface as connector-registered. The live acceptance runs fixed natural-language cases through Codex and Claude Code, and graph-rebuild evidence cannot invalidate it.
 ## Requirements
 ### Requirement: Records changes carry deterministic installed-wheel proof
 

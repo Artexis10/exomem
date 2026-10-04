@@ -42,3 +42,16 @@ run "one_variable_entry_adds_one_agent_in_the_fleet_location" {
   }
 }
 
+
+run "dedicated_reservation_survives_root_output" {
+  command = plan
+  variables {
+    k3s_agent_nodes = {
+      "owner" = { private_ip = "10.50.1.31", server_type = "cx33", dedicated_cell_id = "aaaaaaaaaaaaaaaa" }
+    }
+  }
+  assert {
+    condition     = output.k3s_agent_nodes["owner"].dedicated_cell_id == "aaaaaaaaaaaaaaaa"
+    error_message = "The root must preserve the host reservation for inventory generation."
+  }
+}

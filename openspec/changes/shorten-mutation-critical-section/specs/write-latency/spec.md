@@ -242,3 +242,51 @@ immediate refusal.
 - **WHEN** a capture retries on the server and then commits
 - **THEN** `exomem_mutation_busy_total` does not increase
 - **AND** the one refusal that does reach a client increases it once
+
+### Requirement: Availability Republication Prepares Outside Canonical Authority
+
+A graph availability repair SHALL run full source parsing and resolver topology
+proof outside the canonical mutation boundary. Under authority it SHALL replay
+exact source-byte and membership seals and validate its captured graph epoch,
+recall publication, configuration, live database/WAL identity and metadata.
+An invalidated or unreadable preparation SHALL decline without publishing or
+advancing graph-sync acknowledgement. The final seal MAY read source bytes and
+enumerate memberships, but MUST NOT reparse pages or reconstruct topology.
+
+#### Scenario: Slow availability preparation admits a canonical writer
+
+- **WHEN** the source/topology proof is paused before acquiring authority
+- **THEN** an unrelated canonical writer can acquire the mutation boundary
+- **AND** its commit invalidates the older prepared availability publication
+
+#### Scenario: A direct edit or derived-store change invalidates the seal
+
+- **WHEN** source bytes, policy, registry configuration or the live database/WAL
+  changes after source proof and before publication
+- **THEN** the availability repair declines without publishing its prepared marker
+- **AND** same-sized source edits with restored timestamps are checked by bytes
+
+### Requirement: Post-Commit Graph Receipts Use Their Dispatch Identity
+
+Graph handoff and index-completion checks SHALL validate the checkpoint named
+by their own dispatch result rather than rereading a later canonical checkpoint.
+Completed outcomes require covering acknowledgement; registered outcomes require
+their exact flight or covering acknowledgement. Deferred acceptance SHALL retain
+its durable claiming-code, affected-path and dispatch-generation coverage checks.
+A missing registered/deferred identity MUST fail closed without attributing its
+failure to a different writer. Public report fields remain unchanged, and graph
+read availability MUST still require proof for the current canonical checkpoint.
+
+#### Scenario: A later writer advances the epoch before receipt assembly
+
+- **WHEN** writer A's graph result is complete, registered or durably deferred
+- **AND** writer B advances the canonical graph checkpoint before A's final check
+- **THEN** A's receipt is validated against A's dispatch checkpoint
+- **AND** B's outstanding work does not falsely turn A into a missing handoff
+
+#### Scenario: A claimed flight or durable receipt is absent
+
+- **WHEN** the dispatch identity or its claimed flight is missing, or a deferred
+  batch lacks generation-current receipts covering every affected graph path
+- **THEN** the index report remains incomplete and durable batch repair is kept
+- **AND** a newer global checkpoint cannot substitute for the missing evidence

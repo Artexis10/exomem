@@ -253,6 +253,39 @@ def test_a_queued_repair_never_excuses_a_flight_that_was_never_registered(
     assert graph_sync.repair_is_provisioned(root, required, outcome="registered") is False
 
 
+def test_a_drain_finishing_during_handoff_check_counts_as_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Published acknowledgement must replace the queue proof it just consumed."""
+    from exomem import deferred_index
+
+    root = _kb(tmp_path)
+    required = _install_epoch(root, floor=3, checkpoint=3)
+    sidecar = _sidecar_with_meta(root)
+    paths = [path for path, _digest in required.paths]
+    deferred_index.add_graph(root, paths, generation=required.generation)
+    list_paths = deferred_index.list_graph_paths
+
+    def finish_drain(vault_root):
+        with contextlib.closing(sqlite3.connect(sidecar)) as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                [
+                    ("graph_sync_generation", str(required.generation)),
+                    ("graph_sync_digest", required.checkpoint_sha256),
+                    ("graph_sync_checkpoint", required.render()),
+                ],
+            )
+            conn.commit()
+        deferred_index.clear_graph(root, paths)
+        return list_paths(vault_root)
+
+    monkeypatch.setattr(deferred_index, "list_graph_paths", finish_drain)
+    assert graph_sync.repair_is_provisioned(root, required, outcome="deferred")
+    assert graph_sync.acknowledged_checkpoint(root).covers(required)
+    assert list_paths(root) == []
+
+
 def test_a_pending_full_rebuild_marker_also_provisions_the_handoff(tmp_path: Path) -> None:
     """A batch too large to enumerate queues a marker instead of paths."""
     from exomem import deferred_index

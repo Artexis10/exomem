@@ -7,6 +7,7 @@ import json
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
 
+import pytest
 from kubernetes.client.rest import ApiException
 
 from cellctl.k8s_client import CELL_LABEL, ClusterClient
@@ -242,6 +243,9 @@ class _StorageWithNullDrivers:
 
 
 class _CoreWithoutVolumes:
+    def list_node(self):
+        return NS(items=[])
+
     def list_persistent_volume(self):
         return NS(items=[])
 
@@ -249,6 +253,10 @@ class _CoreWithoutVolumes:
 def test_capacity_inputs_read_a_csinode_whose_drivers_are_null() -> None:
     client = ClusterClient.__new__(ClusterClient)
     client._core = _CoreWithoutVolumes()
+    client._core.list_node = lambda: NS(items=[
+        NS(metadata=NS(name=name, labels={}), spec=NS(taints=[]))
+        for name in ("k3s-node", "hetzner-node")
+    ])
     client._storage = _StorageWithNullDrivers(
         [
             {"metadata": {"name": "k3s-node"}, "spec": {"drivers": None}},
@@ -259,8 +267,9 @@ def test_capacity_inputs_read_a_csinode_whose_drivers_are_null() -> None:
         ]
     )
 
-    allocatable, attachments_used, non_cell = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
+    allocatable, attachments_used, non_cell, reserved_nodes = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
 
+    assert reserved_nodes == set()
     assert allocatable == {"k3s-node": None, "hetzner-node": 16}
     assert attachments_used == {} and non_cell == {}
 
@@ -439,3 +448,55 @@ def test_the_isolation_self_check_requires_a_param_ref_to_default_deny_in_the_re
     assert present(NS(**{**good, "name": "something-else"})) is False
     assert present(NS(**{**good, "namespace": "exomem-cloud"})) is False
     assert present(NS(**{**good, "name": None, "selector": NS(match_labels={})})) is False
+
+
+@pytest.mark.parametrize("labels,taints", [
+    ({"exomem.io/dedicated-cell": "aaaaaaaaaaaaaaaa"}, []),
+    ({}, [NS(key="exomem.io/dedicated-cell", value="aaaaaaaaaaaaaaaa", effect="NoSchedule")]),
+])
+def test_capacity_reads_reservation_without_hiding_attached_volumes(labels, taints) -> None:
+    client = ClusterClient.__new__(ClusterClient)
+    client._core = _CoreWithoutVolumes()
+    client._core.list_node = lambda: NS(items=[NS(metadata=NS(name="reserved", labels=labels),
+                                                spec=NS(taints=taints))])
+    client._storage = _StorageWithNullDrivers([
+        {"metadata": {"name": "reserved"}, "spec": {"drivers": [
+            {"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}])
+    client._storage.list_volume_attachment = lambda: NS(items=[NS(
+        spec=NS(attacher="csi.hetzner.cloud", node_name="reserved", source=NS(persistent_volume_name="pv")),
+        status=NS(attached=True))])
+    inputs = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
+    assert inputs[:3] == ({"reserved": 16}, {"reserved": 1}, {"reserved": 1})
+    assert len(inputs) == 4 and inputs[3] == {"reserved"}
+
+
+@pytest.mark.parametrize("appears", [True, False])
+def test_capacity_does_not_admit_a_node_missing_from_its_observation(appears) -> None:
+    """A joining reserved node must not briefly become general admission capacity."""
+    client = ClusterClient.__new__(ClusterClient)
+    client._core = _CoreWithoutVolumes()
+    registered = []
+    client._core.list_node = lambda: NS(items=list(registered))
+    client._storage = _StorageWithNullDrivers([])
+
+    def observe_csi(**kwargs):
+        if appears:
+            registered.append(NS(metadata=NS(name="joining", labels={"exomem.io/dedicated-cell": "aaaaaaaaaaaaaaaa"}), spec=NS(taints=[])))
+        return NS(data=json.dumps({"items": [{"metadata": {"name": "joining"}, "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}]}).encode())
+
+    client._storage.list_csi_node = observe_csi
+    inputs = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
+    assert "joining" in inputs[3]
+
+
+def test_capacity_excludes_an_unobserved_attachment_only_node() -> None:
+    """Fallback attachment limits must not bypass the node reservation proof."""
+    client = ClusterClient.__new__(ClusterClient)
+    client._core = _CoreWithoutVolumes()
+    client._storage = _StorageWithNullDrivers([])
+    client._storage.list_volume_attachment = lambda: NS(items=[NS(
+        spec=NS(attacher="csi.hetzner.cloud", node_name="joining", source=NS(persistent_volume_name="pv")),
+        status=NS(attached=True))])
+    inputs = client.capacity_inputs(csi_driver="csi.hetzner.cloud")
+    assert inputs[1] == {"joining": 1}
+    assert inputs[3] == {"joining"}

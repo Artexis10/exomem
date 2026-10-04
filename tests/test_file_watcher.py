@@ -2354,3 +2354,101 @@ def test_incoherent_startup_short_circuits_before_the_source_proof(
         "durable incoherence must short-circuit ahead of the O(corpus) source proof; "
         f"observed call order: {events}"
     )
+
+
+@pytest.mark.parametrize("stop_at", ["row", "publication", "replacement"])
+def test_stopping_startup_graph_rebuild_retains_debt_and_releases_owner(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, stop_at: str
+) -> None:
+    """Shutdown stops private row work without publishing or losing recovery."""
+    from exomem import graph_sync
+
+    for i in range(3):
+        path = vault / "Knowledge Base" / "Notes" / f"cancel-{i}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# Before {i}\n", encoding="utf-8")
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    graph.suspend_reads()
+    deferred_index.mark_graph_full_rebuild(vault, generation=1)
+    watcher = file_watcher.FileWatcher(vault)
+    monkeypatch.setattr(watcher, "_await_admissible_graph", lambda _graph: False)
+    indexed = []
+    real_index = epistemic_graph.EpistemicGraphIndex._index_path
+
+    def stop_after_one(self, conn, path, **kwargs):
+        result = real_index(self, conn, path, **kwargs)
+        indexed.append(path)
+        if stop_at == "row":
+            watcher.stop()
+        return result
+
+    real_before_publish = epistemic_graph.EpistemicGraphIndex._before_publish_replacement
+
+    def stop_before_publish(self, temporary, live):
+        hold = real_before_publish(self, temporary, live)
+        watcher.stop()
+        return hold
+
+    if stop_at == "publication":
+        monkeypatch.setattr(
+            epistemic_graph.EpistemicGraphIndex, "_before_publish_replacement", stop_before_publish
+        )
+    if stop_at == "replacement":
+        real_replace = graph_sync.replace_sidecar
+
+        def stop_during_replacement(*args, **kwargs):
+            watcher.stop()
+            return real_replace(*args, **kwargs)
+
+        monkeypatch.setattr(graph_sync, "replace_sidecar", stop_during_replacement)
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "_index_path", stop_after_one)
+    monkeypatch.setattr(
+        file_watcher.index_sync, "drain_deferred_work",
+        lambda *_a, **_k: pytest.fail("shutdown entered a new deferred drain"),
+    )
+    watcher.finish_startup_recovery()
+
+    assert len(indexed) == 1 if stop_at == "row" else len(indexed) >= 3
+    assert graph.available() is (stop_at == "replacement")
+    assert bool(deferred_index.graph_full_rebuild_pending(vault)) is (stop_at != "replacement")
+    assert not freshness.external_pending(vault)
+    assert not list(graph.path.parent.glob(".graph-rebuild-*.sqlite*"))
+    temporary = graph.path.with_name("cancel-owner-check.sqlite")
+    assert graph_sync.claim_rebuild_owner(vault, temporary)
+    graph_sync.release_rebuild_owner(vault, temporary)
+
+
+@pytest.mark.parametrize("retry_phase", ["admission", "withdrawal"])
+def test_startup_boundary_retries_observe_owned_stop(vault, monkeypatch, retry_phase):
+    """A held mutation boundary must not spend another retry budget after stop."""
+    from types import SimpleNamespace
+
+    from exomem import foreground_priority
+    from exomem.cli_ops import OpError
+
+    watcher = file_watcher.FileWatcher(vault)
+    sleeps = []
+
+    def stop_on_wait(_seconds):
+        sleeps.append(_seconds)
+        assert len(sleeps) == 1, "shutdown entered another boundary retry"
+        watcher._stop.set()
+        return True
+
+    def busy():
+        raise OpError("MUTATION_BUSY", "held", details={"status": "retryable"})
+
+    graph = SimpleNamespace(
+        durable_checkpoint_is_coherent=lambda: False,
+        _mutation_coordinator=SimpleNamespace(snapshot=lambda: {"state": "held"}),
+        suspend_reads=busy,
+    )
+    monkeypatch.setattr(file_watcher.time, "sleep", stop_on_wait)
+    monkeypatch.setattr(watcher._stop, "wait", stop_on_wait)
+    with foreground_priority.bulk(stop=watcher._stop):
+        with pytest.raises(foreground_priority.BulkCancelled):
+            if retry_phase == "admission":
+                watcher._await_admissible_graph(graph)
+            else:
+                watcher._suspend_reads_within_budget(graph, context="startup", exhausted="pending")

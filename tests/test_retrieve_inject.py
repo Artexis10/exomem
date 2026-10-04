@@ -896,7 +896,10 @@ def test_log_records_lane_and_hit_count_without_the_key(
     _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "e2e-log-lane"}, home)
 
     log = (home / ".claude" / "exomem-retrieve-nudge.log").read_text(encoding="utf-8")
-    assert "nudge fired | lane=rest hits=1 |" in log
+    assert log.endswith(" nudge fired | lane=rest hits=1\n")
+    assert PROMPT not in log
+    assert "kb hook design" not in log
+    assert "Notes/a.md" not in log
     assert "secret-key-value" not in log
 
 
@@ -906,12 +909,20 @@ def test_log_records_the_reminder_only_floor(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
-    monkeypatch.setattr(hook_mod.shutil, "which", lambda name: None)
+    real_which = hook_mod.shutil.which
+
+    def without_cli(name, mode=os.F_OK | os.X_OK, path=None):
+        return None if name in {"exomem", "kb"} else real_which(name, mode=mode, path=path)
+
+    monkeypatch.setattr(hook_mod.shutil, "which", without_cli)
 
     _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "e2e-log-floor"}, home)
 
     log = (home / ".claude" / "exomem-retrieve-nudge.log").read_text(encoding="utf-8")
-    assert "nudge fired | lane=none hits=0 |" in log
+    assert log.endswith(" nudge fired | lane=none hits=0\n")
+    assert PROMPT not in log
+    assert "kb hook design" not in log
+    assert "secret-key-value" not in log
 
 
 def test_log_records_inject_off(
@@ -923,7 +934,10 @@ def test_log_records_inject_off(
     _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "e2e-log-off"}, home)
 
     log = (home / ".claude" / "exomem-retrieve-nudge.log").read_text(encoding="utf-8")
-    assert "nudge fired | lane=off hits=0 |" in log
+    assert log.endswith(" nudge fired | lane=off hits=0\n")
+    assert PROMPT not in log
+    assert "kb hook design" not in log
+    assert "secret-key-value" not in log
 
 
 # --- end-to-end main() wiring ------------------------------------------------------
