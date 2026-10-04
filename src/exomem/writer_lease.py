@@ -1804,6 +1804,95 @@ def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+COLLECTION_STORE_CAPABILITY = "collections-store-v1"
+
+
+def _collection_store_uuid(value: object) -> str:
+    if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+        raise ValueError("collection store identity must be a canonical UUID")
+    return value
+
+
+@dataclass(frozen=True)
+class CollectionStoreHead:
+    store_id: str
+    instance_id: str
+    commit_seq: int
+    head_hash: str | None
+
+    def __post_init__(self) -> None:
+        _collection_store_uuid(self.store_id)
+        _collection_store_uuid(self.instance_id)
+        if type(self.commit_seq) is not int or not 0 <= self.commit_seq <= 2**63 - 1:
+            raise ValueError("collection store sequence must be a nonnegative SQLite integer")
+        if self.commit_seq == 0:
+            if self.head_hash is not None:
+                raise ValueError("collection store genesis hash must be null")
+        elif (
+            not isinstance(self.head_hash, str)
+            or re.fullmatch("[0-9a-f]{64}", self.head_hash) is None
+        ):
+            raise ValueError("collection store head hash must be lowercase 64-hex")
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> CollectionStoreHead:
+        if not isinstance(data, Mapping) or set(data) != {
+            "store_id",
+            "instance_id",
+            "commit_seq",
+            "head_hash",
+        }:
+            raise ValueError("collection store head fields are invalid")
+        return cls(**data)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "store_id": self.store_id,
+            "instance_id": self.instance_id,
+            "commit_seq": self.commit_seq,
+            "head_hash": self.head_hash,
+        }
+
+
+@dataclass(frozen=True)
+class CollectionStoreFenceState:
+    capability: str
+    enrolled: bool
+    store_id: str | None
+    generation: int
+
+    def __post_init__(self) -> None:
+        if self.capability != COLLECTION_STORE_CAPABILITY or type(self.enrolled) is not bool:
+            raise ValueError("collection store fence capability or enrollment is invalid")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("collection store fence generation is invalid")
+        if self.enrolled:
+            _collection_store_uuid(self.store_id)
+            if self.generation < 1:
+                raise ValueError("collection store fence generation is invalid")
+        elif self.store_id is not None or self.generation != 0:
+            raise ValueError("collection store fence metadata is inconsistent")
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> CollectionStoreFenceState:
+        if not isinstance(data, Mapping) or set(data) != {
+            "capability",
+            "enrolled",
+            "store_id",
+            "generation",
+        }:
+            raise ValueError("collection store fence response fields are invalid")
+        return cls(**data)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "capability": self.capability,
+            "enrolled": self.enrolled,
+            "store_id": self.store_id,
+            "generation": self.generation,
+        }
+
+
 @dataclass(frozen=True)
 class LeaseRecord:
     holder: str | None
@@ -1813,6 +1902,9 @@ class LeaseRecord:
     required_schema_version: int | None = None
     schema_fence_generation: int | None = None
     governance_enrolled: bool = False
+    required_collection_store_capability: str | None = None
+    collection_store_fence_generation: int | None = None
+    collection_store_head: CollectionStoreHead | None = None
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> LeaseRecord:
@@ -1846,6 +1938,24 @@ class LeaseRecord:
         has_fence = required_schema is not None and fence_generation is not None
         if enrolled != has_fence:
             raise ValueError("schema fence metadata is inconsistent")
+        store_fields = {
+            "required_collection_store_capability",
+            "collection_store_fence_generation",
+            "collection_store_head",
+        }
+        store_capability = data.get("required_collection_store_capability")
+        store_generation = data.get("collection_store_fence_generation")
+        store_head = data.get("collection_store_head")
+        if store_fields.intersection(data):
+            if (
+                not store_fields.issubset(data)
+                or store_capability != COLLECTION_STORE_CAPABILITY
+                or type(store_generation) is not int
+                or store_generation < 1
+            ):
+                raise ValueError("collection store fence metadata is inconsistent")
+            if store_head is not None:
+                store_head = CollectionStoreHead.from_json(store_head)
         return cls(
             holder,
             float(expires) if expires is not None else None,
@@ -1854,6 +1964,9 @@ class LeaseRecord:
             required_schema,
             fence_generation,
             enrolled,
+            store_capability,
+            store_generation,
+            store_head,
         )
 
 
@@ -2005,33 +2118,54 @@ class LeaseCoordinatorClient:
             raise ValueError("coordinator client requires enabled configuration")
         self.config = config
 
-    def acquire(self) -> LeaseRecord:
-        return self._request(
-            "POST",
-            "acquire",
-            {
-                "replica_id": self.config.replica_id,
-                "ttl_seconds": self.config.ttl_seconds,
-                "schema_version": self.config.schema_version,
-            },
-        )
+    def acquire(self, *, collection_store_capability: str | None = None) -> LeaseRecord:
+        body = {
+            "replica_id": self.config.replica_id,
+            "ttl_seconds": self.config.ttl_seconds,
+            "schema_version": self.config.schema_version,
+        }
+        if collection_store_capability is not None:
+            body["collection_store_capability"] = collection_store_capability
+        return self._request("POST", "acquire", body)
 
-    def renew(self, fencing_token: int) -> LeaseRecord:
-        return self._request(
-            "POST",
-            "renew",
-            {
-                "replica_id": self.config.replica_id,
-                "fencing_token": fencing_token,
-                "ttl_seconds": self.config.ttl_seconds,
-                "schema_version": self.config.schema_version,
-            },
-        )
+    def renew(
+        self,
+        fencing_token: int,
+        *,
+        collection_store_capability: str | None = None,
+        collection_store_head: CollectionStoreHead | None = None,
+    ) -> LeaseRecord:
+        body = {
+            "replica_id": self.config.replica_id,
+            "fencing_token": fencing_token,
+            "ttl_seconds": self.config.ttl_seconds,
+            "schema_version": self.config.schema_version,
+        }
+        if collection_store_capability is not None:
+            body["collection_store_capability"] = collection_store_capability
+        if collection_store_head is not None:
+            body["collection_store_head"] = collection_store_head.as_dict()
+        return self._request("POST", "renew", body)
 
-    def release(self, fencing_token: int) -> LeaseRecord:
+    def release(
+        self,
+        fencing_token: int,
+        *,
+        collection_store_head: CollectionStoreHead | None = None,
+    ) -> LeaseRecord:
         replica_id = self.config.replica_id
         assert replica_id is not None
-        return self.release_holder(replica_id, fencing_token)
+        if collection_store_head is None:
+            return self.release_holder(replica_id, fencing_token)
+        return self._request(
+            "POST",
+            "release",
+            {
+                "replica_id": replica_id,
+                "fencing_token": fencing_token,
+                "collection_store_head": collection_store_head.as_dict(),
+            },
+        )
 
     def release_holder(self, holder_replica_id: str, fencing_token: int) -> LeaseRecord:
         """Release on behalf of ANY holder, not just this client's own
@@ -2048,6 +2182,51 @@ class LeaseCoordinatorClient:
 
     def status(self) -> LeaseRecord:
         return self._request("GET", "", None)
+
+    def collection_store_fence(self) -> CollectionStoreFenceState:
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "GET",
+            f"/v1/vaults/{vault}/collection-store-fence",
+            None,
+            contract_route="/v1/vaults/<id>/collection-store-fence",
+        )
+        try:
+            return CollectionStoreFenceState.from_json(payload)
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def transition_collection_store_fence(
+        self,
+        *,
+        expected_generation: int,
+        store_id: str,
+    ) -> CollectionStoreFenceState:
+        if type(expected_generation) is not int or expected_generation < 0:
+            raise ValueError("expected_generation must be a nonnegative integer")
+        _collection_store_uuid(store_id)
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "PUT",
+            f"/v1/vaults/{vault}/collection-store-fence",
+            {
+                "expected_generation": expected_generation,
+                "store_id": store_id,
+                "capability": COLLECTION_STORE_CAPABILITY,
+            },
+            contract_route="/v1/vaults/<id>/collection-store-fence",
+        )
+        try:
+            state = CollectionStoreFenceState.from_json(payload)
+            if (
+                not state.enrolled
+                or state.store_id != store_id
+                or state.generation not in {expected_generation, expected_generation + 1}
+            ):
+                raise ValueError("collection store fence transition result is inconsistent")
+            return state
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
 
     def schema_admission(self, schema_version: int) -> SchemaAdmission:
         if isinstance(schema_version, bool) or schema_version not in {3, 4}:
