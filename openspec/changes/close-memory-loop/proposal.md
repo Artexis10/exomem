@@ -16,6 +16,7 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 - Include hot profile, activation priors, vault-derived conventions and the deterministic consolidation dreamer as required programme milestones. Optional frozen-verifier assistance is default-off and soft-fails; it labels review candidates only and never authors knowledge or controls retrieval.
 - Separate development and personal candidate testing from public release publication, using immutable local wheels and the existing managed-service handoff and state-migration checks.
 - Repair the existing activation benchmark and prove capture-to-activation journeys with positive and negative cases, interruption recovery, adapter parity and ordinary-agent initiation. Paid comparative runs remain explicitly deferred.
+- Reach relevant compiled knowledge whose open semantic categories have no declared role, through a separate bounded material lane rather than relabeling private knowledge or query-ranking standing role lanes. Offer source pointers for relevant prose without semantic coverage, and include project-registry edits in activation freshness.
 - Record cross-client live activity as a later compiler integration milestone: bounded, scoped reports of related work with freshness, participation limits and result references. Deliver the existing compiler milestones first; activity is advisory operational state, not completion proof, execution authority or a hosted-launch prerequisite.
 
 ## Capabilities
@@ -29,6 +30,8 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 
 ### Modified Capabilities
 
+- `context-activation`: bounded, query-matched material within already admitted contexts and truthful project-registry freshness.
+- `context-roles`: one explicit material lens, preserving owner overrides and the existing six-role ceiling.
 - `managed-service-upgrades`: a release that changes the lexical catalogue schema cuts over through a catalogue its standby built instead of a cold start.
 
 The existing `activate-agent-led-vocabulary-evolution` change continues to own scoped additive authority; its artifacts are revised with this programme rather than introducing a competing authority delta. The existing `add-context-activation-benchmark` change retains its fixture/scoring ownership. The integration contract adds no second mutation executor or canonical storage engine.

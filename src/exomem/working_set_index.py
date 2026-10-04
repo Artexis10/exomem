@@ -1426,7 +1426,10 @@ def _standing_page(vault_root: Path, members: Sequence[tuple[str, str]]) -> str:
 
 
 def _project_candidates(
-    vault_root: Path, member_paths: Mapping[str, Sequence[tuple[str, str]]]
+    vault_root: Path,
+    member_paths: Mapping[str, Sequence[tuple[str, str]]],
+    *,
+    registry: Any = None,
 ) -> tuple[list[_Candidate], dict[str, list[tuple[str, str, str]]]]:
     """Project-key anchors, and their member pages as the anchor's own links.
 
@@ -1457,7 +1460,8 @@ def _project_candidates(
     from . import project_keys
 
     try:
-        registry = project_keys.load_project_registry(Path(vault_root))
+        if registry is None:
+            registry = project_keys.load_project_registry(Path(vault_root))
     except Exception:  # noqa: BLE001 - a missing registry costs project anchors only
         log.debug("activation index: project registry unavailable", exc_info=True)
         return [], {}
@@ -2090,6 +2094,19 @@ class WorkingSetIndex:
             return ""
         return str(row[0]) if row else ""
 
+    def project_registry_hash(self) -> str:
+        """Effective project registry this generation's anchors were built from."""
+        conn = self._connect()
+        if conn is None:
+            return ""
+        try:
+            row = conn.execute(
+                "SELECT value FROM index_meta WHERE key = 'project_registry_hash'"
+            ).fetchone()
+        except sqlite3.Error:
+            return ""
+        return str(row[0]) if row else ""
+
     def resolve_names(self, names: Iterable[str]) -> dict[str, tuple[str, ...]]:
         """Map wikilink names to EVERY vault path that bears them.
 
@@ -2349,7 +2366,12 @@ class WorkingSetIndex:
         # write is what keeps two concurrent updates of one vault out of each
         # other's way, so it is never reset: the next write replaces it.
         _PENDING_MANIFESTS.set([None])
-        candidates, edges, page_names, term_counts = self._collect()
+        from . import project_keys
+
+        # Bind the published identity to exactly the snapshot that derives the
+        # anchors, even if YAML changes again during the background walk.
+        project_registry = project_keys.load_project_registry(self.vault_root)
+        candidates, edges, page_names, term_counts = self._collect(project_registry=project_registry)
         existing = {
             anchor_id: signature
             for anchor_id, signature in conn.execute(
@@ -2357,7 +2379,11 @@ class WorkingSetIndex:
             )
         }
         wanted = {candidate.anchor_id: candidate for candidate in candidates}
-        changed = full or set(existing) != set(wanted)
+        changed = (
+            full
+            or self.project_registry_hash() != project_registry.content_hash
+            or set(existing) != set(wanted)
+        )
         if not changed:
             changed = any(
                 existing[anchor_id] != candidate.source_signature
@@ -2490,6 +2516,11 @@ class WorkingSetIndex:
                 "INSERT OR REPLACE INTO index_meta (key, value) VALUES "
                 "('learned_alias_rejected', ?)",
                 (str(sum(candidate.learned_rejected for candidate in candidates)),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO index_meta (key, value) VALUES "
+                "('project_registry_hash', ?)",
+                (project_registry.content_hash,),
             )
             generation = sidecar_store.bump_meta(conn, "generation")
             # The whole token, inside the same transaction that bumped it: the
@@ -2663,6 +2694,8 @@ class WorkingSetIndex:
 
     def _collect(
         self,
+        *,
+        project_registry: Any = None,
     ) -> tuple[
         list[_Candidate],
         dict[str, list[tuple[str, str, str]]],
@@ -2690,7 +2723,9 @@ class WorkingSetIndex:
             self.vault_root, conventions=conventions
         )
         records, plans = _collection_candidates(self.vault_root)
-        projects, project_edges = _project_candidates(self.vault_root, project_members)
+        projects, project_edges = _project_candidates(
+            self.vault_root, project_members, registry=project_registry
+        )
 
         # Cap in the SAME order `anchors()` has always reported (pages first),
         # over anchor identities only — page entries are not `_Candidate`s yet.
