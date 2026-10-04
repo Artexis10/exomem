@@ -17,6 +17,16 @@ not establish the new exact-path or query-qualified freshness guarantees.
 
 ## Decisions
 
+### Outcome-first delivery refinement (2026-10-04)
+
+The first graph release outcome is an anchored evidence-chain or reverse-impact answer with ordered witnesses, correct relation direction, current released sources and honest incompleteness through the installed public interface. Release an explicitly bounded preview, not the entire graph capability. Reuse the shared admitted IR/executor and proven combined-store placement in G4; do not create another engine or assume an unproved legacy-projection adapter.
+
+GP requires the G1–G3 subset needed for those requests: per-hop/author/evidence admission, applicable ontology identity/closure, query-qualified freshness, exactness/refusal, caps, safe explanation and independent reference/hidden-absent tests. Wire the corresponding G5 lifecycle/discovery subset without private harness hints. Preserve absolute supported-workload/resource bounds, independent integrated review, installed artifact/portability checks and rollback. Missing prerequisites block the affected workflow, never become fabricated empty answers.
+
+Full patterns, ontology definition/rename/merge authoring, mixed declared-type queries and compiler path units remain unavailable until their own contracts pass; they are not blanket prerequisites for the document evidence/impact subset. S1 remains first and independent. Generic P4/P5 and unrelated Q5 features do not block GP.
+
+G6 comparative cells and the ≥60-task full matrix qualify the complete capability and its comparative claims. Missing or slower Neo4j results keep parity/superiority unclaimed, but do not revoke a correct GP preview meeting its absolute bounds. Advertise larger tiers only after their measurements. GP does not complete the full matrix or unfinished tasks. This refinement supersedes blanket preview dependencies below without waiving data, disclosure or correctness invariants.
+
 ### 1. Existing graph assessment from current source
 
 Reviewed `src/exomem/epistemic_graph.py`, `graph_sync.py`, `traversal_profiles.py`, `relation_registry.py` and `working_set.py` in the round-one worktree baseline. These are implementation evidence, not a new specification authority.
@@ -162,8 +172,8 @@ Adapter `capabilities/plan/estimate/execute/cancel/snapshot/bind-release` must c
 1. G1: after shared IR/admission and parent store interfaces are available, implement ontology identity/closure behind graph-query preview with source-vocabulary parity.
 2. G2–G3: dark traversal/path/pattern compilation, independent reference and withheld/absent proofs; no public graph-ready claim.
 3. G4: prove combined-store migration and replay/crash/lease/backup invariants; do not replace the combined store during rebuild.
-4. G5: publish non-frozen MCP query_request lifecycle, schema_memory query-engine/ontology inspect and mixed-view inventory/inspect, graph skill/bootstrap route stubs and bounded compiler path units after shared collection surfaces; S1 remains independent and ships before graph/ontology; frozen candidates unchanged.
-5. G6: run independent integrated review/full checks, Neo4j/agent/activation/scale gates; release graph-query preview only after passing required targets, then verify portability and ordinary queries/writes.
+4. GP: after S1 and G4, expose the proved evidence-chain/reverse-impact subset with its G1–G3/G5 prerequisites, independent integrated review/full completion checks and installed/portable outcome verification. Keep unsupported operations unavailable, frozen candidates unchanged and absolute bounds intact; no comparative or unrelated-feature dependency.
+5. G5/G6: add full patterns/ontology/mixed views and compiler witnesses after their respective contracts pass; run the full agent/activation matrix and comparative/scale measurements before publishing those capabilities or claims. An unrelated pending comparison does not retract an accepted GP preview.
 6. After merge/release evidence proves all non-optional tasks shipped, sync/validate/archive through OpenSpec. This design lane neither checks implementation tasks nor archives either change.
 
 Rollback disables new graph operations, preserves canonical collections and file sources, and serves legacy graph only with a current proof. Unsupported older readers refuse the migrated schema. No manual sidecar deletion or service/index operations in this design lane.

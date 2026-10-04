@@ -432,29 +432,17 @@ def _english_anchors(measured: Measured, arm: str, case_id: str) -> dict[str, tu
     }
 
 
-def test_the_band_yields_to_a_different_page_the_retrieval_carry_names(measured: Measured) -> None:
-    """T6 asks to convert the grill's target temperature, a turn about unit
-    conversion that names the grill. "grill" is a rare word naming the grill
-    page and the turn clears the band against it, so on its own evidence the
-    page would resolve on `rare_term` + `vector_band`: a poison, since T6
-    expects `unresolved`. Tightening that pair is ruled out, because it is what
-    resolves the multilingual golds M1-de, M1-ru and M5-ja.
-
-    Without the band the turn resolves nothing, and the retrieval-carry lane
-    carries a different page, the oven-conversions note. The band does not
-    get to resolve a page against that: where the band is what resolved the
-    turn and the carry names a different dominant page, the band-resolved
-    page is held at `partial` and the turn is carried exactly as the off arm
-    carries it, so the band gains no poison here."""
+def test_scoped_conversion_does_not_carry_unrelated_settings_on_either_arm(measured: Measured) -> None:
+    """T6's property-only body match cannot serve saved oven settings, and
+    rejecting them must not resurrect the weak ordinary-word grill anchor."""
     grill = measured.english_key_to_path["c2_grill_equipment_page"]
-    on = _english_anchors(measured, "on", "T6")
-    off = _english_anchors(measured, "off", "T6")
-    carried = {"Knowledge Base/Notes/Kitchen/oven-temperature-conversions.md": "retrieval_carried"}
-    assert grill not in off, off
-    assert {path: status for path, (status, _e) in off.items()} == carried, off
-    assert on.get(grill, ("absent",))[0] != "resolved", on
-    assert {path: status for path, (status, _e) in on.items()} == carried, on
-    assert measured.english_packets["on"]["T6"]["generation"]["carried_by"] == "retrieval"
+    oven = "Knowledge Base/Notes/Kitchen/oven-temperature-conversions.md"
+    for arm in ("off", "on"):
+        packet = measured.english_packets[arm]["T6"]
+        assert packet["abstained"]
+        assert _english_anchors(measured, arm, "T6").get(grill, ("absent",))[0] != "resolved"
+        assert not any(unit["provenance"]["path"] == oven for unit in packet["units"])
+        assert not any(pointer["ref"] == oven for pointer in packet["pointers"])
     assert measured.english["T6"]["on"].poison_hit <= measured.english["T6"]["off"].poison_hit
 
 

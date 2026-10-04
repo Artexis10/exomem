@@ -2503,6 +2503,264 @@ def test_the_carry_query_keeps_the_lexical_stage_term_budget(
 SLED_ANCHOR = "Knowledge Base/Products/Cargo Sled.md"
 
 
+@pytest.mark.parametrize("band", [False, True])
+def test_possessive_body_contact_does_not_carry_units_or_prose(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch, band: bool,
+) -> None:
+    # A shared property phrase cannot serve another object's saved settings,
+    # including through the uncovered-prose pointer or an empty-carry fallback.
+    _write(carry_vault / CARRY_PAGE,
+        "---\ntype: research-note\nstatus: active\n---\n# Workshop notes\n\n"
+        "Quillon vantry calibration also appears in this uncovered prose.\n\n"
+        "- [method] Quillon vantry calibration uses the oven gas setting. ^oven\n"
+        "- [observation] Quillon vantry calibration uses a fan setting. ^fan\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    if band:
+        _band_on_the_sled(monkeypatch)
+    packet = working_set.compile_packet(
+        carry_vault, turn="Explain the sled's quillon vantry calibration.", max_chars=4000,
+    )
+    assert not any(u["provenance"]["path"] == CARRY_PAGE for u in packet["units"])
+    assert not any(p["ref"] == CARRY_PAGE for p in packet["pointers"])
+    assert _statuses(packet).get(SLED_ANCHOR) != "resolved"
+
+
+def test_possessive_clause_keeps_an_independent_shared_word_page_request(
+    carry_vault: Path, budget_free,
+) -> None:
+    # Shared stems across clauses must not collapse two admission occurrences.
+    other = "Knowledge Base/Notes/Research/workshop-notes.md"
+    _write(carry_vault / other,
+        "---\ntype: research-note\nstatus: active\n---\n# Workshop notes\n\n"
+        "- [constraint] Quillon calibration settings use oven controls. ^oven\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    packet = working_set.compile_packet(carry_vault, turn=(
+        "Explain the sled's quillon calibration settings; "
+        "also recall the Quillon vantry window."
+    ), max_chars=4000)
+    assert any(u["provenance"]["path"] == CARRY_PAGE for u in packet["units"])
+    assert not any(u["provenance"]["path"] == other for u in packet["units"])
+
+
+def test_possessive_authored_title_keeps_its_context(carry_vault: Path, budget_free) -> None:
+    page = "Knowledge Base/Products/Dana's Plan.md"
+    _write(carry_vault / page,
+        "---\ntype: research-note\nstatus: active\n---\n# Dana's Plan\n\n"
+        "- [method] Dana's Plan starts with a site survey. ^survey\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    packet = working_set.compile_packet(carry_vault, turn="Recall Dana's Plan.", max_chars=4000)
+    assert any(u["provenance"]["path"] == page for u in packet["units"])
+
+
+def test_possessive_band_demotion_is_local_to_the_candidate(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _band_on_the_sled(monkeypatch)
+    packet = working_set.compile_packet(carry_vault, turn=(
+        "Explain the sled's quillon vantry calibration; also consider Northern Corridor."
+    ), max_chars=4000)
+    assert _statuses(packet).get(SLED_ANCHOR) == "partial"
+    assert any(a["status"] == "resolved" and a["path"] != SLED_ANCHOR for a in packet["anchors"])
+
+
+def test_possessive_band_demotion_preserves_unrelated_namesake_ambiguity(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Demoting the sled must not resolve the independent choice between namesakes.
+    for folder in ("People", "Organizations"):
+        _write(carry_vault / f"Knowledge Base/Entities/{folder}/Mercury.md",
+            "---\ntype: entity\nstatus: active\n---\n# Mercury\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    _band_on_the_sled(monkeypatch)
+    packet = working_set.compile_packet(carry_vault,
+        turn="Explain the sled's calibration; also recall Mercury.", max_chars=4000)
+    assert packet["abstention"]["reason"] == "ambiguous"
+    assert len(packet["ambiguity"]) == 2
+    assert _statuses(packet)[SLED_ANCHOR] == "partial"
+
+
+def test_possessive_band_demotion_retires_affected_ambiguity(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    second = "Knowledge Base/Products/Survey Sled.md"
+    _write(carry_vault / second,
+        "---\ntype: note\nstatus: active\n---\n# Survey Sled\n\n"
+        "- [constraint] Payload capacity is 90 kg. ^capacity\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    monkeypatch.setattr(working_set, "signature_evidence",
+        lambda *_: ({SLED_ANCHOR: True, second: True}, "ready"))
+    packet = working_set.compile_packet(carry_vault,
+        turn="Explain the sled's calibration.", max_chars=4000)
+    assert _statuses(packet)[SLED_ANCHOR] == _statuses(packet)[second] == "partial"
+    assert packet["abstention"]["reason"] == "unresolved"
+    assert not packet["ambiguity"]
+
+
+def test_possessive_band_demotion_keeps_independently_named_resource_units(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other = "Knowledge Base/Products/Cedar Winch.md"
+    _write(carry_vault / other,
+        "---\ntype: note\nstatus: active\n---\n# Cedar Winch\n\n"
+        "- [constraint] Winch capacity is 90 kg. ^capacity\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    _band_on_the_sled(monkeypatch)
+    packet = working_set.compile_packet(carry_vault,
+        turn="Explain the sled's calibration; also inspect Cedar Winch.", max_chars=4000)
+    assert _statuses(packet)[SLED_ANCHOR] == "partial"
+    assert _statuses(packet)[other] == "resolved"
+    assert not packet["abstained"]
+    assert not packet["ambiguity"]
+    assert any(u["provenance"]["path"] == other for u in packet["units"])
+
+
+def test_possessive_title_fallback_does_not_carry_another_objects_constraint(
+    carry_vault: Path, budget_free,
+) -> None:
+    # One rare title word plus an ordinary neighbour takes the fallback route;
+    # it must obey the same subject admission as a strict two-rare-word pair.
+    page = "Knowledge Base/Notes/Research/oven-conversions.md"
+    _write(carry_vault / page,
+        "---\ntype: research-note\nstatus: active\n---\n"
+        "# Oven target temperature conversions\n\n"
+        "- [constraint] The oven target temperature is 210 degrees. ^oven\n")
+    for index in range(8):
+        _write(carry_vault / f"Knowledge Base/Notes/Journal/temperature-{index}.md",
+            "---\ntype: note\nstatus: active\n---\n# Weather log\n\n"
+            "The outdoor temperature changed overnight.\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    packet = working_set.compile_packet(carry_vault,
+        turn="Explain the sled's target temperature.", max_chars=4000)
+    assert not any(u["provenance"]["path"] == page for u in packet["units"])
+    assert not any(p["ref"] == page for p in packet["pointers"])
+    # A separately stated partial title still carries through that fallback.
+    independent = working_set.compile_packet(carry_vault,
+        turn="Explain the sled's calibration; also recall target temperature.", max_chars=4000)
+    assert any(u["provenance"]["path"] == page for u in independent["units"])
+
+
+def test_possessive_title_fallback_keeps_an_independent_shared_word_request(
+    carry_vault: Path, budget_free,
+) -> None:
+    oven = "Knowledge Base/Notes/Research/oven-settings.md"
+    vacuum = "Knowledge Base/Notes/Research/vacuum-settings.md"
+    _write(carry_vault / oven,
+        "---\ntype: research-note\nstatus: active\n---\n"
+        "# Oven target temperature conversions\n\n"
+        "- [constraint] The oven target temperature is 210 degrees. ^setting\n")
+    _write(carry_vault / vacuum,
+        "---\ntype: research-note\nstatus: active\n---\n"
+        "# Vacuum temperature checklist\n\n"
+        "- [constraint] Vacuum temperature requires the blue gauge. ^setting\n")
+    for index in range(8):
+        _write(carry_vault / f"Knowledge Base/Notes/Journal/temperature-{index}.md",
+            "---\ntype: note\nstatus: active\n---\n# Weather log\n\n"
+            "The outdoor temperature changed overnight.\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    packet = working_set.compile_packet(carry_vault, turn=(
+        "Explain the sled's target temperature; also recall vacuum temperature."
+    ), max_chars=4000)
+    assert any(u["provenance"]["path"] == vacuum for u in packet["units"])
+    assert not any(u["provenance"]["path"] == oven for u in packet["units"])
+    assert not any(p["ref"] == oven for p in packet["pointers"])
+
+
+def test_rejected_scoped_carry_preserves_the_independent_partial_menu(
+    carry_vault: Path, budget_free,
+) -> None:
+    # A rejected property contact must not erase a person the agent can choose.
+    _write(carry_vault / CARRY_PAGE,
+        "---\ntype: research-note\nstatus: active\n---\n# Workshop notes\n\n"
+        "- [constraint] Quillon vantry calibration uses the oven setting. ^oven\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    packet = working_set.compile_packet(carry_vault, turn=(
+        "Explain the sled's quillon vantry calibration; also consider Solheim."
+    ), max_chars=4000)
+    assert packet["abstention"]["reason"] == "unresolved"
+    assert _statuses(packet)[MARIT] == "partial"
+    assert packet["missing"]
+    assert not packet["units"]
+
+
+def test_copula_contraction_keeps_unscoped_body_carry(carry_vault: Path, budget_free) -> None:
+    # "Dana's working" can mean "Dana is working" and proves no possession.
+    _write(carry_vault / CARRY_PAGE,
+        "---\ntype: research-note\nstatus: active\n---\n# Workshop notes\n\n"
+        "- [constraint] Quillon vantry calibration uses the blue gauge. ^gauge\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    packet = working_set.compile_packet(carry_vault,
+        turn="Dana's working on the quillon vantry calibration.", max_chars=4000)
+    assert any(u["provenance"]["path"] == CARRY_PAGE for u in packet["units"])
+
+
+def test_scoped_relation_requires_an_unambiguous_target(carry_vault: Path, budget_free) -> None:
+    # The subject's unique full name does not make its shared alias unique.
+    for name in ("Cargo Sled", "Survey Sled"):
+        _write(carry_vault / f"Knowledge Base/Products/{name}.md",
+            f"---\ntype: note\nstatus: active\naliases: [Carrier]\n---\n# {name}\n")
+    _write(carry_vault / CARRY_PAGE,
+        "---\ntype: research-note\nstatus: active\n---\n# Workshop notes\n\n"
+        "## Claim\n- category: constraint\n- id: ambiguous-target\n"
+        "- relations: about_entity: Carrier\n\n"
+        "The quillon vantry constraint uses the oven setting.\n\n"
+        "## Claim\n- category: constraint\n- id: canonical-target\n"
+        f"- relations: about_entity: {SLED_ANCHOR}\n\n"
+        "The quillon vantry constraint uses the blue gauge.\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    packet = working_set.compile_packet(carry_vault,
+        turn="Explain Cargo Sled's quillon vantry constraint.", max_chars=6000)
+    carried = [u for u in packet["units"] if u["provenance"]["path"] == CARRY_PAGE]
+    assert len(carried) == 1
+    assert "blue gauge" in carried[0]["text"]
+
+
+@pytest.mark.parametrize("category, property_name", [
+    ("constraint", "quillon vantry constraint"),
+    ("calibration_record", "quillon vantry calibration"),
+])
+def test_possessive_body_contact_requires_each_rich_units_subject_and_category(
+    carry_vault: Path, budget_free, category: str, property_name: str,
+) -> None:
+    # Catches sibling leakage separately in categorical and material projection;
+    # the material case also needs the authored category's accepted alias.
+    _write(carry_vault / "Knowledge Base/_Schema/semantic-language-registry.yaml",
+        "schema_version: 1\ncategories:\n  calibration_record:\n"
+        "    description: Calibration records\n    aliases: [calibration]\n")
+    _write(carry_vault / CARRY_PAGE,
+        "---\ntype: research-note\nstatus: active\n---\n# Workshop notes\n\n"
+        f"## Claim\n- category: {category}\n- id: associated\n"
+        f"- relations: about_entity: [[{SLED_ANCHOR}]]\n\n"
+        f"The {property_name} uses the blue gauge.\n\n"
+        f"## Claim\n- category: {category}\n- id: sibling\n"
+        "- relations: about_entity: [[Other equipment]]\n\n"
+        f"The {property_name} uses the oven setting.\n\n"
+        "## Claim\n- category: observation\n- id: wrong-category\n"
+        f"- relations: about_entity: [[{SLED_ANCHOR}]]\n\n"
+        f"The {property_name} has unrelated commercial implications.\n")
+    lexstore.ensure_fresh(carry_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(carry_vault).rebuild()
+    packet = working_set.compile_packet(carry_vault,
+        turn=f"Explain Cargo Sled's {property_name}.", max_chars=6000)
+    carried = [u for u in packet["units"] if u["provenance"]["path"] == CARRY_PAGE]
+    assert len(carried) == 1, (packet["roles"], packet["missing"], carried)
+    assert "blue gauge" in carried[0]["text"]
+
+
 def _band_on_the_sled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Semantic evidence as a real encoder would give it: the sled anchor
     clears the band, so a rare word of its name plus the band resolves it."""

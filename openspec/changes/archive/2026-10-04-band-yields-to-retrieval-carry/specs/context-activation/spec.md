@@ -16,20 +16,33 @@ dominant page that is not one of the band-resolved pages, and a carried packet c
 built from that page, the operation SHALL serve that carried packet, the one the same
 turn gets with semantic evidence off. In every other case — the carry names one of
 the band-resolved pages, several pages or none, cannot run, or its page yields no
-carried packet — the band's resolution SHALL stand, so a yield never leaves the turn
-with nothing. A turn with any anchor resolved without `vector_band` SHALL NOT ask the
+carried packet — the band's resolution SHALL stand outside the explicitly scoped
+subject-request exception below. A turn with any anchor resolved without `vector_band` SHALL NOT ask the
 carry for this purpose, and the rule SHALL NOT change which evidence kinds resolve an
-anchor.
+anchor outside that exception.
 
-#### Scenario: A common noun plus the band yields to the page the carry names
-- **WHEN** a turn with a casing signal about unit conversion ("Can you convert the
-  grill's target temperature from Fahrenheit to Celsius?") writes a rare word from an
-  equipment page's name without a capital, the page
-  resolves only on `rare_term` + `vector_band`, and the retrieval carry names a
-  temperature-conversions note as the one dominant page
-- **THEN** the equipment page is not `resolved`, the packet carries the note at
-  `retrieval_carried` with `generation.carried_by = "retrieval"`, and the packet is
-  the one the same turn gets with semantic evidence off
+For a bounded possessive subject/property request recognized under the existing
+context-activation scope contract, activation SHALL evaluate the affected ordinary-word
+band candidate locally. If it lacks independent subject contact and meets the existing
+name/casing protections, it SHALL remain at most partial before packet branching,
+whether or not rival material survives. An independently resolved anchor elsewhere
+SHALL retain its status and SHALL NOT restore that weak candidate. Independently
+named pages retain their ordinary admission; property-clause-only body contact must
+pass the subject-scoped admission predicate. This exception SHALL NOT widen
+retrieval-only identity resolution or veto protected multilingual names.
+
+#### Scenario: A scoped conversion request does not substitute another object's facts
+- **WHEN** a turn with a casing signal asks to convert one object's target temperature,
+  that object's page has only the yieldable ordinary-word band evidence, and another
+  object's settings page shares the conversion words without subject admission
+- **THEN** the weak equipment candidate is not `resolved`, the unrelated settings and
+  their prose pointers are not served, and both evidence arms preserve honest
+  partial/unresolved subject status rather than substituting saved facts
+
+#### Scenario: An independent anchor does not restore a weak property candidate
+- **WHEN** that scoped request also independently names another project or page
+- **THEN** the independently named context survives while the affected ordinary-word
+  band candidate remains at most partial
 
 #### Scenario: A rare name is not vetoed by an incidental phrase
 - **WHEN** a German or Russian turn names an anchor by a capitalised rare name
@@ -44,14 +57,14 @@ anchor.
 - **THEN** the anchor resolves on `rare_term` + `vector_band` whatever other page
   shares words with the turn
 
-#### Scenario: A carried page that yields nothing does not cost the band's page
+#### Scenario: An unscoped carried page that yields nothing does not cost the band's page
 - **WHEN** a yieldable turn's retrieval carry names one different page, but the carry's
-  lanes read nothing off that page
+  lanes read nothing off that page and no recognized subject/property request applies
 - **THEN** the band-resolved page stays `resolved` and the packet is built from it
 
 #### Scenario: The carry names the band's own page, several pages or none
 - **WHEN** a yieldable turn's retrieval carry names the page the band resolved, two or
-  more pages, or none
+  more pages, or none, outside the recognized subject/property exception
 - **THEN** the band's resolution stands
 
 #### Scenario: An anchor resolved on its own words is not yieldable
