@@ -150,10 +150,16 @@ def _is_generated_media_or_model(_path: str, parts: tuple[str, ...]) -> bool:
 def _is_registered_internal_state(path: str, parts: tuple[str, ...]) -> bool:
     if not parts or parts[0].casefold() != kb_dirname().casefold():
         return False
-    return (
-        reserved_paths.classify_logical(path).disposition
-        is reserved_paths.PathDisposition.RESERVED
-    )
+    classification = reserved_paths.classify_logical(path)
+    if classification.descriptor_id == "collection-replica":
+        from .collection_store import authority, replica
+
+        if path in {
+            authority.marker_path(Path()).as_posix(),
+            replica.replica_path(Path()).as_posix(),
+        }:
+            return False
+    return classification.disposition is reserved_paths.PathDisposition.RESERVED
 
 
 def _is_hosted_runtime_state(_path: str, parts: tuple[str, ...]) -> bool:

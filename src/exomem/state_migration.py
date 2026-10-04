@@ -462,7 +462,11 @@ def require_vault_state_ready(
     could protect, only a first run it would break.
     """
 
+    from .collection_store.authority import required_state_compatibility_ids
+
     vault_root = Path(vault_root)
+    marker_optional = required_state_compatibility_ids(vault_root)
+    _require_supported_compatibility(marker_optional)
     state_dir = state_paths.vault_state_dir(vault_root)
     key = _cache_key(vault_root, state_dir)
     with _RESOLUTION_LOCK:
@@ -488,7 +492,7 @@ def require_vault_state_ready(
     if manifest["state"] != "complete":
         raise StateMigrationOfflineRequired("migration manifest is in progress")
     physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
-    _require_supported_compatibility(optional)
+    _require_supported_compatibility(optional | marker_optional)
     if physical != set(_descriptor_ids()):
         raise StateMigrationOfflineRequired("migration manifest descriptor set is stale")
     if scan_vault_state(vault_root):

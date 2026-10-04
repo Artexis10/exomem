@@ -85,6 +85,15 @@ def parse_marker(root, raw):
     return marker
 
 
+def required_state_compatibility_ids(root):
+    """Read launch requirements from the existing authority marker only."""
+    raw = read_marker(root)
+    if raw is None:
+        return frozenset()
+    marker = parse_marker(root, raw)
+    return frozenset({marker["collection_store_fence"]["capability"]})
+
+
 def pending_create(conn):
     row = conn.execute("SELECT value FROM store_meta WHERE key=?", (PENDING_CREATE,)).fetchone()
     if row is None:

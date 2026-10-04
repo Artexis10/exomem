@@ -39,11 +39,19 @@ def _export(
     tmp_path: Path,
     *,
     portable_state: bool = False,
+    collection_marker: bytes | None = None,
 ) -> portability.ExportResult:
     source = tmp_path / "source"
     init_module.init_vault(source)
     note = source / "Knowledge Base/Notes/restore-proof.md"
     note.write_text("# Restore proof\n\ncanonical-sentinel\n", encoding="utf-8")
+    if collection_marker is not None:
+        from exomem.collection_store import authority, replica
+
+        marker = authority.marker_path(source)
+        marker.parent.mkdir(parents=True)
+        marker.write_bytes(collection_marker)
+        replica.replica_path(source).write_bytes(b"published replica")
     if portable_state:
         review = state_paths.vault_state_dir(source) / ".review-state.json"
         review.write_text('{"restored":true}\n', encoding="utf-8")
@@ -508,6 +516,37 @@ def test_restore_candidate_rejects_unpinned_or_online_inputs_before_publication(
 
     assert error.value.code == code
     assert not (tmp_path / "target-vault").exists()
+
+
+def test_restore_mixed_marker_refuses_before_publication_or_security_activation(tmp_path: Path) -> None:
+    from exomem.collection_store import authority, replica
+
+    sid = "123e4567-e89b-42d3-a456-426614174000"
+    marker = json.dumps({
+        "version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
+        "authority_epoch": 1,
+        "collections": [{"collection_id": "123e4567-e89b-42d3-a456-426614174001",
+                         "manifest_path": "Knowledge Base/Records/Work/_collection.md",
+                         "authority": "store", "store_id": sid}],
+        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
+    }).encode()
+    exported = _export(tmp_path, collection_marker=marker)
+    request = _request(tmp_path, exported)
+    activations = []
+    with zipfile.ZipFile(exported.archive_path) as archive:
+        assert archive.read(authority.marker_path(Path()).as_posix()) == marker
+        assert archive.read(replica.replica_path(Path()).as_posix()) == b"published replica"
+
+    with pytest.raises(OperatorFailure) as error:
+        restore_candidate(request, bootstrap_security=lambda **kwargs: activations.append(kwargs))
+
+    assert error.value.code == "HOSTED_RESTORE_TARGET_CONFLICT"
+    assert not (tmp_path / "target-vault").exists()
+    assert not (tmp_path / "target-state/vault-state").exists()
+    assert activations == []
+    staging, = tmp_path.glob(".target-vault.restore-*")
+    assert authority.read_marker(staging) == marker
+    assert replica.replica_path(staging).read_bytes() == b"published replica"
 
 
 def test_restore_candidate_requires_empty_target_and_exclusive_lifetime_lock(
