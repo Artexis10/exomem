@@ -9,6 +9,8 @@
 
 ## 2. Task-relevant carry refinement
 
-- [ ] 2.1 Red-first on actual packets: reject unrelated property-body-contact units and prose pointers on both evidence arms; preserve an independently named shared-word page occurrence and possessive authored page titles.
-- [ ] 2.2 Demote only the affected ordinary-word band candidate before branching, without empty-carry resurrection or interference from a separately resolved anchor; preserve the existing multilingual name/casing protection.
-- [ ] 2.3 Verify rich subject/category context versus an unrelated sibling, existing standing/body-only routes, unchanged corpus/scorer and scoped completion tests; obtain independent review and report remaining grammar/quality limits before ordinary delivery.
+- [x] 2.1 Red-first on actual packets: reject unrelated property-body-contact units and prose pointers on both evidence arms; preserve an independently named shared-word page occurrence and possessive authored page titles.
+- [x] 2.2 Demote only the affected ordinary-word band candidate before branching, without empty-carry resurrection or interference from a separately resolved anchor; preserve the existing multilingual name/casing protection.
+- [x] 2.3 Verify rich subject/category context versus an unrelated sibling, existing standing/body-only routes, unchanged corpus/scorer and scoped completion tests; obtain independent review and report remaining grammar/quality limits before ordinary delivery.
+
+Verification of the candidate: author-independent review approved the occurrence-local correction; 2,617 compiler/context tests and 12 offline BGE-M3 cases passed. A freshly built and installed 0.104 package preserved the scoped negative, independent context and genuine ambiguity through the public activation operation. The unchanged corpus remains raw 9/18 and A8/A9 10/18; this does not establish overall quality uplift or original-client incident closure. Source delivery and canonical-spec closure remain task 1.6.
